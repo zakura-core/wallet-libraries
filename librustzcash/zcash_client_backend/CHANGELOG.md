@@ -16,6 +16,22 @@ workspace.
   version (0.24.0-rc.7); the initial Zakura release will be preceded by `0.1.0-rc`
   release candidates.
 
+### Added
+- `zcash_client_backend::data_api::ConsolidationNotes` and
+  `InputSource::select_spendable_notes_for_consolidation`, an input-selection
+  primitive with a best-effort default implementation.
+- Reusable consolidation-selection test cases under the `test-dependencies`
+  feature, covering funding cardinality, fee iteration, confirmation and
+  exclusion filtering, lock tiers, transparent value, and shielded action
+  shape.
+
+### Changed
+- `zcash_client_backend::data_api::wallet::input_selection::NoteSelection` has a
+  new `PreferConsolidation` variant. It prefers a small funding set and may fill
+  otherwise unused shielded action slots with the smallest eligible notes,
+  without changing the transaction fee or observable shape. Exhaustive matches
+  must add an arm for it.
+
 ## [0.24.0-rc.7] - 2026-08-03
 
 ### Added
