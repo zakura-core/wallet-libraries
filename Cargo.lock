@@ -6790,7 +6790,6 @@ dependencies = [
  "zakura-orchard",
  "zakura-pasta-curves",
  "zakura-pczt",
- "zakura-pool-migration",
  "zakura-primitives",
  "zakura-proofs",
  "zakura-sapling-crypto",
@@ -6978,28 +6977,6 @@ dependencies = [
  "zcash_protocol",
  "zcash_script",
  "zcash_transparent",
- "zip32",
-]
-
-[[package]]
-name = "zakura-pool-migration"
-version = "0.1.0-rc.6"
-dependencies = [
- "corez",
- "getset",
- "incrementalmerkletree",
- "libm",
- "proptest",
- "rand_chacha 0.3.1",
- "rand_core 0.6.4",
- "shardtree",
- "zakura-client-backend",
- "zakura-keys",
- "zakura-orchard",
- "zakura-pczt",
- "zakura-primitives",
- "zcash_pool_migration_memory",
- "zcash_protocol",
  "zip32",
 ]
 
@@ -7326,20 +7303,6 @@ dependencies = [
  "zcash_client_backend",
  "zcash_keys",
  "zcash_primitives",
- "zcash_protocol",
- "zip32",
-]
-
-[[package]]
-name = "zcash_pool_migration_memory"
-version = "0.1.0"
-dependencies = [
- "incrementalmerkletree",
- "rand_chacha 0.3.1",
- "rand_core 0.6.4",
- "zakura-orchard",
- "zakura-pczt",
- "zakura-pool-migration",
  "zcash_protocol",
  "zip32",
 ]

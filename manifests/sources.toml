@@ -38,7 +38,7 @@ url = "https://github.com/zcash/librustzcash.git"
 ref = "zcash_client_sqlite-0.22.0-rc.7"
 # The vendor-branch commit carrying this release. CI checks it is an ancestor
 # of HEAD, which is what proves the tree was merged rather than hand-edited.
-vendor_commit = "37e109f9fd9964e3aca05d45d954c12fb8c1a148"
+vendor_commit = "8c83527a850883897de05a51bb18f6a70237c70f"
 # The librustzcash repository tags every crate independently. `zcash_voting`
 # selects the release train by its `zcash_client_sqlite` version, so that is
 # the tag series this repository follows.
@@ -68,18 +68,6 @@ package = "zakura-client-backend"
 [[crate]]
 path = "zcash_client_sqlite"
 package = "zakura-client-sqlite"
-
-# Not optional: `zcash_client_sqlite` takes this as a hard dependency.
-[[crate]]
-path = "zcash_pool_migration"
-package = "zakura-pool-migration"
-
-# Test-only backends that `zcash_pool_migration` takes as a path
-# dev-dependency, so its manifest loads and its test suite still builds. Cargo
-# drops path-only dev-dependencies when publishing, so this crate is never
-# published and keeps its upstream name: omitting `package` skips the rename.
-[[crate]]
-path = "zcash_pool_migration_memory"
 
 # Workspace dependencies redirected onto the published Zakura crypto stack.
 # The upstream dependency key is kept, so crate sources continue to say

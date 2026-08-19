@@ -626,13 +626,12 @@ CREATE INDEX idx_ironwood_received_note_spends_transaction_id ON ironwood_receiv
 ///
 /// `replan_threshold` is the integer percent above which unsatisfiable planned transfer value
 /// triggers an immediate replan, stamped at commit. Its `DEFAULT` is
-/// [`ReplanThreshold::DEFAULT`]'s percent (20), present only so that a table created by the
+/// `ReplanThreshold::DEFAULT`'s percent (20), present only so that a table created by the
 /// `orchard_ironwood_migration_tables` DDL and one repaired by the
 /// `orchard_ironwood_migration_unsatisfiability` `ADD COLUMN` share this schema text; the store
 /// always writes the column explicitly.
 ///
 /// [`AnchorBucketInterval::ZIP_318`]: zcash_protocol::zip318::AnchorBucketInterval::ZIP_318
-/// [`ReplanThreshold::DEFAULT`]: zcash_pool_migration::satisfiability::ReplanThreshold::DEFAULT
 pub(super) const TABLE_ORCHARD_IRONWOOD_MIGRATIONS: &str = "
 CREATE TABLE orchard_ironwood_migrations (
     id INTEGER PRIMARY KEY,
@@ -1967,3 +1966,31 @@ pub(super) const VIEW_ADDRESS_FIRST_USE: &str = "
     GROUP BY
         address_id, account_id, key_scope,
         diversifier_index_be, transparent_child_index";
+
+/// Creates the Orchard -> Ironwood pool-migration tables at their current shape.
+///
+/// The pool-migration engine used to own this, and it built the tables from the
+/// same DDL constants below. This fork does not carry the engine, but it does
+/// carry the migrations that create these tables, and their tests need a
+/// fixture database that already has them.
+#[cfg(test)]
+pub(super) fn init_orchard_ironwood_migration_tables(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<()> {
+    for statement in [
+        TABLE_ORCHARD_IRONWOOD_MIGRATIONS,
+        TABLE_ORCHARD_IRONWOOD_MIGRATION_CROSSING_VALUES,
+        TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_INPUTS,
+        TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_OUTPUTS,
+        TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_DIRECT_FUNDING,
+        TABLE_ORCHARD_IRONWOOD_MIGRATION_TRANSACTIONS,
+        TABLE_ORCHARD_IRONWOOD_MIGRATION_TRANSACTION_DEPS,
+        TABLE_ORCHARD_IRONWOOD_MIGRATION_SPEND_NULLIFIERS,
+        INDEX_ORCHARD_IRONWOOD_MIGRATION_TX_DUE,
+        INDEX_ORCHARD_IRONWOOD_MIGRATIONS_ACCOUNT,
+    ] {
+        conn.execute_batch(statement)?;
+    }
+
+    Ok(())
+}

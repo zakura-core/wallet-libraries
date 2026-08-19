@@ -969,7 +969,7 @@ mod tests {
     #[test]
     fn canonical_pool_migration_ddl_matches_the_migration_path() {
         let conn = Connection::open_in_memory().unwrap();
-        crate::pool_migration::orchard_ironwood::init_migration_tables(&conn).unwrap();
+        crate::wallet::db::init_orchard_ironwood_migration_tables(&conn).unwrap();
 
         let expected = [
             (

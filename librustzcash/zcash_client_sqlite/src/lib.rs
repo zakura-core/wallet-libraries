@@ -161,7 +161,6 @@ use {
 
 pub mod chain;
 pub mod error;
-pub mod pool_migration;
 pub mod util;
 pub mod wallet;
 #[cfg(feature = "zewif")]
@@ -2237,23 +2236,17 @@ impl<P: consensus::Parameters, CL: Clock, R: RngCore> WalletWrite
         // anchor retention is inactive) on networks that do not yet have an assigned NU6.3
         // activation height.
         //
-        // The grids are this wallet's configured interval TOGETHER WITH the interval every
-        // in-flight migration was committed under. The latter comes from the database, not from
-        // configuration: a migration's transfers are anchored to boundaries of its committed grid
-        // and are provable only while those checkpoints survive, so an application that reopens the
-        // wallet without reapplying a non-default interval must not thereby cause this scan to pass
-        // a boundary that migration still needs. Retaining the union costs at most a few extra
-        // checkpoints and makes that failure unreachable.
+        // Upstream also unions in the grid every in-flight pool migration was committed under,
+        // read from the database. This fork does not carry the pool-migration engine, so no such
+        // row can exist and the union is exactly this wallet's configured interval. Restoring that
+        // behaviour means restoring the engine, not just this call.
         let anchor_retention = self
             .params
             .activation_height(consensus::NetworkUpgrade::Nu6_3)
             .map(|from_height| {
-                let committed = pool_migration::orchard_ironwood::active_anchor_bucket_intervals(
-                    self.conn.borrow(),
-                )?;
                 Ok::<_, SqliteClientError>(AnchorRetention::union(
                     from_height,
-                    core::iter::once(self.anchor_retention_interval).chain(committed),
+                    core::iter::once(self.anchor_retention_interval),
                 ))
             })
             .transpose()?

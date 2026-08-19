@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn is_a_no_op_when_the_column_is_present() {
         let mut conn = Connection::open_in_memory().unwrap();
-        crate::pool_migration::orchard_ironwood::init_migration_tables(&conn).unwrap();
+        crate::wallet::db::init_orchard_ironwood_migration_tables(&conn).unwrap();
         assert!(has_anchor_column(&conn));
 
         let tx = conn.transaction().unwrap();
