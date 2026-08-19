@@ -6671,7 +6671,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-backend"
-version = "0.1.0-rc0"
+version = "0.1.0-rc1"
 dependencies = [
  "ambassador",
  "arti-client",
@@ -6746,7 +6746,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-sqlite"
-version = "0.1.0-rc0"
+version = "0.1.0-rc1"
 dependencies = [
  "ambassador",
  "assert_matches",
@@ -7111,7 +7111,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-wallet-lib"
-version = "0.1.0-rc0"
+version = "0.1.0-rc1"
 dependencies = [
  "orchard",
  "pczt",
