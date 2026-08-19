@@ -10,17 +10,21 @@ workspace.
 
 ## [Unreleased]
 
-- Forked from upstream `zcash_client_sqlite` and renamed to `zakura-client-sqlite`;
-  this changelog starts fresh for the Zakura fork's initial release.
-- Restarted the version lineage at 0.1.0, leaving behind the inherited upstream
-  version (0.22.0-rc.7); the initial Zakura release will be preceded by `0.1.0-rc`
-  release candidates.
+## [0.1.0-rc1] - 2026-08-19
 
 ### Added
 - A store-backed implementation of
   `InputSource::select_spendable_notes_for_consolidation` that selects necessary
   funding notes largest first, then returns the smallest eligible notes from
   the same preferred lock tier as optional consolidation candidates.
+
+## [0.1.0-rc0] - 2026-08-19
+
+- Forked from upstream `zcash_client_sqlite` and renamed to `zakura-client-sqlite`;
+  this changelog starts fresh for the Zakura fork's initial release.
+- Restarted the version lineage at 0.1.0, leaving behind the inherited upstream
+  version (0.22.0-rc.7); the initial Zakura release will be preceded by `0.1.0-rc`
+  release candidates.
 
 ## [0.22.0-rc.7] - 2026-08-03
 

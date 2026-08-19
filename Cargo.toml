@@ -34,7 +34,7 @@ categories = ["cryptography::cryptocurrencies"]
 # Intra-workspace dependencies
 equihash = { version = "0.3", default-features = false }
 zcash_address = { version = "0.13.0", default-features = false }
-zcash_client_backend = { version = "0.1.0-rc0", path = "librustzcash/zcash_client_backend", package = "zakura-client-backend" }
+zcash_client_backend = { version = "0.1.0-rc1", path = "librustzcash/zcash_client_backend", package = "zakura-client-backend" }
 # zcash_encoding 0.5.0 is a breaking release (MSRV bump + `CompactSize::write` now
 # rejects values above `MAX_COMPACT_SIZE`). To avoid forcing every dependent to
 # migrate at once, the workspace default stays pinned to the published 0.4; only
