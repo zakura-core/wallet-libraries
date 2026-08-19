@@ -119,9 +119,9 @@ Until these crates are published, pin them by git revision. The dependency keys
 keep their upstream names, so wallet source needs no changes:
 
 ```toml
-zcash_client_backend = { git = "https://github.com/valargroup/wallet-libraries.git", rev = "<commit>", package = "zakura-client-backend" }
-zcash_client_sqlite = { git = "https://github.com/valargroup/wallet-libraries.git", rev = "<commit>", package = "zakura-client-sqlite" }
-pczt = { git = "https://github.com/valargroup/wallet-libraries.git", rev = "<commit>", package = "zakura-pczt" }
+zcash_client_backend = { git = "https://github.com/zakura-core/wallet-libraries.git", rev = "<commit>", package = "zakura-client-backend" }
+zcash_client_sqlite = { git = "https://github.com/zakura-core/wallet-libraries.git", rev = "<commit>", package = "zakura-client-sqlite" }
+pczt = { git = "https://github.com/zakura-core/wallet-libraries.git", rev = "<commit>", package = "zakura-pczt" }
 ```
 
 The crypto stack comes from crates.io as `zakura-*`; do not also declare the
@@ -212,8 +212,8 @@ scripts/
 
 ## Status
 
-Not yet moved to the Zakura organization, and none of these crates are
-published yet — only the `0.0.0` placeholders that hold their names.
+None of these crates are published yet — only the `0.0.0` placeholders that
+hold their names.
 
 Every name is reserved in `zakura-core/reserved`: `zakura-pczt`,
 `zakura-client-backend`, `zakura-client-sqlite`, and `zakura-wallet-lib`.

@@ -10,7 +10,7 @@ edition.workspace = true
 rust-version.workspace = true
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/valargroup/wallet-libraries"
+repository = "https://github.com/zakura-core/wallet-libraries"
 categories = ["cryptography::cryptocurrencies"]
 keywords = ["zcash", "zakura"]
 
