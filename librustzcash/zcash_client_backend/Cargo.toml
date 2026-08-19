@@ -1,5 +1,5 @@
 [package]
-name = "zcash_client_backend"
+name = "zakura-client-backend"
 description = "APIs for creating shielded Zcash light clients"
 version = "0.24.0-rc.7"
 authors = [
@@ -307,6 +307,7 @@ unstable-serialization = ["dep:byteorder"]
 unstable-spanning-tree = []
 
 [lib]
+name = "zcash_client_backend"
 bench = false
 
 [badges]

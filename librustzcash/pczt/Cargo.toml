@@ -1,5 +1,5 @@
 [package]
-name = "pczt"
+name = "zakura-pczt"
 version = "0.9.2"
 authors = ["Jack Grigg <jack@electriccoin.co>"]
 edition.workspace = true
@@ -176,3 +176,6 @@ required-features = ["internal-tests"]
 
 [lints]
 workspace = true
+
+[lib]
+name = "pczt"

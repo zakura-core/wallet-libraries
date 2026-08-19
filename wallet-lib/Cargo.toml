@@ -1,0 +1,77 @@
+[package]
+name = "zakura-wallet-lib"
+version = "0.1.0"
+authors = ["Zakura developers"]
+description = """
+Selects either the upstream librustzcash wallet stack or its Zakura forks, so
+one source tree can build against both.
+"""
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/zakura-core/wallet-libraries"
+categories = ["cryptography::cryptocurrencies"]
+keywords = ["zcash", "zakura"]
+
+[lib]
+name = "zakura_wallet_lib"
+
+# Exactly one backend is active at a time, so each family is optional and
+# enabled by its own feature. Cargo features are additive and cannot express
+# "enable this when that is off", which is why the upstream family needs a
+# named feature rather than being the implicit `not(zakura)` case.
+#
+# Every key is renamed explicitly, so the extern name a re-export refers to is
+# the key itself, not the library target name — which is deliberately identical
+# across both families.
+[dependencies]
+
+# -- upstream (crates.io), pinned to the release this repository forks --------
+lrz-client-backend = { package = "zcash_client_backend", version = "0.24.0-rc.7", default-features = false, optional = true }
+lrz-client-sqlite = { package = "zcash_client_sqlite", version = "0.22.0-rc.7", default-features = false, optional = true }
+lrz-keys = { package = "zcash_keys", version = "0.16.1", default-features = false, optional = true }
+lrz-orchard = { package = "orchard", version = "0.15", optional = true }
+lrz-pczt = { package = "pczt", version = "0.9.2", optional = true }
+lrz-primitives = { package = "zcash_primitives", version = "0.30.0", default-features = false, optional = true }
+
+# -- Zakura: the crypto stack from crates.io, the wallet layer from this repo -
+zakura-client-backend = { path = "../librustzcash/zcash_client_backend", default-features = false, optional = true }
+zakura-client-sqlite = { path = "../librustzcash/zcash_client_sqlite", default-features = false, optional = true }
+zakura-keys = { version = "1.0.0-rc.1", default-features = false, optional = true }
+zakura-orchard = { version = "1.0.0-rc.1", optional = true }
+zakura-pczt = { path = "../librustzcash/pczt", optional = true }
+zakura-primitives = { version = "1.0.0-rc.1", default-features = false, optional = true }
+
+[features]
+default = ["lrz"]
+
+## The upstream librustzcash stack from crates.io. What ZODL builds.
+lrz = [
+    "dep:lrz-client-backend",
+    "dep:lrz-client-sqlite",
+    "dep:lrz-keys",
+    "dep:lrz-orchard",
+    "dep:lrz-pczt",
+    "dep:lrz-primitives",
+]
+
+## The Zakura forks. What Vizor builds. Select with `default-features = false`.
+zakura = [
+    "dep:zakura-client-backend",
+    "dep:zakura-client-sqlite",
+    "dep:zakura-keys",
+    "dep:zakura-orchard",
+    "dep:zakura-pczt",
+    "dep:zakura-primitives",
+]
+
+## Enables the `orchard` feature of whichever wallet backend is selected.
+orchard = [
+    "lrz-client-backend?/orchard",
+    "lrz-client-sqlite?/orchard",
+    "lrz-keys?/orchard",
+    "zakura-client-backend?/orchard",
+    "zakura-client-sqlite?/orchard",
+    "zakura-keys?/orchard",
+]

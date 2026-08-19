@@ -1,5 +1,5 @@
 [package]
-name = "zcash_client_sqlite"
+name = "zakura-client-sqlite"
 description = "An SQLite-based Zcash light client"
 version = "0.22.0-rc.7"
 authors = [
@@ -243,6 +243,7 @@ pczt-tests = [
 ]
 
 [lib]
+name = "zcash_client_sqlite"
 bench = false
 
 [lints]

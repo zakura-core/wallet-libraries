@@ -1,0 +1,114 @@
+# Upstream source and generation rules for the Zakura wallet layer.
+#
+# This repository vendors only the librustzcash crates that Vizor needs and
+# that `zakura-core/libraries` does not already provide. Everything else is
+# consumed from crates.io, either as an upstream release or as a published
+# `zakura-*` fork.
+#
+# `ref` is the human-readable release tag. `commit` is the peeled commit that
+# the sync script verifies, so retagging cannot silently change the source.
+#
+# `tag_pattern` selects the upstream tags that represent a release of this
+# source, and must capture a `version` group used for semantic-version
+# ordering. `allow_prerelease` decides whether the scheduled discovery job may
+# propose a prerelease tag; a manual override can always pin one.
+
+# Repository layout. `vendored_directory` holds the generated forks; the sync
+# script owns it completely and deletes it before every extraction, so nothing
+# hand-written may live there. `extra_members` are hand-written workspace
+# members that sync never touches: the compatibility facade, and new Zakura
+# work such as the PIR-based sync engine.
+[layout]
+vendored_directory = "librustzcash"
+# Pristine upstream lives on its own branch, and releases arrive on `main` as
+# merges from it. `upstream_manifest` is upstream's workspace manifest, carried
+# under a name Cargo does not read: the root Cargo.toml is generated from it,
+# so the dependency rewiring never takes part in a merge.
+vendor_branch = "vendor/librustzcash"
+upstream_manifest = "librustzcash/upstream-workspace.toml"
+# `zakura/` members are added here as they are written.
+extra_members = ["wallet-lib"]
+# The backend selector. Named separately because the verification scripts have
+# to build it one backend at a time, unlike every other member.
+facade = "wallet-lib"
+
+[[source]]
+name = "librustzcash"
+url = "https://github.com/zcash/librustzcash.git"
+ref = "zcash_client_sqlite-0.22.0-rc.7"
+# The vendor-branch commit carrying this release. CI checks it is an ancestor
+# of HEAD, which is what proves the tree was merged rather than hand-edited.
+vendor_commit = "37e109f9fd9964e3aca05d45d954c12fb8c1a148"
+# The librustzcash repository tags every crate independently. `zcash_voting`
+# selects the release train by its `zcash_client_sqlite` version, so that is
+# the tag series this repository follows.
+tag_pattern = "^zcash_client_sqlite-(?P<version>.+)$"
+allow_prerelease = true
+
+# The vendored crates, in dependency order. `path` is the directory inside the
+# upstream repository; it is reused verbatim under `crates/` so that `use`
+# paths and integration tests keep working. `package` is the published name,
+# reserved in `zakura-core/reserved`; the library target keeps the upstream
+# name, matching the convention in `zakura-core/libraries`.
+#
+# Membership rule, inherited from that repository and verified by
+# `scripts/verify-zakura-graph.sh`: a crate belongs here when it depends on the
+# renamed crypto stack and `libraries` does not already ship it. A crate that
+# `zakura-*` pulls from crates.io must NOT be vendored here, or the graph ends
+# up carrying two incompatible copies of it.
+
+[[crate]]
+path = "pczt"
+package = "zakura-pczt"
+
+[[crate]]
+path = "zcash_client_backend"
+package = "zakura-client-backend"
+
+[[crate]]
+path = "zcash_client_sqlite"
+package = "zakura-client-sqlite"
+
+# Not optional: `zcash_client_sqlite` takes this as a hard dependency.
+[[crate]]
+path = "zcash_pool_migration"
+package = "zakura-pool-migration"
+
+# Test-only backends that `zcash_pool_migration` takes as a path
+# dev-dependency, so its manifest loads and its test suite still builds. Cargo
+# drops path-only dev-dependencies when publishing, so this crate is never
+# published and keeps its upstream name: omitting `package` skips the rename.
+[[crate]]
+path = "zcash_pool_migration_memory"
+
+# Workspace dependencies redirected onto the published Zakura crypto stack.
+# The upstream dependency key is kept, so crate sources continue to say
+# `orchard::` and `zcash_primitives::` while resolving to the forks.
+[rewire]
+zcash_primitives = { package = "zakura-primitives", version = "1.0.0-rc.1" }
+zcash_keys = { package = "zakura-keys", version = "1.0.0-rc.1" }
+zcash_proofs = { package = "zakura-proofs", version = "1.0.0-rc.1" }
+orchard = { package = "zakura-orchard", version = "1.0.0-rc.1" }
+sapling = { package = "zakura-sapling-crypto", version = "1.0.0-rc.1" }
+redjubjub = { package = "zakura-redjubjub", version = "1.0.0-rc.1" }
+pasta_curves = { package = "zakura-pasta-curves", version = "1.0.0-rc.1" }
+
+# Crate names that must never appear in a built graph: the crates.io originals
+# of everything `libraries` forks. Any one of them means an edge escaped the
+# rewiring, and two copies of a type that looks identical are not the same type.
+[graph]
+forbidden = [
+  "orchard",
+  "sapling-crypto",
+  "zcash_primitives",
+  "zcash_keys",
+  "zcash_proofs",
+  "halo2_proofs",
+  "halo2_gadgets",
+  "halo2_poseidon",
+  "halo2_legacy_pdqsort",
+  "pasta_curves",
+  "sinsemilla",
+  "reddsa",
+  "redjubjub",
+]

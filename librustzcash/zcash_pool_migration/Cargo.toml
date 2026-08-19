@@ -1,5 +1,5 @@
 [package]
-name = "zcash_pool_migration"
+name = "zakura-pool-migration"
 description = "Backend-agnostic value-pool migration engine for Zcash wallets"
 version = "0.1.0-rc.6"
 authors = [
@@ -99,3 +99,6 @@ test-dependencies = [
 
 [lints]
 workspace = true
+
+[lib]
+name = "zcash_pool_migration"

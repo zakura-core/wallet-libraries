@@ -1,0 +1,73 @@
+name: Verify wallet libraries
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/verify.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "wallet-lib/**"
+      - "librustzcash/**"
+      - "zakura/**"
+      - "manifests/**"
+      - "patches/**"
+      - "scripts/**"
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  zakura-graph:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out wallet libraries
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check the wallet layer against the Zakura crypto stack
+        run: ./scripts/verify-zakura-graph.sh
+
+  wallet-lib-modes:
+    # The facade selects between the two stacks, so it is built both ways and
+    # each build is checked for crates from the other one.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out wallet libraries
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build the facade against each backend
+        run: ./scripts/verify-wallet-lib-modes.sh
+
+  vendor-ancestry:
+    # `librustzcash/` is edited directly, so "regenerate and diff" no longer
+    # means anything. What still has to hold is that the tree got here by
+    # merging the vendor branch: the recorded vendor commit must be an ancestor
+    # of HEAD. A hand-edit that skipped the merge fails this.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out wallet libraries
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the recorded vendor commit is an ancestor
+        run: ./scripts/verify-vendor-ancestry.sh
+
+  tests:
+    # Upstream's own test suite is the regression net for the changes we carry.
+    # It matters more the further this fork diverges, so it runs on every
+    # change rather than only before a release.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out wallet libraries
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Run the vendored test suites
+        run: cargo test --workspace --exclude zakura-wallet-lib --locked

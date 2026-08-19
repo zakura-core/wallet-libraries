@@ -1,0 +1,168 @@
+name: Sync upstream releases
+
+on:
+  schedule:
+    # Daily upstream tag check. Scheduled runs only fire on the default branch.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      librustzcash_ref:
+        description: "zcash/librustzcash tag or commit (blank discovers the newest release)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      targets: ${{ steps.discover.outputs.targets }}
+    steps:
+      - name: Check out wallet libraries
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Find sources with a newer upstream release
+        id: discover
+        env:
+          LIBRUSTZCASH_REF: ${{ inputs.librustzcash_ref }}
+        run: |
+          args=()
+          if [[ -n "$LIBRUSTZCASH_REF" ]]; then
+            args+=(--override "librustzcash=$LIBRUSTZCASH_REF")
+          fi
+          targets="$(./scripts/discover-upstream-updates.py "${args[@]}")"
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+  sync:
+    needs: discover
+    if: needs.discover.outputs.targets != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+    strategy:
+      # One pull request per source keeps a failing update from blocking the
+      # other, and keeps each branch reviewable on its own.
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.discover.outputs.targets) }}
+    concurrency:
+      group: upstream-sync-${{ matrix.target.name }}
+      cancel-in-progress: true
+    steps:
+      - name: Check out wallet libraries
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The sync is a merge, so it needs history, and it pushes the vendor
+          # branch alongside the pull request branch.
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync ${{ matrix.target.name }}
+        id: sync
+        env:
+          # Passed through the environment: a tag name is upstream-controlled
+          # input and must not be interpolated into the shell command itself.
+          SOURCE_NAME: ${{ matrix.target.name }}
+          SOURCE_REF: ${{ matrix.target.ref }}
+        run: |
+          set +e
+          ./scripts/sync-upstream.sh "$SOURCE_REF"
+          status=$?
+          set -e
+          if [[ "$status" -eq 0 ]]; then
+            echo "conflicts=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Exit 2 is a merge conflict. Commit the markers so the automation
+          # branch is checkable; a person finishes the merge on the PR branch.
+          if [[ "$status" -eq 2 && -f .git/MERGE_HEAD ]]; then
+            git add -A
+            git -c core.editor=true commit --no-edit \
+              -m "WIP: merge librustzcash ${SOURCE_REF} with conflicts" \
+              -m "Conflict markers are intentional. Resolve them on this branch, regenerate the workspace, update the pin, and verify."
+            echo "conflicts=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$status"
+
+      - name: Push the vendor branch
+        # The pull request's merge commit has a vendor-branch parent, so that
+        # branch has to exist on the remote for the history to resolve.
+        run: git push origin vendor/librustzcash
+
+      - name: Verify the Zakura-only dependency graph
+        if: steps.sync.outputs.conflicts != 'true'
+        run: ./scripts/verify-zakura-graph.sh
+
+      - name: Verify both facade backends
+        if: steps.sync.outputs.conflicts != 'true'
+        run: ./scripts/verify-wallet-lib-modes.sh
+
+      - name: Open upstream sync pull request
+        if: steps.sync.outputs.conflicts != 'true'
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        with:
+          # `UPSTREAM_SYNC_TOKEN` is optional. Pull requests created with the
+          # default `GITHUB_TOKEN` do not trigger `verify.yml`, so without it a
+          # sync pull request shows no checks even though this job verified the
+          # result. Set it to a token that may open pull requests to get the
+          # same verification re-run on the branch, independently of this job.
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          # One long-lived branch per source: a newer upstream tag updates the
+          # open pull request instead of opening a second one.
+          branch: automation/upstream-sync/${{ matrix.target.name }}
+          delete-branch: true
+          commit-message: "chore: sync ${{ matrix.target.name }} to ${{ matrix.target.ref }}"
+          title: "chore: sync ${{ matrix.target.name }} to ${{ matrix.target.ref }}"
+          body: |
+            Merges `${{ matrix.target.ref }}` into the fork.
+
+            Verified before this pull request was written:
+
+            - the whole workspace checks with all targets and all features;
+            - no crates.io original of a `zakura-*` fork entered the graph;
+            - every vendored crate resolves to exactly one copy;
+            - the facade still builds against both backends.
+
+            Run:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Consumers pin these crates by git revision until they are
+            published, so their pins need moving after this merges.
+
+      - name: Open draft pull request for merge conflicts
+        if: steps.sync.outputs.conflicts == 'true'
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        with:
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          branch: automation/upstream-sync/${{ matrix.target.name }}
+          delete-branch: true
+          draft: true
+          title: "WIP: sync ${{ matrix.target.name }} to ${{ matrix.target.ref }} (conflicts)"
+          body: |
+            Merging `${{ matrix.target.ref }}` conflicted. The conflicted merge
+            is committed on this branch (with markers) so it can be checked out
+            and finished by hand. `vendor/librustzcash` is already updated and
+            pushed.
+
+            ```bash
+            git fetch origin
+            git checkout automation/upstream-sync/${{ matrix.target.name }}
+            # resolve conflict markers under librustzcash/
+            python3 scripts/generate-workspace.py .
+            # set ref and vendor_commit in manifests/sources.toml to this release
+            ./scripts/verify-zakura-graph.sh
+            ./scripts/verify-wallet-lib-modes.sh
+            ```
+
+            Run:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

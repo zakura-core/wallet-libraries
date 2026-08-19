@@ -20,7 +20,7 @@ categories.workspace = true
 # feature unconditionally: this crate exists only to support the engine's tests.
 zcash_pool_migration = { path = "../zcash_pool_migration", features = [
     "orchard",
-] }
+], package = "zakura-pool-migration" }
 
 orchard = { workspace = true }
 pczt = { workspace = true }
