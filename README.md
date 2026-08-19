@@ -95,10 +95,10 @@ use zakura_wallet_lib::{client_backend, orchard};
 
 ```toml
 # ZODL: upstream, the default
-zakura-wallet-lib = "0.1"
+zakura-wallet-lib = "0.1.0-rc0"
 
 # Vizor: the forks
-zakura-wallet-lib = { version = "0.1", default-features = false, features = ["zakura"] }
+zakura-wallet-lib = { version = "0.1.0-rc0", default-features = false, features = ["zakura"] }
 ```
 
 The two features are mutually exclusive. Cargo features are additive and there
@@ -115,13 +115,12 @@ all — it declares the packages it wants directly, as below.
 
 ## Consume from a wallet
 
-Until these crates are published, pin them by git revision. The dependency keys
-keep their upstream names, so wallet source needs no changes:
+The dependency keys keep their upstream names, so wallet source needs no changes:
 
 ```toml
-zcash_client_backend = { git = "https://github.com/zakura-core/wallet-libraries.git", rev = "<commit>", package = "zakura-client-backend" }
-zcash_client_sqlite = { git = "https://github.com/zakura-core/wallet-libraries.git", rev = "<commit>", package = "zakura-client-sqlite" }
-pczt = { git = "https://github.com/zakura-core/wallet-libraries.git", rev = "<commit>", package = "zakura-pczt" }
+zcash_client_backend = { version = "0.1.0-rc0", package = "zakura-client-backend" }
+zcash_client_sqlite = { version = "0.1.0-rc0", package = "zakura-client-sqlite" }
+pczt = { version = "0.1.0-rc0", package = "zakura-pczt" }
 ```
 
 The crypto stack comes from crates.io as `zakura-*`; do not also declare the

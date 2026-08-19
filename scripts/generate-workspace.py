@@ -15,10 +15,14 @@ Three rules are applied to `[workspace.dependencies]`:
    published Zakura fork, keeping the upstream key so crate sources are
    unchanged (`orchard = { package = "zakura-orchard", ... }`);
 2. a path dependency on a crate this repository vendors keeps its path,
-   rewritten into the vendored directory, and gains the crate's published name;
+   rewritten into the vendored directory, gains the crate's published name,
+   and takes the Zakura `version` from `[[crate]]` rather than upstream's;
 3. any other path dependency loses its path and becomes a plain crates.io
    requirement, because `libraries` resolves those same crates from crates.io
    and a second local copy would be a distinct type.
+
+`workspace.package.repository` is rewritten to this repository so published
+crates do not advertise the upstream librustzcash URL.
 """
 
 from __future__ import annotations
@@ -73,15 +77,33 @@ def main(argv: list[str]) -> int:
 
     upstream_manifest = repo_root / manifest["layout"]["upstream_manifest"]
 
-    vendored = {
-        crate["path"]: crate.get("package", crate["path"])
-        for crate in manifest["crate"]
-    }
+    vendored = {crate["path"]: crate for crate in manifest["crate"]}
+    for crate in vendored.values():
+        if "version" not in crate:
+            print(
+                f"crate {crate.get('package', crate['path'])} is missing version",
+                file=sys.stderr,
+            )
+            return 1
+
     rewire = manifest["rewire"]
     layout = manifest["layout"]
     vendored_directory = layout["vendored_directory"]
 
     text = upstream_manifest.read_text()
+
+    repository = layout.get("repository")
+    if repository:
+        text, replaced = re.subn(
+            r'^repository = "https://github.com/zcash/librustzcash"$',
+            f'repository = "{repository}"',
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if replaced != 1:
+            print("could not rewrite workspace.package.repository", file=sys.stderr)
+            return 1
 
     members = "".join(
         f'    "{vendored_directory}/{path}",\n' for path in vendored
@@ -106,8 +128,10 @@ def main(argv: list[str]) -> int:
             fields["package"] = f'"{target["package"]}"'
         elif "path" in fields:
             if package in vendored:
+                crate = vendored[package]
                 fields["path"] = f'"{vendored_directory}/{package}"'
-                fields["package"] = f'"{vendored[package]}"'
+                fields["package"] = f'"{crate.get("package", package)}"'
+                fields["version"] = f'"{crate["version"]}"'
             else:
                 fields.pop("path")
         else:

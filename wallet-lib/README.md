@@ -5,8 +5,7 @@ its Zakura forks (`zakura`), and re-exports the selected family under stable
 names. Crates that must build both for ZODL and for Vizor depend on this
 instead of naming either family directly.
 
-The name is provisional: nothing consumes it yet, and no crates.io reservation
-exists for it.
+The name is reserved on crates.io as `zakura-wallet-lib`.
 
 See `src/lib.rs` for the selection rules and the guarantees this crate does and
 does not provide.

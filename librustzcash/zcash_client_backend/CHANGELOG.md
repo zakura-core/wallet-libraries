@@ -10,6 +10,12 @@ workspace.
 
 ## [Unreleased]
 
+- Forked from upstream `zcash_client_backend` and renamed to `zakura-client-backend`;
+  this changelog starts fresh for the Zakura fork's initial release.
+- Restarted the version lineage at 0.1.0, leaving behind the inherited upstream
+  version (0.24.0-rc.7); the initial Zakura release will be preceded by `0.1.0-rc`
+  release candidates.
+
 ## [0.24.0-rc.7] - 2026-08-03
 
 ### Added

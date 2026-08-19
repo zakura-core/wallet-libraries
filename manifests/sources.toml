@@ -31,6 +31,8 @@ extra_members = ["wallet-lib"]
 # The backend selector. Named separately because the verification scripts have
 # to build it one backend at a time, unlike every other member.
 facade = "wallet-lib"
+# Inherited by every vendored crate through `repository.workspace = true`.
+repository = "https://github.com/zakura-core/wallet-libraries"
 
 [[source]]
 name = "librustzcash"
@@ -46,10 +48,12 @@ tag_pattern = "^zcash_client_sqlite-(?P<version>.+)$"
 allow_prerelease = true
 
 # The vendored crates, in dependency order. `path` is the directory inside the
-# upstream repository; it is reused verbatim under `crates/` so that `use`
+# upstream repository; it is reused verbatim under `librustzcash/` so that `use`
 # paths and integration tests keep working. `package` is the published name,
 # reserved in `zakura-core/reserved`; the library target keeps the upstream
-# name, matching the convention in `zakura-core/libraries`.
+# name, matching the convention in `zakura-core/libraries`. `version` is the
+# Zakura release, independent of the inherited upstream version: the first
+# published lineage starts at `0.1.0-rc0`.
 #
 # Membership rule, inherited from that repository and verified by
 # `scripts/verify-zakura-graph.sh`: a crate belongs here when it depends on the
@@ -60,14 +64,17 @@ allow_prerelease = true
 [[crate]]
 path = "pczt"
 package = "zakura-pczt"
+version = "0.1.0-rc0"
 
 [[crate]]
 path = "zcash_client_backend"
 package = "zakura-client-backend"
+version = "0.1.0-rc0"
 
 [[crate]]
 path = "zcash_client_sqlite"
 package = "zakura-client-sqlite"
+version = "0.1.0-rc0"
 
 # Workspace dependencies redirected onto the published Zakura crypto stack.
 # The upstream dependency key is kept, so crate sources continue to say

@@ -21,7 +21,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 rust-version = "1.88"
-repository = "https://github.com/zcash/librustzcash"
+repository = "https://github.com/zakura-core/wallet-libraries"
 license = "MIT OR Apache-2.0"
 categories = ["cryptography::cryptocurrencies"]
 
@@ -34,7 +34,7 @@ categories = ["cryptography::cryptocurrencies"]
 # Intra-workspace dependencies
 equihash = { version = "0.3", default-features = false }
 zcash_address = { version = "0.13.0", default-features = false }
-zcash_client_backend = { version = "0.24.0-rc.7", path = "librustzcash/zcash_client_backend", package = "zakura-client-backend" }
+zcash_client_backend = { version = "0.1.0-rc0", path = "librustzcash/zcash_client_backend", package = "zakura-client-backend" }
 # zcash_encoding 0.5.0 is a breaking release (MSRV bump + `CompactSize::write` now
 # rejects values above `MAX_COMPACT_SIZE`). To avoid forcing every dependent to
 # migrate at once, the workspace default stays pinned to the published 0.4; only
@@ -51,7 +51,7 @@ zcash_note_encryption = "0.4.1"
 zcash_primitives = { version = "1.0.0-rc.1", default-features = false, package = "zakura-primitives" }
 zcash_proofs = { version = "1.0.0-rc.1", default-features = false, package = "zakura-proofs" }
 
-pczt = { version = "0.9.2", path = "librustzcash/pczt", package = "zakura-pczt" }
+pczt = { version = "0.1.0-rc0", path = "librustzcash/pczt", package = "zakura-pczt" }
 
 # Shielded protocols
 bellman = { version = "0.14", default-features = false, features = ["groth16"] }

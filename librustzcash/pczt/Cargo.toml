@@ -1,6 +1,6 @@
 [package]
 name = "zakura-pczt"
-version = "0.9.2"
+version = "0.1.0-rc0"
 authors = ["Jack Grigg <jack@electriccoin.co>"]
 edition.workspace = true
 rust-version.workspace = true
