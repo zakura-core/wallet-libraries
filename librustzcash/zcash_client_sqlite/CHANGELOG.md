@@ -16,6 +16,12 @@ workspace.
   version (0.22.0-rc.7); the initial Zakura release will be preceded by `0.1.0-rc`
   release candidates.
 
+### Added
+- A store-backed implementation of
+  `InputSource::select_spendable_notes_for_consolidation` that selects necessary
+  funding notes largest first, then returns the smallest eligible notes from
+  the same preferred lock tier as optional consolidation candidates.
+
 ## [0.22.0-rc.7] - 2026-08-03
 
 ### Added
