@@ -35,7 +35,7 @@
 
 use incrementalmerkletree::Position;
 use nonempty::NonEmpty;
-use rand::RngCore;
+use rand_core::RngCore;
 use secrecy::{ExposeSecret, SecretVec};
 use shardtree::{ShardTree, error::ShardTreeError, store::ShardStore};
 use std::{

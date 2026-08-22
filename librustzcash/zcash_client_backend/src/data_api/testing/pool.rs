@@ -8,7 +8,8 @@ use std::{
 
 use assert_matches::assert_matches;
 use incrementalmerkletree::{Hashable, Level, Position, frontier::Frontier};
-use rand::{Rng, RngCore};
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
+use rand_08::{Rng, RngCore};
 use secrecy::Secret;
 use shardtree::error::ShardTreeError;
 
@@ -124,13 +125,15 @@ use {
 use {
     crate::data_api::wallet::{SignerView, redact_pczt_for_batch_signer, redact_pczt_for_signer},
     pczt::roles::{combiner::Combiner, prover::Prover, signer::Signer},
-    rand_core::OsRng,
     transparent::builder::TransparentSigningSet,
     zcash_primitives::transaction::builder::{BuildConfig, Builder},
     zcash_proofs::prover::LocalTxProver,
     zcash_protocol::consensus::ZIP212_GRACE_PERIOD,
     zcash_script::opcode::PushValue,
 };
+
+#[allow(non_upper_case_globals)]
+const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
 
 #[cfg(all(feature = "pczt", feature = "transparent-inputs"))]
 use {

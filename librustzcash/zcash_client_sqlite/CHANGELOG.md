@@ -10,6 +10,12 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc2] - 2026-08-21
+
+### Changed
+- Updated the backend, PCZT, and Zakura protocol dependencies to their
+  RC3-compatible release line.
+
 ## [0.1.0-rc1] - 2026-08-19
 
 ### Added

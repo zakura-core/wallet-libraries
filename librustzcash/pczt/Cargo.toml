@@ -1,6 +1,6 @@
 [package]
 name = "zakura-pczt"
-version = "0.1.0-rc0"
+version = "0.1.0-rc1"
 authors = ["Jack Grigg <jack@electriccoin.co>"]
 edition.workspace = true
 rust-version.workspace = true
@@ -20,6 +20,7 @@ zcash_primitives = { workspace = true, optional = true }
 zcash_protocol = { workspace = true, default-features = false }
 
 blake2b_simd = { workspace = true, optional = true }
+rand = { workspace = true, optional = true, features = ["sys_rng"] }
 rand_core = { workspace = true, optional = true }
 
 # Encoding
@@ -56,7 +57,7 @@ document-features = { workspace = true, optional = true }
 [dev-dependencies]
 hex.workspace = true
 incrementalmerkletree.workspace = true
-rand_chacha.workspace = true
+rand_chacha_10 = { package = "rand_chacha", version = "0.10" }
 ripemd.workspace = true
 secp256k1 = { workspace = true, features = ["rand"] }
 sha2.workspace = true
@@ -113,7 +114,7 @@ zcp-builder = ["dep:zcash_primitives", "orchard", "sapling", "transparent"]
 io-finalizer = [
     "dep:blake2b_simd",
     "dep:rand_core",
-    "rand_core/getrandom",
+    "dep:rand",
     "dep:zcash_primitives",
     "orchard",
     "sapling",
@@ -123,7 +124,7 @@ io-finalizer = [
 ## Enables the Prover role.
 prover = [
     "dep:rand_core",
-    "rand_core/getrandom",
+    "dep:rand",
     "orchard?/circuit",
     "sapling?/circuit",
     "sapling?/temporary-zcashd",
@@ -133,7 +134,7 @@ prover = [
 signer = [
     "dep:blake2b_simd",
     "dep:rand_core",
-    "rand_core/getrandom",
+    "dep:rand",
     "dep:zcash_primitives",
     "orchard",
     "sapling",
@@ -147,7 +148,7 @@ spend-finalizer = ["transparent"]
 tx-extractor = [
     "dep:blake2b_simd",
     "dep:rand_core",
-    "rand_core/getrandom",
+    "dep:rand",
     "dep:zcash_primitives",
     "orchard",
     "orchard/circuit",

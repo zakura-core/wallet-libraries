@@ -9,7 +9,7 @@ than merging this file is what keeps the Zakura rewiring out of every upstream
 merge: the rules live in manifests/sources.toml, and the manifest they are
 applied to arrives untouched on the vendor branch.
 
-Three rules are applied to `[workspace.dependencies]`:
+Four rules are applied to `[workspace.dependencies]`:
 
 1. a dependency named in the manifest's `[rewire]` table is redirected at the
    published Zakura fork, keeping the upstream key so crate sources are
@@ -20,6 +20,8 @@ Three rules are applied to `[workspace.dependencies]`:
 3. any other path dependency loses its path and becomes a plain crates.io
    requirement, because `libraries` resolves those same crates from crates.io
    and a second local copy would be a distinct type.
+4. a dependency named in `[versions]` keeps its upstream metadata but takes the
+   configured version required by the selected Zakura release family.
 
 `workspace.package.repository` is rewritten to this repository so published
 crates do not advertise the upstream librustzcash URL.
@@ -87,6 +89,7 @@ def main(argv: list[str]) -> int:
             return 1
 
     rewire = manifest["rewire"]
+    versions = manifest.get("versions", {})
     layout = manifest["layout"]
     vendored_directory = layout["vendored_directory"]
 
@@ -134,8 +137,11 @@ def main(argv: list[str]) -> int:
                 fields["version"] = f'"{crate["version"]}"'
             else:
                 fields.pop("path")
-        else:
+        elif key not in versions:
             return match.group(0)
+
+        if key in versions:
+            fields["version"] = f'"{versions[key]}"'
 
         return f"{key} = {render(fields)}"
 

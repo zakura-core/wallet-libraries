@@ -64,29 +64,41 @@ allow_prerelease = true
 [[crate]]
 path = "pczt"
 package = "zakura-pczt"
-version = "0.1.0-rc0"
+version = "0.1.0-rc1"
 
 [[crate]]
 path = "zcash_client_backend"
 package = "zakura-client-backend"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 
 [[crate]]
 path = "zcash_client_sqlite"
 package = "zakura-client-sqlite"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 
 # Workspace dependencies redirected onto the published Zakura crypto stack.
 # The upstream dependency key is kept, so crate sources continue to say
 # `orchard::` and `zcash_primitives::` while resolving to the forks.
 [rewire]
-zcash_primitives = { package = "zakura-primitives", version = "1.0.0-rc.1" }
-zcash_keys = { package = "zakura-keys", version = "1.0.0-rc.1" }
-zcash_proofs = { package = "zakura-proofs", version = "1.0.0-rc.1" }
-orchard = { package = "zakura-orchard", version = "1.0.0-rc.1" }
-sapling = { package = "zakura-sapling-crypto", version = "1.0.0-rc.1" }
-redjubjub = { package = "zakura-redjubjub", version = "1.0.0-rc.1" }
-pasta_curves = { package = "zakura-pasta-curves", version = "1.0.0-rc.1" }
+bellman = { package = "zakura-bellman", version = "1.0.0-rc.3" }
+bls12_381 = { package = "zakura-bls12-381", version = "1.0.0-rc.3" }
+jubjub = { package = "zakura-jubjub", version = "1.0.0-rc.3" }
+zcash_primitives = { package = "zakura-primitives", version = "1.0.0-rc.3" }
+zcash_keys = { package = "zakura-keys", version = "1.0.0-rc.3" }
+zcash_proofs = { package = "zakura-proofs", version = "1.0.0-rc.3" }
+orchard = { package = "zakura-orchard", version = "1.0.0-rc.3" }
+sapling = { package = "zakura-sapling-crypto", version = "1.0.0-rc.3" }
+redjubjub = { package = "zakura-redjubjub", version = "1.0.0-rc.3" }
+pasta_curves = { package = "zakura-pasta-curves", version = "1.0.0-rc.3" }
+
+# Non-renamed ecosystem crates whose public traits changed with the RC3 crypto
+# family. The generated workspace keeps upstream's other dependency metadata
+# while replacing these version requirements.
+[versions]
+ff = "0.14"
+group = "0.14"
+rand = "0.10"
+rand_core = "0.10"
 
 # Crate names that must never appear in a built graph: the crates.io originals
 # of everything `libraries` forks. Any one of them means an edge escaped the
@@ -106,4 +118,7 @@ forbidden = [
   "sinsemilla",
   "reddsa",
   "redjubjub",
+  "bellman",
+  "bls12_381",
+  "jubjub",
 ]

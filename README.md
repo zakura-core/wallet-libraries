@@ -59,7 +59,7 @@ Nothing is patched at the source level. `manifests/sources.toml` holds a
 Cargo dependency rename:
 
 ```toml
-orchard = { version = "1.0.0-rc.1", package = "zakura-orchard" }
+orchard = { version = "1.0.0-rc.3", package = "zakura-orchard" }
 ```
 
 The dependency key stays `orchard`, so every `orchard::` path in the vendored
@@ -95,10 +95,10 @@ use zakura_wallet_lib::{client_backend, orchard};
 
 ```toml
 # ZODL: upstream, the default
-zakura-wallet-lib = "0.1.0-rc1"
+zakura-wallet-lib = "0.1.0-rc2"
 
 # Vizor: the forks
-zakura-wallet-lib = { version = "0.1.0-rc1", default-features = false, features = ["zakura"] }
+zakura-wallet-lib = { version = "0.1.0-rc2", default-features = false, features = ["zakura"] }
 ```
 
 The two features are mutually exclusive. Cargo features are additive and there
@@ -118,9 +118,9 @@ all — it declares the packages it wants directly, as below.
 The dependency keys keep their upstream names, so wallet source needs no changes:
 
 ```toml
-zcash_client_backend = { version = "0.1.0-rc1", package = "zakura-client-backend" }
-zcash_client_sqlite = { version = "0.1.0-rc1", package = "zakura-client-sqlite" }
-pczt = { version = "0.1.0-rc0", package = "zakura-pczt" }
+zcash_client_backend = { version = "0.1.0-rc2", package = "zakura-client-backend" }
+zcash_client_sqlite = { version = "0.1.0-rc2", package = "zakura-client-sqlite" }
+pczt = { version = "0.1.0-rc1", package = "zakura-pczt" }
 ```
 
 The crypto stack comes from crates.io as `zakura-*`; do not also declare the

@@ -28,10 +28,16 @@ use pczt::{
     },
     v1, v2,
 };
-use rand_chacha::ChaCha20Rng;
-use rand_core::{OsRng, SeedableRng};
+use rand::{
+    rand_core::{SeedableRng, UnwrapErr},
+    rngs::SysRng,
+};
+use rand_chacha_10::ChaCha20Rng;
 use shardtree::{ShardTree, store::memory::MemoryShardStore};
 use zcash_note_encryption::try_note_decryption;
+
+#[allow(non_upper_case_globals)]
+const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
 use zcash_primitives::transaction::{
     builder::{BuildConfig, Builder, BundlePadding, DeferredPcztBuilder, PcztResult},
     fees::zip317,

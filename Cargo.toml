@@ -34,7 +34,7 @@ categories = ["cryptography::cryptocurrencies"]
 # Intra-workspace dependencies
 equihash = { version = "0.3", default-features = false }
 zcash_address = { version = "0.13.0", default-features = false }
-zcash_client_backend = { version = "0.1.0-rc1", path = "librustzcash/zcash_client_backend", package = "zakura-client-backend" }
+zcash_client_backend = { version = "0.1.0-rc2", path = "librustzcash/zcash_client_backend", package = "zakura-client-backend" }
 # zcash_encoding 0.5.0 is a breaking release (MSRV bump + `CompactSize::write` now
 # rejects values above `MAX_COMPACT_SIZE`). To avoid forcing every dependent to
 # migrate at once, the workspace default stays pinned to the published 0.4; only
@@ -42,21 +42,21 @@ zcash_client_backend = { version = "0.1.0-rc1", path = "librustzcash/zcash_clien
 # explicit path dependency on the local 0.5. Migrate the remaining crates one at a
 # time, then flip this back to `path = "components/zcash_encoding"` at "0.5".
 zcash_encoding = { version = "0.4", default-features = false }
-zcash_keys = { version = "1.0.0-rc.1", default-features = false, package = "zakura-keys" }
+zcash_keys = { version = "1.0.0-rc.3", default-features = false, package = "zakura-keys" }
 zcash_pool_migration = { version = "0.1.0-rc.6" }
 zcash_protocol = { version = "0.10.4", default-features = false }
 zip321 = { version = "0.9.0-rc.1" }
 
 zcash_note_encryption = "0.4.1"
-zcash_primitives = { version = "1.0.0-rc.1", default-features = false, package = "zakura-primitives" }
-zcash_proofs = { version = "1.0.0-rc.1", default-features = false, package = "zakura-proofs" }
+zcash_primitives = { version = "1.0.0-rc.3", default-features = false, package = "zakura-primitives" }
+zcash_proofs = { version = "1.0.0-rc.3", default-features = false, package = "zakura-proofs" }
 
-pczt = { version = "0.1.0-rc0", path = "librustzcash/pczt", package = "zakura-pczt" }
+pczt = { version = "0.1.0-rc1", path = "librustzcash/pczt", package = "zakura-pczt" }
 
 # Shielded protocols
-bellman = { version = "0.14", default-features = false, features = ["groth16"] }
-ff = { version = "0.13", default-features = false }
-group = "0.13"
+bellman = { version = "1.0.0-rc.3", default-features = false, features = ["groth16"], package = "zakura-bellman" }
+ff = { version = "0.14", default-features = false }
+group = { version = "0.14" }
 incrementalmerkletree = { version = "0.8.2", default-features = false }
 shardtree = "0.7"
 tempfile = "3.5.0"
@@ -66,14 +66,14 @@ zcash_spec = "0.2"
 # - Sapling
 bitvec = { version = "1", default-features = false, features = ["alloc"] }
 blake2s_simd = { version = "1", default-features = false }
-bls12_381 = "0.8"
-jubjub = "0.10"
-redjubjub = { version = "1.0.0-rc.1", default-features = false, package = "zakura-redjubjub" }
-sapling = { package = "zakura-sapling-crypto", version = "1.0.0-rc.1", default-features = false }
+bls12_381 = { version = "1.0.0-rc.3", package = "zakura-bls12-381" }
+jubjub = { version = "1.0.0-rc.3", package = "zakura-jubjub" }
+redjubjub = { version = "1.0.0-rc.3", default-features = false, package = "zakura-redjubjub" }
+sapling = { package = "zakura-sapling-crypto", version = "1.0.0-rc.3", default-features = false }
 
 # - Orchard
-orchard = { version = "1.0.0-rc.1", default-features = false, package = "zakura-orchard" }
-pasta_curves = { version = "1.0.0-rc.1", package = "zakura-pasta-curves" }
+orchard = { version = "1.0.0-rc.3", default-features = false, package = "zakura-orchard" }
+pasta_curves = { version = "1.0.0-rc.3", package = "zakura-pasta-curves" }
 
 # - Transparent
 bip32 = { version = "=0.6.0-pre.1", default-features = false, features = ["alloc"] }
@@ -91,8 +91,8 @@ libm = "0.2"
 nonempty = { version = "0.11", default-features = false }
 
 # CSPRNG
-rand = { version = "0.8", default-features = false }
-rand_core = { version = "0.6", default-features = false }
+rand = { version = "0.10", default-features = false }
+rand_core = { version = "0.10", default-features = false }
 rand_distr = { version = "0.4", default-features = false }
 
 # Currency conversions

@@ -14,7 +14,7 @@ use assert_matches::assert_matches;
 use group::ff::Field;
 use incrementalmerkletree::{Marking, Retention};
 use nonempty::NonEmpty;
-use rand::{CryptoRng, Rng, RngCore, SeedableRng};
+use rand_08::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaChaRng;
 use secrecy::{ExposeSecret, Secret, SecretVec};
 use shardtree::{
