@@ -10,6 +10,12 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc2] - 2026-08-21
+
+### Changed
+- Updated the Zakura wallet and proving dependencies to the RC3 cryptography
+  family and migrated cryptographic randomness to the `rand_core 0.10` API.
+
 ## [0.1.0-rc1] - 2026-08-19
 
 ### Added

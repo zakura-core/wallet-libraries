@@ -772,8 +772,9 @@ pub(crate) mod tests {
         chain::{ChainState, CommitmentTreeRoot},
         scanning::{ScanPriority, spanning_tree::testing::scan_range},
         testing::{
-            AddressType, FakeCompactOutput, InitialChainState, TestBuilder, TestState,
-            pool::ShieldedPoolTester, sapling::SaplingPoolTester,
+            AddressType, FakeCompactOutput, InitialChainState, TestBuilder, TestRng, TestState,
+            pool::ShieldedPoolTester, random_frontier_with_prior_subtree_roots,
+            sapling::SaplingPoolTester,
         },
         wallet::ConfirmationsPolicy,
     };
@@ -853,6 +854,27 @@ pub(crate) mod tests {
         zcash_protocol::{ShieldedPool, memo::Memo},
     };
 
+    fn random_sapling_frontier<const DEPTH: u8>(
+        rng: &mut TestRng,
+        tree_size: u64,
+        subtree_depth: NonZeroU8,
+    ) -> (Vec<::sapling::Node>, Frontier<::sapling::Node, DEPTH>) {
+        random_frontier_with_prior_subtree_roots(rng, tree_size, subtree_depth, |rng| {
+            ::sapling::Node::random(rng)
+        })
+    }
+
+    #[cfg(feature = "orchard")]
+    fn random_orchard_frontier<const DEPTH: u8>(
+        rng: &mut TestRng,
+        tree_size: u64,
+        subtree_depth: NonZeroU8,
+    ) -> (Vec<MerkleHashOrchard>, Frontier<MerkleHashOrchard, DEPTH>) {
+        random_frontier_with_prior_subtree_roots(rng, tree_size, subtree_depth, |rng| {
+            MerkleHashOrchard::random(rng)
+        })
+    }
+
     #[test]
     fn sapling_scan_complete() {
         scan_complete::<SaplingPoolTester>();
@@ -881,12 +903,11 @@ pub(crate) mod tests {
                 let sapling_activation_height =
                     network.activation_height(NetworkUpgrade::Sapling).unwrap();
                 // Construct a fake chain state for the end of block 300
-                let (prior_sapling_roots, sapling_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        initial_sapling_tree_size.into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_sapling_roots, sapling_initial_tree) = random_sapling_frontier(
+                    rng,
+                    initial_sapling_tree_size.into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
                 let prior_sapling_roots = prior_sapling_roots
                     .into_iter()
                     .zip(1u32..)
@@ -896,12 +917,11 @@ pub(crate) mod tests {
                     .collect::<Vec<_>>();
 
                 #[cfg(feature = "orchard")]
-                let (prior_orchard_roots, orchard_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        initial_orchard_tree_size.into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_orchard_roots, orchard_initial_tree) = random_orchard_frontier(
+                    rng,
+                    initial_orchard_tree_size.into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
                 #[cfg(feature = "orchard")]
                 let prior_orchard_roots = prior_orchard_roots
                     .into_iter()
@@ -1063,19 +1083,17 @@ pub(crate) mod tests {
 
                 // Construct a fake chain state for the end of the block with the given
                 // birthday_offset from the end of the last shard.
-                let (prior_sapling_roots, sapling_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        (frontier_position + 1).into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_sapling_roots, sapling_initial_tree) = random_sapling_frontier(
+                    rng,
+                    (frontier_position + 1).into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
                 #[cfg(feature = "orchard")]
-                let (prior_orchard_roots, orchard_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        (frontier_position + 1).into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_orchard_roots, orchard_initial_tree) = random_orchard_frontier(
+                    rng,
+                    (frontier_position + 1).into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
 
                 // No Ironwood notes are involved in this test, so its chain state carries an
                 // empty Ironwood tree.
@@ -1308,12 +1326,11 @@ pub(crate) mod tests {
 
                 // Construct a fake chain state for the end of the block with the given
                 // birthday_offset from the Nu5 birthday.
-                let (prior_sapling_roots, sapling_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        frontier_tree_size.into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_sapling_roots, sapling_initial_tree) = random_sapling_frontier(
+                    rng,
+                    frontier_tree_size.into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
                 // There will only be one prior root
                 let prior_sapling_roots = prior_sapling_roots
                     .into_iter()
@@ -1321,12 +1338,11 @@ pub(crate) mod tests {
                     .collect::<Vec<_>>();
 
                 #[cfg(feature = "orchard")]
-                let (prior_orchard_roots, orchard_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        frontier_tree_size.into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_orchard_roots, orchard_initial_tree) = random_orchard_frontier(
+                    rng,
+                    frontier_tree_size.into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
                 // There will only be one prior root
                 #[cfg(feature = "orchard")]
                 let prior_orchard_roots = prior_orchard_roots
@@ -1508,12 +1524,11 @@ pub(crate) mod tests {
 
                 // Construct a fake chain state for the end of the block with the given
                 // birthday_offset from the Nu5 birthday.
-                let (prior_sapling_roots, sapling_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        frontier_tree_size.into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_sapling_roots, sapling_initial_tree) = random_sapling_frontier(
+                    rng,
+                    frontier_tree_size.into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
                 // There will only be one prior root
                 let prior_sapling_roots = prior_sapling_roots
                     .into_iter()
@@ -1521,12 +1536,11 @@ pub(crate) mod tests {
                     .collect::<Vec<_>>();
 
                 #[cfg(feature = "orchard")]
-                let (prior_orchard_roots, orchard_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        frontier_tree_size.into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_orchard_roots, orchard_initial_tree) = random_orchard_frontier(
+                    rng,
+                    frontier_tree_size.into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
                 // There will only be one prior root
                 #[cfg(feature = "orchard")]
                 let prior_orchard_roots = prior_orchard_roots
@@ -1853,12 +1867,11 @@ pub(crate) mod tests {
                 let birthday_height =
                     network.activation_height(NetworkUpgrade::Nu5).unwrap() + birthday_nu5_offset;
 
-                let (prior_orchard_roots, orchard_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        birthday_tree_size.into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_orchard_roots, orchard_initial_tree) = random_orchard_frontier(
+                    rng,
+                    birthday_tree_size.into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
 
                 // There will only be one prior root. The completion height of the first shard will
                 // be 10 blocks prior to the wallet birthday height. This isn't actually enough

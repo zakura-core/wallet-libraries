@@ -1005,7 +1005,7 @@ pub mod testing {
         GroupEncoding,
         ff::{Field, PrimeField},
     };
-    use rand_core::{OsRng, RngCore};
+    use rand::{Rng, rand_core::UnwrapErr, rngs::SysRng};
     use sapling::{
         Nullifier,
         constants::SPENDING_KEY_GENERATOR,
@@ -1014,6 +1014,9 @@ pub mod testing {
         value::NoteValue,
         zip32::DiversifiableFullViewingKey,
     };
+
+    #[allow(non_upper_case_globals)]
+    const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
     use zcash_note_encryption::{COMPACT_NOTE_SIZE, Domain};
     use zcash_primitives::{
         block::BlockHash, transaction::components::sapling::zip212_enforcement,
@@ -1028,7 +1031,7 @@ pub mod testing {
         self as compact, CompactBlock, CompactSaplingOutput, CompactSaplingSpend, CompactTx,
     };
 
-    fn random_compact_tx(mut rng: impl RngCore) -> CompactTx {
+    fn random_compact_tx(mut rng: impl Rng) -> CompactTx {
         let fake_nf = {
             let mut nf = vec![0; 32];
             rng.fill_bytes(&mut nf);

@@ -5,7 +5,7 @@ use std::{
     convert::Infallible,
     fmt,
     hash::Hash,
-    num::NonZeroU32,
+    num::{NonZeroU8, NonZeroU32, NonZeroU64},
 };
 
 #[cfg(feature = "pczt")]
@@ -14,7 +14,7 @@ use assert_matches::assert_matches;
 use group::ff::Field;
 use incrementalmerkletree::{Marking, Retention};
 use nonempty::NonEmpty;
-use rand::{CryptoRng, Rng, RngCore, SeedableRng};
+use rand_08::{CryptoRng as CryptoRng08, Rng as Rng08, RngCore as RngCore08, SeedableRng};
 use rand_chacha::ChaChaRng;
 use secrecy::{ExposeSecret, Secret, SecretVec};
 use shardtree::{
@@ -98,6 +98,145 @@ use super::{
         propose_send_max_transfer, propose_standard_transfer_to_address, propose_transfer,
     },
 };
+
+/// A deterministic test RNG compatible with both the legacy Rand 0.8 test
+/// utilities and the Rand 0.10 traits used by the Zakura RC3 crypto crates.
+#[derive(Clone, Debug)]
+pub struct TestRng(ChaChaRng);
+
+impl TestRng {
+    pub fn seed_from_u64(seed: u64) -> Self {
+        Self(ChaChaRng::seed_from_u64(seed))
+    }
+}
+
+impl RngCore08 for TestRng {
+    fn next_u32(&mut self) -> u32 {
+        self.0.next_u32()
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0.next_u64()
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.0.fill_bytes(dest);
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_08::Error> {
+        self.0.try_fill_bytes(dest)
+    }
+}
+
+impl CryptoRng08 for TestRng {}
+
+impl rand::rand_core::TryRng for TestRng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(self.0.next_u32())
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(self.0.next_u64())
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        self.0.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+impl rand::rand_core::TryCryptoRng for TestRng {}
+
+/// The RNG capabilities required by test helpers that cross the Rand 0.8/0.10
+/// boundary.
+pub trait TestRngCore: RngCore08 + CryptoRng08 + rand::Rng + rand::rand_core::CryptoRng {}
+
+impl<R> TestRngCore for R where R: RngCore08 + CryptoRng08 + rand::Rng + rand::rand_core::CryptoRng {}
+
+/// Generates a random frontier and its prior subtree roots using an explicit
+/// node generator.
+///
+/// This preserves the behavior of
+/// `Frontier::random_with_prior_subtree_roots` without requiring the node's
+/// random distribution to use the Rand 0.8 version fixed by
+/// `incrementalmerkletree`.
+pub fn random_frontier_with_prior_subtree_roots<H, R, const DEPTH: u8>(
+    rng: &mut R,
+    tree_size: u64,
+    subtree_depth: NonZeroU8,
+    mut random_node: impl FnMut(&mut R) -> H,
+) -> (Vec<H>, incrementalmerkletree::frontier::Frontier<H, DEPTH>)
+where
+    H: incrementalmerkletree::Hashable + Clone,
+{
+    use incrementalmerkletree::{Level, Position, frontier::Frontier};
+
+    assert!(tree_size <= 2u64.checked_pow(DEPTH.into()).unwrap());
+    let Some(tree_size) = NonZeroU64::new(tree_size) else {
+        return (vec![], Frontier::empty());
+    };
+
+    let prior_subtree_count: u64 = u64::from(tree_size) >> u8::from(subtree_depth);
+    let prior_roots: Vec<H> = core::iter::repeat_with(|| random_node(rng))
+        .take(prior_subtree_count as usize)
+        .collect();
+
+    let position = Position::from(u64::from(tree_size) - 1);
+    let leaf = random_node(rng);
+    let mut ommers: Vec<H> = core::iter::repeat_with(|| random_node(rng))
+        .take(position.past_ommer_count().into())
+        .collect();
+
+    if !prior_roots.is_empty() {
+        let subtree_root_level = Level::from(u8::from(subtree_depth));
+        let mut replacement_ommers: Vec<(Level, H)> = vec![];
+        let mut roots_iter = prior_roots.iter();
+
+        loop {
+            if let Some(top) = replacement_ommers.pop() {
+                if let Some(prev) = replacement_ommers.pop() {
+                    if top.0 == prev.0 {
+                        replacement_ommers.push((top.0 + 1, H::combine(top.0, &prev.1, &top.1)));
+                        continue;
+                    } else {
+                        replacement_ommers.push(prev);
+                    }
+                }
+
+                if let Some(root) = roots_iter.next() {
+                    if top.0 == subtree_root_level {
+                        replacement_ommers.push((
+                            subtree_root_level + 1,
+                            H::combine(subtree_root_level, &top.1, root),
+                        ));
+                    } else {
+                        replacement_ommers.push(top);
+                        replacement_ommers.push((subtree_root_level, root.clone()));
+                    }
+                } else {
+                    replacement_ommers.push(top);
+                    break;
+                }
+            } else if let Some(root) = roots_iter.next() {
+                replacement_ommers.push((subtree_root_level, root.clone()));
+            } else {
+                break;
+            }
+        }
+
+        let ommer_count = ommers.len();
+        for (idx, (_, ommer)) in replacement_ommers.into_iter().enumerate() {
+            ommers[ommer_count - (idx + 1)] = ommer;
+        }
+    }
+
+    (
+        prior_roots,
+        Frontier::from_parts(position, leaf, ommers).expect("generated frontier is valid"),
+    )
+}
 
 #[cfg(feature = "pczt")]
 fn real_test_prover() -> &'static LocalTxProver {
@@ -547,7 +686,7 @@ pub struct TestState<Cache, DataStore: WalletTest, Network> {
     wallet_data: DataStore,
     network: Network,
     test_account: Option<(SecretVec<u8>, TestAccount<DataStore::Account>)>,
-    rng: ChaChaRng,
+    rng: TestRng,
 }
 
 impl<Cache, DataStore: WalletTest, Network> TestState<Cache, DataStore, Network> {
@@ -562,7 +701,7 @@ impl<Cache, DataStore: WalletTest, Network> TestState<Cache, DataStore, Network>
     }
 
     /// Exposes the test framework's source of randomness.
-    pub fn rng_mut(&mut self) -> &mut ChaChaRng {
+    pub fn rng_mut(&mut self) -> &mut TestRng {
         &mut self.rng
     }
 
@@ -1748,7 +1887,7 @@ pub trait DataStoreFactory {
 
 /// A [`TestState`] builder, that configures the environment for a test.
 pub struct TestBuilder<Cache, DataStoreFactory> {
-    rng: ChaChaRng,
+    rng: TestRng,
     network: LocalNetwork,
     cache: Cache,
     ds_factory: DataStoreFactory,
@@ -1783,7 +1922,7 @@ impl TestBuilder<(), ()> {
     /// Constructs a new test environment builder.
     pub fn new() -> Self {
         TestBuilder {
-            rng: ChaChaRng::seed_from_u64(0),
+            rng: TestRng::seed_from_u64(0),
             network: Self::DEFAULT_NETWORK,
             cache: (),
             ds_factory: (),
@@ -1898,7 +2037,9 @@ impl<Cache, DsFactory> TestBuilder<Cache, DsFactory> {
     /// use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
     /// use zcash_client_backend::data_api::{
     ///     chain::{ChainState, CommitmentTreeRoot},
-    ///     testing::{InitialChainState, TestBuilder},
+    ///     testing::{
+    ///         InitialChainState, TestBuilder, random_frontier_with_prior_subtree_roots,
+    ///     },
     /// };
     ///
     /// // For this test, we'll start inserting leaf notes 5 notes after the end of the
@@ -1919,10 +2060,11 @@ impl<Cache, DsFactory> TestBuilder<Cache, DsFactory> {
     ///
     ///         // Construct a fake chain state for the end of block 300
     ///         let (prior_sapling_roots, sapling_initial_tree) =
-    ///             Frontier::random_with_prior_subtree_roots(
+    ///             random_frontier_with_prior_subtree_roots(
     ///                 rng,
     ///                 initial_sapling_tree_size.into(),
     ///                 NonZeroU8::new(16).unwrap(),
+    ///                 |rng| sapling::Node::random(rng),
     ///             );
     ///         let prior_sapling_roots = prior_sapling_roots
     ///             .into_iter()
@@ -1934,10 +2076,11 @@ impl<Cache, DsFactory> TestBuilder<Cache, DsFactory> {
     ///
     ///         #[cfg(feature = "orchard")]
     ///         let (prior_orchard_roots, orchard_initial_tree) =
-    ///             Frontier::random_with_prior_subtree_roots(
+    ///             random_frontier_with_prior_subtree_roots(
     ///                 rng,
     ///                 initial_orchard_tree_size.into(),
     ///                 NonZeroU8::new(16).unwrap(),
+    ///                 |rng| orchard::tree::MerkleHashOrchard::random(rng),
     ///             );
     ///         #[cfg(feature = "orchard")]
     ///         let prior_orchard_roots = prior_orchard_roots
@@ -1966,7 +2109,7 @@ impl<Cache, DsFactory> TestBuilder<Cache, DsFactory> {
     /// ```
     pub fn with_initial_chain_state(
         mut self,
-        chain_state: impl FnOnce(&mut ChaChaRng, &LocalNetwork) -> InitialChainState,
+        chain_state: impl FnOnce(&mut TestRng, &LocalNetwork) -> InitialChainState,
     ) -> Self {
         assert!(self.initial_chain_state.is_none());
         assert!(self.account_birthday.is_none());
@@ -2164,12 +2307,7 @@ pub trait TestFvk: Clone {
 
     /// Adds a single spend to the given [`CompactTx`] of a note previously received by
     /// this full viewing key.
-    fn add_spend<R: RngCore + CryptoRng>(
-        &self,
-        ctx: &mut CompactTx,
-        nf: Self::Nullifier,
-        rng: &mut R,
-    );
+    fn add_spend<R: TestRngCore>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, rng: &mut R);
 
     /// Adds a single output to the given [`CompactTx`], where the output will be discovered when
     /// scanning with an incoming viewing key corresponding to this FVK. Its outputs will also be
@@ -2181,7 +2319,7 @@ pub trait TestFvk: Clone {
     /// Returns the nullifier of the newly created note, so that tests can readily have it on hand
     /// for the purpose of spending that note.
     #[allow(clippy::too_many_arguments)]
-    fn add_output<P: consensus::Parameters, R: RngCore + CryptoRng>(
+    fn add_output<P: consensus::Parameters, R: TestRngCore>(
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2209,7 +2347,7 @@ pub trait TestFvk: Clone {
     /// Returns the nullifier full the newly created note which will need to be revealed when that
     /// note is later spent.
     #[allow(clippy::too_many_arguments)]
-    fn add_logical_action<P: consensus::Parameters, R: RngCore + CryptoRng>(
+    fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2237,16 +2375,11 @@ impl<A: TestFvk> TestFvk for &A {
         (*self).ovk_bytes(scope)
     }
 
-    fn add_spend<R: RngCore + CryptoRng>(
-        &self,
-        ctx: &mut CompactTx,
-        nf: Self::Nullifier,
-        rng: &mut R,
-    ) {
+    fn add_spend<R: TestRngCore>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, rng: &mut R) {
         (*self).add_spend(ctx, nf, rng)
     }
 
-    fn add_output<P: consensus::Parameters, R: RngCore + CryptoRng>(
+    fn add_output<P: consensus::Parameters, R: TestRngCore>(
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2271,7 +2404,7 @@ impl<A: TestFvk> TestFvk for &A {
         )
     }
 
-    fn add_logical_action<P: consensus::Parameters, R: RngCore + CryptoRng>(
+    fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2311,17 +2444,12 @@ impl TestFvk for DiversifiableFullViewingKey {
         self.to_ovk(scope).0
     }
 
-    fn add_spend<R: RngCore + CryptoRng>(
-        &self,
-        ctx: &mut CompactTx,
-        nf: Self::Nullifier,
-        _: &mut R,
-    ) {
+    fn add_spend<R: TestRngCore>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, _: &mut R) {
         let cspend = CompactSaplingSpend { nf: nf.to_vec() };
         ctx.spends.push(cspend);
     }
 
-    fn add_output<P: consensus::Parameters, R: RngCore + CryptoRng>(
+    fn add_output<P: consensus::Parameters, R: TestRngCore>(
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2348,7 +2476,7 @@ impl TestFvk for DiversifiableFullViewingKey {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn add_logical_action<P: consensus::Parameters, R: RngCore + CryptoRng>(
+    fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2387,7 +2515,7 @@ impl TestFvk for ::orchard::keys::FullViewingKey {
         *self.to_ovk(scope).as_ref()
     }
 
-    fn add_spend<R: RngCore + CryptoRng>(
+    fn add_spend<R: TestRngCore>(
         &self,
         ctx: &mut CompactTx,
         nullifier_to_reveal: Self::Nullifier,
@@ -2397,7 +2525,7 @@ impl TestFvk for ::orchard::keys::FullViewingKey {
         // random OVK.
         let recipient = loop {
             let mut bytes = [0; 32];
-            rng.fill_bytes(&mut bytes);
+            RngCore08::fill_bytes(rng, &mut bytes);
             let sk = ::orchard::keys::SpendingKey::from_bytes(bytes);
             if sk.is_some().into() {
                 break ::orchard::keys::FullViewingKey::from(&sk.unwrap())
@@ -2410,7 +2538,7 @@ impl TestFvk for ::orchard::keys::FullViewingKey {
         ctx.actions.push(cact);
     }
 
-    fn add_output<P: consensus::Parameters, R: RngCore + CryptoRng>(
+    fn add_output<P: consensus::Parameters, R: TestRngCore>(
         &self,
         ctx: &mut CompactTx,
         _: &P,
@@ -2444,7 +2572,7 @@ impl TestFvk for ::orchard::keys::FullViewingKey {
         note.nullifier(self)
     }
 
-    fn add_logical_action<P: consensus::Parameters, R: RngCore + CryptoRng>(
+    fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
         &self,
         ctx: &mut CompactTx,
         _: &P,
@@ -2497,7 +2625,7 @@ impl TestFvk for IronwoodFvk {
         *self.0.to_ovk(scope).as_ref()
     }
 
-    fn add_spend<R: RngCore + CryptoRng>(
+    fn add_spend<R: TestRngCore>(
         &self,
         ctx: &mut CompactTx,
         nullifier_to_reveal: Self::Nullifier,
@@ -2507,7 +2635,7 @@ impl TestFvk for IronwoodFvk {
         // random OVK.
         let recipient = loop {
             let mut bytes = [0; 32];
-            rng.fill_bytes(&mut bytes);
+            RngCore08::fill_bytes(rng, &mut bytes);
             let sk = ::orchard::keys::SpendingKey::from_bytes(bytes);
             if sk.is_some().into() {
                 break ::orchard::keys::FullViewingKey::from(&sk.unwrap())
@@ -2520,7 +2648,7 @@ impl TestFvk for IronwoodFvk {
         ctx.ironwood_actions.push(cact);
     }
 
-    fn add_output<P: consensus::Parameters, R: RngCore + CryptoRng>(
+    fn add_output<P: consensus::Parameters, R: TestRngCore>(
         &self,
         ctx: &mut CompactTx,
         _: &P,
@@ -2554,7 +2682,7 @@ impl TestFvk for IronwoodFvk {
         note.nullifier(&self.0)
     }
 
-    fn add_logical_action<P: consensus::Parameters, R: RngCore + CryptoRng>(
+    fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
         &self,
         ctx: &mut CompactTx,
         _: &P,
@@ -2607,7 +2735,7 @@ pub enum AddressType {
 /// Creates a `CompactSaplingOutput` at the given height paying the given recipient.
 ///
 /// Returns the `CompactSaplingOutput` and the new note.
-fn compact_sapling_output<P: consensus::Parameters, R: RngCore + CryptoRng>(
+fn compact_sapling_output<P: consensus::Parameters, R: TestRngCore>(
     params: &P,
     height: BlockHeight,
     recipient: ::sapling::PaymentAddress,
@@ -2645,7 +2773,7 @@ fn compact_sapling_output<P: consensus::Parameters, R: RngCore + CryptoRng>(
 ///
 /// Returns the `CompactOrchardAction` and the new note.
 #[cfg(feature = "orchard")]
-fn compact_orchard_action<R: RngCore + CryptoRng>(
+fn compact_orchard_action<R: TestRngCore>(
     nf_old: ::orchard::note::Nullifier,
     recipient: ::orchard::Address,
     value: Zatoshis,
@@ -2685,7 +2813,7 @@ fn compact_orchard_action<R: RngCore + CryptoRng>(
 /// `CompactOrchardAction` and the note. This mirrors [`compact_orchard_action`], but constructs the
 /// action directly because the orchard crate's `fake_compact_action` only produces version 2 notes.
 #[cfg(feature = "orchard")]
-fn compact_ironwood_action<R: RngCore + CryptoRng>(
+fn compact_ironwood_action<R: TestRngCore>(
     nf_old: ::orchard::note::Nullifier,
     recipient: ::orchard::Address,
     value: Zatoshis,
@@ -2698,7 +2826,7 @@ fn compact_ironwood_action<R: RngCore + CryptoRng>(
     let rho = Rho::from_bytes(&nf_old.to_bytes()).unwrap();
     let rseed = loop {
         let mut bytes = [0u8; 32];
-        rng.fill_bytes(&mut bytes);
+        RngCore08::fill_bytes(rng, &mut bytes);
         if let Some(rseed) = Option::from(RandomSeed::from_bytes(bytes, &rho)) {
             break rseed;
         }
@@ -2728,10 +2856,10 @@ fn compact_ironwood_action<R: RngCore + CryptoRng>(
 }
 
 /// Creates a fake `CompactTx` with a random transaction ID and no spends or outputs.
-fn fake_compact_tx<R: RngCore + CryptoRng>(rng: &mut R) -> CompactTx {
+fn fake_compact_tx<R: TestRngCore>(rng: &mut R) -> CompactTx {
     let mut ctx = CompactTx::default();
     let mut txid = vec![0; 32];
-    rng.fill_bytes(&mut txid);
+    RngCore08::fill_bytes(rng, &mut txid);
     ctx.txid = txid;
 
     ctx
@@ -2761,7 +2889,7 @@ impl<Fvk> FakeCompactOutput<Fvk> {
 
     /// Constructs a new random fake external output to the given FVK with a value in the range
     /// 10000..1000000 ZAT.
-    pub fn random<R: RngCore>(rng: &mut R, recipient_fvk: Fvk) -> Self {
+    pub fn random<R: RngCore08>(rng: &mut R, recipient_fvk: Fvk) -> Self {
         Self {
             recipient_fvk,
             recipient_address_type: AddressType::DefaultExternal,
@@ -2784,7 +2912,7 @@ fn fake_compact_block<P: consensus::Parameters, Fvk: TestFvk>(
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
     initial_ironwood_tree_size: u32,
-    mut rng: impl RngCore + CryptoRng,
+    mut rng: impl TestRngCore,
 ) -> (CompactBlock, Vec<Fvk::Nullifier>) {
     // Create a fake CompactBlock containing the note
     let mut ctx = fake_compact_tx(&mut rng);
@@ -2826,7 +2954,7 @@ fn fake_compact_block_from_tx(
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
     initial_ironwood_tree_size: u32,
-    rng: impl RngCore,
+    rng: impl RngCore08,
 ) -> CompactBlock {
     // Create a fake CompactTx containing the transaction.
     let mut ctx = CompactTx {
@@ -2883,7 +3011,7 @@ fn fake_compact_block_spending<P: consensus::Parameters, Fvk: TestFvk>(
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
     initial_ironwood_tree_size: u32,
-    mut rng: impl RngCore + CryptoRng,
+    mut rng: impl TestRngCore,
 ) -> CompactBlock {
     let mut ctx = fake_compact_tx(&mut rng);
 
@@ -2981,7 +3109,7 @@ fn fake_compact_block_from_compact_tx(
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
     initial_ironwood_tree_size: u32,
-    mut rng: impl RngCore,
+    mut rng: impl RngCore08,
 ) -> CompactBlock {
     let mut cb = CompactBlock {
         hash: {

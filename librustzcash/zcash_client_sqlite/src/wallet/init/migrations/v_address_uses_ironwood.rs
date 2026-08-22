@@ -98,10 +98,10 @@ impl RusqliteMigration for Migration {
 
 #[cfg(test)]
 mod tests {
-    use rand_chacha::ChaChaRng;
     use rusqlite::{OptionalExtension, named_params};
     use secrecy::Secret;
     use tempfile::NamedTempFile;
+    use zcash_client_backend::data_api::testing::TestRng;
     use zcash_keys::keys::UnifiedSpendingKey;
     use zcash_protocol::consensus::Network;
 
@@ -119,7 +119,7 @@ mod tests {
 
     /// The wallet type the scenarios operate on: a file-backed database with the deterministic
     /// clock and RNG the crate's other tests use.
-    type TestWalletDb = WalletDb<rusqlite::Connection, Network, FixedClock, ChaChaRng>;
+    type TestWalletDb = WalletDb<rusqlite::Connection, Network, FixedClock, TestRng>;
 
     /// The network the scenario wallets are built for. Any network works; the views under test do
     /// not consult consensus parameters.

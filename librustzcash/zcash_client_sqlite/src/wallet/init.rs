@@ -2,7 +2,7 @@
 
 use std::{borrow::BorrowMut, fmt, rc::Rc};
 
-use rand_core::RngCore;
+use rand_core::Rng;
 use regex::Regex;
 use schemerz::{Migrator, MigratorError};
 use schemerz_rusqlite::{RusqliteAdapter, RusqliteMigration};
@@ -308,7 +308,7 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
 /// # use std::error::Error;
 /// # use secrecy::SecretVec;
 /// # use tempfile::NamedTempFile;
-/// use rand_core::OsRng;
+/// use rand::{rand_core::UnwrapErr, rngs::SysRng};
 /// use zcash_protocol::consensus::Network;
 /// use zcash_client_sqlite::{
 ///     WalletDb,
@@ -320,7 +320,12 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
 /// # let data_file = NamedTempFile::new().unwrap();
 /// # let get_data_db_path = || data_file.path();
 /// # let load_seed = || -> Result<_, String> { Ok(SecretVec::new(vec![])) };
-/// let mut db = WalletDb::for_path(get_data_db_path(), Network::TestNetwork, SystemClock, OsRng)?;
+/// let mut db = WalletDb::for_path(
+///     get_data_db_path(),
+///     Network::TestNetwork,
+///     SystemClock,
+///     UnwrapErr(SysRng),
+/// )?;
 /// match init_wallet_db(&mut db, None) {
 ///     Err(e)
 ///         if matches!(
@@ -346,7 +351,7 @@ pub fn init_wallet_db<
     C: BorrowMut<rusqlite::Connection>,
     P: consensus::Parameters + 'static,
     CL: Clock + Clone + 'static,
-    R: RngCore + Clone + 'static,
+    R: Rng + Clone + 'static,
 >(
     wdb: &mut WalletDb<C, P, CL, R>,
     seed: Option<SecretVec<u8>>,
@@ -404,7 +409,7 @@ pub fn init_wallet_db<
 /// # use std::error::Error;
 /// # use secrecy::SecretVec;
 /// # use tempfile::NamedTempFile;
-/// use rand_core::OsRng;
+/// use rand::{rand_core::UnwrapErr, rngs::SysRng};
 /// use zcash_protocol::consensus::Network;
 /// use zcash_client_sqlite::{
 ///     WalletDb,
@@ -416,7 +421,12 @@ pub fn init_wallet_db<
 /// # let data_file = NamedTempFile::new().unwrap();
 /// # let get_data_db_path = || data_file.path();
 /// # let load_seed = || -> Result<_, String> { Ok(SecretVec::new(vec![])) };
-/// let mut db = WalletDb::for_path(get_data_db_path(), Network::TestNetwork, SystemClock, OsRng)?;
+/// let mut db = WalletDb::for_path(
+///     get_data_db_path(),
+///     Network::TestNetwork,
+///     SystemClock,
+///     UnwrapErr(SysRng),
+/// )?;
 /// match WalletMigrator::new().init_or_migrate(&mut db) {
 ///     Err(e)
 ///         if matches!(
@@ -541,7 +551,7 @@ impl WalletMigrator {
         C: BorrowMut<rusqlite::Connection>,
         P: consensus::Parameters + 'static,
         CL: Clock + Clone + 'static,
-        R: RngCore + Clone + 'static,
+        R: Rng + Clone + 'static,
     >(
         self,
         wdb: &mut WalletDb<C, P, CL, R>,
@@ -555,7 +565,7 @@ impl WalletMigrator {
         C: BorrowMut<rusqlite::Connection>,
         P: consensus::Parameters + 'static,
         CL: Clock + Clone + 'static,
-        R: RngCore + Clone + 'static,
+        R: Rng + Clone + 'static,
     >(
         self,
         wdb: &mut WalletDb<C, P, CL, R>,
@@ -575,7 +585,7 @@ fn init_wallet_db_internal<
     C: BorrowMut<rusqlite::Connection>,
     P: consensus::Parameters + 'static,
     CL: Clock + Clone + 'static,
-    R: RngCore + Clone + 'static,
+    R: Rng + Clone + 'static,
 >(
     wdb: &mut WalletDb<C, P, CL, R>,
     seed: Option<SecretVec<u8>>,
@@ -705,7 +715,7 @@ fn verify_sqlite_version_compatibility(
 
 #[cfg(test)]
 pub(crate) mod testing {
-    use rand::RngCore;
+    use rand::Rng;
     use schemerz::MigratorError;
     use secrecy::SecretVec;
     use uuid::Uuid;
@@ -718,7 +728,7 @@ pub(crate) mod testing {
     pub(crate) fn init_wallet_db<
         P: consensus::Parameters + 'static,
         CL: Clock + Clone + 'static,
-        R: RngCore + Clone + 'static,
+        R: Rng + Clone + 'static,
     >(
         wdb: &mut WalletDb<rusqlite::Connection, P, CL, R>,
         seed: Option<SecretVec<u8>>,
@@ -729,7 +739,7 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use rand::RngCore;
+    use rand::Rng;
     use rusqlite::{self, Connection, ToSql, named_params};
     use secrecy::Secret;
 
@@ -1046,7 +1056,7 @@ mod tests {
 
     #[test]
     fn init_migrate_from_0_3_0() {
-        fn init_0_3_0<P: consensus::Parameters, CL: Clock + Clone, R: RngCore + Clone>(
+        fn init_0_3_0<P: consensus::Parameters, CL: Clock + Clone, R: Rng + Clone>(
             wdb: &mut WalletDb<rusqlite::Connection, P, CL, R>,
             extfvk: &ExtendedFullViewingKey,
             account: AccountId,

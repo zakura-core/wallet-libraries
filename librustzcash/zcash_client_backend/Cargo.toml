@@ -1,7 +1,7 @@
 [package]
 name = "zakura-client-backend"
 description = "APIs for creating shielded Zcash light clients"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 authors = [
     "Jack Grigg <jack@z.cash>",
     "Kris Nuttycombe <kris@electriccoin.co>"
@@ -131,7 +131,8 @@ tower = { workspace = true, optional = true }
 # - HTTP through Tor
 http-body-util = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }
-rand = { workspace = true, optional = true }
+rand = { workspace = true, features = ["sys_rng", "thread_rng"] }
+rand_08 = { package = "rand", version = "0.8", optional = true }
 serde = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
@@ -259,7 +260,6 @@ tor = [
     "dep:http-body-util",
     "dep:hyper",
     "dep:hyper-util",
-    "dep:rand",
     "dep:rust_decimal",
     "dep:serde",
     "dep:serde_json",
@@ -281,8 +281,8 @@ test-dependencies = [
     "dep:assert_matches",
     "dep:proptest",
     "dep:jubjub",
-    "dep:rand",
     "dep:rand_chacha",
+    "dep:rand_08",
     "transparent/test-dependencies",
     "orchard/test-dependencies",
     "zcash_keys/test-dependencies",

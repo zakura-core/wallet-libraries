@@ -811,10 +811,14 @@ mod tests {
             pallas,
         },
         proptest::prelude::*,
-        rand_core::{OsRng, RngCore},
+        rand::{Rng, rand_core::UnwrapErr, rngs::SysRng},
         zcash_note_encryption::Domain,
         zcash_protocol::ShieldedPool,
     };
+
+    #[cfg(feature = "orchard")]
+    #[allow(non_upper_case_globals)]
+    const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
 
     use incrementalmerkletree::{Marking, Position, Retention};
     use sapling::Nullifier;

@@ -35,7 +35,7 @@ to a wallet-internal shielded address, as described in [ZIP 316](https://zips.z.
 //! [`propose_transfer`]: crate::data_api::wallet::propose_transfer
 
 use nonempty::NonEmpty;
-use rand_core::OsRng;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use std::{
     num::NonZeroU32,
     ops::{Add, Sub},
@@ -2630,7 +2630,7 @@ where
         &transparent_signing_set,
         sapling_extsks,
         orchard_saks,
-        OsRng,
+        UnwrapErr(SysRng),
         spend_prover,
         output_prover,
         fee_rule,
@@ -2927,7 +2927,9 @@ where
     }
 
     // Build the transaction with the specified fee rule
-    let mut build_result = build_state.builder.build_for_pczt(OsRng, fee_rule)?;
+    let mut build_result = build_state
+        .builder
+        .build_for_pczt(UnwrapErr(SysRng), fee_rule)?;
 
     if let Some(expiry_height) = expiry_height {
         build_result.pczt_parts.expiry_height = expiry_height;

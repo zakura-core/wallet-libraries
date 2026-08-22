@@ -2,8 +2,6 @@
 //! `zcash_client_backend` testing framework.
 
 use ambassador::Delegate;
-use rand::SeedableRng;
-use rand_chacha::ChaChaRng;
 use rusqlite::Connection;
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -26,7 +24,7 @@ use zcash_client_backend::{
         chain::{ChainState, CommitmentTreeRoot},
         error::{LockError, RewindError},
         scanning::{ScanPriority, ScanRange},
-        testing::{DataStoreFactory, Reset, TestState},
+        testing::{DataStoreFactory, Reset, TestRng, TestState},
         wallet::{ConfirmationsPolicy, TargetHeight, input_selection::LockFilter},
         *,
     },
@@ -67,8 +65,8 @@ pub(crate) fn test_clock() -> FixedClock {
     FixedClock::new(SystemTime::UNIX_EPOCH + TEST_EPOCH_SECONDS_OFFSET)
 }
 
-pub(crate) fn test_rng() -> ChaChaRng {
-    ChaChaRng::from_seed([0u8; 32])
+pub(crate) fn test_rng() -> TestRng {
+    TestRng::seed_from_u64(0)
 }
 
 /// A [`WalletDb`] wrapped as a testing-framework data store: it delegates the wallet traits to the
@@ -82,13 +80,13 @@ pub(crate) fn test_rng() -> ChaChaRng {
 #[delegate(WalletWrite, target = "wallet_db")]
 #[delegate(WalletCommitmentTrees, target = "wallet_db")]
 pub struct TestDb {
-    wallet_db: WalletDb<Connection, LocalNetwork, FixedClock, ChaChaRng>,
+    wallet_db: WalletDb<Connection, LocalNetwork, FixedClock, TestRng>,
     data_file: Option<NamedTempFile>,
 }
 
 impl TestDb {
     fn from_parts(
-        wallet_db: WalletDb<Connection, LocalNetwork, FixedClock, ChaChaRng>,
+        wallet_db: WalletDb<Connection, LocalNetwork, FixedClock, TestRng>,
         data_file: Option<NamedTempFile>,
     ) -> Self {
         Self {
@@ -98,12 +96,12 @@ impl TestDb {
     }
 
     /// The wrapped wallet database.
-    pub fn db(&self) -> &WalletDb<Connection, LocalNetwork, FixedClock, ChaChaRng> {
+    pub fn db(&self) -> &WalletDb<Connection, LocalNetwork, FixedClock, TestRng> {
         &self.wallet_db
     }
 
     /// The wrapped wallet database, mutably.
-    pub fn db_mut(&mut self) -> &mut WalletDb<Connection, LocalNetwork, FixedClock, ChaChaRng> {
+    pub fn db_mut(&mut self) -> &mut WalletDb<Connection, LocalNetwork, FixedClock, TestRng> {
         &mut self.wallet_db
     }
 

@@ -10,6 +10,14 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc1] - 2026-08-21
+
+### Changed
+- Updated the Zakura proving and protocol dependencies to the RC3 cryptography
+  family, including `ff 0.14`, `group 0.14`, and `rand_core 0.10`.
+
+## [0.1.0-rc0] - 2026-08-19
+
 - Forked from upstream `pczt` and renamed to `zakura-pczt`; this changelog starts
   fresh for the Zakura fork's initial release.
 - Restarted the version lineage at 0.1.0, leaving behind the inherited upstream

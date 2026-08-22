@@ -817,7 +817,7 @@ impl Parsed {
 
 #[cfg(all(test, feature = "sapling"))]
 mod tests {
-    use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
+    use rand_chacha_10::{ChaCha20Rng, rand_core::SeedableRng};
 
     use super::{Bundle, ParseError};
     use crate::common::AnchorRequirement;
