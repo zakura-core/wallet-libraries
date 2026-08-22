@@ -3630,6 +3630,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_distr"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d431c2703ccf129de4d45253c03f49ebb22b97d6ad79ee3ecfc7e3f4862c1d8"
+dependencies = [
+ "num-traits",
+ "rand 0.10.2",
+]
+
+[[package]]
 name = "rand_jitter"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6897,7 +6907,7 @@ dependencies = [
  "rand 0.10.2",
  "rand_chacha 0.3.1",
  "rand_core 0.10.1",
- "rand_distr",
+ "rand_distr 0.6.0",
  "regex",
  "rusqlite",
  "schemerz",
@@ -7365,7 +7375,7 @@ dependencies = [
  "prost",
  "rand 0.8.7",
  "rand_core 0.6.4",
- "rand_distr",
+ "rand_distr 0.4.3",
  "regex",
  "rusqlite",
  "sapling-crypto",

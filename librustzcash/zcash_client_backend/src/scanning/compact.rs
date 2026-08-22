@@ -816,6 +816,7 @@ mod tests {
         zcash_protocol::ShieldedPool,
     };
 
+    #[cfg(feature = "orchard")]
     #[allow(non_upper_case_globals)]
     const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
 

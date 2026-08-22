@@ -99,6 +99,7 @@ ff = "0.14"
 group = "0.14"
 rand = "0.10"
 rand_core = "0.10"
+rand_distr = "0.6"
 
 # Crate names that must never appear in a built graph: the crates.io originals
 # of everything `libraries` forks. Any one of them means an edge escaped the
@@ -121,4 +122,5 @@ forbidden = [
   "bellman",
   "bls12_381",
   "jubjub",
+  "pairing",
 ]

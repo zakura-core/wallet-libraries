@@ -162,10 +162,10 @@ impl RusqliteMigration for Migration {
 
 #[cfg(test)]
 mod tests {
-    use rand_chacha::ChaChaRng;
     use rusqlite::{self, params};
     use tempfile::NamedTempFile;
 
+    use zcash_client_backend::data_api::testing::TestRng;
     use zcash_keys::keys::UnifiedSpendingKey;
     use zcash_protocol::consensus::Network;
     use zip32::AccountId;
@@ -218,7 +218,7 @@ mod tests {
             rusqlite::Connection,
             Network,
             FixedClock,
-            ChaChaRng,
+            TestRng,
         >,
                                    expected_notes: i64| {
             let mut q = db_data

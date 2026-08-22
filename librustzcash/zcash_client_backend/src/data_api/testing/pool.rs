@@ -8,7 +8,6 @@ use std::{
 
 use assert_matches::assert_matches;
 use incrementalmerkletree::{Hashable, Level, Position, frontier::Frontier};
-use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use rand_08::{Rng, RngCore};
 use secrecy::Secret;
 use shardtree::error::ShardTreeError;
@@ -58,7 +57,34 @@ use crate::{
     wallet::{Note, NoteId, OvkPolicy, ReceivedNote},
 };
 
-use super::{DataStoreFactory, Reset, TestCache, TestFvk, TestState};
+use super::{
+    DataStoreFactory, Reset, TestCache, TestFvk, TestRng, TestState,
+    random_frontier_with_prior_subtree_roots,
+};
+
+fn random_sapling_frontier<const DEPTH: u8>(
+    rng: &mut TestRng,
+    tree_size: u64,
+    subtree_depth: NonZeroU8,
+) -> (Vec<::sapling::Node>, Frontier<::sapling::Node, DEPTH>) {
+    random_frontier_with_prior_subtree_roots(rng, tree_size, subtree_depth, |rng| {
+        ::sapling::Node::random(rng)
+    })
+}
+
+#[cfg(feature = "orchard")]
+fn random_orchard_frontier<const DEPTH: u8>(
+    rng: &mut TestRng,
+    tree_size: u64,
+    subtree_depth: NonZeroU8,
+) -> (
+    Vec<::orchard::tree::MerkleHashOrchard>,
+    Frontier<::orchard::tree::MerkleHashOrchard, DEPTH>,
+) {
+    random_frontier_with_prior_subtree_roots(rng, tree_size, subtree_depth, |rng| {
+        ::orchard::tree::MerkleHashOrchard::random(rng)
+    })
+}
 
 use crate::data_api::ll::wallet::PRUNING_DEPTH;
 use crate::data_api::wallet::input_selection::GreedyInputSelectorError;
@@ -125,6 +151,7 @@ use {
 use {
     crate::data_api::wallet::{SignerView, redact_pczt_for_batch_signer, redact_pczt_for_signer},
     pczt::roles::{combiner::Combiner, prover::Prover, signer::Signer},
+    rand::{rand_core::UnwrapErr, rngs::SysRng},
     transparent::builder::TransparentSigningSet,
     zcash_primitives::transaction::builder::{BuildConfig, Builder},
     zcash_proofs::prover::LocalTxProver,
@@ -132,6 +159,7 @@ use {
     zcash_script::opcode::PushValue,
 };
 
+#[cfg(feature = "pczt")]
 #[allow(non_upper_case_globals)]
 const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
 
@@ -3916,12 +3944,11 @@ pub fn birthday_in_anchor_shard<T: ShieldedPoolTester>(
 
             // Construct a fake chain state for the end of the block with the given
             // birthday_offset from the Nu5 birthday.
-            let (prior_sapling_roots, sapling_initial_tree) =
-                Frontier::random_with_prior_subtree_roots(
-                    rng,
-                    frontier_tree_size.into(),
-                    NonZeroU8::new(16).unwrap(),
-                );
+            let (prior_sapling_roots, sapling_initial_tree) = random_sapling_frontier(
+                rng,
+                frontier_tree_size.into(),
+                NonZeroU8::new(16).unwrap(),
+            );
             // There will only be one prior root
             let prior_sapling_roots = prior_sapling_roots
                 .into_iter()
@@ -3929,12 +3956,11 @@ pub fn birthday_in_anchor_shard<T: ShieldedPoolTester>(
                 .collect::<Vec<_>>();
 
             #[cfg(feature = "orchard")]
-            let (prior_orchard_roots, orchard_initial_tree) =
-                Frontier::random_with_prior_subtree_roots(
-                    rng,
-                    frontier_tree_size.into(),
-                    NonZeroU8::new(16).unwrap(),
-                );
+            let (prior_orchard_roots, orchard_initial_tree) = random_orchard_frontier(
+                rng,
+                frontier_tree_size.into(),
+                NonZeroU8::new(16).unwrap(),
+            );
             // There will only be one prior root
             #[cfg(feature = "orchard")]
             let prior_orchard_roots = prior_orchard_roots
@@ -5178,7 +5204,7 @@ pub fn truncate_to_chain_state_below_birthday<T: ShieldedPoolTester, Dsf>(
             let birthday_height = network.activation_height(NetworkUpgrade::Sapling).unwrap() + 200;
 
             let (prior_sapling_roots, sapling_initial_tree) =
-                Frontier::random_with_prior_subtree_roots(rng, 1u64, NonZeroU8::new(16).unwrap());
+                random_sapling_frontier(rng, 1u64, NonZeroU8::new(16).unwrap());
             let prior_sapling_roots = prior_sapling_roots
                 .into_iter()
                 .map(|root| CommitmentTreeRoot::from_parts(birthday_height - 100, root))
@@ -5186,7 +5212,7 @@ pub fn truncate_to_chain_state_below_birthday<T: ShieldedPoolTester, Dsf>(
 
             #[cfg(feature = "orchard")]
             let (prior_orchard_roots, orchard_initial_tree) =
-                Frontier::random_with_prior_subtree_roots(rng, 1u64, NonZeroU8::new(16).unwrap());
+                random_orchard_frontier(rng, 1u64, NonZeroU8::new(16).unwrap());
             #[cfg(feature = "orchard")]
             let prior_orchard_roots = prior_orchard_roots
                 .into_iter()
@@ -5330,17 +5356,11 @@ pub fn truncate_to_chain_state_above_scanned<T: ShieldedPoolTester, Dsf>(
     // unknown.
     let target_height = max_scanned + 50;
     let shard_2_tree_size: u64 = (0x2 << 16) + 2;
-    let (_, shard2_sapling_frontier) = Frontier::random_with_prior_subtree_roots(
-        st.rng_mut(),
-        shard_2_tree_size,
-        NonZeroU8::new(16).unwrap(),
-    );
+    let (_, shard2_sapling_frontier) =
+        random_sapling_frontier(st.rng_mut(), shard_2_tree_size, NonZeroU8::new(16).unwrap());
     #[cfg(feature = "orchard")]
-    let (_, shard2_orchard_frontier) = Frontier::random_with_prior_subtree_roots(
-        st.rng_mut(),
-        shard_2_tree_size,
-        NonZeroU8::new(16).unwrap(),
-    );
+    let (_, shard2_orchard_frontier) =
+        random_orchard_frontier(st.rng_mut(), shard_2_tree_size, NonZeroU8::new(16).unwrap());
     // Ironwood is not active at these test heights, so its tree is empty.
     #[cfg(feature = "orchard")]
     let shard2_ironwood_frontier = Frontier::empty();
@@ -5752,12 +5772,11 @@ where
             // within the activated range.
             let birthday_height = network.activation_height(NetworkUpgrade::Nu5).unwrap() + 1000;
 
-            let (prior_sapling_roots, sapling_initial_tree) =
-                Frontier::random_with_prior_subtree_roots(
-                    rng,
-                    initial_tree_size.into(),
-                    NonZeroU8::new(SHARD_HEIGHT as u8).unwrap(),
-                );
+            let (prior_sapling_roots, sapling_initial_tree) = random_sapling_frontier(
+                rng,
+                initial_tree_size.into(),
+                NonZeroU8::new(SHARD_HEIGHT as u8).unwrap(),
+            );
             // Shard 0 is the only complete shard at this tree size.
             let prior_sapling_roots = prior_sapling_roots
                 .into_iter()
@@ -5765,12 +5784,11 @@ where
                 .collect::<Vec<_>>();
 
             #[cfg(feature = "orchard")]
-            let (prior_orchard_roots, orchard_initial_tree) =
-                Frontier::random_with_prior_subtree_roots(
-                    rng,
-                    initial_tree_size.into(),
-                    NonZeroU8::new(SHARD_HEIGHT as u8).unwrap(),
-                );
+            let (prior_orchard_roots, orchard_initial_tree) = random_orchard_frontier(
+                rng,
+                initial_tree_size.into(),
+                NonZeroU8::new(SHARD_HEIGHT as u8).unwrap(),
+            );
             #[cfg(feature = "orchard")]
             let prior_orchard_roots = prior_orchard_roots
                 .into_iter()
@@ -6010,12 +6028,11 @@ where
             // within the activated range.
             let birthday_height = network.activation_height(NetworkUpgrade::Nu5).unwrap() + 1000;
 
-            let (prior_sapling_roots, sapling_initial_tree) =
-                Frontier::random_with_prior_subtree_roots(
-                    rng,
-                    initial_tree_size.into(),
-                    NonZeroU8::new(SHARD_HEIGHT as u8).unwrap(),
-                );
+            let (prior_sapling_roots, sapling_initial_tree) = random_sapling_frontier(
+                rng,
+                initial_tree_size.into(),
+                NonZeroU8::new(SHARD_HEIGHT as u8).unwrap(),
+            );
             // Each prior subtree root is attached to one arbitrary height
             // well before the birthday. 500 is a round buffer past NU5 but
             // strictly below `birthday_height`; the exact value doesn't
@@ -6027,12 +6044,11 @@ where
                 .collect::<Vec<_>>();
 
             #[cfg(feature = "orchard")]
-            let (prior_orchard_roots, orchard_initial_tree) =
-                Frontier::random_with_prior_subtree_roots(
-                    rng,
-                    initial_tree_size.into(),
-                    NonZeroU8::new(SHARD_HEIGHT as u8).unwrap(),
-                );
+            let (prior_orchard_roots, orchard_initial_tree) = random_orchard_frontier(
+                rng,
+                initial_tree_size.into(),
+                NonZeroU8::new(SHARD_HEIGHT as u8).unwrap(),
+            );
             #[cfg(feature = "orchard")]
             let prior_orchard_roots = prior_orchard_roots
                 .into_iter()

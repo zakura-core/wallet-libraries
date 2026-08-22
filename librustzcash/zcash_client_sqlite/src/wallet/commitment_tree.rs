@@ -1647,8 +1647,8 @@ mod tests {
     #[cfg(feature = "orchard")]
     use {
         crate::error::SqliteClientError, ::orchard::tree::MerkleHashOrchard,
-        incrementalmerkletree::frontier::Frontier, rand::SeedableRng, rand_chacha::ChaChaRng,
-        zcash_client_backend::data_api::ORCHARD_SHARD_HEIGHT,
+        incrementalmerkletree::frontier::Frontier,
+        zcash_client_backend::data_api::{ORCHARD_SHARD_HEIGHT, testing::TestRng},
     };
 
     fn new_tree<T: ShieldedPoolTester + ShieldedPoolPersistence>(
@@ -2012,7 +2012,7 @@ mod tests {
 
         WalletMigrator::new().init_or_migrate(&mut db_data).unwrap();
 
-        let mut rng = ChaChaRng::seed_from_u64(0);
+        let mut rng = TestRng::seed_from_u64(0);
 
         // We build two parallel trees: the wallet's ShardTree (persisted to the DB)
         // and a lightweight Frontier that captures the tree state at the historical height.
@@ -2131,7 +2131,7 @@ mod tests {
 
         WalletMigrator::new().init_or_migrate(&mut db_data).unwrap();
 
-        let mut rng = ChaChaRng::seed_from_u64(1);
+        let mut rng = TestRng::seed_from_u64(1);
 
         let mut frontier_tree: Frontier<MerkleHashOrchard, 32> = Frontier::empty();
         let historical_height = BlockHeight::from(10);

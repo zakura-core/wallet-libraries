@@ -66,7 +66,7 @@ use bip0039::{
     ChineseSimplified, ChineseTraditional, Czech, English, French, Italian, Japanese, Korean,
     Mnemonic, Portuguese, Spanish,
 };
-use rand::RngCore;
+use rand::Rng;
 use secrecy::{ExposeSecret, SecretVec};
 use zcash_client_backend::{
     data_api::{
@@ -883,7 +883,7 @@ where
     C: std::borrow::BorrowMut<rusqlite::Connection>,
     P: consensus::Parameters,
     CL: Clock,
-    R: RngCore,
+    R: Rng,
     S: SecretSink,
 {
     let params = wdb.params().clone();
@@ -1640,7 +1640,7 @@ mod tests {
     use std::collections::BTreeMap;
     use tempfile::NamedTempFile;
     use zcash_client_backend::{
-        data_api::{Account as _, AccountPurpose, AccountSource, WalletRead},
+        data_api::{Account as _, AccountPurpose, AccountSource, WalletRead, testing::TestRng},
         wallet::Exposure,
     };
     use zcash_keys::{
@@ -1715,7 +1715,7 @@ mod tests {
             rusqlite::Connection,
             consensus::Network,
             crate::util::testing::FixedClock,
-            rand_chacha::ChaChaRng,
+            TestRng,
         >,
     ) {
         let db_file = NamedTempFile::new().unwrap();
@@ -1748,12 +1748,7 @@ mod tests {
     /// Creates an initialized empty wallet database on a regtest network.
     fn regtest_wallet_db() -> (
         NamedTempFile,
-        WalletDb<
-            rusqlite::Connection,
-            LocalNetwork,
-            crate::util::testing::FixedClock,
-            rand_chacha::ChaChaRng,
-        >,
+        WalletDb<rusqlite::Connection, LocalNetwork, crate::util::testing::FixedClock, TestRng>,
     ) {
         let db_file = NamedTempFile::new().unwrap();
         let mut wdb = WalletDb::for_path(

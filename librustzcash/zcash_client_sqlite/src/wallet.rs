@@ -5935,7 +5935,8 @@ mod tests {
         error::RewindError,
         testing::{
             AddressType, DataStoreFactory, FakeCompactOutput, InitialChainState, TestBuilder,
-            TestState, pool::ShieldedPoolTester, sapling::SaplingPoolTester,
+            TestRng, TestState, pool::ShieldedPoolTester, random_frontier_with_prior_subtree_roots,
+            sapling::SaplingPoolTester,
         },
         wallet::ConfirmationsPolicy,
     };
@@ -5967,6 +5968,27 @@ mod tests {
         zcash_client_backend::data_api::WalletCommitmentTrees,
         zcash_protocol::local_consensus::LocalNetwork,
     };
+
+    fn random_sapling_frontier<const DEPTH: u8>(
+        rng: &mut TestRng,
+        tree_size: u64,
+        subtree_depth: NonZeroU8,
+    ) -> (Vec<::sapling::Node>, Frontier<::sapling::Node, DEPTH>) {
+        random_frontier_with_prior_subtree_roots(rng, tree_size, subtree_depth, |rng| {
+            ::sapling::Node::random(rng)
+        })
+    }
+
+    #[cfg(feature = "orchard")]
+    fn random_orchard_frontier<const DEPTH: u8>(
+        rng: &mut TestRng,
+        tree_size: u64,
+        subtree_depth: NonZeroU8,
+    ) -> (Vec<MerkleHashOrchard>, Frontier<MerkleHashOrchard, DEPTH>) {
+        random_frontier_with_prior_subtree_roots(rng, tree_size, subtree_depth, |rng| {
+            MerkleHashOrchard::random(rng)
+        })
+    }
 
     fn connection_with_checkpoint_tables() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -6347,12 +6369,11 @@ mod tests {
             .with_initial_chain_state(|rng, network| {
                 let sapling_activation_height =
                     network.activation_height(NetworkUpgrade::Sapling).unwrap();
-                let (prior_sapling_roots, sapling_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        initial_sapling_tree_size.into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_sapling_roots, sapling_initial_tree) = random_sapling_frontier(
+                    rng,
+                    initial_sapling_tree_size.into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
                 let prior_sapling_roots = prior_sapling_roots
                     .into_iter()
                     .zip(1u32..)
@@ -6362,12 +6383,11 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 #[cfg(feature = "orchard")]
-                let (prior_orchard_roots, orchard_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        initial_orchard_tree_size.into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_orchard_roots, orchard_initial_tree) = random_orchard_frontier(
+                    rng,
+                    initial_orchard_tree_size.into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
                 #[cfg(feature = "orchard")]
                 let prior_orchard_roots = prior_orchard_roots
                     .into_iter()
@@ -6492,12 +6512,11 @@ mod tests {
             .with_initial_chain_state(|rng, network| {
                 let sapling_activation_height =
                     network.activation_height(NetworkUpgrade::Sapling).unwrap();
-                let (prior_sapling_roots, sapling_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        initial_sapling_tree_size.into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_sapling_roots, sapling_initial_tree) = random_sapling_frontier(
+                    rng,
+                    initial_sapling_tree_size.into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
                 let prior_sapling_roots = prior_sapling_roots
                     .into_iter()
                     .zip(1u32..)
@@ -6507,12 +6526,11 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 #[cfg(feature = "orchard")]
-                let (prior_orchard_roots, orchard_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        initial_orchard_tree_size.into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_orchard_roots, orchard_initial_tree) = random_orchard_frontier(
+                    rng,
+                    initial_orchard_tree_size.into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
                 #[cfg(feature = "orchard")]
                 let prior_orchard_roots = prior_orchard_roots
                     .into_iter()
@@ -6654,12 +6672,11 @@ mod tests {
             .with_initial_chain_state(|rng, network| {
                 let sapling_activation_height =
                     network.activation_height(NetworkUpgrade::Sapling).unwrap();
-                let (prior_sapling_roots, sapling_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        initial_sapling_tree_size.into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_sapling_roots, sapling_initial_tree) = random_sapling_frontier(
+                    rng,
+                    initial_sapling_tree_size.into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
                 let prior_sapling_roots = prior_sapling_roots
                     .into_iter()
                     .zip(1u32..)
@@ -6669,12 +6686,11 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 #[cfg(feature = "orchard")]
-                let (prior_orchard_roots, orchard_initial_tree) =
-                    Frontier::random_with_prior_subtree_roots(
-                        rng,
-                        initial_orchard_tree_size.into(),
-                        NonZeroU8::new(16).unwrap(),
-                    );
+                let (prior_orchard_roots, orchard_initial_tree) = random_orchard_frontier(
+                    rng,
+                    initial_orchard_tree_size.into(),
+                    NonZeroU8::new(16).unwrap(),
+                );
                 #[cfg(feature = "orchard")]
                 let prior_orchard_roots = prior_orchard_roots
                     .into_iter()

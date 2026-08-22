@@ -76,7 +76,7 @@ mod zip318_classification;
 
 use std::{rc::Rc, sync::Mutex};
 
-use rand_core::RngCore;
+use rand_core::Rng;
 use rusqlite::{OptionalExtension, named_params};
 use schemerz_rusqlite::RusqliteMigration;
 use secrecy::SecretVec;
@@ -180,7 +180,7 @@ pub mod ids {
 pub(super) fn all_migrations<
     P: consensus::Parameters + 'static,
     C: Clock + Clone + 'static,
-    R: RngCore + Clone + 'static,
+    R: Rng + Clone + 'static,
 >(
     params: &P,
     clock: C,
