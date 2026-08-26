@@ -1386,7 +1386,11 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     }
 
     fn suggest_scan_ranges(&self) -> Result<Vec<ScanRange>, Self::Error> {
-        wallet::scanning::suggest_scan_ranges(self.conn.borrow(), ScanPriority::Historic)
+        wallet::scanning::suggest_scan_ranges(
+            self.conn.borrow(),
+            ScanPriority::Historic,
+            wallet::scanning::latest_pool_activation(&self.params),
+        )
     }
 
     fn get_target_and_anchor_heights(

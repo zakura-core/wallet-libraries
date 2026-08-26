@@ -17,6 +17,22 @@ pub enum ScanPriority {
     Scanned,
     /// Block ranges to be scanned to advance the fully-scanned height.
     Historic,
+    /// Block ranges above the activation height of the most recently activated shielded
+    /// pool.
+    ///
+    /// A wallet's spendable value concentrates in the newest pool, so scanning this window
+    /// ahead of older history surfaces the user's balance without waiting on the full
+    /// pre-activation backfill. Ranges here rank below [`ScanPriority::FoundNote`] so that
+    /// witness-completion work still preempts them.
+    ///
+    /// This is a scheduling signal rather than stored state. `zcash_client_sqlite` derives it
+    /// when answering [`WalletRead::suggest_scan_ranges`], reporting the
+    /// [`ScanPriority::Historic`] coverage at or above the activation height under this
+    /// priority while any pre-activation history remains; its scan queue continues to store
+    /// that coverage as `Historic`.
+    ///
+    /// [`WalletRead::suggest_scan_ranges`]: crate::data_api::WalletRead::suggest_scan_ranges
+    LatestPoolActivation,
     /// Block ranges adjacent to heights at which the user opened the wallet.
     OpenAdjacent,
     /// Blocks that must be scanned to complete note commitment tree shards adjacent to found notes.

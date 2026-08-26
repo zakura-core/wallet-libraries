@@ -10,6 +10,23 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `zcash_client_backend::data_api::scanning::ScanPriority::LatestPoolActivation`, a
+  priority level between `Historic` and `OpenAdjacent` for block ranges above the
+  activation height of the most recently activated shielded pool. A wallet
+  recovering from a birthday below NU6.3 now scans the Ironwood era before
+  backfilling its pre-Ironwood history, so its balance appears without waiting on
+  the full backfill.
+
+  This is a scheduling signal reported by `WalletRead::suggest_scan_ranges`, not a
+  new kind of stored state; see the `zcash_client_sqlite` changelog for how that
+  backend derives it.
+
+  This is a breaking change for downstream code that matches exhaustively on
+  `ScanPriority`; the enum is deliberately not `#[non_exhaustive]`, because the
+  exhaustiveness check is what keeps the variants and their integer codes in
+  sync.
+
 ## [0.1.0-rc2] - 2026-08-21
 
 ### Changed

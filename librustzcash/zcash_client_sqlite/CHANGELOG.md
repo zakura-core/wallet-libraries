@@ -10,6 +10,27 @@ workspace.
 
 ## [Unreleased]
 
+### Changed
+- `WalletRead::suggest_scan_ranges` now reports the `Historic` scan-queue coverage
+  at or above the NU6.3 activation height under
+  `ScanPriority::LatestPoolActivation`, so that a wallet whose birthday precedes
+  the Ironwood pool scans the Ironwood era before backfilling its older history.
+  Once no pre-activation `Historic` coverage remains, the backfill proceeds
+  normally.
+
+  The priority is derived when answering the query; `scan_queue` still stores that
+  coverage as `Historic`, so no new priority code is written to the database and a
+  wallet database remains readable by earlier releases. The policy applies only on
+  networks with an assigned NU6.3 activation height, and only when the `orchard`
+  feature is enabled -- without it the wallet has no Ironwood viewing keys and
+  cannot detect Ironwood notes at all.
+
+  Note that `WalletSummary::is_synced` remains `false` until the pre-activation
+  backfill completes, because `fully_scanned_height` requires contiguous coverage
+  from the wallet birthday. Consumers that want to surface a recovered balance
+  early should use the account balances and the scan-progress ratio rather than
+  `is_synced`.
+
 ## [0.1.0-rc2] - 2026-08-21
 
 ### Changed

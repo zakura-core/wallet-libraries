@@ -2355,6 +2355,11 @@ pub trait WalletRead {
     /// priority must always be scanned first in order to avoid blockchain continuity errors in the
     /// case of a reorg.
     ///
+    /// Ranges above the activation height of the most recently activated shielded pool are
+    /// returned ahead of older history (see [`ScanPriority::LatestPoolActivation`]), so a wallet
+    /// recovering from a birthday below that height surfaces its balance before the
+    /// pre-activation backfill completes.
+    ///
     /// [`CompactBlock`]: crate::proto::compact_formats::CompactBlock
     /// [`ScanPriority::Verify`]: crate::data_api::scanning::ScanPriority
     fn suggest_scan_ranges(&self) -> Result<Vec<ScanRange>, Self::Error>;
