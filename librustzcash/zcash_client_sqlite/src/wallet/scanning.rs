@@ -205,10 +205,17 @@ pub(crate) fn insert_queue_entries<'a>(
     for entry in entries {
         trace!("Inserting queue entry {}", entry);
         if !entry.is_empty() {
+            // `LatestPoolActivation` is a read-time label derived from `Historic` coverage.
+            // Persisting its code would make the database unreadable to older releases that
+            // do not recognize the derived priority.
+            let stored_priority = match entry.priority() {
+                LatestPoolActivation => Historic,
+                priority => priority,
+            };
             stmt.execute(named_params![
                 ":block_range_start": u32::from(entry.block_range().start),
                 ":block_range_end": u32::from(entry.block_range().end),
-                ":priority": priority_code(&entry.priority())
+                ":priority": priority_code(&stored_priority)
             ])?;
         }
     }
@@ -869,6 +876,7 @@ pub(crate) mod tests {
     use std::num::NonZeroU8;
 
     use incrementalmerkletree::{Hashable, Position, frontier::Frontier};
+    use nonempty::NonEmpty;
 
     use secrecy::SecretVec;
     use zcash_client_backend::data_api::{
@@ -2670,6 +2678,46 @@ pub(crate) mod tests {
         assert_eq!(
             suggestions.first().map(|r| r.priority()),
             Some(LatestPoolActivation),
+        );
+    }
+
+    /// The public rescan API accepts every `ScanPriority`, but the activation priority is a
+    /// read-time label only. Normalize it at the storage boundary so that releases whose parser
+    /// only accepts the pre-existing codes can still read the wallet after a downgrade.
+    #[test]
+    fn queue_rescans_does_not_persist_latest_pool_activation() {
+        let mut st = pre_nu6_3_birthday_wallet();
+        st.wallet_mut()
+            .update_chain_tip(BlockHeight::from_u32(400_000))
+            .unwrap();
+
+        let rescan_start = BlockHeight::from_u32(310_000);
+        let rescan_end = BlockHeight::from_u32(320_000);
+        st.wallet_mut()
+            .db_mut()
+            .queue_rescans(
+                NonEmpty {
+                    head: rescan_start..rescan_end,
+                    tail: vec![],
+                },
+                LatestPoolActivation,
+            )
+            .unwrap();
+
+        let contents = queue_contents(&st);
+        assert!(
+            contents.iter().any(|&(start, end, code)| {
+                start == u32::from(rescan_start)
+                    && end == u32::from(rescan_end)
+                    && code == priority_code(&Historic)
+            }),
+            "the derived priority should be stored as Historic: {contents:?}",
+        );
+        assert!(
+            contents
+                .iter()
+                .all(|&(_, _, code)| [0, 10, 20, 30, 40, 50, 60].contains(&code)),
+            "the queue contains a priority code rejected by the previous release: {contents:?}",
         );
     }
 
