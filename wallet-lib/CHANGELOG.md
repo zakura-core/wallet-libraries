@@ -7,6 +7,13 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc3] - 2026-08-25
+
+### Changed
+- Updated the Zakura wallet backend to `zakura-client-backend 0.1.0-rc3`
+  and `zakura-client-sqlite 0.1.0-rc3`, which prioritize scanning the Ironwood
+  era before older history during wallet recovery.
+
 ## [0.1.0-rc2] - 2026-08-21
 
 ### Changed

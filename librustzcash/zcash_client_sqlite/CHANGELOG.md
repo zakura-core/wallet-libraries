@@ -10,6 +10,8 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc3] - 2026-08-25
+
 ### Changed
 - `WalletRead::suggest_scan_ranges` now reports the `Historic` scan-queue coverage
   at or above the NU6.3 activation height under
