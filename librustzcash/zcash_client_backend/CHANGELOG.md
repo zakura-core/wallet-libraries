@@ -10,6 +10,8 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc3] - 2026-08-25
+
 ### Added
 - `zcash_client_backend::data_api::scanning::ScanPriority::LatestPoolActivation`, a
   priority level between `Historic` and `OpenAdjacent` for block ranges above the
