@@ -95,10 +95,10 @@ use zakura_wallet_lib::{client_backend, orchard};
 
 ```toml
 # ZODL: upstream, the default
-zakura-wallet-lib = "0.1.0-rc2"
+zakura-wallet-lib = "0.1.0-rc3"
 
 # Vizor: the forks
-zakura-wallet-lib = { version = "0.1.0-rc2", default-features = false, features = ["zakura"] }
+zakura-wallet-lib = { version = "0.1.0-rc3", default-features = false, features = ["zakura"] }
 ```
 
 The two features are mutually exclusive. Cargo features are additive and there
@@ -118,8 +118,8 @@ all — it declares the packages it wants directly, as below.
 The dependency keys keep their upstream names, so wallet source needs no changes:
 
 ```toml
-zcash_client_backend = { version = "0.1.0-rc2", package = "zakura-client-backend" }
-zcash_client_sqlite = { version = "0.1.0-rc2", package = "zakura-client-sqlite" }
+zcash_client_backend = { version = "0.1.0-rc3", package = "zakura-client-backend" }
+zcash_client_sqlite = { version = "0.1.0-rc3", package = "zakura-client-sqlite" }
 pczt = { version = "0.1.0-rc1", package = "zakura-pczt" }
 ```
 
