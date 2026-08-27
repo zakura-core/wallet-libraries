@@ -10,6 +10,10 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `SqliteClientError::DivergedCheckpoints`, which exposes the divergent shielded pool and the
+  requested truncation height missing from its note commitment tree checkpoints.
+
 ## [0.1.0-rc3] - 2026-08-25
 
 ### Changed
