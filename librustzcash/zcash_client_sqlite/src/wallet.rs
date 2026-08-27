@@ -4357,8 +4357,8 @@ fn witness_destroying_truncation_error(
     )
 }
 
-/// Reports a [`TreeTruncation::DivergedCheckpoints`] classification for the given pool as
-/// [`SqliteClientError::DivergedCheckpoints`].
+/// Reports a [`TreeTruncation::DivergedCheckpoints`] classification for the given
+/// pool as [`SqliteClientError::DivergedCheckpoints`].
 fn diverged_checkpoints_error(
     pool: ShieldedPool,
     truncation_height: BlockHeight,
@@ -4936,11 +4936,11 @@ fn has_ordinary_checkpoint_below(
 /// birthday (`chain_state.block_height() + 1`) is strictly less than the existing birthday
 /// height; the existing birthday is never raised by this method.
 ///
-/// Returns `Err(RewindError::RewindBeyondBirthdays(_))` only when `reset_account_birthdays` is
-/// empty *and* every account in the wallet has a birthday greater than
-/// `chain_state.block_height() + 1`. Returns `Err(RewindError::DataSource(_))` with a
-/// `CorruptedData` payload if `reset_account_birthdays` contains any account UUID that is not
-/// present in the wallet; with a
+/// Returns [`RewindError::RewindBeyondBirthdays`] only when
+/// `reset_account_birthdays` is empty and every account has a birthday greater
+/// than `chain_state.block_height() + 1`. Returns [`RewindError::DataSource`] with
+/// a [`SqliteClientError::CorruptedData`] payload if `reset_account_birthdays`
+/// contains an account UUID absent from the wallet; with a
 /// [`SqliteClientError::DivergedCheckpoints`] payload if a pool's ordinary
 /// checkpoints straddle the truncation height without one at it (see
 /// [`plan_tree_truncation`]); and with a
@@ -4948,6 +4948,7 @@ fn has_ordinary_checkpoint_below(
 /// tree's scanned state would destroy witness data for notes below the rewind
 /// target that the requeued rescan would not re-create. The latter is a valid
 /// wallet state from which the requested rewind cannot be executed.
+
 pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
     conn: &rusqlite::Transaction,
     params: &P,
