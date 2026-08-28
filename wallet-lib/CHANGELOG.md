@@ -18,6 +18,8 @@ and this library adheres to Rust's notion of
   base backend modes without Orchard. The old `orchard` name remains a
   compatibility alias for `zakura-orchard`; `zakura-voting` and `lrz-voting`
   provide the complete capability sets required by `zcash_voting`.
+- Pinned the RC3 Zakura family exactly so fresh downstream lockfiles cannot
+  select newer RCs with a higher Rust version or incompatible type family.
 
 ## [0.1.0-rc3] - 2026-08-25
 

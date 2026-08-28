@@ -38,10 +38,10 @@ lrz-primitives = { package = "zcash_primitives", version = "0.30.0", default-fea
 # -- Zakura: the default stack, under the upstream names consumers expect ----
 zcash-client-backend = { package = "zakura-client-backend", path = "../librustzcash/zcash_client_backend", version = "0.1.0-rc3", default-features = false, optional = true }
 zcash-client-sqlite = { package = "zakura-client-sqlite", path = "../librustzcash/zcash_client_sqlite", version = "0.1.0-rc3", default-features = false, optional = true }
-zcash-keys = { package = "zakura-keys", version = "1.0.0-rc.3", default-features = false, optional = true }
-orchard = { package = "zakura-orchard", version = "1.0.0-rc.3", optional = true }
+zcash-keys = { package = "zakura-keys", version = "=1.0.0-rc.3", default-features = false, optional = true }
+orchard = { package = "zakura-orchard", version = "=1.0.0-rc.3", optional = true }
 pczt = { package = "zakura-pczt", path = "../librustzcash/pczt", version = "0.1.0-rc1", optional = true }
-zcash-primitives = { package = "zakura-primitives", version = "1.0.0-rc.3", default-features = false, optional = true }
+zcash-primitives = { package = "zakura-primitives", version = "=1.0.0-rc.3", default-features = false, optional = true }
 
 [features]
 default = ["zakura-orchard"]
