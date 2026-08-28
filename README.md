@@ -113,7 +113,8 @@ consumer's lockfile or Cargo metadata, or if the mutually-exclusive rules stop
 holding. The legacy cross-family `orchard` selector is replaced by explicit
 `zakura-orchard` and `lrz-orchard` combinations. Consumers without Orchard
 can select the base `zakura` or `lrz` feature. The old `orchard` name remains
-a compatibility alias for the default `zakura-orchard` path.
+a compatibility alias for the default `zakura-orchard` path. Consumers that
+need the complete voting capability set use `zakura-voting` or `lrz-voting`.
 
 An end consumer that builds for exactly one stack does not need this crate at
 all — it declares the packages it wants directly, as below.

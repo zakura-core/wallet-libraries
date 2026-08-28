@@ -1,17 +1,14 @@
 # `zakura-wallet-lib`
 
-Selects either the Zakura wallet stack (`zakura-orchard`, the default) or the
-upstream librustzcash stack (`lrz-orchard`), and re-exports the selected family
-under stable names. Crates that must build both for Gemini and for Vizor depend
-on this instead of naming either family directly. Gemini selects LRZ with
-`default-features = false, features = ["lrz-orchard"]`; Vizor uses the
-defaults.
+Selects the Zakura wallet stack with Orchard by default and re-exports the
+selected family under stable names. Crates that must build both for Gemini and
+for Vizor depend on this instead of naming either family directly.
 
-Consumers that do not need Orchard can select the base `zakura` or `lrz`
-feature. The old cross-family `orchard` selector is replaced by explicit
-`zakura-orchard` and `lrz-orchard` combinations so Cargo does not retain the
-disabled family in downstream lockfiles and metadata. `orchard` remains a
-compatibility alias for `zakura-orchard`; LRZ consumers use `lrz-orchard`.
+Capabilities compose explicitly: `zakura-orchard` / `lrz-orchard` add Orchard,
+while `zakura-voting` / `lrz-voting` add the complete feature set required by
+`zcash_voting`. This avoids weak cross-family references, so Cargo does not
+retain the disabled family in downstream lockfiles and metadata. `orchard`
+remains a compatibility alias for `zakura-orchard`.
 
 The name is reserved on crates.io as `zakura-wallet-lib`.
 

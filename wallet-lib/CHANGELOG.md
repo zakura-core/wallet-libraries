@@ -16,7 +16,8 @@ and this library adheres to Rust's notion of
   `zakura-orchard` and `lrz-orchard` combinations, preventing disabled
   packages from leaking into downstream lockfiles and metadata while retaining
   base backend modes without Orchard. The old `orchard` name remains a
-  compatibility alias for `zakura-orchard`.
+  compatibility alias for `zakura-orchard`; `zakura-voting` and `lrz-voting`
+  provide the complete capability sets required by `zcash_voting`.
 
 ## [0.1.0-rc3] - 2026-08-25
 

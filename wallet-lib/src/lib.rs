@@ -25,7 +25,9 @@
 //!
 //! Consumers that do not need Orchard select the base `zakura` or `lrz`
 //! feature. The legacy `orchard` feature remains a compatibility alias for
-//! `zakura-orchard`; LRZ consumers use `lrz-orchard`.
+//! `zakura-orchard`; LRZ consumers use `lrz-orchard`. The
+//! `zakura-voting`/`lrz-voting` combinations add the complete capabilities
+//! required by `zcash_voting`.
 //!
 //! The two are mutually exclusive. Cargo features are additive, so that cannot
 //! be stated in the manifest and is enforced below instead: a graph that

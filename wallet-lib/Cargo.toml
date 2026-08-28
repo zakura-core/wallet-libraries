@@ -73,6 +73,16 @@ lrz-orchard = [
     "lrz-keys/orchard",
     "lrz-pczt/orchard",
     "lrz-pczt/io-finalizer",
+]
+
+## Complete LRZ capability set required by zcash_voting.
+lrz-voting = [
+    "lrz-orchard",
+    "lrz-client-backend/lightwalletd-tonic",
+    "lrz-client-backend/lightwalletd-tonic-tls-webpki-roots",
+    "lrz-orchard/circuit",
+    "lrz-orchard/unstable-voting-circuits",
+    "lrz-pczt/io-finalizer",
     "lrz-pczt/signer",
     "lrz-pczt/zcp-builder",
 ]
@@ -85,6 +95,17 @@ zakura-orchard = [
     "zcash-client-sqlite/orchard",
     "zcash-keys/orchard",
     "pczt/orchard",
+    "pczt/io-finalizer",
+]
+
+## Complete Zakura capability set required by zcash_voting.
+zakura-voting = [
+    "zakura-orchard",
+    "zcash-client-backend/lightwalletd-tonic",
+    "zcash-client-backend/lightwalletd-tonic-tls-webpki-roots",
+    "orchard/circuit",
+    "orchard/std",
+    "orchard/unstable-voting-circuits",
     "pczt/io-finalizer",
     "pczt/signer",
     "pczt/zcp-builder",

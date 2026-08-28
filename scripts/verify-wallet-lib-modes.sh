@@ -100,6 +100,12 @@ check_mode lrz-orchard "^zakura-" \
 check_mode zakura-orchard "$forbidden" \
   "a crates.io original entered the Zakura Orchard build:"
 
+check_mode lrz-voting "^zakura-" \
+  "a Zakura fork entered the LRZ voting build:"
+
+check_mode zakura-voting "$forbidden" \
+  "a crates.io original entered the Zakura voting build:"
+
 # `cargo tree` reports the active build graph, but Cargo #10801 can retain
 # disabled weak dependencies in a downstream lockfile and metadata. Exercise
 # the facade from outside this workspace in the two real consumer shapes.
@@ -112,9 +118,13 @@ wallet_lib = Path(os.environ["WALLET_LIB_REPO_ROOT"]) / "wallet-lib"
 dependencies = {
     "gemini": (
         f'zakura-wallet-lib = {{ path = "{wallet_lib}", '
-        'default-features = false, features = ["lrz-orchard"] }'
+        'default-features = false, features = ["lrz-voting"] }'
     ),
     "vizor": f'zakura-wallet-lib = {{ path = "{wallet_lib}" }}',
+    "vizor-voting": (
+        f'zakura-wallet-lib = {{ path = "{wallet_lib}", '
+        'default-features = false, features = ["zakura-voting"] }'
+    ),
     "vizor-legacy": (
         f'zakura-wallet-lib = {{ path = "{wallet_lib}", '
         'default-features = false, features = ["zakura", "orchard"] }'
@@ -140,7 +150,7 @@ edition = "2021"
     )
 PY
 
-for consumer in gemini vizor vizor-legacy; do
+for consumer in gemini vizor vizor-voting vizor-legacy; do
   cargo metadata --manifest-path "$probe_root/$consumer/Cargo.toml" \
     --format-version 1 > "$probe_root/$consumer/metadata.json"
 done
@@ -156,7 +166,7 @@ probe_root, source_manifest = Path(sys.argv[1]), Path(sys.argv[2])
 with source_manifest.open("rb") as manifest_file:
     upstream_names = set(tomllib.load(manifest_file)["graph"]["forbidden"])
 
-for consumer in ("gemini", "vizor", "vizor-legacy"):
+for consumer in ("gemini", "vizor", "vizor-voting", "vizor-legacy"):
     root = probe_root / consumer
     metadata = json.loads((root / "metadata.json").read_text())
     packages_by_id = {
@@ -212,6 +222,7 @@ PY
 
 [[ "$(cargo run --quiet --manifest-path "$probe_root/gemini/Cargo.toml")" == "lrz" ]]
 [[ "$(cargo run --quiet --manifest-path "$probe_root/vizor/Cargo.toml")" == "zakura" ]]
+[[ "$(cargo run --quiet --manifest-path "$probe_root/vizor-voting/Cargo.toml")" == "zakura" ]]
 [[ "$(cargo run --quiet --manifest-path "$probe_root/vizor-legacy/Cargo.toml")" == "zakura" ]]
 
 # The compatibility `orchard` alias is Zakura-specific. Combining it with LRZ
