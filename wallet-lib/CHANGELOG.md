@@ -12,6 +12,11 @@ and this library adheres to Rust's notion of
   `default-features = false, features = ["lrz"]` alternative.
 - Exposed Zakura dependencies under their clean upstream crate names while
   retaining `lrz-*` aliases for the upstream stack.
+- Replaced the weak cross-family `orchard` selector with explicit
+  `zakura-orchard` and `lrz-orchard` combinations, preventing disabled
+  packages from leaking into downstream lockfiles and metadata while retaining
+  base backend modes without Orchard. The old `orchard` name remains a
+  compatibility alias for `zakura-orchard`.
 
 ## [0.1.0-rc3] - 2026-08-25
 

@@ -44,14 +44,13 @@ pczt = { package = "zakura-pczt", path = "../librustzcash/pczt", version = "0.1.
 zcash-primitives = { package = "zakura-primitives", version = "1.0.0-rc.3", default-features = false, optional = true }
 
 [features]
-default = ["zakura"]
+default = ["zakura-orchard"]
 
 ## The upstream librustzcash stack from crates.io. What Gemini selects.
 lrz = [
     "dep:lrz-client-backend",
     "dep:lrz-client-sqlite",
     "dep:lrz-keys",
-    "dep:lrz-orchard",
     "dep:lrz-pczt",
     "dep:lrz-primitives",
 ]
@@ -61,17 +60,36 @@ zakura = [
     "dep:zcash-client-backend",
     "dep:zcash-client-sqlite",
     "dep:zcash-keys",
-    "dep:orchard",
     "dep:pczt",
     "dep:zcash-primitives",
 ]
 
-## Enables the `orchard` feature of whichever wallet backend is selected.
-orchard = [
-    "lrz-client-backend?/orchard",
-    "lrz-client-sqlite?/orchard",
-    "lrz-keys?/orchard",
-    "zcash-client-backend?/orchard",
-    "zcash-client-sqlite?/orchard",
-    "zcash-keys?/orchard",
+## LRZ with Orchard wallet and PCZT support.
+lrz-orchard = [
+    "lrz",
+    "dep:lrz-orchard",
+    "lrz-client-backend/orchard",
+    "lrz-client-sqlite/orchard",
+    "lrz-keys/orchard",
+    "lrz-pczt/orchard",
+    "lrz-pczt/io-finalizer",
+    "lrz-pczt/signer",
+    "lrz-pczt/zcp-builder",
 ]
+
+## Zakura with Orchard wallet and PCZT support. This is the Vizor default.
+zakura-orchard = [
+    "zakura",
+    "dep:orchard",
+    "zcash-client-backend/orchard",
+    "zcash-client-sqlite/orchard",
+    "zcash-keys/orchard",
+    "pczt/orchard",
+    "pczt/io-finalizer",
+    "pczt/signer",
+    "pczt/zcp-builder",
+]
+
+## Compatibility alias for existing Vizor manifests. LRZ consumers must use
+## `lrz-orchard`; combining `lrz` with this Zakura alias fails as mixed mode.
+orchard = ["zakura-orchard"]

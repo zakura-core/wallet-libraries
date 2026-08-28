@@ -94,11 +94,11 @@ use zakura_wallet_lib::{client_backend, orchard};
 ```
 
 ```toml
-# Vizor: Zakura, the default
+# Vizor: Zakura with Orchard, the default
 zakura-wallet-lib = "0.1.0-rc3"
 
-# Gemini: upstream LRZ
-zakura-wallet-lib = { version = "0.1.0-rc3", default-features = false, features = ["lrz"] }
+# Gemini: upstream LRZ with Orchard
+zakura-wallet-lib = { version = "0.1.0-rc3", default-features = false, features = ["lrz-orchard"] }
 ```
 
 The two features are mutually exclusive. Cargo features are additive and there
@@ -108,7 +108,12 @@ family needs its own named feature rather than being the implicit
 `default-features = false`. Enabling both, or neither, is a compile error.
 
 `scripts/verify-wallet-lib-modes.sh` builds it each way and fails if a crate from
-the other family appears, or if the mutually-exclusive rules stop holding.
+the other family appears, if disabled packages leak into an external
+consumer's lockfile or Cargo metadata, or if the mutually-exclusive rules stop
+holding. The legacy cross-family `orchard` selector is replaced by explicit
+`zakura-orchard` and `lrz-orchard` combinations. Consumers without Orchard
+can select the base `zakura` or `lrz` feature. The old `orchard` name remains
+a compatibility alias for the default `zakura-orchard` path.
 
 An end consumer that builds for exactly one stack does not need this crate at
 all — it declares the packages it wants directly, as below.
