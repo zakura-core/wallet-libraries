@@ -43,6 +43,23 @@ orchard = { package = "zakura-orchard", version = "=1.0.0-rc.3", optional = true
 pczt = { package = "zakura-pczt", path = "../librustzcash/pczt", version = "0.1.0-rc1", optional = true }
 zcash-primitives = { package = "zakura-primitives", version = "=1.0.0-rc.3", default-features = false, optional = true }
 
+# Exact family constraints for fresh downstream lockfiles. Published RC3
+# manifests use compatible prerelease requirements that can otherwise resolve
+# to newer RCs with a higher MSRV or incompatible type identities.
+zakura-bellman-pin = { package = "zakura-bellman", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-bls12-381-pin = { package = "zakura-bls12-381", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-halo2-gadgets-pin = { package = "zakura-halo2-gadgets", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-halo2-legacy-pdqsort-pin = { package = "zakura-halo2-legacy-pdqsort", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-halo2-poseidon-pin = { package = "zakura-halo2-poseidon", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-halo2-proofs-pin = { package = "zakura-halo2-proofs", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-jubjub-pin = { package = "zakura-jubjub", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-pairing-pin = { package = "zakura-pairing", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-pasta-curves-pin = { package = "zakura-pasta-curves", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-reddsa-pin = { package = "zakura-reddsa", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-redjubjub-pin = { package = "zakura-redjubjub", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-sapling-crypto-pin = { package = "zakura-sapling-crypto", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-sinsemilla-pin = { package = "zakura-sinsemilla", version = "=1.0.0-rc.3", default-features = false, optional = true }
+
 [features]
 default = ["zakura-orchard"]
 
@@ -62,6 +79,12 @@ zakura = [
     "dep:zcash-keys",
     "dep:pczt",
     "dep:zcash-primitives",
+    "dep:zakura-bellman-pin",
+    "dep:zakura-bls12-381-pin",
+    "dep:zakura-jubjub-pin",
+    "dep:zakura-pairing-pin",
+    "dep:zakura-redjubjub-pin",
+    "dep:zakura-sapling-crypto-pin",
 ]
 
 ## LRZ with Orchard wallet and PCZT support.
@@ -96,6 +119,13 @@ zakura-orchard = [
     "zcash-keys/orchard",
     "pczt/orchard",
     "pczt/io-finalizer",
+    "dep:zakura-halo2-gadgets-pin",
+    "dep:zakura-halo2-legacy-pdqsort-pin",
+    "dep:zakura-halo2-poseidon-pin",
+    "dep:zakura-halo2-proofs-pin",
+    "dep:zakura-pasta-curves-pin",
+    "dep:zakura-reddsa-pin",
+    "dep:zakura-sinsemilla-pin",
 ]
 
 ## Complete Zakura capability set required by zcash_voting.
