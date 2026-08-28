@@ -16,8 +16,9 @@ and this library adheres to Rust's notion of
   backend modes: `zakura` and `lrz`. Each includes Orchard and the capability
   set required by `zcash_voting`, while keeping the unselected family out of
   downstream lockfiles and metadata.
-- Pinned the RC3 Zakura family exactly so fresh downstream lockfiles cannot
+- Pinned the RC4 Zakura family exactly so fresh downstream lockfiles cannot
   select newer RCs with a higher Rust version or incompatible type family.
+- Updated the Zakura cryptography stack to the RC4 release family.
 
 ## [0.1.0-rc3] - 2026-08-25
 
