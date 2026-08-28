@@ -1,6 +1,6 @@
 //! One name for two stacks.
 //!
-//! A crate that has to build for both ZODL and Vizor cannot name
+//! A crate that has to build for both Gemini and Vizor cannot name
 //! `zcash_client_backend` or `zakura-client-backend` directly: one of them is
 //! absent in either build. It depends on this crate instead and reaches the
 //! selected family through these re-exports:
@@ -16,16 +16,16 @@
 //!
 //! # Selecting a backend
 //!
-//! `lrz` is the default and resolves to the crates.io release this repository
-//! forks. Vizor selects the other:
+//! `zakura` is the default and resolves to the forks. Gemini selects the
+//! upstream LRZ stack explicitly:
 //!
 //! ```toml
-//! zakura-wallet-lib = { version = "0.1", default-features = false, features = ["zakura"] }
+//! zakura-wallet-lib = { version = "0.1", default-features = false, features = ["lrz"] }
 //! ```
 //!
 //! The two are mutually exclusive. Cargo features are additive, so that cannot
 //! be stated in the manifest and is enforced below instead: a graph that
-//! enables both — usually a dependency that forgot `default-features = false` —
+//! enables both — usually an LRZ dependency that forgot `default-features = false` —
 //! fails to compile rather than silently resolving two copies of the crypto
 //! stack.
 //!
@@ -39,7 +39,7 @@
 #[cfg(all(feature = "lrz", feature = "zakura"))]
 compile_error!(
     "`lrz` and `zakura` are mutually exclusive: pass `default-features = false` \
-     when selecting `zakura`"
+     when selecting `lrz`"
 );
 
 #[cfg(not(any(feature = "lrz", feature = "zakura")))]
@@ -57,14 +57,15 @@ mod backend {
     pub use ::lrz_primitives as primitives;
 }
 
-// The Zakura family is reached by its *upstream* names. Only the package names
-// were changed by the fork; every library target still calls itself what it
-// always did, which is what lets the vendored sources stay untouched — and it
-// shows up here as `zcash_client_backend` resolving to `zakura-client-backend`.
+// The default Zakura family is declared under the clean upstream names. Only
+// the package names were changed by the fork; every library target still calls
+// itself what it always did, which is what lets the vendored sources stay
+// untouched — and it shows up here as `zcash_client_backend` resolving to
+// `zakura-client-backend`.
 #[cfg(feature = "zakura")]
 mod backend {
-    pub use ::orchard as orchard;
-    pub use ::pczt as pczt;
+    pub use ::orchard;
+    pub use ::pczt;
     pub use ::zcash_client_backend as client_backend;
     pub use ::zcash_client_sqlite as client_sqlite;
     pub use ::zcash_keys as keys;
@@ -77,4 +78,8 @@ pub use backend::*;
 /// Which family this build selected. Useful in logs and in a consumer's own
 /// tests, where asserting the expected backend is cheaper than reading a
 /// dependency tree.
-pub const BACKEND: &str = if cfg!(feature = "zakura") { "zakura" } else { "lrz" };
+pub const BACKEND: &str = if cfg!(feature = "zakura") {
+    "zakura"
+} else {
+    "lrz"
+};

@@ -7,6 +7,12 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+- Made the Zakura wallet stack the default and kept LRZ as the explicit
+  `default-features = false, features = ["lrz"]` alternative.
+- Exposed Zakura dependencies under their clean upstream crate names while
+  retaining `lrz-*` aliases for the upstream stack.
+
 ## [0.1.0-rc3] - 2026-08-25
 
 ### Changed

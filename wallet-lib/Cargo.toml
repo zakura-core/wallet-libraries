@@ -35,18 +35,18 @@ lrz-orchard = { package = "orchard", version = "0.15", optional = true }
 lrz-pczt = { package = "pczt", version = "0.9.2", optional = true }
 lrz-primitives = { package = "zcash_primitives", version = "0.30.0", default-features = false, optional = true }
 
-# -- Zakura: the crypto stack from crates.io, the wallet layer from this repo -
-zakura-client-backend = { path = "../librustzcash/zcash_client_backend", version = "0.1.0-rc3", default-features = false, optional = true }
-zakura-client-sqlite = { path = "../librustzcash/zcash_client_sqlite", version = "0.1.0-rc3", default-features = false, optional = true }
-zakura-keys = { version = "1.0.0-rc.3", default-features = false, optional = true }
-zakura-orchard = { version = "1.0.0-rc.3", optional = true }
-zakura-pczt = { path = "../librustzcash/pczt", version = "0.1.0-rc1", optional = true }
-zakura-primitives = { version = "1.0.0-rc.3", default-features = false, optional = true }
+# -- Zakura: the default stack, under the upstream names consumers expect ----
+zcash-client-backend = { package = "zakura-client-backend", path = "../librustzcash/zcash_client_backend", version = "0.1.0-rc3", default-features = false, optional = true }
+zcash-client-sqlite = { package = "zakura-client-sqlite", path = "../librustzcash/zcash_client_sqlite", version = "0.1.0-rc3", default-features = false, optional = true }
+zcash-keys = { package = "zakura-keys", version = "1.0.0-rc.3", default-features = false, optional = true }
+orchard = { package = "zakura-orchard", version = "1.0.0-rc.3", optional = true }
+pczt = { package = "zakura-pczt", path = "../librustzcash/pczt", version = "0.1.0-rc1", optional = true }
+zcash-primitives = { package = "zakura-primitives", version = "1.0.0-rc.3", default-features = false, optional = true }
 
 [features]
-default = ["lrz"]
+default = ["zakura"]
 
-## The upstream librustzcash stack from crates.io. What ZODL builds.
+## The upstream librustzcash stack from crates.io. What Gemini selects.
 lrz = [
     "dep:lrz-client-backend",
     "dep:lrz-client-sqlite",
@@ -56,14 +56,14 @@ lrz = [
     "dep:lrz-primitives",
 ]
 
-## The Zakura forks. What Vizor builds. Select with `default-features = false`.
+## The Zakura forks. What Vizor builds by default.
 zakura = [
-    "dep:zakura-client-backend",
-    "dep:zakura-client-sqlite",
-    "dep:zakura-keys",
-    "dep:zakura-orchard",
-    "dep:zakura-pczt",
-    "dep:zakura-primitives",
+    "dep:zcash-client-backend",
+    "dep:zcash-client-sqlite",
+    "dep:zcash-keys",
+    "dep:orchard",
+    "dep:pczt",
+    "dep:zcash-primitives",
 ]
 
 ## Enables the `orchard` feature of whichever wallet backend is selected.
@@ -71,7 +71,7 @@ orchard = [
     "lrz-client-backend?/orchard",
     "lrz-client-sqlite?/orchard",
     "lrz-keys?/orchard",
-    "zakura-client-backend?/orchard",
-    "zakura-client-sqlite?/orchard",
-    "zakura-keys?/orchard",
+    "zcash-client-backend?/orchard",
+    "zcash-client-sqlite?/orchard",
+    "zcash-keys?/orchard",
 ]

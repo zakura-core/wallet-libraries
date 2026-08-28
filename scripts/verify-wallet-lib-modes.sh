@@ -68,6 +68,21 @@ check_mode() {
   fi
 }
 
+echo "== $facade with default features"
+cargo check --manifest-path "$repo_root/Cargo.toml" \
+  --package "$facade" --locked
+
+default_tree="$(cargo tree --manifest-path "$repo_root/Cargo.toml" \
+  --package "$facade" --edges normal,build --prefix none --locked \
+  | grep -v "^$facade v")"
+
+if grep -Eq "$forbidden" <<<"$default_tree"; then
+  echo >&2
+  echo "a crates.io original entered the default Zakura build:" >&2
+  grep -E "$forbidden" <<<"$default_tree" | sort -u | sed 's/^/  /' >&2
+  exit 1
+fi
+
 check_mode lrz "^zakura-" \
   "a Zakura fork entered the upstream build:"
 
@@ -81,7 +96,7 @@ if cargo check --manifest-path "$repo_root/Cargo.toml" \
   exit 1
 fi
 
-# Both backends at once is what a consumer that forgot `default-features =
+# Both backends at once is what an LRZ consumer that forgot `default-features =
 # false` produces; it must fail rather than resolve two stacks.
 if cargo check --manifest-path "$repo_root/Cargo.toml" \
   --package "$facade" --features lrz,zakura --locked 2>/dev/null; then
@@ -89,5 +104,5 @@ if cargo check --manifest-path "$repo_root/Cargo.toml" \
   exit 1
 fi
 
-echo "verified: each backend resolves to exactly one stack, and neither"
-echo "no-backend nor both-backends compiles"
+echo "verified: Zakura is the clean default, each explicit backend resolves"
+echo "to exactly one stack, and neither no-backend nor both-backends compiles"
