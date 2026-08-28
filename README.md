@@ -86,7 +86,7 @@ fine here and fails later where the two type families meet.
 ## Selecting a backend
 
 `wallet-lib/` holds `zakura-wallet-lib`, which exists for code that has to build
-for **both** ZODL and Vizor from one source tree — `zcash_voting` and the vote
+for **both** Gemini and Vizor from one source tree — `zcash_voting` and the vote
 commitment tree. It re-exports one family under stable names:
 
 ```rust
@@ -94,17 +94,17 @@ use zakura_wallet_lib::{client_backend, orchard};
 ```
 
 ```toml
-# ZODL: upstream, the default
+# Vizor: Zakura, the default
 zakura-wallet-lib = "0.1.0-rc3"
 
-# Vizor: the forks
-zakura-wallet-lib = { version = "0.1.0-rc3", default-features = false, features = ["zakura"] }
+# Gemini: upstream LRZ
+zakura-wallet-lib = { version = "0.1.0-rc3", default-features = false, features = ["lrz"] }
 ```
 
 The two features are mutually exclusive. Cargo features are additive and there
 is no way to enable a dependency when a feature is *off*, so the upstream
 family needs its own named feature rather than being the implicit
-`not(zakura)` case — which is why selecting `zakura` also requires
+`not(zakura)` case. Because `zakura` is the default, selecting `lrz` requires
 `default-features = false`. Enabling both, or neither, is a compile error.
 
 `scripts/verify-wallet-lib-modes.sh` builds it each way and fails if a crate from
