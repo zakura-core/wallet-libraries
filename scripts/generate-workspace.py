@@ -24,7 +24,8 @@ Four rules are applied to `[workspace.dependencies]`:
    configured version required by the selected Zakura release family.
 
 `workspace.package.repository` is rewritten to this repository so published
-crates do not advertise the upstream librustzcash URL.
+crates do not advertise the upstream librustzcash URL, and
+`workspace.package.rust-version` is set to the Zakura release family's MSRV.
 """
 
 from __future__ import annotations
@@ -106,6 +107,19 @@ def main(argv: list[str]) -> int:
         )
         if replaced != 1:
             print("could not rewrite workspace.package.repository", file=sys.stderr)
+            return 1
+
+    rust_version = layout.get("rust_version")
+    if rust_version:
+        text, replaced = re.subn(
+            r'^rust-version = "[^"]+"$',
+            f'rust-version = "{rust_version}"',
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if replaced != 1:
+            print("could not rewrite workspace.package.rust-version", file=sys.stderr)
             return 1
 
     members = "".join(

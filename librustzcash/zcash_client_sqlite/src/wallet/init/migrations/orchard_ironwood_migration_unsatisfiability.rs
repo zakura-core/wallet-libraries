@@ -81,7 +81,6 @@
 
 use std::collections::HashSet;
 
-
 use rusqlite::named_params;
 use schemerz_rusqlite::RusqliteMigration;
 use uuid::Uuid;

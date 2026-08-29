@@ -31,8 +31,9 @@ extra_members = ["wallet-lib"]
 # The backend selector. Named separately because the verification scripts have
 # to build it one backend at a time, unlike every other member.
 facade = "wallet-lib"
-# Inherited by every vendored crate through `repository.workspace = true`.
+# Inherited by every vendored crate through workspace package metadata.
 repository = "https://github.com/zakura-core/wallet-libraries"
+rust_version = "1.91"
 
 [[source]]
 name = "librustzcash"
@@ -80,18 +81,18 @@ version = "0.1.0-rc3"
 # The upstream dependency key is kept, so crate sources continue to say
 # `orchard::` and `zcash_primitives::` while resolving to the forks.
 [rewire]
-bellman = { package = "zakura-bellman", version = "=1.0.0-rc.4" }
-bls12_381 = { package = "zakura-bls12-381", version = "=1.0.0-rc.4" }
-jubjub = { package = "zakura-jubjub", version = "=1.0.0-rc.4" }
-zcash_primitives = { package = "zakura-primitives", version = "=1.0.0-rc.4" }
-zcash_keys = { package = "zakura-keys", version = "=1.0.0-rc.4" }
-zcash_proofs = { package = "zakura-proofs", version = "=1.0.0-rc.4" }
-orchard = { package = "zakura-orchard", version = "=1.0.0-rc.4" }
-sapling = { package = "zakura-sapling-crypto", version = "=1.0.0-rc.4" }
-redjubjub = { package = "zakura-redjubjub", version = "=1.0.0-rc.4" }
-pasta_curves = { package = "zakura-pasta-curves", version = "=1.0.0-rc.4" }
+bellman = { package = "zakura-bellman", version = "=1.0.0-rc.5" }
+bls12_381 = { package = "zakura-bls12-381", version = "=1.0.0-rc.5" }
+jubjub = { package = "zakura-jubjub", version = "=1.0.0-rc.5" }
+zcash_primitives = { package = "zakura-primitives", version = "=1.0.0-rc.5" }
+zcash_keys = { package = "zakura-keys", version = "=1.0.0-rc.5" }
+zcash_proofs = { package = "zakura-proofs", version = "=1.0.0-rc.5" }
+orchard = { package = "zakura-orchard", version = "=1.0.0-rc.5" }
+sapling = { package = "zakura-sapling-crypto", version = "=1.0.0-rc.5" }
+redjubjub = { package = "zakura-redjubjub", version = "=1.0.0-rc.5" }
+pasta_curves = { package = "zakura-pasta-curves", version = "=1.0.0-rc.5" }
 
-# Non-renamed ecosystem crates whose public traits changed with the RC4 crypto
+# Non-renamed ecosystem crates whose public traits changed with the RC5 crypto
 # family. The generated workspace keeps upstream's other dependency metadata
 # while replacing these version requirements.
 [versions]
