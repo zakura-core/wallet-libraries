@@ -16,18 +16,15 @@
 //!
 //! # Selecting a backend
 //!
-//! `zakura-orchard` is the default and resolves to the forks with Orchard
-//! support. Gemini selects the upstream LRZ stack explicitly:
+//! `zakura` is the default and resolves to the complete fork capability set.
+//! Gemini selects the equivalent upstream LRZ stack explicitly:
 //!
 //! ```toml
-//! zakura-wallet-lib = { version = "0.1", default-features = false, features = ["lrz-orchard"] }
+//! zakura-wallet-lib = { version = "0.1", default-features = false, features = ["lrz"] }
 //! ```
 //!
-//! Consumers that do not need Orchard select the base `zakura` or `lrz`
-//! feature. The legacy `orchard` feature remains a compatibility alias for
-//! `zakura-orchard`; LRZ consumers use `lrz-orchard`. The
-//! `zakura-voting`/`lrz-voting` combinations add the complete capabilities
-//! required by `zcash_voting`.
+//! These are the only two feature flags. Both include Orchard and the complete
+//! capabilities required by `zcash_voting`.
 //!
 //! The two are mutually exclusive. Cargo features are additive, so that cannot
 //! be stated in the manifest and is enforced below instead: a graph that
@@ -58,11 +55,9 @@ mod backend {
     pub use ::lrz_client_backend as client_backend;
     pub use ::lrz_client_sqlite as client_sqlite;
     pub use ::lrz_keys as keys;
+    pub use ::lrz_orchard as orchard;
     pub use ::lrz_pczt as pczt;
     pub use ::lrz_primitives as primitives;
-
-    #[cfg(feature = "lrz-orchard")]
-    pub use ::lrz_orchard as orchard;
 }
 
 // The default Zakura family is declared under the clean upstream names. Only
@@ -72,14 +67,12 @@ mod backend {
 // `zakura-client-backend`.
 #[cfg(feature = "zakura")]
 mod backend {
+    pub use ::orchard;
     pub use ::pczt;
     pub use ::zcash_client_backend as client_backend;
     pub use ::zcash_client_sqlite as client_sqlite;
     pub use ::zcash_keys as keys;
     pub use ::zcash_primitives as primitives;
-
-    #[cfg(feature = "zakura-orchard")]
-    pub use ::orchard;
 }
 
 #[cfg(any(feature = "lrz", feature = "zakura"))]

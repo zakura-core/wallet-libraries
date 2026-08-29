@@ -94,18 +94,6 @@ check_mode lrz "^zakura-" \
 check_mode zakura "$forbidden" \
   "a crates.io original entered the Zakura build:"
 
-check_mode lrz-orchard "^zakura-" \
-  "a Zakura fork entered the LRZ Orchard build:"
-
-check_mode zakura-orchard "$forbidden" \
-  "a crates.io original entered the Zakura Orchard build:"
-
-check_mode lrz-voting "^zakura-" \
-  "a Zakura fork entered the LRZ voting build:"
-
-check_mode zakura-voting "$forbidden" \
-  "a crates.io original entered the Zakura voting build:"
-
 # `cargo tree` reports the active build graph, but Cargo #10801 can retain
 # disabled weak dependencies in a downstream lockfile and metadata. Exercise
 # the facade from outside this workspace in the two real consumer shapes.
@@ -116,19 +104,15 @@ from pathlib import Path
 probe_root = Path(os.environ["WALLET_LIB_PROBE_ROOT"])
 wallet_lib = Path(os.environ["WALLET_LIB_REPO_ROOT"]) / "wallet-lib"
 dependencies = {
-    "gemini": (
+    "lrz": (
         f'zakura-wallet-lib = {{ path = "{wallet_lib}", '
-        'default-features = false, features = ["lrz-voting"] }'
+        'default-features = false, features = ["lrz"] }'
     ),
-    "vizor": f'zakura-wallet-lib = {{ path = "{wallet_lib}" }}',
-    "vizor-voting": (
+    "zakura": (
         f'zakura-wallet-lib = {{ path = "{wallet_lib}", '
-        'default-features = false, features = ["zakura-voting"] }'
+        'default-features = false, features = ["zakura"] }'
     ),
-    "vizor-legacy": (
-        f'zakura-wallet-lib = {{ path = "{wallet_lib}", '
-        'default-features = false, features = ["zakura", "orchard"] }'
-    ),
+    "zakura-default": f'zakura-wallet-lib = {{ path = "{wallet_lib}" }}',
 }
 
 for name, dependency in dependencies.items():
@@ -150,7 +134,7 @@ edition = "2021"
     )
 PY
 
-for consumer in gemini vizor vizor-voting vizor-legacy; do
+for consumer in lrz zakura zakura-default; do
   cargo metadata --manifest-path "$probe_root/$consumer/Cargo.toml" \
     --format-version 1 > "$probe_root/$consumer/metadata.json"
 done
@@ -166,7 +150,7 @@ probe_root, source_manifest = Path(sys.argv[1]), Path(sys.argv[2])
 with source_manifest.open("rb") as manifest_file:
     upstream_names = set(tomllib.load(manifest_file)["graph"]["forbidden"])
 
-for consumer in ("gemini", "vizor", "vizor-voting", "vizor-legacy"):
+for consumer in ("lrz", "zakura", "zakura-default"):
     root = probe_root / consumer
     metadata = json.loads((root / "metadata.json").read_text())
     packages_by_id = {
@@ -184,7 +168,7 @@ for consumer in ("gemini", "vizor", "vizor-voting", "vizor-legacy"):
         )
     )
 
-    if consumer == "gemini":
+    if consumer == "lrz":
         allowed = {"zakura-wallet-lib"}
         checks = {
             "metadata packages": {
@@ -205,6 +189,17 @@ for consumer in ("gemini", "vizor", "vizor-voting", "vizor-legacy"):
         }
 
     failures = {label: names for label, names in checks.items() if names}
+    if consumer == "zakura":
+        drifted_rcs = {
+            f'{package["name"]} {package["version"]}'
+            for package in metadata["packages"]
+            if package["name"].startswith("zakura-")
+            and package["version"].startswith("1.0.0-rc.")
+            and package["version"] != "1.0.0-rc.3"
+        }
+        if drifted_rcs:
+            failures["non-RC3 Zakura packages"] = drifted_rcs
+
     if failures:
         for label, names in failures.items():
             print(
@@ -215,24 +210,14 @@ for consumer in ("gemini", "vizor", "vizor-voting", "vizor-legacy"):
         raise SystemExit(1)
 
 print(
-    "verified: external Gemini metadata/lock contains no Zakura forks, "
-    "and external Vizor metadata/lock contains no LRZ originals"
+    "verified: external LRZ metadata/lock contains no Zakura forks, "
+    "and external Zakura metadata/lock contains no LRZ originals"
 )
 PY
 
-[[ "$(cargo run --quiet --manifest-path "$probe_root/gemini/Cargo.toml")" == "lrz" ]]
-[[ "$(cargo run --quiet --manifest-path "$probe_root/vizor/Cargo.toml")" == "zakura" ]]
-[[ "$(cargo run --quiet --manifest-path "$probe_root/vizor-voting/Cargo.toml")" == "zakura" ]]
-[[ "$(cargo run --quiet --manifest-path "$probe_root/vizor-legacy/Cargo.toml")" == "zakura" ]]
-
-# The compatibility `orchard` alias is Zakura-specific. Combining it with LRZ
-# must fail as mixed mode rather than weak-reference both families.
-if cargo check --manifest-path "$repo_root/Cargo.toml" \
-  --package "$facade" --no-default-features --features lrz,orchard \
-  --locked 2>/dev/null; then
-  echo "the removed conditional Orchard selector must not compile" >&2
-  exit 1
-fi
+[[ "$(cargo run --quiet --manifest-path "$probe_root/lrz/Cargo.toml")" == "lrz" ]]
+[[ "$(cargo run --quiet --manifest-path "$probe_root/zakura/Cargo.toml")" == "zakura" ]]
+[[ "$(cargo run --quiet --manifest-path "$probe_root/zakura-default/Cargo.toml")" == "zakura" ]]
 
 # Neither backend selected must fail loudly rather than build an empty facade.
 if cargo check --manifest-path "$repo_root/Cargo.toml" \

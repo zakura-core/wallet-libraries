@@ -61,86 +61,60 @@ zakura-sapling-crypto-pin = { package = "zakura-sapling-crypto", version = "=1.0
 zakura-sinsemilla-pin = { package = "zakura-sinsemilla", version = "=1.0.0-rc.3", default-features = false, optional = true }
 
 [features]
-default = ["zakura-orchard"]
+default = ["zakura"]
 
-## The upstream librustzcash stack from crates.io. What Gemini selects.
+## Complete upstream librustzcash capability set required by zcash_voting.
 lrz = [
     "dep:lrz-client-backend",
     "dep:lrz-client-sqlite",
     "dep:lrz-keys",
+    "dep:lrz-orchard",
     "dep:lrz-pczt",
     "dep:lrz-primitives",
-]
-
-## The Zakura forks. What Vizor builds by default.
-zakura = [
-    "dep:zcash-client-backend",
-    "dep:zcash-client-sqlite",
-    "dep:zcash-keys",
-    "dep:pczt",
-    "dep:zcash-primitives",
-    "dep:zakura-bellman-pin",
-    "dep:zakura-bls12-381-pin",
-    "dep:zakura-jubjub-pin",
-    "dep:zakura-pairing-pin",
-    "dep:zakura-redjubjub-pin",
-    "dep:zakura-sapling-crypto-pin",
-]
-
-## LRZ with Orchard wallet and PCZT support.
-lrz-orchard = [
-    "lrz",
-    "dep:lrz-orchard",
     "lrz-client-backend/orchard",
-    "lrz-client-sqlite/orchard",
-    "lrz-keys/orchard",
-    "lrz-pczt/orchard",
-    "lrz-pczt/io-finalizer",
-]
-
-## Complete LRZ capability set required by zcash_voting.
-lrz-voting = [
-    "lrz-orchard",
     "lrz-client-backend/lightwalletd-tonic",
     "lrz-client-backend/lightwalletd-tonic-tls-webpki-roots",
+    "lrz-client-sqlite/orchard",
+    "lrz-keys/orchard",
     "lrz-orchard/circuit",
     "lrz-orchard/unstable-voting-circuits",
+    "lrz-pczt/orchard",
     "lrz-pczt/io-finalizer",
     "lrz-pczt/signer",
     "lrz-pczt/zcp-builder",
 ]
 
-## Zakura with Orchard wallet and PCZT support. This is the Vizor default.
-zakura-orchard = [
-    "zakura",
+## Complete Zakura capability set required by zcash_voting. This is the default.
+zakura = [
+    "dep:zcash-client-backend",
+    "dep:zcash-client-sqlite",
+    "dep:zcash-keys",
     "dep:orchard",
-    "zcash-client-backend/orchard",
-    "zcash-client-sqlite/orchard",
-    "zcash-keys/orchard",
-    "pczt/orchard",
-    "pczt/io-finalizer",
+    "dep:pczt",
+    "dep:zcash-primitives",
+    "dep:zakura-bellman-pin",
+    "dep:zakura-bls12-381-pin",
     "dep:zakura-halo2-gadgets-pin",
     "dep:zakura-halo2-legacy-pdqsort-pin",
     "dep:zakura-halo2-poseidon-pin",
     "dep:zakura-halo2-proofs-pin",
+    "dep:zakura-jubjub-pin",
+    "dep:zakura-pairing-pin",
     "dep:zakura-pasta-curves-pin",
     "dep:zakura-reddsa-pin",
+    "dep:zakura-redjubjub-pin",
+    "dep:zakura-sapling-crypto-pin",
     "dep:zakura-sinsemilla-pin",
-]
-
-## Complete Zakura capability set required by zcash_voting.
-zakura-voting = [
-    "zakura-orchard",
+    "zcash-client-backend/orchard",
     "zcash-client-backend/lightwalletd-tonic",
     "zcash-client-backend/lightwalletd-tonic-tls-webpki-roots",
+    "zcash-client-sqlite/orchard",
+    "zcash-keys/orchard",
     "orchard/circuit",
     "orchard/std",
     "orchard/unstable-voting-circuits",
+    "pczt/orchard",
     "pczt/io-finalizer",
     "pczt/signer",
     "pczt/zcp-builder",
 ]
-
-## Compatibility alias for existing Vizor manifests. LRZ consumers must use
-## `lrz-orchard`; combining `lrz` with this Zakura alias fails as mixed mode.
-orchard = ["zakura-orchard"]

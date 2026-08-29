@@ -12,12 +12,10 @@ and this library adheres to Rust's notion of
   `default-features = false, features = ["lrz"]` alternative.
 - Exposed Zakura dependencies under their clean upstream crate names while
   retaining `lrz-*` aliases for the upstream stack.
-- Replaced the weak cross-family `orchard` selector with explicit
-  `zakura-orchard` and `lrz-orchard` combinations, preventing disabled
-  packages from leaking into downstream lockfiles and metadata while retaining
-  base backend modes without Orchard. The old `orchard` name remains a
-  compatibility alias for `zakura-orchard`; `zakura-voting` and `lrz-voting`
-  provide the complete capability sets required by `zcash_voting`.
+- Replaced the weak cross-family capability selectors with two complete
+  backend modes: `zakura` and `lrz`. Each includes Orchard and the capability
+  set required by `zcash_voting`, while keeping the unselected family out of
+  downstream lockfiles and metadata.
 - Pinned the RC3 Zakura family exactly so fresh downstream lockfiles cannot
   select newer RCs with a higher Rust version or incompatible type family.
 
