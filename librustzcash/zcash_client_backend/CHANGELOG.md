@@ -10,6 +10,11 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `start_orchard_proving_key_warmup`, an idempotent API that initializes the
+  transaction builder's process-wide Orchard proving-key cache on a background
+  worker.
+
 ## [0.1.0-rc3] - 2026-08-25
 
 ### Added
