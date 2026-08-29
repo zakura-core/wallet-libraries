@@ -16,12 +16,15 @@
 //!
 //! # Selecting a backend
 //!
-//! `zakura` is the default and resolves to the forks. Gemini selects the
-//! upstream LRZ stack explicitly:
+//! `zakura` is the default and resolves to the complete fork capability set.
+//! Gemini selects the equivalent upstream LRZ stack explicitly:
 //!
 //! ```toml
 //! zakura-wallet-lib = { version = "0.1", default-features = false, features = ["lrz"] }
 //! ```
+//!
+//! These are the only two feature flags. Both include Orchard and the complete
+//! capabilities required by `zcash_voting`.
 //!
 //! The two are mutually exclusive. Cargo features are additive, so that cannot
 //! be stated in the manifest and is enforced below instead: a graph that

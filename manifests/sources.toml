@@ -80,16 +80,16 @@ version = "0.1.0-rc3"
 # The upstream dependency key is kept, so crate sources continue to say
 # `orchard::` and `zcash_primitives::` while resolving to the forks.
 [rewire]
-bellman = { package = "zakura-bellman", version = "1.0.0-rc.3" }
-bls12_381 = { package = "zakura-bls12-381", version = "1.0.0-rc.3" }
-jubjub = { package = "zakura-jubjub", version = "1.0.0-rc.3" }
-zcash_primitives = { package = "zakura-primitives", version = "1.0.0-rc.3" }
-zcash_keys = { package = "zakura-keys", version = "1.0.0-rc.3" }
-zcash_proofs = { package = "zakura-proofs", version = "1.0.0-rc.3" }
-orchard = { package = "zakura-orchard", version = "1.0.0-rc.3" }
-sapling = { package = "zakura-sapling-crypto", version = "1.0.0-rc.3" }
-redjubjub = { package = "zakura-redjubjub", version = "1.0.0-rc.3" }
-pasta_curves = { package = "zakura-pasta-curves", version = "1.0.0-rc.3" }
+bellman = { package = "zakura-bellman", version = "=1.0.0-rc.3" }
+bls12_381 = { package = "zakura-bls12-381", version = "=1.0.0-rc.3" }
+jubjub = { package = "zakura-jubjub", version = "=1.0.0-rc.3" }
+zcash_primitives = { package = "zakura-primitives", version = "=1.0.0-rc.3" }
+zcash_keys = { package = "zakura-keys", version = "=1.0.0-rc.3" }
+zcash_proofs = { package = "zakura-proofs", version = "=1.0.0-rc.3" }
+orchard = { package = "zakura-orchard", version = "=1.0.0-rc.3" }
+sapling = { package = "zakura-sapling-crypto", version = "=1.0.0-rc.3" }
+redjubjub = { package = "zakura-redjubjub", version = "=1.0.0-rc.3" }
+pasta_curves = { package = "zakura-pasta-curves", version = "=1.0.0-rc.3" }
 
 # Non-renamed ecosystem crates whose public traits changed with the RC3 crypto
 # family. The generated workspace keeps upstream's other dependency metadata

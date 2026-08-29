@@ -94,10 +94,10 @@ use zakura_wallet_lib::{client_backend, orchard};
 ```
 
 ```toml
-# Vizor: Zakura, the default
+# Vizor: complete Zakura capability set, the default
 zakura-wallet-lib = "0.1.0-rc3"
 
-# Gemini: upstream LRZ
+# Gemini: equivalent upstream LRZ capability set
 zakura-wallet-lib = { version = "0.1.0-rc3", default-features = false, features = ["lrz"] }
 ```
 
@@ -108,7 +108,10 @@ family needs its own named feature rather than being the implicit
 `default-features = false`. Enabling both, or neither, is a compile error.
 
 `scripts/verify-wallet-lib-modes.sh` builds it each way and fails if a crate from
-the other family appears, or if the mutually-exclusive rules stop holding.
+the other family appears, if disabled packages leak into an external
+consumer's lockfile or Cargo metadata, or if the mutually-exclusive rules stop
+holding. `zakura` and `lrz` are the only feature flags; each enables Orchard
+and the complete capability set required by `zcash_voting`.
 
 An end consumer that builds for exactly one stack does not need this crate at
 all — it declares the packages it wants directly, as below.

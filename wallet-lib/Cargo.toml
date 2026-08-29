@@ -38,15 +38,32 @@ lrz-primitives = { package = "zcash_primitives", version = "0.30.0", default-fea
 # -- Zakura: the default stack, under the upstream names consumers expect ----
 zcash-client-backend = { package = "zakura-client-backend", path = "../librustzcash/zcash_client_backend", version = "0.1.0-rc3", default-features = false, optional = true }
 zcash-client-sqlite = { package = "zakura-client-sqlite", path = "../librustzcash/zcash_client_sqlite", version = "0.1.0-rc3", default-features = false, optional = true }
-zcash-keys = { package = "zakura-keys", version = "1.0.0-rc.3", default-features = false, optional = true }
-orchard = { package = "zakura-orchard", version = "1.0.0-rc.3", optional = true }
+zcash-keys = { package = "zakura-keys", version = "=1.0.0-rc.3", default-features = false, optional = true }
+orchard = { package = "zakura-orchard", version = "=1.0.0-rc.3", optional = true }
 pczt = { package = "zakura-pczt", path = "../librustzcash/pczt", version = "0.1.0-rc1", optional = true }
-zcash-primitives = { package = "zakura-primitives", version = "1.0.0-rc.3", default-features = false, optional = true }
+zcash-primitives = { package = "zakura-primitives", version = "=1.0.0-rc.3", default-features = false, optional = true }
+
+# Exact family constraints for fresh downstream lockfiles. Published RC3
+# manifests use compatible prerelease requirements that can otherwise resolve
+# to newer RCs with a higher MSRV or incompatible type identities.
+zakura-bellman-pin = { package = "zakura-bellman", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-bls12-381-pin = { package = "zakura-bls12-381", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-halo2-gadgets-pin = { package = "zakura-halo2-gadgets", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-halo2-legacy-pdqsort-pin = { package = "zakura-halo2-legacy-pdqsort", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-halo2-poseidon-pin = { package = "zakura-halo2-poseidon", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-halo2-proofs-pin = { package = "zakura-halo2-proofs", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-jubjub-pin = { package = "zakura-jubjub", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-pairing-pin = { package = "zakura-pairing", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-pasta-curves-pin = { package = "zakura-pasta-curves", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-reddsa-pin = { package = "zakura-reddsa", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-redjubjub-pin = { package = "zakura-redjubjub", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-sapling-crypto-pin = { package = "zakura-sapling-crypto", version = "=1.0.0-rc.3", default-features = false, optional = true }
+zakura-sinsemilla-pin = { package = "zakura-sinsemilla", version = "=1.0.0-rc.3", default-features = false, optional = true }
 
 [features]
 default = ["zakura"]
 
-## The upstream librustzcash stack from crates.io. What Gemini selects.
+## Complete upstream librustzcash capability set required by zcash_voting.
 lrz = [
     "dep:lrz-client-backend",
     "dep:lrz-client-sqlite",
@@ -54,9 +71,20 @@ lrz = [
     "dep:lrz-orchard",
     "dep:lrz-pczt",
     "dep:lrz-primitives",
+    "lrz-client-backend/orchard",
+    "lrz-client-backend/lightwalletd-tonic",
+    "lrz-client-backend/lightwalletd-tonic-tls-webpki-roots",
+    "lrz-client-sqlite/orchard",
+    "lrz-keys/orchard",
+    "lrz-orchard/circuit",
+    "lrz-orchard/unstable-voting-circuits",
+    "lrz-pczt/orchard",
+    "lrz-pczt/io-finalizer",
+    "lrz-pczt/signer",
+    "lrz-pczt/zcp-builder",
 ]
 
-## The Zakura forks. What Vizor builds by default.
+## Complete Zakura capability set required by zcash_voting. This is the default.
 zakura = [
     "dep:zcash-client-backend",
     "dep:zcash-client-sqlite",
@@ -64,14 +92,29 @@ zakura = [
     "dep:orchard",
     "dep:pczt",
     "dep:zcash-primitives",
-]
-
-## Enables the `orchard` feature of whichever wallet backend is selected.
-orchard = [
-    "lrz-client-backend?/orchard",
-    "lrz-client-sqlite?/orchard",
-    "lrz-keys?/orchard",
-    "zcash-client-backend?/orchard",
-    "zcash-client-sqlite?/orchard",
-    "zcash-keys?/orchard",
+    "dep:zakura-bellman-pin",
+    "dep:zakura-bls12-381-pin",
+    "dep:zakura-halo2-gadgets-pin",
+    "dep:zakura-halo2-legacy-pdqsort-pin",
+    "dep:zakura-halo2-poseidon-pin",
+    "dep:zakura-halo2-proofs-pin",
+    "dep:zakura-jubjub-pin",
+    "dep:zakura-pairing-pin",
+    "dep:zakura-pasta-curves-pin",
+    "dep:zakura-reddsa-pin",
+    "dep:zakura-redjubjub-pin",
+    "dep:zakura-sapling-crypto-pin",
+    "dep:zakura-sinsemilla-pin",
+    "zcash-client-backend/orchard",
+    "zcash-client-backend/lightwalletd-tonic",
+    "zcash-client-backend/lightwalletd-tonic-tls-webpki-roots",
+    "zcash-client-sqlite/orchard",
+    "zcash-keys/orchard",
+    "orchard/circuit",
+    "orchard/std",
+    "orchard/unstable-voting-circuits",
+    "pczt/orchard",
+    "pczt/io-finalizer",
+    "pczt/signer",
+    "pczt/zcp-builder",
 ]

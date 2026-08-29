@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the wallet-lib facade both ways and prove each build reaches exactly
-# one stack.
+# Build the wallet-lib facade in every base/Orchard mode and prove each build
+# reaches exactly one stack.
 #
 # The facade is the only crate here whose features are mutually exclusive, so it
 # is excluded from the whole-workspace check and verified by this script
@@ -14,6 +14,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$repo_root/manifests/sources.toml"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target/verify-wallet-lib-modes}"
+
+probe_root="$(mktemp -d "${TMPDIR:-/tmp}/wallet-lib-modes.XXXXXX")"
+trap 'rm -rf "$probe_root"' EXIT
+export WALLET_LIB_PROBE_ROOT="$probe_root"
+export WALLET_LIB_REPO_ROOT="$repo_root"
 
 # The facade's package name, read through the directory the manifest names.
 facade="$(python3 - "$manifest" "$repo_root" <<'PY'
@@ -88,6 +93,131 @@ check_mode lrz "^zakura-" \
 
 check_mode zakura "$forbidden" \
   "a crates.io original entered the Zakura build:"
+
+# `cargo tree` reports the active build graph, but Cargo #10801 can retain
+# disabled weak dependencies in a downstream lockfile and metadata. Exercise
+# the facade from outside this workspace in the two real consumer shapes.
+python3 <<'PY'
+import os
+from pathlib import Path
+
+probe_root = Path(os.environ["WALLET_LIB_PROBE_ROOT"])
+wallet_lib = Path(os.environ["WALLET_LIB_REPO_ROOT"]) / "wallet-lib"
+dependencies = {
+    "lrz": (
+        f'zakura-wallet-lib = {{ path = "{wallet_lib}", '
+        'default-features = false, features = ["lrz"] }'
+    ),
+    "zakura": (
+        f'zakura-wallet-lib = {{ path = "{wallet_lib}", '
+        'default-features = false, features = ["zakura"] }'
+    ),
+    "zakura-default": f'zakura-wallet-lib = {{ path = "{wallet_lib}" }}',
+}
+
+for name, dependency in dependencies.items():
+    consumer = probe_root / name
+    (consumer / "src").mkdir(parents=True)
+    (consumer / "Cargo.toml").write_text(
+        f"""\
+[package]
+name = "{name}-wallet-lib-probe"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+{dependency}
+"""
+    )
+    (consumer / "src" / "main.rs").write_text(
+        'fn main() { println!("{}", zakura_wallet_lib::BACKEND); }\n'
+    )
+PY
+
+for consumer in lrz zakura zakura-default; do
+  cargo metadata --manifest-path "$probe_root/$consumer/Cargo.toml" \
+    --format-version 1 > "$probe_root/$consumer/metadata.json"
+done
+
+python3 - "$probe_root" "$manifest" <<'PY'
+import json
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+probe_root, source_manifest = Path(sys.argv[1]), Path(sys.argv[2])
+with source_manifest.open("rb") as manifest_file:
+    upstream_names = set(tomllib.load(manifest_file)["graph"]["forbidden"])
+
+for consumer in ("lrz", "zakura", "zakura-default"):
+    root = probe_root / consumer
+    metadata = json.loads((root / "metadata.json").read_text())
+    packages_by_id = {
+        package["id"]: package["name"] for package in metadata["packages"]
+    }
+    package_names = set(packages_by_id.values())
+    resolved_names = {
+        packages_by_id[node["id"]] for node in metadata["resolve"]["nodes"]
+    }
+    lock_names = set(
+        re.findall(
+            r'^name = "([^"]+)"$',
+            (root / "Cargo.lock").read_text(),
+            re.MULTILINE,
+        )
+    )
+
+    if consumer == "lrz":
+        allowed = {"zakura-wallet-lib"}
+        checks = {
+            "metadata packages": {
+                name for name in package_names if name.startswith("zakura-")
+            } - allowed,
+            "resolved nodes": {
+                name for name in resolved_names if name.startswith("zakura-")
+            } - allowed,
+            "lockfile": {
+                name for name in lock_names if name.startswith("zakura-")
+            } - allowed,
+        }
+    else:
+        checks = {
+            "metadata packages": package_names & upstream_names,
+            "resolved nodes": resolved_names & upstream_names,
+            "lockfile": lock_names & upstream_names,
+        }
+
+    failures = {label: names for label, names in checks.items() if names}
+    if consumer == "zakura":
+        drifted_rcs = {
+            f'{package["name"]} {package["version"]}'
+            for package in metadata["packages"]
+            if package["name"].startswith("zakura-")
+            and package["version"].startswith("1.0.0-rc.")
+            and package["version"] != "1.0.0-rc.3"
+        }
+        if drifted_rcs:
+            failures["non-RC3 Zakura packages"] = drifted_rcs
+
+    if failures:
+        for label, names in failures.items():
+            print(
+                f"{consumer} {label} contains the other backend: "
+                + " ".join(sorted(names)),
+                file=sys.stderr,
+            )
+        raise SystemExit(1)
+
+print(
+    "verified: external LRZ metadata/lock contains no Zakura forks, "
+    "and external Zakura metadata/lock contains no LRZ originals"
+)
+PY
+
+[[ "$(cargo run --quiet --manifest-path "$probe_root/lrz/Cargo.toml")" == "lrz" ]]
+[[ "$(cargo run --quiet --manifest-path "$probe_root/zakura/Cargo.toml")" == "zakura" ]]
+[[ "$(cargo run --quiet --manifest-path "$probe_root/zakura-default/Cargo.toml")" == "zakura" ]]
 
 # Neither backend selected must fail loudly rather than build an empty facade.
 if cargo check --manifest-path "$repo_root/Cargo.toml" \
