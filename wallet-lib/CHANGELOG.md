@@ -10,6 +10,7 @@ and this library adheres to Rust's notion of
 ## [0.1.0-rc4] - 2026-08-28
 
 ### Changed
+- Updated the Zakura cryptography stack to the stable 1.0 release family.
 - Made the Zakura wallet stack the default and kept LRZ as the explicit
   `default-features = false, features = ["lrz"]` alternative.
 - Exposed Zakura dependencies under their clean upstream crate names while

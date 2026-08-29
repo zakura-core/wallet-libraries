@@ -38,27 +38,26 @@ lrz-primitives = { package = "zcash_primitives", version = "0.30.0", default-fea
 # -- Zakura: the default stack, under the upstream names consumers expect ----
 zcash-client-backend = { package = "zakura-client-backend", path = "../librustzcash/zcash_client_backend", version = "0.1.0-rc4", default-features = false, optional = true }
 zcash-client-sqlite = { package = "zakura-client-sqlite", path = "../librustzcash/zcash_client_sqlite", version = "0.1.0-rc4", default-features = false, optional = true }
-zcash-keys = { package = "zakura-keys", version = "=1.0.0-rc.5", default-features = false, optional = true }
-orchard = { package = "zakura-orchard", version = "=1.0.0-rc.5", optional = true }
+zcash-keys = { package = "zakura-keys", version = "=1.0.0", default-features = false, optional = true }
+orchard = { package = "zakura-orchard", version = "=1.0.0", optional = true }
 pczt = { package = "zakura-pczt", path = "../librustzcash/pczt", version = "0.1.0-rc2", optional = true }
-zcash-primitives = { package = "zakura-primitives", version = "=1.0.0-rc.5", default-features = false, optional = true }
+zcash-primitives = { package = "zakura-primitives", version = "=1.0.0", default-features = false, optional = true }
 
-# Cargo prerelease requirements also accept newer release candidates. Keep
-# every transitive crate in the default Zakura graph on RC5 so a fresh
-# consumer lockfile cannot mix in an MSRV-incompatible release.
-zakura-bellman-pin = { package = "zakura-bellman", version = "=1.0.0-rc.5", default-features = false, optional = true }
-zakura-bls12-381-pin = { package = "zakura-bls12-381", version = "=1.0.0-rc.5", default-features = false, optional = true }
-zakura-halo2-gadgets-pin = { package = "zakura-halo2-gadgets", version = "=1.0.0-rc.5", default-features = false, optional = true }
-zakura-halo2-legacy-pdqsort-pin = { package = "zakura-halo2-legacy-pdqsort", version = "=1.0.0-rc.5", default-features = false, optional = true }
-zakura-halo2-poseidon-pin = { package = "zakura-halo2-poseidon", version = "=1.0.0-rc.5", default-features = false, optional = true }
-zakura-halo2-proofs-pin = { package = "zakura-halo2-proofs", version = "=1.0.0-rc.5", default-features = false, optional = true }
-zakura-jubjub-pin = { package = "zakura-jubjub", version = "=1.0.0-rc.5", default-features = false, optional = true }
-zakura-pairing-pin = { package = "zakura-pairing", version = "=1.0.0-rc.5", default-features = false, optional = true }
-zakura-pasta-curves-pin = { package = "zakura-pasta-curves", version = "=1.0.0-rc.5", default-features = false, optional = true }
-zakura-reddsa-pin = { package = "zakura-reddsa", version = "=1.0.0-rc.5", default-features = false, optional = true }
-zakura-redjubjub-pin = { package = "zakura-redjubjub", version = "=1.0.0-rc.5", default-features = false, optional = true }
-zakura-sapling-crypto-pin = { package = "zakura-sapling-crypto", version = "=1.0.0-rc.5", default-features = false, optional = true }
-zakura-sinsemilla-pin = { package = "zakura-sinsemilla", version = "=1.0.0-rc.5", default-features = false, optional = true }
+# Keep every transitive crate in the default Zakura graph on the stable 1.0
+# family so a fresh consumer lockfile cannot mix incompatible type families.
+zakura-bellman-pin = { package = "zakura-bellman", version = "=1.0.0", default-features = false, optional = true }
+zakura-bls12-381-pin = { package = "zakura-bls12-381", version = "=1.0.0", default-features = false, optional = true }
+zakura-halo2-gadgets-pin = { package = "zakura-halo2-gadgets", version = "=1.0.0", default-features = false, optional = true }
+zakura-halo2-legacy-pdqsort-pin = { package = "zakura-halo2-legacy-pdqsort", version = "=1.0.0", default-features = false, optional = true }
+zakura-halo2-poseidon-pin = { package = "zakura-halo2-poseidon", version = "=1.0.0", default-features = false, optional = true }
+zakura-halo2-proofs-pin = { package = "zakura-halo2-proofs", version = "=1.0.0", default-features = false, optional = true }
+zakura-jubjub-pin = { package = "zakura-jubjub", version = "=1.0.0", default-features = false, optional = true }
+zakura-pairing-pin = { package = "zakura-pairing", version = "=1.0.0", default-features = false, optional = true }
+zakura-pasta-curves-pin = { package = "zakura-pasta-curves", version = "=1.0.0", default-features = false, optional = true }
+zakura-reddsa-pin = { package = "zakura-reddsa", version = "=1.0.0", default-features = false, optional = true }
+zakura-redjubjub-pin = { package = "zakura-redjubjub", version = "=1.0.0", default-features = false, optional = true }
+zakura-sapling-crypto-pin = { package = "zakura-sapling-crypto", version = "=1.0.0", default-features = false, optional = true }
+zakura-sinsemilla-pin = { package = "zakura-sinsemilla", version = "=1.0.0", default-features = false, optional = true }
 
 [features]
 default = ["zakura"]
