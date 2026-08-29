@@ -7,6 +7,8 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc4] - 2026-08-28
+
 ### Changed
 - Made the Zakura wallet stack the default and kept LRZ as the explicit
   `default-features = false, features = ["lrz"]` alternative.

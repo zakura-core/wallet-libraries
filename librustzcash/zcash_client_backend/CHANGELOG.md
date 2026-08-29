@@ -10,10 +10,16 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc4] - 2026-08-28
+
 ### Added
 - `start_orchard_proving_key_warmup`, an idempotent API that initializes the
   transaction builder's process-wide Orchard proving-key cache on a background
   worker.
+
+### Changed
+- Updated the Zakura proving and protocol dependencies to the RC5 cryptography
+  family and raised the MSRV to Rust 1.91.
 
 ## [0.1.0-rc3] - 2026-08-25
 
