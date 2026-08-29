@@ -190,15 +190,15 @@ for consumer in ("lrz", "zakura", "zakura-default"):
 
     failures = {label: names for label, names in checks.items() if names}
     if consumer == "zakura":
-        drifted_rcs = {
+        drifted_1_0 = {
             f'{package["name"]} {package["version"]}'
             for package in metadata["packages"]
             if package["name"].startswith("zakura-")
-            and package["version"].startswith("1.0.0-rc.")
-            and package["version"] != "1.0.0-rc.5"
+            and package["version"].startswith("1.0.0")
+            and package["version"] != "1.0.0"
         }
-        if drifted_rcs:
-            failures["non-RC5 Zakura packages"] = drifted_rcs
+        if drifted_1_0:
+            failures["non-stable Zakura 1.0 packages"] = drifted_1_0
 
     if failures:
         for label, names in failures.items():
@@ -289,14 +289,14 @@ expected = {
     "zakura-sapling-crypto",
     "zakura-sinsemilla",
 }
-required_version = "1.0.0-rc.5"
+required_version = "1.0.0"
 problems = [
     f"{name}: expected {required_version}, found {packages.get(name, 'missing')}"
     for name in sorted(expected)
     if packages.get(name) != required_version
 ]
 if problems:
-    print("fresh consumer did not stay on the RC5 crypto family:", file=sys.stderr)
+    print("fresh consumer did not stay on the stable 1.0 crypto family:", file=sys.stderr)
     for problem in problems:
         print(f"  {problem}", file=sys.stderr)
     raise SystemExit(1)
@@ -305,5 +305,5 @@ PY
 cargo +1.91 check --manifest-path "$consumer/Cargo.toml" --locked
 
 echo "verified: Zakura is the clean default, each explicit backend resolves"
-echo "to exactly one stack, a fresh Rust 1.91 consumer stays on RC5, and"
+echo "to exactly one stack, a fresh Rust 1.91 consumer stays on stable 1.0, and"
 echo "neither no-backend nor both-backends compiles"

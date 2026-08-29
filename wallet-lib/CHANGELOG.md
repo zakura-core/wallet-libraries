@@ -7,6 +7,9 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+- Updated the Zakura cryptography stack to the stable 1.0 release family.
+
 ## [0.1.0-rc4] - 2026-08-28
 
 ### Changed

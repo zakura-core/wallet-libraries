@@ -42,19 +42,19 @@ zcash_client_backend = { version = "0.1.0-rc4", path = "librustzcash/zcash_clien
 # explicit path dependency on the local 0.5. Migrate the remaining crates one at a
 # time, then flip this back to `path = "components/zcash_encoding"` at "0.5".
 zcash_encoding = { version = "0.4", default-features = false }
-zcash_keys = { version = "=1.0.0-rc.5", default-features = false, package = "zakura-keys" }
+zcash_keys = { version = "=1.0.0", default-features = false, package = "zakura-keys" }
 zcash_pool_migration = { version = "0.1.0-rc.6" }
 zcash_protocol = { version = "0.10.4", default-features = false }
 zip321 = { version = "0.9.0-rc.1" }
 
 zcash_note_encryption = "0.4.1"
-zcash_primitives = { version = "=1.0.0-rc.5", default-features = false, package = "zakura-primitives" }
-zcash_proofs = { version = "=1.0.0-rc.5", default-features = false, package = "zakura-proofs" }
+zcash_primitives = { version = "=1.0.0", default-features = false, package = "zakura-primitives" }
+zcash_proofs = { version = "=1.0.0", default-features = false, package = "zakura-proofs" }
 
 pczt = { version = "0.1.0-rc2", path = "librustzcash/pczt", package = "zakura-pczt" }
 
 # Shielded protocols
-bellman = { version = "=1.0.0-rc.5", default-features = false, features = ["groth16"], package = "zakura-bellman" }
+bellman = { version = "=1.0.0", default-features = false, features = ["groth16"], package = "zakura-bellman" }
 ff = { version = "0.14", default-features = false }
 group = { version = "0.14" }
 incrementalmerkletree = { version = "0.8.2", default-features = false }
@@ -66,14 +66,14 @@ zcash_spec = "0.2"
 # - Sapling
 bitvec = { version = "1", default-features = false, features = ["alloc"] }
 blake2s_simd = { version = "1", default-features = false }
-bls12_381 = { version = "=1.0.0-rc.5", package = "zakura-bls12-381" }
-jubjub = { version = "=1.0.0-rc.5", package = "zakura-jubjub" }
-redjubjub = { version = "=1.0.0-rc.5", default-features = false, package = "zakura-redjubjub" }
-sapling = { package = "zakura-sapling-crypto", version = "=1.0.0-rc.5", default-features = false }
+bls12_381 = { version = "=1.0.0", package = "zakura-bls12-381" }
+jubjub = { version = "=1.0.0", package = "zakura-jubjub" }
+redjubjub = { version = "=1.0.0", default-features = false, package = "zakura-redjubjub" }
+sapling = { package = "zakura-sapling-crypto", version = "=1.0.0", default-features = false }
 
 # - Orchard
-orchard = { version = "=1.0.0-rc.5", default-features = false, package = "zakura-orchard" }
-pasta_curves = { version = "=1.0.0-rc.5", package = "zakura-pasta-curves" }
+orchard = { version = "=1.0.0", default-features = false, package = "zakura-orchard" }
+pasta_curves = { version = "=1.0.0", package = "zakura-pasta-curves" }
 
 # - Transparent
 bip32 = { version = "=0.6.0-pre.1", default-features = false, features = ["alloc"] }
