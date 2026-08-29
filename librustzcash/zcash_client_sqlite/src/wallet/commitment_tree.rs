@@ -1646,7 +1646,8 @@ mod tests {
     use std::collections::BTreeSet;
     #[cfg(feature = "orchard")]
     use {
-        crate::error::SqliteClientError, ::orchard::tree::MerkleHashOrchard,
+        crate::error::SqliteClientError,
+        ::orchard::tree::MerkleHashOrchard,
         incrementalmerkletree::frontier::Frontier,
         zcash_client_backend::data_api::{ORCHARD_SHARD_HEIGHT, testing::TestRng},
     };

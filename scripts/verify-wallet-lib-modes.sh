@@ -195,10 +195,10 @@ for consumer in ("lrz", "zakura", "zakura-default"):
             for package in metadata["packages"]
             if package["name"].startswith("zakura-")
             and package["version"].startswith("1.0.0-rc.")
-            and package["version"] != "1.0.0-rc.3"
+            and package["version"] != "1.0.0-rc.5"
         }
         if drifted_rcs:
-            failures["non-RC3 Zakura packages"] = drifted_rcs
+            failures["non-RC5 Zakura packages"] = drifted_rcs
 
     if failures:
         for label, names in failures.items():
@@ -234,5 +234,76 @@ if cargo check --manifest-path "$repo_root/Cargo.toml" \
   exit 1
 fi
 
+# Resolve the facade as a fresh external consumer. The workspace lockfile
+# cannot protect downstream users, and Cargo's prerelease ranges otherwise
+# allow a newer Zakura release with a higher MSRV into their graph.
+consumer="$(mktemp -d "${TMPDIR:-/tmp}/zakura-wallet-lib-consumer.XXXXXX")"
+trap 'rm -rf "$consumer"' EXIT
+mkdir -p "$consumer/src"
+cat > "$consumer/Cargo.toml" <<EOF
+[package]
+name = "external-wallet-lib-consumer"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.91"
+
+[dependencies]
+zakura-wallet-lib = { path = "$repo_root/wallet-lib" }
+EOF
+cat > "$consumer/src/lib.rs" <<'EOF'
+pub use zakura_wallet_lib::*;
+EOF
+
+echo "== fresh external consumer with Rust 1.91"
+if ! rustup run 1.91 rustc --version >/dev/null 2>&1; then
+  rustup toolchain install 1.91 --profile minimal --no-self-update
+fi
+cargo +1.91 generate-lockfile --manifest-path "$consumer/Cargo.toml"
+cargo +1.91 metadata --manifest-path "$consumer/Cargo.toml" \
+  --format-version 1 --locked > "$consumer/metadata.json"
+
+python3 - "$consumer/metadata.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+packages = {
+    package["name"]: package["version"]
+    for package in json.loads(Path(sys.argv[1]).read_text())["packages"]
+}
+expected = {
+    "zakura-bellman",
+    "zakura-bls12-381",
+    "zakura-halo2-gadgets",
+    "zakura-halo2-legacy-pdqsort",
+    "zakura-halo2-poseidon",
+    "zakura-halo2-proofs",
+    "zakura-jubjub",
+    "zakura-keys",
+    "zakura-orchard",
+    "zakura-pairing",
+    "zakura-pasta-curves",
+    "zakura-primitives",
+    "zakura-reddsa",
+    "zakura-redjubjub",
+    "zakura-sapling-crypto",
+    "zakura-sinsemilla",
+}
+required_version = "1.0.0-rc.5"
+problems = [
+    f"{name}: expected {required_version}, found {packages.get(name, 'missing')}"
+    for name in sorted(expected)
+    if packages.get(name) != required_version
+]
+if problems:
+    print("fresh consumer did not stay on the RC5 crypto family:", file=sys.stderr)
+    for problem in problems:
+        print(f"  {problem}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+
+cargo +1.91 check --manifest-path "$consumer/Cargo.toml" --locked
+
 echo "verified: Zakura is the clean default, each explicit backend resolves"
-echo "to exactly one stack, and neither no-backend nor both-backends compiles"
+echo "to exactly one stack, a fresh Rust 1.91 consumer stays on RC5, and"
+echo "neither no-backend nor both-backends compiles"
