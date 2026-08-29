@@ -65,17 +65,17 @@ allow_prerelease = true
 [[crate]]
 path = "pczt"
 package = "zakura-pczt"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 
 [[crate]]
 path = "zcash_client_backend"
 package = "zakura-client-backend"
-version = "0.1.0-rc3"
+version = "0.1.0-rc4"
 
 [[crate]]
 path = "zcash_client_sqlite"
 package = "zakura-client-sqlite"
-version = "0.1.0-rc3"
+version = "0.1.0-rc4"
 
 # Workspace dependencies redirected onto the published Zakura crypto stack.
 # The upstream dependency key is kept, so crate sources continue to say

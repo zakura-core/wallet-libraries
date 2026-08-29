@@ -10,6 +10,12 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc4] - 2026-08-28
+
+### Changed
+- Updated the Zakura wallet and protocol dependencies to the RC5 cryptography
+  family and raised the MSRV to Rust 1.91.
+
 ## [0.1.0-rc3] - 2026-08-25
 
 ### Changed
