@@ -2688,6 +2688,136 @@ pub(crate) mod tests {
             );
         }
 
+        /// The memo retrieval queue as `(received_note_id, commitment_tree_position)` rows.
+        fn memo_queue(conn: &rusqlite::Connection) -> Vec<(i64, i64)> {
+            conn.prepare(
+                "SELECT received_note_id, commitment_tree_position
+                 FROM ironwood_memo_retrieval_queue
+                 ORDER BY commitment_tree_position",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        }
+
+        /// A reorg un-mines a transaction without deleting its Ironwood notes or clearing their
+        /// commitment tree positions, so a rescan can legitimately assign a position that a stale
+        /// note still claims. The memo retrieval queue requires positions to be unique, so
+        /// reconciling it while storing the new note must resolve that collision; otherwise the
+        /// `UNIQUE` constraint aborts `put_received_note` and takes block scanning down with it.
+        #[test]
+        fn rescanning_a_reorged_ironwood_position_does_not_abort_the_scan() {
+            let mut st = TestBuilder::new()
+                .with_network(ironwood_active_network())
+                .with_data_store_factory(TestDbFactory::default())
+                .with_block_cache(BlockCache::new())
+                .with_account_from_sapling_activation(BlockHash([0; 32]))
+                .build();
+
+            let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+            let value = Zatoshis::const_from_u64(100_000);
+
+            // Two Ironwood notes in consecutive blocks take tree positions 0 and 1, and both are
+            // queued for memo retrieval because compact scanning never learns their memos.
+            let (h0, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+            let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+            st.scan_cached_blocks(h0, 2);
+
+            let queued = memo_queue(st.wallet().conn());
+            assert_eq!(
+                queued.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
+                vec![0, 1],
+                "both compact-scanned Ironwood notes should await memo retrieval",
+            );
+            let stale_note_id = queued[1].0;
+
+            // A reorg rolls the wallet back past the second block. Its note row survives, still
+            // carrying position 1, but its transaction is no longer mined.
+            st.truncate_to_height(h0);
+            assert_eq!(
+                memo_queue(st.wallet().conn()),
+                vec![queued[0]],
+                "un-mined notes must not be left queued: their positions are no longer theirs",
+            );
+
+            // A different block arrives at the same height, and its Ironwood note therefore takes
+            // the same tree position the stale note still claims.
+            let (replacement, _, _) = st.generate_next_block(
+                &fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(200_000),
+            );
+            assert_eq!(replacement, h1, "the replacement block reuses the height");
+            st.scan_cached_blocks(h1, 1);
+
+            let queued = memo_queue(st.wallet().conn());
+            assert_eq!(
+                queued.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
+                vec![0, 1],
+                "the rescanned note should hold position 1 in the queue",
+            );
+            assert_ne!(
+                queued[1].0, stale_note_id,
+                "position 1 should be claimed by the rescanned note, not the reorged-out one",
+            );
+        }
+
+        /// The same collision, but with the stale queue entry present at the moment of the
+        /// rescan. A wallet migrated from a release that queued notes without dequeuing them on
+        /// truncation can be in exactly this state, so reconciliation must evict the stale
+        /// claimant rather than rely on truncation having already removed it.
+        #[test]
+        fn rescanning_evicts_a_stale_claim_on_an_ironwood_position() {
+            let mut st = TestBuilder::new()
+                .with_network(ironwood_active_network())
+                .with_data_store_factory(TestDbFactory::default())
+                .with_block_cache(BlockCache::new())
+                .with_account_from_sapling_activation(BlockHash([0; 32]))
+                .build();
+
+            let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+            let value = Zatoshis::const_from_u64(100_000);
+
+            let (h0, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+            let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+            st.scan_cached_blocks(h0, 2);
+            let stale_note_id = memo_queue(st.wallet().conn())[1].0;
+
+            st.truncate_to_height(h0);
+
+            // Restore the entry truncation removed, reproducing a database that reorged under a
+            // release which did not dequeue un-mined notes.
+            st.wallet_mut()
+                .conn_mut()
+                .execute(
+                    "INSERT INTO ironwood_memo_retrieval_queue (
+                         received_note_id, commitment_tree_position
+                     ) VALUES (?1, 1)",
+                    [stale_note_id],
+                )
+                .unwrap();
+
+            st.generate_next_block(
+                &fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(200_000),
+            );
+            st.scan_cached_blocks(h1, 1);
+
+            let queued = memo_queue(st.wallet().conn());
+            assert_eq!(
+                queued.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
+                vec![0, 1],
+                "exactly one note should claim each position after the rescan",
+            );
+            assert_ne!(
+                queued[1].0, stale_note_id,
+                "the stale claim on position 1 should have been evicted",
+            );
+        }
+
         /// A transaction may be connected to the wallet solely by spending one of its Ironwood
         /// notes: it produces an Ironwood bundle revealing that note's nullifier, but has no
         /// wallet-owned outputs. `get_funding_accounts` must recognize such a spend, otherwise
