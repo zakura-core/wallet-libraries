@@ -151,9 +151,13 @@ orchard = [
     # The pool-migration store finalizes a proved migration PCZT into a `Transaction` when it
     # persists it to the wallet's transaction tables (`PoolMigrations::store_proved_transaction`).
     "pczt/orchard",
+    "pczt/io-finalizer",
     "pczt/spend-finalizer",
     "pczt/tx-extractor",
 ]
+
+## Enables the position-keyed Ironwood memo queue and authenticated completion APIs.
+zakura-pir-memo = ["orchard", "zcash_client_backend/zakura-pir-memo"]
 
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.
 test-dependencies = [

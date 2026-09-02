@@ -53,6 +53,11 @@ use tracing::warn;
 use util::Clock;
 use uuid::Uuid;
 
+#[cfg(feature = "zakura-pir-memo")]
+use zcash_client_backend::data_api::memo_pir::{
+    MemoPirRead, MemoPirRequest, MemoPirSnapshotAnchor, MemoPirSnapshotStatus, MemoPirWrite,
+    PendingIronwoodMemo,
+};
 use zcash_client_backend::{
     TransferType,
     data_api::{
@@ -1560,6 +1565,64 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
             target_height,
             confirmations_policy,
         )
+    }
+}
+
+#[cfg(feature = "zakura-pir-memo")]
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> MemoPirRead
+    for WalletDb<C, P, CL, R>
+{
+    fn memo_pir_requests(&self) -> Result<Vec<MemoPirRequest>, Self::Error> {
+        wallet::memo_pir::requests(self.conn.borrow())
+    }
+
+    fn memo_pir_snapshot_status(
+        &self,
+        anchor: MemoPirSnapshotAnchor,
+    ) -> Result<MemoPirSnapshotStatus, Self::Error> {
+        // `chain_height` is the last advertised network tip, not the wallet's scan frontier. In
+        // particular it is normally updated before scanning begins, so it cannot tell us whether
+        // the wallet has authenticated the snapshot's block yet.
+        let fully_scanned_height = wallet::fully_scanned_height(self.conn.borrow())?;
+        if fully_scanned_height.is_none_or(|height| height < anchor.height) {
+            return Ok(MemoPirSnapshotStatus::NotYetScanned);
+        }
+
+        let Some(metadata) = self.block_metadata(anchor.height)? else {
+            // A fully-scanned range is contiguous from the wallet birthday and should retain
+            // metadata for every height in that range. Missing metadata here is therefore an
+            // inconsistent local state, not a reason to trust the remote snapshot.
+            return Ok(MemoPirSnapshotStatus::Mismatch);
+        };
+        Ok(
+            if metadata.block_hash() == anchor.block_hash
+                && metadata.ironwood_tree_size().map(u64::from) == Some(anchor.ironwood_tree_size)
+            {
+                MemoPirSnapshotStatus::Accepted
+            } else {
+                MemoPirSnapshotStatus::Mismatch
+            },
+        )
+    }
+
+    fn pending_ironwood_memo(
+        &self,
+        position: Position,
+    ) -> Result<Option<PendingIronwoodMemo<Self::AccountId>>, Self::Error> {
+        wallet::memo_pir::pending(self.conn.borrow(), &self.params, position)
+    }
+}
+
+#[cfg(feature = "zakura-pir-memo")]
+impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng> MemoPirWrite
+    for WalletDb<C, P, CL, R>
+{
+    fn put_ironwood_memo(
+        &mut self,
+        position: Position,
+        memo: &zcash_protocol::memo::MemoBytes,
+    ) -> Result<bool, Self::Error> {
+        self.transactionally(|wdb| wallet::memo_pir::put(wdb.conn.0, position, memo))
     }
 }
 
@@ -3979,6 +4042,37 @@ mod tests {
         assert_eq!(
             st.wallet().get_wallet_recover_until().unwrap(),
             Some(zcash_protocol::consensus::BlockHeight::from_u32(123456))
+        );
+    }
+
+    #[cfg(feature = "zakura-pir-memo")]
+    #[test]
+    fn memo_pir_snapshot_waits_for_the_scan_frontier() {
+        use zcash_client_backend::data_api::memo_pir::{
+            MemoPirRead, MemoPirSnapshotAnchor, MemoPirSnapshotStatus,
+        };
+        use zcash_protocol::consensus::BlockHeight;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let anchor_height = BlockHeight::from_u32(2_000_000);
+
+        // Learning a network tip above the snapshot does not mean the wallet has scanned the
+        // snapshot height. This is the normal state immediately before a restored wallet syncs.
+        st.wallet_mut().update_chain_tip(anchor_height + 1).unwrap();
+
+        assert_eq!(
+            st.wallet()
+                .db()
+                .memo_pir_snapshot_status(MemoPirSnapshotAnchor {
+                    height: anchor_height,
+                    block_hash: BlockHash([0; 32]),
+                    ironwood_tree_size: 0,
+                })
+                .unwrap(),
+            MemoPirSnapshotStatus::NotYetScanned
         );
     }
 

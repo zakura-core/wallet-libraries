@@ -613,6 +613,35 @@ pub(crate) fn put_received_note<
         .query_row(sql_args, |row| row.get::<_, i64>(0))
         .map_err(SqliteClientError::from)?;
 
+    if shielded_pool == ShieldedPool::Ironwood {
+        // Reconcile from the final row, not merely this call's compact/full input: the upsert
+        // preserves an already-known memo and position via IFNULL.
+        conn.execute(
+            "INSERT INTO ironwood_memo_retrieval_queue (
+                 received_note_id, commitment_tree_position
+             )
+             SELECT id, commitment_tree_position
+             FROM ironwood_received_notes
+             WHERE id = :received_note_id
+               AND memo IS NULL
+               AND commitment_tree_position IS NOT NULL
+             ON CONFLICT(received_note_id) DO UPDATE SET
+                 commitment_tree_position = excluded.commitment_tree_position",
+            named_params![":received_note_id": received_note_id],
+        )?;
+        conn.execute(
+            "DELETE FROM ironwood_memo_retrieval_queue
+             WHERE received_note_id = :received_note_id
+               AND NOT EXISTS (
+                   SELECT 1 FROM ironwood_received_notes
+                   WHERE id = :received_note_id
+                     AND memo IS NULL
+                     AND commitment_tree_position IS NOT NULL
+               )",
+            named_params![":received_note_id": received_note_id],
+        )?;
+    }
+
     if let Some(spent_in) = spent_in {
         conn.execute(
             &format!(

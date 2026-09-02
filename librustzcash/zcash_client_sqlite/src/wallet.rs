@@ -186,6 +186,8 @@ mod db;
 pub(crate) mod encoding;
 pub mod init;
 pub(crate) mod locking;
+#[cfg(feature = "zakura-pir-memo")]
+pub(crate) mod memo_pir;
 #[cfg(feature = "orchard")]
 pub(crate) mod orchard;
 pub(crate) mod sapling;

@@ -1,0 +1,29 @@
+[package]
+name = "zakura-pir-memo"
+version = "0.1.0"
+description = "Private Ironwood memo retrieval client for Zakura wallets"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "zakura_pir_memo"
+
+[features]
+default = ["https-client"]
+https-client = ["dep:reqwest"]
+
+[dependencies]
+hex.workspace = true
+ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", rev = "e875404cef33661906ab60af236dfb327e6b28b1" }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror = "2"
+zcash_client_backend = { workspace = true, features = ["orchard", "zakura-pir-memo"] }
+zcash_primitives.workspace = true
+zcash_protocol.workspace = true
