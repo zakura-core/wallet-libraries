@@ -604,6 +604,21 @@ CREATE INDEX idx_ironwood_received_note_spends_transaction_id ON ironwood_receiv
     transaction_id ASC
 )";
 
+/// Stores the Ironwood notes whose memo is still unknown, keyed by the note's commitment tree
+/// position so that the memo can be retrieved by private information retrieval without revealing
+/// a transaction identifier.
+///
+/// A position identifies at most one mined note, so `commitment_tree_position` is unique; the
+/// memo-PIR store reads, authenticates, and writes rows exclusively by position, and that
+/// uniqueness is what makes resolving a position to a single note unambiguous.
+pub(super) const TABLE_IRONWOOD_MEMO_RETRIEVAL_QUEUE: &str = "
+CREATE TABLE ironwood_memo_retrieval_queue (
+    received_note_id INTEGER PRIMARY KEY
+        REFERENCES ironwood_received_notes(id) ON DELETE CASCADE,
+    commitment_tree_position INTEGER NOT NULL UNIQUE
+        CHECK (commitment_tree_position >= 0)
+)";
+
 // The in-progress Orchard -> Ironwood pool migration (ZIP 318). The table DDL and store live in the
 // `crate::pool_migration` module; these golden copies track the normalized schema those tables
 // install into `wallet.db`. Every structured value is stored in typed columns and child tables; the

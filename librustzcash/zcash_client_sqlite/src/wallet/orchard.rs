@@ -525,6 +525,76 @@ pub(crate) fn parse_note_version(code: i64) -> Option<NoteVersion> {
     }
 }
 
+/// Selects the Ironwood note `:received_note_id` if memo PIR could still complete it: the memo is
+/// not yet known, the note has a commitment tree position to query by, and its plaintext version
+/// is one that memo PIR can decrypt.
+///
+/// Minedness is part of the predicate because truncation un-mines a transaction without deleting
+/// its notes or clearing their commitment tree positions, so an un-mined note may still be
+/// carrying a position that now belongs to a different note. Requiring the transaction to be
+/// mined is what makes the note the authoritative claimant of that position.
+const MEMO_RETRIEVAL_ELIGIBLE: &str = "
+    FROM ironwood_received_notes rn
+    JOIN transactions t ON t.id_tx = rn.transaction_id
+    WHERE rn.id = :received_note_id
+      AND rn.memo IS NULL
+      AND rn.commitment_tree_position IS NOT NULL
+      AND rn.note_version = :v3
+      AND t.mined_height IS NOT NULL";
+
+/// Brings the memo retrieval queue into agreement with the stored state of one Ironwood note.
+///
+/// This reconciles from the final database row rather than from this call's compact or full
+/// input, because the upsert preserves an already-known memo and position via `IFNULL`: a compact
+/// record may arrive after a full one, and it must not re-queue a note whose memo is already
+/// stored.
+///
+/// The eviction step exists because a commitment tree position is unique in the queue but *not*
+/// in `ironwood_received_notes`. After a reorg, a note whose transaction was un-mined keeps its
+/// old position, so a rescan that assigns that position to a different note would otherwise
+/// violate the queue's `UNIQUE(commitment_tree_position)` constraint and abort the whole scan.
+fn reconcile_memo_retrieval_queue(
+    conn: &rusqlite::Transaction,
+    received_note_id: i64,
+) -> Result<(), SqliteClientError> {
+    let params = named_params![
+        ":received_note_id": received_note_id,
+        ":v3": note_version_code(NoteVersion::V3),
+    ];
+
+    // Drop this note's own entry if it is no longer something memo PIR can complete.
+    conn.prepare_cached(&format!(
+        "DELETE FROM ironwood_memo_retrieval_queue
+         WHERE received_note_id = :received_note_id
+           AND NOT EXISTS (SELECT 1 {MEMO_RETRIEVAL_ELIGIBLE})"
+    ))?
+    .execute(params)?;
+
+    // Evict any other note's stale claim on the position this note now authoritatively holds,
+    // so that the upsert below cannot collide on `commitment_tree_position`.
+    conn.prepare_cached(&format!(
+        "DELETE FROM ironwood_memo_retrieval_queue
+         WHERE received_note_id <> :received_note_id
+           AND commitment_tree_position IN (
+               SELECT rn.commitment_tree_position {MEMO_RETRIEVAL_ELIGIBLE}
+           )"
+    ))?
+    .execute(params)?;
+
+    // Queue this note, or move its existing entry to the position it now holds.
+    conn.prepare_cached(&format!(
+        "INSERT INTO ironwood_memo_retrieval_queue (
+             received_note_id, commitment_tree_position
+         )
+         SELECT rn.id, rn.commitment_tree_position {MEMO_RETRIEVAL_ELIGIBLE}
+         ON CONFLICT(received_note_id) DO UPDATE SET
+             commitment_tree_position = excluded.commitment_tree_position"
+    ))?
+    .execute(params)?;
+
+    Ok(())
+}
+
 /// Records the specified shielded output as having been received.
 ///
 /// The output's note plaintext version determines the pool to which the note belongs — version 2
@@ -614,32 +684,7 @@ pub(crate) fn put_received_note<
         .map_err(SqliteClientError::from)?;
 
     if shielded_pool == ShieldedPool::Ironwood {
-        // Reconcile from the final row, not merely this call's compact/full input: the upsert
-        // preserves an already-known memo and position via IFNULL.
-        conn.execute(
-            "INSERT INTO ironwood_memo_retrieval_queue (
-                 received_note_id, commitment_tree_position
-             )
-             SELECT id, commitment_tree_position
-             FROM ironwood_received_notes
-             WHERE id = :received_note_id
-               AND memo IS NULL
-               AND commitment_tree_position IS NOT NULL
-             ON CONFLICT(received_note_id) DO UPDATE SET
-                 commitment_tree_position = excluded.commitment_tree_position",
-            named_params![":received_note_id": received_note_id],
-        )?;
-        conn.execute(
-            "DELETE FROM ironwood_memo_retrieval_queue
-             WHERE received_note_id = :received_note_id
-               AND NOT EXISTS (
-                   SELECT 1 FROM ironwood_received_notes
-                   WHERE id = :received_note_id
-                     AND memo IS NULL
-                     AND commitment_tree_position IS NOT NULL
-               )",
-            named_params![":received_note_id": received_note_id],
-        )?;
+        reconcile_memo_retrieval_queue(conn, received_note_id)?;
     }
 
     if let Some(spent_in) = spent_in {

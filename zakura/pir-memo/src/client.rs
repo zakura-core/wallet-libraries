@@ -8,11 +8,20 @@ use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::BlockHeight;
 
 use crate::{
-    Coverage, ITEM_SIZE_BITS, MemoPirRow, MemoSnapshotMetadata, POOL, RECORD_BYTES,
-    RECORDS_PER_ROW, ROW_BYTES, SCHEMA_VERSION, SHARD_ROWS,
+    Coverage, ITEM_SIZE_BITS, MEMO_SETUP_SEED, MemoPirRow, MemoSnapshotMetadata, POOL,
+    RECORD_BYTES, RECORDS_PER_ROW, ROW_BYTES, SCHEMA_VERSION, SHARD_ROWS,
 };
 
-const MEMO_SETUP_SEED: [u8; 32] = *b"spendability-memo-pir-setup-0000";
+/// Expands a wire setup seed into the 32-byte form the iPIR client consumes.
+///
+/// This must stay byte-identical to `nullifier_pir::backend::seed_from_u64`, which the pinned
+/// `ipir-sp` revision does not export; the server side of this protocol derives its offline
+/// setup the same way.
+fn seed_bytes(value: u64) -> [u8; 32] {
+    let mut seed = [0; 32];
+    seed[..8].copy_from_slice(&value.to_le_bytes());
+    seed
+}
 #[cfg(feature = "https-client")]
 const MAX_METADATA_BYTES: usize = 1024 * 1024;
 #[cfg(feature = "https-client")]
@@ -46,6 +55,19 @@ pub enum ClientError {
     #[cfg(feature = "https-client")]
     #[error("memo PIR endpoint must use HTTPS")]
     InsecureTransport,
+    /// The snapshot was built against a different offline-setup seed than this client pins.
+    ///
+    /// Separate from [`ClientError::Metadata`] because this is almost always server
+    /// misconfiguration, and both seeds are the whole diagnostic.
+    #[error(
+        "snapshot setup seed {advertised:#x} does not match the pinned memo-PIR seed {expected:#x}"
+    )]
+    SetupSeedMismatch {
+        /// Seed advertised by the server.
+        advertised: u64,
+        /// Seed this client requires.
+        expected: u64,
+    },
 }
 
 /// Validated, transport-neutral client state for one immutable snapshot generation.
@@ -94,6 +116,14 @@ impl MemoPirSession {
             || metadata.pool != POOL
         {
             return Err(ClientError::Metadata("wrong schema, network, or pool"));
+        }
+        // Checked before anything expensive, and before the parameters are even parsed: a seed
+        // disagreement makes every later step produce plausible-looking garbage.
+        if metadata.setup_seed != MEMO_SETUP_SEED {
+            return Err(ClientError::SetupSeedMismatch {
+                advertised: metadata.setup_seed,
+                expected: MEMO_SETUP_SEED,
+            });
         }
         if !matches!(
             metadata.coverage,
@@ -157,7 +187,10 @@ impl MemoPirSession {
         }
         let published_c1 = recover_published_c1(public_params, rlwe.d, blocks, rlwe.q);
         let client = IPIRClient::new(&rlwe, &ypir);
-        let setup = client.generate_public_query_setup_simplepir_from_seed(MEMO_SETUP_SEED);
+        // Derived from the validated wire value rather than the constant directly, so the
+        // metadata field stays load-bearing and cannot drift out of the code path.
+        let setup =
+            client.generate_public_query_setup_simplepir_from_seed(seed_bytes(metadata.setup_seed));
         Ok(Self {
             metadata,
             anchor,
@@ -366,6 +399,7 @@ mod tests {
             first_global_row: 0,
             generation: 1,
             parameter_id: "test".to_owned(),
+            setup_seed: MEMO_SETUP_SEED,
             public_params_epoch: String::new(),
             public_params_sha256: String::new(),
             shards: Vec::<ShardDescriptor>::new(),
@@ -386,6 +420,33 @@ mod tests {
             &[],
         );
         assert!(matches!(result, Err(ClientError::Metadata(_))));
+    }
+
+    #[test]
+    fn rejects_a_snapshot_built_against_another_setup_seed() {
+        let mut metadata = metadata(Coverage::Full {
+            covered_position_start: 0,
+        });
+        metadata.setup_seed = MEMO_SETUP_SEED ^ 1;
+
+        let result = MemoPirSession::new("main", metadata, b"not JSON", &[]);
+
+        assert!(matches!(
+            result,
+            Err(ClientError::SetupSeedMismatch {
+                advertised,
+                expected,
+            }) if advertised == MEMO_SETUP_SEED ^ 1 && expected == MEMO_SETUP_SEED
+        ));
+    }
+
+    #[test]
+    fn expands_a_wire_seed_like_the_reference_implementation() {
+        assert_eq!(seed_bytes(0), [0; 32]);
+
+        let mut expected = [0; 32];
+        expected[..8].copy_from_slice(&[0x1a, 0x13, 0x07, 0xec, 0x84, 0xe2, 0x1a, 0xaf]);
+        assert_eq!(seed_bytes(MEMO_SETUP_SEED), expected);
     }
 
     #[test]

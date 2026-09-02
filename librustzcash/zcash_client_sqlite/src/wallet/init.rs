@@ -818,6 +818,7 @@ mod tests {
             db::TABLE_ACCOUNTS,
             db::TABLE_ADDRESSES,
             db::TABLE_BLOCKS,
+            db::TABLE_IRONWOOD_MEMO_RETRIEVAL_QUEUE,
             db::TABLE_IRONWOOD_RECEIVED_NOTE_SPENDS,
             db::TABLE_IRONWOOD_RECEIVED_NOTES,
             db::TABLE_IRONWOOD_TREE_CAP,

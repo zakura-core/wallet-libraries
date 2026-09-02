@@ -47,6 +47,16 @@ The client consumes `/memo/metadata`, `/memo/params`,
 ciphertext. Eight records form a 4,896-byte PIR row. A note at position `p`
 maps to global row `p / 8` and slot `p % 8`.
 
+The snapshot advertises the seed of the deterministic public offline-query setup,
+and the client requires it to equal a value this protocol version pins: the first
+eight bytes, little-endian, of
+`SHA-256("zcash/ironwood-memo-pir/setup-seed/v1")`. The seed is domain separated
+so that it can never coincide with the nullifier-PIR deployment's, and it is
+carried on the wire rather than agreed out of band so that a server built against
+a different setup is rejected with a clear error instead of returning rows the
+client silently fails to decrypt. The server expands it to 32 bytes exactly as
+`nullifier_pir::backend::seed_from_u64` does.
+
 Every query uses fresh randomness. A request begins with the snapshot generation
 followed by serialized packing keys and the modulus-switched iPIR query. A
 response begins with the generation and public-parameter epoch; its total size

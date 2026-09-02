@@ -4230,6 +4230,21 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         named_params![":height": u32::from(truncation_height)],
     )?;
 
+    // Dequeue memo retrievals for the notes we just un-mined. Their commitment tree positions are
+    // deliberately retained (received notes are never deleted here, because they may hold memo
+    // data that cannot be recovered), but a retained position is no longer authoritative: it may
+    // be reassigned to a different note by the rescan this truncation schedules. Querying it
+    // would spend a PIR request on a position the wallet no longer owns. Whatever remains
+    // completable is re-queued by that rescan.
+    conn.execute_batch(
+        "DELETE FROM ironwood_memo_retrieval_queue
+         WHERE received_note_id IN (
+             SELECT rn.id FROM ironwood_received_notes rn
+             JOIN transactions t ON t.id_tx = rn.transaction_id
+             WHERE t.mined_height IS NULL
+         )",
+    )?;
+
     // If we're removing scanned blocks, we need to truncate the note commitment tree and remove
     // affected block records from the database.
     if truncation_height < last_scanned_height {

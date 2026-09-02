@@ -3,6 +3,14 @@ use zcash_client_backend::data_api::memo_pir::IronwoodMemoRecord;
 
 /// Version of the memo-PIR wire schema.
 pub const SCHEMA_VERSION: u16 = 1;
+/// Seed for the deterministic public offline-query setup that this protocol version pins.
+///
+/// This is the first eight bytes, little-endian, of
+/// `SHA-256("zcash/ironwood-memo-pir/setup-seed/v1")`, so it cannot collide with the seed of any
+/// other iPIR deployment that picks its own value — in particular the nullifier-PIR
+/// "spendability" domain, whose seed this client must never reuse. The derivation is checked by
+/// `pins_a_domain_separated_setup_seed` rather than trusted to this comment.
+pub const MEMO_SETUP_SEED: u64 = 0xaf1a_e284_ec07_131a;
 /// Shielded pool served by this client.
 pub const POOL: &str = "ironwood";
 /// Bytes in one `(ephemeral_key, enc_ciphertext)` record.
@@ -90,6 +98,13 @@ pub struct MemoSnapshotMetadata {
     pub generation: u64,
     /// Server parameter-set identifier.
     pub parameter_id: String,
+    /// Seed for the deterministic public offline-query setup.
+    ///
+    /// Carried on the wire so that a server built against a different setup is rejected with a
+    /// clear error instead of returning rows this client silently fails to decrypt. Clients
+    /// require it to equal [`MEMO_SETUP_SEED`]; it is deliberately not defaulted, so a server
+    /// that omits the field fails loudly rather than agreeing on zero.
+    pub setup_seed: u64,
     /// Short public-parameter digest used on query responses.
     pub public_params_epoch: String,
     /// Full public-parameter SHA-256 digest.
@@ -146,6 +161,19 @@ impl MemoPirRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins the derivation of [`MEMO_SETUP_SEED`], so that the literal cannot drift from the
+    /// domain string the server is expected to derive it from.
+    #[test]
+    fn pins_a_domain_separated_setup_seed() {
+        use sha2::{Digest, Sha256};
+
+        let digest = Sha256::digest(b"zcash/ironwood-memo-pir/setup-seed/v1");
+        assert_eq!(
+            MEMO_SETUP_SEED,
+            u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 is 32 bytes")),
+        );
+    }
 
     #[test]
     fn extracts_only_records_from_the_same_row() {
