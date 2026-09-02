@@ -3,13 +3,11 @@ use ipir_sp::serialize::serialize_packing_keys;
 use ipir_sp::{IPIRClient, YpirSchemeParams};
 use rand::{Rng, rngs::OsRng};
 use sha2::{Digest, Sha256};
-use zcash_client_backend::data_api::memo_pir::MemoPirSnapshotAnchor;
-use zcash_primitives::block::BlockHash;
-use zcash_protocol::consensus::BlockHeight;
 
 use crate::{
-    Coverage, ITEM_SIZE_BITS, MEMO_SETUP_SEED, MemoPirRow, MemoSnapshotMetadata, POOL,
-    RECORD_BYTES, RECORDS_PER_ROW, ROW_BYTES, SCHEMA_VERSION, SHARD_ROWS,
+    Coverage, ITEM_SIZE_BITS, MEMO_SETUP_SEED, MemoPirRow, MemoPirSnapshotAnchor,
+    MemoSnapshotMetadata, POOL, RECORD_BYTES, RECORDS_PER_ROW, ROW_BYTES, SCHEMA_VERSION,
+    SHARD_ROWS,
 };
 
 /// Expands a wire setup seed into the 32-byte form the iPIR client consumes.
@@ -159,8 +157,8 @@ impl MemoPirSession {
         // Metadata uses the conventional RPC/explorer display order; BlockHash stores wire order.
         anchor_hash.reverse();
         let anchor = MemoPirSnapshotAnchor {
-            height: BlockHeight::from(anchor_height),
-            block_hash: BlockHash::from_slice(&anchor_hash),
+            height: anchor_height,
+            block_hash: anchor_hash.try_into().expect("length checked"),
             ironwood_tree_size: metadata.ironwood_tree_size,
         };
 

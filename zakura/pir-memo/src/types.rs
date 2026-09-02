@@ -1,5 +1,41 @@
 use serde::{Deserialize, Serialize};
-use zcash_client_backend::data_api::memo_pir::IronwoodMemoRecord;
+
+/// The complete encrypted-note fields stored in one memo-PIR record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoPirRecord {
+    ephemeral_key: [u8; 32],
+    ciphertext: [u8; 580],
+}
+
+impl MemoPirRecord {
+    pub(crate) fn from_parts(ephemeral_key: [u8; 32], ciphertext: [u8; 580]) -> Self {
+        Self {
+            ephemeral_key,
+            ciphertext,
+        }
+    }
+
+    /// Returns the ephemeral key bytes.
+    pub fn ephemeral_key(&self) -> &[u8; 32] {
+        &self.ephemeral_key
+    }
+
+    /// Returns the complete encrypted note ciphertext.
+    pub fn ciphertext(&self) -> &[u8; 580] {
+        &self.ciphertext
+    }
+}
+
+/// Chain state to which a memo-PIR snapshot is anchored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemoPirSnapshotAnchor {
+    /// Snapshot block height.
+    pub height: u32,
+    /// Snapshot block hash in consensus wire order.
+    pub block_hash: [u8; 32],
+    /// Ironwood tree size at the end of the anchor block.
+    pub ironwood_tree_size: u64,
+}
 
 /// Version of the memo-PIR wire schema.
 pub const SCHEMA_VERSION: u16 = 1;
@@ -143,7 +179,7 @@ impl MemoPirRow {
     }
 
     /// Extracts the record for `position` if it belongs to this row.
-    pub fn record(&self, position: u64) -> Option<IronwoodMemoRecord> {
+    pub fn record(&self, position: u64) -> Option<MemoPirRecord> {
         if position / RECORDS_PER_ROW as u64 != self.global_row {
             return None;
         }
@@ -154,7 +190,7 @@ impl MemoPirRow {
         let ciphertext = self.bytes[start + 32..start + RECORD_BYTES]
             .try_into()
             .expect("fixed row geometry");
-        Some(IronwoodMemoRecord::from_parts(ephemeral_key, ciphertext))
+        Some(MemoPirRecord::from_parts(ephemeral_key, ciphertext))
     }
 }
 
