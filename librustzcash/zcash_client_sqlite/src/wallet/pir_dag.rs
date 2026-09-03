@@ -146,6 +146,58 @@ pub(crate) fn witness_at(
     .transpose()
 }
 
+/// The stored witness for the note at `position` as the transaction builder
+/// consumes it, if one exists and its bytes decode as tree nodes.
+pub(crate) fn external_witness(
+    conn: &Connection,
+    position: Position,
+) -> Result<
+    Option<zcash_client_backend::data_api::ExternalIronwoodWitness>,
+    super::commitment_tree::Error,
+> {
+    external_witness_inner(conn, position).map_err(|error| match error {
+        SqliteClientError::DbError(error) => super::commitment_tree::Error::Query(error),
+        other => super::commitment_tree::Error::Serialization(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            other.to_string(),
+        )),
+    })
+}
+
+fn external_witness_inner(
+    conn: &Connection,
+    position: Position,
+) -> Result<Option<zcash_client_backend::data_api::ExternalIronwoodWitness>, SqliteClientError> {
+    use incrementalmerkletree::Hashable as _;
+    use orchard::tree::MerkleHashOrchard;
+
+    let Some(record) = witness_at(conn, position)? else {
+        return Ok(None);
+    };
+    let anchor =
+        Option::from(orchard::Anchor::from_bytes(record.anchor_root)).ok_or_else(|| {
+            SqliteClientError::CorruptedData("stored PIR witness anchor is not a tree root".into())
+        })?;
+    let mut auth_path = [MerkleHashOrchard::empty_leaf(); 32];
+    for (level, sibling) in record.siblings.iter().enumerate() {
+        auth_path[level] =
+            Option::from(MerkleHashOrchard::from_bytes(sibling)).ok_or_else(|| {
+                SqliteClientError::CorruptedData(
+                    "stored PIR witness sibling is not a tree node".into(),
+                )
+            })?;
+    }
+    let position = u32::try_from(u64::from(position)).map_err(|_| {
+        SqliteClientError::CorruptedData("stored PIR witness position exceeds u32".into())
+    })?;
+    Ok(Some(
+        zcash_client_backend::data_api::ExternalIronwoodWitness {
+            anchor,
+            merkle_path: orchard::tree::MerklePath::from_parts(position, auth_path),
+        },
+    ))
+}
+
 /// A transaction row for a txid the wallet learned of through PIR. `block`
 /// stays NULL (it references scanned blocks) while `mined_height` records
 /// where it was mined; scanning fills `block` in when it reaches the height.
@@ -408,5 +460,71 @@ mod tests {
             .unwrap();
         assert_eq!(spends, 1);
         assert_eq!(mined, u32::from(height + 20));
+    }
+
+    /// The stored siblings come back as a path whose root is the stored
+    /// anchor, so the transaction builder's anchor check passes.
+    #[test]
+    fn stored_witness_converts_to_a_path_reaching_its_anchor() {
+        use incrementalmerkletree::Hashable as _;
+        use orchard::tree::MerkleHashOrchard;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let account = st.test_account().cloned().unwrap();
+        let fvk = account
+            .account()
+            .ufvk()
+            .and_then(|ufvk| ufvk.orchard().cloned())
+            .expect("Orchard key");
+        let height = account.birthday().height() + 10;
+        let record = change_record(&fvk, 9_000, [6; 32], height);
+        let cmx = ExtractedNoteCommitment::from_bytes(&record.cmx).unwrap();
+        let position = Position::from(5u64);
+        discover_change(
+            st.wallet_mut().db_mut(),
+            position,
+            std::slice::from_ref(&record),
+        )
+        .unwrap();
+
+        // A tree holding only this leaf at position 5: every sibling is an empty subtree.
+        let mut siblings = [[0u8; 32]; 32];
+        let mut node = MerkleHashOrchard::from_cmx(&cmx);
+        let mut index = u64::from(position);
+        for (level, sibling) in siblings.iter_mut().enumerate() {
+            let empty = MerkleHashOrchard::empty_root((level as u8).into());
+            *sibling = empty.to_bytes();
+            node = if index & 1 == 1 {
+                MerkleHashOrchard::combine((level as u8).into(), &empty, &node)
+            } else {
+                MerkleHashOrchard::combine((level as u8).into(), &node, &empty)
+            };
+            index >>= 1;
+        }
+        let witness = PirWitnessRecord {
+            position,
+            leaf: cmx.to_bytes(),
+            siblings,
+            anchor_height: height + 1,
+            anchor_root: node.to_bytes(),
+        };
+        assert!(st.wallet_mut().db_mut().put_pir_witness(&witness).unwrap());
+
+        let external = super::external_witness(st.wallet().conn(), position)
+            .unwrap()
+            .expect("stored");
+        assert_eq!(external.merkle_path.root(cmx), external.anchor);
+        assert_eq!(
+            external.anchor,
+            orchard::Anchor::from_bytes(node.to_bytes()).unwrap()
+        );
+        assert!(
+            super::external_witness(st.wallet().conn(), Position::from(6u64))
+                .unwrap()
+                .is_none()
+        );
     }
 }

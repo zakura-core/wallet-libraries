@@ -3431,6 +3431,14 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL, R> Wallet
             .map_err(ShardTreeError::Storage)
     }
 
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-memo"))]
+    fn external_ironwood_witness(
+        &mut self,
+        position: Position,
+    ) -> Result<Option<zcash_client_backend::data_api::ExternalIronwoodWitness>, Self::Error> {
+        wallet::pir_dag::external_witness(self.conn.borrow(), position)
+    }
+
     #[cfg(feature = "orchard")]
     fn with_ironwood_tree_mut<F, A, E>(&mut self, mut callback: F) -> Result<Option<A>, E>
     where
@@ -3553,6 +3561,14 @@ impl<P: consensus::Parameters, CL, R> WalletCommitmentTrees
     ) -> Result<Option<orchard::tree::MerkleHashOrchard>, ShardTreeError<Self::Error>> {
         wallet::commitment_tree::get_subtree_root(self.conn.0, IRONWOOD_TABLES_PREFIX, index)
             .map_err(ShardTreeError::Storage)
+    }
+
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-memo"))]
+    fn external_ironwood_witness(
+        &mut self,
+        position: Position,
+    ) -> Result<Option<zcash_client_backend::data_api::ExternalIronwoodWitness>, Self::Error> {
+        wallet::pir_dag::external_witness(self.conn.0, position)
     }
 
     #[cfg(feature = "orchard")]

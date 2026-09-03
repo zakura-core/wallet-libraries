@@ -1846,52 +1846,96 @@ where
     // is therefore captured by `involves(Ironwood)`. Transactions with no Ironwood-pool inputs or
     // outputs (for example a pure-Sapling spend or a transparent-to-Sapling shielding) must not
     // require an Ironwood anchor, even once Ironwood is active.
+    // An input the local shard tree cannot witness yet may carry an externally obtained,
+    // verified path (DAG-sync). One bundle has one anchor, so external paths are used only
+    // when every Ironwood input has one reaching the same root; otherwise the local tree
+    // witnesses all of them at `anchor_height` as usual.
     #[cfg(feature = "orchard")]
-    let (ironwood_anchor, ironwood_inputs) =
-        if proposal_step.involves(PoolType::Shielded(ShieldedPool::Ironwood)) {
-            wallet_db
-                .with_ironwood_tree_mut::<_, _, Error<_, _, _, _, _, _>>(|ironwood_tree| {
-                    let anchor = ironwood_tree
-                        .root_at_checkpoint_id(&anchor_height)?
-                        .ok_or(ProposalError::AnchorNotFound(anchor_height))?
-                        .into();
+    let external_ironwood = if proposal_step.involves(PoolType::Shielded(ShieldedPool::Ironwood)) {
+        let mut anchor: Option<orchard::Anchor> = None;
+        let mut inputs = Vec::new();
+        let mut complete = true;
+        for selected in proposal_step
+            .shielded_inputs()
+            .into_iter()
+            .flat_map(|inputs| inputs.notes().iter())
+        {
+            let Note::Orchard {
+                note,
+                pool: orchard::ValuePool::Ironwood,
+            } = selected.note()
+            else {
+                continue;
+            };
+            match wallet_db
+                .external_ironwood_witness(selected.note_commitment_tree_position())
+                .map_err(|e| Error::from(ShardTreeError::Storage(e)))?
+            {
+                Some(witness) if anchor.is_none_or(|a| a == witness.anchor) => {
+                    anchor = Some(witness.anchor);
+                    inputs.push((note, witness.merkle_path));
+                }
+                _ => {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        match anchor {
+            Some(anchor) if complete => Some((anchor, inputs)),
+            _ => None,
+        }
+    } else {
+        None
+    };
 
-                    let ironwood_inputs = proposal_step
-                        .shielded_inputs()
-                        .map(|inputs| {
-                            inputs
-                                .notes()
-                                .iter()
-                                .filter_map(|selected| match selected.note() {
-                                    Note::Orchard {
-                                        note,
-                                        pool: orchard::ValuePool::Ironwood,
-                                    } => ironwood_tree
-                                        .witness_at_checkpoint_id_caching(
-                                            selected.note_commitment_tree_position(),
-                                            &anchor_height,
-                                        )
-                                        .and_then(|witness| {
-                                            witness.ok_or(ShardTreeError::Query(
-                                                QueryError::CheckpointPruned,
-                                            ))
-                                        })
-                                        .map(|merkle_path| Some((note, merkle_path.into())))
-                                        .map_err(Error::from)
-                                        .transpose(),
-                                    _ => None,
-                                })
-                                .collect::<Result<Vec<_>, Error<_, _, _, _, _, _>>>()
-                        })
-                        .transpose()?
-                        .unwrap_or_default();
+    #[cfg(feature = "orchard")]
+    let (ironwood_anchor, ironwood_inputs) = if let Some((anchor, inputs)) = external_ironwood {
+        (Some(anchor), inputs)
+    } else if proposal_step.involves(PoolType::Shielded(ShieldedPool::Ironwood)) {
+        wallet_db
+            .with_ironwood_tree_mut::<_, _, Error<_, _, _, _, _, _>>(|ironwood_tree| {
+                let anchor = ironwood_tree
+                    .root_at_checkpoint_id(&anchor_height)?
+                    .ok_or(ProposalError::AnchorNotFound(anchor_height))?
+                    .into();
 
-                    Ok((Some(anchor), ironwood_inputs))
-                })?
-                .ok_or(Error::ProposalNotSupported)?
-        } else {
-            (None, vec![])
-        };
+                let ironwood_inputs = proposal_step
+                    .shielded_inputs()
+                    .map(|inputs| {
+                        inputs
+                            .notes()
+                            .iter()
+                            .filter_map(|selected| match selected.note() {
+                                Note::Orchard {
+                                    note,
+                                    pool: orchard::ValuePool::Ironwood,
+                                } => ironwood_tree
+                                    .witness_at_checkpoint_id_caching(
+                                        selected.note_commitment_tree_position(),
+                                        &anchor_height,
+                                    )
+                                    .and_then(|witness| {
+                                        witness.ok_or(ShardTreeError::Query(
+                                            QueryError::CheckpointPruned,
+                                        ))
+                                    })
+                                    .map(|merkle_path| Some((note, merkle_path.into())))
+                                    .map_err(Error::from)
+                                    .transpose(),
+                                _ => None,
+                            })
+                            .collect::<Result<Vec<_>, Error<_, _, _, _, _, _>>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+
+                Ok((Some(anchor), ironwood_inputs))
+            })?
+            .ok_or(Error::ProposalNotSupported)?
+    } else {
+        (None, vec![])
+    };
 
     #[cfg(not(feature = "orchard"))]
     let ironwood_anchor = None;
