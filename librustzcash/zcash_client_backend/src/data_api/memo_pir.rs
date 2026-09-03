@@ -76,9 +76,10 @@ pub struct MemoPirSnapshotAnchor {
 /// Whether a snapshot anchor is safe to use with the wallet's scanned chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoPirSnapshotStatus {
-    /// Height and Ironwood tree size match locally scanned state.
+    /// The scanned anchor block's hash and Ironwood tree size match the snapshot.
     Accepted,
-    /// The wallet has not scanned the anchor height yet.
+    /// The wallet has not scanned the anchor block yet. Only that block matters; ranges
+    /// below it may still be queued.
     NotYetScanned,
     /// Local chain state disagrees with the snapshot.
     Mismatch,

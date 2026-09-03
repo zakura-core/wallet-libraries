@@ -1580,19 +1580,17 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> MemoPirRe
         &self,
         anchor: MemoPirSnapshotAnchor,
     ) -> Result<MemoPirSnapshotStatus, Self::Error> {
-        // `chain_height` is the last advertised network tip, not the wallet's scan frontier. In
-        // particular it is normally updated before scanning begins, so it cannot tell us whether
-        // the wallet has authenticated the snapshot's block yet.
-        let fully_scanned_height = wallet::fully_scanned_height(self.conn.borrow())?;
-        if fully_scanned_height.is_none_or(|height| height < anchor.height) {
-            return Ok(MemoPirSnapshotStatus::NotYetScanned);
-        }
-
+        // The snapshot is authenticated against the anchor block itself: its hash and
+        // Ironwood tree size must match what the wallet scanned at that height. The scan
+        // frontier is deliberately not consulted. Scanning prioritises the range after
+        // Ironwood activation, so a restored wallet usually holds the anchor block while
+        // older pre-Ironwood ranges are still queued; waiting for a contiguous scan would
+        // hold every Ironwood memo hostage to that backfill for no gain in safety. Block
+        // metadata exists only for scanned heights, so its absence means "not yet".
+        // `chain_height` cannot stand in for this: it is the last advertised network tip
+        // and is normally updated before scanning begins.
         let Some(metadata) = self.block_metadata(anchor.height)? else {
-            // A fully-scanned range is contiguous from the wallet birthday and should retain
-            // metadata for every height in that range. Missing metadata here is therefore an
-            // inconsistent local state, not a reason to trust the remote snapshot.
-            return Ok(MemoPirSnapshotStatus::Mismatch);
+            return Ok(MemoPirSnapshotStatus::NotYetScanned);
         };
         Ok(
             if metadata.block_hash() == anchor.block_hash
@@ -4047,7 +4045,7 @@ mod tests {
 
     #[cfg(feature = "zakura-pir-memo")]
     #[test]
-    fn memo_pir_snapshot_waits_for_the_scan_frontier() {
+    fn memo_pir_snapshot_is_authenticated_against_the_scanned_anchor_block() {
         use zcash_client_backend::data_api::memo_pir::{
             MemoPirRead, MemoPirSnapshotAnchor, MemoPirSnapshotStatus,
         };
@@ -4074,6 +4072,32 @@ mod tests {
                 .unwrap(),
             MemoPirSnapshotStatus::NotYetScanned
         );
+
+        // Scanning the anchor block is what authenticates the snapshot, even while older
+        // ranges below it are still queued (the scan frontier stays below the anchor).
+        // The local test network has no Ironwood activation, so the block reports an
+        // Ironwood tree size of zero regardless of the stored column.
+        st.wallet_mut()
+            .conn_mut()
+            .execute(
+                "INSERT INTO blocks (height, hash, time, sapling_tree)
+                 VALUES (?1, ?2, 0, X'000000')",
+                rusqlite::params![u32::from(anchor_height), &[7u8; 32][..]],
+            )
+            .unwrap();
+        let status = |block_hash: [u8; 32], ironwood_tree_size: u64| {
+            st.wallet()
+                .db()
+                .memo_pir_snapshot_status(MemoPirSnapshotAnchor {
+                    height: anchor_height,
+                    block_hash: BlockHash(block_hash),
+                    ironwood_tree_size,
+                })
+                .unwrap()
+        };
+        assert_eq!(status([7; 32], 0), MemoPirSnapshotStatus::Accepted);
+        assert_eq!(status([8; 32], 0), MemoPirSnapshotStatus::Mismatch);
+        assert_eq!(status([7; 32], 1), MemoPirSnapshotStatus::Mismatch);
     }
 
     #[test]
