@@ -7659,6 +7659,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "hex",
+ "inspiring",
  "ipir-sp",
  "rand 0.8.7",
  "reqwest",

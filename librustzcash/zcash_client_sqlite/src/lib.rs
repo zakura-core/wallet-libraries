@@ -4032,7 +4032,10 @@ mod tests {
     use crate::{
         AccountUuid,
         error::SqliteClientError,
-        testing::db::{TestDb, TestDbFactory},
+        testing::{
+            BlockCache,
+            db::{TestDb, TestDbFactory},
+        },
         util::Clock as _,
         wallet::MIN_SHIELDED_DIVERSIFIER_OFFSET,
     };
@@ -4053,7 +4056,7 @@ mod tests {
     };
     #[cfg(feature = "transparent-inputs")]
     use {
-        crate::{GapLimits, testing::BlockCache, wallet::transparent::transaction_data_requests},
+        crate::{GapLimits, wallet::transparent::transaction_data_requests},
         std::collections::BTreeSet,
         zcash_client_backend::data_api::TransactionDataRequest,
     };
@@ -4106,6 +4109,286 @@ mod tests {
                 .unwrap(),
             EnhancePirSnapshotStatus::NotYetScanned
         );
+    }
+
+    #[cfg(feature = "zakura-pir-enhance")]
+    #[test]
+    fn enhance_pir_snapshot_requires_matching_scanned_metadata() {
+        use zcash_client_backend::data_api::enhance_pir::{
+            EnhancePirRead, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus,
+        };
+        use zcash_protocol::consensus::BlockHeight;
+
+        let activation = BlockHeight::from_u32(100_000);
+        let network = LocalNetwork {
+            nu6: Some(activation),
+            nu6_1: Some(activation),
+            nu6_2: Some(activation),
+            nu6_3: Some(activation),
+            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+        };
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let (anchor_height, _) = st.generate_empty_block();
+        let (later_height, _) = st.generate_empty_block();
+        st.scan_cached_blocks(anchor_height, 2);
+        let anchor_hash = st
+            .wallet()
+            .db()
+            .block_metadata(anchor_height)
+            .unwrap()
+            .unwrap()
+            .block_hash();
+
+        let anchor = EnhancePirSnapshotAnchor {
+            height: anchor_height,
+            block_hash: anchor_hash,
+            ironwood_tree_size: 0,
+        };
+        assert_eq!(
+            st.wallet()
+                .db()
+                .enhance_pir_snapshot_status(anchor)
+                .unwrap(),
+            EnhancePirSnapshotStatus::Accepted
+        );
+        assert_eq!(
+            st.wallet()
+                .db()
+                .enhance_pir_snapshot_status(EnhancePirSnapshotAnchor {
+                    block_hash: BlockHash([9; 32]),
+                    ..anchor
+                })
+                .unwrap(),
+            EnhancePirSnapshotStatus::Mismatch
+        );
+        assert_eq!(
+            st.wallet()
+                .db()
+                .enhance_pir_snapshot_status(EnhancePirSnapshotAnchor {
+                    ironwood_tree_size: 1,
+                    ..anchor
+                })
+                .unwrap(),
+            EnhancePirSnapshotStatus::Mismatch
+        );
+
+        st.wallet_mut()
+            .conn_mut()
+            .execute(
+                "DELETE FROM blocks WHERE height = ?1",
+                [u32::from(anchor_height)],
+            )
+            .unwrap();
+        assert_eq!(
+            st.wallet()
+                .db()
+                .enhance_pir_snapshot_status(anchor)
+                .unwrap(),
+            EnhancePirSnapshotStatus::Mismatch,
+            "missing metadata below the scan frontier at {later_height} is inconsistent"
+        );
+    }
+
+    #[cfg(feature = "zakura-pir-enhance")]
+    #[test]
+    fn enhance_pir_authentication_only_dequeues_the_matching_note() {
+        use orchard::note::NoteVersion;
+        use orchard::note_encryption::{IronwoodDomain, IronwoodNoteEncryption};
+        use zcash_client_backend::data_api::{
+            enhance_pir::{
+                EnhancePirRead, EnhancePirStoreResult, IronwoodEnhanceRecord,
+                decrypt_and_store_ironwood_memo,
+            },
+            testing::{
+                AddressType, IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
+            },
+        };
+        use zcash_note_encryption::Domain;
+        use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
+
+        let activation = BlockHeight::from_u32(100_000);
+        let network = LocalNetwork {
+            nu6: Some(activation),
+            nu6_1: Some(activation),
+            nu6_2: Some(activation),
+            nu6_3: Some(activation),
+            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+        };
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+        let (first_height, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(10_000),
+        );
+        st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(20_000),
+        );
+        st.scan_cached_blocks(first_height, 2);
+
+        let requests = st.wallet().db().enhance_pir_requests().unwrap();
+        assert_eq!(requests.len(), 2);
+        let pending = st
+            .wallet()
+            .db()
+            .pending_ironwood_memo(requests[0].position())
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.note.version(), NoteVersion::V3);
+        let encryptor = IronwoodNoteEncryption::new(None, pending.note, [7; 512]);
+        let record = IronwoodEnhanceRecord::from_parts(
+            IronwoodDomain::epk_bytes(encryptor.epk()).0,
+            encryptor.encrypt_note_plaintext(),
+            [0; 32],
+            [0; 80],
+        );
+
+        assert_eq!(
+            decrypt_and_store_ironwood_memo(st.wallet_mut().db_mut(), requests[0], &record)
+                .unwrap(),
+            EnhancePirStoreResult::Stored
+        );
+        assert_eq!(
+            decrypt_and_store_ironwood_memo(st.wallet_mut().db_mut(), requests[0], &record)
+                .unwrap(),
+            EnhancePirStoreResult::AlreadyResolved
+        );
+        assert_eq!(
+            decrypt_and_store_ironwood_memo(st.wallet_mut().db_mut(), requests[1], &record)
+                .unwrap(),
+            EnhancePirStoreResult::Rejected
+        );
+        assert_eq!(
+            st.wallet().db().enhance_pir_requests().unwrap(),
+            vec![requests[1]],
+            "a record for another note must not dequeue the unresolved request"
+        );
+    }
+
+    #[cfg(feature = "zakura-pir-enhance")]
+    #[test]
+    fn enhance_pir_outgoing_completion_stores_fields_exactly_once() {
+        use incrementalmerkletree::Position;
+        use orchard::keys::Scope;
+        use zcash_client_backend::{
+            data_api::{
+                Account as _,
+                enhance_pir::{EnhancePirRead, EnhancePirWrite},
+                testing::{
+                    AddressType, IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
+                },
+            },
+            wallet::IronwoodEnhanceCandidate,
+        };
+        use zcash_protocol::{consensus::BlockHeight, memo::MemoBytes, value::Zatoshis};
+
+        let activation = BlockHeight::from_u32(100_000);
+        let network = LocalNetwork {
+            nu6: Some(activation),
+            nu6_1: Some(activation),
+            nu6_2: Some(activation),
+            nu6_3: Some(activation),
+            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+        };
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let account_id = st.test_account().unwrap().id();
+        let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+        let recipient = fvk.0.address_at(3u32, Scope::External);
+        let (height, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(10_000),
+        );
+        st.scan_cached_blocks(height, 1);
+        let tx_ref = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id_tx FROM transactions WHERE mined_height = ?1",
+                [u32::from(height)],
+                |row| row.get::<_, i64>(0).map(crate::TxRef),
+            )
+            .unwrap();
+        let position = Position::from(99);
+        crate::wallet::enhance_pir::queue_outgoing(
+            st.wallet().conn(),
+            tx_ref,
+            &[IronwoodEnhanceCandidate::from_parts(
+                position,
+                4,
+                [1; 32],
+                [2; 32],
+                vec![account_id],
+            )],
+        )
+        .unwrap();
+        let memo = MemoBytes::from_bytes(&[3; 512]).unwrap();
+
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .put_ironwood_sent_output(
+                    position,
+                    account_id,
+                    recipient,
+                    Zatoshis::const_from_u64(123),
+                    &memo,
+                )
+                .unwrap()
+        );
+        assert!(
+            !st.wallet_mut()
+                .db_mut()
+                .put_ironwood_sent_output(
+                    position,
+                    account_id,
+                    recipient,
+                    Zatoshis::const_from_u64(123),
+                    &memo,
+                )
+                .unwrap()
+        );
+        assert!(
+            !st.wallet()
+                .db()
+                .enhance_pir_requests()
+                .unwrap()
+                .iter()
+                .any(|request| request.position() == position)
+        );
+        let (output_index, value, stored_memo, has_recipient): (i64, i64, Vec<u8>, bool) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT output_index, value, memo,
+                        to_address IS NOT NULL OR to_account_id IS NOT NULL
+                 FROM sent_notes
+                 WHERE transaction_id = ?1 AND output_index = 4",
+                [tx_ref.0],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(output_index, 4);
+        assert_eq!(value, 123);
+        assert_eq!(MemoBytes::from_bytes(&stored_memo).unwrap(), memo);
+        assert!(has_recipient);
     }
 
     #[test]

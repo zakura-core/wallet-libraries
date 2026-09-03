@@ -1149,6 +1149,85 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "zakura-pir-enhance")]
+    #[test]
+    fn owned_ironwood_spend_captures_every_action_for_outgoing_recovery() {
+        let network = Network::TestNetwork;
+        let account = AccountId::try_from(12).unwrap();
+        let scanning_keys = ScanningKeys::<AccountId, Infallible>::empty();
+        let mut rng = OsRng;
+        let owned_nullifier =
+            orchard::note::Nullifier::from_bytes(&pallas::Base::random(&mut rng).to_repr())
+                .unwrap();
+        let other_nullifier =
+            orchard::note::Nullifier::from_bytes(&pallas::Base::random(&mut rng).to_repr())
+                .unwrap();
+        let cmx_0 = pallas::Base::random(&mut rng).to_repr();
+        let cmx_1 = pallas::Base::random(&mut rng).to_repr();
+        let actions =
+            [(owned_nullifier, cmx_0), (other_nullifier, cmx_1)].map(|(nullifier, cmx)| {
+                CompactOrchardAction {
+                    nullifier: nullifier.to_bytes().to_vec(),
+                    cmx: cmx.to_vec(),
+                    ephemeral_key: vec![0; 32],
+                    ciphertext: vec![0; 52],
+                }
+            });
+        let mut tx = CompactTx {
+            txid: vec![7; 32],
+            ..Default::default()
+        };
+        tx.ironwood_actions.extend(actions);
+        let mut block = CompactBlock {
+            hash: vec![1; 32],
+            prev_hash: vec![0; 32],
+            height: 1,
+            ..Default::default()
+        };
+        block.vtx.push(tx);
+        block.chain_metadata = Some(ChainMetadata {
+            sapling_commitment_tree_size: 0,
+            orchard_commitment_tree_size: 0,
+            ironwood_commitment_tree_size: 7,
+        });
+        let nullifiers = Nullifiers::new(vec![], vec![], vec![(account, owned_nullifier)]);
+
+        let scanned = scan_block_with_runners::<_, _, _, (), (), ()>(
+            &network,
+            block,
+            &scanning_keys,
+            &nullifiers,
+            Some(&BlockMetadata::from_parts(
+                BlockHeight::from(0),
+                BlockHash([0; 32]),
+                Some(0),
+                Some(0),
+                Some(5),
+            )),
+            None,
+        )
+        .unwrap();
+
+        let tx = &scanned.transactions()[0];
+        assert_eq!(tx.ironwood_spends().len(), 1);
+        assert_eq!(tx.ironwood_enhance_candidates().len(), 2);
+        for (index, candidate) in tx.ironwood_enhance_candidates().iter().enumerate() {
+            assert_eq!(candidate.position(), Position::from(5 + index as u64));
+            assert_eq!(candidate.output_index(), index);
+            assert_eq!(candidate.funding_accounts(), &[account]);
+        }
+        assert_eq!(
+            tx.ironwood_enhance_candidates()[0].nullifier(),
+            &owned_nullifier.to_bytes()
+        );
+        assert_eq!(tx.ironwood_enhance_candidates()[0].cmx(), &cmx_0);
+        assert_eq!(
+            tx.ironwood_enhance_candidates()[1].nullifier(),
+            &other_nullifier.to_bytes()
+        );
+        assert_eq!(tx.ironwood_enhance_candidates()[1].cmx(), &cmx_1);
+    }
+
     #[test]
     fn scan_block_with_txs_after_my_tx() {
         fn go(scan_multithreaded: bool) {

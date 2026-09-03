@@ -72,7 +72,12 @@ jobs:
       - name: Run the vendored test suites
         run: cargo test --workspace --exclude zakura-wallet-lib --exclude zakura-pir-enhance --locked
 
-      # This client enables the backend's Orchard APIs, so test it separately
-      # instead of unifying those features into SQLite's feature-minimal tests.
+      - name: Run the Enhance PIR backend tests
+        run: cargo test -p zakura-client-backend --features zakura-pir-enhance,test-dependencies --locked
+
+      - name: Run the Enhance PIR SQLite tests
+        run: cargo test -p zakura-client-sqlite --features zakura-pir-enhance,test-dependencies --locked
+
+      # The standalone client is excluded from the vendored workspace suite.
       - name: Run the Enhance PIR client tests
         run: cargo test -p zakura-pir-enhance --locked

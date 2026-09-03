@@ -2832,6 +2832,76 @@ pub(crate) mod tests {
             );
         }
 
+        #[cfg(feature = "zakura-pir-enhance")]
+        #[test]
+        fn truncation_removes_outgoing_enhancement_state() {
+            use incrementalmerkletree::Position;
+            use zcash_client_backend::wallet::IronwoodEnhanceCandidate;
+
+            let mut st = TestBuilder::new()
+                .with_network(ironwood_active_network())
+                .with_data_store_factory(TestDbFactory::default())
+                .with_block_cache(BlockCache::new())
+                .with_account_from_sapling_activation(BlockHash([0; 32]))
+                .build();
+            let account_id = st.test_account().unwrap().id();
+            let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+            let (prior_height, _, _) = st.generate_next_block(
+                &fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(50_000),
+            );
+            let (height, _, _) = st.generate_next_block(
+                &fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(100_000),
+            );
+            st.scan_cached_blocks(prior_height, 2);
+            let tx_ref = st
+                .wallet()
+                .conn()
+                .query_row(
+                    "SELECT id_tx FROM transactions WHERE mined_height = ?1",
+                    [u32::from(height)],
+                    |row| row.get::<_, i64>(0).map(crate::TxRef),
+                )
+                .unwrap();
+            crate::wallet::enhance_pir::queue_outgoing(
+                st.wallet().conn(),
+                tx_ref,
+                &[IronwoodEnhanceCandidate::from_parts(
+                    Position::from(99),
+                    2,
+                    [1; 32],
+                    [2; 32],
+                    vec![account_id],
+                )],
+            )
+            .unwrap();
+
+            st.truncate_to_height(prior_height);
+
+            for (table, predicate) in [
+                ("ironwood_enhance_outgoing_queue", "transaction_id = ?1"),
+                (
+                    "ironwood_enhance_outgoing_accounts",
+                    "commitment_tree_position = 99 AND ?1 = ?1",
+                ),
+                ("ironwood_enhance_tx_protection", "transaction_id = ?1"),
+            ] {
+                let count: i64 = st
+                    .wallet()
+                    .conn()
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE {predicate}"),
+                        [tx_ref.0],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(count, 0, "{table} must be cleared by truncation");
+            }
+        }
+
         /// A transaction may be connected to the wallet solely by spending one of its Ironwood
         /// notes: it produces an Ironwood bundle revealing that note's nullifier, but has no
         /// wallet-owned outputs. `get_funding_accounts` must recognize such a spend, otherwise

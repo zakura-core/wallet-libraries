@@ -394,6 +394,17 @@ mod tests {
             [account.expose_uuid()],
         )
         .unwrap();
+        let replacement_account = AccountUuid::from_uuid(Uuid::from_u128(8));
+        conn.execute(
+            "INSERT INTO accounts VALUES (2, ?1)",
+            [replacement_account.expose_uuid()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ironwood_memo_retrieval_queue VALUES (99, 42)",
+            [],
+        )
+        .unwrap();
         super::queue_outgoing(
             &conn,
             TxRef(1),
@@ -407,10 +418,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            super::requests(&conn).unwrap()[0].position(),
-            Position::from(42)
-        );
+        let requests = super::requests(&conn).unwrap();
+        assert_eq!(requests.len(), 1, "UNION deduplicates the shared position");
+        assert_eq!(requests[0].position(), Position::from(42));
         let pending = super::pending_outgoing(&conn, Position::from(42))
             .unwrap()
             .unwrap();
@@ -419,9 +429,100 @@ mod tests {
         assert_eq!(pending.cmx, [2; 32]);
         assert!(super::is_protected(&conn, txid).unwrap());
 
+        super::queue_outgoing(
+            &conn,
+            TxRef(1),
+            &[
+                IronwoodEnhanceCandidate::from_parts(
+                    Position::from(42),
+                    4,
+                    [3; 32],
+                    [4; 32],
+                    vec![replacement_account],
+                ),
+                IronwoodEnhanceCandidate::from_parts(
+                    Position::from(7),
+                    5,
+                    [5; 32],
+                    [6; 32],
+                    vec![account],
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            super::requests(&conn)
+                .unwrap()
+                .iter()
+                .map(|request| request.position())
+                .collect::<Vec<_>>(),
+            vec![Position::from(7), Position::from(42)]
+        );
+        let replacement = super::pending_outgoing(&conn, Position::from(42))
+            .unwrap()
+            .unwrap();
+        assert_eq!(replacement.account_ids, vec![replacement_account]);
+        assert_eq!(replacement.nullifier, [3; 32]);
+        assert_eq!(replacement.cmx, [4; 32]);
+
         conn.execute("UPDATE transactions SET raw = X'00' WHERE id_tx = 1", [])
             .unwrap();
-        assert!(super::requests(&conn).unwrap().is_empty());
+        assert_eq!(
+            super::requests(&conn)
+                .unwrap()
+                .iter()
+                .map(|request| request.position())
+                .collect::<Vec<_>>(),
+            vec![Position::from(42)],
+            "raw transactions suppress outgoing work but preserve incoming requests"
+        );
         assert!(super::is_protected(&conn, txid).unwrap());
+    }
+
+    #[test]
+    fn invalid_queued_scope_is_reported_as_corruption() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE accounts (id INTEGER PRIMARY KEY, uuid BLOB NOT NULL);
+             CREATE TABLE ironwood_received_notes (
+                 id INTEGER PRIMARY KEY,
+                 account_id INTEGER NOT NULL,
+                 diversifier BLOB NOT NULL,
+                 value INTEGER NOT NULL,
+                 rho BLOB NOT NULL,
+                 rseed BLOB NOT NULL,
+                 note_version INTEGER NOT NULL,
+                 recipient_key_scope INTEGER NOT NULL,
+                 memo BLOB
+             );
+             CREATE TABLE ironwood_memo_retrieval_queue (
+                 received_note_id INTEGER PRIMARY KEY,
+                 commitment_tree_position INTEGER NOT NULL UNIQUE
+             );",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO accounts VALUES (1, ?1)", [Uuid::from_u128(1)])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO ironwood_received_notes
+             VALUES (1, 1, zeroblob(11), 1, zeroblob(32), zeroblob(32), 3, 9, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ironwood_memo_retrieval_queue VALUES (1, 12)",
+            [],
+        )
+        .unwrap();
+
+        assert!(matches!(
+            super::pending(
+                &conn,
+                &zcash_protocol::consensus::Network::TestNetwork,
+                Position::from(12)
+            ),
+            Err(crate::error::SqliteClientError::CorruptedData(message))
+                if message == "Invalid Ironwood note key scope"
+        ));
     }
 }

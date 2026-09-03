@@ -461,6 +461,12 @@ async fn read_limited(response: reqwest::Response, limit: usize) -> Result<Vec<u
 
 #[cfg(test)]
 mod tests {
+    use inspiring::{GadgetParams, RlweParams, TopKeyImages};
+    use ipir_sp::{
+        serialize::{deserialize_packing_keys, serialized_packing_keys_len},
+        server::{IPIRServer, build_pack_preprocessed_blocks, published_c1_rows},
+    };
+
     use super::*;
 
     fn acceptance_for(
@@ -521,6 +527,29 @@ mod tests {
         }
     }
 
+    fn set_public_params(session: &mut EnhanceSession, public_params: Vec<u8>) {
+        let digest = Sha256::digest(&public_params);
+        session.generation.public_params_epoch = hex::encode(&digest[..8]);
+        session.generation.public_params_sha256 = hex::encode(digest);
+        session.public_params_base64 = BASE64_STANDARD.encode(public_params);
+    }
+
+    fn assert_generation_error(session: EnhanceSession, expected: &str) {
+        let acceptance = acceptance_for(&session.generation, SHARD_ROWS as u64);
+        assert!(matches!(
+            QuerySession::from_session(session, &acceptance),
+            Err(ClientError::Generation(message)) if message == expected
+        ));
+    }
+
+    fn prepared_query() -> PreparedQuery {
+        PreparedQuery {
+            row: 0,
+            body: vec![],
+            seed: [0; 32],
+        }
+    }
+
     #[test]
     fn constructs_an_atomic_session() {
         let session = valid_session();
@@ -556,6 +585,77 @@ mod tests {
             QuerySession::from_session(session, &acceptance),
             Err(ClientError::Generation(message)) if message == "public parameter digest mismatch"
         ));
+    }
+
+    #[test]
+    fn rejects_each_generation_discriminator() {
+        let mut mutations: Vec<Box<dyn FnOnce(&mut EnhanceGeneration)>> = vec![
+            Box::new(|generation| generation.schema_version += 1),
+            Box::new(|generation| generation.protocol_revision.push_str("-wrong")),
+            Box::new(|generation| generation.network = "test".to_string()),
+            Box::new(|generation| generation.pool = "orchard".to_string()),
+        ];
+
+        for mutate in mutations.drain(..) {
+            let mut session = valid_session();
+            mutate(&mut session.generation);
+            assert_generation_error(session, "wrong schema, protocol, network, or pool");
+        }
+    }
+
+    #[test]
+    fn rejects_the_wrong_setup_seed_and_malformed_anchor_hash() {
+        let mut wrong_seed = valid_session();
+        wrong_seed.generation.setup_seed ^= 1;
+        assert_generation_error(wrong_seed, "setup seed does not match Enhance PIR");
+
+        let mut malformed_anchor = valid_session();
+        malformed_anchor.generation.anchor_block_hash = "not-a-hash".to_string();
+        let acceptance = GenerationAcceptance::new(
+            AcceptedAnchor::new(
+                malformed_anchor.generation.anchor_height,
+                [0; 32],
+                malformed_anchor.generation.ironwood_tree_size,
+            ),
+            ClientResourceLimits::new(SHARD_ROWS as u64),
+        );
+        assert!(matches!(
+            QuerySession::from_session(malformed_anchor, &acceptance),
+            Err(ClientError::Generation(message)) if message == "invalid anchor block hash"
+        ));
+    }
+
+    #[test]
+    fn rejects_parameter_epoch_and_public_parameter_length_mismatches() {
+        let mut wrong_params = valid_session();
+        wrong_params.params.query_bits += 1;
+        assert_generation_error(wrong_params, "parameters do not match the pinned generator");
+
+        let mut wrong_epoch = valid_session();
+        wrong_epoch.generation.public_params_epoch = "00".repeat(8);
+        assert_generation_error(wrong_epoch, "public parameter epoch mismatch");
+
+        for delta in [-1isize, 1] {
+            let mut session = valid_session();
+            let mut public_params = BASE64_STANDARD
+                .decode(&session.public_params_base64)
+                .unwrap();
+            if delta < 0 {
+                public_params.pop();
+            } else {
+                public_params.push(0);
+            }
+            set_public_params(&mut session, public_params);
+            let expected_len = BASE64_STANDARD
+                .decode(valid_session().public_params_base64)
+                .unwrap()
+                .len();
+            let actual_len = (expected_len as isize + delta) as usize;
+            assert_generation_error(
+                session,
+                &format!("public parameters have {actual_len} bytes, expected {expected_len}"),
+            );
+        }
     }
 
     #[test]
@@ -629,5 +729,186 @@ mod tests {
             checked_response_product(usize::MAX, 2, "test"),
             Err(ClientError::Response(message)) if message == "test overflows usize"
         ));
+    }
+
+    #[test]
+    fn maps_position_boundaries_and_rejects_out_of_range_rows() {
+        let mut session = valid_session();
+        session.generation.ironwood_tree_size = 10;
+        session.generation.used_rows = 2;
+        let acceptance = acceptance_for(&session.generation, SHARD_ROWS as u64);
+        let query_session = QuerySession::from_session(session, &acceptance).unwrap();
+
+        for (position, expected) in [(0, (0, 0)), (8, (0, 8)), (9, (1, 0))] {
+            let (query, slot) = query_session.prepare_position(position).unwrap();
+            assert_eq!((query.row(), slot), expected);
+        }
+        assert!(matches!(
+            query_session.prepare_position(10),
+            Err(ClientError::OutsideCoverage(10))
+        ));
+        assert!(matches!(
+            query_session.prepare_row(query_session.params().db_rows),
+            Err(ClientError::OutsideCoverage(position))
+                if position == query_session.params().db_rows as u64
+        ));
+    }
+
+    #[test]
+    fn rejects_response_header_and_length_mismatches_independently() {
+        let session = valid_session();
+        let acceptance = acceptance_for(&session.generation, SHARD_ROWS as u64);
+        let query_session = QuerySession::from_session(session, &acceptance).unwrap();
+
+        for length in [0, 7, 8, 15] {
+            let response = vec![0; length];
+            assert!(matches!(
+                query_session.decode(prepared_query(), &response),
+                Err(ClientError::Response(message)) if message == "generation mismatch"
+            ));
+        }
+
+        let mut wrong_epoch = query_session.generation.generation.to_le_bytes().to_vec();
+        wrong_epoch.extend_from_slice(&[0; 8]);
+        assert!(matches!(
+            query_session.decode(prepared_query(), &wrong_epoch),
+            Err(ClientError::Response(message)) if message == "public parameter epoch mismatch"
+        ));
+
+        let d = query_session.client.rlwe_params().d;
+        let blocks = query_session.params().db_cols / d;
+        let expected_len = 16 + blocks * response_body_len(d, query_session.params().q_prime_1);
+        for length in [16, expected_len - 1, expected_len + 1] {
+            let mut response = query_session.generation.generation.to_le_bytes().to_vec();
+            response.extend_from_slice(&query_session.epoch);
+            response.resize(length, 0);
+            assert!(matches!(
+                query_session.decode(prepared_query(), &response),
+                Err(ClientError::Response(message))
+                    if message == format!("response has {length} bytes, expected {expected_len}")
+            ));
+        }
+
+        let mut wrong_generation = query_session
+            .generation
+            .generation
+            .wrapping_add(1)
+            .to_le_bytes()
+            .to_vec();
+        wrong_generation.extend_from_slice(&query_session.epoch);
+        wrong_generation.resize(expected_len, 0);
+        assert!(matches!(
+            query_session.decode(prepared_query(), &wrong_generation),
+            Err(ClientError::Response(message)) if message == "generation mismatch"
+        ));
+    }
+
+    #[test]
+    fn end_to_end_query_returns_the_known_record() {
+        let rlwe = RlweParams::new(
+            8,
+            12289,
+            256,
+            0.1,
+            GadgetParams {
+                bits_per: 3,
+                ell: 5,
+            },
+        )
+        .unwrap();
+        let db_cols = ROW_BYTES.next_multiple_of(rlwe.d);
+        let ypir = YpirSchemeParams {
+            num_items: 8,
+            item_size_bits: (db_cols * 8) as u64,
+            poly_len: rlwe.d,
+            db_dim_1: 0,
+            db_dim_2: 1,
+            instances: db_cols / rlwe.d,
+            db_rows: 8,
+            db_cols,
+            p: 256,
+            q_prime_1: rlwe.q,
+            q_prime_2: rlwe.q,
+            q2_bits: 14,
+            t_exp_left: 3,
+            t_exp_right: 2,
+            query_bits: 14,
+        };
+        let client = IPIRClient::new(&rlwe, &ypir);
+        let setup = client.generate_public_query_setup_simplepir_from_seed(setup_seed_bytes());
+
+        let expected_record = EnhanceRecord([0x5a; RECORD_BYTES]);
+        let target_position = RECORDS_PER_ROW as u64 + 3;
+        let target_row = 1;
+        let target_slot = 3;
+        let mut database = vec![0u16; ypir.db_rows * ypir.db_cols];
+        let record_start = target_row * ypir.db_cols + target_slot * RECORD_BYTES;
+        for (dst, src) in database[record_start..record_start + RECORD_BYTES]
+            .iter_mut()
+            .zip(expected_record.as_bytes())
+        {
+            *dst = u16::from(*src);
+        }
+
+        let server = IPIRServer::new(ypir.clone(), database.into_iter(), false, true);
+        let offline = server.perform_offline_precomputation_simplepir(&rlwe, &setup);
+        let preprocessed = build_pack_preprocessed_blocks(&rlwe, &offline.crs_blocks).unwrap();
+        let top_keys = TopKeyImages::build(&rlwe);
+        let public_params = published_c1_rows(&preprocessed, rlwe.q);
+        let published_c1 =
+            recover_published_c1(&public_params, rlwe.d, ypir.db_cols / rlwe.d, rlwe.q);
+        let query_session = QuerySession {
+            generation: EnhanceGeneration {
+                schema_version: SCHEMA_VERSION,
+                protocol_revision: PROTOCOL_REVISION.to_string(),
+                network: NETWORK.to_string(),
+                pool: POOL.to_string(),
+                anchor_height: 1,
+                anchor_block_hash: "00".repeat(32),
+                ironwood_tree_size: RECORDS_PER_ROW as u64 * 2,
+                generation: 7,
+                record_bytes: RECORD_BYTES as u32,
+                records_per_row: RECORDS_PER_ROW as u32,
+                row_bytes: ROW_BYTES as u32,
+                shard_rows: SHARD_ROWS as u32,
+                used_rows: 2,
+                logical_rows: ypir.db_rows as u64,
+                parameter_id: "known-answer".to_string(),
+                setup_seed: ENHANCE_SETUP_SEED,
+                public_params_epoch: String::new(),
+                public_params_sha256: String::new(),
+                shards: vec![],
+            },
+            ypir,
+            client,
+            setup,
+            published_c1,
+            epoch: [9; 8],
+        };
+
+        let (query, slot) = query_session.prepare_position(target_position).unwrap();
+        assert_eq!((query.row(), slot), (target_row, target_slot));
+        assert_eq!(
+            u64::from_le_bytes(query.body()[..8].try_into().unwrap()),
+            query_session.generation.generation
+        );
+        let keys_len = serialized_packing_keys_len(&rlwe);
+        let keys = deserialize_packing_keys(&rlwe, &query.body()[8..8 + keys_len]).unwrap();
+        let response_body = server
+            .perform_full_online_computation_simplepir_measured(
+                &rlwe,
+                &query.body()[8 + keys_len..],
+                &keys,
+                &top_keys,
+                &preprocessed,
+            )
+            .unwrap()
+            .0;
+        let mut response = query_session.generation.generation.to_le_bytes().to_vec();
+        response.extend_from_slice(&query_session.epoch);
+        response.extend_from_slice(&response_body);
+
+        let row = query_session.decode(query, &response).unwrap();
+        assert_eq!(record_in_row(&row, slot), expected_record);
     }
 }
