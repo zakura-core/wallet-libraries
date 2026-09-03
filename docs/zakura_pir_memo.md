@@ -41,8 +41,11 @@ not the server or Vizor integration specification.
 
 ## Client protocol
 
-The client consumes `/memo/metadata`, `/memo/params`,
-`/memo/public-params`, and `/memo/query`. The fixed record is 792 bytes
+The client reads `GET /v1/generation`, the manifest describing every table the
+coordinator serves at one anchor, and then `/v1/action/params`,
+`/v1/action/public-params`, and `POST /v1/action/query` for the ACTION table.
+Every query is bound to the manifest's generation; the coordinator keeps two
+generations answerable so a query built just before a publish still succeeds. The fixed record is 792 bytes
 (schema version 2): the action's nullifier, the ephemeral key, the complete
 580-byte encrypted-note ciphertext, `cv_net`, the 80-byte outgoing ciphertext,
 the transaction ID in internal byte order, and the little-endian block height.
