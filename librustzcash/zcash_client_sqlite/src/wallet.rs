@@ -188,6 +188,21 @@ pub mod init;
 pub(crate) mod locking;
 #[cfg(feature = "zakura-pir-memo")]
 pub(crate) mod memo_pir;
+#[cfg(feature = "zakura-pir-memo")]
+pub(crate) mod pir_dag;
+
+/// SQL for "this note has a durable witness" for the given pool table.
+pub(crate) fn pir_dag_stabilized(table_prefix: &str) -> String {
+    #[cfg(feature = "zakura-pir-memo")]
+    {
+        pir_dag::stabilized_expr(table_prefix)
+    }
+    #[cfg(not(feature = "zakura-pir-memo"))]
+    {
+        let _ = table_prefix;
+        "rn.witness_stabilized".to_string()
+    }
+}
 #[cfg(feature = "orchard")]
 pub(crate) mod orchard;
 pub(crate) mod sapling;
@@ -789,6 +804,14 @@ pub(crate) fn delete_account(
         named_params![
             ":account_uuid": account_uuid.0,
         ],
+    )?;
+
+    // Retrieval requests are keyed by txid, not by transaction row, so the rows just deleted
+    // leave orphan requests behind unless they are cleared here.
+    conn.execute(
+        "DELETE FROM tx_retrieval_queue
+         WHERE txid NOT IN (SELECT txid FROM transactions)",
+        [],
     )?;
 
     // At this point, the only information remaining about the account is its entry in the
@@ -2661,7 +2684,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         let mut stmt_select_notes = tx.prepare_cached(&format!(
             "SELECT accounts.uuid, rn.id, rn.value, rn.is_change, rn.recipient_key_scope,
                     scan_state.max_priority,
-                    rn.witness_stabilized,
+                    {stabilized} AS witness_stabilized,
                     t.mined_height,
                     IFNULL(t.trust_status, 0) AS trust_status,
                     MAX(tt.mined_height) AS max_shielding_input_height,
@@ -2685,6 +2708,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
              GROUP BY rn.id",
             common::tx_unexpired_condition("t"),
             common::spent_notes_clause(table_prefix),
+            stabilized = crate::wallet::pir_dag_stabilized(table_prefix),
         ))?;
 
         let mut rows = stmt_select_notes.query(named_params![

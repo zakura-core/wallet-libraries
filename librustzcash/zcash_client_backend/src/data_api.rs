@@ -106,6 +106,8 @@ use crate::{
 
 #[cfg(feature = "zakura-pir-memo")]
 pub mod memo_pir;
+#[cfg(feature = "zakura-pir-memo")]
+pub mod pir_dag;
 
 #[cfg(feature = "transparent-inputs")]
 use {

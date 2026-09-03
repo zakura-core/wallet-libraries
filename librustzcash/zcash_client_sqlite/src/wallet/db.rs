@@ -619,6 +619,20 @@ CREATE TABLE ironwood_memo_retrieval_queue (
         CHECK (commitment_tree_position >= 0)
 )";
 
+/// Stores, per Ironwood note, a Merkle path the DAG-sync pass reconstructed from the witness
+/// PIR tables and verified against the anchor's tree root. A note with a row here is spendable
+/// even before the local shard tree has stabilized its witness.
+pub(super) const TABLE_IRONWOOD_PIR_WITNESSES: &str = "
+CREATE TABLE ironwood_pir_witnesses (
+    received_note_id INTEGER PRIMARY KEY
+        REFERENCES ironwood_received_notes(id) ON DELETE CASCADE,
+    anchor_height INTEGER NOT NULL,
+    anchor_root BLOB NOT NULL CHECK (length(anchor_root) = 32),
+    leaf BLOB NOT NULL CHECK (length(leaf) = 32),
+    siblings BLOB NOT NULL CHECK (length(siblings) = 1024),
+    subshard_leaves BLOB
+)";
+
 // The in-progress Orchard -> Ironwood pool migration (ZIP 318). The table DDL and store live in the
 // `crate::pool_migration` module; these golden copies track the normalized schema those tables
 // install into `wallet.db`. Every structured value is stored in typed columns and child tables; the

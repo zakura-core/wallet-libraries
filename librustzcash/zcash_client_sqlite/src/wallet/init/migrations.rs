@@ -27,6 +27,7 @@ mod fix_v_transactions_expired_unmined;
 mod full_account_ids;
 mod initial_setup;
 mod ironwood_memo_retrieval_queue;
+mod ironwood_pir_witnesses;
 mod ironwood_pool_code_views;
 mod ironwood_received_notes;
 mod ironwood_shardtree;
@@ -131,6 +132,7 @@ pub mod ids {
         full_account_ids::MIGRATION_ID as FULL_ACCOUNT_IDS,
         initial_setup::MIGRATION_ID as INITIAL_SETUP,
         ironwood_memo_retrieval_queue::MIGRATION_ID as IRONWOOD_MEMO_RETRIEVAL_QUEUE,
+        ironwood_pir_witnesses::MIGRATION_ID as IRONWOOD_PIR_WITNESSES,
         ironwood_pool_code_views::MIGRATION_ID as IRONWOOD_POOL_CODE_VIEWS,
         ironwood_received_notes::MIGRATION_ID as IRONWOOD_RECEIVED_NOTES,
         ironwood_shardtree::MIGRATION_ID as IRONWOOD_SHARDTREE,
@@ -363,6 +365,7 @@ pub(super) fn all_migrations<
         Box::new(orchard_note_version::Migration),
         Box::new(ironwood_received_notes::Migration),
         Box::new(ironwood_memo_retrieval_queue::Migration),
+        Box::new(ironwood_pir_witnesses::Migration),
         Box::new(ironwood_pool_code_views::Migration),
         Box::new(fix_bad_ironwood_change_flagging::Migration),
         Box::new(v_address_uses_ironwood::Migration),
@@ -571,7 +574,7 @@ pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     ivk_item_cache::MIGRATION_ID,
     add_transparent_receiver_address_index::MIGRATION_ID,
     add_transparent_value_index::MIGRATION_ID,
-    ironwood_memo_retrieval_queue::MIGRATION_ID,
+    ironwood_pir_witnesses::MIGRATION_ID,
     fix_bad_ironwood_change_flagging::MIGRATION_ID,
     v_address_uses_ironwood::MIGRATION_ID,
     orchard_ironwood_migration_unsatisfiability::MIGRATION_ID,
@@ -694,6 +697,7 @@ pub(crate) mod tests {
             ids::INITIAL_SETUP,
             ids::IRONWOOD_POOL_CODE_VIEWS,
             ids::IRONWOOD_MEMO_RETRIEVAL_QUEUE,
+            ids::IRONWOOD_PIR_WITNESSES,
             ids::IRONWOOD_RECEIVED_NOTES,
             ids::IRONWOOD_SHARDTREE,
             ids::IVK_ITEM_CACHE,

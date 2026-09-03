@@ -587,7 +587,7 @@ where
              accounts.ufvk as ufvk, rn.recipient_key_scope,
              t.block AS mined_height,
              scan_state.max_priority,
-             rn.witness_stabilized,
+             {stabilized} AS witness_stabilized,
              IFNULL(t.trust_status, 0) AS trust_status,
              MAX(tt.mined_height) AS max_shielding_input_height,
              MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust
@@ -616,7 +616,8 @@ where
          GROUP BY rn.id",
         tx_unexpired_condition("t"),
         spent_notes_clause(table_prefix),
-        output_eligible_condition(lock_filter, "rn")
+        output_eligible_condition(lock_filter, "rn"),
+        stabilized = super::pir_dag_stabilized(table_prefix),
     ))?;
 
     let excluded: Vec<Value> = exclude
@@ -876,7 +877,7 @@ where
                  {so_far} AS so_far,
                  accounts.ufvk as ufvk, rn.recipient_key_scope,
                  t.block AS mined_height,
-                 rn.witness_stabilized,
+                 {stabilized} AS witness_stabilized,
                  IFNULL(t.trust_status, 0) AS trust_status,
                  MAX(tt.mined_height) AS max_shielding_input_height,
                  MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust
@@ -904,7 +905,7 @@ where
              -- A stabilized note's witness is durable across rewinds, so it bypasses
              -- the scan-state gating
              AND (
-                 rn.witness_stabilized = 1
+                 {stabilized} = 1
                  OR (
                      :tip_unscanned = 0 -- the tip shard has no unscanned ranges
                      AND scan_state.max_priority <= :scanned_priority -- the note shard is fully scanned or ignored
@@ -917,6 +918,7 @@ where
          )
          {selection_tail}",
         spent_notes_clause(table_prefix),
+        stabilized = super::pir_dag_stabilized(table_prefix),
     ))?;
 
     let excluded: Vec<Value> = exclude
