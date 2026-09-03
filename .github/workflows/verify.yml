@@ -70,9 +70,9 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Run the vendored test suites
-        run: cargo test --workspace --exclude zakura-wallet-lib --exclude zakura-pir-memo --locked
+        run: cargo test --workspace --exclude zakura-wallet-lib --exclude zakura-pir-enhance --locked
 
       # This client enables the backend's Orchard APIs, so test it separately
       # instead of unifying those features into SQLite's feature-minimal tests.
-      - name: Run the memo PIR client tests
-        run: cargo test -p zakura-pir-memo --locked
+      - name: Run the Enhance PIR client tests
+        run: cargo test -p zakura-pir-enhance --locked

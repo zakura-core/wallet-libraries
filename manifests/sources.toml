@@ -27,7 +27,7 @@ vendored_directory = "librustzcash"
 vendor_branch = "vendor/librustzcash"
 upstream_manifest = "librustzcash/upstream-workspace.toml"
 # `zakura/` members are added here as they are written.
-extra_members = ["wallet-lib", "zakura/pir-memo"]
+extra_members = ["wallet-lib", "zakura/pir-enhance"]
 # The backend selector. Named separately because the verification scripts have
 # to build it one backend at a time, unlike every other member.
 facade = "wallet-lib"

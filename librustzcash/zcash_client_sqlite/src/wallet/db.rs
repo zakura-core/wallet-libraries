@@ -609,7 +609,7 @@ CREATE INDEX idx_ironwood_received_note_spends_transaction_id ON ironwood_receiv
 /// a transaction identifier.
 ///
 /// A position identifies at most one mined note, so `commitment_tree_position` is unique; the
-/// memo-PIR store reads, authenticates, and writes rows exclusively by position, and that
+/// Enhance PIR store reads, authenticates, and writes rows exclusively by position, and that
 /// uniqueness is what makes resolving a position to a single note unambiguous.
 pub(super) const TABLE_IRONWOOD_MEMO_RETRIEVAL_QUEUE: &str = "
 CREATE TABLE ironwood_memo_retrieval_queue (
@@ -617,6 +617,30 @@ CREATE TABLE ironwood_memo_retrieval_queue (
         REFERENCES ironwood_received_notes(id) ON DELETE CASCADE,
     commitment_tree_position INTEGER NOT NULL UNIQUE
         CHECK (commitment_tree_position >= 0)
+)";
+
+pub(super) const TABLE_IRONWOOD_ENHANCE_OUTGOING_QUEUE: &str = "
+CREATE TABLE ironwood_enhance_outgoing_queue (
+    commitment_tree_position INTEGER PRIMARY KEY CHECK (commitment_tree_position >= 0),
+    transaction_id INTEGER NOT NULL REFERENCES transactions(id_tx) ON DELETE CASCADE,
+    output_index INTEGER NOT NULL CHECK (output_index >= 0),
+    nullifier BLOB NOT NULL CHECK (length(nullifier) = 32),
+    cmx BLOB NOT NULL CHECK (length(cmx) = 32),
+    UNIQUE(transaction_id, output_index)
+)";
+
+pub(super) const TABLE_IRONWOOD_ENHANCE_OUTGOING_ACCOUNTS: &str = "
+CREATE TABLE ironwood_enhance_outgoing_accounts (
+    commitment_tree_position INTEGER NOT NULL REFERENCES ironwood_enhance_outgoing_queue(commitment_tree_position) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    PRIMARY KEY(commitment_tree_position, account_id)
+)";
+
+pub(super) const TABLE_IRONWOOD_ENHANCE_TX_PROTECTION: &str = "
+CREATE TABLE ironwood_enhance_tx_protection (
+    transaction_id INTEGER NOT NULL REFERENCES transactions(id_tx) ON DELETE CASCADE,
+    commitment_tree_position INTEGER NOT NULL CHECK (commitment_tree_position >= 0),
+    PRIMARY KEY(transaction_id, commitment_tree_position)
 )";
 
 // The in-progress Orchard -> Ironwood pool migration (ZIP 318). The table DDL and store live in the

@@ -40,7 +40,7 @@ impl RusqliteMigration for Migration {
     /// without deleting its notes or clearing their commitment tree positions, so an existing
     /// wallet can already hold two notes claiming one position; without the grouping, the
     /// `UNIQUE` constraint would abort this migration and leave the wallet unopenable. Notes
-    /// whose plaintext is not V3 can never be completed by memo PIR, so queuing them would
+    /// whose plaintext is not V3 can never be completed by Enhance PIR, so queuing them would
     /// create entries that are retried forever.
     fn up(&self, transaction: &rusqlite::Transaction) -> Result<(), Self::Error> {
         transaction.execute_batch(
@@ -125,7 +125,7 @@ mod tests {
              INSERT INTO ironwood_received_notes VALUES (2, 1, X'F6', 10, 3);
              -- Skipped: no position, so there is nothing to query by.
              INSERT INTO ironwood_received_notes VALUES (3, 1, NULL, NULL, 3);
-             -- Skipped: memo PIR can never complete a non-V3 note.
+             -- Skipped: Enhance PIR can never complete a non-V3 note.
              INSERT INTO ironwood_received_notes VALUES (4, 1, NULL, 11, 2);
              -- Skipped: the transaction is not mined, so the position is not authoritative.
              INSERT INTO ironwood_received_notes VALUES (5, 2, NULL, 12, 3);",

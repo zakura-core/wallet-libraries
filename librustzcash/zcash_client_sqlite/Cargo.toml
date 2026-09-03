@@ -156,8 +156,8 @@ orchard = [
     "pczt/tx-extractor",
 ]
 
-## Enables the position-keyed Ironwood memo queue and authenticated completion APIs.
-zakura-pir-memo = ["orchard", "zcash_client_backend/zakura-pir-memo"]
+## Enables position-keyed incoming and outgoing Ironwood enhancement storage.
+zakura-pir-enhance = ["orchard", "zcash_client_backend/zakura-pir-enhance"]
 
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.
 test-dependencies = [

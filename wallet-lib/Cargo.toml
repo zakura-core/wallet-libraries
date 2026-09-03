@@ -118,12 +118,12 @@ zakura = [
     "pczt/zcp-builder",
 ]
 
-## Enables Zakura's private, position-keyed Ironwood memo completion APIs.
+## Enables Zakura's private, position-keyed Ironwood action enhancement APIs.
 ##
-## The hand-written `zakura-pir-memo` client remains a direct application
+## The hand-written `zakura-pir-enhance` client remains a direct application
 ## dependency because this published facade cannot depend on an unpublished crate.
-zakura-pir-memo = [
+zakura-pir-enhance = [
     "zakura",
-    "zcash-client-backend/zakura-pir-memo",
-    "zcash-client-sqlite/zakura-pir-memo",
+    "zcash-client-backend/zakura-pir-enhance",
+    "zcash-client-sqlite/zakura-pir-enhance",
 ]

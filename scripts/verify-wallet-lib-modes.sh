@@ -94,8 +94,8 @@ check_mode lrz "^zakura-" \
 check_mode zakura "$forbidden" \
   "a crates.io original entered the Zakura build:"
 
-check_mode zakura-pir-memo "$forbidden" \
-  "a crates.io original entered the Zakura memo-PIR build:"
+check_mode zakura-pir-enhance "$forbidden" \
+  "a crates.io original entered the Zakura Enhance PIR build:"
 
 # `cargo tree` reports the active build graph, but Cargo #10801 can retain
 # disabled weak dependencies in a downstream lockfile and metadata. Exercise

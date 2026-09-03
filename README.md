@@ -43,7 +43,7 @@ Three directories:
 ```text
 librustzcash/   forked upstream crates   generated; sync deletes and rewrites it
 wallet-lib/     the backend selector     hand-written
-zakura/         new Zakura work          hand-written; includes memo PIR
+zakura/         new Zakura work          hand-written; includes Enhance PIR
 ```
 
 Only `librustzcash/` and the root `Cargo.toml` are generated. Anything

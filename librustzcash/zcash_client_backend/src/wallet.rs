@@ -185,6 +185,58 @@ pub struct WalletTx<AccountId> {
     ironwood_spends: Vec<WalletIronwoodSpend<AccountId>>,
     #[cfg(feature = "orchard")]
     ironwood_outputs: Vec<WalletIronwoodOutput<AccountId>>,
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+    ironwood_enhance_candidates: Vec<IronwoodEnhanceCandidate<AccountId>>,
+}
+
+/// Compact-block context needed to privately recover one outgoing Ironwood output.
+#[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IronwoodEnhanceCandidate<AccountId> {
+    position: Position,
+    output_index: usize,
+    nullifier: [u8; 32],
+    cmx: [u8; 32],
+    funding_accounts: Vec<AccountId>,
+}
+
+#[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+impl<AccountId> IronwoodEnhanceCandidate<AccountId> {
+    pub fn from_parts(
+        position: Position,
+        output_index: usize,
+        nullifier: [u8; 32],
+        cmx: [u8; 32],
+        funding_accounts: Vec<AccountId>,
+    ) -> Self {
+        Self {
+            position,
+            output_index,
+            nullifier,
+            cmx,
+            funding_accounts,
+        }
+    }
+
+    pub fn position(&self) -> Position {
+        self.position
+    }
+
+    pub fn output_index(&self) -> usize {
+        self.output_index
+    }
+
+    pub fn nullifier(&self) -> &[u8; 32] {
+        &self.nullifier
+    }
+
+    pub fn cmx(&self) -> &[u8; 32] {
+        &self.cmx
+    }
+
+    pub fn funding_accounts(&self) -> &[AccountId] {
+        &self.funding_accounts
+    }
 }
 
 impl<AccountId> WalletTx<AccountId> {
@@ -219,7 +271,18 @@ impl<AccountId> WalletTx<AccountId> {
             ironwood_spends,
             #[cfg(feature = "orchard")]
             ironwood_outputs,
+            #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+            ironwood_enhance_candidates: vec![],
         }
+    }
+
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+    pub fn with_ironwood_enhance_candidates(
+        mut self,
+        candidates: Vec<IronwoodEnhanceCandidate<AccountId>>,
+    ) -> Self {
+        self.ironwood_enhance_candidates = candidates;
+        self
     }
 
     /// Returns the [`TxId`] for the corresponding [`Transaction`].
@@ -277,6 +340,12 @@ impl<AccountId> WalletTx<AccountId> {
     #[cfg(feature = "orchard")]
     pub fn ironwood_outputs(&self) -> &[WalletIronwoodOutput<AccountId>] {
         self.ironwood_outputs.as_ref()
+    }
+
+    /// Returns outgoing Ironwood recovery candidates observed during compact scanning.
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+    pub fn ironwood_enhance_candidates(&self) -> &[IronwoodEnhanceCandidate<AccountId>] {
+        &self.ironwood_enhance_candidates
     }
 }
 

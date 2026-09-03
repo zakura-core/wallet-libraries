@@ -1,7 +1,7 @@
 [package]
-name = "zakura-pir-memo"
+name = "zakura-pir-enhance"
 version = "0.1.0"
-description = "Private Ironwood memo retrieval client for Zakura wallets"
+description = "Private Ironwood compact-action enhancement client for Zakura wallets"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [lib]
-name = "zakura_pir_memo"
+name = "zakura_pir_enhance"
 
 [features]
 default = ["https-client"]

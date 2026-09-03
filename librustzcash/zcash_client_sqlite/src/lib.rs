@@ -53,10 +53,10 @@ use tracing::warn;
 use util::Clock;
 use uuid::Uuid;
 
-#[cfg(feature = "zakura-pir-memo")]
-use zcash_client_backend::data_api::memo_pir::{
-    MemoPirRead, MemoPirRequest, MemoPirSnapshotAnchor, MemoPirSnapshotStatus, MemoPirWrite,
-    PendingIronwoodMemo,
+#[cfg(feature = "zakura-pir-enhance")]
+use zcash_client_backend::data_api::enhance_pir::{
+    EnhancePirRead, EnhancePirRequest, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus,
+    EnhancePirWrite, PendingIronwoodMemo, PendingIronwoodOutgoing,
 };
 use zcash_client_backend::{
     TransferType,
@@ -1568,39 +1568,39 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     }
 }
 
-#[cfg(feature = "zakura-pir-memo")]
-impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> MemoPirRead
+#[cfg(feature = "zakura-pir-enhance")]
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePirRead
     for WalletDb<C, P, CL, R>
 {
-    fn memo_pir_requests(&self) -> Result<Vec<MemoPirRequest>, Self::Error> {
-        wallet::memo_pir::requests(self.conn.borrow())
+    fn enhance_pir_requests(&self) -> Result<Vec<EnhancePirRequest>, Self::Error> {
+        wallet::enhance_pir::requests(self.conn.borrow())
     }
 
-    fn memo_pir_snapshot_status(
+    fn enhance_pir_snapshot_status(
         &self,
-        anchor: MemoPirSnapshotAnchor,
-    ) -> Result<MemoPirSnapshotStatus, Self::Error> {
+        anchor: EnhancePirSnapshotAnchor,
+    ) -> Result<EnhancePirSnapshotStatus, Self::Error> {
         // `chain_height` is the last advertised network tip, not the wallet's scan frontier. In
         // particular it is normally updated before scanning begins, so it cannot tell us whether
         // the wallet has authenticated the snapshot's block yet.
         let fully_scanned_height = wallet::fully_scanned_height(self.conn.borrow())?;
         if fully_scanned_height.is_none_or(|height| height < anchor.height) {
-            return Ok(MemoPirSnapshotStatus::NotYetScanned);
+            return Ok(EnhancePirSnapshotStatus::NotYetScanned);
         }
 
         let Some(metadata) = self.block_metadata(anchor.height)? else {
             // A fully-scanned range is contiguous from the wallet birthday and should retain
             // metadata for every height in that range. Missing metadata here is therefore an
             // inconsistent local state, not a reason to trust the remote snapshot.
-            return Ok(MemoPirSnapshotStatus::Mismatch);
+            return Ok(EnhancePirSnapshotStatus::Mismatch);
         };
         Ok(
             if metadata.block_hash() == anchor.block_hash
                 && metadata.ironwood_tree_size().map(u64::from) == Some(anchor.ironwood_tree_size)
             {
-                MemoPirSnapshotStatus::Accepted
+                EnhancePirSnapshotStatus::Accepted
             } else {
-                MemoPirSnapshotStatus::Mismatch
+                EnhancePirSnapshotStatus::Mismatch
             },
         )
     }
@@ -1609,20 +1609,52 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> MemoPirRe
         &self,
         position: Position,
     ) -> Result<Option<PendingIronwoodMemo<Self::AccountId>>, Self::Error> {
-        wallet::memo_pir::pending(self.conn.borrow(), &self.params, position)
+        wallet::enhance_pir::pending(self.conn.borrow(), &self.params, position)
+    }
+
+    fn pending_ironwood_outgoing(
+        &self,
+        position: Position,
+    ) -> Result<Option<PendingIronwoodOutgoing<Self::AccountId>>, Self::Error> {
+        wallet::enhance_pir::pending_outgoing(self.conn.borrow(), position)
+    }
+
+    fn is_ironwood_enhancement_protected(&self, txid: TxId) -> Result<bool, Self::Error> {
+        wallet::enhance_pir::is_protected(self.conn.borrow(), txid)
     }
 }
 
-#[cfg(feature = "zakura-pir-memo")]
-impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng> MemoPirWrite
-    for WalletDb<C, P, CL, R>
+#[cfg(feature = "zakura-pir-enhance")]
+impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
+    EnhancePirWrite for WalletDb<C, P, CL, R>
 {
     fn put_ironwood_memo(
         &mut self,
         position: Position,
         memo: &zcash_protocol::memo::MemoBytes,
     ) -> Result<bool, Self::Error> {
-        self.transactionally(|wdb| wallet::memo_pir::put(wdb.conn.0, position, memo))
+        self.transactionally(|wdb| wallet::enhance_pir::put(wdb.conn.0, position, memo))
+    }
+
+    fn put_ironwood_sent_output(
+        &mut self,
+        position: Position,
+        from_account: Self::AccountId,
+        recipient: orchard::Address,
+        value: zcash_protocol::value::Zatoshis,
+        memo: &zcash_protocol::memo::MemoBytes,
+    ) -> Result<bool, Self::Error> {
+        self.transactionally(|wdb| {
+            wallet::enhance_pir::put_outgoing(
+                wdb.conn.0,
+                wdb.params,
+                position,
+                from_account,
+                recipient,
+                value,
+                memo,
+            )
+        })
     }
 }
 
@@ -4045,11 +4077,11 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "zakura-pir-memo")]
+    #[cfg(feature = "zakura-pir-enhance")]
     #[test]
-    fn memo_pir_snapshot_waits_for_the_scan_frontier() {
-        use zcash_client_backend::data_api::memo_pir::{
-            MemoPirRead, MemoPirSnapshotAnchor, MemoPirSnapshotStatus,
+    fn enhance_pir_snapshot_waits_for_the_scan_frontier() {
+        use zcash_client_backend::data_api::enhance_pir::{
+            EnhancePirRead, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus,
         };
         use zcash_protocol::consensus::BlockHeight;
 
@@ -4066,13 +4098,13 @@ mod tests {
         assert_eq!(
             st.wallet()
                 .db()
-                .memo_pir_snapshot_status(MemoPirSnapshotAnchor {
+                .enhance_pir_snapshot_status(EnhancePirSnapshotAnchor {
                     height: anchor_height,
                     block_hash: BlockHash([0; 32]),
                     ironwood_tree_size: 0,
                 })
                 .unwrap(),
-            MemoPirSnapshotStatus::NotYetScanned
+            EnhancePirSnapshotStatus::NotYetScanned
         );
     }
 

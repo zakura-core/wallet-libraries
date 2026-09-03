@@ -1,4 +1,4 @@
-//! Storage-neutral APIs for privately completing Ironwood memos.
+//! Storage-neutral APIs for privately enhancing compact Ironwood actions.
 //!
 //! These APIs deliberately use note-commitment-tree positions rather than
 //! transaction IDs. A response is accepted only after the complete ciphertext
@@ -6,24 +6,27 @@
 
 use incrementalmerkletree::Position;
 use orchard::{
+    Address,
     keys::PreparedIncomingViewingKey,
     note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier},
     note_encryption::{CompactAction, IronwoodDomain},
+    value::ValueCommitment,
 };
-use zcash_note_encryption::{EphemeralKeyBytes, ShieldedOutput};
+use zcash_note_encryption::{EphemeralKeyBytes, ShieldedOutput, try_output_recovery_with_ovk};
 use zcash_primitives::block::BlockHash;
-use zcash_protocol::{consensus::BlockHeight, memo::MemoBytes};
+use zcash_primitives::transaction::TxId;
+use zcash_protocol::{consensus::BlockHeight, memo::MemoBytes, value::Zatoshis};
 use zip32::Scope;
 
 use super::{Account, WalletRead};
 
 /// One pending memo lookup, identified only by its Ironwood tree position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct MemoPirRequest {
+pub struct EnhancePirRequest {
     position: Position,
 }
 
-impl MemoPirRequest {
+impl EnhancePirRequest {
     /// Constructs a request for `position`.
     pub fn from_position(position: Position) -> Self {
         Self { position }
@@ -35,19 +38,28 @@ impl MemoPirRequest {
     }
 }
 
-/// The complete encrypted-note fields stored in one memo-PIR record.
+/// The complete encrypted-note fields stored in one Enhance PIR record.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IronwoodMemoRecord {
+pub struct IronwoodEnhanceRecord {
     ephemeral_key: [u8; 32],
     ciphertext: [u8; 580],
+    cv_net: [u8; 32],
+    out_ciphertext: [u8; 80],
 }
 
-impl IronwoodMemoRecord {
+impl IronwoodEnhanceRecord {
     /// Constructs a record from the fields of an Ironwood encrypted note.
-    pub fn from_parts(ephemeral_key: [u8; 32], ciphertext: [u8; 580]) -> Self {
+    pub fn from_parts(
+        ephemeral_key: [u8; 32],
+        ciphertext: [u8; 580],
+        cv_net: [u8; 32],
+        out_ciphertext: [u8; 80],
+    ) -> Self {
         Self {
             ephemeral_key,
             ciphertext,
+            cv_net,
+            out_ciphertext,
         }
     }
 
@@ -60,11 +72,19 @@ impl IronwoodMemoRecord {
     pub fn ciphertext(&self) -> &[u8; 580] {
         &self.ciphertext
     }
+
+    pub fn cv_net(&self) -> &[u8; 32] {
+        &self.cv_net
+    }
+
+    pub fn out_ciphertext(&self) -> &[u8; 80] {
+        &self.out_ciphertext
+    }
 }
 
 /// Chain state to which a PIR snapshot is anchored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MemoPirSnapshotAnchor {
+pub struct EnhancePirSnapshotAnchor {
     /// Snapshot block height.
     pub height: BlockHeight,
     /// Snapshot block hash.
@@ -75,7 +95,7 @@ pub struct MemoPirSnapshotAnchor {
 
 /// Whether a snapshot anchor is safe to use with the wallet's scanned chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MemoPirSnapshotStatus {
+pub enum EnhancePirSnapshotStatus {
     /// Height and Ironwood tree size match locally scanned state.
     Accepted,
     /// The wallet has not scanned the anchor height yet.
@@ -86,7 +106,7 @@ pub enum MemoPirSnapshotStatus {
 
 /// Result of authenticating and applying a PIR record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MemoPirStoreResult {
+pub enum EnhancePirStoreResult {
     /// The authenticated memo was stored and the queue entry removed.
     Stored,
     /// No unresolved note exists at this position.
@@ -95,7 +115,7 @@ pub enum MemoPirStoreResult {
     Rejected,
 }
 
-/// Wallet state needed to authenticate a memo-PIR response.
+/// Wallet state needed to authenticate a Enhance PIR response.
 #[doc(hidden)]
 pub struct PendingIronwoodMemo<AccountId> {
     /// Account that received the note.
@@ -106,16 +126,24 @@ pub struct PendingIronwoodMemo<AccountId> {
     pub scope: Scope,
 }
 
+/// Compact action and candidate senders retained for outgoing recovery.
+#[doc(hidden)]
+pub struct PendingIronwoodOutgoing<AccountId> {
+    pub account_ids: Vec<AccountId>,
+    pub nullifier: [u8; 32],
+    pub cmx: [u8; 32],
+}
+
 /// Read interface for the independent position-keyed memo queue.
-pub trait MemoPirRead: WalletRead {
+pub trait EnhancePirRead: WalletRead {
     /// Returns unresolved Ironwood memo requests in ascending position order.
-    fn memo_pir_requests(&self) -> Result<Vec<MemoPirRequest>, Self::Error>;
+    fn enhance_pir_requests(&self) -> Result<Vec<EnhancePirRequest>, Self::Error>;
 
     /// Compares the snapshot anchor to locally scanned chain state.
-    fn memo_pir_snapshot_status(
+    fn enhance_pir_snapshot_status(
         &self,
-        anchor: MemoPirSnapshotAnchor,
-    ) -> Result<MemoPirSnapshotStatus, Self::Error>;
+        anchor: EnhancePirSnapshotAnchor,
+    ) -> Result<EnhancePirSnapshotStatus, Self::Error>;
 
     /// Returns authentication context for an unresolved position.
     #[doc(hidden)]
@@ -123,10 +151,19 @@ pub trait MemoPirRead: WalletRead {
         &self,
         position: Position,
     ) -> Result<Option<PendingIronwoodMemo<Self::AccountId>>, Self::Error>;
+
+    #[doc(hidden)]
+    fn pending_ironwood_outgoing(
+        &self,
+        position: Position,
+    ) -> Result<Option<PendingIronwoodOutgoing<Self::AccountId>>, Self::Error>;
+
+    /// Returns whether an Ironwood transaction must not be enhanced by txid.
+    fn is_ironwood_enhancement_protected(&self, txid: TxId) -> Result<bool, Self::Error>;
 }
 
 /// Atomic storage operation used after successful response authentication.
-pub trait MemoPirWrite: MemoPirRead {
+pub trait EnhancePirWrite: EnhancePirRead {
     /// Stores a memo iff the same position is still unresolved, and removes its queue entry.
     #[doc(hidden)]
     fn put_ironwood_memo(
@@ -134,11 +171,21 @@ pub trait MemoPirWrite: MemoPirRead {
         position: Position,
         memo: &MemoBytes,
     ) -> Result<bool, Self::Error>;
+
+    #[doc(hidden)]
+    fn put_ironwood_sent_output(
+        &mut self,
+        position: Position,
+        from_account: Self::AccountId,
+        recipient: Address,
+        value: Zatoshis,
+        memo: &MemoBytes,
+    ) -> Result<bool, Self::Error>;
 }
 
 struct FullOutput<'a> {
     cmx: [u8; 32],
-    record: &'a IronwoodMemoRecord,
+    record: &'a IronwoodEnhanceRecord,
 }
 
 impl ShieldedOutput<IronwoodDomain, 580> for FullOutput<'_> {
@@ -160,19 +207,19 @@ impl ShieldedOutput<IronwoodDomain, 580> for FullOutput<'_> {
 ///
 /// Malformed, misaddressed, stale, or cryptographically invalid records leave
 /// both the note and its queue entry unchanged.
-pub fn decrypt_and_store_ironwood_memo<DbT: MemoPirWrite>(
+pub fn decrypt_and_store_ironwood_memo<DbT: EnhancePirWrite>(
     db: &mut DbT,
-    request: MemoPirRequest,
-    record: &IronwoodMemoRecord,
-) -> Result<MemoPirStoreResult, DbT::Error> {
+    request: EnhancePirRequest,
+    record: &IronwoodEnhanceRecord,
+) -> Result<EnhancePirStoreResult, DbT::Error> {
     let Some(pending) = db.pending_ironwood_memo(request.position())? else {
-        return Ok(MemoPirStoreResult::AlreadyResolved);
+        return Ok(EnhancePirStoreResult::AlreadyResolved);
     };
     if pending.note.version() != NoteVersion::V3 {
-        return Ok(MemoPirStoreResult::Rejected);
+        return Ok(EnhancePirStoreResult::Rejected);
     }
     let Some(account) = db.get_account(pending.account_id)? else {
-        return Ok(MemoPirStoreResult::Rejected);
+        return Ok(EnhancePirStoreResult::Rejected);
     };
     let ivk = match pending.scope {
         Scope::External => account.uivk().orchard().as_ref().map(|ivk| ivk.prepare()),
@@ -182,24 +229,24 @@ pub fn decrypt_and_store_ironwood_memo<DbT: MemoPirWrite>(
             .map(|fvk| fvk.to_ivk(Scope::Internal).prepare()),
     };
     let Some(ivk): Option<PreparedIncomingViewingKey> = ivk else {
-        return Ok(MemoPirStoreResult::Rejected);
+        return Ok(EnhancePirStoreResult::Rejected);
     };
 
     let Some(memo) = decrypt_memo(&pending.note, &ivk, record) else {
-        return Ok(MemoPirStoreResult::Rejected);
+        return Ok(EnhancePirStoreResult::Rejected);
     };
 
     Ok(if db.put_ironwood_memo(request.position(), &memo)? {
-        MemoPirStoreResult::Stored
+        EnhancePirStoreResult::Stored
     } else {
-        MemoPirStoreResult::AlreadyResolved
+        EnhancePirStoreResult::AlreadyResolved
     })
 }
 
 fn decrypt_memo(
     expected_note: &Note,
     ivk: &PreparedIncomingViewingKey,
-    record: &IronwoodMemoRecord,
+    record: &IronwoodEnhanceRecord,
 ) -> Option<MemoBytes> {
     let nullifier = Nullifier::from_bytes(&expected_note.rho().to_bytes());
     let nullifier = Option::from(nullifier)?;
@@ -228,6 +275,72 @@ fn decrypt_memo(
     Some(MemoBytes::from_bytes(&memo).expect("note decryption returns exactly 512 bytes"))
 }
 
+/// Authenticates and stores an outgoing Ironwood output recovered with a
+/// funding account's external outgoing viewing key.
+pub fn recover_and_store_ironwood_outgoing<DbT: EnhancePirWrite>(
+    db: &mut DbT,
+    request: EnhancePirRequest,
+    record: &IronwoodEnhanceRecord,
+) -> Result<EnhancePirStoreResult, DbT::Error> {
+    let Some(pending) = db.pending_ironwood_outgoing(request.position())? else {
+        return Ok(EnhancePirStoreResult::AlreadyResolved);
+    };
+    let mut recovered = None;
+    for account_id in pending.account_ids.iter().copied() {
+        let Some(account) = db.get_account(account_id)? else {
+            continue;
+        };
+        let Some(fvk) = account.ufvk().and_then(|ufvk| ufvk.orchard()) else {
+            continue;
+        };
+        if let Some((note, recipient, memo)) = recover_outgoing(fvk, &pending, record) {
+            if recovered.is_some() {
+                return Ok(EnhancePirStoreResult::Rejected);
+            }
+            recovered = Some((account_id, note, recipient, memo));
+        }
+    }
+    let Some((account_id, note, recipient, memo)) = recovered else {
+        return Ok(EnhancePirStoreResult::Rejected);
+    };
+    let value = Zatoshis::from_u64(note.value().inner()).expect("note value is in range");
+    let memo = MemoBytes::from_bytes(&memo).expect("note decryption returns exactly 512 bytes");
+    Ok(
+        if db.put_ironwood_sent_output(request.position(), account_id, recipient, value, &memo)? {
+            EnhancePirStoreResult::Stored
+        } else {
+            EnhancePirStoreResult::AlreadyResolved
+        },
+    )
+}
+
+fn recover_outgoing<AccountId>(
+    fvk: &orchard::keys::FullViewingKey,
+    pending: &PendingIronwoodOutgoing<AccountId>,
+    record: &IronwoodEnhanceRecord,
+) -> Option<(Note, Address, [u8; 512])> {
+    let nullifier = Option::from(Nullifier::from_bytes(&pending.nullifier))?;
+    let cmx = Option::from(ExtractedNoteCommitment::from_bytes(&pending.cmx))?;
+    let cv_net = Option::from(ValueCommitment::from_bytes(record.cv_net()))?;
+    let compact = CompactAction::from_parts(
+        nullifier,
+        cmx,
+        EphemeralKeyBytes(*record.ephemeral_key()),
+        record.ciphertext()[..52].try_into().expect("fixed size"),
+    );
+    let output = FullOutput {
+        cmx: pending.cmx,
+        record,
+    };
+    try_output_recovery_with_ovk(
+        &IronwoodDomain::for_compact_action(&compact),
+        &fvk.to_ovk(Scope::External),
+        &output,
+        &cv_net,
+        record.out_ciphertext(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use orchard::{
@@ -236,10 +349,14 @@ mod tests {
         value::NoteValue,
     };
     use pasta_curves::{
-        group::ff::{Field, PrimeField},
+        group::{
+            Group, GroupEncoding,
+            ff::{Field, PrimeField},
+        },
         pallas,
     };
     use rand::{Rng as _, rand_core::UnwrapErr, rngs::SysRng};
+    use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng as _};
     use zcash_keys::keys::UnifiedSpendingKey;
     use zcash_note_encryption::Domain;
     use zcash_protocol::consensus::Network;
@@ -249,7 +366,7 @@ mod tests {
     #[allow(non_upper_case_globals)]
     const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
 
-    fn encrypted_record() -> (Note, PreparedIncomingViewingKey, IronwoodMemoRecord) {
+    fn encrypted_record() -> (Note, PreparedIncomingViewingKey, IronwoodEnhanceRecord) {
         let usk =
             UnifiedSpendingKey::from_seed(&Network::TestNetwork, &[0; 32], zip32::AccountId::ZERO)
                 .expect("valid spending key");
@@ -277,9 +394,11 @@ mod tests {
         )
         .unwrap();
         let encryptor = IronwoodNoteEncryption::new(None, note, [7; 512]);
-        let record = IronwoodMemoRecord::from_parts(
+        let record = IronwoodEnhanceRecord::from_parts(
             IronwoodDomain::epk_bytes(encryptor.epk()).0,
             encryptor.encrypt_note_plaintext(),
+            [0; 32],
+            [0; 80],
         );
         (note, fvk.to_ivk(Scope::External).prepare(), record)
     }
@@ -294,10 +413,71 @@ mod tests {
 
         let mut ciphertext = *record.ciphertext();
         ciphertext[579] ^= 1;
-        let tampered = IronwoodMemoRecord::from_parts(*record.ephemeral_key(), ciphertext);
+        let tampered = IronwoodEnhanceRecord::from_parts(
+            *record.ephemeral_key(),
+            ciphertext,
+            *record.cv_net(),
+            *record.out_ciphertext(),
+        );
         assert!(decrypt_memo(&note, &ivk, &tampered).is_none());
 
         let (_, _, another_note_record) = encrypted_record();
         assert!(decrypt_memo(&note, &ivk, &another_note_record).is_none());
+    }
+
+    #[test]
+    fn recovers_outgoing_fields_with_the_sender_ovk() {
+        let usk =
+            UnifiedSpendingKey::from_seed(&Network::TestNetwork, &[9; 32], zip32::AccountId::ZERO)
+                .unwrap();
+        let fvk = usk.to_unified_full_viewing_key().orchard().unwrap().clone();
+        let mut rng = OsRng;
+        let nf = Nullifier::from_bytes(&pallas::Base::random(&mut rng).to_repr()).unwrap();
+        let rho = Rho::from_bytes(&nf.to_bytes()).unwrap();
+        let rseed = loop {
+            let mut bytes = [0; 32];
+            rng.fill_bytes(&mut bytes);
+            if let Some(rseed) = Option::from(RandomSeed::from_bytes(bytes, &rho)) {
+                break rseed;
+            }
+        };
+        let note = Note::from_parts(
+            fvk.address_at(3u32, Scope::External),
+            NoteValue::from_raw(123),
+            rho,
+            rseed,
+            NoteVersion::V3,
+        )
+        .unwrap();
+        let encryptor =
+            IronwoodNoteEncryption::new(Some(fvk.to_ovk(Scope::External)), note, [4; 512]);
+        let cmx = ExtractedNoteCommitment::from(note.commitment());
+        let cv_net = ValueCommitment::from_bytes(&pallas::Point::generator().to_bytes()).unwrap();
+        let mut outgoing_rng = ChaCha20Rng::from_seed([7; 32]);
+        let record = IronwoodEnhanceRecord::from_parts(
+            IronwoodDomain::epk_bytes(encryptor.epk()).0,
+            encryptor.encrypt_note_plaintext(),
+            cv_net.to_bytes(),
+            encryptor.encrypt_outgoing_plaintext(&cv_net, &cmx, &mut outgoing_rng),
+        );
+        let pending = PendingIronwoodOutgoing {
+            account_ids: vec![()],
+            nullifier: nf.to_bytes(),
+            cmx: cmx.to_bytes(),
+        };
+
+        let (recovered_note, recipient, memo) = recover_outgoing(&fvk, &pending, &record).unwrap();
+        assert_eq!(recovered_note, note);
+        assert_eq!(recipient, note.recipient());
+        assert_eq!(memo, [4; 512]);
+
+        let wrong_fvk =
+            UnifiedSpendingKey::from_seed(&Network::TestNetwork, &[8; 32], zip32::AccountId::ZERO)
+                .unwrap()
+                .to_unified_full_viewing_key()
+                .orchard()
+                .unwrap()
+                .clone();
+        assert!(recover_outgoing(&wrong_fvk, &pending, &record).is_none());
     }
 }

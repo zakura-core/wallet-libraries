@@ -23,8 +23,8 @@
 //! zakura-wallet-lib = { version = "0.1", default-features = false, features = ["lrz"] }
 //! ```
 //!
-//! `zakura` and `lrz` select the backend. The additive `zakura-pir-memo`
-//! feature selects Zakura and enables its private Ironwood memo queue APIs.
+//! `zakura` and `lrz` select the backend. The additive `zakura-pir-enhance`
+//! feature selects Zakura and enables its private Ironwood enhancement APIs.
 //!
 //! The two are mutually exclusive. Cargo features are additive, so that cannot
 //! be stated in the manifest and is enforced below instead: a graph that

@@ -397,6 +397,32 @@ where
             spent_from_accounts.chain(ironwood_spends.iter().map(|spend| spend.account_id()));
         let spent_from_accounts = spent_from_accounts.copied().collect::<HashSet<_>>();
 
+        #[cfg(feature = "zakura-pir-enhance")]
+        let ironwood_enhance_candidates = if spent_from_accounts.is_empty() {
+            vec![]
+        } else {
+            tx.ironwood_actions
+                .iter()
+                .enumerate()
+                .map(|(index, raw)| {
+                    let action =
+                        CompactAction::try_from(raw).map_err(|_| ScanError::EncodingInvalid {
+                            at_height: cur_height,
+                            txid,
+                            pool_type: ShieldedPool::Ironwood,
+                            index,
+                        })?;
+                    Ok(crate::wallet::IronwoodEnhanceCandidate::from_parts(
+                        pos_tracker.ironwood_note_position(index),
+                        index,
+                        action.nullifier().to_bytes(),
+                        action.cmx().to_bytes(),
+                        spent_from_accounts.iter().copied().collect(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, ScanError>>()?
+        };
+
         let (sapling_outputs, mut sapling_nc) = find_received(
             cur_height,
             pos_tracker.compact_tx_contains_last_sapling_outputs_in_block(&tx),
@@ -523,7 +549,7 @@ where
         let has_ironwood = false;
 
         if has_sapling || has_orchard || has_ironwood {
-            wtxs.push(WalletTx::new(
+            let wallet_tx = WalletTx::new(
                 txid,
                 tx_index,
                 // TODO: Scan transparent data in CompactTx if present.
@@ -539,7 +565,10 @@ where
                 ironwood_spends,
                 #[cfg(feature = "orchard")]
                 ironwood_outputs,
-            ));
+            );
+            #[cfg(feature = "zakura-pir-enhance")]
+            let wallet_tx = wallet_tx.with_ironwood_enhance_candidates(ironwood_enhance_candidates);
+            wtxs.push(wallet_tx);
         }
 
         pos_tracker.increment_over_compact_tx(&tx);

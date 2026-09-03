@@ -7654,7 +7654,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zakura-pir-memo"
+name = "zakura-pir-enhance"
 version = "0.1.0"
 dependencies = [
  "hex",

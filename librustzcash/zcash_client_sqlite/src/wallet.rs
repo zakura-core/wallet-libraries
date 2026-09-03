@@ -184,10 +184,10 @@ pub mod commitment_tree;
 pub(crate) mod common;
 mod db;
 pub(crate) mod encoding;
+#[cfg(feature = "zakura-pir-enhance")]
+pub(crate) mod enhance_pir;
 pub mod init;
 pub(crate) mod locking;
-#[cfg(feature = "zakura-pir-memo")]
-pub(crate) mod memo_pir;
 #[cfg(feature = "orchard")]
 pub(crate) mod orchard;
 pub(crate) mod sapling;
@@ -4221,6 +4221,25 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         named_params![":height": u32::from(truncation_height)],
     )?;
 
+    // Drop position claims before clearing mined heights; the rescan will recreate
+    // candidates and protection markers at their new authoritative positions.
+    #[cfg(feature = "zakura-pir-enhance")]
+    conn.execute(
+        "DELETE FROM ironwood_enhance_tx_protection
+         WHERE transaction_id IN (
+             SELECT id_tx FROM transactions WHERE mined_height > :height
+         )",
+        named_params![":height": u32::from(truncation_height)],
+    )?;
+    #[cfg(feature = "zakura-pir-enhance")]
+    conn.execute(
+        "DELETE FROM ironwood_enhance_outgoing_queue
+         WHERE transaction_id IN (
+             SELECT id_tx FROM transactions WHERE mined_height > :height
+         )",
+        named_params![":height": u32::from(truncation_height)],
+    )?;
+
     // Un-mine transactions. This must be done outside of the last_scanned_height check because
     // transaction entries may be created as a consequence of receiving transparent TXOs.
     conn.execute(
@@ -5064,9 +5083,14 @@ pub(crate) fn put_tx_meta(
         ":tx_index": u16::from(tx.block_index()),
     ];
 
-    stmt_upsert_tx_meta
+    let tx_ref = stmt_upsert_tx_meta
         .query_row(tx_params, |row| row.get::<_, i64>(0).map(TxRef))
-        .map_err(SqliteClientError::from)
+        .map_err(SqliteClientError::from)?;
+
+    #[cfg(feature = "zakura-pir-enhance")]
+    enhance_pir::queue_outgoing(conn, tx_ref, tx.ironwood_enhance_candidates())?;
+
+    Ok(tx_ref)
 }
 
 /// Returns the most likely wallet address that corresponds to the protocol-level receiver of a

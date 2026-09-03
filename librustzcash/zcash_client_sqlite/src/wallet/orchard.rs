@@ -525,9 +525,9 @@ pub(crate) fn parse_note_version(code: i64) -> Option<NoteVersion> {
     }
 }
 
-/// Selects the Ironwood note `:received_note_id` if memo PIR could still complete it: the memo is
+/// Selects the Ironwood note `:received_note_id` if Enhance PIR could still complete it: the memo is
 /// not yet known, the note has a commitment tree position to query by, and its plaintext version
-/// is one that memo PIR can decrypt.
+/// is one that Enhance PIR can decrypt.
 ///
 /// Minedness is part of the predicate because truncation un-mines a transaction without deleting
 /// its notes or clearing their commitment tree positions, so an un-mined note may still be
@@ -562,7 +562,7 @@ fn reconcile_memo_retrieval_queue(
         ":v3": note_version_code(NoteVersion::V3),
     ];
 
-    // Drop this note's own entry if it is no longer something memo PIR can complete.
+    // Drop this note's own entry if it is no longer something Enhance PIR can complete.
     conn.prepare_cached(&format!(
         "DELETE FROM ironwood_memo_retrieval_queue
          WHERE received_note_id = :received_note_id
@@ -591,6 +591,20 @@ fn reconcile_memo_retrieval_queue(
              commitment_tree_position = excluded.commitment_tree_position"
     ))?
     .execute(params)?;
+
+    #[cfg(feature = "zakura-pir-enhance")]
+    conn.execute(
+        "INSERT INTO ironwood_enhance_tx_protection (
+             transaction_id, commitment_tree_position
+         )
+         SELECT rn.transaction_id, rn.commitment_tree_position
+         FROM ironwood_received_notes rn
+         WHERE rn.id = :received_note_id
+           AND rn.memo IS NULL
+           AND rn.commitment_tree_position IS NOT NULL
+         ON CONFLICT DO NOTHING",
+        named_params![":received_note_id": received_note_id],
+    )?;
 
     Ok(())
 }
