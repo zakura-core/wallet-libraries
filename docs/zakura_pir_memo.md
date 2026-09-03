@@ -42,9 +42,12 @@ not the server or Vizor integration specification.
 ## Client protocol
 
 The client consumes `/memo/metadata`, `/memo/params`,
-`/memo/public-params`, and `/memo/query`. The fixed record is 612 bytes:
-32 bytes of ephemeral key followed by the complete 580-byte encrypted-note
-ciphertext. Eight records form a 4,896-byte PIR row. A note at position `p`
+`/memo/public-params`, and `/memo/query`. The fixed record is 792 bytes
+(schema version 2): the action's nullifier, the ephemeral key, the complete
+580-byte encrypted-note ciphertext, `cv_net`, the 80-byte outgoing ciphertext,
+the transaction ID in internal byte order, and the little-endian block height.
+Memo completion reads only the ephemeral key and ciphertext; the other fields
+serve DAG-sync. Eight records form a 6,336-byte PIR row. A note at position `p`
 maps to global row `p / 8` and slot `p % 8`.
 
 The snapshot advertises the seed of the deterministic public offline-query setup,

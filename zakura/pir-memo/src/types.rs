@@ -1,18 +1,60 @@
 use serde::{Deserialize, Serialize};
 
-/// The complete encrypted-note fields stored in one memo-PIR record.
+/// One Ironwood action as served by the PIR database. Layout, in order:
+///
+/// ```text
+/// nf[32] ‖ ephemeralKey[32] ‖ encCiphertext[580] ‖ cv_net[32] ‖ outCiphertext[80] ‖ txid[32] ‖ height[4 LE]
+/// ```
+///
+/// Memo completion uses only the ephemeral key and ciphertext. The other fields
+/// exist for DAG-sync: `nullifier` is the action's spent nullifier (the output
+/// note's `rho`), `cv_net` and `out_ciphertext` allow outgoing recovery, and
+/// `txid` (internal byte order) plus `height` place the action without any
+/// lightwalletd request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoPirRecord {
+    nullifier: [u8; 32],
     ephemeral_key: [u8; 32],
     ciphertext: [u8; 580],
+    cv_net: [u8; 32],
+    out_ciphertext: [u8; 80],
+    txid: [u8; 32],
+    height: u32,
 }
 
 impl MemoPirRecord {
-    pub(crate) fn from_parts(ephemeral_key: [u8; 32], ciphertext: [u8; 580]) -> Self {
+    pub(crate) fn from_bytes(bytes: &[u8; RECORD_BYTES]) -> Self {
+        let field = |start: usize, len: usize| &bytes[start..start + len];
         Self {
-            ephemeral_key,
-            ciphertext,
+            nullifier: field(RECORD_NULLIFIER_OFFSET, 32)
+                .try_into()
+                .expect("fixed record geometry"),
+            ephemeral_key: field(RECORD_EPHEMERAL_KEY_OFFSET, 32)
+                .try_into()
+                .expect("fixed record geometry"),
+            ciphertext: field(RECORD_ENC_CIPHERTEXT_OFFSET, 580)
+                .try_into()
+                .expect("fixed record geometry"),
+            cv_net: field(RECORD_CV_NET_OFFSET, 32)
+                .try_into()
+                .expect("fixed record geometry"),
+            out_ciphertext: field(RECORD_OUT_CIPHERTEXT_OFFSET, 80)
+                .try_into()
+                .expect("fixed record geometry"),
+            txid: field(RECORD_TXID_OFFSET, 32)
+                .try_into()
+                .expect("fixed record geometry"),
+            height: u32::from_le_bytes(
+                field(RECORD_HEIGHT_OFFSET, 4)
+                    .try_into()
+                    .expect("fixed record geometry"),
+            ),
         }
+    }
+
+    /// Returns the action's spent nullifier, which is `rho` of the output note.
+    pub fn nullifier(&self) -> &[u8; 32] {
+        &self.nullifier
     }
 
     /// Returns the ephemeral key bytes.
@@ -23,6 +65,26 @@ impl MemoPirRecord {
     /// Returns the complete encrypted note ciphertext.
     pub fn ciphertext(&self) -> &[u8; 580] {
         &self.ciphertext
+    }
+
+    /// Returns the action's net value commitment.
+    pub fn cv_net(&self) -> &[u8; 32] {
+        &self.cv_net
+    }
+
+    /// Returns the outgoing ciphertext used for OVK recovery.
+    pub fn out_ciphertext(&self) -> &[u8; 80] {
+        &self.out_ciphertext
+    }
+
+    /// Returns the containing transaction's ID in internal byte order.
+    pub fn txid(&self) -> &[u8; 32] {
+        &self.txid
+    }
+
+    /// Returns the height of the block containing the action.
+    pub fn height(&self) -> u32 {
+        self.height
     }
 }
 
@@ -37,8 +99,8 @@ pub struct MemoPirSnapshotAnchor {
     pub ironwood_tree_size: u64,
 }
 
-/// Version of the memo-PIR wire schema.
-pub const SCHEMA_VERSION: u16 = 1;
+/// Version of the memo-PIR wire schema. Version 2 introduced the 792-byte action record.
+pub const SCHEMA_VERSION: u16 = 2;
 /// Seed for the deterministic public offline-query setup that this protocol version pins.
 ///
 /// This is the first eight bytes, little-endian, of
@@ -49,8 +111,22 @@ pub const SCHEMA_VERSION: u16 = 1;
 pub const MEMO_SETUP_SEED: u64 = 0xaf1a_e284_ec07_131a;
 /// Shielded pool served by this client.
 pub const POOL: &str = "ironwood";
-/// Bytes in one `(ephemeral_key, enc_ciphertext)` record.
-pub const RECORD_BYTES: usize = 612;
+/// Bytes in one action record; see [`MemoPirRecord`] for the layout.
+pub const RECORD_BYTES: usize = 792;
+/// Byte offset of the nullifier within a record.
+pub const RECORD_NULLIFIER_OFFSET: usize = 0;
+/// Byte offset of the ephemeral key within a record.
+pub const RECORD_EPHEMERAL_KEY_OFFSET: usize = 32;
+/// Byte offset of the full encrypted note within a record.
+pub const RECORD_ENC_CIPHERTEXT_OFFSET: usize = 64;
+/// Byte offset of `cv_net` within a record.
+pub const RECORD_CV_NET_OFFSET: usize = 644;
+/// Byte offset of the outgoing ciphertext within a record.
+pub const RECORD_OUT_CIPHERTEXT_OFFSET: usize = 676;
+/// Byte offset of the transaction ID within a record.
+pub const RECORD_TXID_OFFSET: usize = 756;
+/// Byte offset of the little-endian block height within a record.
+pub const RECORD_HEIGHT_OFFSET: usize = 788;
 /// Records packed into one PIR database row.
 pub const RECORDS_PER_ROW: usize = 8;
 /// Bytes in one decoded PIR row.
@@ -184,13 +260,10 @@ impl MemoPirRow {
             return None;
         }
         let start = position as usize % RECORDS_PER_ROW * RECORD_BYTES;
-        let ephemeral_key = self.bytes[start..start + 32]
+        let bytes: &[u8; RECORD_BYTES] = self.bytes[start..start + RECORD_BYTES]
             .try_into()
             .expect("fixed row geometry");
-        let ciphertext = self.bytes[start + 32..start + RECORD_BYTES]
-            .try_into()
-            .expect("fixed row geometry");
-        Some(MemoPirRecord::from_parts(ephemeral_key, ciphertext))
+        Some(MemoPirRecord::from_bytes(bytes))
     }
 }
 
@@ -212,18 +285,36 @@ mod tests {
     }
 
     #[test]
+    fn record_geometry_is_pinned() {
+        assert_eq!(RECORD_BYTES, 792);
+        assert_eq!(ROW_BYTES, 6_336);
+        assert_eq!(RECORD_HEIGHT_OFFSET + 4, RECORD_BYTES);
+    }
+
+    #[test]
     fn extracts_only_records_from_the_same_row() {
         let mut bytes = [0; ROW_BYTES];
         let slot = 3;
         let start = slot * RECORD_BYTES;
-        bytes[start..start + 32].fill(7);
-        bytes[start + 32..start + RECORD_BYTES].fill(9);
+        bytes[start + RECORD_NULLIFIER_OFFSET..start + RECORD_EPHEMERAL_KEY_OFFSET].fill(6);
+        bytes[start + RECORD_EPHEMERAL_KEY_OFFSET..start + RECORD_ENC_CIPHERTEXT_OFFSET].fill(7);
+        bytes[start + RECORD_ENC_CIPHERTEXT_OFFSET..start + RECORD_CV_NET_OFFSET].fill(9);
+        bytes[start + RECORD_CV_NET_OFFSET..start + RECORD_OUT_CIPHERTEXT_OFFSET].fill(10);
+        bytes[start + RECORD_OUT_CIPHERTEXT_OFFSET..start + RECORD_TXID_OFFSET].fill(11);
+        bytes[start + RECORD_TXID_OFFSET..start + RECORD_HEIGHT_OFFSET].fill(12);
+        bytes[start + RECORD_HEIGHT_OFFSET..start + RECORD_BYTES]
+            .copy_from_slice(&3_428_143u32.to_le_bytes());
         let row = MemoPirRow::new(11, bytes);
 
         let position = 11 * RECORDS_PER_ROW as u64 + slot as u64;
         let record = row.record(position).expect("position belongs to row");
+        assert_eq!(record.nullifier(), &[6; 32]);
         assert_eq!(record.ephemeral_key(), &[7; 32]);
         assert_eq!(record.ciphertext(), &[9; 580]);
+        assert_eq!(record.cv_net(), &[10; 32]);
+        assert_eq!(record.out_ciphertext(), &[11; 80]);
+        assert_eq!(record.txid(), &[12; 32]);
+        assert_eq!(record.height(), 3_428_143);
         assert!(row.record(position + RECORDS_PER_ROW as u64).is_none());
     }
 }
