@@ -16,6 +16,7 @@ default = ["https-client"]
 https-client = ["dep:reqwest"]
 
 [dependencies]
+base64 = "0.22"
 hex.workspace = true
 ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", rev = "e875404cef33661906ab60af236dfb327e6b28b1" }
 rand = "0.8"

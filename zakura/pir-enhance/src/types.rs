@@ -1,3 +1,4 @@
+use ipir_sp::YpirSchemeParams;
 use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_VERSION: u16 = 5;
@@ -125,6 +126,17 @@ pub struct EnhanceGeneration {
     pub public_params_epoch: String,
     pub public_params_sha256: String,
     pub shards: Vec<ShardDescriptor>,
+}
+
+/// An atomic description of one answerable Enhance PIR generation.
+///
+/// The published parameters are base64-encoded so all material needed to
+/// construct a query session is captured by one JSON response.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct EnhanceSession {
+    pub generation: EnhanceGeneration,
+    pub params: YpirSchemeParams,
+    pub public_params_base64: String,
 }
 
 impl EnhanceGeneration {

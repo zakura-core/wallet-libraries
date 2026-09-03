@@ -7657,6 +7657,7 @@ dependencies = [
 name = "zakura-pir-enhance"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "hex",
  "ipir-sp",
  "rand 0.8.7",

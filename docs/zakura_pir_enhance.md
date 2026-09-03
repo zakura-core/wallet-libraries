@@ -11,9 +11,9 @@ Nine records form a 6,516-byte row. The client pins the setup seed, validates
 the generation and public-parameter digest, and binds requests and responses to
 one immutable generation.
 
-Applications fetch `/v1/enhance/generation`, then generation-pinned
-`/v1/enhance/params` and `/v1/enhance/public-params`, and submit randomized
-queries to `/v1/enhance/query`. A shard descriptor's `worker` is an opaque
+Applications fetch the atomic `/v1/enhance/session` payload and submit
+generation-pinned randomized queries to `/v1/enhance/query`. A shard
+descriptor's `worker` is an opaque
 logical group identifier; replication and failover are server concerns.
 
 ## Wallet storage

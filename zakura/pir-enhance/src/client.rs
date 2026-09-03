@@ -1,8 +1,9 @@
 use crate::types::{
-    ENHANCE_SETUP_SEED, EnhanceGeneration, EnhanceRecord, ITEM_SIZE_BITS, NETWORK, POOL,
-    PROTOCOL_REVISION, RECORD_BYTES, RECORDS_PER_ROW, ROW_BYTES, SCHEMA_VERSION, SHARD_ROWS,
+    ENHANCE_SETUP_SEED, EnhanceGeneration, EnhanceRecord, EnhanceSession, ITEM_SIZE_BITS, NETWORK,
+    POOL, PROTOCOL_REVISION, RECORD_BYTES, RECORDS_PER_ROW, ROW_BYTES, SCHEMA_VERSION, SHARD_ROWS,
     setup_seed_bytes,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ipir_sp::modulus_switch::{published_c1_len, recover_published_c1, response_body_len};
 use ipir_sp::serialize::serialize_packing_keys;
 use ipir_sp::{IPIRClient, YpirSchemeParams};
@@ -16,6 +17,8 @@ pub enum ClientError {
     Http(#[from] reqwest::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("invalid public parameters base64: {0}")]
+    PublicParamsBase64(#[from] base64::DecodeError),
     #[error("server generation is incompatible: {0}")]
     Generation(String),
     #[error("position {0} is outside advertised coverage")]
@@ -52,6 +55,11 @@ impl PreparedQuery {
 }
 
 impl QuerySession {
+    pub fn from_session(session: EnhanceSession) -> Result<Self, ClientError> {
+        let public_params = BASE64_STANDARD.decode(session.public_params_base64)?;
+        Self::new(session.generation, session.params, &public_params)
+    }
+
     pub fn new(
         generation: EnhanceGeneration,
         ypir: YpirSchemeParams,
@@ -218,37 +226,16 @@ impl EnhancePirClient {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
-        let generation: EnhanceGeneration = serde_json::from_slice(
+        let session: EnhanceSession = serde_json::from_slice(
             &read_limited(
-                http.get(format!("{base_url}/v1/enhance/generation"))
+                http.get(format!("{base_url}/v1/enhance/session"))
                     .send()
                     .await?,
                 1024 * 1024,
             )
             .await?,
         )?;
-        let generation_id = generation.generation;
-        let ypir: YpirSchemeParams = serde_json::from_slice(
-            &read_limited(
-                http.get(format!(
-                    "{base_url}/v1/enhance/params?generation={generation_id}"
-                ))
-                .send()
-                .await?,
-                64 * 1024,
-            )
-            .await?,
-        )?;
-        let public_params = read_limited(
-            http.get(format!(
-                "{base_url}/v1/enhance/public-params?generation={generation_id}"
-            ))
-            .send()
-            .await?,
-            16 * 1024 * 1024,
-        )
-        .await?;
-        let session = QuerySession::new(generation, ypir, &public_params)?;
+        let session = QuerySession::from_session(session)?;
         Ok(Self {
             http,
             base_url,
@@ -305,4 +292,67 @@ async fn read_limited(response: reqwest::Response, limit: usize) -> Result<Vec<u
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_session() -> EnhanceSession {
+        let (rlwe, params) = ipir_sp::params_for_simplepir(SHARD_ROWS as u64, ITEM_SIZE_BITS)
+            .expect("fixed Enhance geometry");
+        let public_params = vec![0; (params.db_cols / rlwe.d) * published_c1_len(rlwe.d, rlwe.q)];
+        let digest = Sha256::digest(&public_params);
+        let generation = EnhanceGeneration {
+            schema_version: SCHEMA_VERSION,
+            protocol_revision: PROTOCOL_REVISION.to_string(),
+            network: NETWORK.to_string(),
+            pool: POOL.to_string(),
+            anchor_height: 3_428_143,
+            anchor_block_hash: "00".repeat(32),
+            ironwood_tree_size: 1,
+            generation: 1,
+            record_bytes: RECORD_BYTES as u32,
+            records_per_row: RECORDS_PER_ROW as u32,
+            row_bytes: ROW_BYTES as u32,
+            shard_rows: SHARD_ROWS as u32,
+            used_rows: 1,
+            logical_rows: SHARD_ROWS as u64,
+            parameter_id: "test".to_string(),
+            setup_seed: ENHANCE_SETUP_SEED,
+            public_params_epoch: hex::encode(&digest[..8]),
+            public_params_sha256: hex::encode(digest),
+            shards: vec![],
+        };
+        EnhanceSession {
+            generation,
+            params,
+            public_params_base64: BASE64_STANDARD.encode(public_params),
+        }
+    }
+
+    #[test]
+    fn constructs_an_atomic_session() {
+        QuerySession::from_session(valid_session()).expect("valid session");
+    }
+
+    #[test]
+    fn rejects_malformed_public_parameter_base64() {
+        let mut session = valid_session();
+        session.public_params_base64 = "not base64***".to_string();
+        assert!(matches!(
+            QuerySession::from_session(session),
+            Err(ClientError::PublicParamsBase64(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_a_public_parameter_digest_mismatch() {
+        let mut session = valid_session();
+        session.generation.public_params_sha256 = "00".repeat(32);
+        assert!(matches!(
+            QuerySession::from_session(session),
+            Err(ClientError::Generation(message)) if message == "public parameter digest mismatch"
+        ));
+    }
 }
