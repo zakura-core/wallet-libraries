@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// One Ironwood action as served by the PIR database. Layout, in order:
 ///
@@ -99,9 +100,9 @@ pub struct MemoPirSnapshotAnchor {
     pub ironwood_tree_size: u64,
 }
 
-/// Version of the memo-PIR wire schema. Version 2 introduced the 792-byte action record.
-pub const SCHEMA_VERSION: u16 = 2;
-/// Seed for the deterministic public offline-query setup that this protocol version pins.
+/// Wire schema of [`GenerationManifest`] this client speaks.
+pub const MANIFEST_SCHEMA_VERSION: u16 = 3;
+/// Seed for the deterministic public offline-query setup of the ACTION table.
 ///
 /// This is the first eight bytes, little-endian, of
 /// `SHA-256("zcash/ironwood-memo-pir/setup-seed/v1")`, so it cannot collide with the seed of any
@@ -127,36 +128,93 @@ pub const RECORD_OUT_CIPHERTEXT_OFFSET: usize = 676;
 pub const RECORD_TXID_OFFSET: usize = 756;
 /// Byte offset of the little-endian block height within a record.
 pub const RECORD_HEIGHT_OFFSET: usize = 788;
-/// Records packed into one PIR database row.
+/// Records packed into one ACTION row.
 pub const RECORDS_PER_ROW: usize = 8;
-/// Bytes in one decoded PIR row.
+/// Bytes in one decoded ACTION row.
 pub const ROW_BYTES: usize = RECORD_BYTES * RECORDS_PER_ROW;
-/// Rows in one independently published server shard.
+/// Rows in one independently published ACTION shard.
 pub const SHARD_ROWS: usize = 8_192;
-/// iPIR item size for one row.
+/// iPIR item size for one ACTION row.
 pub const ITEM_SIZE_BITS: u64 = (ROW_BYTES * 8) as u64;
 
-/// Coverage advertised by a memo-PIR snapshot.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Coverage {
-    /// The snapshot contains every Ironwood position from the pool's start.
-    Full {
-        /// First covered position; production clients require this to be zero.
-        covered_position_start: u64,
-    },
-    /// A bounded history window. Wallet clients reject this mode.
-    Windowed {
-        /// Requested source lookback.
-        requested_lookback_blocks: u64,
-        /// Maximum number of active shards.
-        max_active_shards: u32,
-        /// First covered commitment-tree position.
-        covered_position_start: u64,
-        /// Effective first covered block height.
-        effective_start_height: u64,
-    },
+/// Identity of one PIR table served by the coordinator. The wire name appears
+/// in URLs and in the generation manifest, so it is fixed forever.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DatabaseId {
+    /// One Ironwood action per record, indexed by commitment-tree position.
+    Action,
+    /// Note-commitment sub-shards, indexed by position (not yet served).
+    Witness,
+    /// Nullifier hash buckets up to the daily checkpoint (not yet served).
+    NfCold,
+    /// Nullifier hash buckets since the checkpoint (not yet served).
+    NfWarm,
 }
+
+impl DatabaseId {
+    /// The name used in URLs and manifest keys.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            DatabaseId::Action => "action",
+            DatabaseId::Witness => "witness",
+            DatabaseId::NfCold => "nf-cold",
+            DatabaseId::NfWarm => "nf-warm",
+        }
+    }
+}
+
+impl std::fmt::Display for DatabaseId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Row geometry of one table, as this client pins it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableLayout {
+    /// Bytes in one record.
+    pub record_bytes: usize,
+    /// Records packed into one PIR row.
+    pub records_per_row: usize,
+    /// Rows in one published shard.
+    pub shard_rows: usize,
+}
+
+impl TableLayout {
+    /// Bytes in one row.
+    pub const fn row_bytes(&self) -> usize {
+        self.record_bytes * self.records_per_row
+    }
+
+    /// iPIR item size for one row.
+    pub const fn item_size_bits(&self) -> u64 {
+        (self.row_bytes() * 8) as u64
+    }
+}
+
+/// What this client requires of one table before it will query it: the
+/// geometry its decoder is built for and the setup seed its queries assume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableExpectation {
+    /// Table the expectation applies to.
+    pub table: DatabaseId,
+    /// Required row geometry.
+    pub layout: TableLayout,
+    /// Required public setup seed.
+    pub setup_seed: u64,
+}
+
+/// The ACTION table as this protocol version pins it.
+pub const ACTION_EXPECTATION: TableExpectation = TableExpectation {
+    table: DatabaseId::Action,
+    layout: TableLayout {
+        record_bytes: RECORD_BYTES,
+        records_per_row: RECORDS_PER_ROW,
+        shard_rows: SHARD_ROWS,
+    },
+    setup_seed: MEMO_SETUP_SEED,
+};
 
 /// Immutable shard metadata advertised by the server.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -165,7 +223,7 @@ pub struct ShardDescriptor {
     pub shard_id: u64,
     /// First global database row in the shard.
     pub global_row_start: u64,
-    /// Number of real note positions represented by the shard.
+    /// Number of real positions represented by the shard.
     pub populated_positions: u64,
     /// SHA-256 digest of the raw row data.
     pub rows_sha256: String,
@@ -175,23 +233,9 @@ pub struct ShardDescriptor {
     pub worker: String,
 }
 
-/// Authenticated snapshot description returned by `/memo/metadata`.
+/// One table as published in a generation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MemoSnapshotMetadata {
-    /// Wire-schema version.
-    pub schema_version: u16,
-    /// Consensus network identifier.
-    pub network: String,
-    /// Shielded pool identifier.
-    pub pool: String,
-    /// Snapshot anchor block height.
-    pub anchor_height: u64,
-    /// Snapshot anchor block hash, hex encoded in server wire order.
-    pub anchor_block_hash: String,
-    /// Ironwood tree size at the anchor.
-    pub ironwood_tree_size: u64,
-    /// Positions represented by this snapshot.
-    pub coverage: Coverage,
+pub struct TableManifest {
     /// Bytes per record.
     pub record_bytes: u32,
     /// Records packed per row.
@@ -200,53 +244,86 @@ pub struct MemoSnapshotMetadata {
     pub row_bytes: u32,
     /// Rows per shard.
     pub shard_rows: u32,
+    /// Populated positions (records) in the table.
+    pub positions: u64,
     /// Rows containing at least one real position.
     pub used_rows: u64,
     /// Power-of-two PIR row count, including padding.
     pub logical_rows: u64,
-    /// First global row represented locally.
-    pub first_global_row: u64,
-    /// Monotonic snapshot generation.
-    pub generation: u64,
     /// Server parameter-set identifier.
     pub parameter_id: String,
     /// Seed for the deterministic public offline-query setup.
     ///
     /// Carried on the wire so that a server built against a different setup is rejected with a
-    /// clear error instead of returning rows this client silently fails to decrypt. Clients
-    /// require it to equal [`MEMO_SETUP_SEED`]; it is deliberately not defaulted, so a server
-    /// that omits the field fails loudly rather than agreeing on zero.
+    /// clear error instead of returning rows this client silently fails to decrypt. It is
+    /// deliberately not defaulted, so a server that omits the field fails loudly rather than
+    /// agreeing on zero.
     pub setup_seed: u64,
     /// Short public-parameter digest used on query responses.
     pub public_params_epoch: String,
     /// Full public-parameter SHA-256 digest.
     pub public_params_sha256: String,
-    /// Published shards comprising the snapshot.
+    /// Published shards comprising the table.
     pub shards: Vec<ShardDescriptor>,
 }
 
-impl MemoSnapshotMetadata {
-    pub(crate) fn row_for_position(&self, position: u64) -> Option<(usize, usize)> {
-        if position >= self.ironwood_tree_size {
-            return None;
-        }
-        let global_row = position / RECORDS_PER_ROW as u64;
-        (global_row < self.logical_rows)
-            .then_some((global_row as usize, position as usize % RECORDS_PER_ROW))
-    }
+/// Every table at one anchor, returned by `/v1/generation`. A client pins one
+/// generation for a whole pass; the coordinator keeps two answerable.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GenerationManifest {
+    /// Wire-schema version.
+    pub schema_version: u16,
+    /// The pinned `ipir-sp` revision the server derives parameters from.
+    pub protocol_revision: String,
+    /// Consensus network identifier.
+    pub network: String,
+    /// Shielded pool identifier.
+    pub pool: String,
+    /// Snapshot anchor block height.
+    pub anchor_height: u64,
+    /// Snapshot anchor block hash, hex encoded in display order.
+    pub anchor_block_hash: String,
+    /// Ironwood tree size at the anchor.
+    pub ironwood_tree_size: u64,
+    /// Monotonic snapshot generation.
+    pub generation: u64,
+    /// Tables published in this generation, keyed by wire name.
+    pub tables: BTreeMap<DatabaseId, TableManifest>,
 }
 
-/// A complete decoded PIR row. Returning a row lets a wallet satisfy all of
-/// its pending positions in that row without issuing linkable duplicate queries.
+/// A complete decoded PIR row of one table. Returning a row lets a wallet
+/// satisfy all of its pending positions in that row without issuing
+/// linkable duplicate queries.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemoPirRow {
+pub struct PirRow {
+    table: DatabaseId,
+    layout: TableLayout,
     global_row: u64,
-    bytes: [u8; ROW_BYTES],
+    bytes: Vec<u8>,
 }
 
-impl MemoPirRow {
-    pub(crate) fn new(global_row: u64, bytes: [u8; ROW_BYTES]) -> Self {
-        Self { global_row, bytes }
+/// The ACTION row type wallets consume for memo completion.
+pub type MemoPirRow = PirRow;
+
+impl PirRow {
+    pub(crate) fn new(
+        table: DatabaseId,
+        layout: TableLayout,
+        global_row: u64,
+        bytes: Vec<u8>,
+    ) -> Self {
+        debug_assert_eq!(bytes.len(), layout.row_bytes());
+        Self {
+            table,
+            layout,
+            global_row,
+            bytes,
+        }
+    }
+
+    /// Returns the table the row belongs to.
+    pub fn table(&self) -> DatabaseId {
+        self.table
     }
 
     /// Returns the global row index.
@@ -254,12 +331,22 @@ impl MemoPirRow {
         self.global_row
     }
 
-    /// Extracts the record for `position` if it belongs to this row.
+    /// Returns the raw row bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Extracts the action record for `position` if this is an ACTION row and the
+    /// position belongs to it.
     pub fn record(&self, position: u64) -> Option<MemoPirRecord> {
-        if position / RECORDS_PER_ROW as u64 != self.global_row {
+        if self.table != DatabaseId::Action || self.layout.record_bytes != RECORD_BYTES {
             return None;
         }
-        let start = position as usize % RECORDS_PER_ROW * RECORD_BYTES;
+        let records_per_row = self.layout.records_per_row as u64;
+        if position / records_per_row != self.global_row {
+            return None;
+        }
+        let start = (position % records_per_row) as usize * RECORD_BYTES;
         let bytes: &[u8; RECORD_BYTES] = self.bytes[start..start + RECORD_BYTES]
             .try_into()
             .expect("fixed row geometry");
@@ -292,6 +379,16 @@ mod tests {
     }
 
     #[test]
+    fn table_names_and_manifest_keys_are_the_wire_names() {
+        let mut tables = BTreeMap::new();
+        tables.insert(DatabaseId::NfCold, 1u8);
+        assert_eq!(serde_json::to_string(&tables).unwrap(), r#"{"nf-cold":1}"#);
+        assert_eq!(DatabaseId::Action.to_string(), "action");
+        assert_eq!(ACTION_EXPECTATION.layout.row_bytes(), ROW_BYTES);
+        assert_eq!(ACTION_EXPECTATION.layout.item_size_bits(), ITEM_SIZE_BITS);
+    }
+
+    #[test]
     fn extracts_only_records_from_the_same_row() {
         let mut bytes = [0; ROW_BYTES];
         let slot = 3;
@@ -304,7 +401,12 @@ mod tests {
         bytes[start + RECORD_TXID_OFFSET..start + RECORD_HEIGHT_OFFSET].fill(12);
         bytes[start + RECORD_HEIGHT_OFFSET..start + RECORD_BYTES]
             .copy_from_slice(&3_428_143u32.to_le_bytes());
-        let row = MemoPirRow::new(11, bytes);
+        let row = MemoPirRow::new(
+            DatabaseId::Action,
+            ACTION_EXPECTATION.layout,
+            11,
+            bytes.to_vec(),
+        );
 
         let position = 11 * RECORDS_PER_ROW as u64 + slot as u64;
         let record = row.record(position).expect("position belongs to row");
