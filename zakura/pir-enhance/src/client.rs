@@ -1,7 +1,7 @@
 use crate::types::{
     ENHANCE_SETUP_SEED, EnhanceGeneration, EnhanceRecord, EnhanceSession, ITEM_SIZE_BITS, NETWORK,
     POOL, PROTOCOL_REVISION, RECORD_BYTES, RECORDS_PER_ROW, ROW_BYTES, SCHEMA_VERSION, SHARD_ROWS,
-    setup_seed_bytes,
+    checked_logical_rows_for, setup_seed_bytes,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ipir_sp::modulus_switch::{published_c1_len, recover_published_c1, response_body_len};
@@ -9,6 +9,57 @@ use ipir_sp::serialize::serialize_packing_keys;
 use ipir_sp::{IPIRClient, YpirSchemeParams};
 use rand::{Rng, rngs::OsRng};
 use sha2::{Digest, Sha256};
+
+/// Wallet-accepted chain state to which an Enhance PIR generation must be bound.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcceptedAnchor {
+    pub height: u64,
+    pub block_hash: [u8; 32],
+    pub ironwood_tree_size: u64,
+}
+
+impl AcceptedAnchor {
+    pub fn new(height: u64, block_hash: [u8; 32], ironwood_tree_size: u64) -> Self {
+        Self {
+            height,
+            block_hash,
+            ironwood_tree_size,
+        }
+    }
+}
+
+/// A local cap on generation-dependent client work.
+///
+/// Setup memory grows with `logical_rows`, so this value must be selected by
+/// the application for the least-capable device it supports. It is local
+/// policy and must not be derived from server metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientResourceLimits {
+    pub max_logical_rows: u64,
+}
+
+impl ClientResourceLimits {
+    pub const fn new(max_logical_rows: u64) -> Self {
+        Self { max_logical_rows }
+    }
+}
+
+/// The wallet-owned inputs required before a generation may be instantiated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationAcceptance {
+    pub anchor: AcceptedAnchor,
+    pub limits: ClientResourceLimits,
+}
+
+impl GenerationAcceptance {
+    pub const fn new(anchor: AcceptedAnchor, limits: ClientResourceLimits) -> Self {
+        Self { anchor, limits }
+    }
+
+    pub fn validate(&self, generation: &EnhanceGeneration) -> Result<(), ClientError> {
+        validate_generation(generation, self)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -55,46 +106,27 @@ impl PreparedQuery {
 }
 
 impl QuerySession {
-    pub fn from_session(session: EnhanceSession) -> Result<Self, ClientError> {
+    pub fn from_session(
+        session: EnhanceSession,
+        acceptance: &GenerationAcceptance,
+    ) -> Result<Self, ClientError> {
+        acceptance.validate(&session.generation)?;
         let public_params = BASE64_STANDARD.decode(session.public_params_base64)?;
-        Self::new(session.generation, session.params, &public_params)
+        Self::new(
+            session.generation,
+            session.params,
+            &public_params,
+            acceptance,
+        )
     }
 
     pub fn new(
         generation: EnhanceGeneration,
         ypir: YpirSchemeParams,
         public_params: &[u8],
+        acceptance: &GenerationAcceptance,
     ) -> Result<Self, ClientError> {
-        if generation.schema_version != SCHEMA_VERSION
-            || generation.protocol_revision != PROTOCOL_REVISION
-            || generation.network != NETWORK
-            || generation.pool != POOL
-        {
-            return Err(ClientError::Generation(
-                "wrong schema, protocol, network, or pool".to_string(),
-            ));
-        }
-        if generation.setup_seed != ENHANCE_SETUP_SEED {
-            return Err(ClientError::Generation(
-                "setup seed does not match Enhance PIR".to_string(),
-            ));
-        }
-        if generation.record_bytes as usize != RECORD_BYTES
-            || generation.records_per_row as usize != RECORDS_PER_ROW
-            || generation.row_bytes as usize != ROW_BYTES
-            || generation.shard_rows as usize != SHARD_ROWS
-            || generation.logical_rows < generation.used_rows
-            || !generation.logical_rows.is_power_of_two()
-            || generation.logical_rows < SHARD_ROWS as u64
-            || generation.used_rows
-                != generation
-                    .ironwood_tree_size
-                    .div_ceil(RECORDS_PER_ROW as u64)
-        {
-            return Err(ClientError::Generation(
-                "invalid database geometry".to_string(),
-            ));
-        }
+        acceptance.validate(&generation)?;
         let (rlwe, expected) =
             ipir_sp::params_for_simplepir(generation.logical_rows, ITEM_SIZE_BITS)
                 .map_err(|error| ClientError::Pir(error.to_string()))?;
@@ -116,8 +148,16 @@ impl QuerySession {
                 "public parameter epoch mismatch".to_string(),
             ));
         }
-        let blocks = ypir.db_cols / rlwe.d;
-        let expected_len = blocks * published_c1_len(rlwe.d, rlwe.q);
+        let blocks = ypir
+            .db_cols
+            .checked_div(rlwe.d)
+            .filter(|_| ypir.db_cols.is_multiple_of(rlwe.d))
+            .ok_or_else(|| ClientError::Generation("invalid PIR dimensions".to_string()))?;
+        let expected_len = checked_generation_product(
+            blocks,
+            published_c1_len(rlwe.d, rlwe.q),
+            "public parameter length",
+        )?;
         if public_params.len() != expected_len {
             return Err(ClientError::Generation(format!(
                 "public parameters have {} bytes, expected {expected_len}",
@@ -185,13 +225,26 @@ impl QuerySession {
                 "public parameter epoch mismatch".to_string(),
             ));
         }
-        let expected_body_len = (self.ypir.db_cols / self.client.rlwe_params().d)
-            * response_body_len(self.client.rlwe_params().d, self.ypir.q_prime_1);
-        if response.len() != 16 + expected_body_len {
+        let d = self.client.rlwe_params().d;
+        let blocks = self
+            .ypir
+            .db_cols
+            .checked_div(d)
+            .filter(|_| self.ypir.db_cols.is_multiple_of(d))
+            .ok_or_else(|| ClientError::Response("invalid PIR dimensions".to_string()))?;
+        let expected_body_len = checked_response_product(
+            blocks,
+            response_body_len(d, self.ypir.q_prime_1),
+            "response body length",
+        )?;
+        let expected_len = 16usize
+            .checked_add(expected_body_len)
+            .ok_or_else(|| ClientError::Response("response length overflows usize".to_string()))?;
+        if response.len() != expected_len {
             return Err(ClientError::Response(format!(
                 "response has {} bytes, expected {}",
                 response.len(),
-                16 + expected_body_len
+                expected_len
             )));
         }
         let decoded =
@@ -212,6 +265,78 @@ pub fn record_in_row(row: &[u8], slot: usize) -> EnhanceRecord {
     EnhanceRecord(bytes)
 }
 
+fn validate_generation(
+    generation: &EnhanceGeneration,
+    acceptance: &GenerationAcceptance,
+) -> Result<(), ClientError> {
+    if generation.schema_version != SCHEMA_VERSION
+        || generation.protocol_revision != PROTOCOL_REVISION
+        || generation.network != NETWORK
+        || generation.pool != POOL
+    {
+        return Err(ClientError::Generation(
+            "wrong schema, protocol, network, or pool".to_string(),
+        ));
+    }
+    if generation.setup_seed != ENHANCE_SETUP_SEED {
+        return Err(ClientError::Generation(
+            "setup seed does not match Enhance PIR".to_string(),
+        ));
+    }
+
+    let advertised_hash: [u8; 32] = hex::decode(&generation.anchor_block_hash)
+        .map_err(|_| ClientError::Generation("invalid anchor block hash".to_string()))?
+        .try_into()
+        .map_err(|_| ClientError::Generation("invalid anchor block hash".to_string()))?;
+    if generation.anchor_height != acceptance.anchor.height
+        || advertised_hash != acceptance.anchor.block_hash
+        || generation.ironwood_tree_size != acceptance.anchor.ironwood_tree_size
+    {
+        return Err(ClientError::Generation(
+            "generation anchor is not accepted by the wallet".to_string(),
+        ));
+    }
+
+    let expected_used_rows = generation
+        .ironwood_tree_size
+        .checked_add(RECORDS_PER_ROW as u64 - 1)
+        .ok_or_else(|| ClientError::Generation("database geometry overflows".to_string()))?
+        / RECORDS_PER_ROW as u64;
+    let expected_logical_rows = checked_logical_rows_for(expected_used_rows)
+        .ok_or_else(|| ClientError::Generation("database geometry overflows".to_string()))?;
+    if generation.record_bytes as usize != RECORD_BYTES
+        || generation.records_per_row as usize != RECORDS_PER_ROW
+        || generation.row_bytes as usize != ROW_BYTES
+        || generation.shard_rows as usize != SHARD_ROWS
+        || generation.used_rows != expected_used_rows
+        || generation.logical_rows != expected_logical_rows
+    {
+        return Err(ClientError::Generation(
+            "invalid database geometry".to_string(),
+        ));
+    }
+    if generation.logical_rows > acceptance.limits.max_logical_rows {
+        return Err(ClientError::Generation(format!(
+            "generation has {} logical rows, exceeding the local limit of {}",
+            generation.logical_rows, acceptance.limits.max_logical_rows
+        )));
+    }
+    usize::try_from(generation.logical_rows)
+        .map_err(|_| ClientError::Generation("logical row count exceeds usize".to_string()))?;
+
+    Ok(())
+}
+
+fn checked_generation_product(left: usize, right: usize, name: &str) -> Result<usize, ClientError> {
+    left.checked_mul(right)
+        .ok_or_else(|| ClientError::Generation(format!("{name} overflows usize")))
+}
+
+fn checked_response_product(left: usize, right: usize, name: &str) -> Result<usize, ClientError> {
+    left.checked_mul(right)
+        .ok_or_else(|| ClientError::Response(format!("{name} overflows usize")))
+}
+
 #[cfg(feature = "https-client")]
 pub struct EnhancePirClient {
     http: reqwest::Client,
@@ -220,27 +345,63 @@ pub struct EnhancePirClient {
 }
 
 #[cfg(feature = "https-client")]
+pub struct PendingEnhancePirClient {
+    http: reqwest::Client,
+    base_url: String,
+    session: EnhanceSession,
+}
+
+#[cfg(feature = "https-client")]
+impl PendingEnhancePirClient {
+    pub fn generation(&self) -> &EnhanceGeneration {
+        &self.session.generation
+    }
+
+    pub async fn connect(
+        self,
+        acceptance: &GenerationAcceptance,
+    ) -> Result<EnhancePirClient, ClientError> {
+        acceptance.validate(&self.session.generation)?;
+        let session = QuerySession::from_session(self.session, acceptance)?;
+        Ok(EnhancePirClient {
+            http: self.http,
+            base_url: self.base_url,
+            session,
+        })
+    }
+}
+
+#[cfg(feature = "https-client")]
 impl EnhancePirClient {
-    pub async fn connect(base_url: &str) -> Result<Self, ClientError> {
+    pub async fn fetch_session(base_url: &str) -> Result<PendingEnhancePirClient, ClientError> {
         let base_url = base_url.trim_end_matches('/').to_string();
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
         let session: EnhanceSession = serde_json::from_slice(
             &read_limited(
-                http.get(format!("{base_url}/v1/enhance/session"))
+                http.get(format!("{base_url}/v1/enhance/init"))
                     .send()
                     .await?,
                 1024 * 1024,
             )
             .await?,
         )?;
-        let session = QuerySession::from_session(session)?;
-        Ok(Self {
+        Ok(PendingEnhancePirClient {
             http,
             base_url,
             session,
         })
+    }
+
+    pub async fn connect(
+        base_url: &str,
+        acceptance: &GenerationAcceptance,
+    ) -> Result<Self, ClientError> {
+        Self::fetch_session(base_url)
+            .await?
+            .connect(acceptance)
+            .await
     }
 
     pub fn generation(&self) -> &EnhanceGeneration {
@@ -286,7 +447,11 @@ async fn read_limited(response: reqwest::Response, limit: usize) -> Result<Vec<u
     }
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await? {
-        if body.len().saturating_add(chunk.len()) > limit {
+        if body
+            .len()
+            .checked_add(chunk.len())
+            .is_none_or(|length| length > limit)
+        {
             return Err(ClientError::Response("HTTP body exceeds limit".to_string()));
         }
         body.extend_from_slice(&chunk);
@@ -298,10 +463,35 @@ async fn read_limited(response: reqwest::Response, limit: usize) -> Result<Vec<u
 mod tests {
     use super::*;
 
+    fn acceptance_for(
+        generation: &EnhanceGeneration,
+        max_logical_rows: u64,
+    ) -> GenerationAcceptance {
+        GenerationAcceptance::new(
+            AcceptedAnchor::new(
+                generation.anchor_height,
+                hex::decode(&generation.anchor_block_hash)
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                generation.ironwood_tree_size,
+            ),
+            ClientResourceLimits::new(max_logical_rows),
+        )
+    }
+
     fn valid_session() -> EnhanceSession {
         let (rlwe, params) = ipir_sp::params_for_simplepir(SHARD_ROWS as u64, ITEM_SIZE_BITS)
             .expect("fixed Enhance geometry");
-        let public_params = vec![0; (params.db_cols / rlwe.d) * published_c1_len(rlwe.d, rlwe.q)];
+        let public_params = vec![
+            0;
+            checked_generation_product(
+                params.db_cols / rlwe.d,
+                published_c1_len(rlwe.d, rlwe.q),
+                "test public parameters",
+            )
+            .unwrap()
+        ];
         let digest = Sha256::digest(&public_params);
         let generation = EnhanceGeneration {
             schema_version: SCHEMA_VERSION,
@@ -333,15 +523,26 @@ mod tests {
 
     #[test]
     fn constructs_an_atomic_session() {
-        QuerySession::from_session(valid_session()).expect("valid session");
+        let session = valid_session();
+        let acceptance = acceptance_for(&session.generation, SHARD_ROWS as u64);
+        QuerySession::from_session(session, &acceptance).expect("valid session");
+    }
+
+    #[test]
+    fn accepts_a_wallet_bound_generation_within_the_local_budget() {
+        let session = valid_session();
+        acceptance_for(&session.generation, SHARD_ROWS as u64)
+            .validate(&session.generation)
+            .expect("valid generation");
     }
 
     #[test]
     fn rejects_malformed_public_parameter_base64() {
         let mut session = valid_session();
+        let acceptance = acceptance_for(&session.generation, SHARD_ROWS as u64);
         session.public_params_base64 = "not base64***".to_string();
         assert!(matches!(
-            QuerySession::from_session(session),
+            QuerySession::from_session(session, &acceptance),
             Err(ClientError::PublicParamsBase64(_))
         ));
     }
@@ -349,10 +550,84 @@ mod tests {
     #[test]
     fn rejects_a_public_parameter_digest_mismatch() {
         let mut session = valid_session();
+        let acceptance = acceptance_for(&session.generation, SHARD_ROWS as u64);
         session.generation.public_params_sha256 = "00".repeat(32);
         assert!(matches!(
-            QuerySession::from_session(session),
+            QuerySession::from_session(session, &acceptance),
             Err(ClientError::Generation(message)) if message == "public parameter digest mismatch"
+        ));
+    }
+
+    #[test]
+    fn rejects_each_unaccepted_anchor_field() {
+        let session = valid_session();
+        let mut wrong_height = acceptance_for(&session.generation, SHARD_ROWS as u64);
+        wrong_height.anchor.height += 1;
+        let mut wrong_hash = acceptance_for(&session.generation, SHARD_ROWS as u64);
+        wrong_hash.anchor.block_hash[0] ^= 1;
+        let mut wrong_tree_size = acceptance_for(&session.generation, SHARD_ROWS as u64);
+        wrong_tree_size.anchor.ironwood_tree_size += 1;
+
+        for acceptance in [wrong_height, wrong_hash, wrong_tree_size] {
+            assert!(matches!(
+                acceptance.validate(&session.generation),
+                Err(ClientError::Generation(message))
+                    if message == "generation anchor is not accepted by the wallet"
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_the_reported_unbounded_generation_before_decoding_parameters() {
+        let mut session = valid_session();
+        session.generation.ironwood_tree_size = 9 * (1_u64 << 32);
+        session.generation.used_rows = 1_u64 << 32;
+        session.generation.logical_rows = 1_u64 << 32;
+        session.public_params_base64 = "not base64***".to_string();
+        let acceptance = acceptance_for(&session.generation, 1_u64 << 20);
+
+        assert!(matches!(
+            QuerySession::from_session(session, &acceptance),
+            Err(ClientError::Generation(message))
+                if message.contains("exceeding the local limit")
+        ));
+    }
+
+    #[test]
+    fn rejects_noncanonical_server_padding() {
+        let mut session = valid_session();
+        let acceptance = acceptance_for(&session.generation, 2 * SHARD_ROWS as u64);
+        session.generation.logical_rows *= 2;
+
+        assert!(matches!(
+            acceptance.validate(&session.generation),
+            Err(ClientError::Generation(message)) if message == "invalid database geometry"
+        ));
+    }
+
+    #[test]
+    fn rejects_generation_geometry_overflow() {
+        let mut session = valid_session();
+        session.generation.ironwood_tree_size = u64::MAX;
+        session.generation.used_rows = u64::MAX;
+        session.generation.logical_rows = 1_u64 << 63;
+        let acceptance = acceptance_for(&session.generation, u64::MAX);
+
+        assert!(matches!(
+            acceptance.validate(&session.generation),
+            Err(ClientError::Generation(message)) if message == "database geometry overflows"
+        ));
+    }
+
+    #[test]
+    fn rejects_wire_length_overflow() {
+        assert!(matches!(
+            checked_generation_product(usize::MAX, 2, "test"),
+            Err(ClientError::Generation(message)) if message == "test overflows usize"
+        ));
+        assert!(matches!(
+            checked_response_product(usize::MAX, 2, "test"),
+            Err(ClientError::Response(message)) if message == "test overflows usize"
         ));
     }
 }

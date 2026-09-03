@@ -11,10 +11,35 @@ Nine records form a 6,516-byte row. The client pins the setup seed, validates
 the generation and public-parameter digest, and binds requests and responses to
 one immutable generation.
 
-Applications fetch the atomic `/v1/enhance/session` payload and submit
+Applications fetch the atomic `/v1/enhance/init` payload and submit
 generation-pinned randomized queries to `/v1/enhance/query`. A shard
 descriptor's `worker` is an opaque
 logical group identifier; replication and failover are server concerns.
+
+## Generation acceptance
+
+The session payload is untrusted. Before deriving PIR parameters or allocating
+the deterministic query setup, an application must bind the advertised
+generation to wallet-accepted chain state:
+
+- `anchor_height` and `anchor_block_hash` must identify a block the wallet has
+  accepted;
+- `ironwood_tree_size` must match the wallet's tree size at that block;
+- `used_rows` and `logical_rows` must be the canonical values derived from that
+  tree size; and
+- `logical_rows` must fit an application-selected local resource limit.
+
+Use `EnhancePirClient::fetch_session` to obtain a
+`PendingEnhancePirClient`, inspect its generation, and look up the matching
+anchor in wallet storage. Pass that state and a locally configured
+`ClientResourceLimits` to `PendingEnhancePirClient::connect`. Custom transports
+must pass the same `GenerationAcceptance` to `QuerySession::from_session` or
+`QuerySession::new`.
+
+The row limit is a setup-memory budget, not an HTTP limit. A small session JSON
+can advertise a very large logical database and otherwise cause a large
+deterministic setup allocation. Select `max_logical_rows` for the least-capable
+supported device and never derive it from server fields.
 
 ## Wallet storage
 

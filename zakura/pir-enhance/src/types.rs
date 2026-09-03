@@ -145,7 +145,13 @@ impl EnhanceGeneration {
             return None;
         }
         let row = position / RECORDS_PER_ROW as u64;
-        (row < self.logical_rows).then_some((row as usize, position as usize % RECORDS_PER_ROW))
+        if row >= self.logical_rows {
+            return None;
+        }
+        Some((
+            usize::try_from(row).ok()?,
+            usize::try_from(position % RECORDS_PER_ROW as u64).ok()?,
+        ))
     }
 }
 
@@ -154,7 +160,11 @@ pub const fn used_rows_for(positions: u64) -> u64 {
 }
 
 pub fn logical_rows_for(used_rows: u64) -> u64 {
-    used_rows.max(SHARD_ROWS as u64).next_power_of_two()
+    checked_logical_rows_for(used_rows).expect("Enhance logical row count exceeds u64")
+}
+
+pub fn checked_logical_rows_for(used_rows: u64) -> Option<u64> {
+    used_rows.max(SHARD_ROWS as u64).checked_next_power_of_two()
 }
 
 pub fn group_index_for_shard(shard_id: u64, group_count: usize) -> Option<usize> {
