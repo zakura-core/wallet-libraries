@@ -17,6 +17,8 @@ https-client = ["dep:reqwest"]
 
 [dependencies]
 hex.workspace = true
+incrementalmerkletree.workspace = true
+orchard.workspace = true
 ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", rev = "e875404cef33661906ab60af236dfb327e6b28b1" }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }

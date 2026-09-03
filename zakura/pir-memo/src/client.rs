@@ -124,6 +124,9 @@ impl PirSession {
         {
             return Err(ClientError::Metadata("wrong schema, network, or pool"));
         }
+        if manifest.envelope.protocol_version != crate::ENVELOPE_PROTOCOL_VERSION {
+            return Err(ClientError::Metadata("unknown envelope protocol version"));
+        }
         let table = expectation.table;
         let entry = manifest
             .tables
@@ -255,7 +258,20 @@ impl PirSession {
         self.prepare_row(OsRng.gen_range(0..self.ypir.db_rows))
     }
 
-    fn prepare_row(&self, row: usize) -> Result<PreparedQuery, ClientError> {
+    /// Returns the populated positions (records) of this session's table.
+    pub fn positions(&self) -> u64 {
+        self.table_manifest().positions
+    }
+
+    /// Returns the logical (queryable) row count.
+    pub fn rows(&self) -> usize {
+        self.ypir.db_rows
+    }
+
+    /// Creates a randomized query for one row. Callers that address rows
+    /// directly (witness sub-shards, nullifier buckets) use this; ACTION
+    /// callers use [`PirSession::prepare_position`].
+    pub fn prepare_row(&self, row: usize) -> Result<PreparedQuery, ClientError> {
         if row >= self.ypir.db_rows {
             return Err(ClientError::OutsideCoverage);
         }
@@ -466,6 +482,14 @@ mod tests {
             anchor_block_hash: "00".repeat(32),
             ironwood_tree_size: 1,
             generation: 1,
+            anchor_tree_root: String::new(),
+            cold_checkpoint_height: 0,
+            envelope: crate::Envelope {
+                protocol_version: crate::ENVELOPE_PROTOCOL_VERSION,
+                k_nf: 8,
+                k_act: 4,
+                k_wit: 4,
+            },
             tables,
         }
     }
