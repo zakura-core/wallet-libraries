@@ -58,7 +58,7 @@ impl PirWitness {
     /// Converts to the wallet's Merkle path type for the Ironwood tree.
     pub fn to_merkle_path(&self) -> Option<MerklePath<MerkleHashOrchard, 32>> {
         let siblings: Option<Vec<MerkleHashOrchard>> =
-            self.siblings.iter().map(|s| bytes_to_node(s)).collect();
+            self.siblings.iter().map(bytes_to_node).collect();
         MerklePath::from_parts(siblings?, Position::from(self.position)).ok()
     }
 }
@@ -266,11 +266,11 @@ pub fn apply_frontier_update(
     if (witness.position >> SUBSHARD_HEIGHT) == (last >> SUBSHARD_HEIGHT) {
         return Err(WitnessError::NeedsLeaves);
     }
-    for level in 0..TREE_DEPTH {
+    for (level, node) in nodes.iter().enumerate() {
         let sibling_pos = (witness.position >> level) ^ 1;
         let rightmost_pos = last >> level;
         if sibling_pos == rightmost_pos {
-            witness.siblings[level] = nodes[level];
+            witness.siblings[level] = *node;
         } else if sibling_pos > rightmost_pos {
             witness.siblings[level] = empty_root(level as u8);
         }
@@ -330,7 +330,7 @@ mod tests {
             anchor_height: 100,
             tree_size: n,
             shard_roots: shard_roots.iter().map(hex::encode).collect(),
-            frontier_subshard_root: frontier_root.map(|r| hex::encode(r)),
+            frontier_subshard_root: frontier_root.map(hex::encode),
             tree_root: hex::encode(tree_root),
         };
         let (shard, subshard, _) = decompose(position);
