@@ -7658,6 +7658,7 @@ name = "zakura-pir-memo"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "incrementalmerkletree",
  "ipir-sp",
  "rand 0.8.7",
  "reqwest",
@@ -7665,6 +7666,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "zakura-orchard",
 ]
 
 [[package]]

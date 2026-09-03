@@ -106,6 +106,8 @@ use crate::{
 
 #[cfg(feature = "zakura-pir-memo")]
 pub mod memo_pir;
+#[cfg(feature = "zakura-pir-memo")]
+pub mod pir_dag;
 
 #[cfg(feature = "transparent-inputs")]
 use {
@@ -4257,6 +4259,17 @@ where
     Ok(())
 }
 
+/// An Ironwood authentication path obtained outside the local shard tree, bound to the anchor
+/// it reaches. See [`WalletCommitmentTrees::external_ironwood_witness`].
+#[cfg(feature = "orchard")]
+#[derive(Clone, Debug)]
+pub struct ExternalIronwoodWitness {
+    /// The Ironwood tree root the path authenticates to.
+    pub anchor: orchard::Anchor,
+    /// The path from the note commitment to `anchor`.
+    pub merkle_path: orchard::tree::MerklePath,
+}
+
 /// This trait describes a capability for manipulating wallet note commitment trees.
 #[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait WalletCommitmentTrees {
@@ -4394,6 +4407,21 @@ pub trait WalletCommitmentTrees {
         &mut self,
         _index: u64,
     ) -> Result<Option<orchard::tree::MerkleHashOrchard>, ShardTreeError<Self::Error>> {
+        Ok(None)
+    }
+
+    /// Returns an externally supplied, already verified witness for the Ironwood note at
+    /// `position`, if the wallet holds one (see [`pir_dag::PirDagRead`]). Transaction
+    /// construction prefers these over the local shard tree when every Ironwood input has one
+    /// at the same anchor, so a note the local tree cannot yet witness is still spendable.
+    /// The default holds none.
+    ///
+    /// [`pir_dag::PirDagRead`]: crate::data_api::pir_dag::PirDagRead
+    #[cfg(feature = "orchard")]
+    fn external_ironwood_witness(
+        &mut self,
+        _position: incrementalmerkletree::Position,
+    ) -> Result<Option<ExternalIronwoodWitness>, Self::Error> {
         Ok(None)
     }
 

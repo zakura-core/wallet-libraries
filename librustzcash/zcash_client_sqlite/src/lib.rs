@@ -1612,6 +1612,56 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> MemoPirRe
 }
 
 #[cfg(feature = "zakura-pir-memo")]
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R>
+    zcash_client_backend::data_api::pir_dag::PirDagRead for WalletDb<C, P, CL, R>
+{
+    fn dag_notes(
+        &self,
+    ) -> Result<Vec<zcash_client_backend::data_api::pir_dag::DagNote<Self::AccountId>>, Self::Error>
+    {
+        wallet::pir_dag::dag_notes(self.conn.borrow())
+    }
+
+    fn pir_witness(
+        &self,
+        position: Position,
+    ) -> Result<Option<zcash_client_backend::data_api::pir_dag::PirWitnessRecord>, Self::Error>
+    {
+        wallet::pir_dag::witness_at(self.conn.borrow(), position)
+    }
+}
+
+#[cfg(feature = "zakura-pir-memo")]
+impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
+    zcash_client_backend::data_api::pir_dag::PirDagWrite for WalletDb<C, P, CL, R>
+{
+    fn put_pir_witness(
+        &mut self,
+        witness: &zcash_client_backend::data_api::pir_dag::PirWitnessRecord,
+    ) -> Result<bool, Self::Error> {
+        self.transactionally(|wdb| wallet::pir_dag::put_witness(wdb.conn.0, witness))
+    }
+
+    fn record_pir_spend(
+        &mut self,
+        position: Position,
+        meta: zcash_client_backend::data_api::pir_dag::SpendMeta,
+        txid: [u8; 32],
+    ) -> Result<bool, Self::Error> {
+        self.transactionally(|wdb| wallet::pir_dag::record_spend(wdb.conn.0, position, meta, txid))
+    }
+
+    fn put_discovered_note(
+        &mut self,
+        note: &zcash_client_backend::data_api::pir_dag::DiscoveredNote<Self::AccountId>,
+    ) -> Result<(), Self::Error> {
+        self.transactionally(|wdb| {
+            wallet::pir_dag::put_discovered_note(wdb.conn.0, &wdb.params, note)
+        })
+    }
+}
+
+#[cfg(feature = "zakura-pir-memo")]
 impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng> MemoPirWrite
     for WalletDb<C, P, CL, R>
 {
@@ -3381,6 +3431,14 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL, R> Wallet
             .map_err(ShardTreeError::Storage)
     }
 
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-memo"))]
+    fn external_ironwood_witness(
+        &mut self,
+        position: Position,
+    ) -> Result<Option<zcash_client_backend::data_api::ExternalIronwoodWitness>, Self::Error> {
+        wallet::pir_dag::external_witness(self.conn.borrow(), position)
+    }
+
     #[cfg(feature = "orchard")]
     fn with_ironwood_tree_mut<F, A, E>(&mut self, mut callback: F) -> Result<Option<A>, E>
     where
@@ -3503,6 +3561,14 @@ impl<P: consensus::Parameters, CL, R> WalletCommitmentTrees
     ) -> Result<Option<orchard::tree::MerkleHashOrchard>, ShardTreeError<Self::Error>> {
         wallet::commitment_tree::get_subtree_root(self.conn.0, IRONWOOD_TABLES_PREFIX, index)
             .map_err(ShardTreeError::Storage)
+    }
+
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-memo"))]
+    fn external_ironwood_witness(
+        &mut self,
+        position: Position,
+    ) -> Result<Option<zcash_client_backend::data_api::ExternalIronwoodWitness>, Self::Error> {
+        wallet::pir_dag::external_witness(self.conn.0, position)
     }
 
     #[cfg(feature = "orchard")]
