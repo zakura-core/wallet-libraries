@@ -31,7 +31,8 @@ pub(crate) fn stabilized_expr(table_prefix: &str) -> String {
 pub(crate) fn dag_notes(conn: &Connection) -> Result<Vec<DagNote<AccountUuid>>, SqliteClientError> {
     let mut stmt = conn.prepare_cached(
         "SELECT a.uuid, rn.commitment_tree_position, rn.nf,
-                EXISTS (SELECT 1 FROM ironwood_pir_witnesses w WHERE w.received_note_id = rn.id)
+                EXISTS (SELECT 1 FROM ironwood_pir_witnesses w WHERE w.received_note_id = rn.id),
+                rn.witness_stabilized
          FROM ironwood_received_notes rn
          JOIN accounts a ON a.id = rn.account_id
          JOIN transactions t ON t.id_tx = rn.transaction_id
@@ -51,10 +52,11 @@ pub(crate) fn dag_notes(conn: &Connection) -> Result<Vec<DagNote<AccountUuid>>, 
         let position: i64 = row.get(1)?;
         let nf: [u8; 32] = row.get(2)?;
         let has_witness: bool = row.get(3)?;
-        Ok((uuid, position, nf, has_witness))
+        let witness_stabilized: bool = row.get(4)?;
+        Ok((uuid, position, nf, has_witness, witness_stabilized))
     })?;
     rows.map(|row| {
-        let (uuid, position, nullifier, has_witness) = row?;
+        let (uuid, position, nullifier, has_witness, witness_stabilized) = row?;
         let position = u64::try_from(position).map_err(|_| {
             SqliteClientError::CorruptedData("Ironwood note has an invalid position".to_owned())
         })?;
@@ -63,6 +65,7 @@ pub(crate) fn dag_notes(conn: &Connection) -> Result<Vec<DagNote<AccountUuid>>, 
             position: Position::from(position),
             nullifier,
             has_witness,
+            witness_stabilized,
         })
     })
     .collect()
@@ -360,6 +363,7 @@ mod tests {
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].position, first_output_position);
         assert!(!notes[0].has_witness);
+        assert!(!notes[0].witness_stabilized);
         assert_eq!(notes[0].account_id, account.id());
 
         let conn = st.wallet().conn();

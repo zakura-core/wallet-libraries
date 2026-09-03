@@ -44,6 +44,9 @@ pub struct DagNote<AccountId> {
     pub nullifier: [u8; 32],
     /// Whether a verified external witness is stored for it.
     pub has_witness: bool,
+    /// Whether the local shard tree can already witness it; such a note needs
+    /// no external witness.
+    pub witness_stabilized: bool,
 }
 
 /// A Merkle path for one note, reconstructed and verified by the client.
