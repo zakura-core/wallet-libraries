@@ -209,6 +209,9 @@ spend-index = ["transparent-inputs"]
 ## Orchard note-handling code, not the crate linkage.
 orchard = ["dep:pasta_curves", "zcash_keys/orchard"]
 
+## Enables position-keyed Ironwood compact-action enhancement APIs.
+zakura-pir-enhance = ["orchard"]
+
 ## Enables compatibility with legacy zcashd wallet data
 zcashd-compat = ["zcash_keys/zcashd-compat"]
 

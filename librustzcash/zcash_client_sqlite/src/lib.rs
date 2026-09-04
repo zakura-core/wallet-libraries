@@ -53,6 +53,12 @@ use tracing::warn;
 use util::Clock;
 use uuid::Uuid;
 
+#[cfg(feature = "zakura-pir-enhance")]
+use zcash_client_backend::data_api::enhance_pir::{
+    Authenticated, EnhancePirRead, EnhancePirRequest, EnhancePirSnapshotAnchor,
+    EnhancePirSnapshotStatus, EnhancePirWrite, EnhancementMode, IronwoodEnhanceRequestId,
+    PendingIronwoodMemo, PendingIronwoodOutgoing,
+};
 use zcash_client_backend::{
     TransferType,
     data_api::{
@@ -289,6 +295,8 @@ pub struct WalletDb<C, P, CL, R> {
     clock: CL,
     rng: R,
     anchor_retention_interval: AnchorRetentionInterval,
+    #[cfg(feature = "zakura-pir-enhance")]
+    enhancement_mode: EnhancementMode,
     #[cfg(feature = "transparent-inputs")]
     gap_limits: GapLimits,
 }
@@ -470,6 +478,8 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
                 clock,
                 rng,
                 anchor_retention_interval: AnchorRetentionInterval::default(),
+                #[cfg(feature = "zakura-pir-enhance")]
+                enhancement_mode: EnhancementMode::default(),
                 #[cfg(feature = "transparent-inputs")]
                 gap_limits: GapLimits::default(),
             })
@@ -506,6 +516,24 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     }
 }
 
+#[cfg(feature = "zakura-pir-enhance")]
+impl<C, P, CL, R> WalletDb<C, P, CL, R> {
+    /// Configures whether protected Ironwood transactions are exposed through ordinary
+    /// transaction-ID enhancement.
+    ///
+    /// This process-local setting defaults to [`EnhancementMode::Standard`] and must be reapplied
+    /// whenever the wallet is opened.
+    pub fn with_enhancement_mode(mut self, mode: EnhancementMode) -> Self {
+        self.set_enhancement_mode(mode);
+        self
+    }
+
+    /// Updates the runtime enhancement mode; see [`Self::with_enhancement_mode`].
+    pub fn set_enhancement_mode(&mut self, mode: EnhancementMode) {
+        self.enhancement_mode = mode;
+    }
+}
+
 #[cfg(feature = "transparent-inputs")]
 impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// Sets the gap limits to be used by the wallet in transparent address generation.
@@ -537,6 +565,8 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock,
             rng,
             anchor_retention_interval: AnchorRetentionInterval::default(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            enhancement_mode: EnhancementMode::default(),
             #[cfg(feature = "transparent-inputs")]
             gap_limits: GapLimits::default(),
         }
@@ -565,6 +595,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock: &self.clock,
             rng: &mut self.rng,
             anchor_retention_interval: self.anchor_retention_interval,
+            #[cfg(feature = "zakura-pir-enhance")]
+            enhancement_mode: self.enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: self.gap_limits,
         };
@@ -623,6 +655,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock: &self.clock,
             rng: &mut self.rng,
             anchor_retention_interval: self.anchor_retention_interval,
+            #[cfg(feature = "zakura-pir-enhance")]
+            enhancement_mode: self.enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: self.gap_limits,
         };
@@ -1069,6 +1103,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
             self.conn.borrow(),
             outpoint,
             Some(target_height),
+            {
+                #[cfg(feature = "zakura-pir-enhance")]
+                {
+                    self.enhancement_mode == EnhancementMode::PrivateIronwood
+                }
+                #[cfg(not(feature = "zakura-pir-enhance"))]
+                {
+                    false
+                }
+            },
         )
     }
 
@@ -1089,6 +1133,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
             confirmations_policy,
             output_filter,
             lock_filter,
+            {
+                #[cfg(feature = "zakura-pir-enhance")]
+                {
+                    self.enhancement_mode == EnhancementMode::PrivateIronwood
+                }
+                #[cfg(not(feature = "zakura-pir-enhance"))]
+                {
+                    false
+                }
+            },
         )
     }
 
@@ -1109,6 +1163,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
             confirmations_policy,
             output_filter,
             lock_filter,
+            {
+                #[cfg(feature = "zakura-pir-enhance")]
+                {
+                    self.enhancement_mode == EnhancementMode::PrivateIronwood
+                }
+                #[cfg(not(feature = "zakura-pir-enhance"))]
+                {
+                    false
+                }
+            },
         )
     }
 
@@ -1137,6 +1201,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
             max_inputs,
             fee_rule,
             lock_filter,
+            {
+                #[cfg(feature = "zakura-pir-enhance")]
+                {
+                    self.enhancement_mode == EnhancementMode::PrivateIronwood
+                }
+                #[cfg(not(feature = "zakura-pir-enhance"))]
+                {
+                    false
+                }
+            },
         )
     }
 
@@ -1531,7 +1605,18 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
         if let Some(_chain_tip_height) = wallet::chain_tip_height(self.conn.borrow())? {
-            let iter = wallet::transaction_data_requests(self.conn.borrow())?.into_iter();
+            let protect_ironwood = {
+                #[cfg(feature = "zakura-pir-enhance")]
+                {
+                    self.enhancement_mode == EnhancementMode::PrivateIronwood
+                }
+                #[cfg(not(feature = "zakura-pir-enhance"))]
+                {
+                    false
+                }
+            };
+            let iter = wallet::transaction_data_requests(self.conn.borrow(), protect_ironwood)?
+                .into_iter();
 
             #[cfg(feature = "transparent-inputs")]
             let iter = iter.chain(wallet::transparent::transaction_data_requests(
@@ -1560,6 +1645,133 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
             target_height,
             confirmations_policy,
         )
+    }
+}
+
+#[cfg(feature = "zakura-pir-enhance")]
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePirRead
+    for WalletDb<C, P, CL, R>
+{
+    fn enhance_pir_requests(&self) -> Result<Vec<EnhancePirRequest>, Self::Error> {
+        wallet::enhance_pir::requests(self.conn.borrow())
+    }
+
+    fn enhance_pir_snapshot_status(
+        &self,
+        anchor: EnhancePirSnapshotAnchor,
+    ) -> Result<EnhancePirSnapshotStatus, Self::Error> {
+        // `chain_height` is the last advertised network tip, not the wallet's scan frontier. In
+        // particular it is normally updated before scanning begins, so it cannot tell us whether
+        // the wallet has authenticated the snapshot's block yet.
+        let fully_scanned_height = wallet::fully_scanned_height(self.conn.borrow())?;
+        if fully_scanned_height.is_none_or(|height| height < anchor.height) {
+            return Ok(EnhancePirSnapshotStatus::NotYetScanned);
+        }
+        if fully_scanned_height != Some(anchor.height) {
+            // Tip-bound generations are accepted only at the exact scan
+            // frontier. This prevents an older, once-canonical generation
+            // from certifying transparent unspent status through a newer tip.
+            return Ok(EnhancePirSnapshotStatus::Mismatch);
+        }
+
+        let Some(metadata) = self.block_metadata(anchor.height)? else {
+            // A fully-scanned range is contiguous from the wallet birthday and should retain
+            // metadata for every height in that range. Missing metadata here is therefore an
+            // inconsistent local state, not a reason to trust the remote snapshot.
+            return Ok(EnhancePirSnapshotStatus::Mismatch);
+        };
+        Ok(
+            if metadata.block_hash() == anchor.block_hash
+                && metadata.ironwood_tree_size().map(u64::from) == Some(anchor.ironwood_tree_size)
+            {
+                EnhancePirSnapshotStatus::Accepted
+            } else {
+                EnhancePirSnapshotStatus::Mismatch
+            },
+        )
+    }
+
+    fn pending_ironwood_memo(
+        &self,
+        position: Position,
+    ) -> Result<Option<PendingIronwoodMemo<Self::AccountId>>, Self::Error> {
+        wallet::enhance_pir::pending(self.conn.borrow(), &self.params, position)
+    }
+
+    fn pending_ironwood_outgoing(
+        &self,
+        position: Position,
+    ) -> Result<Option<PendingIronwoodOutgoing<Self::AccountId>>, Self::Error> {
+        wallet::enhance_pir::pending_outgoing(self.conn.borrow(), position)
+    }
+
+    fn is_ironwood_enhancement_protected(&self, txid: TxId) -> Result<bool, Self::Error> {
+        wallet::enhance_pir::is_protected(self.conn.borrow(), txid)
+    }
+}
+
+#[cfg(feature = "zakura-pir-enhance")]
+impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
+    EnhancePirWrite for WalletDb<C, P, CL, R>
+{
+    fn put_ironwood_transaction_shape(
+        &mut self,
+        _authenticated: Authenticated,
+        position: Position,
+        has_transparent_outputs: bool,
+    ) -> Result<(), Self::Error> {
+        self.transactionally(|wdb| {
+            wallet::enhance_pir::put_transaction_shape(
+                wdb.conn.0,
+                position,
+                has_transparent_outputs,
+            )
+        })
+    }
+
+    fn put_ironwood_memo(
+        &mut self,
+        _authenticated: Authenticated,
+        position: Position,
+        request_id: IronwoodEnhanceRequestId,
+        memo: &zcash_protocol::memo::MemoBytes,
+    ) -> Result<bool, Self::Error> {
+        self.transactionally(|wdb| wallet::enhance_pir::put(wdb.conn.0, position, request_id, memo))
+    }
+
+    fn put_ironwood_sent_output(
+        &mut self,
+        _authenticated: Authenticated,
+        position: Position,
+        request_id: IronwoodEnhanceRequestId,
+        from_account: Self::AccountId,
+        recipient: orchard::Address,
+        value: zcash_protocol::value::Zatoshis,
+        memo: &zcash_protocol::memo::MemoBytes,
+    ) -> Result<bool, Self::Error> {
+        self.transactionally(|wdb| {
+            wallet::enhance_pir::put_outgoing(
+                wdb.conn.0,
+                wdb.params,
+                position,
+                request_id,
+                from_account,
+                recipient,
+                value,
+                memo,
+            )
+        })
+    }
+
+    fn retire_ironwood_outgoing(
+        &mut self,
+        _authenticated: Authenticated,
+        position: Position,
+        request_id: IronwoodEnhanceRequestId,
+    ) -> Result<bool, Self::Error> {
+        self.transactionally(|wdb| {
+            wallet::enhance_pir::retire_outgoing(wdb.conn.0, position, request_id)
+        })
     }
 }
 
@@ -1690,6 +1902,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletTes
             self.conn.borrow(),
             outpoint,
             target_height,
+            false,
         )
     }
 
@@ -2056,6 +2269,19 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         as_of_height: BlockHeight,
     ) -> Result<(), <Self as WalletRead>::Error> {
         self.transactionally(|wdb| wdb.notify_output_verified_unspent(outpoint, as_of_height))
+    }
+
+    #[cfg(feature = "spend-index")]
+    fn notify_output_spent(
+        &mut self,
+        outpoint: OutPoint,
+        spending_txid: TxId,
+        mined_height: BlockHeight,
+        tx_index: TxIndex,
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        self.transactionally(|wdb| {
+            wdb.notify_output_spent(outpoint, spending_txid, mined_height, tx_index)
+        })
     }
 }
 
@@ -2588,6 +2814,24 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             as_of_height,
         )
     }
+
+    #[cfg(feature = "spend-index")]
+    fn notify_output_spent(
+        &mut self,
+        outpoint: OutPoint,
+        spending_txid: TxId,
+        mined_height: BlockHeight,
+        tx_index: TxIndex,
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        let spent_in_tx = wallet::put_transparent_spending_tx_meta(
+            self.conn.0,
+            spending_txid,
+            mined_height,
+            tx_index,
+        )?;
+        wallet::transparent::mark_transparent_utxo_spent(self.conn.0, spent_in_tx, &outpoint)?;
+        Ok(())
+    }
 }
 
 impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clock, R: Rng>
@@ -2689,6 +2933,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             self.conn.borrow(),
             outpoint,
             target_height,
+            false,
         )
     }
 
@@ -2872,6 +3117,8 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             tx_ref,
             target_or_mined_height,
             spent_in,
+            #[cfg(feature = "zakura-pir-enhance")]
+            true,
         )?;
 
         Ok(())
@@ -2884,6 +3131,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         tx_ref: Self::TxRef,
         target_or_mined_height: Option<BlockHeight>,
         spent_in: Option<Self::TxRef>,
+        #[cfg(feature = "zakura-pir-enhance")] pir_eligible: bool,
     ) -> Result<(), Self::Error> {
         wallet::orchard::put_received_note(
             self.conn.borrow(),
@@ -2893,6 +3141,8 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             tx_ref,
             target_or_mined_height,
             spent_in,
+            #[cfg(feature = "zakura-pir-enhance")]
+            pir_eligible,
         )?;
 
         Ok(())
@@ -3934,6 +4184,8 @@ mod tests {
     use zcash_protocol::{consensus, local_consensus::LocalNetwork};
     use zip32::DiversifierIndex;
 
+    #[cfg(any(feature = "zakura-pir-enhance", feature = "transparent-inputs"))]
+    use crate::testing::BlockCache;
     use crate::{
         AccountUuid,
         error::SqliteClientError,
@@ -3958,7 +4210,7 @@ mod tests {
     };
     #[cfg(feature = "transparent-inputs")]
     use {
-        crate::{GapLimits, testing::BlockCache, wallet::transparent::transaction_data_requests},
+        crate::{GapLimits, wallet::transparent::transaction_data_requests},
         std::collections::BTreeSet,
         zcash_client_backend::data_api::TransactionDataRequest,
     };
@@ -3980,6 +4232,659 @@ mod tests {
             st.wallet().get_wallet_recover_until().unwrap(),
             Some(zcash_protocol::consensus::BlockHeight::from_u32(123456))
         );
+    }
+
+    #[cfg(feature = "zakura-pir-enhance")]
+    #[test]
+    fn enhance_pir_snapshot_waits_for_the_scan_frontier() {
+        use zcash_client_backend::data_api::enhance_pir::{
+            EnhancePirRead, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus,
+        };
+        use zcash_protocol::consensus::BlockHeight;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let anchor_height = BlockHeight::from_u32(2_000_000);
+
+        // Learning a network tip above the snapshot does not mean the wallet has scanned the
+        // snapshot height. This is the normal state immediately before a restored wallet syncs.
+        st.wallet_mut().update_chain_tip(anchor_height + 1).unwrap();
+
+        assert_eq!(
+            st.wallet()
+                .db()
+                .enhance_pir_snapshot_status(EnhancePirSnapshotAnchor {
+                    height: anchor_height,
+                    block_hash: BlockHash([0; 32]),
+                    ironwood_tree_size: 0,
+                })
+                .unwrap(),
+            EnhancePirSnapshotStatus::NotYetScanned
+        );
+    }
+
+    #[cfg(feature = "zakura-pir-enhance")]
+    #[test]
+    fn enhance_pir_snapshot_requires_matching_scanned_metadata() {
+        use zcash_client_backend::data_api::enhance_pir::{
+            EnhancePirRead, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus,
+        };
+        use zcash_protocol::consensus::BlockHeight;
+
+        let activation = BlockHeight::from_u32(100_000);
+        let network = LocalNetwork {
+            nu6: Some(activation),
+            nu6_1: Some(activation),
+            nu6_2: Some(activation),
+            nu6_3: Some(activation),
+            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+        };
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let (anchor_height, _) = st.generate_empty_block();
+        let (later_height, _) = st.generate_empty_block();
+        st.scan_cached_blocks(anchor_height, 2);
+        let old_anchor_hash = st
+            .wallet()
+            .db()
+            .block_metadata(anchor_height)
+            .unwrap()
+            .unwrap()
+            .block_hash();
+
+        let old_anchor = EnhancePirSnapshotAnchor {
+            height: anchor_height,
+            block_hash: old_anchor_hash,
+            ironwood_tree_size: 0,
+        };
+        assert_eq!(
+            st.wallet()
+                .db()
+                .enhance_pir_snapshot_status(old_anchor)
+                .unwrap(),
+            EnhancePirSnapshotStatus::Mismatch,
+            "a generation below the fully-scanned tip must be rejected"
+        );
+        let anchor = EnhancePirSnapshotAnchor {
+            height: later_height,
+            block_hash: st
+                .wallet()
+                .db()
+                .block_metadata(later_height)
+                .unwrap()
+                .unwrap()
+                .block_hash(),
+            ironwood_tree_size: 0,
+        };
+        assert_eq!(
+            st.wallet()
+                .db()
+                .enhance_pir_snapshot_status(anchor)
+                .unwrap(),
+            EnhancePirSnapshotStatus::Accepted
+        );
+        assert_eq!(
+            st.wallet()
+                .db()
+                .enhance_pir_snapshot_status(EnhancePirSnapshotAnchor {
+                    block_hash: BlockHash([9; 32]),
+                    ..anchor
+                })
+                .unwrap(),
+            EnhancePirSnapshotStatus::Mismatch
+        );
+        assert_eq!(
+            st.wallet()
+                .db()
+                .enhance_pir_snapshot_status(EnhancePirSnapshotAnchor {
+                    ironwood_tree_size: 1,
+                    ..anchor
+                })
+                .unwrap(),
+            EnhancePirSnapshotStatus::Mismatch
+        );
+
+        st.wallet_mut()
+            .conn_mut()
+            .execute(
+                "DELETE FROM blocks WHERE height = ?1",
+                [u32::from(later_height)],
+            )
+            .unwrap();
+        assert_eq!(
+            st.wallet()
+                .db()
+                .enhance_pir_snapshot_status(anchor)
+                .unwrap(),
+            EnhancePirSnapshotStatus::Mismatch,
+            "missing metadata below the scan frontier at {later_height} is inconsistent"
+        );
+    }
+
+    /// Disabling the PIR setting is the only escape from protection, and it must expose exactly
+    /// the transactions PIR has not finished with: incomplete ones become ordinary enhancement
+    /// requests again, while completed ones stay invisible because completion retired them. A
+    /// user who never disables the setting exposes nothing.
+    #[cfg(feature = "zakura-pir-enhance")]
+    #[test]
+    fn disabling_private_enhancement_exposes_only_unfinished_transactions() {
+        use incrementalmerkletree::Position;
+        use orchard::keys::Scope;
+        use zcash_client_backend::{
+            data_api::{
+                Account as _, TransactionDataRequest,
+                enhance_pir::{Authenticated, EnhancePirRead, EnhancePirWrite, EnhancementMode},
+                testing::{
+                    AddressType, IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
+                },
+            },
+            wallet::IronwoodEnhanceCandidate,
+        };
+        use zcash_protocol::{consensus::BlockHeight, memo::MemoBytes, value::Zatoshis};
+
+        let activation = BlockHeight::from_u32(100_000);
+        let network = LocalNetwork {
+            nu6: Some(activation),
+            nu6_1: Some(activation),
+            nu6_2: Some(activation),
+            nu6_3: Some(activation),
+            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+        };
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let account_id = st.test_account().unwrap().id();
+        let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+        let recipient = fvk.0.address_at(3u32, Scope::External);
+        let (height, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(10_000),
+        );
+        st.scan_cached_blocks(height, 1);
+
+        let (tx_ref, txid) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id_tx, txid FROM transactions WHERE mined_height = ?1",
+                [u32::from(height)],
+                |row| Ok((crate::TxRef(row.get(0)?), row.get::<_, Vec<u8>>(1)?)),
+            )
+            .unwrap();
+
+        let position = Position::from(99);
+        crate::wallet::enhance_pir::queue_outgoing(
+            st.wallet().conn(),
+            tx_ref,
+            &[IronwoodEnhanceCandidate::from_parts(
+                position,
+                4,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                [4; 52],
+                vec![account_id],
+            )],
+            true,
+        )
+        .unwrap();
+
+        let enhancement_requested = |st: &TestState<BlockCache, TestDb, LocalNetwork>| {
+            st.wallet()
+                .db()
+                .transaction_data_requests()
+                .unwrap()
+                .iter()
+                .any(|request| {
+                    matches!(
+                        request,
+                        TransactionDataRequest::Enhancement(requested)
+                            if requested.as_ref() == txid.as_slice()
+                    )
+                })
+        };
+
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+        assert!(
+            !enhancement_requested(&st),
+            "a protected transaction must not be requested by txid while PIR is enabled"
+        );
+
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::Standard);
+        assert!(
+            enhancement_requested(&st),
+            "disabling PIR must fall back to ordinary enhancement for unfinished work"
+        );
+
+        // Protection is transaction-wide, so the transaction is only finished when every one of
+        // its positions is: the note the wallet received here still needs its memo, alongside the
+        // outgoing candidate queued above.
+        let memo = MemoBytes::from_bytes(&[3; 512]).unwrap();
+        let incoming = st
+            .wallet()
+            .db()
+            .enhance_pir_requests()
+            .unwrap()
+            .into_iter()
+            .map(|request| request.position())
+            .find(|candidate| *candidate != position)
+            .expect("the received note awaits its memo");
+
+        let incoming_id = st
+            .wallet()
+            .db()
+            .pending_ironwood_memo(incoming)
+            .unwrap()
+            .unwrap()
+            .request_id;
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .put_ironwood_memo(Authenticated::for_testing(), incoming, incoming_id, &memo)
+                .unwrap()
+        );
+        assert!(
+            enhancement_requested(&st),
+            "one position still outstanding keeps the standard fallback available"
+        );
+
+        let request_id = st
+            .wallet()
+            .db()
+            .pending_ironwood_outgoing(position)
+            .unwrap()
+            .unwrap()
+            .request_id;
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .put_ironwood_sent_output(
+                    Authenticated::for_testing(),
+                    position,
+                    request_id,
+                    account_id,
+                    recipient,
+                    Zatoshis::const_from_u64(123),
+                    &memo,
+                )
+                .unwrap()
+        );
+
+        for mode in [EnhancementMode::Standard, EnhancementMode::PrivateIronwood] {
+            st.wallet_mut().db_mut().set_enhancement_mode(mode);
+            assert!(
+                !enhancement_requested(&st),
+                "a completed transaction stays retired in {mode:?}"
+            );
+        }
+    }
+
+    /// A record whose `cv_net` and `out_ciphertext` do not recover must not cost the wallet its
+    /// transaction-ID fallback.
+    ///
+    /// Those two fields are the only ones a record carries that are not bound to the compact
+    /// action the wallet scanned, and they are exactly what recovery consumes, so a server can
+    /// pair the genuine on-chain prefix with forged versions of them and force non-recovery for
+    /// any position it chooses. The transaction must stay recoverable by the ordinary path for a
+    /// user who later disables Enhance PIR.
+    #[cfg(feature = "zakura-pir-enhance")]
+    #[test]
+    fn unrecoverable_outgoing_records_do_not_cost_the_txid_fallback() {
+        use incrementalmerkletree::Position;
+        use zakura_pir_enhance::{EnhanceRecord, EnhanceRecordParts, apply_record};
+        use zcash_client_backend::{
+            data_api::{
+                Account as _, TransactionDataRequest,
+                enhance_pir::{
+                    Authenticated, EnhancePirRead, EnhancePirRequest, EnhancePirStoreResult,
+                    EnhancePirWrite, EnhancementMode,
+                },
+                testing::{
+                    AddressType, IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
+                },
+            },
+            wallet::IronwoodEnhanceCandidate,
+        };
+        use zcash_protocol::{consensus::BlockHeight, memo::MemoBytes, value::Zatoshis};
+
+        let activation = BlockHeight::from_u32(100_000);
+        let network = LocalNetwork {
+            nu6: Some(activation),
+            nu6_1: Some(activation),
+            nu6_2: Some(activation),
+            nu6_3: Some(activation),
+            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+        };
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let account_id = st.test_account().unwrap().id();
+        let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+        let (height, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(10_000),
+        );
+        st.scan_cached_blocks(height, 1);
+
+        let (tx_ref, txid) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id_tx, txid FROM transactions WHERE mined_height = ?1",
+                [u32::from(height)],
+                |row| Ok((crate::TxRef(row.get(0)?), row.get::<_, Vec<u8>>(1)?)),
+            )
+            .unwrap();
+
+        let position = Position::from(99);
+        let ephemeral_key = [3; 32];
+        let compact_ciphertext = [4; 52];
+        crate::wallet::enhance_pir::queue_outgoing(
+            st.wallet().conn(),
+            tx_ref,
+            &[IronwoodEnhanceCandidate::from_parts(
+                position,
+                4,
+                [1; 32],
+                [2; 32],
+                ephemeral_key,
+                compact_ciphertext,
+                vec![account_id],
+            )],
+            true,
+        )
+        .unwrap();
+
+        let record = |ephemeral_key: [u8; 32]| {
+            let mut enc_ciphertext = [0; 580];
+            enc_ciphertext[..52].copy_from_slice(&compact_ciphertext);
+            EnhanceRecord::from_parts(EnhanceRecordParts {
+                ephemeral_key,
+                enc_ciphertext,
+                // Neither field is bound to anything the wallet scanned, so a server is free to
+                // choose them; nothing here can be recovered under any outgoing viewing key.
+                cv_net: [5; 32],
+                out_ciphertext: [6; 80],
+                has_transparent_inputs: false,
+                has_transparent_outputs: false,
+            })
+        };
+        let request = EnhancePirRequest::from_position(position);
+
+        // A record for some other action is refused outright, and leaves the work in place.
+        let applied = apply_record(st.wallet_mut().db_mut(), request, &record([7; 32])).unwrap();
+        assert_eq!(applied.outgoing, EnhancePirStoreResult::Rejected);
+        assert_eq!(
+            st.wallet().db().enhance_pir_requests().unwrap().len(),
+            2,
+            "a rejected record must not consume the position"
+        );
+
+        // The genuine action, with the two unbound fields forged, cannot be recovered.
+        let applied =
+            apply_record(st.wallet_mut().db_mut(), request, &record(ephemeral_key)).unwrap();
+        assert_eq!(applied.outgoing, EnhancePirStoreResult::NotRecoverable);
+        assert_eq!(
+            st.wallet()
+                .db()
+                .enhance_pir_requests()
+                .unwrap()
+                .into_iter()
+                .map(|request| request.position())
+                .collect::<Vec<_>>(),
+            vec![Position::from(0)],
+            "the position stops being offered as work"
+        );
+        assert_eq!(
+            apply_record(st.wallet_mut().db_mut(), request, &record(ephemeral_key))
+                .unwrap()
+                .outgoing,
+            EnhancePirStoreResult::AlreadyResolved,
+            "and cannot be applied a second time"
+        );
+
+        // Drive the transaction's remaining position to genuine completion. This is the moment
+        // the erasure would land: if the unrecovered position had been dropped rather than
+        // marked, nothing would distinguish it from a completed one, and this completion would
+        // retire the transaction's fallback on its behalf.
+        let incoming = Position::from(0);
+        let incoming_id = st
+            .wallet()
+            .db()
+            .pending_ironwood_memo(incoming)
+            .unwrap()
+            .unwrap()
+            .request_id;
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .put_ironwood_memo(
+                    Authenticated::for_testing(),
+                    incoming,
+                    incoming_id,
+                    &MemoBytes::empty(),
+                )
+                .unwrap()
+        );
+        assert!(
+            st.wallet().db().enhance_pir_requests().unwrap().is_empty(),
+            "no Enhance PIR work remains to be issued"
+        );
+
+        let enhancement_requested = |st: &TestState<BlockCache, TestDb, LocalNetwork>| {
+            st.wallet()
+                .db()
+                .transaction_data_requests()
+                .unwrap()
+                .iter()
+                .any(|request| {
+                    matches!(
+                        request,
+                        TransactionDataRequest::Enhancement(requested)
+                            if requested.as_ref() == txid.as_slice()
+                    )
+                })
+        };
+
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+        assert!(
+            !enhancement_requested(&st),
+            "the transaction stays protected while the setting is on"
+        );
+
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::Standard);
+        assert!(
+            enhancement_requested(&st),
+            "a server must not be able to erase the transaction from every retrieval path"
+        );
+    }
+
+    #[cfg(feature = "zakura-pir-enhance")]
+    #[test]
+    fn enhance_pir_outgoing_completion_stores_fields_exactly_once() {
+        use incrementalmerkletree::Position;
+        use orchard::keys::Scope;
+        use zcash_client_backend::{
+            data_api::{
+                Account as _,
+                enhance_pir::{Authenticated, EnhancePirRead, EnhancePirWrite},
+                testing::{
+                    AddressType, IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
+                },
+            },
+            wallet::IronwoodEnhanceCandidate,
+        };
+        use zcash_protocol::{consensus::BlockHeight, memo::MemoBytes, value::Zatoshis};
+
+        let activation = BlockHeight::from_u32(100_000);
+        let network = LocalNetwork {
+            nu6: Some(activation),
+            nu6_1: Some(activation),
+            nu6_2: Some(activation),
+            nu6_3: Some(activation),
+            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+        };
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let account_id = st.test_account().unwrap().id();
+        let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+        let recipient = fvk.0.address_at(3u32, Scope::External);
+        let (height, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(10_000),
+        );
+        st.scan_cached_blocks(height, 1);
+        let tx_ref = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id_tx FROM transactions WHERE mined_height = ?1",
+                [u32::from(height)],
+                |row| row.get::<_, i64>(0).map(crate::TxRef),
+            )
+            .unwrap();
+        let position = Position::from(99);
+        crate::wallet::enhance_pir::queue_outgoing(
+            st.wallet().conn(),
+            tx_ref,
+            &[IronwoodEnhanceCandidate::from_parts(
+                position,
+                4,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                [4; 52],
+                vec![account_id],
+            )],
+            true,
+        )
+        .unwrap();
+        let memo = MemoBytes::from_bytes(&[3; 512]).unwrap();
+        let request_id = st
+            .wallet()
+            .db()
+            .pending_ironwood_outgoing(position)
+            .unwrap()
+            .unwrap()
+            .request_id;
+        crate::wallet::enhance_pir::queue_outgoing(
+            st.wallet().conn(),
+            tx_ref,
+            &[IronwoodEnhanceCandidate::from_parts(
+                position,
+                5,
+                [4; 32],
+                [5; 32],
+                [6; 32],
+                [7; 52],
+                vec![account_id],
+            )],
+            true,
+        )
+        .unwrap();
+        let replacement_id = st
+            .wallet()
+            .db()
+            .pending_ironwood_outgoing(position)
+            .unwrap()
+            .unwrap()
+            .request_id;
+
+        assert!(
+            !st.wallet_mut()
+                .db_mut()
+                .put_ironwood_sent_output(
+                    Authenticated::for_testing(),
+                    position,
+                    request_id,
+                    account_id,
+                    recipient,
+                    Zatoshis::const_from_u64(123),
+                    &memo,
+                )
+                .unwrap(),
+            "a stale identity must not complete a reassigned position"
+        );
+
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .put_ironwood_sent_output(
+                    Authenticated::for_testing(),
+                    position,
+                    replacement_id,
+                    account_id,
+                    recipient,
+                    Zatoshis::const_from_u64(123),
+                    &memo,
+                )
+                .unwrap()
+        );
+        assert!(
+            !st.wallet_mut()
+                .db_mut()
+                .put_ironwood_sent_output(
+                    Authenticated::for_testing(),
+                    position,
+                    replacement_id,
+                    account_id,
+                    recipient,
+                    Zatoshis::const_from_u64(123),
+                    &memo,
+                )
+                .unwrap()
+        );
+        assert!(
+            !st.wallet()
+                .db()
+                .enhance_pir_requests()
+                .unwrap()
+                .iter()
+                .any(|request| request.position() == position)
+        );
+        let (output_index, value, stored_memo, has_recipient): (i64, i64, Vec<u8>, bool) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT output_index, value, memo,
+                        to_address IS NOT NULL OR to_account_id IS NOT NULL
+                 FROM sent_notes
+                 WHERE transaction_id = ?1 AND output_index = 5",
+                [tx_ref.0],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(output_index, 5);
+        assert_eq!(value, 123);
+        assert_eq!(MemoBytes::from_bytes(&stored_memo).unwrap(), memo);
+        assert!(has_recipient);
     }
 
     #[test]

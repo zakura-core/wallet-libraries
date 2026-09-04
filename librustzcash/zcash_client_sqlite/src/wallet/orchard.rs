@@ -525,6 +525,126 @@ pub(crate) fn parse_note_version(code: i64) -> Option<NoteVersion> {
     }
 }
 
+/// Selects the Ironwood note `:received_note_id` if Enhance PIR could still complete it: the memo is
+/// not yet known, the note has a commitment tree position to query by, and its plaintext version
+/// is one that Enhance PIR can decrypt.
+///
+/// Minedness is part of the predicate because truncation un-mines a transaction without deleting
+/// its notes or clearing their commitment tree positions, so an un-mined note may still be
+/// carrying a position that now belongs to a different note. Requiring the transaction to be
+/// mined is what makes the note the authoritative claimant of that position.
+const MEMO_RETRIEVAL_ELIGIBLE: &str = "
+    FROM ironwood_received_notes rn
+    JOIN transactions t ON t.id_tx = rn.transaction_id
+    WHERE rn.id = :received_note_id
+      AND rn.memo IS NULL
+      AND rn.commitment_tree_position IS NOT NULL
+      AND rn.note_version = :v3
+      AND t.mined_height IS NOT NULL";
+
+/// Brings the memo retrieval queue into agreement with the stored state of one Ironwood note.
+///
+/// This reconciles from the final database row rather than from this call's compact or full
+/// input, because the upsert preserves an already-known memo and position via `IFNULL`: a compact
+/// record may arrive after a full one, and it must not re-queue a note whose memo is already
+/// stored.
+///
+/// The eviction step exists because a commitment tree position is unique in the queue but *not*
+/// in `ironwood_received_notes`. After a reorg, a note whose transaction was un-mined keeps its
+/// old position, so a rescan that assigns that position to a different note would otherwise
+/// violate the queue's `UNIQUE(commitment_tree_position)` constraint and abort the whole scan.
+fn reconcile_memo_retrieval_queue(
+    conn: &rusqlite::Transaction,
+    received_note_id: i64,
+    #[cfg(feature = "zakura-pir-enhance")] pir_eligible: bool,
+) -> Result<(), SqliteClientError> {
+    #[cfg(feature = "zakura-pir-enhance")]
+    if !pir_eligible {
+        conn.execute(
+            "DELETE FROM ironwood_memo_retrieval_queue
+             WHERE received_note_id IN (
+                 SELECT other.id
+                 FROM ironwood_received_notes current
+                 JOIN ironwood_received_notes other
+                   ON other.transaction_id = current.transaction_id
+                 WHERE current.id = :received_note_id
+             )",
+            named_params![":received_note_id": received_note_id],
+        )?;
+        conn.execute(
+            "DELETE FROM ironwood_enhance_outgoing_queue
+             WHERE transaction_id = (
+                 SELECT transaction_id
+                 FROM ironwood_received_notes
+                 WHERE id = :received_note_id
+             )",
+            named_params![":received_note_id": received_note_id],
+        )?;
+        conn.execute(
+            "DELETE FROM ironwood_enhance_tx_protection
+             WHERE transaction_id = (
+                 SELECT transaction_id
+                 FROM ironwood_received_notes
+                 WHERE id = :received_note_id
+             )",
+            named_params![":received_note_id": received_note_id],
+        )?;
+        return Ok(());
+    }
+
+    let params = named_params![
+        ":received_note_id": received_note_id,
+        ":v3": note_version_code(NoteVersion::V3),
+    ];
+
+    // Drop this note's own entry if it is no longer something Enhance PIR can complete.
+    conn.prepare_cached(&format!(
+        "DELETE FROM ironwood_memo_retrieval_queue
+         WHERE received_note_id = :received_note_id
+           AND NOT EXISTS (SELECT 1 {MEMO_RETRIEVAL_ELIGIBLE})"
+    ))?
+    .execute(params)?;
+
+    // Evict any other note's stale claim on the position this note now authoritatively holds,
+    // so that the upsert below cannot collide on `commitment_tree_position`.
+    conn.prepare_cached(&format!(
+        "DELETE FROM ironwood_memo_retrieval_queue
+         WHERE received_note_id <> :received_note_id
+           AND commitment_tree_position IN (
+               SELECT rn.commitment_tree_position {MEMO_RETRIEVAL_ELIGIBLE}
+           )"
+    ))?
+    .execute(params)?;
+
+    // Queue this note, or move its existing entry to the position it now holds.
+    conn.prepare_cached(&format!(
+        "INSERT INTO ironwood_memo_retrieval_queue (
+             received_note_id, commitment_tree_position
+         )
+         SELECT rn.id, rn.commitment_tree_position {MEMO_RETRIEVAL_ELIGIBLE}
+         ON CONFLICT(received_note_id) DO UPDATE SET
+             commitment_tree_position = excluded.commitment_tree_position"
+    ))?
+    .execute(params)?;
+
+    // Protect the transaction on exactly the condition that queued the note above. A protected
+    // transaction is one Enhance PIR is expected to complete, so protecting a note the queue
+    // will not carry — an un-mined one, or a plaintext version PIR cannot decrypt — would
+    // withhold the transaction from transaction-ID enhancement with no PIR work outstanding
+    // that could ever release it.
+    #[cfg(feature = "zakura-pir-enhance")]
+    conn.prepare_cached(&format!(
+        "INSERT INTO ironwood_enhance_tx_protection (
+             transaction_id, commitment_tree_position
+         )
+         SELECT rn.transaction_id, rn.commitment_tree_position {MEMO_RETRIEVAL_ELIGIBLE}
+         ON CONFLICT DO NOTHING"
+    ))?
+    .execute(params)?;
+
+    Ok(())
+}
+
 /// Records the specified shielded output as having been received.
 ///
 /// The output's note plaintext version determines the pool to which the note belongs — version 2
@@ -542,6 +662,7 @@ pub(crate) fn parse_note_version(code: i64) -> Option<NoteVersion> {
 /// version is recorded in the `note_version` column but does not influence table selection. This
 /// lets the scanner route its separate Orchard and Ironwood output streams to their respective
 /// tables while the decrypted-transaction path selects the table from the note version.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn put_received_note<
     T: ReceivedOrchardOutput<AccountId = AccountUuid>,
     P: consensus::Parameters,
@@ -553,6 +674,7 @@ pub(crate) fn put_received_note<
     tx_ref: TxRef,
     target_or_mined_height: Option<BlockHeight>,
     spent_in: Option<TxRef>,
+    #[cfg(feature = "zakura-pir-enhance")] pir_eligible: bool,
 ) -> Result<AccountRef, SqliteClientError> {
     let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(shielded_pool)?;
 
@@ -612,6 +734,15 @@ pub(crate) fn put_received_note<
     let received_note_id = stmt_upsert_received_note
         .query_row(sql_args, |row| row.get::<_, i64>(0))
         .map_err(SqliteClientError::from)?;
+
+    if shielded_pool == ShieldedPool::Ironwood {
+        reconcile_memo_retrieval_queue(
+            conn,
+            received_note_id,
+            #[cfg(feature = "zakura-pir-enhance")]
+            pir_eligible,
+        )?;
+    }
 
     if let Some(spent_in) = spent_in {
         conn.execute(
@@ -1306,6 +1437,8 @@ pub(crate) mod tests {
             tx_ref,
             None,
             None,
+            #[cfg(feature = "zakura-pir-enhance")]
+            true,
         )
         .unwrap();
         super::put_received_note(
@@ -1316,6 +1449,8 @@ pub(crate) mod tests {
             tx_ref,
             None,
             None,
+            #[cfg(feature = "zakura-pir-enhance")]
+            true,
         )
         .unwrap();
 
@@ -2612,6 +2747,279 @@ pub(crate) mod tests {
                 stale_checkpoints, 0,
                 "truncation must remove Ironwood tree checkpoints above the truncation height",
             );
+        }
+
+        /// The memo retrieval queue as `(received_note_id, commitment_tree_position)` rows.
+        fn memo_queue(conn: &rusqlite::Connection) -> Vec<(i64, i64)> {
+            conn.prepare(
+                "SELECT received_note_id, commitment_tree_position
+                 FROM ironwood_memo_retrieval_queue
+                 ORDER BY commitment_tree_position",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        }
+
+        /// A reorg un-mines a transaction without deleting its Ironwood notes or clearing their
+        /// commitment tree positions, so a rescan can legitimately assign a position that a stale
+        /// note still claims. The memo retrieval queue requires positions to be unique, so
+        /// reconciling it while storing the new note must resolve that collision; otherwise the
+        /// `UNIQUE` constraint aborts `put_received_note` and takes block scanning down with it.
+        #[test]
+        fn rescanning_a_reorged_ironwood_position_does_not_abort_the_scan() {
+            let mut st = TestBuilder::new()
+                .with_network(ironwood_active_network())
+                .with_data_store_factory(TestDbFactory::default())
+                .with_block_cache(BlockCache::new())
+                .with_account_from_sapling_activation(BlockHash([0; 32]))
+                .build();
+
+            let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+            let value = Zatoshis::const_from_u64(100_000);
+
+            // Two Ironwood notes in consecutive blocks take tree positions 0 and 1, and both are
+            // queued for memo retrieval because compact scanning never learns their memos.
+            let (h0, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+            let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+            st.scan_cached_blocks(h0, 2);
+
+            let queued = memo_queue(st.wallet().conn());
+            assert_eq!(
+                queued.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
+                vec![0, 1],
+                "both compact-scanned Ironwood notes should await memo retrieval",
+            );
+            let stale_note_id = queued[1].0;
+
+            // A reorg rolls the wallet back past the second block. Its note row survives, still
+            // carrying position 1, but its transaction is no longer mined.
+            st.truncate_to_height(h0);
+            assert_eq!(
+                memo_queue(st.wallet().conn()),
+                vec![queued[0]],
+                "un-mined notes must not be left queued: their positions are no longer theirs",
+            );
+
+            // A different block arrives at the same height, and its Ironwood note therefore takes
+            // the same tree position the stale note still claims.
+            let (replacement, _, _) = st.generate_next_block(
+                &fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(200_000),
+            );
+            assert_eq!(replacement, h1, "the replacement block reuses the height");
+            st.scan_cached_blocks(h1, 1);
+
+            let queued = memo_queue(st.wallet().conn());
+            assert_eq!(
+                queued.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
+                vec![0, 1],
+                "the rescanned note should hold position 1 in the queue",
+            );
+            assert_ne!(
+                queued[1].0, stale_note_id,
+                "position 1 should be claimed by the rescanned note, not the reorged-out one",
+            );
+        }
+
+        /// The same collision, but with the stale queue entry present at the moment of the
+        /// rescan. A wallet migrated from a release that queued notes without dequeuing them on
+        /// truncation can be in exactly this state, so reconciliation must evict the stale
+        /// claimant rather than rely on truncation having already removed it.
+        #[test]
+        fn rescanning_evicts_a_stale_claim_on_an_ironwood_position() {
+            let mut st = TestBuilder::new()
+                .with_network(ironwood_active_network())
+                .with_data_store_factory(TestDbFactory::default())
+                .with_block_cache(BlockCache::new())
+                .with_account_from_sapling_activation(BlockHash([0; 32]))
+                .build();
+
+            let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+            let value = Zatoshis::const_from_u64(100_000);
+
+            let (h0, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+            let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+            st.scan_cached_blocks(h0, 2);
+            let stale_note_id = memo_queue(st.wallet().conn())[1].0;
+
+            st.truncate_to_height(h0);
+
+            // Restore the entry truncation removed, reproducing a database that reorged under a
+            // release which did not dequeue un-mined notes.
+            st.wallet_mut()
+                .conn_mut()
+                .execute(
+                    "INSERT INTO ironwood_memo_retrieval_queue (
+                         received_note_id, commitment_tree_position
+                     ) VALUES (?1, 1)",
+                    [stale_note_id],
+                )
+                .unwrap();
+
+            st.generate_next_block(
+                &fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(200_000),
+            );
+            st.scan_cached_blocks(h1, 1);
+
+            let queued = memo_queue(st.wallet().conn());
+            assert_eq!(
+                queued.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
+                vec![0, 1],
+                "exactly one note should claim each position after the rescan",
+            );
+            assert_ne!(
+                queued[1].0, stale_note_id,
+                "the stale claim on position 1 should have been evicted",
+            );
+        }
+
+        /// Protection must be established on exactly the condition that queues a note.
+        ///
+        /// A protected transaction is withheld from transaction-ID enhancement on the promise
+        /// that Enhance PIR will complete it. Protecting a note the queue will not carry — here
+        /// one whose transaction is not mined, so its commitment tree position is not
+        /// authoritative — would withhold the transaction with no PIR work outstanding that
+        /// could ever release it.
+        #[cfg(feature = "zakura-pir-enhance")]
+        #[test]
+        fn ineligible_notes_neither_queue_nor_protect() {
+            let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(
+                "CREATE TABLE transactions (id_tx INTEGER PRIMARY KEY, mined_height INTEGER);
+                 CREATE TABLE ironwood_received_notes (
+                     id INTEGER PRIMARY KEY,
+                     transaction_id INTEGER NOT NULL,
+                     memo BLOB,
+                     commitment_tree_position INTEGER,
+                     note_version INTEGER NOT NULL
+                 );
+                 CREATE TABLE ironwood_memo_retrieval_queue (
+                     received_note_id INTEGER PRIMARY KEY,
+                     commitment_tree_position INTEGER NOT NULL UNIQUE
+                 );
+                 CREATE TABLE ironwood_enhance_outgoing_queue (
+                     commitment_tree_position INTEGER PRIMARY KEY,
+                     transaction_id INTEGER NOT NULL
+                 );
+                 CREATE TABLE ironwood_enhance_tx_protection (
+                     transaction_id INTEGER NOT NULL,
+                     commitment_tree_position INTEGER NOT NULL,
+                     PRIMARY KEY(transaction_id, commitment_tree_position)
+                 );
+                 INSERT INTO transactions VALUES (1, 100), (2, NULL);
+                 INSERT INTO ironwood_received_notes VALUES (1, 1, NULL, 9, 3);
+                 INSERT INTO ironwood_received_notes VALUES (2, 2, NULL, 10, 3);",
+            )
+            .unwrap();
+
+            let protection = |tx: &rusqlite::Transaction<'_>| -> Vec<(i64, i64)> {
+                tx.prepare(
+                    "SELECT transaction_id, commitment_tree_position
+                     FROM ironwood_enhance_tx_protection
+                     ORDER BY commitment_tree_position",
+                )
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+            };
+
+            super::super::reconcile_memo_retrieval_queue(&tx, 1, true).unwrap();
+            assert_eq!(memo_queue(&tx), vec![(1, 9)]);
+            assert_eq!(protection(&tx), vec![(1, 9)]);
+
+            super::super::reconcile_memo_retrieval_queue(&tx, 2, true).unwrap();
+            assert_eq!(
+                memo_queue(&tx),
+                vec![(1, 9)],
+                "an un-mined note holds no authoritative position, so it is not queued",
+            );
+            assert_eq!(
+                protection(&tx),
+                vec![(1, 9)],
+                "and it must not protect its transaction either",
+            );
+        }
+
+        #[cfg(feature = "zakura-pir-enhance")]
+        #[test]
+        fn truncation_removes_outgoing_enhancement_state() {
+            use incrementalmerkletree::Position;
+            use zcash_client_backend::wallet::IronwoodEnhanceCandidate;
+
+            let mut st = TestBuilder::new()
+                .with_network(ironwood_active_network())
+                .with_data_store_factory(TestDbFactory::default())
+                .with_block_cache(BlockCache::new())
+                .with_account_from_sapling_activation(BlockHash([0; 32]))
+                .build();
+            let account_id = st.test_account().unwrap().id();
+            let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+            let (prior_height, _, _) = st.generate_next_block(
+                &fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(50_000),
+            );
+            let (height, _, _) = st.generate_next_block(
+                &fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(100_000),
+            );
+            st.scan_cached_blocks(prior_height, 2);
+            let tx_ref = st
+                .wallet()
+                .conn()
+                .query_row(
+                    "SELECT id_tx FROM transactions WHERE mined_height = ?1",
+                    [u32::from(height)],
+                    |row| row.get::<_, i64>(0).map(crate::TxRef),
+                )
+                .unwrap();
+            crate::wallet::enhance_pir::queue_outgoing(
+                st.wallet().conn(),
+                tx_ref,
+                &[IronwoodEnhanceCandidate::from_parts(
+                    Position::from(99),
+                    2,
+                    [1; 32],
+                    [2; 32],
+                    [3; 32],
+                    [4; 52],
+                    vec![account_id],
+                )],
+                true,
+            )
+            .unwrap();
+
+            st.truncate_to_height(prior_height);
+
+            for (table, predicate) in [
+                ("ironwood_enhance_outgoing_queue", "transaction_id = ?1"),
+                (
+                    "ironwood_enhance_outgoing_accounts",
+                    "commitment_tree_position = 99 AND ?1 = ?1",
+                ),
+                ("ironwood_enhance_tx_protection", "transaction_id = ?1"),
+            ] {
+                let count: i64 = st
+                    .wallet()
+                    .conn()
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE {predicate}"),
+                        [tx_ref.0],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(count, 0, "{table} must be cleared by truncation");
+            }
         }
 
         /// A transaction may be connected to the wallet solely by spending one of its Ironwood

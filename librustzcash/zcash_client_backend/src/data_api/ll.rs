@@ -481,6 +481,7 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
         tx_ref: Self::TxRef,
         target_or_mined_height: Option<BlockHeight>,
         spent_in: Option<Self::TxRef>,
+        #[cfg(feature = "zakura-pir-enhance")] pir_eligible: bool,
     ) -> Result<(), Self::Error>;
 
     /// Updates the backing store to indicate that the Orchard output having the given nullifier is

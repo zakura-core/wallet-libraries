@@ -1,0 +1,28 @@
+[package]
+name = "zakura-pir-transparent-spend"
+version = "0.1.0"
+description = "Private transparent-outpoint spend lookup client for Zakura wallets"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "zakura_pir_transparent_spend"
+
+[dependencies]
+base64 = "0.22"
+hex.workspace = true
+ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", rev = "e875404cef33661906ab60af236dfb327e6b28b1" }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror = "2"
+tokio = { version = "1", features = ["macros"] }
+transparent.workspace = true
+zcash_client_backend = { workspace = true, features = ["spend-index", "zakura-pir-enhance"] }
+zcash_primitives.workspace = true
+zcash_protocol.workspace = true
