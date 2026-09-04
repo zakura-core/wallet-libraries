@@ -23,6 +23,8 @@ use crate::{AccountUuid, error::SqliteClientError};
 
 use super::{TxQueryType, get_account, memo_repr, orchard::parse_note_version};
 
+type PendingOutgoingRow = ([u8; 32], u32, [u8; 32], [u8; 32]);
+
 fn retire_enhancement_if_complete(
     tx: &Transaction<'_>,
     tx_ref: crate::TxRef,
@@ -95,7 +97,7 @@ pub(crate) fn pending_outgoing(
     conn: &Connection,
     position: Position,
 ) -> Result<Option<PendingIronwoodOutgoing<AccountUuid>>, SqliteClientError> {
-    let action: Option<([u8; 32], u32, [u8; 32], [u8; 32])> = conn
+    let action: Option<PendingOutgoingRow> = conn
         .query_row(
             "SELECT t.txid, q.output_index, q.nullifier, q.cmx
              FROM ironwood_enhance_outgoing_queue q
@@ -396,6 +398,7 @@ pub(crate) fn put(
     Ok(changed == 1)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn put_outgoing<P: Parameters>(
     tx: &Transaction<'_>,
     params: &P,
