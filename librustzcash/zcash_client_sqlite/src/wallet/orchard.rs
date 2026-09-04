@@ -627,19 +627,20 @@ fn reconcile_memo_retrieval_queue(
     ))?
     .execute(params)?;
 
+    // Protect the transaction on exactly the condition that queued the note above. A protected
+    // transaction is one Enhance PIR is expected to complete, so protecting a note the queue
+    // will not carry — an un-mined one, or a plaintext version PIR cannot decrypt — would
+    // withhold the transaction from transaction-ID enhancement with no PIR work outstanding
+    // that could ever release it.
     #[cfg(feature = "zakura-pir-enhance")]
-    conn.execute(
+    conn.prepare_cached(&format!(
         "INSERT INTO ironwood_enhance_tx_protection (
              transaction_id, commitment_tree_position
          )
-         SELECT rn.transaction_id, rn.commitment_tree_position
-         FROM ironwood_received_notes rn
-         WHERE rn.id = :received_note_id
-           AND rn.memo IS NULL
-           AND rn.commitment_tree_position IS NOT NULL
-         ON CONFLICT DO NOTHING",
-        named_params![":received_note_id": received_note_id],
-    )?;
+         SELECT rn.transaction_id, rn.commitment_tree_position {MEMO_RETRIEVAL_ELIGIBLE}
+         ON CONFLICT DO NOTHING"
+    ))?
+    .execute(params)?;
 
     Ok(())
 }
@@ -2875,6 +2876,76 @@ pub(crate) mod tests {
             assert_ne!(
                 queued[1].0, stale_note_id,
                 "the stale claim on position 1 should have been evicted",
+            );
+        }
+
+        /// Protection must be established on exactly the condition that queues a note.
+        ///
+        /// A protected transaction is withheld from transaction-ID enhancement on the promise
+        /// that Enhance PIR will complete it. Protecting a note the queue will not carry — here
+        /// one whose transaction is not mined, so its commitment tree position is not
+        /// authoritative — would withhold the transaction with no PIR work outstanding that
+        /// could ever release it.
+        #[cfg(feature = "zakura-pir-enhance")]
+        #[test]
+        fn ineligible_notes_neither_queue_nor_protect() {
+            let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(
+                "CREATE TABLE transactions (id_tx INTEGER PRIMARY KEY, mined_height INTEGER);
+                 CREATE TABLE ironwood_received_notes (
+                     id INTEGER PRIMARY KEY,
+                     transaction_id INTEGER NOT NULL,
+                     memo BLOB,
+                     commitment_tree_position INTEGER,
+                     note_version INTEGER NOT NULL
+                 );
+                 CREATE TABLE ironwood_memo_retrieval_queue (
+                     received_note_id INTEGER PRIMARY KEY,
+                     commitment_tree_position INTEGER NOT NULL UNIQUE
+                 );
+                 CREATE TABLE ironwood_enhance_outgoing_queue (
+                     commitment_tree_position INTEGER PRIMARY KEY,
+                     transaction_id INTEGER NOT NULL
+                 );
+                 CREATE TABLE ironwood_enhance_tx_protection (
+                     transaction_id INTEGER NOT NULL,
+                     commitment_tree_position INTEGER NOT NULL,
+                     PRIMARY KEY(transaction_id, commitment_tree_position)
+                 );
+                 INSERT INTO transactions VALUES (1, 100), (2, NULL);
+                 INSERT INTO ironwood_received_notes VALUES (1, 1, NULL, 9, 3);
+                 INSERT INTO ironwood_received_notes VALUES (2, 2, NULL, 10, 3);",
+            )
+            .unwrap();
+
+            let protection = |tx: &rusqlite::Transaction<'_>| -> Vec<(i64, i64)> {
+                tx.prepare(
+                    "SELECT transaction_id, commitment_tree_position
+                     FROM ironwood_enhance_tx_protection
+                     ORDER BY commitment_tree_position",
+                )
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+            };
+
+            super::super::reconcile_memo_retrieval_queue(&tx, 1, true).unwrap();
+            assert_eq!(memo_queue(&tx), vec![(1, 9)]);
+            assert_eq!(protection(&tx), vec![(1, 9)]);
+
+            super::super::reconcile_memo_retrieval_queue(&tx, 2, true).unwrap();
+            assert_eq!(
+                memo_queue(&tx),
+                vec![(1, 9)],
+                "an un-mined note holds no authoritative position, so it is not queued",
+            );
+            assert_eq!(
+                protection(&tx),
+                vec![(1, 9)],
+                "and it must not protect its transaction either",
             );
         }
 

@@ -25,35 +25,65 @@ use super::{TxQueryType, get_account, memo_repr, orchard::parse_note_version};
 
 type PendingOutgoingRow = ([u8; 32], u32, [u8; 32], [u8; 32], [u8; 32], [u8; 52]);
 
+/// Selects the outgoing queue rows that still stand between a transaction and completion:
+/// rows whose transaction has not obtained its full data by some other route.
+///
+/// Issuing work and retiring the transaction-ID fallback differ by exactly one clause, and
+/// both callers state it rather than restating the whole predicate. A `not_recoverable` row
+/// is no longer *work* — nothing further can be done with it — but it is emphatically not
+/// *completion*, so it must keep blocking retirement; see [`retire_outgoing`] for why that
+/// distinction is load-bearing. The two work-issuing queries therefore extend this fragment
+/// with `AND q.not_recoverable = 0`, and [`retire_enhancement_if_complete`] does not.
+///
+/// `t.raw IS NULL` is common to all three: once the wallet holds the full transaction, its
+/// outgoing rows can never be applied, so treating them as outstanding would leave the
+/// transaction permanently unable to retire.
+const OUTSTANDING_OUTGOING: &str = "
+    FROM ironwood_enhance_outgoing_queue q
+    JOIN transactions t ON t.id_tx = q.transaction_id
+    WHERE t.raw IS NULL";
+
+/// Retires a transaction's ordinary transaction-ID enhancement request once Enhance PIR has
+/// finished with it.
+///
+/// Two conditions must hold, and the first is not an optimization. A transaction is retired
+/// only if it is *protected* — only if Enhance PIR was made responsible for it by scanning,
+/// which happens solely for compact transactions that represent the Ironwood pool and no
+/// other. Absence of protection means the transaction is not ours: it may be a mixed-pool
+/// transaction whose Sapling, Orchard or transparent data the transaction-ID request is the
+/// only way to obtain, and deleting that request would put it permanently out of reach.
+/// Reading "not protected" as "complete" would do exactly that.
+///
+/// The second is that no outstanding position remains, on either queue.
 fn retire_enhancement_if_complete(
     tx: &Transaction<'_>,
     tx_ref: crate::TxRef,
 ) -> Result<(), SqliteClientError> {
-    let has_pending_positions = tx.query_row(
-        "SELECT EXISTS (
-             SELECT 1
-             FROM ironwood_enhance_tx_protection p
-             WHERE p.transaction_id = :transaction_id
-               AND (
-                   EXISTS (
-                       SELECT 1
-                       FROM ironwood_memo_retrieval_queue incoming
-                       WHERE incoming.commitment_tree_position =
-                           p.commitment_tree_position
-                   )
-                   OR EXISTS (
-                       SELECT 1
-                       FROM ironwood_enhance_outgoing_queue outgoing
-                       WHERE outgoing.commitment_tree_position =
-                           p.commitment_tree_position
-                   )
-               )
-         )",
+    let complete = tx.query_row(
+        &format!(
+            "SELECT
+                 EXISTS (
+                     SELECT 1
+                     FROM ironwood_enhance_tx_protection p
+                     WHERE p.transaction_id = :transaction_id
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1
+                     FROM ironwood_memo_retrieval_queue incoming
+                     JOIN ironwood_received_notes rn
+                       ON rn.id = incoming.received_note_id
+                     WHERE rn.transaction_id = :transaction_id
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 {OUTSTANDING_OUTGOING}
+                       AND q.transaction_id = :transaction_id
+                 )"
+        ),
         named_params![":transaction_id": tx_ref.0],
         |row| row.get::<_, bool>(0),
     )?;
 
-    if !has_pending_positions {
+    if complete {
         tx.execute(
             "DELETE FROM tx_retrieval_queue
              WHERE txid = (
@@ -71,15 +101,13 @@ fn retire_enhancement_if_complete(
 }
 
 pub(crate) fn requests(conn: &Connection) -> Result<Vec<EnhancePirRequest>, SqliteClientError> {
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare_cached(&format!(
         "SELECT commitment_tree_position FROM ironwood_memo_retrieval_queue
          UNION
-         SELECT q.commitment_tree_position
-         FROM ironwood_enhance_outgoing_queue q
-         JOIN transactions t ON t.id_tx = q.transaction_id
-         WHERE t.raw IS NULL AND q.not_recoverable = 0
-         ORDER BY commitment_tree_position ASC",
-    )?;
+         SELECT q.commitment_tree_position {OUTSTANDING_OUTGOING}
+           AND q.not_recoverable = 0
+         ORDER BY commitment_tree_position ASC"
+    ))?;
     let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
     rows.map(|position| {
         let position = position?;
@@ -99,13 +127,13 @@ pub(crate) fn pending_outgoing(
 ) -> Result<Option<PendingIronwoodOutgoing<AccountUuid>>, SqliteClientError> {
     let action: Option<PendingOutgoingRow> = conn
         .query_row(
-            "SELECT t.txid, q.output_index, q.nullifier, q.cmx,
-                    q.ephemeral_key, q.compact_ciphertext
-             FROM ironwood_enhance_outgoing_queue q
-             JOIN transactions t ON t.id_tx = q.transaction_id
-             WHERE q.commitment_tree_position = :position
-               AND t.raw IS NULL
-               AND q.not_recoverable = 0",
+            &format!(
+                "SELECT t.txid, q.output_index, q.nullifier, q.cmx,
+                        q.ephemeral_key, q.compact_ciphertext
+                 {OUTSTANDING_OUTGOING}
+                   AND q.commitment_tree_position = :position
+                   AND q.not_recoverable = 0"
+            ),
             named_params![":position": u64::from(position)],
             |row| {
                 Ok((
@@ -484,9 +512,11 @@ pub(crate) fn put_outgoing<P: Parameters>(
 /// called. Both follow from the same point: retiring a transaction's transaction-ID fallback
 /// asserts that Enhance PIR *completed* it, and giving up on one of its positions is not
 /// completing it. Deleting the row would erase that distinction, because
-/// [`retire_enhancement_if_complete`] infers completion from the absence of queue entries — so
-/// the next position of the same transaction to complete legitimately would retire the fallback
-/// on this position's behalf.
+/// [`retire_enhancement_if_complete`] reads completion off the queues — so the next position of
+/// the same transaction to complete legitimately would retire the fallback on this position's
+/// behalf. Marking is what keeps the row outstanding: [`OUTSTANDING_OUTGOING`] deliberately does
+/// not filter on `not_recoverable`, which is the sole clause separating a row that still blocks
+/// retirement from one that is still work.
 ///
 /// That distinction is load-bearing rather than pedantic. Two reasons for non-recovery are
 /// benign — a dummy action, or an output the wallet sent under `OvkPolicy::Discard` — but a
@@ -541,7 +571,8 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE transactions (
                  id_tx INTEGER PRIMARY KEY,
-                 txid BLOB NOT NULL
+                 txid BLOB NOT NULL,
+                 raw BLOB
              );
              CREATE TABLE ironwood_received_notes (
                  id INTEGER PRIMARY KEY,
@@ -567,7 +598,7 @@ mod tests {
                  query_type INTEGER NOT NULL,
                  UNIQUE(txid, query_type)
              );
-             INSERT INTO transactions VALUES (1, zeroblob(32));
+             INSERT INTO transactions (id_tx, txid) VALUES (1, zeroblob(32));
              INSERT INTO ironwood_received_notes VALUES
                  (1, 1, 0, NULL),
                  (2, 1, 1, NULL);
@@ -985,6 +1016,146 @@ mod tests {
             1,
             "a transaction with an unrecovered position is never Enhance PIR-complete, so the \
              fallback survives for a user who later disables the setting"
+        );
+    }
+
+    /// The tables retirement reads, with one transaction holding one received note.
+    fn retirement_schema(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE transactions (
+                 id_tx INTEGER PRIMARY KEY, txid BLOB NOT NULL, raw BLOB
+             );
+             CREATE TABLE ironwood_received_notes (
+                 id INTEGER PRIMARY KEY,
+                 transaction_id INTEGER NOT NULL,
+                 action_index INTEGER NOT NULL,
+                 memo BLOB
+             );
+             CREATE TABLE ironwood_memo_retrieval_queue (
+                 received_note_id INTEGER PRIMARY KEY,
+                 commitment_tree_position INTEGER NOT NULL UNIQUE
+             );
+             CREATE TABLE ironwood_enhance_outgoing_queue (
+                 commitment_tree_position INTEGER PRIMARY KEY,
+                 transaction_id INTEGER NOT NULL,
+                 output_index INTEGER NOT NULL,
+                 nullifier BLOB NOT NULL,
+                 cmx BLOB NOT NULL,
+                 ephemeral_key BLOB NOT NULL,
+                 compact_ciphertext BLOB NOT NULL,
+                 not_recoverable INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE ironwood_enhance_tx_protection (
+                 transaction_id INTEGER NOT NULL,
+                 commitment_tree_position INTEGER NOT NULL,
+                 PRIMARY KEY(transaction_id, commitment_tree_position)
+             );
+             CREATE TABLE tx_retrieval_queue (
+                 txid BLOB NOT NULL,
+                 query_type INTEGER NOT NULL,
+                 UNIQUE(txid, query_type)
+             );
+             INSERT INTO transactions VALUES (1, zeroblob(32), NULL);
+             INSERT INTO ironwood_received_notes VALUES (1, 1, 0, NULL);
+             INSERT INTO ironwood_memo_retrieval_queue VALUES (1, 7);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tx_retrieval_queue VALUES (zeroblob(32), :query_type)",
+            named_params![":query_type": super::TxQueryType::Enhancement.code()],
+        )
+        .unwrap();
+    }
+
+    fn enhancement_request_count(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM tx_retrieval_queue WHERE query_type = :query_type",
+            named_params![":query_type": super::TxQueryType::Enhancement.code()],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Completing every position of an *unprotected* transaction must not retire its
+    /// transaction-ID request.
+    ///
+    /// Protection is what records that Enhance PIR is responsible for a transaction, and only
+    /// scanning can establish it, because eligibility is a property of the compact transaction
+    /// rather than of anything the database keeps. A queued position on an unprotected
+    /// transaction is exactly the shape a wallet has after the migration backfills the memo
+    /// queue: the transaction may be mixed-pool, in which case its transaction-ID request is the
+    /// only route to its other pools' data and deleting it would put that data permanently out
+    /// of reach.
+    #[test]
+    fn completion_never_retires_an_unprotected_transaction() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        retirement_schema(&conn);
+        // Deliberately no `ironwood_enhance_tx_protection` row.
+
+        let tx = conn.transaction().unwrap();
+        assert!(
+            super::put(
+                &tx,
+                Position::from(7),
+                super::IronwoodEnhanceRequestId::new(TxId::from_bytes([0; 32]), 0),
+                &MemoBytes::empty(),
+            )
+            .unwrap(),
+            "the memo is still stored; only the fallback decision differs"
+        );
+        assert!(
+            super::requests(&tx).unwrap().is_empty(),
+            "no work remains to be issued"
+        );
+        assert_eq!(
+            enhancement_request_count(&tx),
+            1,
+            "an unprotected transaction is not Enhance PIR's to complete, so its \
+             transaction-ID request must survive"
+        );
+    }
+
+    /// An outgoing row whose transaction has since obtained its full data can never be applied,
+    /// so it must not keep the transaction from retiring for ever.
+    ///
+    /// This is the one clause `OUTSTANDING_OUTGOING` shares with work issuance. The other,
+    /// `not_recoverable = 0`, is deliberately absent from retirement; see
+    /// `non_recoverable_positions_stop_being_work_without_counting_as_complete`.
+    #[test]
+    fn outgoing_rows_on_a_retrieved_transaction_do_not_block_retirement() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        retirement_schema(&conn);
+        conn.execute_batch(
+            "INSERT INTO ironwood_enhance_outgoing_queue
+                 VALUES (42, 1, 3, zeroblob(32), zeroblob(32), zeroblob(32), zeroblob(52), 0);
+             INSERT INTO ironwood_enhance_tx_protection VALUES (1, 7), (1, 42);
+             UPDATE transactions SET raw = X'00' WHERE id_tx = 1;",
+        )
+        .unwrap();
+
+        let tx = conn.transaction().unwrap();
+        assert!(
+            super::requests(&tx)
+                .unwrap()
+                .into_iter()
+                .map(|request| request.position())
+                .eq([Position::from(7)]),
+            "the outgoing row is no longer work either"
+        );
+        assert!(
+            super::put(
+                &tx,
+                Position::from(7),
+                super::IronwoodEnhanceRequestId::new(TxId::from_bytes([0; 32]), 0),
+                &MemoBytes::empty(),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            enhancement_request_count(&tx),
+            0,
+            "an unapplicable outgoing row must not leave the transaction permanently \
+             unable to retire"
         );
     }
 

@@ -67,8 +67,16 @@ the `zakura-pir-enhance` Cargo feature in both setting states. Set the wallet's
 runtime enhancement mode to `PrivateIronwood` while PIR is enabled and back to
 `Standard` when it is disabled. Protection markers and pending work are
 maintained in either mode. A partially processed transaction therefore returns
-to the standard path when PIR is disabled, while successful completion of every
-PIR position retires its dormant transaction-ID enhancement request.
+to the standard path when PIR is disabled, while a protected transaction whose
+every PIR position has completed retires its dormant transaction-ID enhancement
+request.
+
+Protection is established only by scanning, which is the only place that can
+observe whether a compact transaction represented the Ironwood pool and no
+other. A transaction that is not protected is not Enhance PIR's to complete, and
+its transaction-ID request is never retired — including for notes an upgrading
+wallet had already scanned before this protocol existed, which are queued for
+memo retrieval but stay on the standard path until a rescan.
 
 PIR hides the selected row and transaction identifier, but not contact with the
 service, timing, or query volume. This crate does not implement cover traffic.
