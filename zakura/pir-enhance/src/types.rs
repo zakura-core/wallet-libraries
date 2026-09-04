@@ -3,9 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_VERSION: u16 = 5;
 pub const PROTOCOL_REVISION: &str = "ironwood-enhance-pir-v1";
-pub const NETWORK: &str = "main";
 pub const POOL: &str = "ironwood";
-pub const ACTIVATION_HEIGHT: u64 = 3_428_143;
 pub const CONFIRMATIONS: u64 = 10;
 
 pub const RECORD_BYTES: usize = 724;
@@ -17,9 +15,6 @@ pub const SHARD_POSITIONS: usize = SHARD_ROWS * RECORDS_PER_ROW;
 /// holds the complete assignment; replicas are alternatives, not additive
 /// contributors to a query.
 pub const SHARDS_PER_GROUP: u64 = 6;
-/// Backwards-compatible alias for callers compiled against the former
-/// single-owner placement terminology.
-pub const SHARDS_PER_WORKER: u64 = SHARDS_PER_GROUP;
 pub const ITEM_SIZE_BITS: u64 = (ROW_BYTES * 8) as u64;
 
 pub const RECORD_EPHEMERAL_KEY_OFFSET: usize = 0;
@@ -37,8 +32,12 @@ pub fn setup_seed_bytes() -> [u8; 32] {
 }
 
 /// The private fields needed to enhance one compact Ironwood action.
+///
+/// The bytes are private so that a record can only be built from a decoded PIR row or from a
+/// complete set of parts; the wallet authenticates a record by decrypting it, and an arbitrary
+/// byte string is not something any caller should be able to present as one.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EnhanceRecord(pub [u8; RECORD_BYTES]);
+pub struct EnhanceRecord([u8; RECORD_BYTES]);
 
 pub struct EnhanceRecordParts {
     pub ephemeral_key: [u8; 32],
@@ -48,6 +47,11 @@ pub struct EnhanceRecordParts {
 }
 
 impl EnhanceRecord {
+    /// Wraps the bytes of one record extracted from a decoded PIR row.
+    pub(crate) fn from_row_bytes(bytes: [u8; RECORD_BYTES]) -> Self {
+        Self(bytes)
+    }
+
     pub fn from_parts(parts: EnhanceRecordParts) -> Self {
         let mut bytes = [0; RECORD_BYTES];
         bytes[RECORD_EPHEMERAL_KEY_OFFSET..RECORD_ENC_CIPHERTEXT_OFFSET]
@@ -176,11 +180,6 @@ pub fn group_index_for_shard(shard_id: u64, group_count: usize) -> Option<usize>
     }
     let index = usize::try_from(shard_id / SHARDS_PER_GROUP).ok()?;
     (index < group_count).then_some(index)
-}
-
-/// Backwards-compatible alias for the former single-owner placement helper.
-pub fn worker_index_for_shard(shard_id: u64, worker_count: usize) -> Option<usize> {
-    group_index_for_shard(shard_id, worker_count)
 }
 
 #[cfg(test)]

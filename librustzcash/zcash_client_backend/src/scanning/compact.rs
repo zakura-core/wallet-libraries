@@ -404,34 +404,6 @@ where
             && tx.actions.is_empty()
             && tx.vin.is_empty()
             && tx.vout.is_empty();
-        #[cfg(feature = "zakura-pir-enhance")]
-        let ironwood_enhance_candidates = if spent_from_accounts.is_empty()
-            || !ironwood_pir_eligible
-        {
-            vec![]
-        } else {
-            tx.ironwood_actions
-                .iter()
-                .enumerate()
-                .map(|(index, raw)| {
-                    let action =
-                        CompactAction::try_from(raw).map_err(|_| ScanError::EncodingInvalid {
-                            at_height: cur_height,
-                            txid,
-                            pool_type: ShieldedPool::Ironwood,
-                            index,
-                        })?;
-                    Ok(crate::wallet::IronwoodEnhanceCandidate::from_parts(
-                        pos_tracker.ironwood_note_position(index),
-                        index,
-                        action.nullifier().to_bytes(),
-                        action.cmx().to_bytes(),
-                        spent_from_accounts.iter().copied().collect(),
-                    ))
-                })
-                .collect::<Result<Vec<_>, ScanError>>()?
-        };
-
         let (sapling_outputs, mut sapling_nc) = find_received(
             cur_height,
             pos_tracker.compact_tx_contains_last_sapling_outputs_in_block(&tx),
@@ -546,6 +518,45 @@ where
         );
         #[cfg(feature = "orchard")]
         ironwood_note_commitments.append(&mut ironwood_nc);
+
+        // Actions the wallet decrypted for itself — including change, which compact scanning
+        // finds because `ScanningKeys` covers the internal scope as well as the external one.
+        // These are served by the incoming memo queue, so they must not also become outgoing
+        // candidates: change is encrypted under the internal OVK and outgoing recovery only
+        // holds the external one, so an outgoing entry for such a position could never be
+        // resolved. It would keep its transaction protected, and therefore un-enhanced, forever.
+        #[cfg(feature = "zakura-pir-enhance")]
+        let ironwood_enhance_candidates = if spent_from_accounts.is_empty()
+            || !ironwood_pir_eligible
+        {
+            vec![]
+        } else {
+            let received_indices = ironwood_outputs
+                .iter()
+                .map(|output| output.index())
+                .collect::<HashSet<_>>();
+            tx.ironwood_actions
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !received_indices.contains(index))
+                .map(|(index, raw)| {
+                    let action =
+                        CompactAction::try_from(raw).map_err(|_| ScanError::EncodingInvalid {
+                            at_height: cur_height,
+                            txid,
+                            pool_type: ShieldedPool::Ironwood,
+                            index,
+                        })?;
+                    Ok(crate::wallet::IronwoodEnhanceCandidate::from_parts(
+                        pos_tracker.ironwood_note_position(index),
+                        index,
+                        action.nullifier().to_bytes(),
+                        action.cmx().to_bytes(),
+                        spent_from_accounts.iter().copied().collect(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, ScanError>>()?
+        };
 
         #[cfg(feature = "orchard")]
         let has_orchard = !(orchard_spends.is_empty() && orchard_outputs.is_empty());
@@ -1275,6 +1286,130 @@ mod tests {
             mixed_tx.ironwood_enhance_candidates().is_empty(),
             "mixed-pool transactions must remain on standard txid enhancement"
         );
+    }
+
+    /// A wallet-owned Ironwood output — in particular change, which is found because
+    /// `ScanningKeys` covers the internal scope — is served by the incoming memo queue. It must
+    /// not also be emitted as an outgoing candidate: change is encrypted under the internal OVK
+    /// while outgoing recovery holds only the external one, so such an entry could never be
+    /// resolved and would keep its transaction protected, and so un-enhanced, forever.
+    #[cfg(feature = "zakura-pir-enhance")]
+    #[test]
+    fn wallet_owned_ironwood_outputs_are_not_outgoing_candidates() {
+        let network = Network::TestNetwork;
+        let account = AccountId::try_from(0).unwrap();
+        let usk = UnifiedSpendingKey::from_seed(&network, &[0; 32], account).unwrap();
+        let ufvk = usk.to_unified_full_viewing_key();
+        let fvk = ufvk.orchard().expect("Orchard key is present").clone();
+        let scanning_keys = ScanningKeys::from_account_ufvks([(account, ufvk)]);
+        let mut rng = OsRng;
+
+        // Action 0 spends a note the wallet owns and pays change back to the wallet's own
+        // internal address, so the scanner decrypts it as a received note.
+        let owned_nf =
+            orchard::note::Nullifier::from_bytes(&pallas::Base::random(&mut rng).to_repr())
+                .unwrap();
+        let rho = Rho::from_bytes(&owned_nf.to_bytes()).unwrap();
+        let rseed = loop {
+            let mut bytes = [0; 32];
+            rng.fill_bytes(&mut bytes);
+            if let Some(rseed) = Option::from(RandomSeed::from_bytes(bytes, &rho)) {
+                break rseed;
+            }
+        };
+        let change = Note::from_parts(
+            fvk.address_at(0u32, Scope::Internal),
+            NoteValue::from_raw(1000),
+            rho,
+            rseed,
+            NoteVersion::V3,
+        )
+        .unwrap();
+        // Change carries the internal OVK, exactly as the builder writes it.
+        let encryptor =
+            IronwoodNoteEncryption::new(Some(fvk.to_ovk(Scope::Internal)), change, [0; 512]);
+        let change_action = CompactOrchardAction {
+            nullifier: owned_nf.to_bytes().to_vec(),
+            cmx: ExtractedNoteCommitment::from(change.commitment())
+                .to_bytes()
+                .to_vec(),
+            ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0.to_vec(),
+            ciphertext: encryptor.encrypt_note_plaintext()[..52].to_vec(),
+        };
+
+        // Action 1 pays someone else, so the wallet cannot decrypt it and it stays a candidate.
+        let other_nf =
+            orchard::note::Nullifier::from_bytes(&pallas::Base::random(&mut rng).to_repr())
+                .unwrap();
+        let external_cmx = pallas::Base::random(&mut rng).to_repr();
+        let external_action = CompactOrchardAction {
+            nullifier: other_nf.to_bytes().to_vec(),
+            cmx: external_cmx.to_vec(),
+            ephemeral_key: vec![0; 32],
+            ciphertext: vec![0; 52],
+        };
+
+        let mut tx = CompactTx {
+            txid: vec![3; 32],
+            ..Default::default()
+        };
+        tx.ironwood_actions.push(change_action);
+        tx.ironwood_actions.push(external_action);
+        let mut block = CompactBlock {
+            hash: vec![1; 32],
+            prev_hash: vec![0; 32],
+            height: 1,
+            ..Default::default()
+        };
+        block.vtx.push(tx);
+        block.chain_metadata = Some(ChainMetadata {
+            sapling_commitment_tree_size: 0,
+            orchard_commitment_tree_size: 0,
+            ironwood_commitment_tree_size: 2,
+        });
+
+        let scanned = scan_block_with_runners::<_, _, _, (), (), ()>(
+            &network,
+            block,
+            &scanning_keys,
+            &Nullifiers::new(vec![], vec![], vec![(account, owned_nf)]),
+            Some(&BlockMetadata::from_parts(
+                BlockHeight::from(0),
+                BlockHash([0; 32]),
+                Some(0),
+                Some(0),
+                Some(0),
+            )),
+            None,
+        )
+        .unwrap();
+
+        let tx = &scanned.transactions()[0];
+        assert!(tx.ironwood_pir_eligible());
+        assert_eq!(
+            tx.ironwood_outputs().len(),
+            1,
+            "the change output should be received by the wallet"
+        );
+        assert_eq!(tx.ironwood_outputs()[0].index(), 0);
+        // Dropping the outgoing candidate also drops the `sent_notes` row that would have been
+        // written for this output, and with it `flag_previously_received_change`. That repair is
+        // only needed for notes scanned before their transaction's spends were linkable — which
+        // an Enhance PIR candidate never is, since it exists only when the wallet already
+        // recognised the spend. So `is_change` has to be right here, at scan time.
+        assert!(
+            tx.ironwood_outputs()[0].is_change(),
+            "change must be flagged during scanning, with no later repair to rely on"
+        );
+
+        let candidates = tx.ironwood_enhance_candidates();
+        assert_eq!(
+            candidates.len(),
+            1,
+            "only the output the wallet cannot decrypt needs outgoing recovery"
+        );
+        assert_eq!(candidates[0].output_index(), 1);
+        assert_eq!(candidates[0].nullifier(), &other_nf.to_bytes());
     }
 
     #[test]

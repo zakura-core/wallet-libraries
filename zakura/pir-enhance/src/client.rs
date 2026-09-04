@@ -1,6 +1,6 @@
 use crate::types::{
-    ENHANCE_SETUP_SEED, EnhanceGeneration, EnhanceRecord, EnhanceSession, ITEM_SIZE_BITS, NETWORK,
-    POOL, PROTOCOL_REVISION, RECORD_BYTES, RECORDS_PER_ROW, ROW_BYTES, SCHEMA_VERSION, SHARD_ROWS,
+    ENHANCE_SETUP_SEED, EnhanceGeneration, EnhanceRecord, EnhanceSession, ITEM_SIZE_BITS, POOL,
+    PROTOCOL_REVISION, RECORD_BYTES, RECORDS_PER_ROW, ROW_BYTES, SCHEMA_VERSION, SHARD_ROWS,
     checked_logical_rows_for, setup_seed_bytes,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -47,13 +47,33 @@ impl ClientResourceLimits {
 /// The wallet-owned inputs required before a generation may be instantiated.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GenerationAcceptance {
+    /// Consensus network the wallet is following, as the generation spells it (`"main"`,
+    /// `"test"`, `"regtest"`).
+    ///
+    /// Supplied by the wallet rather than pinned by this crate: a client that assumes one
+    /// network cannot be used on the others, and — more importantly — cannot notice that it has
+    /// been pointed at a server serving a chain the wallet is not on.
+    pub network: String,
+    /// First height on `network` at which Enhance PIR snapshots exist. A generation anchored
+    /// below it did not come from this protocol.
+    pub activation_height: u64,
     pub anchor: AcceptedAnchor,
     pub limits: ClientResourceLimits,
 }
 
 impl GenerationAcceptance {
-    pub const fn new(anchor: AcceptedAnchor, limits: ClientResourceLimits) -> Self {
-        Self { anchor, limits }
+    pub fn new(
+        network: impl Into<String>,
+        activation_height: u64,
+        anchor: AcceptedAnchor,
+        limits: ClientResourceLimits,
+    ) -> Self {
+        Self {
+            network: network.into(),
+            activation_height,
+            anchor,
+            limits,
+        }
     }
 
     pub fn validate(&self, generation: &EnhanceGeneration) -> Result<(), ClientError> {
@@ -303,7 +323,7 @@ pub fn record_in_row(row: &[u8], slot: usize) -> Result<EnhanceRecord, ClientErr
         .ok_or_else(|| ClientError::Response("record slot is outside decoded row".to_string()))?
         .try_into()
         .expect("fixed record length");
-    Ok(EnhanceRecord(bytes))
+    Ok(EnhanceRecord::from_row_bytes(bytes))
 }
 
 fn validate_generation(
@@ -312,12 +332,18 @@ fn validate_generation(
 ) -> Result<(), ClientError> {
     if generation.schema_version != SCHEMA_VERSION
         || generation.protocol_revision != PROTOCOL_REVISION
-        || generation.network != NETWORK
+        || generation.network != acceptance.network
         || generation.pool != POOL
     {
         return Err(ClientError::Generation(
             "wrong schema, protocol, network, or pool".to_string(),
         ));
+    }
+    if generation.anchor_height < acceptance.activation_height {
+        return Err(ClientError::Generation(format!(
+            "generation is anchored at {}, below the Enhance PIR activation height {}",
+            generation.anchor_height, acceptance.activation_height
+        )));
     }
     if generation.setup_seed != ENHANCE_SETUP_SEED {
         return Err(ClientError::Generation(
@@ -510,11 +536,19 @@ mod tests {
 
     use super::*;
 
+    /// Network and activation height are wallet-supplied rather than pinned by the crate, so
+    /// the fixtures below have to state them. The fixtures anchor at height 1, so activation has
+    /// to sit at or below that.
+    const TEST_NETWORK: &str = "main";
+    const TEST_ACTIVATION_HEIGHT: u64 = 0;
+
     fn acceptance_for(
         generation: &EnhanceGeneration,
         max_logical_rows: u64,
     ) -> GenerationAcceptance {
         GenerationAcceptance::new(
+            TEST_NETWORK,
+            TEST_ACTIVATION_HEIGHT,
             AcceptedAnchor::new(
                 generation.anchor_height,
                 hex::decode(&generation.anchor_block_hash)
@@ -543,7 +577,7 @@ mod tests {
         let generation = EnhanceGeneration {
             schema_version: SCHEMA_VERSION,
             protocol_revision: PROTOCOL_REVISION.to_string(),
-            network: NETWORK.to_string(),
+            network: TEST_NETWORK.to_string(),
             pool: POOL.to_string(),
             anchor_height: 3_428_143,
             anchor_block_hash: "00".repeat(32),
@@ -637,6 +671,45 @@ mod tests {
         }
     }
 
+    /// The network is wallet-supplied, not pinned by this crate, so a wallet on any network can
+    /// accept a generation naming that network — and one naming a different chain is refused
+    /// even when it is otherwise well formed.
+    #[test]
+    fn accepts_the_network_the_wallet_names() {
+        for network in ["main", "test", "regtest"] {
+            let mut session = valid_session();
+            session.generation.network = network.to_string();
+            let mut acceptance = acceptance_for(&session.generation, SHARD_ROWS as u64);
+            acceptance.network = network.to_string();
+            assert!(
+                acceptance.validate(&session.generation).is_ok(),
+                "a wallet on {network} should accept a {network} generation"
+            );
+
+            acceptance.network = "somewhere-else".to_string();
+            assert!(matches!(
+                acceptance.validate(&session.generation),
+                Err(ClientError::Generation(message))
+                    if message == "wrong schema, protocol, network, or pool"
+            ));
+        }
+    }
+
+    /// A generation anchored below the wallet's activation height did not come from this
+    /// protocol, whatever else it claims.
+    #[test]
+    fn rejects_a_generation_anchored_below_activation() {
+        let session = valid_session();
+        let mut acceptance = acceptance_for(&session.generation, SHARD_ROWS as u64);
+        acceptance.activation_height = session.generation.anchor_height + 1;
+
+        assert!(matches!(
+            acceptance.validate(&session.generation),
+            Err(ClientError::Generation(message))
+                if message.contains("below the Enhance PIR activation height")
+        ));
+    }
+
     #[test]
     fn rejects_the_wrong_setup_seed_and_malformed_anchor_hash() {
         let mut wrong_seed = valid_session();
@@ -646,6 +719,8 @@ mod tests {
         let mut malformed_anchor = valid_session();
         malformed_anchor.generation.anchor_block_hash = "not-a-hash".to_string();
         let acceptance = GenerationAcceptance::new(
+            TEST_NETWORK,
+            TEST_ACTIVATION_HEIGHT,
             AcceptedAnchor::new(
                 malformed_anchor.generation.anchor_height,
                 [0; 32],
@@ -896,7 +971,7 @@ mod tests {
         let client = IPIRClient::new(&rlwe, &ypir);
         let setup = client.generate_public_query_setup_simplepir_from_seed(setup_seed_bytes());
 
-        let expected_record = EnhanceRecord([0x5a; RECORD_BYTES]);
+        let expected_record = EnhanceRecord::from_row_bytes([0x5a; RECORD_BYTES]);
         let target_position = RECORDS_PER_ROW as u64 + 3;
         let target_row = 1;
         let target_slot = 3;
@@ -920,7 +995,7 @@ mod tests {
             generation: EnhanceGeneration {
                 schema_version: SCHEMA_VERSION,
                 protocol_revision: PROTOCOL_REVISION.to_string(),
-                network: NETWORK.to_string(),
+                network: TEST_NETWORK.to_string(),
                 pool: POOL.to_string(),
                 anchor_height: 1,
                 anchor_block_hash: "00".repeat(32),

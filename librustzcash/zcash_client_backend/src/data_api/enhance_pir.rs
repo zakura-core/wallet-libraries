@@ -34,6 +34,13 @@ pub enum EnhancementMode {
     /// Protection is transaction-wide, but only pure-Ironwood compact transactions are eligible.
     /// Mixed-pool transactions remain on standard transaction-ID enhancement. Status requests and
     /// enhancement of other, unprotected transactions remain available.
+    ///
+    /// Switching back to [`EnhancementMode::Standard`] is the only way out of protection, and it
+    /// exposes exactly the transactions PIR has not finished with. Enhancement requests are
+    /// recorded during scanning regardless of mode and are removed once every position of a
+    /// transaction completes, so a finished transaction stays invisible in both modes while an
+    /// unfinished one falls back to being requested by transaction ID. A user who never disables
+    /// the setting therefore exposes nothing, and one who does exposes only outstanding work.
     PrivateIronwood,
 }
 
@@ -213,20 +220,51 @@ pub trait EnhancePirRead: WalletRead {
     fn is_ironwood_enhancement_protected(&self, txid: TxId) -> Result<bool, Self::Error>;
 }
 
-/// Atomic storage operation used after successful response authentication.
+/// Evidence that a PIR record was authenticated against wallet-owned state before being written.
+///
+/// Only [`decrypt_and_store_ironwood_memo`] and [`recover_and_store_ironwood_outgoing`] can
+/// construct one, because its field is private to this module. The write methods of
+/// [`EnhancePirWrite`] therefore cannot be reached except through the authenticating functions:
+/// nothing else can present a memo or a recipient, value and memo to be stored as though a server
+/// response had proved them.
+///
+/// This is what makes the storage boundary safe to expose at all. A `#[doc(hidden)]` marker would
+/// only have hidden these methods from the documentation; it is not access control.
+#[derive(Clone, Copy, Debug)]
+pub struct Authenticated(());
+
+impl Authenticated {
+    /// Constructs the witness without authenticating anything.
+    ///
+    /// Test builds only, so that a storage implementation can be exercised directly without
+    /// standing up a decryptable record. Production callers reach the write methods solely
+    /// through [`decrypt_and_store_ironwood_memo`] and [`recover_and_store_ironwood_outgoing`].
+    #[cfg(any(test, feature = "test-dependencies"))]
+    pub fn for_testing() -> Self {
+        Self(())
+    }
+}
+
+/// Atomic storage operations used after successful response authentication.
 pub trait EnhancePirWrite: EnhancePirRead {
-    /// Stores a memo iff the same position is still unresolved, and removes its queue entry.
-    #[doc(hidden)]
+    /// Stores a memo iff the same position and request identity are still unresolved, and removes
+    /// the queue entry.
+    ///
+    /// Reachable only from [`decrypt_and_store_ironwood_memo`]; see [`Authenticated`].
     fn put_ironwood_memo(
         &mut self,
+        authenticated: Authenticated,
         position: Position,
         request_id: IronwoodEnhanceRequestId,
         memo: &MemoBytes,
     ) -> Result<bool, Self::Error>;
 
-    #[doc(hidden)]
+    /// Records the sent output recovered for a position, and removes its queue entry.
+    ///
+    /// Reachable only from [`recover_and_store_ironwood_outgoing`]; see [`Authenticated`].
     fn put_ironwood_sent_output(
         &mut self,
+        authenticated: Authenticated,
         position: Position,
         request_id: IronwoodEnhanceRequestId,
         from_account: Self::AccountId,
@@ -290,7 +328,12 @@ pub fn decrypt_and_store_ironwood_memo<DbT: EnhancePirWrite>(
     };
 
     Ok(
-        if db.put_ironwood_memo(request.position(), pending.request_id, &memo)? {
+        if db.put_ironwood_memo(
+            Authenticated(()),
+            request.position(),
+            pending.request_id,
+            &memo,
+        )? {
             EnhancePirStoreResult::Stored
         } else {
             EnhancePirStoreResult::AlreadyResolved
@@ -362,6 +405,7 @@ pub fn recover_and_store_ironwood_outgoing<DbT: EnhancePirWrite>(
     let memo = MemoBytes::from_bytes(&memo).expect("note decryption returns exactly 512 bytes");
     Ok(
         if db.put_ironwood_sent_output(
+            Authenticated(()),
             request.position(),
             pending.request_id,
             account_id,

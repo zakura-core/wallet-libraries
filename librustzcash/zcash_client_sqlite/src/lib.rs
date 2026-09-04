@@ -55,9 +55,9 @@ use uuid::Uuid;
 
 #[cfg(feature = "zakura-pir-enhance")]
 use zcash_client_backend::data_api::enhance_pir::{
-    EnhancePirRead, EnhancePirRequest, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus,
-    EnhancePirWrite, EnhancementMode, IronwoodEnhanceRequestId, PendingIronwoodMemo,
-    PendingIronwoodOutgoing,
+    Authenticated, EnhancePirRead, EnhancePirRequest, EnhancePirSnapshotAnchor,
+    EnhancePirSnapshotStatus, EnhancePirWrite, EnhancementMode, IronwoodEnhanceRequestId,
+    PendingIronwoodMemo, PendingIronwoodOutgoing,
 };
 use zcash_client_backend::{
     TransferType,
@@ -1670,6 +1670,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
 {
     fn put_ironwood_memo(
         &mut self,
+        _authenticated: Authenticated,
         position: Position,
         request_id: IronwoodEnhanceRequestId,
         memo: &zcash_protocol::memo::MemoBytes,
@@ -1679,6 +1680,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
 
     fn put_ironwood_sent_output(
         &mut self,
+        _authenticated: Authenticated,
         position: Position,
         request_id: IronwoodEnhanceRequestId,
         from_account: Self::AccountId,
@@ -4241,20 +4243,26 @@ mod tests {
         );
     }
 
+    /// Disabling the PIR setting is the only escape from protection, and it must expose exactly
+    /// the transactions PIR has not finished with: incomplete ones become ordinary enhancement
+    /// requests again, while completed ones stay invisible because completion retired them. A
+    /// user who never disables the setting exposes nothing.
     #[cfg(feature = "zakura-pir-enhance")]
     #[test]
-    fn enhance_pir_authentication_only_dequeues_the_matching_note() {
-        use orchard::note::NoteVersion;
-        use orchard::note_encryption::{IronwoodDomain, IronwoodNoteEncryption};
-        use zakura_pir_enhance::{EnhanceRecord, EnhanceRecordParts, apply_record};
-        use zcash_client_backend::data_api::{
-            enhance_pir::{EnhancePirRead, EnhancePirStoreResult},
-            testing::{
-                AddressType, IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
+    fn disabling_private_enhancement_exposes_only_unfinished_transactions() {
+        use incrementalmerkletree::Position;
+        use orchard::keys::Scope;
+        use zcash_client_backend::{
+            data_api::{
+                Account as _, TransactionDataRequest,
+                enhance_pir::{Authenticated, EnhancePirRead, EnhancePirWrite, EnhancementMode},
+                testing::{
+                    AddressType, IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
+                },
             },
+            wallet::IronwoodEnhanceCandidate,
         };
-        use zcash_note_encryption::Domain;
-        use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
+        use zcash_protocol::{consensus::BlockHeight, memo::MemoBytes, value::Zatoshis};
 
         let activation = BlockHeight::from_u32(100_000);
         let network = LocalNetwork {
@@ -4270,62 +4278,133 @@ mod tests {
             .with_block_cache(BlockCache::new())
             .with_account_from_sapling_activation(BlockHash([0; 32]))
             .build();
+        let account_id = st.test_account().unwrap().id();
         let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
-        let (first_height, _, _) = st.generate_next_block(
+        let recipient = fvk.0.address_at(3u32, Scope::External);
+        let (height, _, _) = st.generate_next_block(
             &fvk,
             AddressType::DefaultExternal,
             Zatoshis::const_from_u64(10_000),
         );
-        st.generate_next_block(
-            &fvk,
-            AddressType::DefaultExternal,
-            Zatoshis::const_from_u64(20_000),
-        );
-        st.scan_cached_blocks(first_height, 2);
+        st.scan_cached_blocks(height, 1);
 
-        let requests = st.wallet().db().enhance_pir_requests().unwrap();
-        assert_eq!(requests.len(), 2);
-        let pending = st
+        let (tx_ref, txid) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id_tx, txid FROM transactions WHERE mined_height = ?1",
+                [u32::from(height)],
+                |row| Ok((crate::TxRef(row.get(0)?), row.get::<_, Vec<u8>>(1)?)),
+            )
+            .unwrap();
+
+        let position = Position::from(99);
+        crate::wallet::enhance_pir::queue_outgoing(
+            st.wallet().conn(),
+            tx_ref,
+            &[IronwoodEnhanceCandidate::from_parts(
+                position,
+                4,
+                [1; 32],
+                [2; 32],
+                vec![account_id],
+            )],
+            true,
+        )
+        .unwrap();
+
+        let enhancement_requested = |st: &TestState<BlockCache, TestDb, LocalNetwork>| {
+            st.wallet()
+                .db()
+                .transaction_data_requests()
+                .unwrap()
+                .iter()
+                .any(|request| {
+                    matches!(
+                        request,
+                        TransactionDataRequest::Enhancement(requested)
+                            if requested.as_ref() == txid.as_slice()
+                    )
+                })
+        };
+
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+        assert!(
+            !enhancement_requested(&st),
+            "a protected transaction must not be requested by txid while PIR is enabled"
+        );
+
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::Standard);
+        assert!(
+            enhancement_requested(&st),
+            "disabling PIR must fall back to ordinary enhancement for unfinished work"
+        );
+
+        // Protection is transaction-wide, so the transaction is only finished when every one of
+        // its positions is: the note the wallet received here still needs its memo, alongside the
+        // outgoing candidate queued above.
+        let memo = MemoBytes::from_bytes(&[3; 512]).unwrap();
+        let incoming = st
             .wallet()
             .db()
-            .pending_ironwood_memo(requests[0].position())
+            .enhance_pir_requests()
             .unwrap()
-            .unwrap();
-        assert_eq!(pending.note.version(), NoteVersion::V3);
-        let encryptor = IronwoodNoteEncryption::new(None, pending.note, [7; 512]);
-        let record = EnhanceRecord::from_parts(EnhanceRecordParts {
-            ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0,
-            enc_ciphertext: encryptor.encrypt_note_plaintext(),
-            cv_net: [0; 32],
-            out_ciphertext: [0; 80],
-        });
+            .into_iter()
+            .map(|request| request.position())
+            .find(|candidate| *candidate != position)
+            .expect("the received note awaits its memo");
 
-        assert_eq!(
-            apply_record(st.wallet_mut().db_mut(), requests[0], &record).unwrap(),
-            zakura_pir_enhance::ApplyRecordResult {
-                incoming: EnhancePirStoreResult::Stored,
-                outgoing: EnhancePirStoreResult::AlreadyResolved,
-            }
+        let incoming_id = st
+            .wallet()
+            .db()
+            .pending_ironwood_memo(incoming)
+            .unwrap()
+            .unwrap()
+            .request_id;
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .put_ironwood_memo(Authenticated::for_testing(), incoming, incoming_id, &memo)
+                .unwrap()
         );
-        assert_eq!(
-            apply_record(st.wallet_mut().db_mut(), requests[0], &record).unwrap(),
-            zakura_pir_enhance::ApplyRecordResult {
-                incoming: EnhancePirStoreResult::AlreadyResolved,
-                outgoing: EnhancePirStoreResult::AlreadyResolved,
-            }
+        assert!(
+            enhancement_requested(&st),
+            "one position still outstanding keeps the standard fallback available"
         );
-        assert_eq!(
-            apply_record(st.wallet_mut().db_mut(), requests[1], &record).unwrap(),
-            zakura_pir_enhance::ApplyRecordResult {
-                incoming: EnhancePirStoreResult::Rejected,
-                outgoing: EnhancePirStoreResult::AlreadyResolved,
-            }
+
+        let request_id = st
+            .wallet()
+            .db()
+            .pending_ironwood_outgoing(position)
+            .unwrap()
+            .unwrap()
+            .request_id;
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .put_ironwood_sent_output(
+                    Authenticated::for_testing(),
+                    position,
+                    request_id,
+                    account_id,
+                    recipient,
+                    Zatoshis::const_from_u64(123),
+                    &memo,
+                )
+                .unwrap()
         );
-        assert_eq!(
-            st.wallet().db().enhance_pir_requests().unwrap(),
-            vec![requests[1]],
-            "a record for another note must not dequeue the unresolved request"
-        );
+
+        for mode in [EnhancementMode::Standard, EnhancementMode::PrivateIronwood] {
+            st.wallet_mut().db_mut().set_enhancement_mode(mode);
+            assert!(
+                !enhancement_requested(&st),
+                "a completed transaction stays retired in {mode:?}"
+            );
+        }
     }
 
     #[cfg(feature = "zakura-pir-enhance")]
@@ -4336,7 +4415,7 @@ mod tests {
         use zcash_client_backend::{
             data_api::{
                 Account as _,
-                enhance_pir::{EnhancePirRead, EnhancePirWrite},
+                enhance_pir::{Authenticated, EnhancePirRead, EnhancePirWrite},
                 testing::{
                     AddressType, IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
                 },
@@ -4424,6 +4503,7 @@ mod tests {
             !st.wallet_mut()
                 .db_mut()
                 .put_ironwood_sent_output(
+                    Authenticated::for_testing(),
                     position,
                     request_id,
                     account_id,
@@ -4439,6 +4519,7 @@ mod tests {
             st.wallet_mut()
                 .db_mut()
                 .put_ironwood_sent_output(
+                    Authenticated::for_testing(),
                     position,
                     replacement_id,
                     account_id,
@@ -4452,6 +4533,7 @@ mod tests {
             !st.wallet_mut()
                 .db_mut()
                 .put_ironwood_sent_output(
+                    Authenticated::for_testing(),
                     position,
                     replacement_id,
                     account_id,
