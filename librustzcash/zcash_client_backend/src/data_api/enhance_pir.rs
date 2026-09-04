@@ -20,6 +20,23 @@ use zip32::Scope;
 
 use super::{Account, WalletRead};
 
+/// Selects how ordinary transaction enhancement interacts with private Ironwood enhancement.
+///
+/// Applications that expose a runtime PIR setting should always compile with
+/// `zakura-pir-enhance`, and update this mode when the setting changes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EnhancementMode {
+    /// Exposes ordinary transaction-ID enhancement requests, including for Ironwood transactions.
+    #[default]
+    Standard,
+    /// Suppresses transaction-ID enhancement for transactions protected by Enhance PIR.
+    ///
+    /// Protection is transaction-wide, but only pure-Ironwood compact transactions are eligible.
+    /// Mixed-pool transactions remain on standard transaction-ID enhancement. Status requests and
+    /// enhancement of other, unprotected transactions remain available.
+    PrivateIronwood,
+}
+
 /// One pending memo lookup, identified only by its Ironwood tree position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EnhancePirRequest {
@@ -158,7 +175,11 @@ pub trait EnhancePirRead: WalletRead {
         position: Position,
     ) -> Result<Option<PendingIronwoodOutgoing<Self::AccountId>>, Self::Error>;
 
-    /// Returns whether an Ironwood transaction must not be enhanced by txid.
+    /// Returns whether an Ironwood transaction is covered by transaction-wide txid protection.
+    ///
+    /// This is an informational API. Storage implementations must enforce the configured
+    /// [`EnhancementMode`] in their ordinary transaction-data request path so that callers cannot
+    /// accidentally dispatch a protected enhancement request.
     fn is_ironwood_enhancement_protected(&self, txid: TxId) -> Result<bool, Self::Error>;
 }
 

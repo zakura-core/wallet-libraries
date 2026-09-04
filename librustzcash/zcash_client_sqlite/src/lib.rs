@@ -56,7 +56,7 @@ use uuid::Uuid;
 #[cfg(feature = "zakura-pir-enhance")]
 use zcash_client_backend::data_api::enhance_pir::{
     EnhancePirRead, EnhancePirRequest, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus,
-    EnhancePirWrite, PendingIronwoodMemo, PendingIronwoodOutgoing,
+    EnhancePirWrite, EnhancementMode, PendingIronwoodMemo, PendingIronwoodOutgoing,
 };
 use zcash_client_backend::{
     TransferType,
@@ -294,6 +294,8 @@ pub struct WalletDb<C, P, CL, R> {
     clock: CL,
     rng: R,
     anchor_retention_interval: AnchorRetentionInterval,
+    #[cfg(feature = "zakura-pir-enhance")]
+    enhancement_mode: EnhancementMode,
     #[cfg(feature = "transparent-inputs")]
     gap_limits: GapLimits,
 }
@@ -475,6 +477,8 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
                 clock,
                 rng,
                 anchor_retention_interval: AnchorRetentionInterval::default(),
+                #[cfg(feature = "zakura-pir-enhance")]
+                enhancement_mode: EnhancementMode::default(),
                 #[cfg(feature = "transparent-inputs")]
                 gap_limits: GapLimits::default(),
             })
@@ -511,6 +515,24 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     }
 }
 
+#[cfg(feature = "zakura-pir-enhance")]
+impl<C, P, CL, R> WalletDb<C, P, CL, R> {
+    /// Configures whether protected Ironwood transactions are exposed through ordinary
+    /// transaction-ID enhancement.
+    ///
+    /// This process-local setting defaults to [`EnhancementMode::Standard`] and must be reapplied
+    /// whenever the wallet is opened.
+    pub fn with_enhancement_mode(mut self, mode: EnhancementMode) -> Self {
+        self.set_enhancement_mode(mode);
+        self
+    }
+
+    /// Updates the runtime enhancement mode; see [`Self::with_enhancement_mode`].
+    pub fn set_enhancement_mode(&mut self, mode: EnhancementMode) {
+        self.enhancement_mode = mode;
+    }
+}
+
 #[cfg(feature = "transparent-inputs")]
 impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// Sets the gap limits to be used by the wallet in transparent address generation.
@@ -542,6 +564,8 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock,
             rng,
             anchor_retention_interval: AnchorRetentionInterval::default(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            enhancement_mode: EnhancementMode::default(),
             #[cfg(feature = "transparent-inputs")]
             gap_limits: GapLimits::default(),
         }
@@ -570,6 +594,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock: &self.clock,
             rng: &mut self.rng,
             anchor_retention_interval: self.anchor_retention_interval,
+            #[cfg(feature = "zakura-pir-enhance")]
+            enhancement_mode: self.enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: self.gap_limits,
         };
@@ -628,6 +654,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock: &self.clock,
             rng: &mut self.rng,
             anchor_retention_interval: self.anchor_retention_interval,
+            #[cfg(feature = "zakura-pir-enhance")]
+            enhancement_mode: self.enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: self.gap_limits,
         };
@@ -1536,7 +1564,18 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
         if let Some(_chain_tip_height) = wallet::chain_tip_height(self.conn.borrow())? {
-            let iter = wallet::transaction_data_requests(self.conn.borrow())?.into_iter();
+            let protect_ironwood = {
+                #[cfg(feature = "zakura-pir-enhance")]
+                {
+                    self.enhancement_mode == EnhancementMode::PrivateIronwood
+                }
+                #[cfg(not(feature = "zakura-pir-enhance"))]
+                {
+                    false
+                }
+            };
+            let iter = wallet::transaction_data_requests(self.conn.borrow(), protect_ironwood)?
+                .into_iter();
 
             #[cfg(feature = "transparent-inputs")]
             let iter = iter.chain(wallet::transparent::transaction_data_requests(
@@ -2967,6 +3006,8 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             tx_ref,
             target_or_mined_height,
             spent_in,
+            #[cfg(feature = "zakura-pir-enhance")]
+            true,
         )?;
 
         Ok(())
@@ -2979,6 +3020,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         tx_ref: Self::TxRef,
         target_or_mined_height: Option<BlockHeight>,
         spent_in: Option<Self::TxRef>,
+        #[cfg(feature = "zakura-pir-enhance")] pir_eligible: bool,
     ) -> Result<(), Self::Error> {
         wallet::orchard::put_received_note(
             self.conn.borrow(),
@@ -2988,6 +3030,8 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             tx_ref,
             target_or_mined_height,
             spent_in,
+            #[cfg(feature = "zakura-pir-enhance")]
+            pir_eligible,
         )?;
 
         Ok(())
@@ -4337,6 +4381,7 @@ mod tests {
                 [2; 32],
                 vec![account_id],
             )],
+            true,
         )
         .unwrap();
         let memo = MemoBytes::from_bytes(&[3; 512]).unwrap();

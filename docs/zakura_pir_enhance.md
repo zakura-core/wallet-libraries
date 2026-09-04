@@ -56,7 +56,19 @@ Malformed or unrelated records leave the queue unchanged.
 
 Queued transactions are marked as protected. A client that enables private
 Ironwood recovery must not fall back to a transaction-ID enhancement request
-for a protected transaction. Non-Ironwood recovery can continue normally.
+for a protected transaction. Only compact transactions containing Ironwood and
+no other represented pool are eligible for PIR protection. Mixed-pool
+transactions remain on standard transaction-ID enhancement. Transaction-ID
+enhancement of other, unprotected transactions and transaction status requests
+also continue normally.
+
+Applications that expose PIR as an advanced runtime setting must compile with
+the `zakura-pir-enhance` Cargo feature in both setting states. Set the wallet's
+runtime enhancement mode to `PrivateIronwood` while PIR is enabled and back to
+`Standard` when it is disabled. Protection markers and pending work are
+maintained in either mode. A partially processed transaction therefore returns
+to the standard path when PIR is disabled, while successful completion of every
+PIR position retires its dormant transaction-ID enhancement request.
 
 PIR hides the selected row and transaction identifier, but not contact with the
 service, timing, or query volume. This crate does not implement cover traffic.

@@ -398,7 +398,16 @@ where
         let spent_from_accounts = spent_from_accounts.copied().collect::<HashSet<_>>();
 
         #[cfg(feature = "zakura-pir-enhance")]
-        let ironwood_enhance_candidates = if spent_from_accounts.is_empty() {
+        let ironwood_pir_eligible = !tx.ironwood_actions.is_empty()
+            && tx.spends.is_empty()
+            && tx.outputs.is_empty()
+            && tx.actions.is_empty()
+            && tx.vin.is_empty()
+            && tx.vout.is_empty();
+        #[cfg(feature = "zakura-pir-enhance")]
+        let ironwood_enhance_candidates = if spent_from_accounts.is_empty()
+            || !ironwood_pir_eligible
+        {
             vec![]
         } else {
             tx.ironwood_actions
@@ -567,7 +576,10 @@ where
                 ironwood_outputs,
             );
             #[cfg(feature = "zakura-pir-enhance")]
-            let wallet_tx = wallet_tx.with_ironwood_enhance_candidates(ironwood_enhance_candidates);
+            let wallet_tx = wallet_tx.with_ironwood_enhance_candidates(
+                ironwood_enhance_candidates,
+                ironwood_pir_eligible,
+            );
             wtxs.push(wallet_tx);
         }
 
@@ -1178,6 +1190,8 @@ mod tests {
             ..Default::default()
         };
         tx.ironwood_actions.extend(actions);
+        let mut mixed_tx = tx.clone();
+        mixed_tx.actions.push(mixed_tx.ironwood_actions[0].clone());
         let mut block = CompactBlock {
             hash: vec![1; 32],
             prev_hash: vec![0; 32],
@@ -1226,6 +1240,41 @@ mod tests {
             &other_nullifier.to_bytes()
         );
         assert_eq!(tx.ironwood_enhance_candidates()[1].cmx(), &cmx_1);
+        assert!(tx.ironwood_pir_eligible());
+
+        let mut mixed_block = CompactBlock {
+            hash: vec![2; 32],
+            prev_hash: vec![0; 32],
+            height: 1,
+            ..Default::default()
+        };
+        mixed_block.vtx.push(mixed_tx);
+        mixed_block.chain_metadata = Some(ChainMetadata {
+            sapling_commitment_tree_size: 0,
+            orchard_commitment_tree_size: 1,
+            ironwood_commitment_tree_size: 7,
+        });
+        let mixed_scanned = scan_block_with_runners::<_, _, _, (), (), ()>(
+            &network,
+            mixed_block,
+            &scanning_keys,
+            &nullifiers,
+            Some(&BlockMetadata::from_parts(
+                BlockHeight::from(0),
+                BlockHash([0; 32]),
+                Some(0),
+                Some(0),
+                Some(5),
+            )),
+            None,
+        )
+        .unwrap();
+        let mixed_tx = &mixed_scanned.transactions()[0];
+        assert!(!mixed_tx.ironwood_pir_eligible());
+        assert!(
+            mixed_tx.ironwood_enhance_candidates().is_empty(),
+            "mixed-pool transactions must remain on standard txid enhancement"
+        );
     }
 
     #[test]

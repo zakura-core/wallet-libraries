@@ -19,7 +19,52 @@ use zip32::Scope;
 
 use crate::{AccountUuid, error::SqliteClientError};
 
-use super::{get_account, memo_repr, orchard::parse_note_version};
+use super::{TxQueryType, get_account, memo_repr, orchard::parse_note_version};
+
+fn retire_enhancement_if_complete(
+    tx: &Transaction<'_>,
+    tx_ref: crate::TxRef,
+) -> Result<(), SqliteClientError> {
+    let has_pending_positions = tx.query_row(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM ironwood_enhance_tx_protection p
+             WHERE p.transaction_id = :transaction_id
+               AND (
+                   EXISTS (
+                       SELECT 1
+                       FROM ironwood_memo_retrieval_queue incoming
+                       WHERE incoming.commitment_tree_position =
+                           p.commitment_tree_position
+                   )
+                   OR EXISTS (
+                       SELECT 1
+                       FROM ironwood_enhance_outgoing_queue outgoing
+                       WHERE outgoing.commitment_tree_position =
+                           p.commitment_tree_position
+                   )
+               )
+         )",
+        named_params![":transaction_id": tx_ref.0],
+        |row| row.get::<_, bool>(0),
+    )?;
+
+    if !has_pending_positions {
+        tx.execute(
+            "DELETE FROM tx_retrieval_queue
+             WHERE txid = (
+                 SELECT txid FROM transactions WHERE id_tx = :transaction_id
+             )
+               AND query_type = :enhancement_type",
+            named_params![
+                ":transaction_id": tx_ref.0,
+                ":enhancement_type": TxQueryType::Enhancement.code(),
+            ],
+        )?;
+    }
+
+    Ok(())
+}
 
 pub(crate) fn requests(conn: &Connection) -> Result<Vec<EnhancePirRequest>, SqliteClientError> {
     let mut stmt = conn.prepare_cached(
@@ -96,7 +141,22 @@ pub(crate) fn queue_outgoing(
     conn: &Connection,
     tx_ref: crate::TxRef,
     candidates: &[IronwoodEnhanceCandidate<AccountUuid>],
+    pir_eligible: bool,
 ) -> Result<(), SqliteClientError> {
+    if !pir_eligible {
+        conn.execute(
+            "DELETE FROM ironwood_enhance_outgoing_queue
+             WHERE transaction_id = :transaction_id",
+            named_params![":transaction_id": tx_ref.0],
+        )?;
+        conn.execute(
+            "DELETE FROM ironwood_enhance_tx_protection
+             WHERE transaction_id = :transaction_id",
+            named_params![":transaction_id": tx_ref.0],
+        )?;
+        return Ok(());
+    }
+
     for candidate in candidates {
         let position = u64::from(candidate.position());
         conn.execute(
@@ -235,6 +295,20 @@ pub(crate) fn put(
     position: Position,
     memo: &MemoBytes,
 ) -> Result<bool, SqliteClientError> {
+    let tx_ref = tx
+        .query_row(
+            "SELECT rn.transaction_id
+             FROM ironwood_memo_retrieval_queue q
+             JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
+             WHERE q.commitment_tree_position = :position",
+            named_params![":position": u64::from(position)],
+            |row| row.get::<_, i64>(0).map(crate::TxRef),
+        )
+        .optional()?;
+    let Some(tx_ref) = tx_ref else {
+        return Ok(false);
+    };
+
     let changed = tx.execute(
         "UPDATE ironwood_received_notes
          SET memo = :memo
@@ -253,6 +327,7 @@ pub(crate) fn put(
              WHERE commitment_tree_position = :position",
             named_params![":position": u64::from(position)],
         )?;
+        retire_enhancement_if_complete(tx, tx_ref)?;
     }
     Ok(changed == 1)
 }
@@ -299,13 +374,14 @@ pub(crate) fn put_outgoing<P: Parameters>(
          WHERE commitment_tree_position = :position",
         named_params![":position": u64::from(position)],
     )?;
+    retire_enhancement_if_complete(tx, tx_ref)?;
     Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use incrementalmerkletree::Position;
-    use rusqlite::Connection;
+    use rusqlite::{Connection, named_params};
     use uuid::Uuid;
     use zcash_client_backend::wallet::IronwoodEnhanceCandidate;
     use zcash_primitives::transaction::TxId;
@@ -317,13 +393,55 @@ mod tests {
     fn completion_updates_and_dequeues_atomically() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE ironwood_received_notes (id INTEGER PRIMARY KEY, memo BLOB);
+            "CREATE TABLE transactions (
+                 id_tx INTEGER PRIMARY KEY,
+                 txid BLOB NOT NULL
+             );
+             CREATE TABLE ironwood_received_notes (
+                 id INTEGER PRIMARY KEY,
+                 transaction_id INTEGER NOT NULL,
+                 memo BLOB
+             );
              CREATE TABLE ironwood_memo_retrieval_queue (
                  received_note_id INTEGER PRIMARY KEY,
                  commitment_tree_position INTEGER NOT NULL UNIQUE
              );
-             INSERT INTO ironwood_received_notes VALUES (1, NULL);
-             INSERT INTO ironwood_memo_retrieval_queue VALUES (1, 42);",
+             CREATE TABLE ironwood_enhance_outgoing_queue (
+                 commitment_tree_position INTEGER PRIMARY KEY,
+                 transaction_id INTEGER NOT NULL
+             );
+             CREATE TABLE ironwood_enhance_tx_protection (
+                 transaction_id INTEGER NOT NULL,
+                 commitment_tree_position INTEGER NOT NULL,
+                 PRIMARY KEY(transaction_id, commitment_tree_position)
+             );
+             CREATE TABLE tx_retrieval_queue (
+                 txid BLOB NOT NULL,
+                 query_type INTEGER NOT NULL,
+                 UNIQUE(txid, query_type)
+             );
+             INSERT INTO transactions VALUES (1, zeroblob(32));
+             INSERT INTO ironwood_received_notes VALUES
+                 (1, 1, NULL),
+                 (2, 1, NULL);
+             INSERT INTO ironwood_memo_retrieval_queue VALUES
+                 (1, 42),
+                 (2, 44);
+             INSERT INTO ironwood_enhance_outgoing_queue VALUES (43, 1);
+             INSERT INTO ironwood_enhance_tx_protection VALUES
+                 (1, 42),
+                 (1, 43),
+                 (1, 44);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tx_retrieval_queue VALUES (zeroblob(32), :query_type)",
+            named_params![":query_type": super::TxQueryType::Enhancement.code()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tx_retrieval_queue VALUES (zeroblob(32), :query_type)",
+            named_params![":query_type": super::TxQueryType::Status.code()],
         )
         .unwrap();
         let tx = conn.transaction().unwrap();
@@ -344,9 +462,59 @@ mod tests {
                 |row| { row.get::<_, i64>(0) }
             )
             .unwrap(),
-            0
+            1
         );
-        assert!(!super::put(&tx, 42u64.into(), &MemoBytes::empty()).unwrap());
+        assert_eq!(
+            tx.query_row(
+                "SELECT COUNT(*) FROM tx_retrieval_queue WHERE query_type = :query_type",
+                named_params![":query_type": super::TxQueryType::Enhancement.code()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "partial PIR completion retains the standard fallback"
+        );
+
+        assert!(!super::put(&tx, 99u64.into(), &MemoBytes::empty()).unwrap());
+        tx.execute(
+            "DELETE FROM ironwood_enhance_outgoing_queue
+             WHERE commitment_tree_position = 43",
+            [],
+        )
+        .unwrap();
+        super::retire_enhancement_if_complete(&tx, TxRef(1)).unwrap();
+        assert_eq!(
+            tx.query_row(
+                "SELECT COUNT(*) FROM tx_retrieval_queue WHERE query_type = :query_type",
+                named_params![":query_type": super::TxQueryType::Enhancement.code()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "another incoming position still needs PIR completion"
+        );
+
+        assert!(super::put(&tx, 44u64.into(), &MemoBytes::empty()).unwrap());
+        assert_eq!(
+            tx.query_row(
+                "SELECT COUNT(*) FROM tx_retrieval_queue WHERE query_type = :query_type",
+                named_params![":query_type": super::TxQueryType::Enhancement.code()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0,
+            "final PIR completion retires the standard fallback"
+        );
+        assert_eq!(
+            tx.query_row(
+                "SELECT COUNT(*) FROM tx_retrieval_queue WHERE query_type = :query_type",
+                named_params![":query_type": super::TxQueryType::Status.code()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "status intent is independent of enhancement completion"
+        );
     }
 
     #[test]
@@ -415,6 +583,7 @@ mod tests {
                 [2; 32],
                 vec![account],
             )],
+            true,
         )
         .unwrap();
 
@@ -448,6 +617,7 @@ mod tests {
                     vec![account],
                 ),
             ],
+            true,
         )
         .unwrap();
         assert_eq!(
@@ -477,6 +647,19 @@ mod tests {
             "raw transactions suppress outgoing work but preserve incoming requests"
         );
         assert!(super::is_protected(&conn, txid).unwrap());
+
+        super::queue_outgoing(&conn, TxRef(1), &[], false).unwrap();
+        assert!(!super::is_protected(&conn, txid).unwrap());
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM ironwood_enhance_outgoing_queue",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0,
+            "mixed-pool eligibility removes outgoing PIR work"
+        );
     }
 
     #[test]

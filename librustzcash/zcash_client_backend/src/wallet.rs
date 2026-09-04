@@ -187,6 +187,8 @@ pub struct WalletTx<AccountId> {
     ironwood_outputs: Vec<WalletIronwoodOutput<AccountId>>,
     #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
     ironwood_enhance_candidates: Vec<IronwoodEnhanceCandidate<AccountId>>,
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+    ironwood_pir_eligible: bool,
 }
 
 /// Compact-block context needed to privately recover one outgoing Ironwood output.
@@ -273,6 +275,8 @@ impl<AccountId> WalletTx<AccountId> {
             ironwood_outputs,
             #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
             ironwood_enhance_candidates: vec![],
+            #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+            ironwood_pir_eligible: false,
         }
     }
 
@@ -280,8 +284,10 @@ impl<AccountId> WalletTx<AccountId> {
     pub fn with_ironwood_enhance_candidates(
         mut self,
         candidates: Vec<IronwoodEnhanceCandidate<AccountId>>,
+        pir_eligible: bool,
     ) -> Self {
         self.ironwood_enhance_candidates = candidates;
+        self.ironwood_pir_eligible = pir_eligible;
         self
     }
 
@@ -346,6 +352,15 @@ impl<AccountId> WalletTx<AccountId> {
     #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
     pub fn ironwood_enhance_candidates(&self) -> &[IronwoodEnhanceCandidate<AccountId>] {
         &self.ironwood_enhance_candidates
+    }
+
+    /// Returns whether the compact transaction represented only Ironwood pool data.
+    ///
+    /// This excludes every other shielded action and any transparent data included by the compact
+    /// block source.
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+    pub fn ironwood_pir_eligible(&self) -> bool {
+        self.ironwood_pir_eligible
     }
 }
 

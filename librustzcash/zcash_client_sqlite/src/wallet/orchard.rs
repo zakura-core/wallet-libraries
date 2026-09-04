@@ -556,7 +556,42 @@ const MEMO_RETRIEVAL_ELIGIBLE: &str = "
 fn reconcile_memo_retrieval_queue(
     conn: &rusqlite::Transaction,
     received_note_id: i64,
+    #[cfg(feature = "zakura-pir-enhance")] pir_eligible: bool,
 ) -> Result<(), SqliteClientError> {
+    #[cfg(feature = "zakura-pir-enhance")]
+    if !pir_eligible {
+        conn.execute(
+            "DELETE FROM ironwood_memo_retrieval_queue
+             WHERE received_note_id IN (
+                 SELECT other.id
+                 FROM ironwood_received_notes current
+                 JOIN ironwood_received_notes other
+                   ON other.transaction_id = current.transaction_id
+                 WHERE current.id = :received_note_id
+             )",
+            named_params![":received_note_id": received_note_id],
+        )?;
+        conn.execute(
+            "DELETE FROM ironwood_enhance_outgoing_queue
+             WHERE transaction_id = (
+                 SELECT transaction_id
+                 FROM ironwood_received_notes
+                 WHERE id = :received_note_id
+             )",
+            named_params![":received_note_id": received_note_id],
+        )?;
+        conn.execute(
+            "DELETE FROM ironwood_enhance_tx_protection
+             WHERE transaction_id = (
+                 SELECT transaction_id
+                 FROM ironwood_received_notes
+                 WHERE id = :received_note_id
+             )",
+            named_params![":received_note_id": received_note_id],
+        )?;
+        return Ok(());
+    }
+
     let params = named_params![
         ":received_note_id": received_note_id,
         ":v3": note_version_code(NoteVersion::V3),
@@ -637,6 +672,7 @@ pub(crate) fn put_received_note<
     tx_ref: TxRef,
     target_or_mined_height: Option<BlockHeight>,
     spent_in: Option<TxRef>,
+    #[cfg(feature = "zakura-pir-enhance")] pir_eligible: bool,
 ) -> Result<AccountRef, SqliteClientError> {
     let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(shielded_pool)?;
 
@@ -698,7 +734,12 @@ pub(crate) fn put_received_note<
         .map_err(SqliteClientError::from)?;
 
     if shielded_pool == ShieldedPool::Ironwood {
-        reconcile_memo_retrieval_queue(conn, received_note_id)?;
+        reconcile_memo_retrieval_queue(
+            conn,
+            received_note_id,
+            #[cfg(feature = "zakura-pir-enhance")]
+            pir_eligible,
+        )?;
     }
 
     if let Some(spent_in) = spent_in {
@@ -1394,6 +1435,8 @@ pub(crate) mod tests {
             tx_ref,
             None,
             None,
+            #[cfg(feature = "zakura-pir-enhance")]
+            true,
         )
         .unwrap();
         super::put_received_note(
@@ -1404,6 +1447,8 @@ pub(crate) mod tests {
             tx_ref,
             None,
             None,
+            #[cfg(feature = "zakura-pir-enhance")]
+            true,
         )
         .unwrap();
 
@@ -2876,6 +2921,7 @@ pub(crate) mod tests {
                     [2; 32],
                     vec![account_id],
                 )],
+                true,
             )
             .unwrap();
 
