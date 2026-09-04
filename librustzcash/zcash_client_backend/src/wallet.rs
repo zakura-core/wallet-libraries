@@ -185,6 +185,74 @@ pub struct WalletTx<AccountId> {
     ironwood_spends: Vec<WalletIronwoodSpend<AccountId>>,
     #[cfg(feature = "orchard")]
     ironwood_outputs: Vec<WalletIronwoodOutput<AccountId>>,
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+    ironwood_enhance_candidates: Vec<IronwoodEnhanceCandidate<AccountId>>,
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+    ironwood_pir_eligible: bool,
+}
+
+/// Compact-block context needed to privately recover one outgoing Ironwood output.
+#[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IronwoodEnhanceCandidate<AccountId> {
+    position: Position,
+    output_index: usize,
+    nullifier: [u8; 32],
+    cmx: [u8; 32],
+    ephemeral_key: [u8; 32],
+    compact_ciphertext: [u8; 52],
+    funding_accounts: Vec<AccountId>,
+}
+
+#[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+impl<AccountId> IronwoodEnhanceCandidate<AccountId> {
+    pub fn from_parts(
+        position: Position,
+        output_index: usize,
+        nullifier: [u8; 32],
+        cmx: [u8; 32],
+        ephemeral_key: [u8; 32],
+        compact_ciphertext: [u8; 52],
+        funding_accounts: Vec<AccountId>,
+    ) -> Self {
+        Self {
+            position,
+            output_index,
+            nullifier,
+            cmx,
+            ephemeral_key,
+            compact_ciphertext,
+            funding_accounts,
+        }
+    }
+
+    pub fn position(&self) -> Position {
+        self.position
+    }
+
+    pub fn output_index(&self) -> usize {
+        self.output_index
+    }
+
+    pub fn nullifier(&self) -> &[u8; 32] {
+        &self.nullifier
+    }
+
+    pub fn cmx(&self) -> &[u8; 32] {
+        &self.cmx
+    }
+
+    pub fn ephemeral_key(&self) -> &[u8; 32] {
+        &self.ephemeral_key
+    }
+
+    pub fn compact_ciphertext(&self) -> &[u8; 52] {
+        &self.compact_ciphertext
+    }
+
+    pub fn funding_accounts(&self) -> &[AccountId] {
+        &self.funding_accounts
+    }
 }
 
 impl<AccountId> WalletTx<AccountId> {
@@ -219,7 +287,28 @@ impl<AccountId> WalletTx<AccountId> {
             ironwood_spends,
             #[cfg(feature = "orchard")]
             ironwood_outputs,
+            #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+            ironwood_enhance_candidates: vec![],
+            #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+            ironwood_pir_eligible: false,
         }
+    }
+
+    /// Attaches recovery candidates and provisional eligibility from compact scanning.
+    ///
+    /// Set `pir_eligible` only for a transaction with Ironwood actions and no
+    /// represented transparent, Sapling, or Orchard fields. The compact source
+    /// must include all shielded pools; omitted transparent activity is checked
+    /// separately using the trusted PIR record flags.
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+    pub fn with_ironwood_enhance_candidates(
+        mut self,
+        candidates: Vec<IronwoodEnhanceCandidate<AccountId>>,
+        pir_eligible: bool,
+    ) -> Self {
+        self.ironwood_enhance_candidates = candidates;
+        self.ironwood_pir_eligible = pir_eligible;
+        self
     }
 
     /// Returns the [`TxId`] for the corresponding [`Transaction`].
@@ -277,6 +366,22 @@ impl<AccountId> WalletTx<AccountId> {
     #[cfg(feature = "orchard")]
     pub fn ironwood_outputs(&self) -> &[WalletIronwoodOutput<AccountId>] {
         self.ironwood_outputs.as_ref()
+    }
+
+    /// Returns outgoing Ironwood recovery candidates observed during compact scanning.
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+    pub fn ironwood_enhance_candidates(&self) -> &[IronwoodEnhanceCandidate<AccountId>] {
+        &self.ironwood_enhance_candidates
+    }
+
+    /// Returns whether the compact transaction represented only Ironwood pool data.
+    ///
+    /// This excludes every other shielded action and any transparent data included by the compact
+    /// block source. It does not prove that the full transaction lacks transparent data omitted by
+    /// that source; see <https://github.com/zakura-core/wallet-libraries/issues/19>.
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+    pub fn ironwood_pir_eligible(&self) -> bool {
+        self.ironwood_pir_eligible
     }
 }
 

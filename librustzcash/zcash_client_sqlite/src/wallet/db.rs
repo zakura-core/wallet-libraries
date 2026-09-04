@@ -604,6 +604,47 @@ CREATE INDEX idx_ironwood_received_note_spends_transaction_id ON ironwood_receiv
     transaction_id ASC
 )";
 
+/// Stores the Ironwood notes whose memo is still unknown, keyed by the note's commitment tree
+/// position so that the memo can be retrieved by private information retrieval without revealing
+/// a transaction identifier.
+///
+/// A position identifies at most one mined note, so `commitment_tree_position` is unique; the
+/// Enhance PIR discovers rows by position and compare-and-swaps completion against the
+/// transaction and action identity authenticated for that position.
+pub(super) const TABLE_IRONWOOD_MEMO_RETRIEVAL_QUEUE: &str = "
+CREATE TABLE ironwood_memo_retrieval_queue (
+    received_note_id INTEGER PRIMARY KEY
+        REFERENCES ironwood_received_notes(id) ON DELETE CASCADE,
+    commitment_tree_position INTEGER NOT NULL UNIQUE
+        CHECK (commitment_tree_position >= 0)
+)";
+
+pub(super) const TABLE_IRONWOOD_ENHANCE_OUTGOING_QUEUE: &str = "
+CREATE TABLE ironwood_enhance_outgoing_queue (
+    commitment_tree_position INTEGER PRIMARY KEY CHECK (commitment_tree_position >= 0),
+    transaction_id INTEGER NOT NULL REFERENCES transactions(id_tx) ON DELETE CASCADE,
+    output_index INTEGER NOT NULL CHECK (output_index >= 0),
+    nullifier BLOB NOT NULL CHECK (length(nullifier) = 32),
+    cmx BLOB NOT NULL CHECK (length(cmx) = 32),
+    ephemeral_key BLOB NOT NULL CHECK (length(ephemeral_key) = 32),
+    compact_ciphertext BLOB NOT NULL CHECK (length(compact_ciphertext) = 52),
+    not_recoverable INTEGER NOT NULL DEFAULT 0 CHECK (not_recoverable IN (0, 1)),
+    UNIQUE(transaction_id, output_index)
+)";
+
+pub(super) const TABLE_IRONWOOD_ENHANCE_OUTGOING_ACCOUNTS: &str = "
+CREATE TABLE ironwood_enhance_outgoing_accounts (
+    commitment_tree_position INTEGER NOT NULL REFERENCES ironwood_enhance_outgoing_queue(commitment_tree_position) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    PRIMARY KEY(commitment_tree_position, account_id)
+)";
+
+pub(super) const TABLE_IRONWOOD_ENHANCE_ROUTING: &str = "
+CREATE TABLE ironwood_enhance_routing (
+    transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
+    route INTEGER NOT NULL CHECK (route IN (0, 1))
+)";
+
 // The in-progress Orchard -> Ironwood pool migration (ZIP 318). The table DDL and store live in the
 // `crate::pool_migration` module; these golden copies track the normalized schema those tables
 // install into `wallet.db`. Every structured value is stored in typed columns and child tables; the
