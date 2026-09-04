@@ -289,11 +289,13 @@ pub fn decrypt_and_store_ironwood_memo<DbT: EnhancePirWrite>(
         return Ok(EnhancePirStoreResult::Rejected);
     };
 
-    Ok(if db.put_ironwood_memo(request.position(), pending.request_id, &memo)? {
-        EnhancePirStoreResult::Stored
-    } else {
-        EnhancePirStoreResult::AlreadyResolved
-    })
+    Ok(
+        if db.put_ironwood_memo(request.position(), pending.request_id, &memo)? {
+            EnhancePirStoreResult::Stored
+        } else {
+            EnhancePirStoreResult::AlreadyResolved
+        },
+    )
 }
 
 fn decrypt_memo(

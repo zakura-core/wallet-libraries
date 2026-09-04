@@ -802,6 +802,9 @@ pub(crate) fn delete_account(
         ],
     )?;
 
+    #[cfg(feature = "zakura-pir-enhance")]
+    enhance_pir::remove_orphaned_outgoing(conn)?;
+
     Ok(())
 }
 

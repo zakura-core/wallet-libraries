@@ -111,6 +111,40 @@ impl QuerySession {
         acceptance: &GenerationAcceptance,
     ) -> Result<Self, ClientError> {
         acceptance.validate(&session.generation)?;
+        let (rlwe, expected_params) =
+            ipir_sp::params_for_simplepir(session.generation.logical_rows, ITEM_SIZE_BITS)
+                .map_err(|error| ClientError::Pir(error.to_string()))?;
+        if session.params != expected_params {
+            return Err(ClientError::Generation(
+                "parameters do not match the pinned generator".to_string(),
+            ));
+        }
+        let blocks = session
+            .params
+            .db_cols
+            .checked_div(rlwe.d)
+            .filter(|_| session.params.db_cols.is_multiple_of(rlwe.d))
+            .ok_or_else(|| ClientError::Generation("invalid PIR dimensions".to_string()))?;
+        let expected_decoded_len = checked_generation_product(
+            blocks,
+            published_c1_len(rlwe.d, rlwe.q),
+            "public parameter length",
+        )?;
+        let expected_encoded_len = expected_decoded_len
+            .checked_add(2)
+            .and_then(|length| length.checked_div(3))
+            .and_then(|length| length.checked_mul(4))
+            .ok_or_else(|| {
+                ClientError::Generation(
+                    "public parameter base64 length overflows usize".to_string(),
+                )
+            })?;
+        if session.public_params_base64.len() != expected_encoded_len {
+            return Err(ClientError::Generation(format!(
+                "public parameters base64 has {} bytes, expected {expected_encoded_len}",
+                session.public_params_base64.len()
+            )));
+        }
         let public_params = BASE64_STANDARD.decode(session.public_params_base64)?;
         Self::new(
             session.generation,
@@ -135,19 +169,6 @@ impl QuerySession {
                 "parameters do not match the pinned generator".to_string(),
             ));
         }
-        let digest = Sha256::digest(public_params);
-        if hex::encode(digest) != generation.public_params_sha256 {
-            return Err(ClientError::Generation(
-                "public parameter digest mismatch".to_string(),
-            ));
-        }
-        let mut epoch = [0; 8];
-        epoch.copy_from_slice(&digest[..8]);
-        if hex::encode(epoch) != generation.public_params_epoch {
-            return Err(ClientError::Generation(
-                "public parameter epoch mismatch".to_string(),
-            ));
-        }
         let blocks = ypir
             .db_cols
             .checked_div(rlwe.d)
@@ -163,6 +184,19 @@ impl QuerySession {
                 "public parameters have {} bytes, expected {expected_len}",
                 public_params.len()
             )));
+        }
+        let digest = Sha256::digest(public_params);
+        if hex::encode(digest) != generation.public_params_sha256 {
+            return Err(ClientError::Generation(
+                "public parameter digest mismatch".to_string(),
+            ));
+        }
+        let mut epoch = [0; 8];
+        epoch.copy_from_slice(&digest[..8]);
+        if hex::encode(epoch) != generation.public_params_epoch {
+            return Err(ClientError::Generation(
+                "public parameter epoch mismatch".to_string(),
+            ));
         }
         let published_c1 = recover_published_c1(public_params, rlwe.d, blocks, rlwe.q);
         let client = IPIRClient::new(&rlwe, &ypir);
@@ -257,12 +291,19 @@ impl QuerySession {
     }
 }
 
-pub fn record_in_row(row: &[u8], slot: usize) -> EnhanceRecord {
-    let start = slot * RECORD_BYTES;
-    let bytes: [u8; RECORD_BYTES] = row[start..start + RECORD_BYTES]
+pub fn record_in_row(row: &[u8], slot: usize) -> Result<EnhanceRecord, ClientError> {
+    let start = slot
+        .checked_mul(RECORD_BYTES)
+        .ok_or_else(|| ClientError::Response("record offset overflows usize".to_string()))?;
+    let end = start
+        .checked_add(RECORD_BYTES)
+        .ok_or_else(|| ClientError::Response("record offset overflows usize".to_string()))?;
+    let bytes: [u8; RECORD_BYTES] = row
+        .get(start..end)
+        .ok_or_else(|| ClientError::Response("record slot is outside decoded row".to_string()))?
         .try_into()
-        .expect("validated Enhance row bounds");
-    EnhanceRecord(bytes)
+        .expect("fixed record length");
+    Ok(EnhanceRecord(bytes))
 }
 
 fn validate_generation(
@@ -411,7 +452,7 @@ impl EnhancePirClient {
     pub async fn query_position(&self, position: u64) -> Result<EnhanceRecord, ClientError> {
         let (query, slot) = self.session.prepare_position(position)?;
         let row = self.send(query).await?;
-        Ok(record_in_row(&row, slot))
+        record_in_row(&row, slot)
     }
 
     pub async fn query_dummy(&self) -> Result<(), ClientError> {
@@ -527,13 +568,6 @@ mod tests {
         }
     }
 
-    fn set_public_params(session: &mut EnhanceSession, public_params: Vec<u8>) {
-        let digest = Sha256::digest(&public_params);
-        session.generation.public_params_epoch = hex::encode(&digest[..8]);
-        session.generation.public_params_sha256 = hex::encode(digest);
-        session.public_params_base64 = BASE64_STANDARD.encode(public_params);
-    }
-
     fn assert_generation_error(session: EnhanceSession, expected: &str) {
         let acceptance = acceptance_for(&session.generation, SHARD_ROWS as u64);
         assert!(matches!(
@@ -569,7 +603,7 @@ mod tests {
     fn rejects_malformed_public_parameter_base64() {
         let mut session = valid_session();
         let acceptance = acceptance_for(&session.generation, SHARD_ROWS as u64);
-        session.public_params_base64 = "not base64***".to_string();
+        session.public_params_base64.replace_range(..1, "*");
         assert!(matches!(
             QuerySession::from_session(session, &acceptance),
             Err(ClientError::PublicParamsBase64(_))
@@ -645,17 +679,40 @@ mod tests {
             } else {
                 public_params.push(0);
             }
-            set_public_params(&mut session, public_params);
+            let digest = Sha256::digest(&public_params);
+            session.generation.public_params_epoch = hex::encode(&digest[..8]);
+            session.generation.public_params_sha256 = hex::encode(digest);
             let expected_len = BASE64_STANDARD
                 .decode(valid_session().public_params_base64)
                 .unwrap()
                 .len();
             let actual_len = (expected_len as isize + delta) as usize;
-            assert_generation_error(
-                session,
-                &format!("public parameters have {actual_len} bytes, expected {expected_len}"),
-            );
+            let acceptance = acceptance_for(&session.generation, SHARD_ROWS as u64);
+            assert!(matches!(
+                QuerySession::new(
+                    session.generation,
+                    session.params,
+                    &public_params,
+                    &acceptance,
+                ),
+                Err(ClientError::Generation(message))
+                    if message == format!(
+                        "public parameters have {actual_len} bytes, expected {expected_len}"
+                    )
+            ));
         }
+    }
+
+    #[test]
+    fn rejects_oversized_custom_session_before_base64_decoding() {
+        let mut session = valid_session();
+        let acceptance = acceptance_for(&session.generation, SHARD_ROWS as u64);
+        session.public_params_base64.push_str("****");
+        assert!(matches!(
+            QuerySession::from_session(session, &acceptance),
+            Err(ClientError::Generation(message))
+                if message.starts_with("public parameters base64 has ")
+        ));
     }
 
     #[test]
@@ -752,6 +809,8 @@ mod tests {
             Err(ClientError::OutsideCoverage(position))
                 if position == query_session.params().db_rows as u64
         ));
+        assert!(record_in_row(&[], 0).is_err());
+        assert!(record_in_row(&vec![0; ROW_BYTES], RECORDS_PER_ROW).is_err());
     }
 
     #[test]
@@ -909,6 +968,6 @@ mod tests {
         response.extend_from_slice(&response_body);
 
         let row = query_session.decode(query, &response).unwrap();
-        assert_eq!(record_in_row(&row, slot), expected_record);
+        assert_eq!(record_in_row(&row, slot).unwrap(), expected_record);
     }
 }

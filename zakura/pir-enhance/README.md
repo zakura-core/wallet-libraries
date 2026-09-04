@@ -19,3 +19,12 @@ pending generation against wallet state, and then call
 fetch is cheap; public-parameter decoding, PIR parameter derivation, and setup
 allocation are deferred until `connect`. `EnhancePirClient::connect` is a
 one-shot convenience when the accepted anchor is already known.
+
+Custom transports receive the same allocation protection: the encoded public
+parameters are checked against the generation's exact expected size before
+base64 decoding.
+
+Enable `wallet-integration` when using `zakura-client-backend`. Its
+`apply_record` helper converts the wire record and applies it to both incoming
+and outgoing work at a position, so a self-send cannot leave one side
+unprocessed.

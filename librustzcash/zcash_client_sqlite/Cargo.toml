@@ -126,6 +126,7 @@ zcash_address = { workspace = true, features = ["test-dependencies"] }
 # adapter that the end-to-end proving simulation drives comes from `wallet`, which the `orchard`
 # feature below enables; see the note there for why it may not be enabled from here.
 zip321 = { workspace = true }
+zakura-pir-enhance = { path = "../../zakura/pir-enhance", default-features = false, features = ["wallet-integration"] }
 
 [features]
 default = ["multicore"]

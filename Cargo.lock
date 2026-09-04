@@ -7444,6 +7444,7 @@ dependencies = [
  "zakura-orchard",
  "zakura-pasta-curves",
  "zakura-pczt",
+ "zakura-pir-enhance",
  "zakura-primitives",
  "zakura-proofs",
  "zakura-sapling-crypto",
@@ -7667,6 +7668,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "zakura-client-backend",
 ]
 
 [[package]]

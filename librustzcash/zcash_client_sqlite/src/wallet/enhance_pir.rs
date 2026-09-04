@@ -8,7 +8,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, named_params};
 use uuid::Uuid;
 use zcash_client_backend::data_api::{
     Account as _,
-    enhance_pir::{EnhancePirRequest, PendingIronwoodMemo, PendingIronwoodOutgoing},
+    enhance_pir::{
+        EnhancePirRequest, IronwoodEnhanceRequestId, PendingIronwoodMemo, PendingIronwoodOutgoing,
+    },
 };
 use zcash_client_backend::wallet::{IronwoodEnhanceCandidate, Recipient};
 use zcash_keys::address::Receiver;
@@ -93,17 +95,17 @@ pub(crate) fn pending_outgoing(
     conn: &Connection,
     position: Position,
 ) -> Result<Option<PendingIronwoodOutgoing<AccountUuid>>, SqliteClientError> {
-    let action: Option<([u8; 32], [u8; 32])> = conn
+    let action: Option<([u8; 32], u32, [u8; 32], [u8; 32])> = conn
         .query_row(
-            "SELECT q.nullifier, q.cmx
+            "SELECT t.txid, q.output_index, q.nullifier, q.cmx
              FROM ironwood_enhance_outgoing_queue q
              JOIN transactions t ON t.id_tx = q.transaction_id
              WHERE q.commitment_tree_position = :position AND t.raw IS NULL",
             named_params![":position": u64::from(position)],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
-    let Some((nullifier, cmx)) = action else {
+    let Some((txid, output_index, nullifier, cmx)) = action else {
         return Ok(None);
     };
     let mut stmt = conn.prepare_cached(
@@ -119,6 +121,7 @@ pub(crate) fn pending_outgoing(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(PendingIronwoodOutgoing {
+        request_id: IronwoodEnhanceRequestId::new(TxId::from_bytes(txid), output_index),
         account_ids,
         nullifier,
         cmx,
@@ -203,38 +206,83 @@ pub(crate) fn queue_outgoing(
     Ok(())
 }
 
+pub(crate) fn remove_orphaned_outgoing(tx: &Transaction<'_>) -> Result<(), SqliteClientError> {
+    tx.execute(
+        "DELETE FROM ironwood_enhance_outgoing_queue
+         WHERE NOT EXISTS (
+             SELECT 1
+             FROM ironwood_enhance_outgoing_accounts accounts
+             WHERE accounts.commitment_tree_position =
+                 ironwood_enhance_outgoing_queue.commitment_tree_position
+         )",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM ironwood_enhance_tx_protection
+         WHERE NOT EXISTS (
+             SELECT 1
+             FROM ironwood_memo_retrieval_queue incoming
+             WHERE incoming.commitment_tree_position =
+                 ironwood_enhance_tx_protection.commitment_tree_position
+         )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM ironwood_enhance_outgoing_queue outgoing
+             WHERE outgoing.commitment_tree_position =
+                 ironwood_enhance_tx_protection.commitment_tree_position
+         )",
+        [],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn pending<P: zcash_protocol::consensus::Parameters>(
     conn: &Connection,
     params: &P,
     position: Position,
 ) -> Result<Option<PendingIronwoodMemo<AccountUuid>>, SqliteClientError> {
     #[allow(clippy::type_complexity)]
-    let raw: Option<(Uuid, [u8; 11], u64, [u8; 32], [u8; 32], i64, i64)> = conn
+    let raw: Option<(
+        [u8; 32],
+        u32,
+        Uuid,
+        [u8; 11],
+        u64,
+        [u8; 32],
+        [u8; 32],
+        i64,
+        i64,
+    )> = conn
         .query_row(
-            "SELECT a.uuid, rn.diversifier, rn.value, rn.rho, rn.rseed,
-                    rn.note_version, rn.recipient_key_scope
+            "SELECT t.txid, rn.output_index, a.uuid, rn.diversifier, rn.value,
+                    rn.rho, rn.rseed, rn.note_version, rn.recipient_key_scope
              FROM ironwood_memo_retrieval_queue q
              JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
+             JOIN transactions t ON t.id_tx = rn.transaction_id
              JOIN accounts a ON a.id = rn.account_id
              WHERE q.commitment_tree_position = :position
                AND rn.memo IS NULL",
             named_params![":position": u64::from(position)],
             |row| {
-                let value = u64::try_from(row.get::<_, i64>(2)?)
-                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(2, i64::MIN))?;
+                let value = u64::try_from(row.get::<_, i64>(4)?)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, i64::MIN))?;
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
-                    value,
+                    row.get(2)?,
                     row.get(3)?,
-                    row.get(4)?,
+                    value,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
                 ))
             },
         )
         .optional()?;
-    let Some((account_uuid, diversifier, value, rho, rseed, version, scope)) = raw else {
+    let Some((txid, output_index, account_uuid, diversifier, value, rho, rseed, version, scope)) =
+        raw
+    else {
         return Ok(None);
     };
     let account_id = AccountUuid::from_uuid(account_uuid);
@@ -284,6 +332,7 @@ pub(crate) fn pending<P: zcash_protocol::consensus::Parameters>(
     ))
     .ok_or_else(|| SqliteClientError::CorruptedData("Invalid queued Ironwood note".to_owned()))?;
     Ok(Some(PendingIronwoodMemo {
+        request_id: IronwoodEnhanceRequestId::new(TxId::from_bytes(txid), output_index),
         account_id,
         note,
         scope,
@@ -293,6 +342,7 @@ pub(crate) fn pending<P: zcash_protocol::consensus::Parameters>(
 pub(crate) fn put(
     tx: &Transaction<'_>,
     position: Position,
+    request_id: IronwoodEnhanceRequestId,
     memo: &MemoBytes,
 ) -> Result<bool, SqliteClientError> {
     let tx_ref = tx
@@ -300,8 +350,15 @@ pub(crate) fn put(
             "SELECT rn.transaction_id
              FROM ironwood_memo_retrieval_queue q
              JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
-             WHERE q.commitment_tree_position = :position",
-            named_params![":position": u64::from(position)],
+             JOIN transactions t ON t.id_tx = rn.transaction_id
+             WHERE q.commitment_tree_position = :position
+               AND t.txid = :txid
+               AND rn.output_index = :output_index",
+            named_params![
+                ":position": u64::from(position),
+                ":txid": request_id.txid().as_ref(),
+                ":output_index": request_id.output_index(),
+            ],
             |row| row.get::<_, i64>(0).map(crate::TxRef),
         )
         .optional()?;
@@ -313,11 +370,18 @@ pub(crate) fn put(
         "UPDATE ironwood_received_notes
          SET memo = :memo
          WHERE id = (
-             SELECT received_note_id FROM ironwood_memo_retrieval_queue
-             WHERE commitment_tree_position = :position
+             SELECT q.received_note_id
+             FROM ironwood_memo_retrieval_queue q
+             JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
+             JOIN transactions t ON t.id_tx = rn.transaction_id
+             WHERE q.commitment_tree_position = :position
+               AND t.txid = :txid
+               AND rn.output_index = :output_index
          ) AND memo IS NULL",
         named_params![
             ":position": u64::from(position),
+            ":txid": request_id.txid().as_ref(),
+            ":output_index": request_id.output_index(),
             ":memo": memo_repr(Some(memo)),
         ],
     )?;
@@ -336,6 +400,7 @@ pub(crate) fn put_outgoing<P: Parameters>(
     tx: &Transaction<'_>,
     params: &P,
     position: Position,
+    request_id: IronwoodEnhanceRequestId,
     from_account: AccountUuid,
     recipient: orchard::Address,
     value: Zatoshis,
@@ -343,10 +408,17 @@ pub(crate) fn put_outgoing<P: Parameters>(
 ) -> Result<bool, SqliteClientError> {
     let target: Option<(crate::TxRef, usize)> = tx
         .query_row(
-            "SELECT transaction_id, output_index
-             FROM ironwood_enhance_outgoing_queue
-             WHERE commitment_tree_position = :position",
-            named_params![":position": u64::from(position)],
+            "SELECT q.transaction_id, q.output_index
+             FROM ironwood_enhance_outgoing_queue q
+             JOIN transactions t ON t.id_tx = q.transaction_id
+             WHERE q.commitment_tree_position = :position
+               AND t.txid = :txid
+               AND q.output_index = :output_index",
+            named_params![
+                ":position": u64::from(position),
+                ":txid": request_id.txid().as_ref(),
+                ":output_index": request_id.output_index(),
+            ],
             |row| Ok((crate::TxRef(row.get(0)?), row.get(1)?)),
         )
         .optional()?;
@@ -400,6 +472,7 @@ mod tests {
              CREATE TABLE ironwood_received_notes (
                  id INTEGER PRIMARY KEY,
                  transaction_id INTEGER NOT NULL,
+                 output_index INTEGER NOT NULL,
                  memo BLOB
              );
              CREATE TABLE ironwood_memo_retrieval_queue (
@@ -422,8 +495,8 @@ mod tests {
              );
              INSERT INTO transactions VALUES (1, zeroblob(32));
              INSERT INTO ironwood_received_notes VALUES
-                 (1, 1, NULL),
-                 (2, 1, NULL);
+                 (1, 1, 0, NULL),
+                 (2, 1, 1, NULL);
              INSERT INTO ironwood_memo_retrieval_queue VALUES
                  (1, 42),
                  (2, 44);
@@ -445,7 +518,13 @@ mod tests {
         )
         .unwrap();
         let tx = conn.transaction().unwrap();
-        assert!(super::put(&tx, 42u64.into(), &MemoBytes::empty()).unwrap());
+        let first_id = super::IronwoodEnhanceRequestId::new(TxId::from_bytes([0; 32]), 0);
+        let second_id = super::IronwoodEnhanceRequestId::new(TxId::from_bytes([0; 32]), 1);
+        assert!(
+            !super::put(&tx, 42u64.into(), second_id, &MemoBytes::empty()).unwrap(),
+            "a stale identity must not complete the current position"
+        );
+        assert!(super::put(&tx, 42u64.into(), first_id, &MemoBytes::empty()).unwrap());
         assert_eq!(
             tx.query_row(
                 "SELECT memo FROM ironwood_received_notes WHERE id = 1",
@@ -475,7 +554,7 @@ mod tests {
             "partial PIR completion retains the standard fallback"
         );
 
-        assert!(!super::put(&tx, 99u64.into(), &MemoBytes::empty()).unwrap());
+        assert!(!super::put(&tx, 99u64.into(), first_id, &MemoBytes::empty()).unwrap());
         tx.execute(
             "DELETE FROM ironwood_enhance_outgoing_queue
              WHERE commitment_tree_position = 43",
@@ -494,7 +573,7 @@ mod tests {
             "another incoming position still needs PIR completion"
         );
 
-        assert!(super::put(&tx, 44u64.into(), &MemoBytes::empty()).unwrap());
+        assert!(super::put(&tx, 44u64.into(), second_id, &MemoBytes::empty()).unwrap());
         assert_eq!(
             tx.query_row(
                 "SELECT COUNT(*) FROM tx_retrieval_queue WHERE query_type = :query_type",
@@ -663,12 +742,67 @@ mod tests {
     }
 
     #[test]
+    fn removing_the_last_candidate_account_retires_orphaned_work() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE transactions (id_tx INTEGER PRIMARY KEY);
+             CREATE TABLE accounts (id INTEGER PRIMARY KEY);
+             CREATE TABLE ironwood_memo_retrieval_queue (
+                 received_note_id INTEGER PRIMARY KEY,
+                 commitment_tree_position INTEGER NOT NULL UNIQUE
+             );
+             CREATE TABLE ironwood_enhance_outgoing_queue (
+                 commitment_tree_position INTEGER PRIMARY KEY,
+                 transaction_id INTEGER NOT NULL REFERENCES transactions(id_tx) ON DELETE CASCADE
+             );
+             CREATE TABLE ironwood_enhance_outgoing_accounts (
+                 commitment_tree_position INTEGER NOT NULL
+                     REFERENCES ironwood_enhance_outgoing_queue(commitment_tree_position)
+                     ON DELETE CASCADE,
+                 account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                 PRIMARY KEY(commitment_tree_position, account_id)
+             );
+             CREATE TABLE ironwood_enhance_tx_protection (
+                 transaction_id INTEGER NOT NULL REFERENCES transactions(id_tx) ON DELETE CASCADE,
+                 commitment_tree_position INTEGER NOT NULL,
+                 PRIMARY KEY(transaction_id, commitment_tree_position)
+             );
+             INSERT INTO transactions VALUES (1);
+             INSERT INTO accounts VALUES (1);
+             INSERT INTO ironwood_enhance_outgoing_queue VALUES (42, 1);
+             INSERT INTO ironwood_enhance_outgoing_accounts VALUES (42, 1);
+             INSERT INTO ironwood_enhance_tx_protection VALUES (1, 42);",
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute("DELETE FROM accounts WHERE id = 1", []).unwrap();
+        super::remove_orphaned_outgoing(&tx).unwrap();
+        assert_eq!(
+            tx.query_row(
+                "SELECT (
+                     SELECT COUNT(*) FROM ironwood_enhance_outgoing_queue
+                 ) + (
+                     SELECT COUNT(*) FROM ironwood_enhance_tx_protection
+                 )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn invalid_queued_scope_is_reported_as_corruption() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE accounts (id INTEGER PRIMARY KEY, uuid BLOB NOT NULL);
+            "CREATE TABLE transactions (id_tx INTEGER PRIMARY KEY, txid BLOB NOT NULL);
+             CREATE TABLE accounts (id INTEGER PRIMARY KEY, uuid BLOB NOT NULL);
              CREATE TABLE ironwood_received_notes (
                  id INTEGER PRIMARY KEY,
+                 transaction_id INTEGER NOT NULL,
+                 output_index INTEGER NOT NULL,
                  account_id INTEGER NOT NULL,
                  diversifier BLOB NOT NULL,
                  value INTEGER NOT NULL,
@@ -681,14 +815,17 @@ mod tests {
              CREATE TABLE ironwood_memo_retrieval_queue (
                  received_note_id INTEGER PRIMARY KEY,
                  commitment_tree_position INTEGER NOT NULL UNIQUE
-             );",
+             );
+             INSERT INTO transactions VALUES (1, zeroblob(32));",
         )
         .unwrap();
         conn.execute("INSERT INTO accounts VALUES (1, ?1)", [Uuid::from_u128(1)])
             .unwrap();
         conn.execute(
             "INSERT INTO ironwood_received_notes
-             VALUES (1, 1, zeroblob(11), 1, zeroblob(32), zeroblob(32), 3, 9, NULL)",
+             VALUES (
+                 1, 1, 0, 1, zeroblob(11), 1, zeroblob(32), zeroblob(32), 3, 9, NULL
+             )",
             [],
         )
         .unwrap();

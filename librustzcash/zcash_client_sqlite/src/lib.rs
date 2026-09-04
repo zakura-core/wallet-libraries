@@ -56,7 +56,8 @@ use uuid::Uuid;
 #[cfg(feature = "zakura-pir-enhance")]
 use zcash_client_backend::data_api::enhance_pir::{
     EnhancePirRead, EnhancePirRequest, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus,
-    EnhancePirWrite, EnhancementMode, PendingIronwoodMemo, PendingIronwoodOutgoing,
+    EnhancePirWrite, EnhancementMode, IronwoodEnhanceRequestId, PendingIronwoodMemo,
+    PendingIronwoodOutgoing,
 };
 use zcash_client_backend::{
     TransferType,
@@ -1670,14 +1671,16 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
     fn put_ironwood_memo(
         &mut self,
         position: Position,
+        request_id: IronwoodEnhanceRequestId,
         memo: &zcash_protocol::memo::MemoBytes,
     ) -> Result<bool, Self::Error> {
-        self.transactionally(|wdb| wallet::enhance_pir::put(wdb.conn.0, position, memo))
+        self.transactionally(|wdb| wallet::enhance_pir::put(wdb.conn.0, position, request_id, memo))
     }
 
     fn put_ironwood_sent_output(
         &mut self,
         position: Position,
+        request_id: IronwoodEnhanceRequestId,
         from_account: Self::AccountId,
         recipient: orchard::Address,
         value: zcash_protocol::value::Zatoshis,
@@ -1688,6 +1691,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
                 wdb.conn.0,
                 wdb.params,
                 position,
+                request_id,
                 from_account,
                 recipient,
                 value,
@@ -4243,11 +4247,9 @@ mod tests {
     fn enhance_pir_authentication_only_dequeues_the_matching_note() {
         use orchard::note::NoteVersion;
         use orchard::note_encryption::{IronwoodDomain, IronwoodNoteEncryption};
+        use zakura_pir_enhance::{EnhanceRecord, EnhanceRecordParts, apply_record};
         use zcash_client_backend::data_api::{
-            enhance_pir::{
-                EnhancePirRead, EnhancePirStoreResult, IronwoodEnhanceRecord,
-                decrypt_and_store_ironwood_memo,
-            },
+            enhance_pir::{EnhancePirRead, EnhancePirStoreResult},
             testing::{
                 AddressType, IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
             },
@@ -4292,27 +4294,33 @@ mod tests {
             .unwrap();
         assert_eq!(pending.note.version(), NoteVersion::V3);
         let encryptor = IronwoodNoteEncryption::new(None, pending.note, [7; 512]);
-        let record = IronwoodEnhanceRecord::from_parts(
-            IronwoodDomain::epk_bytes(encryptor.epk()).0,
-            encryptor.encrypt_note_plaintext(),
-            [0; 32],
-            [0; 80],
-        );
+        let record = EnhanceRecord::from_parts(EnhanceRecordParts {
+            ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0,
+            enc_ciphertext: encryptor.encrypt_note_plaintext(),
+            cv_net: [0; 32],
+            out_ciphertext: [0; 80],
+        });
 
         assert_eq!(
-            decrypt_and_store_ironwood_memo(st.wallet_mut().db_mut(), requests[0], &record)
-                .unwrap(),
-            EnhancePirStoreResult::Stored
+            apply_record(st.wallet_mut().db_mut(), requests[0], &record).unwrap(),
+            zakura_pir_enhance::ApplyRecordResult {
+                incoming: EnhancePirStoreResult::Stored,
+                outgoing: EnhancePirStoreResult::AlreadyResolved,
+            }
         );
         assert_eq!(
-            decrypt_and_store_ironwood_memo(st.wallet_mut().db_mut(), requests[0], &record)
-                .unwrap(),
-            EnhancePirStoreResult::AlreadyResolved
+            apply_record(st.wallet_mut().db_mut(), requests[0], &record).unwrap(),
+            zakura_pir_enhance::ApplyRecordResult {
+                incoming: EnhancePirStoreResult::AlreadyResolved,
+                outgoing: EnhancePirStoreResult::AlreadyResolved,
+            }
         );
         assert_eq!(
-            decrypt_and_store_ironwood_memo(st.wallet_mut().db_mut(), requests[1], &record)
-                .unwrap(),
-            EnhancePirStoreResult::Rejected
+            apply_record(st.wallet_mut().db_mut(), requests[1], &record).unwrap(),
+            zakura_pir_enhance::ApplyRecordResult {
+                incoming: EnhancePirStoreResult::Rejected,
+                outgoing: EnhancePirStoreResult::AlreadyResolved,
+            }
         );
         assert_eq!(
             st.wallet().db().enhance_pir_requests().unwrap(),
@@ -4385,12 +4393,55 @@ mod tests {
         )
         .unwrap();
         let memo = MemoBytes::from_bytes(&[3; 512]).unwrap();
+        let request_id = st
+            .wallet()
+            .db()
+            .pending_ironwood_outgoing(position)
+            .unwrap()
+            .unwrap()
+            .request_id;
+        crate::wallet::enhance_pir::queue_outgoing(
+            st.wallet().conn(),
+            tx_ref,
+            &[IronwoodEnhanceCandidate::from_parts(
+                position,
+                5,
+                [4; 32],
+                [5; 32],
+                vec![account_id],
+            )],
+            true,
+        )
+        .unwrap();
+        let replacement_id = st
+            .wallet()
+            .db()
+            .pending_ironwood_outgoing(position)
+            .unwrap()
+            .unwrap()
+            .request_id;
+
+        assert!(
+            !st.wallet_mut()
+                .db_mut()
+                .put_ironwood_sent_output(
+                    position,
+                    request_id,
+                    account_id,
+                    recipient,
+                    Zatoshis::const_from_u64(123),
+                    &memo,
+                )
+                .unwrap(),
+            "a stale identity must not complete a reassigned position"
+        );
 
         assert!(
             st.wallet_mut()
                 .db_mut()
                 .put_ironwood_sent_output(
                     position,
+                    replacement_id,
                     account_id,
                     recipient,
                     Zatoshis::const_from_u64(123),
@@ -4403,6 +4454,7 @@ mod tests {
                 .db_mut()
                 .put_ironwood_sent_output(
                     position,
+                    replacement_id,
                     account_id,
                     recipient,
                     Zatoshis::const_from_u64(123),
@@ -4425,12 +4477,12 @@ mod tests {
                 "SELECT output_index, value, memo,
                         to_address IS NOT NULL OR to_account_id IS NOT NULL
                  FROM sent_notes
-                 WHERE transaction_id = ?1 AND output_index = 4",
+                 WHERE transaction_id = ?1 AND output_index = 5",
                 [tx_ref.0],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
-        assert_eq!(output_index, 4);
+        assert_eq!(output_index, 5);
         assert_eq!(value, 123);
         assert_eq!(MemoBytes::from_bytes(&stored_memo).unwrap(), memo);
         assert!(has_recipient);
