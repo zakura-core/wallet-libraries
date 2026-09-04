@@ -661,6 +661,7 @@ fn reconcile_memo_retrieval_queue(
 /// version is recorded in the `note_version` column but does not influence table selection. This
 /// lets the scanner route its separate Orchard and Ironwood output streams to their respective
 /// tables while the decrypted-transaction path selects the table from the note version.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn put_received_note<
     T: ReceivedOrchardOutput<AccountId = AccountUuid>,
     P: consensus::Parameters,
