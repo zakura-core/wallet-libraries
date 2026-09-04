@@ -371,7 +371,8 @@ impl<AccountId> WalletTx<AccountId> {
     /// Returns whether the compact transaction represented only Ironwood pool data.
     ///
     /// This excludes every other shielded action and any transparent data included by the compact
-    /// block source.
+    /// block source. It does not prove that the full transaction lacks transparent data omitted by
+    /// that source; see <https://github.com/zakura-core/wallet-libraries/issues/19>.
     #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
     pub fn ironwood_pir_eligible(&self) -> bool {
         self.ironwood_pir_eligible

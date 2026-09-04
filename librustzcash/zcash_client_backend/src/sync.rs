@@ -489,6 +489,8 @@ where
 /// However, for greater reliability, we may want to alter the Data Access API to support
 /// "inferring spentness" from what is _not_ returned as a UTXO, or alternatively fetch
 /// TXOs from `lightwalletd` instead of just UTXOs.
+/// This is also why omitted transparent data must not silently suppress full-transaction
+/// enhancement; see <https://github.com/zakura-core/wallet-libraries/issues/19>.
 ///
 /// [a comment in the Android SDK]: https://github.com/Electric-Coin-Company/zcash-android-wallet-sdk/blob/855204fc8ae4057fdac939f98df4aa38c8e662f1/sdk-lib/src/main/java/cash/z/ecc/android/sdk/block/processor/CompactBlockProcessor.kt#L979-L991
 #[cfg(all(feature = "sync", feature = "transparent-inputs"))]

@@ -398,6 +398,9 @@ where
         let spent_from_accounts = spent_from_accounts.copied().collect::<HashSet<_>>();
 
         #[cfg(feature = "zakura-pir-enhance")]
+        // Empty `vin`/`vout` only describes data represented by the compact source; the default
+        // block-range response may omit a transparent bundle and make this predicate unsound.
+        // See https://github.com/zakura-core/wallet-libraries/issues/19.
         let ironwood_pir_eligible = !tx.ironwood_actions.is_empty()
             && tx.spends.is_empty()
             && tx.outputs.is_empty()
