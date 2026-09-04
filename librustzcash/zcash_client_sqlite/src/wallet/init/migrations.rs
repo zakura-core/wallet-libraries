@@ -695,6 +695,7 @@ pub(crate) mod tests {
             ids::FIX_V_TRANSACTIONS_EXPIRED_UNMINED,
             ids::FULL_ACCOUNT_IDS,
             ids::INITIAL_SETUP,
+            ids::IRONWOOD_ENHANCE_OUTGOING_QUEUE,
             ids::IRONWOOD_POOL_CODE_VIEWS,
             ids::IRONWOOD_MEMO_RETRIEVAL_QUEUE,
             ids::IRONWOOD_RECEIVED_NOTES,

@@ -323,7 +323,11 @@ pub fn record_in_row(row: &[u8], slot: usize) -> Result<EnhanceRecord, ClientErr
         .ok_or_else(|| ClientError::Response("record slot is outside decoded row".to_string()))?
         .try_into()
         .expect("fixed record length");
-    Ok(EnhanceRecord::from_row_bytes(bytes))
+    let record = EnhanceRecord::from_row_bytes(bytes);
+    record
+        .transparent_flags()
+        .map_err(|error| ClientError::Response(error.to_string()))?;
+    Ok(record)
 }
 
 fn validate_generation(
@@ -971,7 +975,9 @@ mod tests {
         let client = IPIRClient::new(&rlwe, &ypir);
         let setup = client.generate_public_query_setup_simplepir_from_seed(setup_seed_bytes());
 
-        let expected_record = EnhanceRecord::from_row_bytes([0x5a; RECORD_BYTES]);
+        let mut expected_bytes = [0x5a; RECORD_BYTES];
+        expected_bytes[crate::types::RECORD_FLAGS_OFFSET] = 0;
+        let expected_record = EnhanceRecord::from_row_bytes(expected_bytes);
         let target_position = RECORDS_PER_ROW as u64 + 3;
         let target_row = 1;
         let target_slot = 3;

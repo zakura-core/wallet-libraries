@@ -185,6 +185,24 @@ pub(crate) fn is_protected(conn: &Connection, txid: TxId) -> Result<bool, Sqlite
     )?)
 }
 
+pub(crate) fn put_transaction_shape(
+    conn: &Transaction<'_>,
+    position: Position,
+    has_transparent_outputs: bool,
+) -> Result<(), SqliteClientError> {
+    if has_transparent_outputs {
+        conn.execute(
+            "DELETE FROM ironwood_enhance_tx_protection
+             WHERE transaction_id IN (
+                 SELECT transaction_id FROM ironwood_enhance_tx_protection
+                 WHERE commitment_tree_position = :position
+             )",
+            named_params![":position": u64::from(position)],
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn queue_outgoing(
     conn: &Connection,
     tx_ref: crate::TxRef,
@@ -788,6 +806,18 @@ mod tests {
         assert_eq!(pending.ephemeral_key, [3; 32]);
         assert_eq!(pending.compact_ciphertext, [4; 52]);
         assert!(super::is_protected(&conn, txid).unwrap());
+
+        let shape_tx = conn.transaction().unwrap();
+        super::put_transaction_shape(&shape_tx, Position::from(42), false).unwrap();
+        shape_tx.commit().unwrap();
+        assert!(super::is_protected(&conn, txid).unwrap());
+        let shape_tx = conn.transaction().unwrap();
+        super::put_transaction_shape(&shape_tx, Position::from(42), true).unwrap();
+        shape_tx.commit().unwrap();
+        assert!(
+            !super::is_protected(&conn, txid).unwrap(),
+            "transparent outputs still require full transaction retrieval"
+        );
 
         super::queue_outgoing(
             &conn,

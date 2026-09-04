@@ -15,6 +15,7 @@ members = [
     "librustzcash/zcash_client_sqlite",
     "wallet-lib",
     "zakura/pir-enhance",
+    "zakura/pir-transparent-spend",
 ]
 
 resolver = "2"

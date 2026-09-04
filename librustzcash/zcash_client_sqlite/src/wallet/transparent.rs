@@ -1313,6 +1313,7 @@ pub(crate) fn get_wallet_transparent_output(
     conn: &rusqlite::Connection,
     outpoint: &OutPoint,
     target_height: Option<TargetHeight>,
+    require_tip_verified: bool,
 ) -> Result<Option<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
     // This could return as unspent outputs that are actually not spendable, if they are the
     // outputs of deshielding transactions where the spend anchors have been invalidated by a
@@ -1337,6 +1338,10 @@ pub(crate) fn get_wallet_transparent_output(
                  -- the transaction that created the output is mined or is definitely unexpired
                  ({}) -- the transaction is unexpired
                  AND u.id NOT IN ({}) -- and the output is unspent
+                 AND (
+                     :require_tip_verified = 0
+                     OR u.max_observed_unspent_height = :spend_status_tip
+                 )
                  AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
              )
          )",
@@ -1349,11 +1354,14 @@ pub(crate) fn get_wallet_transparent_output(
     let output_index = outpoint.n();
     let target_height_arg = target_height.map(u32::from);
     let allow_unspendable = target_height.is_none();
+    let spend_status_tip = target_height_arg.map(|height| height.saturating_sub(1));
     let sql_params: Vec<(&str, &dyn ToSql)> = vec![
         (":txid", &txid_bytes),
         (":output_index", &output_index),
         (":target_height", &target_height_arg),
         (":allow_unspendable", &allow_unspendable),
+        (":require_tip_verified", &require_tip_verified),
+        (":spend_status_tip", &spend_status_tip),
     ];
 
     let result: Result<Option<WalletTransparentOutput<_>>, SqliteClientError> = stmt_select_utxo
@@ -1394,6 +1402,10 @@ fn spendable_transparent_outputs_query(
          AND u.value_zat > :min_value
          AND ({}) -- the transaction is mined or unexpired with minconf 0
          AND u.id NOT IN ({}) -- and the output is unspent
+         AND (
+             :require_tip_verified = 0
+             OR u.max_observed_unspent_height = :spend_status_tip
+         ) -- private mode fails closed unless spend status reaches the scanned tip
          AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
          AND ({}) -- exclude immature coinbase outputs
          AND (
@@ -1436,6 +1448,7 @@ fn coinbase_filter_encoding(output_filter: CoinbaseFilter) -> i32 {
 /// spendable, if they are the outputs of deshielding transactions where the spend anchors have
 /// been invalidated by a rewind. There isn't a way to detect this circumstance at present, but
 /// it should be vanishingly rare as the vast majority of rewinds are of a single block.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn get_spendable_transparent_outputs<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
@@ -1444,6 +1457,7 @@ pub(crate) fn get_spendable_transparent_outputs<P: consensus::Parameters>(
     confirmations_policy: ConfirmationsPolicy,
     output_filter: CoinbaseFilter,
     lock_filter: LockFilter<'_>,
+    require_tip_verified: bool,
 ) -> Result<Vec<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
     // Defer to the batched query with a singleton address set, so that there is a single query
     // body to maintain. `transparent_received_outputs.address` is always equal to the
@@ -1459,6 +1473,7 @@ pub(crate) fn get_spendable_transparent_outputs<P: consensus::Parameters>(
         confirmations_policy,
         output_filter,
         lock_filter,
+        require_tip_verified,
     )
 }
 
@@ -1475,6 +1490,7 @@ pub(crate) fn get_spendable_transparent_outputs<P: consensus::Parameters>(
 ///
 /// The query body mirrors that of [`get_spendable_transparent_outputs`], differing only in that
 /// the receiving address is matched against a set via `rarray` rather than a single value.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn get_spendable_transparent_outputs_for_addresses<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
@@ -1483,6 +1499,7 @@ pub(crate) fn get_spendable_transparent_outputs_for_addresses<P: consensus::Para
     confirmations_policy: ConfirmationsPolicy,
     output_filter: CoinbaseFilter,
     lock_filter: LockFilter<'_>,
+    require_tip_verified: bool,
 ) -> Result<Vec<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
     if addresses.is_empty() {
         return Ok(vec![]);
@@ -1513,6 +1530,7 @@ pub(crate) fn get_spendable_transparent_outputs_for_addresses<P: consensus::Para
     let addresses_ptr = Rc::new(address_values);
 
     let target_height_arg = u32::from(target_height);
+    let spend_status_tip = target_height_arg.saturating_sub(1);
     let min_value = u64::from(zip317::MARGINAL_FEE);
     let overridable_owners = overridable_owners_rarray(lock_filter);
     let mut sql_params: Vec<(&str, &dyn ToSql)> = vec![
@@ -1521,6 +1539,8 @@ pub(crate) fn get_spendable_transparent_outputs_for_addresses<P: consensus::Para
         (":min_confirmations", &min_confirmations),
         (":min_value", &min_value),
         (":coinbase_filter", &coinbase_filter),
+        (":require_tip_verified", &require_tip_verified),
+        (":spend_status_tip", &spend_status_tip),
     ];
     push_lock_params(&mut sql_params, lock_filter, &overridable_owners);
 
@@ -1583,6 +1603,7 @@ pub(crate) fn select_spendable_transparent_outputs<P: consensus::Parameters>(
     max_inputs: usize,
     fee_rule: &StandardFeeRule,
     lock_filter: LockFilter<'_>,
+    require_tip_verified: bool,
 ) -> Result<Vec<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
     // The post-fee bound for `TargetValue::AtLeast`. `TargetValue::AllFunds` has no bound; we
     // return every eligible output in that case.
@@ -1635,6 +1656,7 @@ pub(crate) fn select_spendable_transparent_outputs<P: consensus::Parameters>(
 
     let account_uuid = account.0;
     let target_height_arg = u32::from(target_height);
+    let spend_status_tip = target_height_arg.saturating_sub(1);
     let min_value = u64::from(zip317::MARGINAL_FEE);
     let has_address_allow_list = address_allow_list.is_some();
     let overridable_owners = overridable_owners_rarray(lock_filter);
@@ -1646,6 +1668,8 @@ pub(crate) fn select_spendable_transparent_outputs<P: consensus::Parameters>(
         (":coinbase_filter", &coinbase_filter),
         (":has_address_allow_list", &has_address_allow_list),
         (":addresses", &addresses_ptr),
+        (":require_tip_verified", &require_tip_verified),
+        (":spend_status_tip", &spend_status_tip),
     ];
     push_lock_params(&mut sql_params, lock_filter, &overridable_owners);
 
@@ -4519,7 +4543,7 @@ mod tests {
             conn: &rusqlite::Connection,
             outpoint: &OutPoint,
         ) -> Option<AccountUuid> {
-            get_wallet_transparent_output(conn, outpoint, None)
+            get_wallet_transparent_output(conn, outpoint, None, false)
                 .unwrap()
                 .expect("the seeded transparent output is retrievable")
                 .funding_account()

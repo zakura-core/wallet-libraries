@@ -398,15 +398,13 @@ where
         let spent_from_accounts = spent_from_accounts.copied().collect::<HashSet<_>>();
 
         #[cfg(feature = "zakura-pir-enhance")]
-        // Empty `vin`/`vout` only describes data represented by the compact source; the default
-        // block-range response may omit a transparent bundle and make this predicate unsound.
-        // See https://github.com/zakura-core/wallet-libraries/issues/19.
+        // The compact source may omit vin/vout. Transaction-wide transparent
+        // shape is authenticated later from the Enhance PIR record; until then
+        // the transaction remains provisionally protected.
         let ironwood_pir_eligible = !tx.ironwood_actions.is_empty()
             && tx.spends.is_empty()
             && tx.outputs.is_empty()
-            && tx.actions.is_empty()
-            && tx.vin.is_empty()
-            && tx.vout.is_empty();
+            && tx.actions.is_empty();
         let (sapling_outputs, mut sapling_nc) = find_received(
             cur_height,
             pos_tracker.compact_tx_contains_last_sapling_outputs_in_block(&tx),

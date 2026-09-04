@@ -21,6 +21,12 @@ pub fn wallet_record(record: &EnhanceRecord) -> IronwoodEnhanceRecord {
         *record.enc_ciphertext(),
         *record.cv_net(),
         *record.out_ciphertext(),
+        record
+            .has_transparent_inputs()
+            .expect("record validated by PIR client"),
+        record
+            .has_transparent_outputs()
+            .expect("record validated by PIR client"),
     )
 }
 

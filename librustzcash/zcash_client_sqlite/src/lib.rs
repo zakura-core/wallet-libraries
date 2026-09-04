@@ -1103,6 +1103,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
             self.conn.borrow(),
             outpoint,
             Some(target_height),
+            {
+                #[cfg(feature = "zakura-pir-enhance")]
+                {
+                    self.enhancement_mode == EnhancementMode::PrivateIronwood
+                }
+                #[cfg(not(feature = "zakura-pir-enhance"))]
+                {
+                    false
+                }
+            },
         )
     }
 
@@ -1123,6 +1133,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
             confirmations_policy,
             output_filter,
             lock_filter,
+            {
+                #[cfg(feature = "zakura-pir-enhance")]
+                {
+                    self.enhancement_mode == EnhancementMode::PrivateIronwood
+                }
+                #[cfg(not(feature = "zakura-pir-enhance"))]
+                {
+                    false
+                }
+            },
         )
     }
 
@@ -1143,6 +1163,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
             confirmations_policy,
             output_filter,
             lock_filter,
+            {
+                #[cfg(feature = "zakura-pir-enhance")]
+                {
+                    self.enhancement_mode == EnhancementMode::PrivateIronwood
+                }
+                #[cfg(not(feature = "zakura-pir-enhance"))]
+                {
+                    false
+                }
+            },
         )
     }
 
@@ -1171,6 +1201,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
             max_inputs,
             fee_rule,
             lock_filter,
+            {
+                #[cfg(feature = "zakura-pir-enhance")]
+                {
+                    self.enhancement_mode == EnhancementMode::PrivateIronwood
+                }
+                #[cfg(not(feature = "zakura-pir-enhance"))]
+                {
+                    false
+                }
+            },
         )
     }
 
@@ -1627,6 +1667,12 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
         if fully_scanned_height.is_none_or(|height| height < anchor.height) {
             return Ok(EnhancePirSnapshotStatus::NotYetScanned);
         }
+        if fully_scanned_height != Some(anchor.height) {
+            // Tip-bound generations are accepted only at the exact scan
+            // frontier. This prevents an older, once-canonical generation
+            // from certifying transparent unspent status through a newer tip.
+            return Ok(EnhancePirSnapshotStatus::Mismatch);
+        }
 
         let Some(metadata) = self.block_metadata(anchor.height)? else {
             // A fully-scanned range is contiguous from the wallet birthday and should retain
@@ -1668,6 +1714,21 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
 impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
     EnhancePirWrite for WalletDb<C, P, CL, R>
 {
+    fn put_ironwood_transaction_shape(
+        &mut self,
+        _authenticated: Authenticated,
+        position: Position,
+        has_transparent_outputs: bool,
+    ) -> Result<(), Self::Error> {
+        self.transactionally(|wdb| {
+            wallet::enhance_pir::put_transaction_shape(
+                wdb.conn.0,
+                position,
+                has_transparent_outputs,
+            )
+        })
+    }
+
     fn put_ironwood_memo(
         &mut self,
         _authenticated: Authenticated,
@@ -1841,6 +1902,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletTes
             self.conn.borrow(),
             outpoint,
             target_height,
+            false,
         )
     }
 
@@ -2207,6 +2269,19 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         as_of_height: BlockHeight,
     ) -> Result<(), <Self as WalletRead>::Error> {
         self.transactionally(|wdb| wdb.notify_output_verified_unspent(outpoint, as_of_height))
+    }
+
+    #[cfg(feature = "spend-index")]
+    fn notify_output_spent(
+        &mut self,
+        outpoint: OutPoint,
+        spending_txid: TxId,
+        mined_height: BlockHeight,
+        tx_index: TxIndex,
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        self.transactionally(|wdb| {
+            wdb.notify_output_spent(outpoint, spending_txid, mined_height, tx_index)
+        })
     }
 }
 
@@ -2739,6 +2814,24 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             as_of_height,
         )
     }
+
+    #[cfg(feature = "spend-index")]
+    fn notify_output_spent(
+        &mut self,
+        outpoint: OutPoint,
+        spending_txid: TxId,
+        mined_height: BlockHeight,
+        tx_index: TxIndex,
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        let spent_in_tx = wallet::put_transparent_spending_tx_meta(
+            self.conn.0,
+            spending_txid,
+            mined_height,
+            tx_index,
+        )?;
+        wallet::transparent::mark_transparent_utxo_spent(self.conn.0, spent_in_tx, &outpoint)?;
+        Ok(())
+    }
 }
 
 impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clock, R: Rng>
@@ -2840,6 +2933,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             self.conn.borrow(),
             outpoint,
             target_height,
+            false,
         )
     }
 
@@ -4196,7 +4290,7 @@ mod tests {
         let (anchor_height, _) = st.generate_empty_block();
         let (later_height, _) = st.generate_empty_block();
         st.scan_cached_blocks(anchor_height, 2);
-        let anchor_hash = st
+        let old_anchor_hash = st
             .wallet()
             .db()
             .block_metadata(anchor_height)
@@ -4204,9 +4298,28 @@ mod tests {
             .unwrap()
             .block_hash();
 
-        let anchor = EnhancePirSnapshotAnchor {
+        let old_anchor = EnhancePirSnapshotAnchor {
             height: anchor_height,
-            block_hash: anchor_hash,
+            block_hash: old_anchor_hash,
+            ironwood_tree_size: 0,
+        };
+        assert_eq!(
+            st.wallet()
+                .db()
+                .enhance_pir_snapshot_status(old_anchor)
+                .unwrap(),
+            EnhancePirSnapshotStatus::Mismatch,
+            "a generation below the fully-scanned tip must be rejected"
+        );
+        let anchor = EnhancePirSnapshotAnchor {
+            height: later_height,
+            block_hash: st
+                .wallet()
+                .db()
+                .block_metadata(later_height)
+                .unwrap()
+                .unwrap()
+                .block_hash(),
             ironwood_tree_size: 0,
         };
         assert_eq!(
@@ -4241,7 +4354,7 @@ mod tests {
             .conn_mut()
             .execute(
                 "DELETE FROM blocks WHERE height = ?1",
-                [u32::from(anchor_height)],
+                [u32::from(later_height)],
             )
             .unwrap();
         assert_eq!(
@@ -4510,6 +4623,8 @@ mod tests {
                 // choose them; nothing here can be recovered under any outgoing viewing key.
                 cv_net: [5; 32],
                 out_ciphertext: [6; 80],
+                has_transparent_inputs: false,
+                has_transparent_outputs: false,
             })
         };
         let request = EnhancePirRequest::from_position(position);

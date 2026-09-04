@@ -96,6 +96,8 @@ pub struct IronwoodEnhanceRecord {
     ciphertext: [u8; 580],
     cv_net: [u8; 32],
     out_ciphertext: [u8; 80],
+    has_transparent_inputs: bool,
+    has_transparent_outputs: bool,
 }
 
 impl IronwoodEnhanceRecord {
@@ -105,12 +107,16 @@ impl IronwoodEnhanceRecord {
         ciphertext: [u8; 580],
         cv_net: [u8; 32],
         out_ciphertext: [u8; 80],
+        has_transparent_inputs: bool,
+        has_transparent_outputs: bool,
     ) -> Self {
         Self {
             ephemeral_key,
             ciphertext,
             cv_net,
             out_ciphertext,
+            has_transparent_inputs,
+            has_transparent_outputs,
         }
     }
 
@@ -130,6 +136,14 @@ impl IronwoodEnhanceRecord {
 
     pub fn out_ciphertext(&self) -> &[u8; 80] {
         &self.out_ciphertext
+    }
+
+    pub fn has_transparent_inputs(&self) -> bool {
+        self.has_transparent_inputs
+    }
+
+    pub fn has_transparent_outputs(&self) -> bool {
+        self.has_transparent_outputs
     }
 }
 
@@ -151,7 +165,7 @@ pub enum EnhancePirSnapshotStatus {
     Accepted,
     /// The wallet has not scanned the anchor height yet.
     NotYetScanned,
-    /// Local chain state disagrees with the snapshot.
+    /// The snapshot is stale or local chain state disagrees with it.
     Mismatch,
 }
 
@@ -256,6 +270,18 @@ impl Authenticated {
 
 /// Atomic storage operations used after successful response authentication.
 pub trait EnhancePirWrite: EnhancePirRead {
+    /// Records the transaction-wide shape supplied with an authenticated
+    /// action. Transparent inputs are resolved independently through private
+    /// outpoint-spend lookup. Transparent outputs must retain the ordinary
+    /// full-transaction retrieval request because that lookup cannot reveal
+    /// newly created outputs.
+    fn put_ironwood_transaction_shape(
+        &mut self,
+        authenticated: Authenticated,
+        position: Position,
+        has_transparent_outputs: bool,
+    ) -> Result<(), Self::Error>;
+
     /// Stores a memo iff the same position and request identity are still unresolved, and removes
     /// the queue entry.
     ///
@@ -356,6 +382,12 @@ pub fn decrypt_and_store_ironwood_memo<DbT: EnhancePirWrite>(
         return Ok(EnhancePirStoreResult::Rejected);
     };
 
+    db.put_ironwood_transaction_shape(
+        Authenticated(()),
+        request.position(),
+        record.has_transparent_outputs(),
+    )?;
+
     Ok(
         if db.put_ironwood_memo(
             Authenticated(()),
@@ -415,6 +447,11 @@ pub fn recover_and_store_ironwood_outgoing<DbT: EnhancePirWrite>(
     if !record_matches_compact_action(&pending, record) {
         return Ok(EnhancePirStoreResult::Rejected);
     }
+    db.put_ironwood_transaction_shape(
+        Authenticated(()),
+        request.position(),
+        record.has_transparent_outputs(),
+    )?;
     let mut recovered = None;
     for account_id in pending.account_ids.iter().copied() {
         let Some(account) = db.get_account(account_id)? else {
@@ -555,6 +592,8 @@ mod tests {
             encryptor.encrypt_note_plaintext(),
             [0; 32],
             [0; 80],
+            false,
+            false,
         );
         (note, fvk.to_ivk(Scope::External).prepare(), record)
     }
@@ -574,6 +613,8 @@ mod tests {
             ciphertext,
             *record.cv_net(),
             *record.out_ciphertext(),
+            false,
+            false,
         );
         assert!(decrypt_memo(&note, &ivk, &tampered).is_none());
 
@@ -615,6 +656,8 @@ mod tests {
             encryptor.encrypt_note_plaintext(),
             cv_net.to_bytes(),
             encryptor.encrypt_outgoing_plaintext(&cv_net, &cmx, &mut outgoing_rng),
+            false,
+            false,
         );
         let pending = PendingIronwoodOutgoing {
             request_id: IronwoodEnhanceRequestId::new(TxId::from_bytes([0; 32]), 0),
@@ -647,6 +690,8 @@ mod tests {
             *record.ciphertext(),
             *record.cv_net(),
             *record.out_ciphertext(),
+            false,
+            false,
         );
         assert!(!record_matches_compact_action(
             &pending,
@@ -660,6 +705,8 @@ mod tests {
             wrong_compact_ciphertext,
             *record.cv_net(),
             *record.out_ciphertext(),
+            false,
+            false,
         );
         assert!(!record_matches_compact_action(
             &pending,

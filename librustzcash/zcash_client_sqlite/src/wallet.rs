@@ -5105,6 +5105,33 @@ pub(crate) fn put_tx_meta(
     Ok(tx_ref)
 }
 
+#[cfg(feature = "spend-index")]
+pub(crate) fn put_transparent_spending_tx_meta(
+    conn: &rusqlite::Connection,
+    txid: TxId,
+    height: BlockHeight,
+    tx_index: TxIndex,
+) -> Result<TxRef, SqliteClientError> {
+    conn.query_row(
+        "INSERT INTO transactions (txid, block, mined_height, tx_index, min_observed_height)
+         VALUES (:txid, :height, :height, :tx_index, :height)
+         ON CONFLICT (txid) DO UPDATE SET
+             block = :height,
+             mined_height = :height,
+             tx_index = :tx_index,
+             min_observed_height = MIN(min_observed_height, :height),
+             confirmed_unmined_at_height = NULL
+         RETURNING id_tx",
+        named_params![
+            ":txid": txid.as_ref(),
+            ":height": u32::from(height),
+            ":tx_index": u16::from(tx_index),
+        ],
+        |row| row.get::<_, i64>(0).map(TxRef),
+    )
+    .map_err(SqliteClientError::from)
+}
+
 /// Returns the most likely wallet address that corresponds to the protocol-level receiver of a
 /// note or UTXO.
 pub(crate) fn select_receiving_address<P: consensus::Parameters>(

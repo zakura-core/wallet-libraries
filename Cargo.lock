@@ -7672,6 +7672,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-pir-transparent-spend"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hex",
+ "ipir-sp",
+ "rand 0.8.7",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tokio",
+ "zakura-client-backend",
+ "zakura-primitives",
+ "zcash_protocol",
+ "zcash_transparent",
+]
+
+[[package]]
 name = "zakura-primitives"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

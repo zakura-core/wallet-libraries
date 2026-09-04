@@ -4208,6 +4208,22 @@ pub trait WalletWrite:
             "WalletWrite::notify_output_verified_unspent must be overridden for wallets to use the `spend-index` feature"
         )
     }
+
+    /// Notifies the wallet backend that a transparent output was spent by a
+    /// transaction mined on the accepted best chain. This is the positive
+    /// result of a [`TransactionDataRequest::GetSpendingTx`] lookup.
+    #[cfg(feature = "spend-index")]
+    fn notify_output_spent(
+        &mut self,
+        _outpoint: OutPoint,
+        _spending_txid: TxId,
+        _mined_height: BlockHeight,
+        _tx_index: zcash_protocol::consensus::TxIndex,
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        unimplemented!(
+            "WalletWrite::notify_output_spent must be overridden for wallets to use the `spend-index` feature"
+        )
+    }
 }
 
 /// Applies a batch of note commitment tree changes — shards, an optional replacement tree
