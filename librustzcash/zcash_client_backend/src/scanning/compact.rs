@@ -552,6 +552,14 @@ where
                         index,
                         action.nullifier().to_bytes(),
                         action.cmx().to_bytes(),
+                        raw.ephemeral_key
+                            .as_slice()
+                            .try_into()
+                            .expect("CompactAction validation enforces ephemeral-key length"),
+                        raw.ciphertext
+                            .as_slice()
+                            .try_into()
+                            .expect("CompactAction validation enforces ciphertext length"),
                         spent_from_accounts.iter().copied().collect(),
                     ))
                 })
@@ -1240,6 +1248,8 @@ mod tests {
             assert_eq!(candidate.position(), Position::from(5 + index as u64));
             assert_eq!(candidate.output_index(), index);
             assert_eq!(candidate.funding_accounts(), &[account]);
+            assert_eq!(candidate.ephemeral_key(), &[0; 32]);
+            assert_eq!(candidate.compact_ciphertext(), &[0; 52]);
         }
         assert_eq!(
             tx.ironwood_enhance_candidates()[0].nullifier(),

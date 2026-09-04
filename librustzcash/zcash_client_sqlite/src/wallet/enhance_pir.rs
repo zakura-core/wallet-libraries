@@ -23,7 +23,7 @@ use crate::{AccountUuid, error::SqliteClientError};
 
 use super::{TxQueryType, get_account, memo_repr, orchard::parse_note_version};
 
-type PendingOutgoingRow = ([u8; 32], u32, [u8; 32], [u8; 32]);
+type PendingOutgoingRow = ([u8; 32], u32, [u8; 32], [u8; 32], [u8; 32], [u8; 52]);
 
 fn retire_enhancement_if_complete(
     tx: &Transaction<'_>,
@@ -99,15 +99,26 @@ pub(crate) fn pending_outgoing(
 ) -> Result<Option<PendingIronwoodOutgoing<AccountUuid>>, SqliteClientError> {
     let action: Option<PendingOutgoingRow> = conn
         .query_row(
-            "SELECT t.txid, q.output_index, q.nullifier, q.cmx
+            "SELECT t.txid, q.output_index, q.nullifier, q.cmx,
+                    q.ephemeral_key, q.compact_ciphertext
              FROM ironwood_enhance_outgoing_queue q
              JOIN transactions t ON t.id_tx = q.transaction_id
              WHERE q.commitment_tree_position = :position AND t.raw IS NULL",
             named_params![":position": u64::from(position)],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((txid, output_index, nullifier, cmx)) = action else {
+    let Some((txid, output_index, nullifier, cmx, ephemeral_key, compact_ciphertext)) = action
+    else {
         return Ok(None);
     };
     let mut stmt = conn.prepare_cached(
@@ -127,6 +138,8 @@ pub(crate) fn pending_outgoing(
         account_ids,
         nullifier,
         cmx,
+        ephemeral_key,
+        compact_ciphertext,
     }))
 }
 
@@ -173,19 +186,27 @@ pub(crate) fn queue_outgoing(
         )?;
         conn.execute(
             "INSERT INTO ironwood_enhance_outgoing_queue (
-                 commitment_tree_position, transaction_id, output_index, nullifier, cmx
-             ) VALUES (:position, :tx, :output_index, :nullifier, :cmx)
+                 commitment_tree_position, transaction_id, output_index, nullifier, cmx,
+                 ephemeral_key, compact_ciphertext
+             ) VALUES (
+                 :position, :tx, :output_index, :nullifier, :cmx,
+                 :ephemeral_key, :compact_ciphertext
+             )
              ON CONFLICT(commitment_tree_position) DO UPDATE SET
                  transaction_id = excluded.transaction_id,
                  output_index = excluded.output_index,
                  nullifier = excluded.nullifier,
-                 cmx = excluded.cmx",
+                 cmx = excluded.cmx,
+                 ephemeral_key = excluded.ephemeral_key,
+                 compact_ciphertext = excluded.compact_ciphertext",
             named_params![
                 ":position": position,
                 ":tx": tx_ref.0,
                 ":output_index": i64::try_from(candidate.output_index()).expect("output index fits"),
                 ":nullifier": candidate.nullifier(),
                 ":cmx": candidate.cmx(),
+                ":ephemeral_key": candidate.ephemeral_key(),
+                ":compact_ciphertext": candidate.compact_ciphertext(),
             ],
         )?;
         conn.execute(
@@ -453,6 +474,39 @@ pub(crate) fn put_outgoing<P: Parameters>(
     Ok(true)
 }
 
+pub(crate) fn retire_outgoing(
+    tx: &Transaction<'_>,
+    position: Position,
+    request_id: IronwoodEnhanceRequestId,
+) -> Result<bool, SqliteClientError> {
+    let tx_ref = tx
+        .query_row(
+            "SELECT q.transaction_id
+             FROM ironwood_enhance_outgoing_queue q
+             JOIN transactions t ON t.id_tx = q.transaction_id
+             WHERE q.commitment_tree_position = :position
+               AND t.txid = :txid
+               AND q.output_index = :output_index",
+            named_params![
+                ":position": u64::from(position),
+                ":txid": request_id.txid().as_ref(),
+                ":output_index": request_id.output_index(),
+            ],
+            |row| row.get::<_, i64>(0).map(crate::TxRef),
+        )
+        .optional()?;
+    let Some(tx_ref) = tx_ref else {
+        return Ok(false);
+    };
+    tx.execute(
+        "DELETE FROM ironwood_enhance_outgoing_queue
+         WHERE commitment_tree_position = :position",
+        named_params![":position": u64::from(position)],
+    )?;
+    retire_enhancement_if_complete(tx, tx_ref)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use incrementalmerkletree::Position;
@@ -601,7 +655,7 @@ mod tests {
 
     #[test]
     fn outgoing_candidates_are_position_keyed_and_protect_the_txid() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "PRAGMA foreign_keys = ON;
              CREATE TABLE transactions (
@@ -618,6 +672,8 @@ mod tests {
                  output_index INTEGER NOT NULL,
                  nullifier BLOB NOT NULL,
                  cmx BLOB NOT NULL,
+                 ephemeral_key BLOB NOT NULL,
+                 compact_ciphertext BLOB NOT NULL,
                  UNIQUE(transaction_id, output_index)
              );
              CREATE TABLE ironwood_enhance_outgoing_accounts (
@@ -663,6 +719,8 @@ mod tests {
                 3,
                 [1; 32],
                 [2; 32],
+                [3; 32],
+                [4; 52],
                 vec![account],
             )],
             true,
@@ -678,6 +736,8 @@ mod tests {
         assert_eq!(pending.account_ids, vec![account]);
         assert_eq!(pending.nullifier, [1; 32]);
         assert_eq!(pending.cmx, [2; 32]);
+        assert_eq!(pending.ephemeral_key, [3; 32]);
+        assert_eq!(pending.compact_ciphertext, [4; 52]);
         assert!(super::is_protected(&conn, txid).unwrap());
 
         super::queue_outgoing(
@@ -689,6 +749,8 @@ mod tests {
                     4,
                     [3; 32],
                     [4; 32],
+                    [5; 32],
+                    [6; 52],
                     vec![replacement_account],
                 ),
                 IronwoodEnhanceCandidate::from_parts(
@@ -696,6 +758,8 @@ mod tests {
                     5,
                     [5; 32],
                     [6; 32],
+                    [7; 32],
+                    [8; 52],
                     vec![account],
                 ),
             ],
@@ -716,6 +780,25 @@ mod tests {
         assert_eq!(replacement.account_ids, vec![replacement_account]);
         assert_eq!(replacement.nullifier, [3; 32]);
         assert_eq!(replacement.cmx, [4; 32]);
+        assert_eq!(replacement.ephemeral_key, [5; 32]);
+        assert_eq!(replacement.compact_ciphertext, [6; 52]);
+
+        let tx = conn.transaction().unwrap();
+        assert!(
+            !super::retire_outgoing(
+                &tx,
+                Position::from(42),
+                super::IronwoodEnhanceRequestId::new(txid, 3),
+            )
+            .unwrap()
+        );
+        assert!(super::retire_outgoing(&tx, Position::from(42), replacement.request_id,).unwrap());
+        assert!(
+            super::pending_outgoing(&tx, Position::from(42))
+                .unwrap()
+                .is_none()
+        );
+        tx.commit().unwrap();
 
         conn.execute("UPDATE transactions SET raw = X'00' WHERE id_tx = 1", [])
             .unwrap();

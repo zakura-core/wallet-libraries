@@ -1701,6 +1701,17 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
             )
         })
     }
+
+    fn retire_ironwood_outgoing(
+        &mut self,
+        _authenticated: Authenticated,
+        position: Position,
+        request_id: IronwoodEnhanceRequestId,
+    ) -> Result<bool, Self::Error> {
+        self.transactionally(|wdb| {
+            wallet::enhance_pir::retire_outgoing(wdb.conn.0, position, request_id)
+        })
+    }
 }
 
 #[cfg(any(test, feature = "test-dependencies"))]
@@ -4307,6 +4318,8 @@ mod tests {
                 4,
                 [1; 32],
                 [2; 32],
+                [3; 32],
+                [4; 52],
                 vec![account_id],
             )],
             true,
@@ -4465,6 +4478,8 @@ mod tests {
                 4,
                 [1; 32],
                 [2; 32],
+                [3; 32],
+                [4; 52],
                 vec![account_id],
             )],
             true,
@@ -4486,6 +4501,8 @@ mod tests {
                 5,
                 [4; 32],
                 [5; 32],
+                [6; 32],
+                [7; 52],
                 vec![account_id],
             )],
             true,

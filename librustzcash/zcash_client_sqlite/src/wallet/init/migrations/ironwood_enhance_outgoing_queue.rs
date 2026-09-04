@@ -43,6 +43,8 @@ impl RusqliteMigration for Migration {
                 output_index INTEGER NOT NULL CHECK (output_index >= 0),
                 nullifier BLOB NOT NULL CHECK (length(nullifier) = 32),
                 cmx BLOB NOT NULL CHECK (length(cmx) = 32),
+                ephemeral_key BLOB NOT NULL CHECK (length(ephemeral_key) = 32),
+                compact_ciphertext BLOB NOT NULL CHECK (length(compact_ciphertext) = 52),
                 UNIQUE(transaction_id, output_index)
             );
             CREATE TABLE ironwood_enhance_outgoing_accounts (

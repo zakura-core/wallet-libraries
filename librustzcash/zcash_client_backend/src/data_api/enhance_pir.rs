@@ -162,6 +162,9 @@ pub enum EnhancePirStoreResult {
     Stored,
     /// No unresolved note exists at this position.
     AlreadyResolved,
+    /// The compact action authenticated, but it was a dummy or otherwise had no recoverable
+    /// outgoing plaintext. Its queue entry was removed without creating a sent output.
+    NotRecoverable,
     /// The record did not authenticate against the wallet's recorded note and key.
     Rejected,
 }
@@ -186,6 +189,8 @@ pub struct PendingIronwoodOutgoing<AccountId> {
     pub account_ids: Vec<AccountId>,
     pub nullifier: [u8; 32],
     pub cmx: [u8; 32],
+    pub ephemeral_key: [u8; 32],
+    pub compact_ciphertext: [u8; 52],
 }
 
 /// Read interface for the independent position-keyed memo queue.
@@ -271,6 +276,15 @@ pub trait EnhancePirWrite: EnhancePirRead {
         recipient: Address,
         value: Zatoshis,
         memo: &MemoBytes,
+    ) -> Result<bool, Self::Error>;
+
+    /// Removes an outgoing candidate that was authenticated against its compact action but did
+    /// not contain an outgoing plaintext recoverable by any candidate funding account.
+    fn retire_ironwood_outgoing(
+        &mut self,
+        authenticated: Authenticated,
+        position: Position,
+        request_id: IronwoodEnhanceRequestId,
     ) -> Result<bool, Self::Error>;
 }
 
@@ -383,6 +397,9 @@ pub fn recover_and_store_ironwood_outgoing<DbT: EnhancePirWrite>(
     let Some(pending) = db.pending_ironwood_outgoing(request.position())? else {
         return Ok(EnhancePirStoreResult::AlreadyResolved);
     };
+    if !record_matches_compact_action(&pending, record) {
+        return Ok(EnhancePirStoreResult::Rejected);
+    }
     let mut recovered = None;
     for account_id in pending.account_ids.iter().copied() {
         let Some(account) = db.get_account(account_id)? else {
@@ -399,7 +416,17 @@ pub fn recover_and_store_ironwood_outgoing<DbT: EnhancePirWrite>(
         }
     }
     let Some((account_id, note, recipient, memo)) = recovered else {
-        return Ok(EnhancePirStoreResult::Rejected);
+        return Ok(
+            if db.retire_ironwood_outgoing(
+                Authenticated(()),
+                request.position(),
+                pending.request_id,
+            )? {
+                EnhancePirStoreResult::NotRecoverable
+            } else {
+                EnhancePirStoreResult::AlreadyResolved
+            },
+        );
     };
     let value = Zatoshis::from_u64(note.value().inner()).expect("note value is in range");
     let memo = MemoBytes::from_bytes(&memo).expect("note decryption returns exactly 512 bytes");
@@ -418,6 +445,14 @@ pub fn recover_and_store_ironwood_outgoing<DbT: EnhancePirWrite>(
             EnhancePirStoreResult::AlreadyResolved
         },
     )
+}
+
+fn record_matches_compact_action<AccountId>(
+    pending: &PendingIronwoodOutgoing<AccountId>,
+    record: &IronwoodEnhanceRecord,
+) -> bool {
+    pending.ephemeral_key == *record.ephemeral_key()
+        && pending.compact_ciphertext == record.ciphertext()[..52]
 }
 
 fn recover_outgoing<AccountId>(
@@ -571,6 +606,8 @@ mod tests {
             account_ids: vec![()],
             nullifier: nf.to_bytes(),
             cmx: cmx.to_bytes(),
+            ephemeral_key: *record.ephemeral_key(),
+            compact_ciphertext: record.ciphertext()[..52].try_into().unwrap(),
         };
 
         let (recovered_note, recipient, memo) = recover_outgoing(&fvk, &pending, &record).unwrap();
@@ -586,5 +623,32 @@ mod tests {
                 .unwrap()
                 .clone();
         assert!(recover_outgoing(&wrong_fvk, &pending, &record).is_none());
+
+        assert!(record_matches_compact_action(&pending, &record));
+        let mut wrong_ephemeral_key = *record.ephemeral_key();
+        wrong_ephemeral_key[0] ^= 1;
+        let wrong_ephemeral_key_record = IronwoodEnhanceRecord::from_parts(
+            wrong_ephemeral_key,
+            *record.ciphertext(),
+            *record.cv_net(),
+            *record.out_ciphertext(),
+        );
+        assert!(!record_matches_compact_action(
+            &pending,
+            &wrong_ephemeral_key_record
+        ));
+
+        let mut wrong_compact_ciphertext = *record.ciphertext();
+        wrong_compact_ciphertext[0] ^= 1;
+        let wrong_compact_ciphertext_record = IronwoodEnhanceRecord::from_parts(
+            *record.ephemeral_key(),
+            wrong_compact_ciphertext,
+            *record.cv_net(),
+            *record.out_ciphertext(),
+        );
+        assert!(!record_matches_compact_action(
+            &pending,
+            &wrong_compact_ciphertext_record
+        ));
     }
 }

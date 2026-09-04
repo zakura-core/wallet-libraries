@@ -199,6 +199,8 @@ pub struct IronwoodEnhanceCandidate<AccountId> {
     output_index: usize,
     nullifier: [u8; 32],
     cmx: [u8; 32],
+    ephemeral_key: [u8; 32],
+    compact_ciphertext: [u8; 52],
     funding_accounts: Vec<AccountId>,
 }
 
@@ -209,6 +211,8 @@ impl<AccountId> IronwoodEnhanceCandidate<AccountId> {
         output_index: usize,
         nullifier: [u8; 32],
         cmx: [u8; 32],
+        ephemeral_key: [u8; 32],
+        compact_ciphertext: [u8; 52],
         funding_accounts: Vec<AccountId>,
     ) -> Self {
         Self {
@@ -216,6 +220,8 @@ impl<AccountId> IronwoodEnhanceCandidate<AccountId> {
             output_index,
             nullifier,
             cmx,
+            ephemeral_key,
+            compact_ciphertext,
             funding_accounts,
         }
     }
@@ -234,6 +240,14 @@ impl<AccountId> IronwoodEnhanceCandidate<AccountId> {
 
     pub fn cmx(&self) -> &[u8; 32] {
         &self.cmx
+    }
+
+    pub fn ephemeral_key(&self) -> &[u8; 32] {
+        &self.ephemeral_key
+    }
+
+    pub fn compact_ciphertext(&self) -> &[u8; 52] {
+        &self.compact_ciphertext
     }
 
     pub fn funding_accounts(&self) -> &[AccountId] {

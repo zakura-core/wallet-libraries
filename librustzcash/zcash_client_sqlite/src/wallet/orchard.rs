@@ -2920,6 +2920,8 @@ pub(crate) mod tests {
                     2,
                     [1; 32],
                     [2; 32],
+                    [3; 32],
+                    [4; 52],
                     vec![account_id],
                 )],
                 true,
