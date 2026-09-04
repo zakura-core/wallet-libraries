@@ -4420,6 +4420,192 @@ mod tests {
         }
     }
 
+    /// A record whose `cv_net` and `out_ciphertext` do not recover must not cost the wallet its
+    /// transaction-ID fallback.
+    ///
+    /// Those two fields are the only ones a record carries that are not bound to the compact
+    /// action the wallet scanned, and they are exactly what recovery consumes, so a server can
+    /// pair the genuine on-chain prefix with forged versions of them and force non-recovery for
+    /// any position it chooses. The transaction must stay recoverable by the ordinary path for a
+    /// user who later disables Enhance PIR.
+    #[cfg(feature = "zakura-pir-enhance")]
+    #[test]
+    fn unrecoverable_outgoing_records_do_not_cost_the_txid_fallback() {
+        use incrementalmerkletree::Position;
+        use zakura_pir_enhance::{EnhanceRecord, EnhanceRecordParts, apply_record};
+        use zcash_client_backend::{
+            data_api::{
+                Account as _, TransactionDataRequest,
+                enhance_pir::{
+                    Authenticated, EnhancePirRead, EnhancePirRequest, EnhancePirStoreResult,
+                    EnhancePirWrite, EnhancementMode,
+                },
+                testing::{
+                    AddressType, IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
+                },
+            },
+            wallet::IronwoodEnhanceCandidate,
+        };
+        use zcash_protocol::{consensus::BlockHeight, memo::MemoBytes, value::Zatoshis};
+
+        let activation = BlockHeight::from_u32(100_000);
+        let network = LocalNetwork {
+            nu6: Some(activation),
+            nu6_1: Some(activation),
+            nu6_2: Some(activation),
+            nu6_3: Some(activation),
+            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+        };
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let account_id = st.test_account().unwrap().id();
+        let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+        let (height, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(10_000),
+        );
+        st.scan_cached_blocks(height, 1);
+
+        let (tx_ref, txid) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id_tx, txid FROM transactions WHERE mined_height = ?1",
+                [u32::from(height)],
+                |row| Ok((crate::TxRef(row.get(0)?), row.get::<_, Vec<u8>>(1)?)),
+            )
+            .unwrap();
+
+        let position = Position::from(99);
+        let ephemeral_key = [3; 32];
+        let compact_ciphertext = [4; 52];
+        crate::wallet::enhance_pir::queue_outgoing(
+            st.wallet().conn(),
+            tx_ref,
+            &[IronwoodEnhanceCandidate::from_parts(
+                position,
+                4,
+                [1; 32],
+                [2; 32],
+                ephemeral_key,
+                compact_ciphertext,
+                vec![account_id],
+            )],
+            true,
+        )
+        .unwrap();
+
+        let record = |ephemeral_key: [u8; 32]| {
+            let mut enc_ciphertext = [0; 580];
+            enc_ciphertext[..52].copy_from_slice(&compact_ciphertext);
+            EnhanceRecord::from_parts(EnhanceRecordParts {
+                ephemeral_key,
+                enc_ciphertext,
+                // Neither field is bound to anything the wallet scanned, so a server is free to
+                // choose them; nothing here can be recovered under any outgoing viewing key.
+                cv_net: [5; 32],
+                out_ciphertext: [6; 80],
+            })
+        };
+        let request = EnhancePirRequest::from_position(position);
+
+        // A record for some other action is refused outright, and leaves the work in place.
+        let applied = apply_record(st.wallet_mut().db_mut(), request, &record([7; 32])).unwrap();
+        assert_eq!(applied.outgoing, EnhancePirStoreResult::Rejected);
+        assert_eq!(
+            st.wallet().db().enhance_pir_requests().unwrap().len(),
+            2,
+            "a rejected record must not consume the position"
+        );
+
+        // The genuine action, with the two unbound fields forged, cannot be recovered.
+        let applied =
+            apply_record(st.wallet_mut().db_mut(), request, &record(ephemeral_key)).unwrap();
+        assert_eq!(applied.outgoing, EnhancePirStoreResult::NotRecoverable);
+        assert_eq!(
+            st.wallet()
+                .db()
+                .enhance_pir_requests()
+                .unwrap()
+                .into_iter()
+                .map(|request| request.position())
+                .collect::<Vec<_>>(),
+            vec![Position::from(0)],
+            "the position stops being offered as work"
+        );
+        assert_eq!(
+            apply_record(st.wallet_mut().db_mut(), request, &record(ephemeral_key))
+                .unwrap()
+                .outgoing,
+            EnhancePirStoreResult::AlreadyResolved,
+            "and cannot be applied a second time"
+        );
+
+        // Drive the transaction's remaining position to genuine completion. This is the moment
+        // the erasure would land: if the unrecovered position had been dropped rather than
+        // marked, nothing would distinguish it from a completed one, and this completion would
+        // retire the transaction's fallback on its behalf.
+        let incoming = Position::from(0);
+        let incoming_id = st
+            .wallet()
+            .db()
+            .pending_ironwood_memo(incoming)
+            .unwrap()
+            .unwrap()
+            .request_id;
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .put_ironwood_memo(
+                    Authenticated::for_testing(),
+                    incoming,
+                    incoming_id,
+                    &MemoBytes::empty(),
+                )
+                .unwrap()
+        );
+        assert!(
+            st.wallet().db().enhance_pir_requests().unwrap().is_empty(),
+            "no Enhance PIR work remains to be issued"
+        );
+
+        let enhancement_requested = |st: &TestState<BlockCache, TestDb, LocalNetwork>| {
+            st.wallet()
+                .db()
+                .transaction_data_requests()
+                .unwrap()
+                .iter()
+                .any(|request| {
+                    matches!(
+                        request,
+                        TransactionDataRequest::Enhancement(requested)
+                            if requested.as_ref() == txid.as_slice()
+                    )
+                })
+        };
+
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+        assert!(
+            !enhancement_requested(&st),
+            "the transaction stays protected while the setting is on"
+        );
+
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::Standard);
+        assert!(
+            enhancement_requested(&st),
+            "a server must not be able to erase the transaction from every retrieval path"
+        );
+    }
+
     #[cfg(feature = "zakura-pir-enhance")]
     #[test]
     fn enhance_pir_outgoing_completion_stores_fields_exactly_once() {

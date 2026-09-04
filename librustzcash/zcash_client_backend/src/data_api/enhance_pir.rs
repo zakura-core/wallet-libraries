@@ -164,6 +164,10 @@ pub enum EnhancePirStoreResult {
     AlreadyResolved,
     /// The compact action authenticated, but it was a dummy or otherwise had no recoverable
     /// outgoing plaintext. Its queue entry was removed without creating a sent output.
+    ///
+    /// This is not completion: the transaction keeps its ordinary transaction-ID enhancement
+    /// request, so a wallet that later leaves [`EnhancementMode::PrivateIronwood`] can still
+    /// recover the data. See [`EnhancePirWrite::retire_ironwood_outgoing`].
     NotRecoverable,
     /// The record did not authenticate against the wallet's recorded note and key.
     Rejected,
@@ -280,6 +284,17 @@ pub trait EnhancePirWrite: EnhancePirRead {
 
     /// Removes an outgoing candidate that was authenticated against its compact action but did
     /// not contain an outgoing plaintext recoverable by any candidate funding account.
+    ///
+    /// Implementations must remove only the Enhance PIR queue entry, and must leave the
+    /// transaction's ordinary transaction-ID enhancement request in place. Non-recovery is not
+    /// completion, and it is not solely a benign condition: of the record's four fields, only
+    /// `ephemeral_key` and the compact ciphertext prefix are bound to the action the wallet
+    /// scanned, while `cv_net` and `out_ciphertext` — the two recovery actually consumes — are
+    /// not. A server can pair the genuine prefix with forged versions of those two and reach
+    /// this path deliberately, so treating it as completion would hand that server the ability
+    /// to erase a transaction from every retrieval path at once.
+    ///
+    /// Reachable only from [`recover_and_store_ironwood_outgoing`]; see [`Authenticated`].
     fn retire_ironwood_outgoing(
         &mut self,
         authenticated: Authenticated,

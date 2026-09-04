@@ -33,6 +33,14 @@ impl schemerz::Migration<Uuid> for Migration {
 impl RusqliteMigration for Migration {
     type Error = WalletMigrationError;
 
+    /// Creates the outgoing Enhance PIR queue and the transaction-wide protection markers.
+    ///
+    /// `ironwood_enhance_outgoing_queue.not_recoverable` records that a record authenticated
+    /// against an action but held no outgoing plaintext any funding account could recover. Such a
+    /// row is marked rather than deleted so that a position which was given up on stays
+    /// distinguishable from one that completed: the transaction remains ineligible for retirement
+    /// and keeps its transaction-ID fallback. See `wallet::enhance_pir::retire_outgoing` for why
+    /// that distinction matters against a server that chooses what to return.
     fn up(&self, transaction: &rusqlite::Transaction) -> Result<(), Self::Error> {
         transaction.execute_batch(
             "CREATE TABLE ironwood_enhance_outgoing_queue (
@@ -45,6 +53,7 @@ impl RusqliteMigration for Migration {
                 cmx BLOB NOT NULL CHECK (length(cmx) = 32),
                 ephemeral_key BLOB NOT NULL CHECK (length(ephemeral_key) = 32),
                 compact_ciphertext BLOB NOT NULL CHECK (length(compact_ciphertext) = 52),
+                not_recoverable INTEGER NOT NULL DEFAULT 0 CHECK (not_recoverable IN (0, 1)),
                 UNIQUE(transaction_id, output_index)
             );
             CREATE TABLE ironwood_enhance_outgoing_accounts (
