@@ -619,6 +619,14 @@ CREATE TABLE ironwood_memo_retrieval_queue (
         CHECK (commitment_tree_position >= 0)
 )";
 
+pub(super) const TABLE_IRONWOOD_ENHANCE_DISCOVERY_QUEUE: &str = "
+CREATE TABLE ironwood_enhance_discovery_queue (
+    transaction_id INTEGER PRIMARY KEY
+        REFERENCES transactions(id_tx) ON DELETE CASCADE,
+    suspended INTEGER NOT NULL DEFAULT 0 CHECK (suspended IN (0, 1))
+)
+";
+
 pub(super) const TABLE_IRONWOOD_ENHANCE_OUTGOING_QUEUE: &str = "
 CREATE TABLE ironwood_enhance_outgoing_queue (
     commitment_tree_position INTEGER PRIMARY KEY CHECK (commitment_tree_position >= 0),

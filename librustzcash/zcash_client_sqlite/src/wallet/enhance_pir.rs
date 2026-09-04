@@ -23,6 +23,8 @@ use crate::{AccountUuid, error::SqliteClientError};
 
 use super::{TxQueryType, get_account, memo_repr, orchard::parse_note_version};
 
+pub(crate) mod discovery;
+
 // A route is transaction-wide. LwdRequired is sticky, including across rescans.
 // No row means ordinary enhancement; completion is derived from the queues.
 const PRIVATE_CANDIDATE: i64 = 0;
@@ -51,7 +53,9 @@ fn retire_enhancement_if_complete(
                JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
                WHERE rn.transaction_id = :tx)
            AND NOT EXISTS (
-               SELECT 1 FROM ironwood_enhance_outgoing_queue WHERE transaction_id = :tx)",
+               SELECT 1 FROM ironwood_enhance_outgoing_queue WHERE transaction_id = :tx)
+           AND NOT EXISTS (
+               SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx)",
         named_params![":tx": tx_ref.0, ":enhancement": TxQueryType::Enhancement.code()],
     )?;
     Ok(())
@@ -177,6 +181,19 @@ pub(crate) fn queue_scanned(
         && (!tx.ironwood_spends().is_empty() || !tx.ironwood_outputs().is_empty())
     {
         return require_lwd(conn, tx_ref);
+    }
+    // Ordinary rescans load only unspent nullifiers. They must not erase outgoing work
+    // merely because an already-linked spend is absent from this scan's account set.
+    let scanned_accounts = tx
+        .ironwood_spends()
+        .iter()
+        .map(|s| *s.account_id())
+        .collect::<std::collections::HashSet<_>>();
+    if discovery::funding(conn, tx_ref)?
+        .iter()
+        .any(|(account, _)| !scanned_accounts.contains(account))
+    {
+        discovery::queue(conn, tx_ref)?;
     }
     queue_transaction(
         conn,
@@ -328,7 +345,7 @@ pub(crate) fn remove_orphaned_outgoing(tx: &Transaction<'_>) -> Result<(), Sqlit
              WHERE a.commitment_tree_position = ironwood_enhance_outgoing_queue.commitment_tree_position)",
         [],
     )?;
-    Ok(())
+    discovery::suspend_orphaned(tx)
 }
 
 pub(crate) fn pending<P: zcash_protocol::consensus::Parameters>(

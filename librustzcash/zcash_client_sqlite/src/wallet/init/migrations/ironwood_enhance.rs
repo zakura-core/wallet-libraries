@@ -64,6 +64,11 @@ impl RusqliteMigration for Migration {
                     REFERENCES accounts(id) ON DELETE CASCADE,
                 PRIMARY KEY(commitment_tree_position, account_id)
             );
+            CREATE TABLE ironwood_enhance_discovery_queue (
+                transaction_id INTEGER PRIMARY KEY
+                    REFERENCES transactions(id_tx) ON DELETE CASCADE,
+                suspended INTEGER NOT NULL DEFAULT 0 CHECK (suspended IN (0, 1))
+            );
             CREATE TABLE ironwood_enhance_routing (
                 transaction_id INTEGER PRIMARY KEY
                     REFERENCES transactions(id_tx) ON DELETE CASCADE,
@@ -107,6 +112,7 @@ mod tests {
             "ironwood_memo_retrieval_queue",
             "ironwood_enhance_outgoing_queue",
             "ironwood_enhance_outgoing_accounts",
+            "ironwood_enhance_discovery_queue",
             "ironwood_enhance_routing",
         ] {
             assert_eq!(

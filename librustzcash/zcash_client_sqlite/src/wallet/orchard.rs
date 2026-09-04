@@ -614,7 +614,7 @@ pub(crate) fn put_received_note<
         .map_err(SqliteClientError::from)?;
 
     if let Some(spent_in) = spent_in {
-        conn.execute(
+        let inserted = conn.execute(
             &format!(
                 "INSERT INTO {table_prefix}_received_note_spends
                     ({table_prefix}_received_note_id, transaction_id)
@@ -626,6 +626,22 @@ pub(crate) fn put_received_note<
                 ":transaction_id": spent_in.0
             ],
         )?;
+        #[cfg(feature = "zakura-pir-enhance")]
+        if shielded_pool == ShieldedPool::Ironwood
+            && (inserted != 0
+                || conn.query_row(
+                    "SELECT NOT EXISTS(SELECT 1 FROM ironwood_enhance_routing
+                     WHERE transaction_id = :tx)",
+                    named_params![":tx": spent_in.0],
+                    |row| row.get::<_, bool>(0),
+                )?)
+        {
+            // Rewinds retain spend links but clear private routing. Reconstruct those
+            // obligations too, without reopening completed work on an ordinary replay.
+            super::enhance_pir::discovery::queue(conn, spent_in)?;
+        }
+        #[cfg(not(feature = "zakura-pir-enhance"))]
+        let _ = inserted;
     }
 
     Ok(account_id)

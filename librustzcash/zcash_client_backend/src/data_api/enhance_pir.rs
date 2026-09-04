@@ -19,6 +19,75 @@ use zcash_protocol::{consensus::BlockHeight, memo::MemoBytes, value::Zatoshis};
 use zip32::Scope;
 
 use super::{Account, WalletRead};
+use crate::proto::compact_formats::{CompactBlock, CompactTx};
+
+/// A compact block needed to rediscover outgoing actions after retroactive spend linkage.
+///
+/// Capture this identity before reading the cache or downloading the block. Prefer cached
+/// blocks or normal batched downloads: a targeted download reveals interest in this height.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IronwoodEnhanceDiscoveryRequest {
+    /// Height of the previously scanned spending block.
+    pub height: BlockHeight,
+    /// Its locally scanned block hash, rechecked when reconstruction is applied.
+    pub block_hash: BlockHash,
+}
+
+/// Why one transaction's outgoing discovery could not be completed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IronwoodEnhanceDiscoveryFailureReason {
+    /// No funding associations survive. Automatic discovery is suspended until new
+    /// funding is linked; private protection and ordinary enhancement intent remain.
+    NoFundingAccounts,
+    /// The supplied block does not contain the locally recorded transaction ID.
+    /// The job remains retryable; remote omission is not evidence of completion.
+    TransactionMissing,
+    /// This transaction's locator, actions, or funding do not match local context.
+    /// The job remains retryable without blocking independently valid transactions.
+    ContextMismatch,
+}
+
+/// A local transaction identity and its discovery failure; never send this to the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IronwoodEnhanceDiscoveryFailure {
+    /// The transaction whose discovery remains incomplete.
+    pub txid: TxId,
+    /// Why this transaction could not be reconstructed.
+    pub reason: IronwoodEnhanceDiscoveryFailureReason,
+}
+
+/// Result of atomically applying independently validated discovery plans from a block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IronwoodEnhanceDiscoveryResult {
+    /// Number of transaction discovery jobs resolved, including mixed-pool routing decisions.
+    Rebuilt(usize),
+    /// Valid jobs were applied, but some transactions remain incomplete. This can report
+    /// zero rebuilt jobs. These failures never cause LWD fallback or retire unresolved intent.
+    Incomplete {
+        /// Number of successfully resolved transaction discovery jobs.
+        rebuilt: usize,
+        /// Failed jobs and their individual reasons, in transaction-index order.
+        unresolved: Vec<IronwoodEnhanceDiscoveryFailure>,
+    },
+    /// No matching active work remains, or the request belongs to an old chain branch.
+    /// Suspended jobs may still exist and are exposed separately.
+    AlreadyResolved,
+    /// Block-wide identity, ordering, or tree geometry is invalid. No state was changed.
+    Rejected,
+}
+
+/// Tests provisional Ironwood-only eligibility using the complete compact transaction.
+///
+/// Empty transparent lists are not proof of absence; PIR record flags may still require LWD.
+/// The compact source must include all shielded pools, not filter to Ironwood.
+pub fn is_ironwood_pir_candidate(tx: &CompactTx) -> bool {
+    !tx.ironwood_actions.is_empty()
+        && tx.spends.is_empty()
+        && tx.outputs.is_empty()
+        && tx.actions.is_empty()
+        && tx.vin.is_empty()
+        && tx.vout.is_empty()
+}
 
 /// Selects how ordinary transaction enhancement interacts with private Ironwood enhancement.
 ///
@@ -218,6 +287,20 @@ pub struct PendingIronwoodOutgoing<AccountId> {
 
 /// Read interface for the independent position-keyed memo queue.
 pub trait EnhancePirRead: WalletRead {
+    /// Returns distinct compact blocks needed to reconstruct outgoing PIR work.
+    /// Suspended jobs are excluded. Jobs survive reopening and block ordinary enhancement
+    /// retirement until rebuilt, even while suspended.
+    fn ironwood_enhance_discovery_requests(
+        &self,
+    ) -> Result<Vec<IronwoodEnhanceDiscoveryRequest>, Self::Error>;
+
+    /// Returns discovery jobs suspended because their funding accounts were deleted.
+    /// Applications should surface these as incomplete, not repeatedly download their blocks.
+    /// New funding linkage reactivates them; Standard mode exposes their ordinary requests.
+    fn suspended_ironwood_enhance_discoveries(
+        &self,
+    ) -> Result<Vec<IronwoodEnhanceDiscoveryFailure>, Self::Error>;
+
     /// Returns unresolved Ironwood memo requests in ascending position order.
     fn enhance_pir_requests(&self) -> Result<Vec<EnhancePirRequest>, Self::Error>;
 
@@ -315,6 +398,21 @@ impl<AccountId> ValidatedIronwoodEnhancement<AccountId> {
 
 /// Atomic storage boundary for an action-bound response.
 pub trait EnhancePirWrite: EnhancePirRead {
+    /// Reconstructs pending outgoing candidates using a previously scanned compact block
+    /// and the wallet's current durable funding associations, including already-spent notes.
+    ///
+    /// The caller obtains blocks using the same trusted compact source as scanning. Matching
+    /// a block hash is a stale-branch check, not cryptographic authentication of its compact
+    /// contents. Invalid block-wide context rejects the entire call without mutation.
+    /// Otherwise, independently valid jobs commit together and transaction-local failures are
+    /// reported individually. SQL failures roll back the whole call. Unresolved work is retained
+    /// (suspended if its funding is gone), never publicly fetched because of an error.
+    fn rebuild_ironwood_enhancement(
+        &mut self,
+        request: IronwoodEnhanceDiscoveryRequest,
+        block: &CompactBlock,
+    ) -> Result<IronwoodEnhanceDiscoveryResult, Self::Error>;
+
     /// Rechecks every expected queue identity and applies incoming data, outgoing
     /// recovery, and routing together, or changes nothing.
     ///
