@@ -4077,13 +4077,12 @@ mod tests {
     use zcash_protocol::{consensus, local_consensus::LocalNetwork};
     use zip32::DiversifierIndex;
 
+    #[cfg(any(feature = "zakura-pir-enhance", feature = "transparent-inputs"))]
+    use crate::testing::BlockCache;
     use crate::{
         AccountUuid,
         error::SqliteClientError,
-        testing::{
-            BlockCache,
-            db::{TestDb, TestDbFactory},
-        },
+        testing::db::{TestDb, TestDbFactory},
         util::Clock as _,
         wallet::MIN_SHIELDED_DIVERSIFIER_OFFSET,
     };

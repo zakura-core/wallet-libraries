@@ -254,7 +254,7 @@ pub(crate) fn pending<P: zcash_protocol::consensus::Parameters>(
         i64,
     )> = conn
         .query_row(
-            "SELECT t.txid, rn.output_index, a.uuid, rn.diversifier, rn.value,
+            "SELECT t.txid, rn.action_index, a.uuid, rn.diversifier, rn.value,
                     rn.rho, rn.rseed, rn.note_version, rn.recipient_key_scope
              FROM ironwood_memo_retrieval_queue q
              JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
@@ -353,7 +353,7 @@ pub(crate) fn put(
              JOIN transactions t ON t.id_tx = rn.transaction_id
              WHERE q.commitment_tree_position = :position
                AND t.txid = :txid
-               AND rn.output_index = :output_index",
+               AND rn.action_index = :output_index",
             named_params![
                 ":position": u64::from(position),
                 ":txid": request_id.txid().as_ref(),
@@ -376,7 +376,7 @@ pub(crate) fn put(
              JOIN transactions t ON t.id_tx = rn.transaction_id
              WHERE q.commitment_tree_position = :position
                AND t.txid = :txid
-               AND rn.output_index = :output_index
+               AND rn.action_index = :output_index
          ) AND memo IS NULL",
         named_params![
             ":position": u64::from(position),
@@ -472,7 +472,7 @@ mod tests {
              CREATE TABLE ironwood_received_notes (
                  id INTEGER PRIMARY KEY,
                  transaction_id INTEGER NOT NULL,
-                 output_index INTEGER NOT NULL,
+                 action_index INTEGER NOT NULL,
                  memo BLOB
              );
              CREATE TABLE ironwood_memo_retrieval_queue (
@@ -802,7 +802,7 @@ mod tests {
              CREATE TABLE ironwood_received_notes (
                  id INTEGER PRIMARY KEY,
                  transaction_id INTEGER NOT NULL,
-                 output_index INTEGER NOT NULL,
+                 action_index INTEGER NOT NULL,
                  account_id INTEGER NOT NULL,
                  diversifier BLOB NOT NULL,
                  value INTEGER NOT NULL,

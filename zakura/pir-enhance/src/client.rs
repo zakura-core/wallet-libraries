@@ -623,14 +623,14 @@ mod tests {
 
     #[test]
     fn rejects_each_generation_discriminator() {
-        let mut mutations: Vec<Box<dyn FnOnce(&mut EnhanceGeneration)>> = vec![
-            Box::new(|generation| generation.schema_version += 1),
-            Box::new(|generation| generation.protocol_revision.push_str("-wrong")),
-            Box::new(|generation| generation.network = "test".to_string()),
-            Box::new(|generation| generation.pool = "orchard".to_string()),
+        let mutations: [fn(&mut EnhanceGeneration); 4] = [
+            |generation| generation.schema_version += 1,
+            |generation| generation.protocol_revision.push_str("-wrong"),
+            |generation| generation.network = "test".to_string(),
+            |generation| generation.pool = "orchard".to_string(),
         ];
 
-        for mutate in mutations.drain(..) {
+        for mutate in mutations {
             let mut session = valid_session();
             mutate(&mut session.generation);
             assert_generation_error(session, "wrong schema, protocol, network, or pool");

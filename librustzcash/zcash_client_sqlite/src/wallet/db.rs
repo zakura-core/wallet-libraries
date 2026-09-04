@@ -609,8 +609,8 @@ CREATE INDEX idx_ironwood_received_note_spends_transaction_id ON ironwood_receiv
 /// a transaction identifier.
 ///
 /// A position identifies at most one mined note, so `commitment_tree_position` is unique; the
-/// Enhance PIR store reads, authenticates, and writes rows exclusively by position, and that
-/// uniqueness is what makes resolving a position to a single note unambiguous.
+/// Enhance PIR discovers rows by position and compare-and-swaps completion against the
+/// transaction and action identity authenticated for that position.
 pub(super) const TABLE_IRONWOOD_MEMO_RETRIEVAL_QUEUE: &str = "
 CREATE TABLE ironwood_memo_retrieval_queue (
     received_note_id INTEGER PRIMARY KEY
