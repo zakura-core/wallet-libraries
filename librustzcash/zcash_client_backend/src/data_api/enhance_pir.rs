@@ -55,6 +55,33 @@ impl EnhancePirRequest {
     }
 }
 
+/// Stable chain identity for an Ironwood action queued for private enhancement.
+///
+/// Tree positions may be reused after a reorg, so completion must compare this
+/// identity in addition to the queried position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IronwoodEnhanceRequestId {
+    txid: TxId,
+    output_index: u32,
+}
+
+impl IronwoodEnhanceRequestId {
+    /// Constructs an action identity.
+    pub fn new(txid: TxId, output_index: u32) -> Self {
+        Self { txid, output_index }
+    }
+
+    /// Returns the transaction containing the action.
+    pub fn txid(&self) -> TxId {
+        self.txid
+    }
+
+    /// Returns the action index within the transaction's Ironwood bundle.
+    pub fn output_index(&self) -> u32 {
+        self.output_index
+    }
+}
+
 /// The complete encrypted-note fields stored in one Enhance PIR record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IronwoodEnhanceRecord {
@@ -135,6 +162,8 @@ pub enum EnhancePirStoreResult {
 /// Wallet state needed to authenticate a Enhance PIR response.
 #[doc(hidden)]
 pub struct PendingIronwoodMemo<AccountId> {
+    /// Stable identity that must still match when the memo is stored.
+    pub request_id: IronwoodEnhanceRequestId,
     /// Account that received the note.
     pub account_id: AccountId,
     /// Compact-scanned note whose commitment must be reproduced.
@@ -146,6 +175,7 @@ pub struct PendingIronwoodMemo<AccountId> {
 /// Compact action and candidate senders retained for outgoing recovery.
 #[doc(hidden)]
 pub struct PendingIronwoodOutgoing<AccountId> {
+    pub request_id: IronwoodEnhanceRequestId,
     pub account_ids: Vec<AccountId>,
     pub nullifier: [u8; 32],
     pub cmx: [u8; 32],
@@ -190,6 +220,7 @@ pub trait EnhancePirWrite: EnhancePirRead {
     fn put_ironwood_memo(
         &mut self,
         position: Position,
+        request_id: IronwoodEnhanceRequestId,
         memo: &MemoBytes,
     ) -> Result<bool, Self::Error>;
 
@@ -197,6 +228,7 @@ pub trait EnhancePirWrite: EnhancePirRead {
     fn put_ironwood_sent_output(
         &mut self,
         position: Position,
+        request_id: IronwoodEnhanceRequestId,
         from_account: Self::AccountId,
         recipient: Address,
         value: Zatoshis,
@@ -257,7 +289,7 @@ pub fn decrypt_and_store_ironwood_memo<DbT: EnhancePirWrite>(
         return Ok(EnhancePirStoreResult::Rejected);
     };
 
-    Ok(if db.put_ironwood_memo(request.position(), &memo)? {
+    Ok(if db.put_ironwood_memo(request.position(), pending.request_id, &memo)? {
         EnhancePirStoreResult::Stored
     } else {
         EnhancePirStoreResult::AlreadyResolved
@@ -327,7 +359,14 @@ pub fn recover_and_store_ironwood_outgoing<DbT: EnhancePirWrite>(
     let value = Zatoshis::from_u64(note.value().inner()).expect("note value is in range");
     let memo = MemoBytes::from_bytes(&memo).expect("note decryption returns exactly 512 bytes");
     Ok(
-        if db.put_ironwood_sent_output(request.position(), account_id, recipient, value, &memo)? {
+        if db.put_ironwood_sent_output(
+            request.position(),
+            pending.request_id,
+            account_id,
+            recipient,
+            value,
+            &memo,
+        )? {
             EnhancePirStoreResult::Stored
         } else {
             EnhancePirStoreResult::AlreadyResolved
@@ -482,6 +521,7 @@ mod tests {
             encryptor.encrypt_outgoing_plaintext(&cv_net, &cmx, &mut outgoing_rng),
         );
         let pending = PendingIronwoodOutgoing {
+            request_id: IronwoodEnhanceRequestId::new(TxId::from_bytes([0; 32]), 0),
             account_ids: vec![()],
             nullifier: nf.to_bytes(),
             cmx: cmx.to_bytes(),
