@@ -32,6 +32,9 @@ use {
 #[cfg(not(feature = "orchard"))]
 use std::marker::PhantomData;
 
+#[cfg(feature = "zakura-pir-enhance")]
+use crate::data_api::enhance_pir::is_ironwood_pir_candidate;
+
 type TaggedSaplingBatch<IvkTag> = Batch<
     IvkTag,
     SaplingDomain,
@@ -397,6 +400,11 @@ where
             spent_from_accounts.chain(ironwood_spends.iter().map(|spend| spend.account_id()));
         let spent_from_accounts = spent_from_accounts.copied().collect::<HashSet<_>>();
 
+        #[cfg(feature = "zakura-pir-enhance")]
+        // Explicit non-Ironwood fields require LWD. Empty transparent lists are
+        // only provisional: schema-v6 PIR flags may reveal an omitted bundle.
+        // The compact source must include every shielded pool, not filter to Ironwood.
+        let ironwood_pir_eligible = is_ironwood_pir_candidate(&tx);
         let (sapling_outputs, mut sapling_nc) = find_received(
             cur_height,
             pos_tracker.compact_tx_contains_last_sapling_outputs_in_block(&tx),
@@ -512,6 +520,53 @@ where
         #[cfg(feature = "orchard")]
         ironwood_note_commitments.append(&mut ironwood_nc);
 
+        // Actions the wallet decrypted for itself — including change, which compact scanning
+        // finds because `ScanningKeys` covers the internal scope as well as the external one.
+        // These are served by the incoming memo queue, so they must not also become outgoing
+        // candidates: change is encrypted under the internal OVK and outgoing recovery only
+        // holds the external one, so an outgoing entry for such a position could never be
+        // resolved. It would keep its transaction protected, and therefore un-enhanced, forever.
+        #[cfg(feature = "zakura-pir-enhance")]
+        let ironwood_enhance_candidates = if spent_from_accounts.is_empty()
+            || !ironwood_pir_eligible
+        {
+            vec![]
+        } else {
+            let received_indices = ironwood_outputs
+                .iter()
+                .map(|output| output.index())
+                .collect::<HashSet<_>>();
+            tx.ironwood_actions
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !received_indices.contains(index))
+                .map(|(index, raw)| {
+                    let action =
+                        CompactAction::try_from(raw).map_err(|_| ScanError::EncodingInvalid {
+                            at_height: cur_height,
+                            txid,
+                            pool_type: ShieldedPool::Ironwood,
+                            index,
+                        })?;
+                    Ok(crate::wallet::IronwoodEnhanceCandidate::from_parts(
+                        pos_tracker.ironwood_note_position(index),
+                        index,
+                        action.nullifier().to_bytes(),
+                        action.cmx().to_bytes(),
+                        raw.ephemeral_key
+                            .as_slice()
+                            .try_into()
+                            .expect("CompactAction validation enforces ephemeral-key length"),
+                        raw.ciphertext
+                            .as_slice()
+                            .try_into()
+                            .expect("CompactAction validation enforces ciphertext length"),
+                        spent_from_accounts.iter().copied().collect(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, ScanError>>()?
+        };
+
         #[cfg(feature = "orchard")]
         let has_orchard = !(orchard_spends.is_empty() && orchard_outputs.is_empty());
         #[cfg(not(feature = "orchard"))]
@@ -523,7 +578,7 @@ where
         let has_ironwood = false;
 
         if has_sapling || has_orchard || has_ironwood {
-            wtxs.push(WalletTx::new(
+            let wallet_tx = WalletTx::new(
                 txid,
                 tx_index,
                 // TODO: Scan transparent data in CompactTx if present.
@@ -539,7 +594,13 @@ where
                 ironwood_spends,
                 #[cfg(feature = "orchard")]
                 ironwood_outputs,
-            ));
+            );
+            #[cfg(feature = "zakura-pir-enhance")]
+            let wallet_tx = wallet_tx.with_ironwood_enhance_candidates(
+                ironwood_enhance_candidates,
+                ironwood_pir_eligible,
+            );
+            wtxs.push(wallet_tx);
         }
 
         pos_tracker.increment_over_compact_tx(&tx);
@@ -791,6 +852,30 @@ impl PositionTracker {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "zakura-pir-enhance")]
+    #[test]
+    fn pir_candidate_rejects_every_explicit_non_ironwood_field() {
+        use crate::proto::compact_formats::CompactTx;
+        let empty = CompactTx::default();
+        assert!(!super::is_ironwood_pir_candidate(&empty));
+        let pure = CompactTx {
+            ironwood_actions: vec![Default::default()],
+            ..empty
+        };
+        assert!(super::is_ironwood_pir_candidate(&pure));
+        for field in 0..5 {
+            let mut mixed = pure.clone();
+            match field {
+                0 => mixed.vin.push(Default::default()),
+                1 => mixed.vout.push(Default::default()),
+                2 => mixed.spends.push(Default::default()),
+                3 => mixed.outputs.push(Default::default()),
+                4 => mixed.actions.push(Default::default()),
+                _ => unreachable!(),
+            }
+            assert!(!super::is_ironwood_pir_candidate(&mixed), "field {field}");
+        }
+    }
 
     use std::convert::Infallible;
 
@@ -1118,6 +1203,248 @@ mod tests {
             ),
             "a malformed Ironwood spend nullifier must produce a handleable ScanError",
         );
+    }
+
+    #[cfg(feature = "zakura-pir-enhance")]
+    #[test]
+    fn owned_ironwood_spend_captures_every_action_for_outgoing_recovery() {
+        let network = Network::TestNetwork;
+        let account = AccountId::try_from(12).unwrap();
+        let scanning_keys = ScanningKeys::<AccountId, Infallible>::empty();
+        let mut rng = OsRng;
+        let owned_nullifier =
+            orchard::note::Nullifier::from_bytes(&pallas::Base::random(&mut rng).to_repr())
+                .unwrap();
+        let other_nullifier =
+            orchard::note::Nullifier::from_bytes(&pallas::Base::random(&mut rng).to_repr())
+                .unwrap();
+        let cmx_0 = pallas::Base::random(&mut rng).to_repr();
+        let cmx_1 = pallas::Base::random(&mut rng).to_repr();
+        let actions =
+            [(owned_nullifier, cmx_0), (other_nullifier, cmx_1)].map(|(nullifier, cmx)| {
+                CompactOrchardAction {
+                    nullifier: nullifier.to_bytes().to_vec(),
+                    cmx: cmx.to_vec(),
+                    ephemeral_key: vec![0; 32],
+                    ciphertext: vec![0; 52],
+                }
+            });
+        let mut tx = CompactTx {
+            txid: vec![7; 32],
+            ..Default::default()
+        };
+        tx.ironwood_actions.extend(actions);
+        let mut mixed_tx = tx.clone();
+        mixed_tx.actions.push(mixed_tx.ironwood_actions[0].clone());
+        let mut block = CompactBlock {
+            hash: vec![1; 32],
+            prev_hash: vec![0; 32],
+            height: 1,
+            ..Default::default()
+        };
+        block.vtx.push(tx);
+        block.chain_metadata = Some(ChainMetadata {
+            sapling_commitment_tree_size: 0,
+            orchard_commitment_tree_size: 0,
+            ironwood_commitment_tree_size: 7,
+        });
+        let nullifiers = Nullifiers::new(vec![], vec![], vec![(account, owned_nullifier)]);
+
+        let scanned = scan_block_with_runners::<_, _, _, (), (), ()>(
+            &network,
+            block,
+            &scanning_keys,
+            &nullifiers,
+            Some(&BlockMetadata::from_parts(
+                BlockHeight::from(0),
+                BlockHash([0; 32]),
+                Some(0),
+                Some(0),
+                Some(5),
+            )),
+            None,
+        )
+        .unwrap();
+
+        let tx = &scanned.transactions()[0];
+        assert_eq!(tx.ironwood_spends().len(), 1);
+        assert_eq!(tx.ironwood_enhance_candidates().len(), 2);
+        for (index, candidate) in tx.ironwood_enhance_candidates().iter().enumerate() {
+            assert_eq!(candidate.position(), Position::from(5 + index as u64));
+            assert_eq!(candidate.output_index(), index);
+            assert_eq!(candidate.funding_accounts(), &[account]);
+            assert_eq!(candidate.ephemeral_key(), &[0; 32]);
+            assert_eq!(candidate.compact_ciphertext(), &[0; 52]);
+        }
+        assert_eq!(
+            tx.ironwood_enhance_candidates()[0].nullifier(),
+            &owned_nullifier.to_bytes()
+        );
+        assert_eq!(tx.ironwood_enhance_candidates()[0].cmx(), &cmx_0);
+        assert_eq!(
+            tx.ironwood_enhance_candidates()[1].nullifier(),
+            &other_nullifier.to_bytes()
+        );
+        assert_eq!(tx.ironwood_enhance_candidates()[1].cmx(), &cmx_1);
+        assert!(tx.ironwood_pir_eligible());
+
+        let mut mixed_block = CompactBlock {
+            hash: vec![2; 32],
+            prev_hash: vec![0; 32],
+            height: 1,
+            ..Default::default()
+        };
+        mixed_block.vtx.push(mixed_tx);
+        mixed_block.chain_metadata = Some(ChainMetadata {
+            sapling_commitment_tree_size: 0,
+            orchard_commitment_tree_size: 1,
+            ironwood_commitment_tree_size: 7,
+        });
+        let mixed_scanned = scan_block_with_runners::<_, _, _, (), (), ()>(
+            &network,
+            mixed_block,
+            &scanning_keys,
+            &nullifiers,
+            Some(&BlockMetadata::from_parts(
+                BlockHeight::from(0),
+                BlockHash([0; 32]),
+                Some(0),
+                Some(0),
+                Some(5),
+            )),
+            None,
+        )
+        .unwrap();
+        let mixed_tx = &mixed_scanned.transactions()[0];
+        assert!(!mixed_tx.ironwood_pir_eligible());
+        assert!(
+            mixed_tx.ironwood_enhance_candidates().is_empty(),
+            "mixed-pool transactions must remain on standard txid enhancement"
+        );
+    }
+
+    /// A wallet-owned Ironwood output — in particular change, which is found because
+    /// `ScanningKeys` covers the internal scope — is served by the incoming memo queue. It must
+    /// not also be emitted as an outgoing candidate: change is encrypted under the internal OVK
+    /// while outgoing recovery holds only the external one, so such an entry could never be
+    /// resolved and would keep its transaction protected, and so un-enhanced, forever.
+    #[cfg(feature = "zakura-pir-enhance")]
+    #[test]
+    fn wallet_owned_ironwood_outputs_are_not_outgoing_candidates() {
+        let network = Network::TestNetwork;
+        let account = AccountId::try_from(0).unwrap();
+        let usk = UnifiedSpendingKey::from_seed(&network, &[0; 32], account).unwrap();
+        let ufvk = usk.to_unified_full_viewing_key();
+        let fvk = ufvk.orchard().expect("Orchard key is present").clone();
+        let scanning_keys = ScanningKeys::from_account_ufvks([(account, ufvk)]);
+        let mut rng = OsRng;
+
+        // Action 0 spends a note the wallet owns and pays change back to the wallet's own
+        // internal address, so the scanner decrypts it as a received note.
+        let owned_nf =
+            orchard::note::Nullifier::from_bytes(&pallas::Base::random(&mut rng).to_repr())
+                .unwrap();
+        let rho = Rho::from_bytes(&owned_nf.to_bytes()).unwrap();
+        let rseed = loop {
+            let mut bytes = [0; 32];
+            rng.fill_bytes(&mut bytes);
+            if let Some(rseed) = Option::from(RandomSeed::from_bytes(bytes, &rho)) {
+                break rseed;
+            }
+        };
+        let change = Note::from_parts(
+            fvk.address_at(0u32, Scope::Internal),
+            NoteValue::from_raw(1000),
+            rho,
+            rseed,
+            NoteVersion::V3,
+        )
+        .unwrap();
+        // Change carries the internal OVK, exactly as the builder writes it.
+        let encryptor =
+            IronwoodNoteEncryption::new(Some(fvk.to_ovk(Scope::Internal)), change, [0; 512]);
+        let change_action = CompactOrchardAction {
+            nullifier: owned_nf.to_bytes().to_vec(),
+            cmx: ExtractedNoteCommitment::from(change.commitment())
+                .to_bytes()
+                .to_vec(),
+            ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0.to_vec(),
+            ciphertext: encryptor.encrypt_note_plaintext()[..52].to_vec(),
+        };
+
+        // Action 1 pays someone else, so the wallet cannot decrypt it and it stays a candidate.
+        let other_nf =
+            orchard::note::Nullifier::from_bytes(&pallas::Base::random(&mut rng).to_repr())
+                .unwrap();
+        let external_cmx = pallas::Base::random(&mut rng).to_repr();
+        let external_action = CompactOrchardAction {
+            nullifier: other_nf.to_bytes().to_vec(),
+            cmx: external_cmx.to_vec(),
+            ephemeral_key: vec![0; 32],
+            ciphertext: vec![0; 52],
+        };
+
+        let mut tx = CompactTx {
+            txid: vec![3; 32],
+            ..Default::default()
+        };
+        tx.ironwood_actions.push(change_action);
+        tx.ironwood_actions.push(external_action);
+        let mut block = CompactBlock {
+            hash: vec![1; 32],
+            prev_hash: vec![0; 32],
+            height: 1,
+            ..Default::default()
+        };
+        block.vtx.push(tx);
+        block.chain_metadata = Some(ChainMetadata {
+            sapling_commitment_tree_size: 0,
+            orchard_commitment_tree_size: 0,
+            ironwood_commitment_tree_size: 2,
+        });
+
+        let scanned = scan_block_with_runners::<_, _, _, (), (), ()>(
+            &network,
+            block,
+            &scanning_keys,
+            &Nullifiers::new(vec![], vec![], vec![(account, owned_nf)]),
+            Some(&BlockMetadata::from_parts(
+                BlockHeight::from(0),
+                BlockHash([0; 32]),
+                Some(0),
+                Some(0),
+                Some(0),
+            )),
+            None,
+        )
+        .unwrap();
+
+        let tx = &scanned.transactions()[0];
+        assert!(tx.ironwood_pir_eligible());
+        assert_eq!(
+            tx.ironwood_outputs().len(),
+            1,
+            "the change output should be received by the wallet"
+        );
+        assert_eq!(tx.ironwood_outputs()[0].index(), 0);
+        // Dropping the outgoing candidate also drops the `sent_notes` row that would have been
+        // written for this output, and with it `flag_previously_received_change`. That repair is
+        // only needed for notes scanned before their transaction's spends were linkable — which
+        // an Enhance PIR candidate never is, since it exists only when the wallet already
+        // recognised the spend. So `is_change` has to be right here, at scan time.
+        assert!(
+            tx.ironwood_outputs()[0].is_change(),
+            "change must be flagged during scanning, with no later repair to rely on"
+        );
+
+        let candidates = tx.ironwood_enhance_candidates();
+        assert_eq!(
+            candidates.len(),
+            1,
+            "only the output the wallet cannot decrypt needs outgoing recovery"
+        );
+        assert_eq!(candidates[0].output_index(), 1);
+        assert_eq!(candidates[0].nullifier(), &other_nf.to_bytes());
     }
 
     #[test]

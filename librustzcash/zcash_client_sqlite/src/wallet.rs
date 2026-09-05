@@ -184,6 +184,8 @@ pub mod commitment_tree;
 pub(crate) mod common;
 mod db;
 pub(crate) mod encoding;
+#[cfg(feature = "zakura-pir-enhance")]
+pub(crate) mod enhance_pir;
 pub mod init;
 pub(crate) mod locking;
 #[cfg(feature = "orchard")]
@@ -799,6 +801,9 @@ pub(crate) fn delete_account(
             ":account_uuid": account_uuid.0,
         ],
     )?;
+
+    #[cfg(feature = "zakura-pir-enhance")]
+    enhance_pir::remove_orphaned_outgoing(conn)?;
 
     Ok(())
 }
@@ -4219,6 +4224,28 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         named_params![":height": u32::from(truncation_height)],
     )?;
 
+    // Drop private position claims before un-mining. A transaction's positive
+    // mixed-pool decision remains sticky even when its tree positions move.
+    conn.execute(
+        "DELETE FROM ironwood_enhance_discovery_queue
+         WHERE transaction_id IN (SELECT id_tx FROM transactions WHERE mined_height > :height)",
+        named_params![":height": u32::from(truncation_height)],
+    )?;
+    conn.execute(
+        "DELETE FROM ironwood_enhance_routing
+         WHERE route = 0 AND transaction_id IN (
+             SELECT id_tx FROM transactions WHERE mined_height > :height
+         )",
+        named_params![":height": u32::from(truncation_height)],
+    )?;
+    conn.execute(
+        "DELETE FROM ironwood_enhance_outgoing_queue
+         WHERE transaction_id IN (
+             SELECT id_tx FROM transactions WHERE mined_height > :height
+         )",
+        named_params![":height": u32::from(truncation_height)],
+    )?;
+
     // Un-mine transactions. This must be done outside of the last_scanned_height check because
     // transaction entries may be created as a consequence of receiving transparent TXOs.
     conn.execute(
@@ -4226,6 +4253,21 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
          SET block = NULL, mined_height = NULL, tx_index = NULL, confirmed_unmined_at_height = NULL
          WHERE mined_height > :height",
         named_params![":height": u32::from(truncation_height)],
+    )?;
+
+    // Dequeue memo retrievals for the notes we just un-mined. Their commitment tree positions are
+    // deliberately retained (received notes are never deleted here, because they may hold memo
+    // data that cannot be recovered), but a retained position is no longer authoritative: it may
+    // be reassigned to a different note by the rescan this truncation schedules. Querying it
+    // would spend a PIR request on a position the wallet no longer owns. Whatever remains
+    // completable is re-queued by that rescan.
+    conn.execute_batch(
+        "DELETE FROM ironwood_memo_retrieval_queue
+         WHERE received_note_id IN (
+             SELECT rn.id FROM ironwood_received_notes rn
+             JOIN transactions t ON t.id_tx = rn.transaction_id
+             WHERE t.mined_height IS NULL
+         )",
     )?;
 
     // If we're removing scanned blocks, we need to truncate the note commitment tree and remove
@@ -4241,6 +4283,8 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
             // Truncation removes checkpoints; it never establishes them, so no anchor retention
             // decision is made through this handle and the interval is immaterial.
             anchor_retention_interval: AnchorRetentionInterval::default(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            enhancement_mode: Default::default(),
             #[cfg(feature = "transparent-inputs")]
             gap_limits: *gap_limits,
         };
@@ -5145,9 +5189,31 @@ pub(crate) fn put_tx_data(
         ":observed_height": u32::from(observed_height)
     ];
 
-    stmt_upsert_tx_data
-        .query_row(tx_params, |row| row.get::<_, i64>(0).map(TxRef))
-        .map_err(SqliteClientError::from)
+    let tx_ref = stmt_upsert_tx_data.query_row(tx_params, |row| row.get::<_, i64>(0).map(TxRef))?;
+    clear_ironwood_enhancement_work(conn, tx_ref)?;
+    Ok(tx_ref)
+}
+
+/// Full transaction storage supersedes private queues without erasing recovered data.
+fn clear_ironwood_enhancement_work(
+    conn: &rusqlite::Connection,
+    tx_ref: TxRef,
+) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "DELETE FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx",
+        named_params![":tx": tx_ref.0],
+    )?;
+    conn.execute(
+        "DELETE FROM ironwood_memo_retrieval_queue
+         WHERE received_note_id IN (
+             SELECT id FROM ironwood_received_notes WHERE transaction_id = :tx)",
+        named_params![":tx": tx_ref.0],
+    )?;
+    conn.execute(
+        "DELETE FROM ironwood_enhance_outgoing_queue WHERE transaction_id = :tx",
+        named_params![":tx": tx_ref.0],
+    )?;
+    Ok(())
 }
 
 /// Records how a transaction classifies against ZIP 318.
@@ -5272,12 +5338,23 @@ pub(crate) fn queue_tx_status(
 /// wallet backend in order to be able to present a complete view of wallet history and memo data.
 pub(crate) fn transaction_data_requests(
     conn: &rusqlite::Connection,
+    protect_ironwood: bool,
 ) -> Result<Vec<TransactionDataRequest>, SqliteClientError> {
     let mut tx_retrieval_stmt = conn.prepare_cached(
         "SELECT q.txid, q.query_type
          FROM tx_retrieval_queue q
          LEFT JOIN transactions t ON t.txid = q.txid
-         WHERE q.query_type = :enhancement_type
+         WHERE (
+            q.query_type = :enhancement_type
+            AND (
+                NOT :protect_ironwood
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM ironwood_enhance_routing p
+                    WHERE p.transaction_id = t.id_tx AND p.route = 0
+                )
+            )
+         )
          OR (
             q.query_type = :status_type
             AND t.mined_height IS NULL
@@ -5302,6 +5379,7 @@ pub(crate) fn transaction_data_requests(
             named_params![
                 ":status_type": TxQueryType::Status.code(),
                 ":enhancement_type": TxQueryType::Enhancement.code(),
+                ":protect_ironwood": protect_ironwood,
                 ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA
             ],
             |row| {
@@ -5928,6 +6006,8 @@ mod tests {
     use sapling::zip32::ExtendedSpendingKey;
     use secrecy::{ExposeSecret, SecretVec};
     use uuid::Uuid;
+    #[cfg(feature = "zakura-pir-enhance")]
+    use zcash_client_backend::data_api::enhance_pir::EnhancementMode;
     use zcash_client_backend::data_api::{
         Account as _, AccountSource, TransactionDataRequest, TransactionStatus, WalletRead,
         WalletWrite,
@@ -6234,6 +6314,155 @@ mod tests {
         let requests = st.wallet().transaction_data_requests().unwrap();
         assert!(requests.contains(&TransactionDataRequest::GetStatus(unexpired_txid)));
         assert!(requests.contains(&TransactionDataRequest::Enhancement(unexpired_txid)));
+    }
+
+    #[test]
+    fn enhancement_mode_filters_only_protected_enhancement_intent() {
+        const PROTECTED_TXID_BYTES: [u8; 32] = [3; 32];
+        const UNPROTECTED_TXID_BYTES: [u8; 32] = [4; 32];
+        const UNKNOWN_TXID_BYTES: [u8; 32] = [5; 32];
+        const MIXED_POOL_TXID_BYTES: [u8; 32] = [6; 32];
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let tip = st.sapling_activation_height();
+        let dfvk = ExtendedSpendingKey::master(&[]).to_diversifiable_full_viewing_key();
+        st.generate_block_at(
+            tip,
+            BlockHash([0; 32]),
+            &[FakeCompactOutput::new(
+                &dfvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(10_000),
+            )],
+            0,
+            0,
+            0,
+            false,
+        );
+        st.scan_cached_blocks(tip, 1);
+
+        let protected_txid = TxId::from_bytes(PROTECTED_TXID_BYTES);
+        let unprotected_txid = TxId::from_bytes(UNPROTECTED_TXID_BYTES);
+        let unknown_txid = TxId::from_bytes(UNKNOWN_TXID_BYTES);
+        let mixed_pool_txid = TxId::from_bytes(MIXED_POOL_TXID_BYTES);
+        let protected_tx_ref = st
+            .wallet()
+            .conn()
+            .query_row(
+                "INSERT INTO transactions (txid, expiry_height, min_observed_height)
+                 VALUES (:txid, 0, :min_observed_height)
+                 RETURNING id_tx",
+                named_params![
+                    ":txid": protected_txid.as_ref(),
+                    ":min_observed_height": u32::from(tip),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        st.wallet()
+            .conn()
+            .execute(
+                "INSERT INTO transactions (txid, expiry_height, min_observed_height)
+                 VALUES (:txid, 0, :min_observed_height)",
+                named_params![
+                    ":txid": unprotected_txid.as_ref(),
+                    ":min_observed_height": u32::from(tip),
+                ],
+            )
+            .unwrap();
+        let mixed_pool_tx_ref = st
+            .wallet()
+            .conn()
+            .query_row(
+                "INSERT INTO transactions (txid, expiry_height, min_observed_height)
+                 VALUES (:txid, 0, :min_observed_height)
+                 RETURNING id_tx",
+                named_params![
+                    ":txid": mixed_pool_txid.as_ref(),
+                    ":min_observed_height": u32::from(tip),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        #[cfg(not(feature = "zakura-pir-enhance"))]
+        let _ = mixed_pool_tx_ref;
+        for (txid, query_type) in [
+            (protected_txid, TxQueryType::Enhancement),
+            (protected_txid, TxQueryType::Status),
+            (unprotected_txid, TxQueryType::Enhancement),
+            (unknown_txid, TxQueryType::Enhancement),
+            (mixed_pool_txid, TxQueryType::Enhancement),
+        ] {
+            st.wallet()
+                .conn()
+                .execute(
+                    "INSERT INTO tx_retrieval_queue (txid, query_type)
+                     VALUES (:txid, :query_type)",
+                    named_params![
+                        ":txid": txid.as_ref(),
+                        ":query_type": query_type.code(),
+                    ],
+                )
+                .unwrap();
+        }
+        st.wallet()
+            .conn()
+            .execute(
+                "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (:transaction_id, 0)",
+                named_params![":transaction_id": protected_tx_ref],
+            )
+            .unwrap();
+
+        #[cfg(feature = "zakura-pir-enhance")]
+        st.wallet()
+            .conn()
+            .execute(
+                "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (:tx, 1)",
+                named_params![":tx": mixed_pool_tx_ref],
+            )
+            .unwrap();
+
+        let standard_requests = st.wallet().transaction_data_requests().unwrap();
+        assert!(standard_requests.contains(&TransactionDataRequest::Enhancement(protected_txid)));
+        assert!(standard_requests.contains(&TransactionDataRequest::GetStatus(protected_txid)));
+        assert!(standard_requests.contains(&TransactionDataRequest::Enhancement(unprotected_txid)));
+        assert!(standard_requests.contains(&TransactionDataRequest::Enhancement(unknown_txid)));
+        assert!(standard_requests.contains(&TransactionDataRequest::Enhancement(mixed_pool_txid)));
+
+        #[cfg(feature = "zakura-pir-enhance")]
+        {
+            st.wallet_mut()
+                .db_mut()
+                .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+            let private_requests = st.wallet().transaction_data_requests().unwrap();
+            assert!(
+                !private_requests.contains(&TransactionDataRequest::Enhancement(protected_txid))
+            );
+            assert!(private_requests.contains(&TransactionDataRequest::GetStatus(protected_txid)));
+            assert!(
+                private_requests.contains(&TransactionDataRequest::Enhancement(unprotected_txid))
+            );
+            assert!(private_requests.contains(&TransactionDataRequest::Enhancement(unknown_txid)));
+            assert!(
+                private_requests.contains(&TransactionDataRequest::Enhancement(mixed_pool_txid)),
+                "mixed-pool transactions stay on standard enhancement"
+            );
+
+            st.wallet_mut()
+                .db_mut()
+                .set_enhancement_mode(EnhancementMode::Standard);
+            assert!(
+                st.wallet()
+                    .transaction_data_requests()
+                    .unwrap()
+                    .contains(&TransactionDataRequest::Enhancement(protected_txid))
+            );
+        }
     }
 
     #[test]

@@ -26,6 +26,8 @@ mod fix_transparent_received_outputs;
 mod fix_v_transactions_expired_unmined;
 mod full_account_ids;
 mod initial_setup;
+mod ironwood_enhance;
+mod ironwood_enhance_discovery;
 mod ironwood_pool_code_views;
 mod ironwood_received_notes;
 mod ironwood_shardtree;
@@ -129,6 +131,8 @@ pub mod ids {
         fix_v_transactions_expired_unmined::MIGRATION_ID as FIX_V_TRANSACTIONS_EXPIRED_UNMINED,
         full_account_ids::MIGRATION_ID as FULL_ACCOUNT_IDS,
         initial_setup::MIGRATION_ID as INITIAL_SETUP,
+        ironwood_enhance::MIGRATION_ID as IRONWOOD_ENHANCE,
+        ironwood_enhance_discovery::MIGRATION_ID as IRONWOOD_ENHANCE_DISCOVERY,
         ironwood_pool_code_views::MIGRATION_ID as IRONWOOD_POOL_CODE_VIEWS,
         ironwood_received_notes::MIGRATION_ID as IRONWOOD_RECEIVED_NOTES,
         ironwood_shardtree::MIGRATION_ID as IRONWOOD_SHARDTREE,
@@ -360,6 +364,8 @@ pub(super) fn all_migrations<
         Box::new(add_transparent_value_index::Migration),
         Box::new(orchard_note_version::Migration),
         Box::new(ironwood_received_notes::Migration),
+        Box::new(ironwood_enhance::Migration),
+        Box::new(ironwood_enhance_discovery::Migration),
         Box::new(ironwood_pool_code_views::Migration),
         Box::new(fix_bad_ironwood_change_flagging::Migration),
         Box::new(v_address_uses_ironwood::Migration),
@@ -568,11 +574,11 @@ pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     ivk_item_cache::MIGRATION_ID,
     add_transparent_receiver_address_index::MIGRATION_ID,
     add_transparent_value_index::MIGRATION_ID,
+    ironwood_enhance_discovery::MIGRATION_ID,
     fix_bad_ironwood_change_flagging::MIGRATION_ID,
     v_address_uses_ironwood::MIGRATION_ID,
     orchard_ironwood_migration_unsatisfiability::MIGRATION_ID,
     tree_retained_checkpoints::MIGRATION_ID,
-    tx_status_observation_intent::MIGRATION_ID,
     v_transactions_zip318_kind::MIGRATION_ID,
 ];
 
@@ -689,6 +695,8 @@ pub(crate) mod tests {
             ids::FULL_ACCOUNT_IDS,
             ids::INITIAL_SETUP,
             ids::IRONWOOD_POOL_CODE_VIEWS,
+            ids::IRONWOOD_ENHANCE,
+            ids::IRONWOOD_ENHANCE_DISCOVERY,
             ids::IRONWOOD_RECEIVED_NOTES,
             ids::IRONWOOD_SHARDTREE,
             ids::IVK_ITEM_CACHE,

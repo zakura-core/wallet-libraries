@@ -1,7 +1,7 @@
 # New Zakura work
 
-Hand-written crates that are ours rather than forks — the PIR-based sync engine
-is the first one planned.
+Hand-written crates that are ours rather than forks. `pir-enhance/` contains the
+unpublished, position-keyed Ironwood compact-action enhancement client.
 
 Nothing here is generated. `scripts/sync-upstream.sh` never touches this
 directory, unlike `librustzcash/`, which it deletes and re-extracts on every
