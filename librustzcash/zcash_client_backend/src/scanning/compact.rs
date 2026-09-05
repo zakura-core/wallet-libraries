@@ -1326,8 +1326,8 @@ mod tests {
     /// A wallet-owned Ironwood output — in particular change, which is found because
     /// `ScanningKeys` covers the internal scope — is served by the incoming memo queue. It must
     /// not also be emitted as an outgoing candidate: change is encrypted under the internal OVK
-    /// while outgoing recovery holds only the external one, so such an entry could never be
-    /// resolved and would keep its transaction protected, and so un-enhanced, forever.
+    /// while outgoing recovery holds only the external one. Incoming decryption recovers
+    /// its memo without an unnecessary outgoing recovery attempt.
     #[cfg(feature = "zakura-pir-enhance")]
     #[test]
     fn wallet_owned_ironwood_outputs_are_not_outgoing_candidates() {

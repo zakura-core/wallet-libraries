@@ -53,7 +53,6 @@ impl RusqliteMigration for Migration {
                 cmx BLOB NOT NULL CHECK (length(cmx) = 32),
                 ephemeral_key BLOB NOT NULL CHECK (length(ephemeral_key) = 32),
                 compact_ciphertext BLOB NOT NULL CHECK (length(compact_ciphertext) = 52),
-                not_recoverable INTEGER NOT NULL DEFAULT 0 CHECK (not_recoverable IN (0, 1)),
                 UNIQUE(transaction_id, output_index)
             );
             CREATE TABLE ironwood_enhance_outgoing_accounts (

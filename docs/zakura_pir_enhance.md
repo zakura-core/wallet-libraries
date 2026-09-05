@@ -89,16 +89,28 @@ Wallet-funded transactions queue actions that were not already decrypted as
 received notes. Received/change actions use incoming decryption, avoiding an
 unrecoverable outgoing job for change encrypted under an internal OVK.
 
+Compact scanning cannot distinguish padding dummies from potential outgoing
+outputs. Padding is routine in default bundles, so wallet-funded transactions
+queue every non-incoming action for recovery.
+
 An outgoing record may match compact fields but fail OVK recovery because it is
 a dummy, uses `OvkPolicy::Discard`, or contains corrupt server-supplied fields.
-The wallet cannot distinguish these cases. It marks the row `not_recoverable`
-and stops automatic retries, but retains the row as incomplete. Other successful
-actions must not erase its ordinary fallback.
+The wallet cannot distinguish these cases. As in ordinary enhancement, it discards
+the candidate without storing a sent output. Deleting the outgoing row also removes
+its candidate-account rows. The same SQL transaction retires ordinary Enhancement
+intent only when all incoming, outgoing, and discovery work is complete.
 
-An explicit rescan requeues suspended candidates, using rediscovery when its
-funding nullifiers are already marked spent. Disabling private mode exposes
-outstanding ordinary enhancement requests. Neither non-recovery nor an error
-automatically causes public fallback.
+This explicitly accepts a security tradeoff: compact matching authenticates the
+ephemeral key and compact ciphertext prefix, not the remaining recovery fields.
+A malicious server can corrupt those fields and cause a legitimate candidate to
+be discarded. Discard is not proof that the action was a dummy. Compact mismatches,
+incoming authentication failures, stale replies, and transport errors leave work
+unchanged and never trigger public fallback.
+
+An explicit rescan can reconstruct discarded candidates, using rediscovery when
+funding nullifiers are already marked spent. New funding associations also reopen
+discovery. Disabling private mode exposes outstanding ordinary enhancement requests;
+it does not recreate requests retired after candidate discard.
 
 ### Out-of-order scanning and retroactive funding
 
@@ -112,8 +124,8 @@ The request remains withheld in private mode. Scan order does not require LWD.
 Discovery reconstructs action positions and compact validation fields from the
 spending block, using the current database spend associations, including already
 spent notes. It excludes received/change actions and previously recovered sent
-outputs. Additional funding accounts reopen discovery and retry suspended OVK
-recovery. An ordinary rescan cannot silently replace this obligation with an
+outputs. Additional funding accounts reopen discovery and retry previously discarded
+OVK candidates. An ordinary rescan cannot silently replace this obligation with an
 empty candidate list just because the scanner loads only unspent nullifiers.
 After a rewind, rescanning a retained spend link also restores discovery if its
 private routing was cleared; repeated funding scans with intact routing remain inert.
@@ -131,6 +143,10 @@ The block must come from the same trusted compact source as normal scanning:
 comparing its claimed hash does not cryptographically authenticate compact
 contents. Discovery errors never trigger public fallback. Full transaction
 storage, positive mixed routing, and rewinds clear obsolete jobs.
+
+Outgoing rows that lose all candidate accounts remain incomplete and are excluded
+from PIR requests and response application until reconstructed. Losing keys is not
+an authenticated non-recovery result.
 
 Deleting an account cascades transactions that exclusively involved it. For
 shared transactions that survive, discovery jobs with no remaining funding
@@ -234,11 +250,11 @@ history: those transactions continue through ordinary enhancement until the user
 explicitly rescans. Enabling the setting alone does not privatize old history.
 
 The local rediscovery prototype revises this unreleased migration, including the
-discovery queue's `suspended` column. Databases that applied an earlier version
-(including the five-table version without suspension) are not upgraded by this prototype;
-use a fresh development database or design a follow-up migration before deploying
-against those databases. The tests initialize fresh temporary databases and do not
-modify an application wallet.
+discovery queue's `suspended` column and removal of the outgoing queue's former
+non-recovery flag. Databases that applied any earlier version of this migration
+are not upgraded by this prototype; use a separately backed-up fresh development
+database or design a follow-up migration before deploying against those databases.
+The tests initialize fresh temporary databases and do not modify an application wallet.
 
 The experimental migrations from #18 were not released and are not supported as
 an upgrade source. Development databases created by #18 need an independently

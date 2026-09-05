@@ -245,7 +245,7 @@ impl Send {
 }
 
 #[test]
-fn later_funding_account_reopens_suspended_ovk_recovery() {
+fn later_funding_account_reopens_discarded_ovk_recovery() {
     let mut send = Send::with_second_funder(true, true);
     send.scan_funding();
     send.scan_send();
@@ -266,6 +266,28 @@ fn later_funding_account_reopens_suspended_ovk_recovery() {
             .unwrap()
             .is_empty()
     );
+    assert!(
+        send.st
+            .wallet()
+            .db()
+            .pending_ironwood_outgoing(outgoing.position())
+            .unwrap()
+            .is_none()
+    );
+    // Finish change too: discovering the second funder must reopen a transaction
+    // whose earlier non-recovery already retired its enhancement intent.
+    for incoming in send.requests() {
+        finish_incoming(&mut send.st, incoming);
+    }
+    send.st
+        .wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::Standard);
+    assert!(!visible(&send.st, outgoing));
+    send.st
+        .wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
     let (height, account) = send.second_funding.unwrap();
     send.st.scan_cached_blocks(height, 1);
     send.rebuild();
@@ -1423,5 +1445,65 @@ fn rewind_and_full_data_clear_discovery() {
                 .unwrap(),
             AlreadyResolved
         );
+    }
+}
+
+#[test]
+fn unbound_ciphertext_tampering_discards_but_compact_mismatch_does_not() {
+    for tamper_note_tail in [false, true] {
+        let mut send = Send::new(false);
+        send.scan_funding();
+        send.scan_send();
+        let request = send.requests()[0];
+        let record = &send.record;
+        let mut epk = *record.ephemeral_key();
+        epk[0] ^= 1;
+        let wrong = EnhanceRecord::from_parts(
+            epk,
+            *record.ciphertext(),
+            *record.cv_net(),
+            *record.out_ciphertext(),
+            false,
+            false,
+        );
+        assert_eq!(
+            apply_record(send.st.wallet_mut().db_mut(), request, &wrong).unwrap(),
+            EnhancePirStoreResult::Rejected
+        );
+        assert_eq!(send.requests(), vec![request]);
+        let mut ciphertext = *record.ciphertext();
+        let mut outgoing = *record.out_ciphertext();
+        if tamper_note_tail {
+            ciphertext[579] ^= 1;
+        } else {
+            outgoing[0] ^= 1;
+        }
+        let corrupt = EnhanceRecord::from_parts(
+            *record.ephemeral_key(),
+            ciphertext,
+            *record.cv_net(),
+            outgoing,
+            false,
+            false,
+        );
+        assert_eq!(
+            apply_record(send.st.wallet_mut().db_mut(), request, &corrupt).unwrap(),
+            EnhancePirStoreResult::NotRecoverable
+        );
+        assert!(send.requests().is_empty());
+        assert_eq!(
+            send.st
+                .wallet()
+                .conn()
+                .query_row("SELECT COUNT(*) FROM sent_notes", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        send.st
+            .wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::Standard);
+        assert!(!visible(&send.st, request));
     }
 }

@@ -106,7 +106,7 @@ pub enum EnhancementMode {
     ///
     /// A positive transparent-presence flag routes the whole transaction to LWD.
     /// Errors never trigger fallback. Disabling this mode exposes outstanding ordinary
-    /// enhancement requests, including work suspended after outgoing non-recovery.
+    /// enhancement requests. Discarded outgoing candidates do not retain those requests.
     PrivateIronwood,
 }
 
@@ -252,8 +252,9 @@ pub enum EnhancePirStoreResult {
     Stored,
     /// The request no longer matches pending work; nothing was changed.
     AlreadyResolved,
-    /// Outgoing recovery failed. The row is suspended, not completed; the
-    /// ordinary fallback remains withheld until private mode is disabled.
+    /// Compact fields matched, but outgoing recovery failed. The candidate was
+    /// discarded without storing sent output data. Ordinary enhancement intent
+    /// is retired only when all work for the transaction is complete.
     NotRecoverable,
     /// The whole transaction now requires ordinary LWD enhancement.
     LwdRequired,
@@ -343,7 +344,8 @@ pub enum IronwoodOutgoingResult<AccountId> {
         value: Zatoshis,
         memo: MemoBytes,
     },
-    /// Compact fields match, but outgoing recovery did not succeed.
+    /// Compact fields match, but outgoing recovery did not succeed. Discard the
+    /// candidate without storing sent output data, then check transaction completion.
     NotRecoverable,
 }
 
@@ -419,6 +421,8 @@ pub trait EnhancePirWrite: EnhancePirRead {
     /// Positive transparent flags set a sticky transaction-wide LWD decision,
     /// clear private work, and preserve ordinary enhancement. False flags can
     /// never undo it. A stale response cannot change routing or note data.
+    /// Non-recovery discards the outgoing candidate without storing sent output
+    /// data. Retire enhancement intent only once all transaction work is complete.
     fn apply_ironwood_enhancement(
         &mut self,
         enhancement: ValidatedIronwoodEnhancement<Self::AccountId>,
@@ -449,6 +453,9 @@ impl ShieldedOutput<IronwoodDomain, 580> for FullOutput<'_> {
 /// Incoming ciphertext must decrypt to the scanned note; outgoing records must
 /// match the scanned compact fields. Authentication/transport failures never
 /// cause public fallback. Identity checks precede even a transparent-flag decision.
+/// Once compact fields match, outgoing non-recovery discards the candidate. The
+/// remaining record fields are not authenticated by compact matching: a malicious
+/// service can corrupt them to cause a legitimate candidate to be discarded.
 pub fn apply_ironwood_enhance_record<DbT: EnhancePirWrite>(
     db: &mut DbT,
     request: EnhancePirRequest,

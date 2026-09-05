@@ -36,7 +36,9 @@ const OUTSTANDING_OUTGOING: &str = "
     FROM ironwood_enhance_outgoing_queue q
     JOIN transactions t ON t.id_tx = q.transaction_id
     JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-    WHERE t.raw IS NULL AND t.mined_height IS NOT NULL AND r.route = 0";
+    WHERE t.raw IS NULL AND t.mined_height IS NOT NULL AND r.route = 0
+      AND EXISTS (SELECT 1 FROM ironwood_enhance_outgoing_accounts a
+                  WHERE a.commitment_tree_position = q.commitment_tree_position)";
 
 fn retire_enhancement_if_complete(
     tx: &Connection,
@@ -103,7 +105,6 @@ pub(crate) fn requests(conn: &Connection) -> Result<Vec<EnhancePirRequest>, Sqli
            AND rn.memo IS NULL AND rn.commitment_tree_position = q.commitment_tree_position
          UNION
          SELECT q.commitment_tree_position, t.txid, q.output_index {OUTSTANDING_OUTGOING}
-           AND q.not_recoverable = 0
          ORDER BY 1"
     ))?;
     stmt.query_map([], |row| {
@@ -126,8 +127,7 @@ pub(crate) fn pending_outgoing(
                 "SELECT t.txid, q.output_index, q.nullifier, q.cmx,
                         q.ephemeral_key, q.compact_ciphertext
                  {OUTSTANDING_OUTGOING}
-                   AND q.commitment_tree_position = :position
-                   AND q.not_recoverable = 0"
+                   AND q.commitment_tree_position = :position"
             ),
             named_params![":position": u64::from(position)],
             |row| {
@@ -256,7 +256,7 @@ fn queue_transaction(
     )?;
     // The candidate list is complete for this scan. Rebuild it so newly
     // recognized received/change actions do not retain obsolete outgoing jobs,
-    // and an explicit rescan retries previously suspended candidates.
+    // and an explicit rescan can reconstruct previously discarded candidates.
     conn.execute(
         "DELETE FROM ironwood_enhance_outgoing_queue WHERE transaction_id = :tx",
         named_params![":tx": tx_ref.0],
@@ -287,8 +287,7 @@ fn queue_transaction(
                  nullifier = excluded.nullifier,
                  cmx = excluded.cmx,
                  ephemeral_key = excluded.ephemeral_key,
-                 compact_ciphertext = excluded.compact_ciphertext,
-                 not_recoverable = 0",
+                 compact_ciphertext = excluded.compact_ciphertext",
             named_params![
                 ":position": position,
                 ":tx": tx_ref.0,
@@ -339,12 +338,8 @@ fn queue_transaction(
 
 /// Deleted funding accounts cannot turn incomplete work into successful completion.
 pub(crate) fn remove_orphaned_outgoing(tx: &Transaction<'_>) -> Result<(), SqliteClientError> {
-    tx.execute(
-        "UPDATE ironwood_enhance_outgoing_queue SET not_recoverable = 1
-         WHERE NOT EXISTS (SELECT 1 FROM ironwood_enhance_outgoing_accounts a
-             WHERE a.commitment_tree_position = ironwood_enhance_outgoing_queue.commitment_tree_position)",
-        [],
-    )?;
+    // Outgoing rows without candidate accounts remain incomplete, but request and
+    // application queries exclude them. No response has resolved those actions.
     discovery::suspend_orphaned(tx)
 }
 
@@ -486,9 +481,11 @@ pub(crate) fn apply<P: Parameters>(
         |row| row.get(0),
     ).optional()?;
     let has_outgoing: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_enhance_outgoing_queue
-         WHERE commitment_tree_position = :position AND transaction_id = :tx
-           AND output_index = :index AND not_recoverable = 0)",
+        "SELECT EXISTS(SELECT 1 FROM ironwood_enhance_outgoing_queue q
+         WHERE q.commitment_tree_position = :position AND q.transaction_id = :tx
+           AND q.output_index = :index
+           AND EXISTS (SELECT 1 FROM ironwood_enhance_outgoing_accounts a
+                       WHERE a.commitment_tree_position = q.commitment_tree_position))",
         named_params![":position": u64::from(request.position()), ":tx": tx_ref.0, ":index": id.output_index()],
         |row| row.get(0),
     )?;
@@ -529,11 +526,11 @@ pub(crate) fn apply<P: Parameters>(
     let result = match outgoing {
         IronwoodOutgoingResult::NotRequested => EnhancePirStoreResult::Stored,
         IronwoodOutgoingResult::NotRecoverable => {
-            // Could be a dummy, OVK discard, or corrupt server fields. Suspend
-            // retries but retain this row so it cannot masquerade as completion.
+            // Compact-bound non-recovery resolves this candidate, as in ordinary
+            // enhancement. This may be padding, OVK discard, or corrupt unbound
+            // server fields; it is not proof that the output is a dummy.
             tx.execute(
-                "UPDATE ironwood_enhance_outgoing_queue SET not_recoverable = 1
-                 WHERE commitment_tree_position = :position",
+                "DELETE FROM ironwood_enhance_outgoing_queue WHERE commitment_tree_position = :position",
                 named_params![":position": u64::from(request.position())],
             )?;
             EnhancePirStoreResult::NotRecoverable

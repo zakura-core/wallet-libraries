@@ -84,6 +84,7 @@ fn state_with_factory(factory: TestDbFactory) -> State {
 }
 
 mod discovery;
+mod recovery;
 
 fn outgoing(st: &State, tx_ref: crate::TxRef, position: u64, index: usize) -> EnhancePirRequest {
     queue_transaction(
@@ -262,49 +263,140 @@ fn stale_identity_cannot_change_memos_or_routing() {
 }
 
 #[test]
-fn non_recovery_suspends_work_without_completion_or_public_fallback() {
-    let (mut st, tx_ref, incoming) = fixture();
-    let outgoing = outgoing(&st, tx_ref, 99, 4);
-    st.wallet_mut()
-        .db_mut()
-        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+fn non_recovery_discards_candidate_and_retires_only_completed_transactions() {
+    for incoming_first in [false, true] {
+        let (mut st, tx_ref, incoming) = fixture_with_factory(TestDbFactory::file_backed());
+        let outgoing = outgoing(&st, tx_ref, 99, 4);
+        st.wallet()
+            .conn()
+            .execute(
+                "INSERT INTO tx_retrieval_queue (txid, query_type) VALUES (?1, 0)",
+                [incoming.request_id().txid().as_ref()],
+            )
+            .unwrap();
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::PrivateIronwood);
 
-    let mut wrong = wire_record(true, false);
-    // A mismatched compact prefix must not apply even a positive flag.
-    let mut parts = [0; 580];
-    parts[..52].copy_from_slice(&[8; 52]);
-    wrong = EnhanceRecord::from_parts(*wrong.ephemeral_key(), parts, [5; 32], [6; 80], true, false);
-    assert_eq!(
-        apply_record(st.wallet_mut().db_mut(), outgoing, &wrong).unwrap(),
-        EnhancePirStoreResult::Rejected
-    );
-    assert_eq!(requests(st.wallet().conn()).unwrap().len(), 2);
-
-    assert_eq!(
-        apply_record(
-            st.wallet_mut().db_mut(),
-            outgoing,
-            &wire_record(false, false)
+        let mut parts = [0; 580];
+        parts[..52].copy_from_slice(&[8; 52]);
+        let wrong = EnhanceRecord::from_parts([3; 32], parts, [5; 32], [6; 80], true, false);
+        assert_eq!(
+            apply_record(st.wallet_mut().db_mut(), outgoing, &wrong).unwrap(),
+            EnhancePirStoreResult::Rejected
+        );
+        assert_eq!(requests(st.wallet().conn()).unwrap().len(), 2);
+        if incoming_first {
+            finish_incoming(&mut st, incoming);
+        }
+        assert_eq!(
+            apply_record(
+                st.wallet_mut().db_mut(),
+                outgoing,
+                &wire_record(false, false)
+            )
+            .unwrap(),
+            EnhancePirStoreResult::NotRecoverable
+        );
+        for table in [
+            "ironwood_enhance_outgoing_queue",
+            "ironwood_enhance_outgoing_accounts",
+            "sent_notes",
+        ] {
+            assert_eq!(
+                st.wallet()
+                    .conn()
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            apply_record(
+                st.wallet_mut().db_mut(),
+                outgoing,
+                &wire_record(true, false)
+            )
+            .unwrap(),
+            EnhancePirStoreResult::AlreadyResolved
+        );
+        assert!(is_protected(st.wallet().conn(), incoming.request_id().txid()).unwrap());
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::Standard);
+        assert_eq!(visible(&st, incoming), !incoming_first);
+        if !incoming_first {
+            finish_incoming(&mut st, incoming);
+        }
+        assert!(requests(st.wallet().conn()).unwrap().is_empty());
+        assert!(!visible(&st, incoming));
+        let statuses: i64 = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM tx_retrieval_queue WHERE query_type = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(statuses, 1);
+        let reopened = crate::WalletDb::for_path(
+            st.wallet().data_file_path(),
+            *st.network(),
+            crate::testing::db::test_clock(),
+            crate::testing::db::test_rng(),
         )
-        .unwrap(),
-        EnhancePirStoreResult::NotRecoverable
-    );
-    finish_incoming(&mut st, incoming);
-    assert!(requests(st.wallet().conn()).unwrap().is_empty());
-    assert!(!visible(&st, incoming));
-    st.wallet_mut()
-        .db_mut()
-        .set_enhancement_mode(EnhancementMode::Standard);
-    assert!(
-        visible(&st, incoming),
-        "non-recovery is not proven dummy/completion"
-    );
-    outgoing_requeued(&st, tx_ref);
+        .unwrap();
+        assert!(reopened.enhance_pir_requests().unwrap().is_empty());
+        assert!(!reopened.transaction_data_requests().unwrap().contains(
+            &TransactionDataRequest::Enhancement(incoming.request_id().txid())
+        ));
+        // No tombstone prevents an explicit reconstruction from trying again.
+        let requeued = outgoing_requeued(&st, tx_ref);
+        assert!(requests(st.wallet().conn()).unwrap().contains(&requeued));
+    }
 }
 
-fn outgoing_requeued(st: &State, tx_ref: crate::TxRef) {
-    let request = outgoing(st, tx_ref, 99, 4);
-    assert!(requests(st.wallet().conn()).unwrap().contains(&request));
+fn outgoing_requeued(st: &State, tx_ref: crate::TxRef) -> EnhancePirRequest {
+    outgoing(st, tx_ref, 99, 4)
+}
+
+#[test]
+fn non_recovery_preserves_other_outgoing_and_discovery_work() {
+    for discovery_pending in [false, true] {
+        let (mut st, tx_ref, incoming) = fixture();
+        let account = st.test_account().unwrap().id();
+        let candidates = [99u64, 100].map(|position| {
+            IronwoodEnhanceCandidate::from_parts(
+                position.into(),
+                position as usize,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                [4; 52],
+                vec![account],
+            )
+        });
+        queue_transaction(st.wallet().conn(), tx_ref, &candidates, true).unwrap();
+        if discovery_pending {
+            st.wallet().conn().execute("INSERT INTO ironwood_enhance_discovery_queue (transaction_id, suspended) VALUES (?1, 1)", [tx_ref.0]).unwrap();
+        }
+        finish_incoming(&mut st, incoming);
+        let outgoing = requests(st.wallet().conn()).unwrap();
+        for (index, request) in outgoing.iter().enumerate() {
+            assert_eq!(
+                apply_record(
+                    st.wallet_mut().db_mut(),
+                    *request,
+                    &wire_record(false, false)
+                )
+                .unwrap(),
+                EnhancePirStoreResult::NotRecoverable
+            );
+            assert_eq!(visible(&st, incoming), discovery_pending || index == 0);
+        }
+    }
 }
 
 #[test]
@@ -408,9 +500,7 @@ fn atomic_write_rolls_back_memo_and_routing_on_queue_failure() {
         // The same action has incoming and outgoing work. Fail after its first
         // mutation: neither a stored memo nor a routing change may survive.
         st.wallet().conn().execute_batch(
-            "CREATE TRIGGER fail_outgoing_update BEFORE UPDATE ON ironwood_enhance_outgoing_queue
-             BEGIN SELECT RAISE(ABORT, 'injected failure'); END;
-             CREATE TRIGGER fail_outgoing_delete BEFORE DELETE ON ironwood_enhance_outgoing_queue
+            "CREATE TRIGGER fail_outgoing_delete BEFORE DELETE ON ironwood_enhance_outgoing_queue
              BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
         ).unwrap();
         assert!(
@@ -578,12 +668,30 @@ fn reopening_restores_routes_but_requires_reapplying_the_runtime_setting() {
 #[test]
 fn losing_a_funding_account_cannot_erase_incomplete_outgoing_work() {
     let (mut st, tx_ref, incoming) = fixture();
-    let _outgoing = outgoing(&st, tx_ref, 99, 4);
+    let outgoing = outgoing(&st, tx_ref, 99, 4);
+    let response = validated(
+        outgoing,
+        false,
+        false,
+        IronwoodOutgoingResult::NotRecoverable,
+    );
     let tx = st.wallet_mut().conn_mut().transaction().unwrap();
     tx.execute("DELETE FROM ironwood_enhance_outgoing_accounts", [])
         .unwrap();
     remove_orphaned_outgoing(&tx).unwrap();
     tx.commit().unwrap();
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .apply_ironwood_enhancement(response)
+            .unwrap(),
+        EnhancePirStoreResult::AlreadyResolved
+    );
+    assert!(
+        pending_outgoing(st.wallet().conn(), outgoing.position())
+            .unwrap()
+            .is_none()
+    );
     finish_incoming(&mut st, incoming);
     assert!(requests(st.wallet().conn()).unwrap().is_empty());
     assert!(visible(&st, incoming));
@@ -688,4 +796,39 @@ fn a_mixed_spend_without_received_ironwood_notes_is_sticky() {
         )
         .unwrap();
     assert_eq!(route, LWD_REQUIRED);
+}
+
+#[test]
+fn retirement_failure_rolls_back_candidate_discard() {
+    let (mut st, tx_ref, incoming) = fixture();
+    let outgoing = outgoing(&st, tx_ref, 99, 4);
+    finish_incoming(&mut st, incoming);
+    st.wallet()
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER fail_retirement BEFORE DELETE ON tx_retrieval_queue
+         BEGIN SELECT RAISE(ABORT, 'injected retirement failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        apply_record(
+            st.wallet_mut().db_mut(),
+            outgoing,
+            &wire_record(false, false)
+        )
+        .is_err()
+    );
+    assert_eq!(requests(st.wallet().conn()).unwrap(), vec![outgoing]);
+    assert!(visible(&st, incoming));
+    assert_eq!(
+        st.wallet()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM ironwood_enhance_outgoing_accounts",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
 }
