@@ -209,9 +209,8 @@ The database maintains routing and work regardless of runtime mode. Successful
 private completion removes only enhancement intent, not transaction-status intent.
 Turning PIR off exposes unfinished transactions; completed transactions remain
 retired unless new funding reopens discovery. Full transaction storage clears
-redundant private work. Rewinds prune
-private position claims before positions can be reused, while preserving positive
-LWD decisions.
+redundant private work. Rewinds prune private position claims before positions can
+be reused, while preserving positive LWD decisions.
 
 ## Protocol and generation acceptance
 
@@ -245,9 +244,9 @@ Public-parameter decoding and deterministic setup remain deferred until acceptan
 
 One migration creates five empty tables: incoming queue, outgoing queue, outgoing
 candidate accounts, outgoing discovery queue, and transaction routing. It does not
-backfill existing
-history: those transactions continue through ordinary enhancement until the user
-explicitly rescans. Enabling the setting alone does not privatize old history.
+backfill existing history: those transactions continue through ordinary enhancement
+until the user explicitly rescans. Enabling the setting alone does not privatize old
+history.
 
 The local rediscovery prototype revises this unreleased migration, including the
 discovery queue's `suspended` column and removal of the outgoing queue's former

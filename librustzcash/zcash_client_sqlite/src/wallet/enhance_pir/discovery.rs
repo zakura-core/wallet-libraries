@@ -180,10 +180,12 @@ pub(crate) fn rebuild(
     )?;
     let jobs = stmt
         .query_map(named_params![":height": u32::from(request.height)], |row| {
+            // A locator is recorded for every queued job, but an absent one is a
+            // context mismatch to report per transaction, not a hard read failure.
             Ok((
                 TxRef(row.get(0)?),
                 row.get::<_, [u8; 32]>(1)?,
-                row.get::<_, u64>(2)?,
+                row.get::<_, Option<u64>>(2)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -289,12 +291,12 @@ pub(crate) fn rebuild(
 fn candidates(
     conn: &Connection,
     tx_ref: TxRef,
-    expected_index: u64,
+    expected_index: Option<u64>,
     position: u32,
     compact_tx: &CompactTx,
     funding: &[(AccountUuid, [u8; 32])],
 ) -> Result<Option<Vec<IronwoodEnhanceCandidate<AccountUuid>>>, SqliteClientError> {
-    if expected_index != compact_tx.index {
+    if expected_index != Some(compact_tx.index) {
         return Ok(None);
     }
     let accounts = funding
