@@ -239,8 +239,20 @@ fn queue_transaction(
         return Ok(());
     }
 
+    // A position identifies one action globally. Rewinds remove obsolete claims
+    // before positions can be reused, so another transaction owning one of these
+    // positions is an integrity failure, not an upsert target.
+    for candidate in candidates {
+        if outgoing_position_owned_by_other(conn, tx_ref, u64::from(candidate.position()))? {
+            return Err(SqliteClientError::CorruptedData(format!(
+                "Ironwood commitment tree position {} is already owned by another transaction",
+                u64::from(candidate.position())
+            )));
+        }
+    }
+
     // Reconcile incoming work only after every note in this transaction exists.
-    // Upserts also evict position claims left by a prior chain branch.
+    // Rewinds have already evicted position claims left by a prior chain branch.
     conn.execute(
         "DELETE FROM ironwood_memo_retrieval_queue
          WHERE received_note_id IN (SELECT id FROM ironwood_received_notes WHERE transaction_id = :tx)",
@@ -273,7 +285,7 @@ fn queue_transaction(
         if recovered {
             continue;
         }
-        conn.execute(
+        let changed = conn.execute(
             "INSERT INTO ironwood_enhance_outgoing_queue (
                  commitment_tree_position, transaction_id, output_index, nullifier, cmx,
                  ephemeral_key, compact_ciphertext
@@ -287,7 +299,8 @@ fn queue_transaction(
                  nullifier = excluded.nullifier,
                  cmx = excluded.cmx,
                  ephemeral_key = excluded.ephemeral_key,
-                 compact_ciphertext = excluded.compact_ciphertext",
+                 compact_ciphertext = excluded.compact_ciphertext
+             WHERE ironwood_enhance_outgoing_queue.transaction_id = excluded.transaction_id",
             named_params![
                 ":position": position,
                 ":tx": tx_ref.0,
@@ -298,6 +311,11 @@ fn queue_transaction(
                 ":compact_ciphertext": candidate.compact_ciphertext(),
             ],
         )?;
+        if changed != 1 {
+            return Err(SqliteClientError::CorruptedData(format!(
+                "Ironwood commitment tree position {position} became owned by another transaction"
+            )));
+        }
         conn.execute(
             "DELETE FROM ironwood_enhance_outgoing_accounts
              WHERE commitment_tree_position = :position",
@@ -334,6 +352,22 @@ fn queue_transaction(
     // No route + no work is not proof of completion. A previously completed
     // private transaction, however, must not gain a txid request on replay.
     retire_enhancement_if_complete(conn, tx_ref)
+}
+
+pub(super) fn outgoing_position_owned_by_other(
+    conn: &Connection,
+    tx_ref: crate::TxRef,
+    position: u64,
+) -> Result<bool, SqliteClientError> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM ironwood_enhance_outgoing_queue
+             WHERE commitment_tree_position = :position AND transaction_id != :tx
+         )",
+        named_params![":position": position, ":tx": tx_ref.0],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
 }
 
 /// Deleted funding accounts cannot turn incomplete work into successful completion.

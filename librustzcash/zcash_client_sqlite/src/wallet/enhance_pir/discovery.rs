@@ -18,7 +18,10 @@ use zcash_protocol::consensus::BlockHeight;
 
 use crate::{AccountUuid, TxRef, error::SqliteClientError};
 
-use super::{LWD_REQUIRED, TxQueryType, queue_transaction, retire_enhancement_if_complete};
+use super::{
+    LWD_REQUIRED, TxQueryType, outgoing_position_owned_by_other, queue_transaction,
+    retire_enhancement_if_complete,
+};
 
 /// Reopens outgoing discovery in the same transaction that persists the spend link.
 /// This is mode-independent; Standard exposes the restored request, PrivateIronwood withholds it.
@@ -67,8 +70,12 @@ pub(crate) fn requests(
         "SELECT DISTINCT b.height, b.hash FROM ironwood_enhance_discovery_queue q
          JOIN transactions t ON t.id_tx = q.transaction_id
          JOIN blocks b ON b.height = t.mined_height
+         LEFT JOIN blocks prior ON prior.height = b.height - 1
          JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-         WHERE t.raw IS NULL AND r.route = 0 AND q.suspended = 0 ORDER BY b.height",
+         WHERE t.raw IS NULL AND r.route = 0 AND q.suspended = 0
+           AND b.ironwood_commitment_tree_size IS NOT NULL
+           AND (b.height = 0 OR prior.ironwood_commitment_tree_size IS NOT NULL)
+         ORDER BY b.height",
     )?;
     stmt.query_map([], |row| {
         Ok(IronwoodEnhanceDiscoveryRequest {
@@ -99,16 +106,29 @@ pub(crate) fn suspended(
     conn: &Connection,
 ) -> Result<Vec<IronwoodEnhanceDiscoveryFailure>, SqliteClientError> {
     let mut stmt = conn.prepare_cached(
-        "SELECT t.txid FROM ironwood_enhance_discovery_queue q
+        "SELECT t.txid,
+                CASE WHEN q.suspended = 1 THEN 0 ELSE 1 END AS reason
+         FROM ironwood_enhance_discovery_queue q
          JOIN transactions t ON t.id_tx = q.transaction_id
+         LEFT JOIN blocks b ON b.height = t.mined_height
+         LEFT JOIN blocks prior ON prior.height = t.mined_height - 1
          JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-         WHERE q.suspended = 1 AND t.raw IS NULL AND t.mined_height IS NOT NULL AND r.route = 0
+         WHERE t.raw IS NULL AND t.mined_height IS NOT NULL AND r.route = 0
+           AND (
+               q.suspended = 1
+               OR b.ironwood_commitment_tree_size IS NULL
+               OR (t.mined_height != 0 AND prior.ironwood_commitment_tree_size IS NULL)
+           )
          ORDER BY t.mined_height, t.tx_index, t.txid",
     )?;
     stmt.query_map([], |row| {
         Ok(IronwoodEnhanceDiscoveryFailure {
             txid: TxId::from_bytes(row.get(0)?),
-            reason: IronwoodEnhanceDiscoveryFailureReason::NoFundingAccounts,
+            reason: match row.get::<_, i64>(1)? {
+                0 => IronwoodEnhanceDiscoveryFailureReason::NoFundingAccounts,
+                1 => IronwoodEnhanceDiscoveryFailureReason::AnchorUnavailable,
+                _ => unreachable!("reason is produced by a closed SQL CASE"),
+            },
         })
     })?
     .collect::<Result<_, _>>()
@@ -199,18 +219,21 @@ pub(crate) fn rebuild(
     let Some(mut position) = count.and_then(|n| end.checked_sub(n)) else {
         return Ok(Rejected);
     };
-    // When the preceding block is available, do not let omitted actions shift positions.
-    if u32::from(request.height) > 0 {
-        let prior: Option<Option<u32>> = conn
-            .query_row(
-                "SELECT ironwood_commitment_tree_size FROM blocks WHERE height = :height",
-                named_params![":height": u32::from(request.height) - 1],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if prior.flatten().is_some_and(|size| size != position) {
-            return Ok(Rejected);
-        }
+    // The preceding tree size anchors the action list. A claimed block hash does
+    // not prove that the supplied compact action list is complete.
+    let expected_start = if u32::from(request.height) == 0 {
+        Some(0)
+    } else {
+        conn.query_row(
+            "SELECT ironwood_commitment_tree_size FROM blocks WHERE height = :height",
+            named_params![":height": u32::from(request.height) - 1],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten()
+    };
+    if expected_start != Some(position) {
+        return Ok(Rejected);
     }
 
     // Validate block-wide ordering before considering any transaction-local failures.
@@ -256,6 +279,16 @@ pub(crate) fn rebuild(
                 txid: TxId::from_bytes(txid),
                 reason,
             });
+        }
+    }
+
+    // Do not allow a bad reconstruction to transfer a globally position-keyed
+    // outgoing row from a transaction that was previously queued.
+    for (tx_ref, candidates, _) in &plans {
+        for candidate in candidates {
+            if outgoing_position_owned_by_other(conn, *tx_ref, u64::from(candidate.position()))? {
+                return Ok(Rejected);
+            }
         }
     }
 

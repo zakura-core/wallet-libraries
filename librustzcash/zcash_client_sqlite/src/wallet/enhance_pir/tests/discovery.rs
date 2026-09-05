@@ -716,6 +716,210 @@ fn invalid_block_geometry_or_ordering_rejects_all_jobs_without_mutation() {
 }
 
 #[test]
+fn reconstruction_requires_the_preceding_tree_size() {
+    let mut send = Send::new(false);
+    send.scan_send();
+    send.scan_funding();
+    let request = send.discovery();
+    let prior_height = u32::from(request.height) - 1;
+    let prior_size = send
+        .st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
+            [prior_height],
+            |row| row.get::<_, u32>(0),
+        )
+        .unwrap();
+    send.st
+        .wallet()
+        .conn()
+        .execute(
+            "UPDATE blocks SET ironwood_commitment_tree_size = NULL WHERE height = ?1",
+            [prior_height],
+        )
+        .unwrap();
+
+    assert_eq!(
+        send.st
+            .wallet_mut()
+            .db_mut()
+            .rebuild_ironwood_enhancement(request, &send.block)
+            .unwrap(),
+        Rejected
+    );
+    assert!(
+        send.st
+            .wallet()
+            .db()
+            .ironwood_enhance_discovery_requests()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        send.st
+            .wallet()
+            .db()
+            .suspended_ironwood_enhance_discoveries()
+            .unwrap(),
+        vec![IronwoodEnhanceDiscoveryFailure {
+            txid: send.block.vtx[0].txid(),
+            reason: AnchorUnavailable,
+        }]
+    );
+    assert!(send.requests().is_empty());
+    assert!(send.queued());
+    send.st
+        .wallet()
+        .conn()
+        .execute(
+            "UPDATE blocks SET ironwood_commitment_tree_size = ?1 WHERE height = ?2",
+            rusqlite::params![prior_size, prior_height],
+        )
+        .unwrap();
+    assert_eq!(send.discovery(), request);
+    assert!(
+        send.st
+            .wallet()
+            .db()
+            .suspended_ironwood_enhance_discoveries()
+            .unwrap()
+            .is_empty()
+    );
+    send.rebuild();
+}
+
+#[test]
+fn discovery_waits_for_the_spending_blocks_tree_size() {
+    let mut send = Send::new(false);
+    send.scan_send();
+    send.scan_funding();
+    let request = send.discovery();
+    send.st
+        .wallet()
+        .conn()
+        .execute(
+            "UPDATE blocks SET ironwood_commitment_tree_size = NULL WHERE height = ?1",
+            [u32::from(request.height)],
+        )
+        .unwrap();
+
+    assert!(
+        send.st
+            .wallet()
+            .db()
+            .ironwood_enhance_discovery_requests()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        send.st
+            .wallet()
+            .db()
+            .suspended_ironwood_enhance_discoveries()
+            .unwrap(),
+        vec![IronwoodEnhanceDiscoveryFailure {
+            txid: send.block.vtx[0].txid(),
+            reason: AnchorUnavailable,
+        }]
+    );
+    assert!(send.queued());
+}
+
+#[test]
+fn reconstruction_cannot_take_an_outgoing_position_from_another_transaction() {
+    let mut send = shared_and_independent_jobs();
+    let request = send.discovery();
+    let end = send
+        .block
+        .chain_metadata
+        .as_ref()
+        .unwrap()
+        .ironwood_commitment_tree_size;
+    let position = end - 1;
+    let owner = send
+        .st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT id_tx FROM transactions WHERE txid = ?1",
+            [&send.block.vtx[0].txid],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    send.st
+        .wallet()
+        .conn()
+        .execute(
+            "INSERT INTO ironwood_enhance_outgoing_queue (
+             commitment_tree_position, transaction_id, output_index, nullifier, cmx,
+             ephemeral_key, compact_ciphertext
+         ) VALUES (?1, ?2, 9, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                position, owner, [91u8; 32], [92u8; 32], [93u8; 32], [94u8; 52]
+            ],
+        )
+        .unwrap();
+    let before = send.st.wallet().db().enhance_pir_requests().unwrap();
+
+    assert_eq!(
+        send.st
+            .wallet_mut()
+            .db_mut()
+            .rebuild_ironwood_enhancement(request, &send.block)
+            .unwrap(),
+        Rejected
+    );
+    let claimant = send
+        .st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT id_tx FROM transactions WHERE txid = ?1",
+            [&send.block.vtx[1].txid],
+            |row| row.get::<_, i64>(0).map(crate::TxRef),
+        )
+        .unwrap();
+    assert!(
+        queue_transaction(
+            send.st.wallet().conn(),
+            claimant,
+            &[IronwoodEnhanceCandidate::from_parts(
+                u64::from(position).into(),
+                0,
+                [81; 32],
+                [82; 32],
+                [83; 32],
+                [84; 52],
+                vec![],
+            )],
+            true,
+        )
+        .is_err(),
+        "the queue itself must also refuse cross-transaction replacement"
+    );
+    let retained_owner = send
+        .st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT transaction_id FROM ironwood_enhance_outgoing_queue
+         WHERE commitment_tree_position = ?1",
+            [position],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(retained_owner, owner);
+    assert_eq!(
+        send.st.wallet().db().enhance_pir_requests().unwrap(),
+        before
+    );
+    assert_eq!(send.discovery(), request);
+    assert!(send.queued());
+}
+
+#[test]
 fn deleting_one_of_multiple_funders_keeps_discovery_active() {
     let mut send = Send::with_second_funder(true, true);
     send.scan_send();

@@ -133,6 +133,10 @@ private routing was cleared; repeated funding scans with intact routing remain i
 Block identity, tree geometry, transaction locators, known received positions,
 and funding nullifiers are checked before any queue changes. Invalid block-wide
 identity, ordering, or tree geometry rejects the entire call without mutation.
+Tree geometry requires the preceding block's Ironwood tree size in local metadata;
+at a scan-range boundary, retain or scan that predecessor before reconstruction.
+Jobs are not advertised for automatic reconstruction until both the spending
+block's ending size and that predecessor anchor are available.
 Transaction-local failures do not block independently valid jobs at the same
 height: valid plans commit together, while failed jobs retain their intent and
 return individual reasons (`TransactionMissing` or `ContextMismatch`). A missing
@@ -157,10 +161,14 @@ encounters. Losing keys does not prove outgoing recovery complete: the suspended
 job still prevents retirement, preserves private protection, and keeps ordinary
 Enhancement intent available if the user disables private mode. Applications can
 read its `NoFundingAccounts` reason through
-`suspended_ironwood_enhance_discoveries()`. Linking another funding note reactivates
-the existing job. Reimporting a deleted funding key rewinds the wallet; rescanning
-the funding and spending blocks reconstructs the required work. Deleting only
-some funding accounts does not suspend a job that still has funding associations.
+`suspended_ironwood_enhance_discoveries()`. The same API reports
+`AnchorUnavailable` for an otherwise active job waiting for the spending block
+and its predecessor's tree-size metadata; regular scanning makes that job
+requestable without changing its queue row. Linking another funding note reactivates
+an existing `NoFundingAccounts` job. Reimporting a deleted funding key rewinds the
+wallet; rescanning the funding and spending blocks reconstructs the required work.
+Deleting only some funding accounts does not suspend a job that still has funding
+associations.
 
 ## Application integration
 
@@ -193,9 +201,11 @@ to the application's retry policy; do not repeatedly feed the same invalid
 cached data in a tight loop. `AlreadyResolved` means no active jobs for that
 request, not that no suspended jobs remain.
 
-Read `suspended_ironwood_enhance_discoveries()` on reopening and after account
-deletion, and surface the missing-funding-key condition to the user instead of
-retrying its block. Do not declare enhancement done merely because the active
+Read `suspended_ironwood_enhance_discoveries()` on reopening and after scanning.
+Surface missing funding keys instead of retrying their blocks. `AnchorUnavailable`
+normally means a range-prioritized sync is waiting for adjacent metadata; surface
+it as incomplete while regular sync catches up instead of repeatedly downloading
+the spending block. Do not declare enhancement done merely because the active
 request APIs are empty while discovery is pending or suspended.
 
 Prefer cache reuse and normal batched downloads. Downloading a specific missing

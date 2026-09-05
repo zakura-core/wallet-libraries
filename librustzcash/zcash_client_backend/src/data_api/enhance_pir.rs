@@ -39,6 +39,10 @@ pub enum IronwoodEnhanceDiscoveryFailureReason {
     /// No funding associations survive. Automatic discovery is suspended until new
     /// funding is linked; private protection and ordinary enhancement intent remain.
     NoFundingAccounts,
+    /// The spending block or its predecessor lacks the tree-size metadata required
+    /// to anchor reconstructed positions. The job becomes requestable when scanning
+    /// supplies that metadata; private protection and ordinary intent remain.
+    AnchorUnavailable,
     /// The supplied block does not contain the locally recorded transaction ID.
     /// The job remains retryable; remote omission is not evidence of completion.
     TransactionMissing,
@@ -295,9 +299,11 @@ pub trait EnhancePirRead: WalletRead {
         &self,
     ) -> Result<Vec<IronwoodEnhanceDiscoveryRequest>, Self::Error>;
 
-    /// Returns discovery jobs suspended because their funding accounts were deleted.
+    /// Returns discovery jobs that cannot currently be requested automatically.
     /// Applications should surface these as incomplete, not repeatedly download their blocks.
-    /// New funding linkage reactivates them; Standard mode exposes their ordinary requests.
+    /// New funding linkage reactivates jobs with `NoFundingAccounts`; scanning the spending
+    /// block and its predecessor makes `AnchorUnavailable` jobs requestable. Standard mode
+    /// exposes their ordinary requests.
     fn suspended_ironwood_enhance_discoveries(
         &self,
     ) -> Result<Vec<IronwoodEnhanceDiscoveryFailure>, Self::Error>;
