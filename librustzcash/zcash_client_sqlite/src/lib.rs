@@ -56,7 +56,8 @@ use uuid::Uuid;
 #[cfg(feature = "zakura-pir-enhance")]
 use zcash_client_backend::data_api::enhance_pir::{
     EnhancePirRead, EnhancePirRequest, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus,
-    EnhancePirStoreResult, EnhancePirWrite, EnhancementMode, PendingIronwoodMemo,
+    EnhancePirStoreResult, EnhancePirWrite, EnhancementMode, IronwoodEnhanceDiscoveryFailure,
+    IronwoodEnhanceDiscoveryRequest, IronwoodEnhanceDiscoveryResult, PendingIronwoodMemo,
     PendingIronwoodOutgoing, ValidatedIronwoodEnhancement,
 };
 use zcash_client_backend::{
@@ -1612,6 +1613,18 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePirRead
     for WalletDb<C, P, CL, R>
 {
+    fn ironwood_enhance_discovery_requests(
+        &self,
+    ) -> Result<Vec<IronwoodEnhanceDiscoveryRequest>, Self::Error> {
+        wallet::enhance_pir::discovery::requests(self.conn.borrow())
+    }
+
+    fn suspended_ironwood_enhance_discoveries(
+        &self,
+    ) -> Result<Vec<IronwoodEnhanceDiscoveryFailure>, Self::Error> {
+        wallet::enhance_pir::discovery::suspended(self.conn.borrow())
+    }
+
     fn enhance_pir_requests(&self) -> Result<Vec<EnhancePirRequest>, Self::Error> {
         wallet::enhance_pir::requests(self.conn.borrow())
     }
@@ -1668,6 +1681,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
 impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
     EnhancePirWrite for WalletDb<C, P, CL, R>
 {
+    fn rebuild_ironwood_enhancement(
+        &mut self,
+        request: IronwoodEnhanceDiscoveryRequest,
+        block: &CompactBlock,
+    ) -> Result<IronwoodEnhanceDiscoveryResult, Self::Error> {
+        self.transactionally(|wdb| {
+            wallet::enhance_pir::discovery::rebuild(wdb.conn.0, request, block)
+        })
+    }
+
     fn apply_ironwood_enhancement(
         &mut self,
         enhancement: ValidatedIronwoodEnhancement<Self::AccountId>,

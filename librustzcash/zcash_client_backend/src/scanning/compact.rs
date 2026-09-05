@@ -33,14 +33,7 @@ use {
 use std::marker::PhantomData;
 
 #[cfg(feature = "zakura-pir-enhance")]
-fn is_ironwood_pir_candidate(tx: &CompactTx) -> bool {
-    !tx.ironwood_actions.is_empty()
-        && tx.spends.is_empty()
-        && tx.outputs.is_empty()
-        && tx.actions.is_empty()
-        && tx.vin.is_empty()
-        && tx.vout.is_empty()
-}
+use crate::data_api::enhance_pir::is_ironwood_pir_candidate;
 
 type TaggedSaplingBatch<IvkTag> = Batch<
     IvkTag,

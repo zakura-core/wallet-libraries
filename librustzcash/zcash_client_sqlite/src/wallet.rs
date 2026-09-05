@@ -4227,6 +4227,11 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     // Drop private position claims before un-mining. A transaction's positive
     // mixed-pool decision remains sticky even when its tree positions move.
     conn.execute(
+        "DELETE FROM ironwood_enhance_discovery_queue
+         WHERE transaction_id IN (SELECT id_tx FROM transactions WHERE mined_height > :height)",
+        named_params![":height": u32::from(truncation_height)],
+    )?;
+    conn.execute(
         "DELETE FROM ironwood_enhance_routing
          WHERE route = 0 AND transaction_id IN (
              SELECT id_tx FROM transactions WHERE mined_height > :height
@@ -5194,6 +5199,10 @@ fn clear_ironwood_enhancement_work(
     conn: &rusqlite::Connection,
     tx_ref: TxRef,
 ) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "DELETE FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx",
+        named_params![":tx": tx_ref.0],
+    )?;
     conn.execute(
         "DELETE FROM ironwood_memo_retrieval_queue
          WHERE received_note_id IN (

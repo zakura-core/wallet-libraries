@@ -28,23 +28,7 @@ fn fixture() -> (State, crate::TxRef, EnhancePirRequest) {
 }
 
 fn fixture_with_factory(factory: TestDbFactory) -> (State, crate::TxRef, EnhancePirRequest) {
-    let activation = BlockHeight::from_u32(100_000);
-    let network = LocalNetwork {
-        nu6: Some(activation),
-        nu6_1: Some(activation),
-        nu6_2: Some(activation),
-        nu6_3: Some(activation),
-        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
-    };
-    let mut st = TestBuilder::new()
-        .with_network(network)
-        .with_data_store_factory(factory)
-        .with_block_cache(BlockCache::new())
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-    // Establish a real retained checkpoint before the block the reorg test removes.
-    let (empty_height, _) = st.generate_empty_block();
-    st.scan_cached_blocks(empty_height, 1);
+    let mut st = state_with_factory(factory);
     let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
     let (height, _, _) = st.generate_next_block(
         &fvk,
@@ -77,6 +61,29 @@ fn fixture_with_factory(factory: TestDbFactory) -> (State, crate::TxRef, Enhance
     );
     (st, tx_ref, request)
 }
+
+fn state_with_factory(factory: TestDbFactory) -> State {
+    let activation = BlockHeight::from_u32(100_000);
+    let network = LocalNetwork {
+        nu6: Some(activation),
+        nu6_1: Some(activation),
+        nu6_2: Some(activation),
+        nu6_3: Some(activation),
+        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+    };
+    let mut st = TestBuilder::new()
+        .with_network(network)
+        .with_data_store_factory(factory)
+        .with_block_cache(BlockCache::new())
+        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .build();
+    // Establish a real retained checkpoint before the block the reorg test removes.
+    let (empty_height, _) = st.generate_empty_block();
+    st.scan_cached_blocks(empty_height, 1);
+    st
+}
+
+mod discovery;
 
 fn outgoing(st: &State, tx_ref: crate::TxRef, position: u64, index: usize) -> EnhancePirRequest {
     queue_transaction(

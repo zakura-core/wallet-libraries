@@ -23,6 +23,8 @@ use crate::{AccountUuid, error::SqliteClientError};
 
 use super::{TxQueryType, get_account, memo_repr, orchard::parse_note_version};
 
+pub(crate) mod discovery;
+
 // A route is transaction-wide. LwdRequired is sticky, including across rescans.
 // No row means ordinary enhancement; completion is derived from the queues.
 const PRIVATE_CANDIDATE: i64 = 0;
@@ -51,7 +53,9 @@ fn retire_enhancement_if_complete(
                JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
                WHERE rn.transaction_id = :tx)
            AND NOT EXISTS (
-               SELECT 1 FROM ironwood_enhance_outgoing_queue WHERE transaction_id = :tx)",
+               SELECT 1 FROM ironwood_enhance_outgoing_queue WHERE transaction_id = :tx)
+           AND NOT EXISTS (
+               SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx)",
         named_params![":tx": tx_ref.0, ":enhancement": TxQueryType::Enhancement.code()],
     )?;
     Ok(())
@@ -178,6 +182,19 @@ pub(crate) fn queue_scanned(
     {
         return require_lwd(conn, tx_ref);
     }
+    // Ordinary rescans load only unspent nullifiers. They must not erase outgoing work
+    // merely because an already-linked spend is absent from this scan's account set.
+    let scanned_accounts = tx
+        .ironwood_spends()
+        .iter()
+        .map(|s| *s.account_id())
+        .collect::<std::collections::HashSet<_>>();
+    if discovery::funding(conn, tx_ref)?
+        .iter()
+        .any(|(account, _)| !scanned_accounts.contains(account))
+    {
+        discovery::queue(conn, tx_ref)?;
+    }
     queue_transaction(
         conn,
         tx_ref,
@@ -222,8 +239,20 @@ fn queue_transaction(
         return Ok(());
     }
 
+    // A position identifies one action globally. Rewinds remove obsolete claims
+    // before positions can be reused, so another transaction owning one of these
+    // positions is an integrity failure, not an upsert target.
+    for candidate in candidates {
+        if outgoing_position_owned_by_other(conn, tx_ref, u64::from(candidate.position()))? {
+            return Err(SqliteClientError::CorruptedData(format!(
+                "Ironwood commitment tree position {} is already owned by another transaction",
+                u64::from(candidate.position())
+            )));
+        }
+    }
+
     // Reconcile incoming work only after every note in this transaction exists.
-    // Upserts also evict position claims left by a prior chain branch.
+    // Rewinds have already evicted position claims left by a prior chain branch.
     conn.execute(
         "DELETE FROM ironwood_memo_retrieval_queue
          WHERE received_note_id IN (SELECT id FROM ironwood_received_notes WHERE transaction_id = :tx)",
@@ -237,9 +266,10 @@ fn queue_transaction(
          ON CONFLICT(commitment_tree_position) DO UPDATE SET received_note_id = excluded.received_note_id",
         named_params![":tx": tx_ref.0],
     )?;
-    // The candidate list is complete for this scan. Rebuild it so newly
-    // recognized received/change actions do not retain obsolete outgoing jobs,
-    // and an explicit rescan retries previously suspended candidates.
+    // Rebuild the candidates recognized by this scan so newly decrypted received/change
+    // actions do not retain outgoing jobs. queue_scanned records a durable discovery
+    // obligation first if spent funding was omitted; this list alone cannot prove completion.
+    // Reconstruction also retries previously suspended candidates.
     conn.execute(
         "DELETE FROM ironwood_enhance_outgoing_queue WHERE transaction_id = :tx",
         named_params![":tx": tx_ref.0],
@@ -256,7 +286,7 @@ fn queue_transaction(
         if recovered {
             continue;
         }
-        conn.execute(
+        let changed = conn.execute(
             "INSERT INTO ironwood_enhance_outgoing_queue (
                  commitment_tree_position, transaction_id, output_index, nullifier, cmx,
                  ephemeral_key, compact_ciphertext
@@ -271,7 +301,8 @@ fn queue_transaction(
                  cmx = excluded.cmx,
                  ephemeral_key = excluded.ephemeral_key,
                  compact_ciphertext = excluded.compact_ciphertext,
-                 not_recoverable = 0",
+                 not_recoverable = 0
+             WHERE ironwood_enhance_outgoing_queue.transaction_id = excluded.transaction_id",
             named_params![
                 ":position": position,
                 ":tx": tx_ref.0,
@@ -282,6 +313,11 @@ fn queue_transaction(
                 ":compact_ciphertext": candidate.compact_ciphertext(),
             ],
         )?;
+        if changed != 1 {
+            return Err(SqliteClientError::CorruptedData(format!(
+                "Ironwood commitment tree position {position} became owned by another transaction"
+            )));
+        }
         conn.execute(
             "DELETE FROM ironwood_enhance_outgoing_accounts
              WHERE commitment_tree_position = :position",
@@ -320,6 +356,22 @@ fn queue_transaction(
     retire_enhancement_if_complete(conn, tx_ref)
 }
 
+pub(super) fn outgoing_position_owned_by_other(
+    conn: &Connection,
+    tx_ref: crate::TxRef,
+    position: u64,
+) -> Result<bool, SqliteClientError> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM ironwood_enhance_outgoing_queue
+             WHERE commitment_tree_position = :position AND transaction_id != :tx
+         )",
+        named_params![":position": position, ":tx": tx_ref.0],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
 /// Deleted funding accounts cannot turn incomplete work into successful completion.
 pub(crate) fn remove_orphaned_outgoing(tx: &Transaction<'_>) -> Result<(), SqliteClientError> {
     tx.execute(
@@ -328,7 +380,7 @@ pub(crate) fn remove_orphaned_outgoing(tx: &Transaction<'_>) -> Result<(), Sqlit
              WHERE a.commitment_tree_position = ironwood_enhance_outgoing_queue.commitment_tree_position)",
         [],
     )?;
-    Ok(())
+    discovery::suspend_orphaned(tx)
 }
 
 pub(crate) fn pending<P: zcash_protocol::consensus::Parameters>(
