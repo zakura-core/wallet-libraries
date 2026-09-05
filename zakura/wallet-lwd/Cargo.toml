@@ -1,0 +1,54 @@
+[package]
+name = "zakura-wallet-lwd"
+version = "0.1.0"
+description = "A lightwalletd chain source for the Zakura wallet core"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "zakura_wallet_lwd"
+
+[features]
+# Exposes the domain-to-wire conversion used by the differential test.
+test-dependencies = []
+
+[dependencies]
+hex.workspace = true
+orchard.workspace = true
+prost.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+tonic = { workspace = true, features = ["codegen", "channel", "transport", "tls-ring", "tls-native-roots"] }
+tonic-prost.workspace = true
+transparent.workspace = true
+zcash_note_encryption.workspace = true
+zcash_script = { workspace = true, features = ["std"] }
+zakura-wallet-core = { path = "../wallet-core" }
+zakura-wallet-sync = { path = "../wallet-sync" }
+zcash_protocol.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+which.workspace = true
+
+[dev-dependencies]
+libc = "0.2"
+proptest.workspace = true
+rusqlite.workspace = true
+zcash_primitives.workspace = true
+zakura-wallet-lwd = { path = ".", features = ["test-dependencies"] }
+# The one place both wallet stacks legitimately coexist: the benchmark that
+# decides whether this rewrite is worth having. A dev-dependency only.
+zcash_client_backend = { workspace = true, features = ["orchard", "sync"] }
+zcash_client_sqlite = { version = "0.1.0-rc4", package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", features = ["orchard"] }
+zcash_keys = { workspace = true, features = ["orchard", "test-dependencies"] }
+secrecy.workspace = true
+zip32.workspace = true
+prost.workspace = true
+rand.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "macros", "rt-multi-thread"] }
+zakura-wallet-scan = { path = "../wallet-scan", features = ["test-dependencies"] }
+zakura-wallet-store = { path = "../wallet-store", features = ["test-dependencies"] }
+zakura-wallet-sync = { path = "../wallet-sync", features = ["test-dependencies"] }

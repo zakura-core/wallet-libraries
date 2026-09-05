@@ -1,0 +1,38 @@
+[package]
+name = "zakura-wallet-store"
+version = "0.1.0"
+description = "SQLite storage for the Zakura wallet core"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "zakura_wallet_store"
+
+[features]
+# Exposes helpers for opening throwaway in-memory wallets.
+test-dependencies = []
+
+[dependencies]
+incrementalmerkletree.workspace = true
+orchard.workspace = true
+rusqlite.workspace = true
+shardtree.workspace = true
+zcash_keys = { workspace = true, features = ["orchard"] }
+zip32.workspace = true
+transparent.workspace = true
+zakura-wallet-core = { path = "../wallet-core" }
+zcash_protocol.workspace = true
+
+[dev-dependencies]
+assert_matches.workspace = true
+zip32.workspace = true
+orchard.workspace = true
+# Detection is only a dev-dependency: the store consumes `DetectedBatch`, which
+# lives in `core`, so there is no production coupling between the two.
+zakura-wallet-scan = { path = "../wallet-scan", features = ["test-dependencies"] }
+incrementalmerkletree = { workspace = true, features = ["test-dependencies"] }
+proptest.workspace = true
+zakura-wallet-store = { path = ".", features = ["test-dependencies"] }

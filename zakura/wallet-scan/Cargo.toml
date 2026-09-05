@@ -1,0 +1,39 @@
+[package]
+name = "zakura-wallet-scan"
+version = "0.1.0"
+description = "Pure compact-block detection for the Zakura wallet core"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "zakura_wallet_scan"
+
+[features]
+# Exposes the synthetic-chain builder used to drive detection in tests.
+test-dependencies = ["dep:rand_chacha"]
+
+[dependencies]
+incrementalmerkletree.workspace = true
+orchard.workspace = true
+rayon.workspace = true
+transparent.workspace = true
+zakura-wallet-core = { path = "../wallet-core" }
+zcash_note_encryption.workspace = true
+zcash_protocol = { workspace = true, features = ["local-consensus"] }
+
+rand_chacha = { workspace = true, optional = true }
+
+[dev-dependencies]
+assert_matches.workspace = true
+incrementalmerkletree.workspace = true
+proptest.workspace = true
+rand_chacha.workspace = true
+transparent.workspace = true
+zcash_protocol = { workspace = true, features = ["local-consensus"] }
+zakura-wallet-core = { path = "../wallet-core", features = ["test-dependencies"] }
+# Integration tests link the library as an external crate, which does not carry
+# `cfg(test)`; this is what makes the synthetic-chain builder visible to them.
+zakura-wallet-scan = { path = ".", features = ["test-dependencies"] }

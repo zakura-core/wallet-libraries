@@ -1,0 +1,38 @@
+[package]
+name = "zakura-wallet-tx"
+version = "0.1.0"
+description = "Note selection and bundle construction for the Zakura wallet core"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "zakura_wallet_tx"
+
+[dependencies]
+incrementalmerkletree.workspace = true
+# The proving stack. Kept to this crate so a watch-only build, and the
+# scanner's own tests, never pay for halo2.
+orchard = { workspace = true, features = ["circuit"] }
+rand.workspace = true
+shardtree.workspace = true
+subtle.workspace = true
+zakura-wallet-core = { path = "../wallet-core" }
+zakura-wallet-store = { path = "../wallet-store" }
+zcash_primitives = { workspace = true, features = ["circuits"] }
+zcash_protocol.workspace = true
+
+[features]
+# Exposes the proving and verifying keys, which take seconds to build.
+test-dependencies = []
+
+[dev-dependencies]
+assert_matches.workspace = true
+# A cryptographic RNG: bundle construction requires one, and rightly refuses a
+# reproducible non-cryptographic generator.
+rand = { workspace = true, features = ["chacha"] }
+zakura-wallet-tx = { path = ".", features = ["test-dependencies"] }
+zakura-wallet-scan = { path = "../wallet-scan", features = ["test-dependencies"] }
+zakura-wallet-store = { path = "../wallet-store", features = ["test-dependencies"] }

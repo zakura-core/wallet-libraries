@@ -15,6 +15,12 @@ members = [
     "librustzcash/zcash_client_sqlite",
     "wallet-lib",
     "zakura/pir-enhance",
+    "zakura/wallet-core",
+    "zakura/wallet-scan",
+    "zakura/wallet-store",
+    "zakura/wallet-sync",
+    "zakura/wallet-lwd",
+    "zakura/wallet-tx",
 ]
 
 resolver = "2"
