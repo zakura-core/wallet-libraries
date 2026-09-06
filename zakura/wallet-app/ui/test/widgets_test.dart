@@ -30,6 +30,8 @@ Widget host(
 
 void main() {
   _syncFailureTests();
+  _emptyHistoryTests();
+  _syncReasonTests();
   _importTests();
   _transparentAndCrossingTests();
   group('BalanceCard', () {
@@ -125,21 +127,54 @@ void main() {
       expect(find.text('Up to date'), findsOneWidget);
     });
 
-    testWidgets('shows the heights, which are what settle it', (tester) async {
+    /// Recovery works downwards from the tip, so the highest scanned block sits
+    /// at the tip from the first batch and "block X of Y" reads as finished
+    /// while there is an hour of work left. The queue is what moves.
+    testWidgets('during recovery it counts down the queue, not the height',
+        (tester) async {
       await tester.pumpWidget(
         host(
           const SyncIndicator(
             progress: SyncProgress(
               phase: SyncPhase.recovering,
-              tip: 200,
-              scannedTo: 50,
+              tip: 3000000,
+              scannedTo: 3000000,
+              blocksRemaining: 52341,
               fraction: 0.25,
             ),
           ),
         ),
       );
-      expect(find.text('Block 50 of 200'), findsOneWidget);
+      expect(find.text('52,341 blocks left to check'), findsOneWidget);
+      expect(find.text('Block 3000000 of 3000000'), findsNothing);
       expect(find.text('25%'), findsOneWidget);
+    });
+
+    testWidgets('with nothing queued it falls back to the heights',
+        (tester) async {
+      await tester.pumpWidget(
+        host(
+          const SyncIndicator(
+            progress: SyncProgress(
+              phase: SyncPhase.tracking,
+              tip: 200,
+              scannedTo: 50,
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Block 50 of 200'), findsOneWidget);
+    });
+
+    testWidgets('recovery says what it is doing in plain terms', (tester) async {
+      await tester.pumpWidget(
+        host(
+          const SyncIndicator(
+            progress: SyncProgress(phase: SyncPhase.recovering),
+          ),
+        ),
+      );
+      expect(find.text('Looking for your transactions…'), findsOneWidget);
     });
 
     testWidgets('prefers the smoothed figure when given one', (tester) async {
@@ -360,7 +395,7 @@ void _syncFailureTests() {
         ),
       );
       expect(find.text('Up to date'), findsNothing);
-      expect(find.text('Could not reach the server'), findsOneWidget);
+      expect(find.text('Synchronisation stopped'), findsOneWidget);
     });
 
     testWidgets('the same progress without a failure is up to date',
@@ -591,6 +626,94 @@ void _importTests() {
       await tester.tap(find.text('Restoring…'));
       await tester.pump();
       expect(called, isFalse);
+    });
+  });
+}
+
+/// Added after the interface told somebody their connection was down when the
+/// server had been fine and a sync had died on an assertion.
+void _syncReasonTests() {
+  group('SyncIndicator reasons', () {
+    /// The indicator does not know why a sync stopped, so it must not say. A
+    /// sync can stop because the server is unreachable, because the chain could
+    /// not be interpreted, or because the engine gave up, and naming the wrong
+    /// one sends somebody to fix something that is not broken.
+    testWidgets('it does not guess at a cause', (tester) async {
+      await tester.pumpWidget(
+        host(
+          const SyncIndicator(
+            progress: SyncProgress(phase: SyncPhase.stopped, failed: true),
+          ),
+        ),
+      );
+      expect(find.textContaining('reach the server'), findsNothing);
+      expect(find.text('Synchronisation stopped'), findsOneWidget);
+    });
+
+    testWidgets('it shows the reason the wallet gave', (tester) async {
+      await tester.pumpWidget(
+        host(
+          const SyncIndicator(
+            progress: SyncProgress(phase: SyncPhase.stopped, failed: true),
+            failureReason: 'the source would not serve blocks 10 to 20',
+          ),
+        ),
+      );
+      expect(
+        find.text('the source would not serve blocks 10 to 20'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('it offers a way out', (tester) async {
+      var retried = false;
+      await tester.pumpWidget(
+        host(
+          SyncIndicator(
+            progress: const SyncProgress(phase: SyncPhase.stopped, failed: true),
+            onRetry: () => retried = true,
+          ),
+        ),
+      );
+      await tester.tap(find.text('Try again'));
+      expect(retried, isTrue);
+    });
+
+    testWidgets('a healthy sync offers nothing to retry', (tester) async {
+      await tester.pumpWidget(
+        host(
+          const SyncIndicator(
+            progress: SyncProgress(
+              phase: SyncPhase.recovering,
+              tip: 100,
+              scannedTo: 50,
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Try again'), findsNothing);
+    });
+  });
+}
+
+/// An empty history means two different things, and saying the wrong one is how
+/// somebody concludes their money is gone.
+void _emptyHistoryTests() {
+  group('HistoryList while searching', () {
+    testWidgets('a recovery in progress says it is still looking',
+        (tester) async {
+      await tester.pumpWidget(
+        host(const HistoryList(entries: [], searching: true)),
+      );
+      expect(find.text('Still looking…'), findsOneWidget);
+      expect(find.text('No transactions yet'), findsNothing);
+    });
+
+    testWidgets('a finished sync says there is nothing', (tester) async {
+      await tester.pumpWidget(
+        host(const HistoryList(entries: [])),
+      );
+      expect(find.text('No transactions yet'), findsOneWidget);
     });
   });
 }

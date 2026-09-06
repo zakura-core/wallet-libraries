@@ -185,13 +185,21 @@ class ZakuraWallet {
     }
     if (_closed || next == _last) return;
 
-    // More blocks scanned means notes may have arrived. Comparing heights
-    // rather than trusting the phase is deliberate: an idle phase does not
-    // mean nothing happened.
-    final scannedMore = (next.scannedTo ?? 0) > (_last.scannedTo ?? 0);
+    // Any change in progress means a batch was applied, and a batch that was
+    // applied may have found something.
+    //
+    // Deliberately not "the highest scanned block went up". Recovery works
+    // *downwards* from the tip, so that height jumps to near the tip on the
+    // first batch and then never moves again — which is the mode every restore
+    // uses. Keying off it meant the wallet found somebody's notes and never
+    // told the interface, which sat there showing an empty history and a zero
+    // balance for the whole recovery.
+    //
+    // This only runs when the value actually changed, and reading a balance is
+    // a query against a local file, so firing on all of them is cheap.
     _last = next;
     _progress.add(next);
-    if (scannedMore) _changed.add(null);
+    _changed.add(null);
   }
 
   /// Closes the wallet and stops polling.

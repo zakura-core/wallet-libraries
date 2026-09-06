@@ -3,6 +3,7 @@ import 'package:zakura_client/zakura_client.dart';
 
 import '../overrides.dart';
 import '../theme/theme.dart';
+import 'primitives.dart';
 
 /// How far synchronisation has got.
 ///
@@ -18,10 +19,18 @@ class SyncIndicator extends StatelessWidget {
   /// Falls back to the raw fraction, which moves in jumps.
   final double? displayFraction;
 
+  /// Why the sync stopped, when it stopped because of a failure.
+  final String? failureReason;
+
+  /// Starts synchronising again.
+  final VoidCallback? onRetry;
+
   /// Creates a synchronisation indicator.
   const SyncIndicator({
     required this.progress,
     this.displayFraction,
+    this.failureReason,
+    this.onRetry,
     super.key,
   });
 
@@ -34,15 +43,48 @@ class SyncIndicator extends StatelessWidget {
     // Checked before anything else. A failed attempt leaves the engine stopped
     // with nothing queued, which is indistinguishable from having caught up
     // unless the failure is asked about first.
-    if (progress.failed) return 'Could not reach the server';
+    //
+    // Deliberately says nothing about the cause. A sync can stop because the
+    // server is unreachable, because the chain could not be interpreted, or
+    // because the engine gave up, and naming the wrong one sends somebody to
+    // fix something that is not broken. The reason is shown underneath, from
+    // the wallet, which knows.
+    if (progress.failed) return 'Synchronisation stopped';
     if (progress.isCaughtUp) return 'Up to date';
     return switch (progress.phase) {
       SyncPhase.bootstrapping => 'Starting…',
-      SyncPhase.recovering => 'Recovering history…',
+      SyncPhase.recovering => 'Looking for your transactions…',
       SyncPhase.tracking => 'Catching up…',
       SyncPhase.idle => 'Waiting for new blocks',
       SyncPhase.stopped => 'Not synchronising',
     };
+  }
+
+  /// How much is left to do, in the terms that actually move.
+  ///
+  /// Recovery works downwards from the tip, so the highest scanned block sits
+  /// at the tip from the first batch onwards and "block X of Y" reads as
+  /// finished while there is still an hour of work left. What moves is the
+  /// queue.
+  static String? remaining(SyncProgress progress) {
+    if (progress.isCaughtUp || progress.failed) return null;
+    if (progress.blocksRemaining > 0) {
+      return '${_thousands(progress.blocksRemaining)} blocks left to check';
+    }
+    if (progress.scannedTo != null && progress.tip != null) {
+      return 'Block ${progress.scannedTo} of ${progress.tip}';
+    }
+    return null;
+  }
+
+  static String _thousands(int n) {
+    final digits = n.toString();
+    final out = StringBuffer();
+    for (var i = 0; i < digits.length; i++) {
+      if (i > 0 && (digits.length - i) % 3 == 0) out.write(',');
+      out.write(digits[i]);
+    }
+    return out.toString();
   }
 
   @override
@@ -81,15 +123,34 @@ class SyncIndicator extends StatelessWidget {
               ),
           ],
         ),
-        if (!progress.isCaughtUp) ...[
-          SizedBox(height: theme.spacing.sm),
-          _Bar(fraction: fraction),
-          // The heights matter more than the bar: they are what distinguishes
-          // "caught up" from "could not reach the server".
-          if (progress.scannedTo != null && progress.tip != null) ...[
+        if (progress.failed) ...[
+          if (failureReason != null) ...[
             SizedBox(height: theme.spacing.xs),
             Text(
-              'Block ${progress.scannedTo} of ${progress.tip}',
+              failureReason!,
+              style: theme.typography.caption
+                  .copyWith(color: theme.colors.textMuted),
+            ),
+          ],
+          if (onRetry != null) ...[
+            SizedBox(height: theme.spacing.md),
+            ZakuraButton(
+              label: 'Try again',
+              kind: ZakuraButtonKind.secondary,
+              onPressed: onRetry,
+            ),
+          ],
+        ] else if (!progress.isCaughtUp) ...[
+          SizedBox(height: theme.spacing.sm),
+          _Bar(fraction: fraction),
+          // What is left matters more than the bar: it is what
+          // distinguishes "caught up" from "stopped", and unlike the
+          // scanned height it is the number that actually moves during a
+          // recovery.
+          if (remaining(progress) != null) ...[
+            SizedBox(height: theme.spacing.xs),
+            Text(
+              remaining(progress)!,
               style: theme.typography.caption
                   .copyWith(color: theme.colors.textMuted),
             ),

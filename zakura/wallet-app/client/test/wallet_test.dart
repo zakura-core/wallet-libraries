@@ -4,6 +4,7 @@ import 'package:zakura_client/zakura_client.dart';
 import 'fake_bindings.dart';
 
 void main() {
+  _recoveryTests();
   late FakeBindings bindings;
   late ZakuraWallet wallet;
 
@@ -201,5 +202,56 @@ void main() {
     await wallet.close();
     expect(bindings.closed, isTrue);
     await wallet.close(); // and is safe to repeat
+  });
+}
+
+/// Added after a restore found somebody's notes and the interface never heard
+/// about it.
+void _recoveryTests() {
+  test('progress that is not a rising block height still announces a change',
+      () async {
+    final bindings = FakeBindings();
+    final wallet = ZakuraWallet(
+      bindings,
+      pollInterval: const Duration(milliseconds: 10),
+    );
+    addTearDown(wallet.close);
+    await wallet.open(directory: '/tmp/x', lightwalletdUrl: 'https://x');
+    await wallet.createAccount(phrase: await wallet.generateMnemonic());
+
+    final changes = <void>[];
+    final sub = wallet.changed.listen(changes.add);
+    await wallet.startSync();
+
+    // Recovery works downwards from the tip, so the highest scanned block is
+    // pinned there from the first batch while the queue drains behind it. A
+    // wallet that only noticed a rising height would never re-read anything.
+    bindings.setProgress(
+      const SyncProgress(
+        phase: SyncPhase.recovering,
+        tip: 3000000,
+        scannedTo: 3000000,
+        blocksRemaining: 50000,
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+    final afterFirst = changes.length;
+
+    bindings.setProgress(
+      const SyncProgress(
+        phase: SyncPhase.recovering,
+        tip: 3000000,
+        scannedTo: 3000000,
+        blocksRemaining: 20000,
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+
+    expect(
+      changes.length,
+      greaterThan(afterFirst),
+      reason: 'the queue drained, so something may have been found',
+    );
+    await sub.cancel();
   });
 }

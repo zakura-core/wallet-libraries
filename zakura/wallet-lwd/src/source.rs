@@ -412,14 +412,27 @@ impl ChainSource for LightwalletdSource {
             self.stats.blocks.fetch_add(1, Ordering::Relaxed);
             self.stats.bytes.fetch_add(size as u64, Ordering::Relaxed);
 
+            // Stop before the budget is exceeded, not after. Deciding once the
+            // block is already in hand would overshoot by its whole size, which
+            // is what the engine's own bound forbids — and since a batch is
+            // usually many blocks, that made the overshoot the normal case
+            // rather than the exception.
+            //
+            // The block being dropped here is not lost. Only the range the
+            // returned blocks actually cover is marked scanned, so this one is
+            // still queued and arrives at the front of the next batch, where an
+            // empty accumulator lets it through however large it is.
+            if !budget.admits(spent, size, blocks.len()) {
+                break;
+            }
+
             spent += size;
             blocks.push(block);
 
-            // Stop pulling once the caller's budget is spent. This is the
-            // whole reason flow control lives in the source: the engine cannot
-            // stop a server stream, and this can. One block larger than the
-            // entire budget is still returned, or a wallet would stall
-            // permanently on a single busy block.
+            // One block larger than the entire budget is still returned, or a
+            // wallet would stall permanently on a single busy block. This is
+            // the whole reason flow control lives in the source: the engine
+            // cannot stop a server stream, and this can.
             if spent >= budget.bytes() {
                 break;
             }

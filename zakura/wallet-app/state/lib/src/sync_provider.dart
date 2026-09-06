@@ -30,6 +30,28 @@ final isSyncingProvider = Provider<bool>((ref) {
   return ref.watch(syncProgressProvider).value?.isRunning ?? false;
 });
 
+/// Why the last sync stopped, when it stopped because of a failure.
+///
+/// Read only when there is a failure to read, so the ordinary case costs
+/// nothing. The interface should show this rather than guessing at a cause:
+/// a sync can stop because the server is unreachable, because the chain could
+/// not be interpreted, or because the engine gave up — and telling somebody
+/// their connection is down when it is not sends them to fix the wrong thing.
+final syncFailureProvider = FutureProvider<String?>((ref) async {
+  final failed = ref.watch(syncProgressProvider).value?.failed ?? false;
+  if (!failed) return null;
+  return ref.watch(walletProvider).syncFailure();
+});
+
+/// Starts synchronising again after a failure.
+final retrySyncProvider = Provider<Future<void> Function()>((ref) {
+  final wallet = ref.watch(walletProvider);
+  return () async {
+    await wallet.stopSync();
+    await wallet.startSync();
+  };
+});
+
 /// A smoothed progress figure, for a bar that has to move.
 ///
 /// The engine reports progress in jumps, one per batch, which on a slow

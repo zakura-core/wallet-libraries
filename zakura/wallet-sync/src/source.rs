@@ -56,6 +56,58 @@ impl ByteBudget {
     pub fn bytes(self) -> usize {
         self.0
     }
+
+    /// Whether a block of `size` may still be added to a batch that has already
+    /// spent `spent` bytes on `count` blocks.
+    ///
+    /// The decision has to be made *before* the block is added, not after:
+    /// stopping once the budget is already spent overshoots by the whole size
+    /// of the last block, and since a batch is usually many blocks that makes
+    /// the overshoot the normal case rather than the exception. The engine
+    /// asserts the bound, so a source that overshoots takes the wallet down
+    /// with it.
+    ///
+    /// An empty batch always admits, however large the block: one larger than
+    /// the entire budget must still be scannable, or a wallet stalls on it
+    /// forever.
+    ///
+    /// Shared rather than written out at each source, because there were two
+    /// and they disagreed — which is the whole defect.
+    pub fn admits(self, spent: usize, size: usize, count: usize) -> bool {
+        count == 0 || spent + size <= self.0
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::ByteBudget;
+
+    #[test]
+    fn an_empty_batch_admits_a_block_larger_than_the_whole_budget() {
+        assert!(ByteBudget::new(100).admits(0, 10_000, 0));
+    }
+
+    #[test]
+    fn a_block_that_fits_is_admitted() {
+        assert!(ByteBudget::new(100).admits(40, 50, 1));
+    }
+
+    #[test]
+    fn a_block_that_exactly_fills_the_budget_is_admitted() {
+        assert!(ByteBudget::new(100).admits(40, 60, 1));
+    }
+
+    /// The defect: deciding after adding let the batch exceed the budget by a
+    /// whole block, which the engine asserts against.
+    #[test]
+    fn a_block_that_would_overshoot_is_refused() {
+        assert!(!ByteBudget::new(100).admits(40, 61, 1));
+    }
+
+    #[test]
+    fn a_full_batch_refuses_even_a_tiny_block() {
+        assert!(!ByteBudget::new(100).admits(100, 1, 3));
+    }
 }
 
 /// Which end of a range to fetch from.

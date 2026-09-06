@@ -99,11 +99,20 @@ class HistoryList extends StatelessWidget {
   /// Whether to scroll, or lay out at full height inside another scroller.
   final bool shrinkWrap;
 
+  /// Whether the wallet is still looking through the chain.
+  ///
+  /// An empty list means two very different things, and saying the wrong one
+  /// is how somebody concludes their money is gone: before a recovery has
+  /// finished it means "not found yet", and only afterwards does it mean
+  /// "there is nothing here".
+  final bool searching;
+
   /// Creates a history list.
   const HistoryList({
     required this.entries,
     this.onTap,
     this.shrinkWrap = false,
+    this.searching = false,
     super.key,
   });
 
@@ -114,11 +123,17 @@ class HistoryList extends StatelessWidget {
     if (entries.isEmpty) {
       final override = ZakuraUiOverridesScope.of(context).historyEmpty;
       return override?.call(context) ??
-          const ZakuraEmptyState(
-            title: 'No transactions yet',
-            subtitle: 'Payments to this wallet will appear here once they are '
-                'found on the chain.',
-          );
+          (searching
+              ? const ZakuraEmptyState(
+                  title: 'Still looking…',
+                  subtitle: 'The wallet is working through the chain. Anything '
+                      'it finds will appear here as it goes.',
+                )
+              : const ZakuraEmptyState(
+                  title: 'No transactions yet',
+                  subtitle: 'Payments to this wallet will appear here once '
+                      'they are found on the chain.',
+                ));
     }
 
     return ListView.separated(

@@ -37,6 +37,8 @@ class HomeScreen extends ConsumerWidget {
               SyncIndicator(
                 progress: progress.value ?? const SyncProgress(),
                 displayFraction: display,
+                failureReason: ref.watch(syncFailureProvider).value,
+                onRetry: () => ref.read(retrySyncProvider)(),
               ),
               SizedBox(height: theme.spacing.lg),
               BalanceCard(balance: balance.value ?? const Balance()),
@@ -68,7 +70,13 @@ class HomeScreen extends ConsumerWidget {
                     theme.typography.title.copyWith(color: theme.colors.text),
               ),
               SizedBox(height: theme.spacing.sm),
-              HistoryList(entries: history.value ?? const [], shrinkWrap: true),
+              HistoryList(
+                entries: history.value ?? const [],
+                shrinkWrap: true,
+                // Before a recovery finishes, an empty list means "not found
+                // yet" rather than "there is nothing here".
+                searching: !(progress.value ?? const SyncProgress()).isCaughtUp,
+              ),
             ],
           ),
         ),

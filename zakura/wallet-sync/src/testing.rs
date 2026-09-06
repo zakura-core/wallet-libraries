@@ -193,10 +193,7 @@ impl ChainSource for InMemoryChain {
         let mut spent = 0usize;
         let take = |block: &CompactBlock, out: &mut Vec<CompactBlock>, spent: &mut usize| {
             let size = estimated_size(block);
-            // Always yield at least one block: a block larger than the whole
-            // budget must still be scannable, or the wallet would stall on it
-            // forever.
-            if !out.is_empty() && *spent + size > budget.bytes() {
+            if !budget.admits(*spent, size, out.len()) {
                 return false;
             }
             *spent += size;
