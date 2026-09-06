@@ -42,6 +42,7 @@ mod send;
 mod sync;
 
 pub use config::{NetworkKind, WalletConfig};
+pub use import::TransactionShape;
 pub use error::{Error, ErrorCode};
 pub use query::{AccountSummary, Balance, HistoryEntry, PoolAmounts};
 pub use send::{SendReceipt, SpendQuote};

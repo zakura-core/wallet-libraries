@@ -132,15 +132,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let history = wallet.history(account, 10)?;
     println!("\n{} transactions", history.len());
     for entry in &history {
+        let pools = |a: &zakura_wallet_facade::PoolAmounts| {
+            let mut parts = Vec::new();
+            if a.transparent > 0 {
+                parts.push(format!("transparent {}", a.transparent));
+            }
+            if a.orchard > 0 {
+                parts.push(format!("orchard {}", a.orchard));
+            }
+            if a.ironwood > 0 {
+                parts.push(format!("ironwood {}", a.ironwood));
+            }
+            parts.join(", ")
+        };
+
         println!(
-            "  {} {:>12} {}",
+            "  {} net {:>12} {}",
             entry
                 .mined_height
                 .map(|h| h.to_string())
                 .unwrap_or_else(|| "unmined".into()),
             entry.net(),
-            if entry.is_change_only { "(change)" } else { "" },
+            if entry.is_change_only { "(change only)" } else { "" },
         );
+        if !entry.spent_by_pool.is_zero() {
+            println!("      spent    {}", pools(&entry.spent_by_pool));
+        }
+        if !entry.received_by_pool.is_zero() {
+            println!("      received {}", pools(&entry.received_by_pool));
+        }
+
+        // What the wallet's own side cannot say: where the value actually went.
+        if let Some(shape) = wallet.transaction_shape(&entry.txid)? {
+            println!(
+                "      shape    transparent in {} out {} ({} zats), \
+orchard {} actions (balance {}), ironwood {} actions (balance {})",
+                shape.transparent_inputs,
+                shape.transparent_outputs,
+                shape.transparent_out_value,
+                shape.orchard_actions,
+                shape.orchard_value_balance,
+                shape.ironwood_actions,
+                shape.ironwood_value_balance,
+            );
+            if shape.is_unshielding() {
+                println!("      >>> this made value public (unshielded)");
+            }
+            if shape.is_shielding() {
+                println!("      >>> this made value private (shielded)");
+            }
+        }
     }
     Ok(())
 }

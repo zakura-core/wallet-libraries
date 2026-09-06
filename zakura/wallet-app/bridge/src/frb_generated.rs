@@ -740,6 +740,7 @@ impl SseDecode for crate::api::types::ApiHistoryEntry {
         let mut var_isChangeOnly = <bool>::sse_decode(deserializer);
         let mut var_receivedByPool = <crate::api::types::ApiPoolAmounts>::sse_decode(deserializer);
         let mut var_spentByPool = <crate::api::types::ApiPoolAmounts>::sse_decode(deserializer);
+        let mut var_paidToTransparent = <u64>::sse_decode(deserializer);
         return crate::api::types::ApiHistoryEntry {
             txid: var_txid,
             mined_height: var_minedHeight,
@@ -748,6 +749,7 @@ impl SseDecode for crate::api::types::ApiHistoryEntry {
             is_change_only: var_isChangeOnly,
             received_by_pool: var_receivedByPool,
             spent_by_pool: var_spentByPool,
+            paid_to_transparent: var_paidToTransparent,
         };
     }
 }
@@ -1066,6 +1068,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::ApiHistoryEntry {
             self.is_change_only.into_into_dart().into_dart(),
             self.received_by_pool.into_into_dart().into_dart(),
             self.spent_by_pool.into_into_dart().into_dart(),
+            self.paid_to_transparent.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1244,6 +1247,7 @@ impl SseEncode for crate::api::types::ApiHistoryEntry {
         <bool>::sse_encode(self.is_change_only, serializer);
         <crate::api::types::ApiPoolAmounts>::sse_encode(self.received_by_pool, serializer);
         <crate::api::types::ApiPoolAmounts>::sse_encode(self.spent_by_pool, serializer);
+        <u64>::sse_encode(self.paid_to_transparent, serializer);
     }
 }
 

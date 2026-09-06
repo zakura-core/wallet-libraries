@@ -94,6 +94,11 @@ pub struct ApiHistoryEntry {
     pub received_by_pool: ApiPoolAmounts,
     /// What the wallet spent, by where it came from.
     pub spent_by_pool: ApiPoolAmounts,
+    /// Value this transaction paid out to transparent addresses.
+    ///
+    /// Read from the transaction's own bytes. The wallet's side says only that
+    /// value left a pool, not whether it went somewhere public.
+    pub paid_to_transparent: u64,
 }
 
 /// What the engine is doing.

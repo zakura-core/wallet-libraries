@@ -99,6 +99,18 @@ pub struct HistoryEntry {
     pub received_by_pool: PoolAmounts,
     /// What the wallet spent, by where it came from.
     pub spent_by_pool: PoolAmounts,
+    /// Value this transaction paid out to transparent addresses.
+    ///
+    /// Read from the transaction's own bytes, not from the wallet's notes. The
+    /// wallet's side says only what it spent — that value left Ironwood — and
+    /// not where it went, which may have been another shielded address or, as
+    /// here, out into the open. Somebody reading their history needs to know
+    /// which, and calling an unshielding "Ironwood" is the wallet keeping the
+    /// most important part to itself.
+    ///
+    /// Zero when the wallet does not hold the transaction's bytes, which is the
+    /// case for anything it had no reason to fetch.
+    pub paid_to_transparent: u64,
 }
 
 impl HistoryEntry {
@@ -211,6 +223,24 @@ impl Wallet {
     /// Unmined transactions sort above mined ones: they are the ones somebody
     /// is waiting on.
     pub fn history(&self, account: u32, limit: usize) -> Result<Vec<HistoryEntry>, Error> {
+        let mut entries = self.history_from_notes(account, limit)?;
+
+        // Fill in where an outgoing payment actually went. Only for the ones
+        // that spent something — a receipt's destination is this wallet — and
+        // only over the page being shown, so the cost is bounded by what is on
+        // screen rather than by how long the history is.
+        for entry in &mut entries {
+            if entry.spent == 0 {
+                continue;
+            }
+            if let Some(shape) = self.transaction_shape(&entry.txid)? {
+                entry.paid_to_transparent = shape.transparent_out_value;
+            }
+        }
+        Ok(entries)
+    }
+
+    fn history_from_notes(&self, account: u32, limit: usize) -> Result<Vec<HistoryEntry>, Error> {
         self.with_reader(|db| {
             self.require_account(db, account)?;
             Ok(db
@@ -230,9 +260,10 @@ impl Wallet {
                         is_change_only: e.is_change_only,
                         received_by_pool: pools(e.received_by_pool),
                         spent_by_pool: pools(e.spent_by_pool),
+                        paid_to_transparent: 0,
                     }
                 })
-                .collect())
+                .collect::<Vec<_>>())
         })
     }
 

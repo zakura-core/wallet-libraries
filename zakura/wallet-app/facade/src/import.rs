@@ -13,6 +13,7 @@
 //! a guess.
 
 use zakura_wallet_core::pool::{Orchard, ShieldedPool};
+use rusqlite::OptionalExtension;
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_protocol::consensus::BlockHeight;
 use zeroize::Zeroizing;
@@ -149,6 +150,100 @@ impl Wallet {
             // or the scanner is not looking for its transparent receipts.
             Self::maintain_watch(db, &params, id)?;
             Ok(id.0)
+        })
+    }
+}
+
+/// What a transaction did, read from its own bytes.
+///
+/// The wallet's own side of a transaction says what it spent and what came
+/// back, and that is not the same as what the transaction *was*: value spent
+/// from Ironwood may have left to a transparent address, to another shielded
+/// one, or back to the wallet. Only the bytes say which, and the wallet keeps
+/// them for its own transactions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionShape {
+    /// How many transparent inputs it spends.
+    pub transparent_inputs: usize,
+    /// How many transparent outputs it creates.
+    pub transparent_outputs: usize,
+    /// The total value of those outputs, which is value made public.
+    pub transparent_out_value: u64,
+    /// How many Orchard actions it carries.
+    pub orchard_actions: usize,
+    /// How many Ironwood actions it carries.
+    pub ironwood_actions: usize,
+    /// The Orchard bundle's value balance: positive when value leaves the pool.
+    pub orchard_value_balance: i64,
+    /// The Ironwood bundle's value balance.
+    pub ironwood_value_balance: i64,
+}
+
+impl TransactionShape {
+    /// Whether value was made public: shielded in, transparent out.
+    pub fn is_unshielding(&self) -> bool {
+        self.transparent_outputs > 0
+            && (self.orchard_value_balance > 0 || self.ironwood_value_balance > 0)
+    }
+
+    /// Whether value was made private: transparent in, shielded out.
+    pub fn is_shielding(&self) -> bool {
+        self.transparent_inputs > 0
+            && (self.orchard_value_balance < 0 || self.ironwood_value_balance < 0)
+    }
+}
+
+impl Wallet {
+    /// Returns what a transaction did, if the wallet kept its bytes.
+    ///
+    /// Only transactions the wallet has a reason to hold — its own, and those
+    /// enhancement fetched — are here. Everything else returns `None` rather
+    /// than a guess.
+    pub fn transaction_shape(&self, txid: &[u8; 32]) -> Result<Option<TransactionShape>, Error> {
+        let params = self.params;
+        self.with_reader(|db| {
+            let row: Option<(Vec<u8>, Option<u32>)> = db
+                .connection()
+                .query_row(
+                    "SELECT r.bytes, t.mined_height
+                     FROM main.raw_transactions r
+                     LEFT JOIN cache.transactions t ON t.txid = r.txid
+                     WHERE r.txid = ?1",
+                    [&txid[..]],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| Error::Storage(e.to_string()))?;
+
+            let Some((bytes, height)) = row else {
+                return Ok(None);
+            };
+
+            let height = height
+                .map(BlockHeight::from_u32)
+                .or(db.chain_tip()?)
+                .unwrap_or_else(|| BlockHeight::from_u32(self.earliest_birthday()));
+            let branch = zcash_protocol::consensus::BranchId::for_height(&params, height);
+
+            let tx = zcash_primitives::transaction::Transaction::read(&bytes[..], branch)
+                .map_err(|e| Error::Build(format!("the stored transaction did not parse: {e}")))?;
+
+            let transparent = tx.transparent_bundle();
+            Ok(Some(TransactionShape {
+                transparent_inputs: transparent.map_or(0, |b| b.vin.len()),
+                transparent_outputs: transparent.map_or(0, |b| b.vout.len()),
+                transparent_out_value: transparent.map_or(0, |b| {
+                    b.vout.iter().map(|o| o.value.into_u64()).sum()
+                }),
+                orchard_actions: tx.orchard_bundle().map_or(0, |b| b.actions().len()),
+                ironwood_actions: tx.ironwood_bundle().map_or(0, |b| b.actions().len()),
+                orchard_value_balance: tx
+                    .orchard_bundle()
+                    .map_or(0, |b| (*b.value_balance()).into()),
+                ironwood_value_balance: tx
+                    .ironwood_bundle()
+                    .map_or(0, |b| (*b.value_balance()).into()),
+            }))
         })
     }
 }

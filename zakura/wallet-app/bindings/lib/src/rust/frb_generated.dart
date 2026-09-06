@@ -751,8 +751,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ApiHistoryEntry dco_decode_api_history_entry(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return ApiHistoryEntry(
       txid: dco_decode_list_prim_u_8_strict(arr[0]),
       minedHeight: dco_decode_opt_box_autoadd_u_32(arr[1]),
@@ -761,6 +761,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       isChangeOnly: dco_decode_bool(arr[4]),
       receivedByPool: dco_decode_api_pool_amounts(arr[5]),
       spentByPool: dco_decode_api_pool_amounts(arr[6]),
+      paidToTransparent: dco_decode_u_64(arr[7]),
     );
   }
 
@@ -972,6 +973,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_isChangeOnly = sse_decode_bool(deserializer);
     var var_receivedByPool = sse_decode_api_pool_amounts(deserializer);
     var var_spentByPool = sse_decode_api_pool_amounts(deserializer);
+    var var_paidToTransparent = sse_decode_u_64(deserializer);
     return ApiHistoryEntry(
       txid: var_txid,
       minedHeight: var_minedHeight,
@@ -980,6 +982,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       isChangeOnly: var_isChangeOnly,
       receivedByPool: var_receivedByPool,
       spentByPool: var_spentByPool,
+      paidToTransparent: var_paidToTransparent,
     );
   }
 
@@ -1215,6 +1218,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.isChangeOnly, serializer);
     sse_encode_api_pool_amounts(self.receivedByPool, serializer);
     sse_encode_api_pool_amounts(self.spentByPool, serializer);
+    sse_encode_u_64(self.paidToTransparent, serializer);
   }
 
   @protected

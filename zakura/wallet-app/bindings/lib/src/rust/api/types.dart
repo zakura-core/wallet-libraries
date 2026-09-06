@@ -139,6 +139,12 @@ class ApiHistoryEntry {
   /// What the wallet spent, by where it came from.
   final ApiPoolAmounts spentByPool;
 
+  /// Value this transaction paid out to transparent addresses.
+  ///
+  /// Read from the transaction's own bytes. The wallet's side says only that
+  /// value left a pool, not whether it went somewhere public.
+  final BigInt paidToTransparent;
+
   const ApiHistoryEntry({
     required this.txid,
     this.minedHeight,
@@ -147,6 +153,7 @@ class ApiHistoryEntry {
     required this.isChangeOnly,
     required this.receivedByPool,
     required this.spentByPool,
+    required this.paidToTransparent,
   });
 
   @override
@@ -157,7 +164,8 @@ class ApiHistoryEntry {
       spent.hashCode ^
       isChangeOnly.hashCode ^
       receivedByPool.hashCode ^
-      spentByPool.hashCode;
+      spentByPool.hashCode ^
+      paidToTransparent.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -170,7 +178,8 @@ class ApiHistoryEntry {
           spent == other.spent &&
           isChangeOnly == other.isChangeOnly &&
           receivedByPool == other.receivedByPool &&
-          spentByPool == other.spentByPool;
+          spentByPool == other.spentByPool &&
+          paidToTransparent == other.paidToTransparent;
 }
 
 /// Value, by where in the protocol it sat.

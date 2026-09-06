@@ -191,6 +191,7 @@ pub fn history(account: u32, limit: u32) -> Result<Vec<ApiHistoryEntry>, ApiErro
                 is_change_only: e.is_change_only,
                 received_by_pool: pools(e.received_by_pool),
                 spent_by_pool: pools(e.spent_by_pool),
+                paid_to_transparent: e.paid_to_transparent,
             }
         })
         .collect())

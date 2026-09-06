@@ -143,6 +143,14 @@ class HistoryEntry {
   /// What the wallet spent, by where it came from.
   final PoolAmounts spentByPool;
 
+  /// Value this transaction paid out to transparent addresses.
+  ///
+  /// Read from the transaction's own bytes rather than from this wallet's
+  /// notes. The wallet's own side says only that value left a pool, not
+  /// whether it went somewhere public — and for an unshielding that is the
+  /// most important part.
+  final Zatoshi paidToTransparent;
+
   const HistoryEntry({
     required this.txid,
     required this.minedHeight,
@@ -151,7 +159,15 @@ class HistoryEntry {
     required this.isChangeOnly,
     this.receivedByPool = const PoolAmounts(),
     this.spentByPool = const PoolAmounts(),
+    this.paidToTransparent = Zatoshi.zero,
   });
+
+  /// Whether this transaction made value public.
+  ///
+  /// Shielded notes spent, value paid out in the open. Worth its own name
+  /// because it is the one movement somebody might not have intended.
+  bool get isUnshielding =>
+      !paidToTransparent.isZero && !spentByPool.total.isZero;
 
   /// Where this transaction's value moved, for somebody reading the list.
   ///
@@ -167,6 +183,14 @@ class HistoryEntry {
 
     if (from.isEmpty && to.isEmpty) return '';
     if (from.isEmpty) return to.map((p) => p.label).join(' and ');
+
+    // Where it actually went, which this wallet's own notes cannot say. An
+    // unshielding spends shielded notes and pays out in the open, and naming it
+    // after the pool it left keeps the important half to itself.
+    if (isUnshielding) {
+      return '${from.map((p) => p.label).join(' and ')} → Transparent';
+    }
+
     if (to.isEmpty) return from.map((p) => p.label).join(' and ');
 
     // Change coming back to the pool it left is not a crossing, it is the same
@@ -180,7 +204,9 @@ class HistoryEntry {
 
   /// Whether any part of this transaction was public.
   bool get touchedTransparent =>
-      !receivedByPool.transparent.isZero || !spentByPool.transparent.isZero;
+      !receivedByPool.transparent.isZero ||
+      !spentByPool.transparent.isZero ||
+      isUnshielding;
 
   /// Whether the chain has recorded this yet.
   bool get isPending => minedHeight == null;

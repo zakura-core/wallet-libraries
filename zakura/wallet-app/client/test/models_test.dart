@@ -2,6 +2,7 @@ import 'package:test/test.dart';
 import 'package:zakura_client/zakura_client.dart';
 
 void main() {
+  _unshieldingTests();
   _poolLabelTests();
   group('Balance', () {
     test('totals spendable and pending, but not what has been spent', () {
@@ -195,6 +196,64 @@ void _poolLabelTests() {
       );
       expect(a.total, const Zatoshi(6));
       expect(const PoolAmounts().isZero, isTrue);
+    });
+  });
+}
+
+/// An unshielding spends shielded notes and pays out in the open. The wallet's
+/// own notes only say value left a pool; where it went comes from the
+/// transaction's bytes, and it is the half that matters most.
+void _unshieldingTests() {
+  HistoryEntry unshield({int paidOut = 929985000}) => HistoryEntry(
+        txid: List<int>.filled(32, 0),
+        minedHeight: 3443766,
+        received: Zatoshi.zero,
+        spent: const Zatoshi(930000000),
+        isChangeOnly: false,
+        spentByPool: const PoolAmounts(ironwood: Zatoshi(930000000)),
+        paidToTransparent: Zatoshi(paidOut),
+      );
+
+  group('unshielding', () {
+    test('is named as going transparent, not as the pool it left', () {
+      expect(unshield().poolLabel, 'Ironwood → Transparent');
+    });
+
+    test('counts as having touched the open', () {
+      expect(unshield().touchedTransparent, isTrue);
+      expect(unshield().isUnshielding, isTrue);
+    });
+
+    /// A shielded payment to somebody else spends notes and pays out nothing
+    /// transparent, and must not be called an unshielding.
+    test('a shielded payment is not one', () {
+      final shielded = HistoryEntry(
+        txid: List<int>.filled(32, 0),
+        minedHeight: 1,
+        received: Zatoshi.zero,
+        spent: const Zatoshi(100),
+        isChangeOnly: false,
+        spentByPool: const PoolAmounts(ironwood: Zatoshi(100)),
+      );
+      expect(shielded.isUnshielding, isFalse);
+      expect(shielded.touchedTransparent, isFalse);
+      expect(shielded.poolLabel, 'Ironwood');
+    });
+
+    /// A receipt pays out nothing, so it is never an unshielding however the
+    /// transaction was shaped.
+    test('a receipt is never one', () {
+      final receipt = HistoryEntry(
+        txid: List<int>.filled(32, 0),
+        minedHeight: 1,
+        received: const Zatoshi(100),
+        spent: Zatoshi.zero,
+        isChangeOnly: false,
+        receivedByPool: const PoolAmounts(ironwood: Zatoshi(100)),
+        paidToTransparent: const Zatoshi(50),
+      );
+      expect(receipt.isUnshielding, isFalse);
+      expect(receipt.poolLabel, 'Ironwood');
     });
   });
 }

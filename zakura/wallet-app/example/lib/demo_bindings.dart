@@ -137,6 +137,9 @@ class DemoBindings implements ZakuraBindings {
               isChangeOnly: true,
               receivedByPool: const PoolAmounts(ironwood: Zatoshi(22500000)),
               spentByPool: const PoolAmounts(ironwood: Zatoshi(40000000)),
+              // Value paid out in the open, which is what makes this an
+              // unshielding rather than an ordinary Ironwood payment.
+              paidToTransparent: const Zatoshi(17485000),
             ),
           ]);
       }

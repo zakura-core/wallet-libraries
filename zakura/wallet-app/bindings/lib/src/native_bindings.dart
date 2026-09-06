@@ -130,6 +130,7 @@ class NativeBindings implements ZakuraBindings {
               isChangeOnly: e.isChangeOnly,
               receivedByPool: _pools(e.receivedByPool),
               spentByPool: _pools(e.spentByPool),
+              paidToTransparent: Zatoshi(e.paidToTransparent.toInt()),
             ),
         ];
       });
