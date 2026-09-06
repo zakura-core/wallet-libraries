@@ -13,6 +13,7 @@ use orchard::note::Nullifier;
 use rusqlite::{OptionalExtension, named_params};
 use zakura_wallet_core::{
     AccountId,
+    retrieval::Locator,
     account::KeyScope,
     enhanced::{EnhancedTx, TransferType},
     pool::PoolId,
@@ -31,7 +32,7 @@ use crate::{
     apply::note_version_code,
     error::Error,
     schema::CACHE_SCHEMA,
-    status::{TxQuery, delete_request, queue_request},
+    retrieval::{clear_private_work, delete, queue},
 };
 
 /// What the wallet knows about a transaction from outside its bytes.
@@ -82,8 +83,12 @@ pub(crate) fn put_enhanced_tx<P: Parameters>(
     // the durable database. A transaction reached through enhancement is not
     // necessarily the wallet's; without this the wallet accumulates strangers'
     // transactions in the one file it never drops.
-    if funding.is_none() && tx.outputs.is_empty() {
-        delete_request(conn, tx.txid, TxQuery::Enhancement)?;
+    if funding.is_none()
+        && tx.outputs.is_empty()
+        && tx.transparent_received.is_empty()
+        && tx.transparent_spends.is_empty()
+    {
+        delete(conn, Locator::Transaction(tx.txid))?;
         return Ok(PutOutcome::Irrelevant);
     }
 
@@ -99,6 +104,30 @@ pub(crate) fn put_enhanced_tx<P: Parameters>(
 
     for (pool, nf) in &tx.spent_nullifiers {
         mark_spent(conn, tx_ref, *pool, nf)?;
+    }
+
+    // The transparent side, in the same order the apply stage writes it: the
+    // outputs first, because marking a spend looks up the output it consumes.
+    // Coinbase-ness is known exactly here rather than inferred from the
+    // transaction's index, which is the one thing a full transaction says that
+    // a compact one has to guess at.
+    for output in &tx.transparent_received {
+        crate::apply::put_transparent_output(
+            conn,
+            tx_ref,
+            output,
+            tx.is_coinbase,
+            chain_tip,
+            observed,
+        )?;
+    }
+
+    for outpoint in &tx.candidate_spends {
+        crate::apply::remember_spend(conn, tx_ref, outpoint)?;
+    }
+
+    for outpoint in &tx.transparent_spends {
+        crate::apply::mark_transparent_spent(conn, tx_ref, outpoint)?;
     }
 
     for output in &tx.outputs {
@@ -162,10 +191,14 @@ pub(crate) fn put_enhanced_tx<P: Parameters>(
 
     // Only the enhancement intent is answered. A status intent, if there is
     // one, is a different question with a different lifetime.
-    delete_request(conn, tx.txid, TxQuery::Enhancement)?;
+    delete(conn, Locator::Transaction(tx.txid))?;
+
+    // The private work for this transaction is now redundant: every field a
+    // position-keyed request would have recovered is in the bytes just stored.
+    clear_private_work(conn, tx.txid)?;
 
     if meta.mined_height.is_none() {
-        queue_request(conn, tx.txid, TxQuery::Status, None)?;
+        queue(conn, Locator::Status(tx.txid), None)?;
     }
 
     Ok(PutOutcome::Stored { tx_ref })
@@ -308,12 +341,13 @@ fn graft_received_note(
     conn.prepare_cached(&format!(
         "INSERT INTO {CACHE_SCHEMA}.received_notes
             (transaction_id, pool, action_index, account_id, diversifier, value,
-             rho, rseed, note_version, is_change, key_scope, memo)
+             rho, rseed, note_version, is_change, key_scope, memo, nf)
          VALUES (:tx, :pool, :action, :account, :diversifier, :value,
-                 :rho, :rseed, :version, :is_change, :scope, :memo)
+                 :rho, :rseed, :version, :is_change, :scope, :memo, :nf)
          ON CONFLICT (transaction_id, pool, action_index) DO UPDATE SET
             memo      = IFNULL(:memo, memo),
-            is_change = MAX(:is_change, is_change)"
+            is_change = MAX(:is_change, is_change),
+            nf        = IFNULL(nf, :nf)"
     ))?
     .execute(named_params![
         ":tx": tx_ref,
@@ -328,6 +362,11 @@ fn graft_received_note(
         ":is_change": is_change,
         ":scope": scope.code(),
         ":memo": &output.memo[..],
+        // Without this the note never enters the nullifier snapshot, so it can
+        // never be matched as spent and sits in the balance forever. The
+        // existing value wins on conflict: scanning derives the same nullifier
+        // and got here first.
+        ":nf": output.nullifier.as_ref().map(|nf| nf.to_bytes().to_vec()),
     ])?;
     Ok(())
 }

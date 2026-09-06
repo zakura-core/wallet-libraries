@@ -15,6 +15,7 @@ use zakura_wallet_core::{
     NullifierSnapshot,
     pool::{PoolId, TreeSizes},
 };
+use zakura_wallet_core::retrieval::Locator;
 use zakura_wallet_core::scanning::{ScanPriority, ScanRange};
 use zcash_protocol::{
     TxId,
@@ -118,17 +119,26 @@ pub(crate) fn put_batch<P: Parameters>(
 
             for candidate in &tx.enhance_candidates {
                 put_enhance_candidate(conn, tx_ref, candidate)?;
+                // The position-keyed request that a private backend answers.
+                // Queued beside the material rather than derived from it later:
+                // the two have different lifetimes — a rewind drops the claim
+                // while the material stays — and deriving one from the other
+                // would tie them together again.
+                crate::retrieval::queue_about(
+                    conn,
+                    Locator::Action {
+                        pool: PoolId::Ironwood,
+                        position: candidate.position,
+                    },
+                    Some(tx.txid),
+                    None,
+                )?;
             }
 
             // Anything the wallet touched needs its full transaction fetched,
             // to recover memos and outgoing data the compact form omits. This
             // is the request private enhancement later intercepts.
-            crate::status::queue_request(
-                conn,
-                tx.txid,
-                crate::status::TxQuery::Enhancement,
-                None,
-            )?;
+            crate::retrieval::queue(conn, Locator::Transaction(tx.txid), None)?;
         }
 
         // Nullifiers that matched nothing are kept, not discarded: under
@@ -438,10 +448,39 @@ fn link_stored_nullifier(
         ":txid": &txid,
     ])?;
 
+    // The spend is only now known to be the wallet's, so this is the first
+    // moment anything has a reason to fetch the transaction that made it.
+    // Under descending recovery a send is scanned before the note that funded
+    // it, so for a send with no change this is the *only* moment: at scan time
+    // the transaction looked like a stranger's and was dropped.
+    let bytes: [u8; 32] = txid.as_slice().try_into().map_err(|_| {
+        Error::Corrupt("a nullifier map entry has a malformed transaction id".into())
+    })?;
+    let spender = TxId::from_bytes(bytes);
+    crate::retrieval::queue_unless_fetched(conn, Locator::Transaction(spender), spender)?;
+
+    // The other half of what this moment costs. At scan time this transaction's
+    // funding was unknown, so `collect_enhance_candidates` recorded nothing for
+    // it — for exactly the transactions private enhancement exists to serve.
+    // Those fields cannot be reconstructed from anything the wallet stores, so
+    // the block has to be read again now that the funding is known. The hash is
+    // the wallet's own record of that height, so the answer can be checked
+    // rather than trusted.
+    if let Some(anchor) = block_anchor(conn, BlockHeight::from_u32(height))? {
+        crate::retrieval::queue_unless_fetched(
+            conn,
+            Locator::Block {
+                height: anchor.height,
+                hash: anchor.hash,
+            },
+            spender,
+        )?;
+    }
+
     Ok(())
 }
 
-fn put_transparent_output(
+pub(crate) fn put_transparent_output(
     conn: &rusqlite::Transaction<'_>,
     tx_ref: i64,
     output: &zakura_wallet_core::DetectedTransparentOutput,
@@ -531,7 +570,7 @@ fn put_transparent_output(
 /// conflicting transactions may each claim to spend the same output, and only
 /// one of them can be right. Which one is decided when the output is stored,
 /// by preferring a mined spender over an unmined one.
-fn remember_spend(
+pub(crate) fn remember_spend(
     conn: &rusqlite::Transaction<'_>,
     tx_ref: i64,
     outpoint: &transparent::bundle::OutPoint,
@@ -549,7 +588,7 @@ fn remember_spend(
     Ok(())
 }
 
-fn mark_transparent_spent(
+pub(crate) fn mark_transparent_spent(
     conn: &rusqlite::Transaction<'_>,
     tx_ref: i64,
     outpoint: &transparent::bundle::OutPoint,
@@ -799,6 +838,27 @@ pub(crate) fn truncate_to(
     )
     .map_err(Error::Query)?;
 
+    // And the requests that named those positions, on the same predicate. A
+    // claim that outlived its material would be a request for a position the
+    // wallet no longer has anything to check the answer against — which is
+    // exactly the state the identity recheck exists to make impossible. Barred
+    // rows are not exempt here: a bar is about a transaction, and no request
+    // for a stale position should survive whatever its subject's routing says.
+    conn.execute(
+        &format!(
+            "DELETE FROM {CACHE_SCHEMA}.retrieval_queue
+             WHERE kind = :action
+               AND subject_txid IN (
+                SELECT txid FROM {CACHE_SCHEMA}.transactions WHERE mined_height > :height
+             )"
+        ),
+        named_params![
+            ":height": h,
+            ":action": zakura_wallet_core::retrieval::LocatorKind::Action.code(),
+        ],
+    )
+    .map_err(Error::Query)?;
+
     // A transparent output's unspent-as-of height cannot outlive the rewind.
     // If the transaction that created it is still mined at or below the new
     // tip, the wallet knows the output existed and was unspent as of there;
@@ -846,8 +906,13 @@ pub(crate) fn truncate_to(
 
     conn.execute(
         &format!(
-            "DELETE FROM {CACHE_SCHEMA}.tx_requests
-             WHERE txid IN (
+            // A barred row is the exception. What it records is that the
+            // transaction's identifier has already had to be disclosed, and a
+            // rewind does not take a disclosure back — dropping the row would
+            // let the next scan try to serve it privately again.
+            "DELETE FROM {CACHE_SCHEMA}.retrieval_queue
+             WHERE fallback_barred = 0
+               AND subject_txid IN (
                 SELECT txid FROM {CACHE_SCHEMA}.transactions WHERE id IN ({REPRODUCIBLE})
              )"
         ),
@@ -926,6 +991,86 @@ pub(crate) fn truncate_to(
     }
 
     Ok(())
+}
+
+/// Stores the enhance candidates a re-detection of one block produced, and
+/// nothing else.
+///
+/// Descending recovery meets a send before the note that funded it, so at scan
+/// time `funding_accounts` is empty and `collect_enhance_candidates` records
+/// nothing — for exactly the transactions private enhancement exists to serve.
+/// The fields it would have recorded cannot be reconstructed later without the
+/// raw transaction, which is what private enhancement is avoiding fetching, so
+/// the only way back is to re-read the block once the funding is known.
+///
+/// Only candidates are applied. The block's commitments are already in the
+/// tree, its transactions are already stored, and its range is already marked
+/// scanned; re-applying any of that would insert at positions already occupied
+/// and would have to teach the scan queue to re-scan a range it has completed.
+///
+/// The block is checked against the wallet's own record of that height before
+/// anything is written. Comparing a claimed hash does not authenticate compact
+/// contents — the block has to come from the same trusted source scanning uses
+/// — but it does stop a block for the wrong height, or for a height the wallet
+/// has since rewound past, being folded in.
+pub(crate) fn put_rediscovered_candidates(
+    conn: &rusqlite::Transaction<'_>,
+    height: BlockHeight,
+    hash: &BlockHash,
+    block: &zakura_wallet_core::DetectedBlock,
+) -> Result<usize, Error> {
+    if block.height != height {
+        return Err(Error::Corrupt(
+            "a rediscovered block is not the height it was asked for".into(),
+        ));
+    }
+
+    let stored = block_anchor(conn, height)?.ok_or_else(|| {
+        Error::Corrupt("a rediscovered block is not one the wallet has scanned".into())
+    })?;
+    if &stored.hash != hash || &stored.hash != &block.hash {
+        return Err(Error::Corrupt(
+            "a rediscovered block does not match the one the wallet scanned".into(),
+        ));
+    }
+
+    let mut stored_count = 0;
+    for tx in &block.transactions {
+        if tx.enhance_candidates.is_empty() {
+            continue;
+        }
+        // Only for transactions the wallet already holds. A re-detection can
+        // surface a transaction the wallet has no other reason to keep, and
+        // storing it here would put a stranger's transaction into the wallet on
+        // the strength of a block fetched for another purpose.
+        let Some(tx_ref) = existing_tx_ref(conn, tx.txid)? else {
+            continue;
+        };
+        for candidate in &tx.enhance_candidates {
+            put_enhance_candidate(conn, tx_ref, candidate)?;
+            crate::retrieval::queue_about(
+                conn,
+                Locator::Action {
+                    pool: PoolId::Ironwood,
+                    position: candidate.position,
+                },
+                Some(tx.txid),
+                None,
+            )?;
+            stored_count += 1;
+        }
+    }
+    Ok(stored_count)
+}
+
+/// The row for a transaction the wallet already stores, if it stores one.
+fn existing_tx_ref(conn: &rusqlite::Transaction<'_>, txid: TxId) -> Result<Option<i64>, Error> {
+    Ok(conn
+        .prepare_cached(&format!(
+            "SELECT id FROM {CACHE_SCHEMA}.transactions WHERE txid = :txid"
+        ))?
+        .query_row(named_params![":txid": txid.as_ref()], |row| row.get(0))
+        .optional()?)
 }
 
 /// Returns the chain state as of the end of `height`, if that block is stored.
@@ -1059,11 +1204,40 @@ fn block_start_sizes(
 pub(crate) fn unspent_nullifiers(
     conn: &rusqlite::Connection,
 ) -> Result<NullifierSnapshot, Error> {
+    nullifier_snapshot(conn, false)
+}
+
+/// Every nullifier the wallet holds a note for, spent or not.
+///
+/// Detection must never see this: a note already spent is not available to be
+/// spent again, and treating it as though it were would find phantom spends.
+///
+/// Rediscovery must see exactly this. Its whole purpose is to re-read a block
+/// whose spend the wallet has *since* recognised, and by then the note it
+/// spends is marked spent — so a snapshot of unspent notes would find no
+/// funding, conclude the transaction was a stranger's, and hand back an empty
+/// candidate list that looks just like a correct answer. That is the failure
+/// `docs/zakura_pir_enhance.md` warns about: an ordinary rescan cannot be
+/// allowed to silently discharge this obligation because the scanner loads only
+/// unspent nullifiers.
+pub(crate) fn all_nullifiers(conn: &rusqlite::Connection) -> Result<NullifierSnapshot, Error> {
+    nullifier_snapshot(conn, true)
+}
+
+fn nullifier_snapshot(
+    conn: &rusqlite::Connection,
+    include_spent: bool,
+) -> Result<NullifierSnapshot, Error> {
     let held = crate::status::held_by_live_spend();
+    let spent_filter = if include_spent {
+        String::new()
+    } else {
+        format!("AND id NOT IN ({held})")
+    };
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT pool, nf, account_id FROM {CACHE_SCHEMA}.received_notes
          WHERE nf IS NOT NULL
-           AND id NOT IN ({held})"
+           {spent_filter}"
     ))?;
     let mut rows = stmt.query([])?;
 

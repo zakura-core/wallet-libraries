@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use zakura_wallet_core::{enhanced::TransactionStatus,
     BlockAnchor,
     pool::PoolId,
+    retrieval::Locator,
     scanning::{ScanPriority, ScanRange},
 };
 use zakura_wallet_scan::{
@@ -29,13 +30,14 @@ use zakura_wallet_scan::{
 use zakura_wallet_store::{
     PRUNING_DEPTH, WalletDb,
     enhance::TxMeta,
-    status::RequestScope,
+    retrieval::RequestScope,
 };
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use crate::{
     error::Error,
     progress::{Ratio, SyncPhase, SyncStatus},
+    retrieval::{PublicRetrieval, Request, Retrieval, Retrieved},
     source::{ByteBudget, ChainSource, Direction, SourceError, estimated_size},
 };
 
@@ -703,25 +705,63 @@ where
             return Ok(None);
         };
 
-        let requests = self.db().tx_requests(scope, tip, self.config.enhance_batch)?;
+        let backend = PublicRetrieval::new(std::sync::Arc::clone(&self.source));
+        let serves = backend.serves();
+
+        let requests =
+            self.db()
+                .pending_requests(scope, serves, tip, self.config.enhance_batch)?;
         if requests.is_empty() {
             return Ok(None);
         }
 
         let params = self.params.clone();
         let keys = self.keys.clone();
+        // Built once for the whole drain, the same way detection builds it per
+        // batch: a full transaction carries its transparent bundle, so an
+        // enhanced transaction can reveal outputs the wallet owns and spends of
+        // outputs it already held. Without a watch set here that side of the
+        // transaction is parsed and thrown away.
+        let watch = merge_watch(&self.watch_set, self.db().transparent_watch()?);
         let (mut fetched, mut applied, mut failed) = (0, 0, 0);
+        // Requests this backend could actually take on. A drain that attempted
+        // nothing must report nothing: returning a step saying "enhanced zero"
+        // would leave the engine with work outstanding and no way to make
+        // progress on it, and `run` would spin on the same batch forever.
+        let mut attempted = 0;
 
+        // The batch is answered one request at a time, which is what the public
+        // protocol offers. The trait takes a slice so a backend that can
+        // amortise a batch — most of the point of a private one — is not forced
+        // to pretend it cannot.
         for request in requests {
-            match self.source.transaction(request.txid).await {
-                Ok(Some(tx)) => {
+            // Belt and braces: the query already filtered by what this backend
+            // serves. For an action the property is not an optimisation —
+            // asking a public server for one would mean naming the transaction
+            // it belongs to, which is exactly what a position-keyed request
+            // exists to avoid.
+            debug_assert!(serves.serves(&request.locator));
+            attempted += 1;
+
+            let answers = backend
+                .retrieve(std::slice::from_ref(&Request {
+                    locator: request.locator,
+                    guard: None,
+                }))
+                .await;
+
+            match answers.into_iter().next().expect("one answer per request") {
+                Ok(Some(Retrieved::Transaction(tx))) => {
                     fetched += 1;
+                    let subject = request
+                        .subject
+                        .expect("a transaction request carries its subject");
                     // The height the transaction is parsed under. If the source
                     // says where it is mined, that; otherwise the next tip,
                     // which is where an unmined transaction would go.
                     let height = tx.status.height().unwrap_or(tip + 1);
 
-                    match decrypt_transaction(&params, &keys, request.txid, height, &tx.raw) {
+                    match decrypt_transaction(&params, &keys, &watch, subject, height, &tx.raw) {
                         Ok(decrypted) => {
                             let meta = TxMeta {
                                 mined_height: tx.status.height(),
@@ -729,11 +769,8 @@ where
                             };
                             self.db_mut().put_enhanced_tx(&params, &decrypted, meta)?;
                             if tx.status.height().is_none() {
-                                self.db_mut().set_transaction_status(
-                                    request.txid,
-                                    tx.status,
-                                    tip,
-                                )?;
+                                self.db_mut()
+                                    .set_transaction_status(subject, tx.status, tip)?;
                             }
                             applied += 1;
                         }
@@ -747,11 +784,41 @@ where
                         Err(EnhanceError::Malformed(_)) => failed += 1,
                     }
                 }
-                // A definite negative, which is what starts the expiry clock.
+                // A block, fetched to reconstruct the enhance candidates that
+                // descending recovery could not record the first time.
+                Ok(Some(Retrieved::Block(block))) => {
+                    fetched += 1;
+                    match self.rebuild_candidates(&request.locator, *block) {
+                        Ok(true) => applied += 1,
+                        // Nothing was applied and nothing is wrong: the wallet
+                        // cannot anchor this block yet. Reported as neither
+                        // progress nor failure, and left queued.
+                        Ok(false) => {}
+                        Err(_) => {
+                            failed += 1;
+                            self.db().mark_attempted(request.locator)?;
+                        }
+                    }
+                }
+                // No backend here answers with an action yet; the arm exists so
+                // that adding one is a change in one place.
+                Ok(Some(Retrieved::Action(_))) => failed += 1,
+                // A definite negative, which is what starts the expiry clock —
+                // but only for a question about a transaction. A height that
+                // came back empty says nothing, because a block that exists
+                // cannot go missing.
                 Ok(None) => {
                     fetched += 1;
-                    self.db_mut()
-                        .set_transaction_status(request.txid, TransactionStatus::NotFound, tip)?;
+                    match request.subject {
+                        Some(subject) if request.locator.subject().is_some() => {
+                            self.db_mut().set_transaction_status(
+                                subject,
+                                TransactionStatus::NotFound,
+                                tip,
+                            )?;
+                        }
+                        _ => self.db().mark_attempted(request.locator)?,
+                    }
                 }
                 // A transport failure, which says nothing about the
                 // transaction. Recording it as a negative here would expire
@@ -759,10 +826,14 @@ where
                 Err(_) => failed += 1,
             }
 
-            self.db().mark_polled(request.txid, tip)?;
+            self.db().mark_polled(request.locator, tip)?;
         }
 
         self.publish(None)?;
+        if attempted == 0 {
+            return Ok(None);
+        }
+
         Ok(Some(Step::Enhanced {
             fetched,
             applied,
@@ -836,6 +907,70 @@ where
 
         Ok(acted)
     }
+
+    /// Re-detects one already-scanned block to recover the enhance candidates
+    /// that were not recordable the first time.
+    ///
+    /// The block is detected against the wallet's *current* nullifier snapshot,
+    /// which is the whole point: at scan time the funding note had not been
+    /// seen, so the spend linked to nothing and the transaction looked like a
+    /// stranger's. Now it links, `funding_accounts` is non-empty, and the same
+    /// pure detection produces the candidates it could not produce before.
+    ///
+    /// Its anchor comes from the wallet's own record of the preceding block. If
+    /// that block is not stored — a range boundary — the job is left queued
+    /// rather than anchored on anything a server said, and ordinary scanning
+    /// makes it possible later.
+    /// Returns whether it applied anything. `false` means the wallet cannot
+    /// anchor the block yet, which the queue normally filters out before the
+    /// request is sent; it can still happen if a rewind earlier in this same
+    /// drain removed the predecessor. Nothing was applied, so the caller must
+    /// not report progress, and the row stays queued for a later tip.
+    fn rebuild_candidates(
+        &mut self,
+        locator: &Locator,
+        block: zakura_wallet_core::CompactBlock,
+    ) -> Result<bool, Error> {
+        let Locator::Block { height, hash } = locator else {
+            return Err(Error::Rediscovery(
+                "a rediscovery job was queued with the wrong locator kind".into(),
+            ));
+        };
+
+        let Some(anchor) = self.db().block_anchor(*height - 1)? else {
+            // Not an error and not an attempt: the wallet simply cannot anchor
+            // this yet. Counting it against the retry bound would burn the
+            // budget on a condition ordinary sync is about to fix.
+            return Ok(false);
+        };
+
+        // Spent notes included, and that is the point: by now the wallet has
+        // recognised the spend this block makes, so the note funding it is
+        // marked spent. A snapshot of unspent notes would find no funding here
+        // and return an empty candidate list indistinguishable from a correct
+        // one.
+        let nullifiers = self.db().all_nullifiers()?;
+        let watch = merge_watch(&self.watch_set, self.db().transparent_watch()?);
+        let detected = detect_batch(
+            &self.params,
+            &self.keys,
+            &watch,
+            &nullifiers,
+            &anchor,
+            std::slice::from_ref(&block),
+        )
+        .map_err(|e| Error::Rediscovery(e.to_string()))?;
+
+        let Some(detected_block) = detected.blocks.first() else {
+            return Err(Error::Rediscovery(
+                "a rediscovered block detected to nothing at all".into(),
+            ));
+        };
+        self.db_mut()
+            .put_rediscovered_candidates(*height, hash, detected_block)?;
+        self.db_mut().resolve_request(*locator)?;
+        Ok(true)
+    }
 }
 
 /// Keeps every account's window of unused transparent addresses full.
@@ -857,7 +992,7 @@ fn widen_transparent_window<P: Parameters>(
 ///
 /// The caller's is kept so that a consumer watching something the wallet did
 /// not derive — an imported key, a test fixture — is not silently dropped.
-fn merge_watch(
+pub fn merge_watch(
     seed: &TransparentWatch,
     stored: zakura_wallet_store::TransparentWatchData,
 ) -> TransparentWatch {

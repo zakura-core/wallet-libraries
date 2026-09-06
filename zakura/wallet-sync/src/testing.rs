@@ -18,7 +18,9 @@ use std::{
     },
 };
 
-use zakura_wallet_core::{BlockAnchor, BlockHash, CompactBlock, pool::TreeSizes};
+use zakura_wallet_core::{
+    BlockAnchor, BlockHash, CompactBlock, pool::TreeSizes, retrieval::ActionRecord,
+};
 use zcash_protocol::consensus::BlockHeight;
 
 use crate::source::{ByteBudget, ChainSource, ChainTip, Direction, estimated_size};
@@ -482,5 +484,88 @@ impl ChainSource for UnservedTransactions {
             .subtree_roots(pool, start_index, limit)
             .await
             .map_err(|_| Unavailable)
+    }
+}
+
+/// A private retrieval backend, standing in for a PIR service.
+///
+/// This is the second implementation of [`crate::Retrieval`], and it is what
+/// makes the seam real rather than a shape the code happens to have. It serves
+/// exactly one locator kind — an action, by tree position — which is the kind a
+/// public server structurally cannot serve, because answering it would require
+/// being told the transaction the action belongs to.
+///
+/// It can also lie. A service that returns a record for a *different* action is
+/// not a hypothetical: it is what the identity recheck exists to defeat, and a
+/// test that cannot produce one cannot show the recheck works.
+#[derive(Clone, Default)]
+pub struct MapRetrieval {
+    records: Arc<Mutex<std::collections::BTreeMap<(u8, u64), ActionRecord>>>,
+    queried: Arc<AtomicUsize>,
+}
+
+impl MapRetrieval {
+    /// A backend holding nothing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Serves `record` at `position` in `pool`.
+    pub fn serve(
+        &self,
+        pool: zakura_wallet_core::pool::PoolId,
+        position: u64,
+        record: ActionRecord,
+    ) {
+        self.records
+            .lock()
+            .unwrap()
+            .insert((pool.code(), position), record);
+    }
+
+    /// How many positions have been asked for.
+    ///
+    /// The count a privacy argument is made about: a backend that hides which
+    /// item was selected still reveals how many were.
+    pub fn queried(&self) -> usize {
+        self.queried.load(Ordering::SeqCst)
+    }
+}
+
+impl crate::Retrieval for MapRetrieval {
+    type Error = Infallible;
+
+    fn serves(&self) -> zakura_wallet_core::retrieval::LocatorKinds {
+        zakura_wallet_core::retrieval::LocatorKinds {
+            status: false,
+            transaction: false,
+            action: true,
+            block: false,
+        }
+    }
+
+    async fn retrieve(
+        &self,
+        requests: &[crate::Request],
+    ) -> Vec<Result<Option<crate::Retrieved>, Self::Error>> {
+        let records = self.records.lock().unwrap();
+        requests
+            .iter()
+            .map(|request| {
+                let zakura_wallet_core::retrieval::Locator::Action { pool, position } =
+                    request.locator
+                else {
+                    // Not served. Reported as a negative rather than a panic,
+                    // so a caller that ignores `serves` is caught by its own
+                    // retry bound rather than by a crash.
+                    return Ok(None);
+                };
+                self.queried.fetch_add(1, Ordering::SeqCst);
+                Ok(records
+                    .get(&(pool.code(), u64::from(position)))
+                    .cloned()
+                    .map(crate::Retrieved::Action))
+            })
+            .collect()
     }
 }

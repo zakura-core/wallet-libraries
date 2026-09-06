@@ -19,7 +19,9 @@ use orchard::{
     note::{Note, Nullifier},
     note_encryption::{DomainVersion, IronwoodVersion, NoteEncryptionDomain, OrchardVersion},
 };
+use transparent::bundle::OutPoint;
 use zakura_wallet_core::{
+    DetectedTransparentOutput,
     account::KeyScope,
     enhanced::{DecryptedOutput, EnhancedTx, TransferType},
     pool::PoolId,
@@ -31,7 +33,7 @@ use zcash_protocol::{
     consensus::{BlockHeight, BranchId, Parameters},
 };
 
-use crate::{error::EnhanceError, keys::ScanKeys};
+use crate::{error::EnhanceError, keys::ScanKeys, transparent::TransparentWatch};
 
 /// Decrypts a full transaction against a wallet's keys.
 ///
@@ -43,9 +45,16 @@ use crate::{error::EnhanceError, keys::ScanKeys};
 ///
 /// `height` selects the consensus branch the transaction is parsed under, and
 /// should be where it was mined, or the next chain tip if it is not yet mined.
+///
+/// `watch` is matched against the transparent bundle. Transparent detection is
+/// set membership rather than trial decryption, so the same watch set scanning
+/// uses answers the same question here, and answering it is not optional: the
+/// wallet reaches transactions through enhancement that scanning never saw, and
+/// discarding their transparent side loses outputs the wallet owns.
 pub fn decrypt_transaction<P: Parameters>(
     params: &P,
     keys: &ScanKeys,
+    watch: &TransparentWatch,
     expected: TxId,
     height: BlockHeight,
     raw: &[u8],
@@ -86,6 +95,8 @@ pub fn decrypt_transaction<P: Parameters>(
     );
 
     let expiry = tx.expiry_height();
+    let (transparent_received, transparent_spends, candidate_spends, is_coinbase) =
+        match_transparent(watch, &tx);
 
     Ok(EnhancedTx {
         txid: tx.txid(),
@@ -93,8 +104,71 @@ pub fn decrypt_transaction<P: Parameters>(
         outputs,
         spent_nullifiers,
         shielded_value_balance,
+        transparent_received,
+        transparent_spends,
+        candidate_spends,
+        is_coinbase,
         raw: raw.to_vec(),
     })
+}
+
+/// Matches a transaction's transparent bundle against the wallet's watch set.
+///
+/// The mirror of `detect::detect_transparent`, over a full bundle rather than a
+/// compact one. It differs in two ways, both because a full transaction says
+/// more than a compact one: coinbase-ness is read from the bundle rather than
+/// inferred from the transaction's index, and there is no need to fold newly
+/// created outputs back into the watch set, because a single transaction cannot
+/// spend an output it creates.
+fn match_transparent(
+    watch: &TransparentWatch,
+    tx: &Transaction,
+) -> (
+    Vec<DetectedTransparentOutput>,
+    Vec<OutPoint>,
+    Vec<OutPoint>,
+    bool,
+) {
+    let Some(bundle) = tx.transparent_bundle() else {
+        return (Vec::new(), Vec::new(), Vec::new(), false);
+    };
+
+    let is_coinbase = bundle.is_coinbase();
+
+    // A coinbase's single input names no real outpoint, so recording it would
+    // put a sentinel into the spend map for every mined block.
+    let candidate_spends: Vec<OutPoint> = if is_coinbase {
+        Vec::new()
+    } else {
+        bundle.vin.iter().map(|txin| txin.prevout().clone()).collect()
+    };
+
+    let transparent_spends = candidate_spends
+        .iter()
+        .filter(|outpoint| watch.spends(outpoint))
+        .cloned()
+        .collect();
+
+    let mut transparent_received = Vec::new();
+    for (output_index, txout) in bundle.vout.iter().enumerate() {
+        if let Some(address) = watch.watched(txout) {
+            let output_index = u32::try_from(output_index)
+                .expect("a transaction cannot have more than u32::MAX outputs");
+            transparent_received.push(DetectedTransparentOutput {
+                output_index,
+                account: address.account,
+                address_id: address.address_id,
+                txout: txout.clone(),
+            });
+        }
+    }
+
+    (
+        transparent_received,
+        transparent_spends,
+        candidate_spends,
+        is_coinbase,
+    )
 }
 
 /// Decrypts one pool's bundle.
@@ -145,6 +219,13 @@ fn try_action<V: DomainVersion, S>(
     for (index, ivk) in keys.ivks().iter().enumerate() {
         if let Some((note, recipient, memo)) = try_note_decryption(domain, ivk, action) {
             let (account, scope) = keys.tag(index);
+            // A key set is built from full viewing keys, so the account that
+            // decrypted a note always has one. Derived here rather than left to
+            // storage because this is the only place the note and its owning
+            // key are both in hand.
+            let fvk = keys
+                .fvk(account)
+                .expect("a key that decrypted a note has a full viewing key");
             return Some(DecryptedOutput {
                 pool,
                 action_index,
@@ -156,6 +237,7 @@ fn try_action<V: DomainVersion, S>(
                     KeyScope::External => TransferType::Incoming,
                     KeyScope::Internal => TransferType::AccountInternal,
                 },
+                nullifier: Some(note.nullifier(fvk)),
             });
         }
     }
@@ -182,6 +264,9 @@ fn try_action<V: DomainVersion, S>(
                     recipient,
                     memo,
                     transfer_type: TransferType::Outgoing,
+                    // Recovered with an outgoing key: the wallet sent this note
+                    // and cannot derive its nullifier.
+                    nullifier: None,
                 });
             }
         }

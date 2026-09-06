@@ -18,13 +18,15 @@
 mod engine;
 mod error;
 mod progress;
+pub mod retrieval;
 mod source;
 
 #[cfg(any(test, feature = "test-dependencies"))]
 pub mod testing;
 
-pub use engine::{Step, SyncConfig, SyncEngine, SyncSummary, Timings, direction_for};
+pub use engine::{Step, SyncConfig, SyncEngine, SyncSummary, Timings, direction_for, merge_watch};
 pub use error::Error;
+pub use retrieval::{PublicRetrieval, Request, Retrieval, Retrieved};
 pub use progress::{Ratio, SyncPhase, SyncStatus};
 pub use source::{
     ByteBudget, ChainSource, ChainTip, Direction, FetchedTransaction, SourceError, SubtreeRoot, SweptUtxo,

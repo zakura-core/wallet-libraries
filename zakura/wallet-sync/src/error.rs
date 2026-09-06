@@ -46,6 +46,13 @@ pub enum Error {
         /// The height whose chain state was needed.
         height: zcash_protocol::consensus::BlockHeight,
     },
+    /// A block fetched to rebuild enhance candidates could not be used.
+    ///
+    /// Never fatal. The candidates it would have produced are an optimisation
+    /// for private enhancement, not wallet state, so a block that does not
+    /// match what the wallet scanned is counted as a failed attempt and the job
+    /// is retried within its bound rather than taking the sync down.
+    Rediscovery(String),
 }
 
 impl fmt::Display for Error {
@@ -63,6 +70,10 @@ impl fmt::Display for Error {
                 "the source could not supply the chain state at height {height}, \
                  which is needed to anchor the range above it"
             ),
+            Error::Rediscovery(why) => write!(
+                f,
+                "a block fetched to rebuild enhance candidates could not be used: {why}"
+            ),
         }
     }
 }
@@ -74,7 +85,7 @@ impl std::error::Error for Error {
             Error::Store(e) => Some(e),
             Error::Enhance(e) => Some(e),
             Error::Unrecoverable { cause, .. } => Some(cause),
-            Error::MissingAnchor { .. } => None,
+            Error::MissingAnchor { .. } | Error::Rediscovery(_) => None,
         }
     }
 }

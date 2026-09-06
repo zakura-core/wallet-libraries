@@ -341,9 +341,19 @@ impl Wallet {
                 stored.orchard_fvk()?.clone(),
             )]);
 
+            // The wallet's own transparent side matters here as much as the
+            // shielded one: a transaction that spends the wallet's UTXOs must
+            // mark them spent at broadcast, not when a later scan happens to
+            // notice, or the balance offers funds that are already committed.
+            let watch = zakura_wallet_sync::merge_watch(
+                &zakura_wallet_scan::TransparentWatch::default(),
+                db.transparent_watch()?,
+            );
+
             let enhanced = zakura_wallet_scan::enhance::decrypt_transaction(
                 &params,
                 &scan_keys,
+                &watch,
                 built.txid,
                 built.target,
                 &built.raw,

@@ -23,6 +23,7 @@ mod report;
 pub mod schema;
 mod scan_queue;
 pub mod transparent_keys;
+pub mod retrieval;
 pub mod status;
 mod tree;
 
@@ -886,20 +887,50 @@ impl WalletDb {
         })
     }
 
-    /// Returns outstanding questions about transactions, most urgent first.
-    pub fn tx_requests(
+    /// Returns outstanding retrieval requests, most urgent first.
+    /// `kinds` is what the backend that will answer them can serve. Rows of
+    /// any other kind are not returned, so they cannot fill the batch and
+    /// starve the ones that can be answered.
+    pub fn pending_requests(
         &self,
-        scope: status::RequestScope,
+        scope: retrieval::RequestScope,
+        kinds: zakura_wallet_core::retrieval::LocatorKinds,
         tip: BlockHeight,
         limit: usize,
-    ) -> Result<Vec<status::TxRequest>, Error> {
-        status::tx_requests(&self.conn, scope, tip, limit)
+    ) -> Result<Vec<retrieval::QueuedRequest>, Error> {
+        retrieval::pending(&self.conn, scope, kinds, tip, limit)
     }
 
     /// Records that a request was asked at this tip, so it is not re-asked
     /// until the chain has moved.
-    pub fn mark_polled(&self, txid: zcash_protocol::TxId, tip: BlockHeight) -> Result<(), Error> {
-        status::mark_polled(&self.conn, txid, tip)
+    pub fn mark_polled(
+        &self,
+        locator: zakura_wallet_core::retrieval::Locator,
+        tip: BlockHeight,
+    ) -> Result<(), Error> {
+        retrieval::mark_polled(&self.conn, locator, tip)
+    }
+
+    /// Records an attempt that produced nothing usable, bounding retries.
+    pub fn mark_attempted(
+        &self,
+        locator: zakura_wallet_core::retrieval::Locator,
+    ) -> Result<(), Error> {
+        retrieval::mark_attempted(&self.conn, locator)
+    }
+
+    /// Records that a transaction can never be served privately again.
+    ///
+    /// Sticky by design: the disclosure this represents cannot be undone, so a
+    /// later response claiming the transaction is private after all must not be
+    /// able to re-protect it.
+    pub fn bar_fallback(&mut self, subject: zcash_protocol::TxId) -> Result<(), Error> {
+        self.transactionally(|conn| retrieval::bar_fallback(conn, subject))
+    }
+
+    /// Whether a transaction has been barred from private retrieval.
+    pub fn is_fallback_barred(&self, subject: zcash_protocol::TxId) -> Result<bool, Error> {
+        retrieval::is_barred(&self.conn, subject)
     }
 
     /// Applies what a source said about a transaction.
@@ -968,6 +999,38 @@ impl WalletDb {
         height: BlockHeight,
     ) -> Result<Option<zakura_wallet_core::BlockAnchor>, Error> {
         apply::block_anchor(&self.conn, height)
+    }
+
+    /// Stores the enhance candidates a re-detection of one block produced.
+    ///
+    /// Used to recover the candidates descending recovery could not record,
+    /// once the funding that makes a transaction the wallet's is known. It
+    /// applies candidates and nothing else, and refuses a block that is not the
+    /// one the wallet scanned at that height.
+    pub fn put_rediscovered_candidates(
+        &mut self,
+        height: BlockHeight,
+        hash: &zakura_wallet_core::BlockHash,
+        block: &zakura_wallet_core::DetectedBlock,
+    ) -> Result<usize, Error> {
+        self.transactionally(|conn| apply::put_rediscovered_candidates(conn, height, hash, block))
+    }
+
+    /// Removes an outstanding retrieval request that has been answered.
+    pub fn resolve_request(
+        &mut self,
+        locator: zakura_wallet_core::retrieval::Locator,
+    ) -> Result<(), Error> {
+        self.transactionally(|conn| retrieval::delete(conn, locator))
+    }
+
+    /// Returns every nullifier the wallet holds a note for, spent or not.
+    ///
+    /// Only for rediscovery. Ordinary detection must use
+    /// [`Self::unspent_nullifiers`]: a spent note offered to the scanner would
+    /// match a spend that already happened.
+    pub fn all_nullifiers(&self) -> Result<zakura_wallet_core::NullifierSnapshot, Error> {
+        apply::all_nullifiers(&self.conn)
     }
 
     /// Returns the wallet's unspent nullifiers, for the scanner to match spends

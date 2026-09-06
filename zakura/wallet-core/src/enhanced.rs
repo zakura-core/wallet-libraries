@@ -11,9 +11,10 @@
 //! without being able to say where it went.
 
 use orchard::note::{Note, Nullifier};
+use transparent::bundle::OutPoint;
 use zcash_protocol::{TxId, consensus::BlockHeight};
 
-use crate::{account::AccountId, pool::PoolId};
+use crate::{account::AccountId, detected::DetectedTransparentOutput, pool::PoolId};
 
 /// How an output relates to the wallet that decrypted it.
 ///
@@ -56,6 +57,16 @@ pub struct DecryptedOutput {
     pub memo: [u8; 512],
     /// How this output relates to the wallet.
     pub transfer_type: TransferType,
+    /// The note's nullifier, when the wallet holds the key that produces it.
+    ///
+    /// `None` for [`TransferType::Outgoing`] only: the wallet sent that note
+    /// and does not own it, so it has no full viewing key to derive a
+    /// nullifier from. For the two incoming variants this is always `Some`,
+    /// and storing it is what lets a note first learned through enhancement
+    /// ever be seen spent -- the nullifier snapshot detection matches against
+    /// is built from stored nullifiers, so a note without one is invisible to
+    /// every later scan.
+    pub nullifier: Option<Nullifier>,
 }
 
 /// A full transaction, as this wallet sees it.
@@ -80,6 +91,29 @@ pub struct EnhancedTx {
     /// prevout values the wallet may not hold — which is why a fee is left
     /// unknown rather than guessed.
     pub shielded_value_balance: i64,
+    /// Transparent outputs of this transaction paid to an address the wallet
+    /// watches.
+    ///
+    /// A full transaction carries its transparent bundle, so enhancement can
+    /// see these directly. Without them a transaction reached only through
+    /// enhancement -- a shielding built on another device, say -- would have
+    /// its transparent side silently discarded, and the outputs it created or
+    /// consumed would not be reflected until a restore sweep asked the server
+    /// about the wallet's addresses by name.
+    pub transparent_received: Vec<DetectedTransparentOutput>,
+    /// Outpoints of the wallet's that this transaction spends.
+    pub transparent_spends: Vec<OutPoint>,
+    /// Every outpoint it spends, wallet's or not.
+    ///
+    /// Kept for the same reason scanning keeps them: under descending recovery
+    /// the spend is met before the output it spends, so the association can
+    /// only be made later.
+    pub candidate_spends: Vec<OutPoint>,
+    /// Whether this is a coinbase transaction.
+    ///
+    /// Known exactly from a full transaction, where the compact form has to
+    /// infer it from the transaction index.
+    pub is_coinbase: bool,
     /// The transaction's own bytes.
     pub raw: Vec<u8>,
 }
@@ -92,7 +126,10 @@ impl EnhancedTx {
     /// it. Storing one that touches the wallet nowhere would fill the durable
     /// database with strangers' transactions.
     pub fn touches_wallet(&self) -> bool {
-        !self.outputs.is_empty() || !self.spent_nullifiers.is_empty()
+        !self.outputs.is_empty()
+            || !self.spent_nullifiers.is_empty()
+            || !self.transparent_received.is_empty()
+            || !self.transparent_spends.is_empty()
     }
 }
 

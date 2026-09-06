@@ -4,16 +4,18 @@
 //! real encrypted notes, so the only thing simulated is the network.
 
 use assert_matches::assert_matches;
-use zakura_wallet_core::{BlockAnchor, CompactBlock, pool::PoolId, scanning::ScanPriority};
+use zakura_wallet_core::{
+    BlockAnchor, CompactBlock, pool::PoolId, retrieval::ActionRecord, scanning::ScanPriority,
+};
 use zakura_wallet_scan::{
     AccountId, KeyScope, ScanKeys, TransparentWatch,
     testing::{ChainBuilder, IRONWOOD_ACTIVATION, fvk_from_seed, test_params},
 };
 use zakura_wallet_store::{WalletDb, testing::test_db};
 use zakura_wallet_sync::{
-    ByteBudget, CancellationToken, ChainSource, Direction, Step, SyncConfig, SyncEngine,
-    SyncPhase,
-    testing::{FailingChain, InMemoryChain, IncoherentChain, UnservedTransactions},
+    ByteBudget, CancellationToken, ChainSource, Direction, PublicRetrieval, Request, Retrieval,
+    Retrieved, Step, SyncConfig, SyncEngine, SyncPhase,
+    testing::{FailingChain, InMemoryChain, IncoherentChain, MapRetrieval, UnservedTransactions},
 };
 use zcash_protocol::consensus::BlockHeight;
 
@@ -1276,7 +1278,17 @@ async fn a_transaction_the_source_will_not_serve_is_counted_not_fatal() {
     let tip = engine.db().chain_tip().unwrap().unwrap();
     let outstanding = engine
         .db()
-        .tx_requests(zakura_wallet_store::status::RequestScope::All, tip + 1, 100)
+        .pending_requests(
+            zakura_wallet_store::retrieval::RequestScope::All,
+            zakura_wallet_core::retrieval::LocatorKinds {
+                status: true,
+                transaction: true,
+                action: true,
+                block: true,
+            },
+            tip + 1,
+            100,
+        )
         .unwrap();
     assert!(
         !outstanding.is_empty(),
@@ -1307,5 +1319,107 @@ async fn the_same_question_is_not_asked_twice_at_one_tip() {
         engine.source().transactions_served(),
         asked,
         "a second step at the same tip must not re-ask"
+    );
+}
+
+// ------------------------------------------------------- the retrieval seam
+
+/// A record that reproduces what a compact block already said about an action.
+fn faithful_record(guard: &zakura_wallet_core::retrieval::Guard) -> ActionRecord {
+    let mut enc = vec![0u8; 580];
+    enc[..52].copy_from_slice(&guard.compact_ciphertext);
+    ActionRecord {
+        ephemeral_key: guard.ephemeral_key,
+        enc_ciphertext: enc,
+        cv_net: [0u8; 32],
+        out_ciphertext: vec![0u8; 80],
+        transparent_inputs: false,
+        transparent_outputs: false,
+    }
+}
+
+fn a_guard() -> zakura_wallet_core::retrieval::Guard {
+    zakura_wallet_core::retrieval::Guard {
+        subject: zcash_protocol::TxId::from_bytes([5u8; 32]),
+        action_index: 2,
+        nullifier: [1u8; 32],
+        cmx: [2u8; 32],
+        ephemeral_key: [3u8; 32],
+        compact_ciphertext: [4u8; 52],
+    }
+}
+
+#[tokio::test]
+async fn a_private_backend_serves_only_what_a_public_one_cannot() {
+    // The two backends are complements, and that is the point of the seam. A
+    // public server cannot answer a position without being told the
+    // transaction, which is the disclosure the position exists to avoid; a
+    // private one answers nothing else.
+    let public = PublicRetrieval::new(std::sync::Arc::new(InMemoryChain::default()));
+    let private = MapRetrieval::new();
+
+    assert!(public.serves().transaction && !public.serves().action);
+    assert!(private.serves().action && !private.serves().transaction);
+}
+
+#[tokio::test]
+async fn a_record_is_accepted_only_if_it_reproduces_what_the_block_said() {
+    // The identity recheck. A service chooses what to return; it cannot make a
+    // fabricated record reproduce an ephemeral key and ciphertext prefix the
+    // wallet read out of a block itself. Everything else in the record is
+    // unauthenticated, which is why failing to recover from it is never treated
+    // as proof of anything.
+    let guard = a_guard();
+    let private = MapRetrieval::new();
+    private.serve(PoolId::Ironwood, 7, faithful_record(&guard));
+
+    let request = Request {
+        locator: zakura_wallet_core::retrieval::Locator::Action {
+            pool: PoolId::Ironwood,
+            position: incrementalmerkletree::Position::from(7),
+        },
+        guard: Some(guard),
+    };
+
+    let answers = private.retrieve(std::slice::from_ref(&request)).await;
+    let record = match answers.into_iter().next().unwrap().unwrap().unwrap() {
+        Retrieved::Action(record) => record,
+        other => panic!("a private backend answers with an action, not {other:?}"),
+    };
+    assert!(record.matches(&guard));
+
+    // The same record against a different action's identity: refused. Without
+    // this a reorg would let a stale answer be written onto whatever now
+    // occupies the position.
+    let mut elsewhere = a_guard();
+    elsewhere.ephemeral_key = [9u8; 32];
+    assert!(!record.matches(&elsewhere));
+
+    // And a record whose ciphertext does not begin with what the block carried.
+    let mut forged = faithful_record(&guard);
+    forged.enc_ciphertext[10] = 0xff;
+    assert!(!forged.matches(&guard));
+}
+
+#[tokio::test]
+async fn a_transparent_flag_bars_a_transaction_from_private_retrieval_for_good() {
+    // The one piece of the fork's routing machine that survives. A record
+    // saying the transaction touches transparent means it can never be
+    // completed privately — its transparent half is in no shielded record — so
+    // the whole transaction has to be fetched publicly. That decision must
+    // outlive rescans and reorgs: the identifier has been disclosed, and a
+    // later response claiming otherwise cannot take that back.
+    let guard = a_guard();
+    let mut record = faithful_record(&guard);
+    record.transparent_inputs = true;
+    assert!(record.touches_transparent());
+
+    let mut db = zakura_wallet_store::testing::test_db().unwrap();
+    assert!(!db.is_fallback_barred(guard.subject).unwrap());
+
+    zakura_wallet_store::WalletDb::bar_fallback(&mut db, guard.subject).unwrap();
+    assert!(
+        db.is_fallback_barred(guard.subject).unwrap(),
+        "the decision must be recorded against the transaction, not the position"
     );
 }

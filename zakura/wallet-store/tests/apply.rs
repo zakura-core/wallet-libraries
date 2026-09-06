@@ -122,7 +122,7 @@ fn a_scanned_note_is_stored_with_everything_needed_to_spend_it() {
     // for the enhancement that recovers its memo.
     assert_eq!(count(&db, "blocks"), 1);
     assert_eq!(count(&db, "transactions"), 1);
-    assert_eq!(count(&db, "tx_requests"), 1);
+    assert_eq!(count(&db, "retrieval_queue"), 1);
 }
 
 #[test]
@@ -1255,5 +1255,514 @@ fn a_spend_seen_before_its_output_is_reconciled_when_the_output_arrives() {
         count(&db, "transparent_received_output_spends"),
         1,
         "the remembered spend must attach itself to the output when it arrives"
+    );
+}
+
+// ------------------------------------------------- the discovery back edge
+
+/// Reads the txids queued for a given kind of question.
+fn requests(db: &WalletDb, query_type: u8) -> Vec<Vec<u8>> {
+    db.connection()
+        .prepare("SELECT subject_txid FROM cache.retrieval_queue WHERE kind = ?1 ORDER BY subject_txid")
+        .unwrap()
+        .query_map([query_type], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn a_spend_found_by_back_linking_asks_for_the_transaction_that_made_it() {
+    // The transaction that spends a wallet note but pays the wallet nothing is
+    // invisible at scan time: it has no note to decrypt, and under descending
+    // recovery the note it spends has not been scanned yet, so its nullifier
+    // matches nothing. Detection drops it. The only moment anything learns it
+    // is the wallet's is when the funding note arrives and the nullifier links
+    // — and if nothing asks for the transaction then, its memo, its recipients
+    // and its outgoing data are never recovered at all.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let mut probe = ChainBuilder::new(START);
+    probe.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice(), KeyScope::External, 100);
+        });
+    });
+    let nf = detect(&probe, &NullifierSnapshot::default())
+        .received_notes()
+        .next()
+        .unwrap()
+        .nullifier;
+
+    let mut later = ChainBuilder::with_anchor(
+        START + 10,
+        zakura_wallet_core::pool::TreeSizes {
+            orchard: 0,
+            ironwood: 1,
+        },
+    );
+    let mut spending = None;
+    later.block(|b| {
+        spending = Some(b.tx(|t| {
+            t.spend(PoolId::Ironwood, nf);
+        }));
+    });
+    let spending = spending.unwrap();
+
+    // Scanned first, and correctly asked about by nobody: at this moment the
+    // wallet has no evidence the transaction concerns it.
+    apply(&mut db, &detect(&later, &NullifierSnapshot::default()));
+    assert!(
+        !requests(&db, 1).contains(&spending.as_ref().to_vec()),
+        "a transaction with no visible wallet activity must not be fetched"
+    );
+
+    // The funding note arrives. Now it is the wallet's send.
+    apply(&mut db, &detect(&probe, &NullifierSnapshot::default()));
+    assert!(
+        requests(&db, 1).contains(&spending.as_ref().to_vec()),
+        "linking the spend must queue the transaction that made it"
+    );
+}
+
+#[test]
+fn a_transaction_already_fetched_is_not_asked_for_again() {
+    // The guard that makes the back edge terminate. `raw_transactions` is
+    // durable and written on every successful enhancement, so a transaction
+    // whose bytes are present has been through this path already.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let mut probe = ChainBuilder::new(START);
+    probe.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice(), KeyScope::External, 100);
+        });
+    });
+    let nf = detect(&probe, &NullifierSnapshot::default())
+        .received_notes()
+        .next()
+        .unwrap()
+        .nullifier;
+
+    let mut later = ChainBuilder::with_anchor(
+        START + 10,
+        zakura_wallet_core::pool::TreeSizes {
+            orchard: 0,
+            ironwood: 1,
+        },
+    );
+    let mut spending = None;
+    later.block(|b| {
+        spending = Some(b.tx(|t| {
+            t.spend(PoolId::Ironwood, nf);
+        }));
+    });
+    let spending = spending.unwrap();
+    apply(&mut db, &detect(&later, &NullifierSnapshot::default()));
+
+    // Stand in for a completed enhancement of that transaction.
+    db.connection()
+        .execute(
+            "INSERT INTO main.raw_transactions (txid, bytes) VALUES (?1, ?2)",
+            rusqlite::params![spending.as_ref(), &[0u8; 4][..]],
+        )
+        .unwrap();
+
+    apply(&mut db, &detect(&probe, &NullifierSnapshot::default()));
+    assert!(
+        !requests(&db, 1).contains(&spending.as_ref().to_vec()),
+        "a transaction whose bytes are already stored must not be re-queued"
+    );
+}
+
+#[test]
+fn a_note_learned_only_through_enhancement_can_still_be_seen_spent() {
+    // Enhancement can be the first thing that knows about a note: the change of
+    // a transaction this wallet broadcast, or any transaction enhanced below
+    // the scanned frontier. The nullifier snapshot detection matches spends
+    // against is built from stored nullifiers, so a grafted note written
+    // without one is invisible to every later scan — it sits in the balance
+    // forever, and spending it changes nothing on screen.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    // A real note, and the nullifier its owner derives from it.
+    let mut probe = ChainBuilder::new(START);
+    let mut note = None;
+    probe.block(|b| {
+        b.tx(|t| {
+            note = Some(t.receive(PoolId::Ironwood, &alice(), KeyScope::External, 100));
+        });
+    });
+    let note = note.unwrap();
+    let nf = note.nullifier(&alice());
+
+    let txid = zcash_protocol::TxId::from_bytes([7u8; 32]);
+    let enhanced = zakura_wallet_core::enhanced::EnhancedTx {
+        txid,
+        expiry_height: None,
+        outputs: vec![zakura_wallet_core::enhanced::DecryptedOutput {
+            pool: PoolId::Ironwood,
+            action_index: 0,
+            account: ALICE,
+            note,
+            recipient: alice().address_at(0u32, orchard::keys::Scope::External),
+            memo: [0u8; 512],
+            transfer_type: zakura_wallet_core::enhanced::TransferType::Incoming,
+            nullifier: Some(nf),
+        }],
+        spent_nullifiers: Vec::new(),
+        shielded_value_balance: 0,
+        transparent_received: Vec::new(),
+        transparent_spends: Vec::new(),
+        candidate_spends: Vec::new(),
+        is_coinbase: false,
+        raw: vec![0u8; 4],
+    };
+
+    db.put_enhanced_tx(
+        &test_params(),
+        &enhanced,
+        zakura_wallet_store::enhance::TxMeta {
+            mined_height: Some(h(START)),
+            ..Default::default()
+        },
+    )
+    .expect("the enhanced transaction stores");
+
+    // The snapshot is the thing that matters: without a nullifier the note is
+    // not in it, and nothing downstream can tell the difference between a note
+    // that was never spent and one whose spend cannot be recognised.
+    let snapshot = db.unspent_nullifiers().unwrap();
+
+    let mut later = ChainBuilder::with_anchor(
+        START + 10,
+        zakura_wallet_core::pool::TreeSizes {
+            orchard: 0,
+            ironwood: 1,
+        },
+    );
+    later.block(|b| {
+        b.tx(|t| {
+            t.spend(PoolId::Ironwood, nf);
+        });
+    });
+    apply(&mut db, &detect(&later, &snapshot));
+
+    assert_eq!(
+        count(&db, "received_note_spends"),
+        1,
+        "the grafted note must be recognised as spent"
+    );
+}
+
+#[test]
+fn candidates_missed_by_descending_recovery_are_recoverable_from_the_block() {
+    // The defect this closes: `collect_enhance_candidates` needs to know the
+    // transaction is the wallet's, and it learns that from *linked* spends.
+    // Under descending recovery the funding note has not been scanned when the
+    // send is, so nothing links, and the candidates are not recorded — for
+    // exactly the transactions private enhancement exists to serve. Their
+    // fields cannot be reconstructed from anything the wallet stores, so
+    // without a way back to the block, enabling PIR later means a full rescan.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let mut probe = ChainBuilder::new(START);
+    probe.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice(), KeyScope::External, 100);
+        });
+    });
+    let nf = detect(&probe, &NullifierSnapshot::default())
+        .received_notes()
+        .next()
+        .unwrap()
+        .nullifier;
+
+    // The send: it spends the wallet's note and pays out. Its extra action is
+    // the one a private enhancement would later have to recover.
+    let mut later = ChainBuilder::with_anchor(
+        START + 10,
+        zakura_wallet_core::pool::TreeSizes {
+            orchard: 0,
+            ironwood: 1,
+        },
+    );
+    later.block(|b| {
+        b.tx(|t| {
+            t.spend(PoolId::Ironwood, nf);
+            t.decoy(PoolId::Ironwood, 40);
+        });
+    });
+
+    apply(&mut db, &detect(&later, &NullifierSnapshot::default()));
+    assert_eq!(
+        count(&db, "enhance_candidates"),
+        0,
+        "at scan time the wallet cannot yet tell this transaction is its own"
+    );
+
+    // The funding note arrives, and the spend links.
+    apply(&mut db, &detect(&probe, &NullifierSnapshot::default()));
+
+    // A block request is now queued, naming the height and the hash the wallet
+    // itself recorded there — so the answer can be checked rather than trusted.
+    let queued: Vec<(u8, Vec<u8>)> = db
+        .connection()
+        .prepare("SELECT kind, locator FROM cache.retrieval_queue")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let anchor = db.block_anchor(h(START + 10)).unwrap().unwrap();
+    let expected = zakura_wallet_core::retrieval::Locator::Block {
+        height: h(START + 10),
+        hash: anchor.hash,
+    };
+    assert!(
+        queued.contains(&(expected.kind().code(), expected.encode())),
+        "linking the spend must queue the block its candidates have to be read from"
+    );
+
+    // Re-detecting that one block against the wallet's *current* snapshot is
+    // what recovers them: the same pure detection, with the funding now known.
+    let snapshot = db.all_nullifiers().unwrap();
+    let redetected = detect(&later, &snapshot);
+    let stored = db
+        .put_rediscovered_candidates(h(START + 10), &anchor.hash, &redetected.blocks[0])
+        .expect("the block is the one the wallet scanned");
+
+    assert!(stored > 0, "the re-detection must produce candidates");
+    assert!(
+        count(&db, "enhance_candidates") > 0,
+        "the candidates missed at scan time must now be stored"
+    );
+}
+
+#[test]
+fn a_rediscovered_block_from_the_wrong_height_is_refused() {
+    // The block has to come from the same trusted source scanning uses, and
+    // comparing a claimed hash does not authenticate compact contents. What
+    // this check does buy is that a block for the wrong height, or for a height
+    // the wallet has since rewound past, cannot be folded in.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let mut chain = ChainBuilder::new(START);
+    chain.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice(), KeyScope::External, 100);
+        });
+    });
+    let batch = detect(&chain, &NullifierSnapshot::default());
+    apply(&mut db, &batch);
+
+    let hash = db.block_anchor(h(START)).unwrap().unwrap().hash;
+    assert!(
+        db.put_rediscovered_candidates(h(START + 5), &hash, &batch.blocks[0])
+            .is_err(),
+        "a block must not be applied against a height it did not come from"
+    );
+}
+
+#[test]
+fn a_rewind_drops_the_position_claims_it_invalidated() {
+    // A candidate names a tree position the wallet was about to ask about
+    // privately. Above a rewind that position may hold somebody else's note, so
+    // both the material and the request that names it have to go. A request
+    // outliving its material would be one the wallet has nothing left to check
+    // the answer against — the state the identity recheck exists to prevent.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let mut chain = ChainBuilder::new(START);
+    chain.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice(), KeyScope::External, 100);
+        });
+    });
+    let batch = detect(&chain, &NullifierSnapshot::default());
+    apply(&mut db, &batch);
+    let nf = batch.received_notes().next().unwrap().nullifier;
+
+    let mut later = ChainBuilder::continuing_from(&batch.end_anchor);
+    later.block(|b| {
+        b.tx(|t| {
+            t.spend(PoolId::Ironwood, nf);
+            t.decoy(PoolId::Ironwood, 40);
+        });
+    });
+    let snapshot = db.unspent_nullifiers().unwrap();
+    apply(&mut db, &detect(&later, &snapshot));
+
+    fn actions(db: &WalletDb) -> u32 {
+        db.connection()
+            .query_row(
+                "SELECT COUNT(*) FROM cache.retrieval_queue WHERE kind = 2",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    assert!(count(&db, "enhance_candidates") > 0);
+    assert!(actions(&db) > 0, "each candidate is queued as a request");
+
+    db.truncate_to(h(START)).unwrap();
+
+    assert_eq!(
+        count(&db, "enhance_candidates"),
+        0,
+        "the material above the rewind is gone"
+    );
+    assert_eq!(
+        actions(&db),
+        0,
+        "and so are the requests that named those positions"
+    );
+}
+
+#[test]
+fn a_malformed_stored_txid_is_an_error_rather_than_a_panic() {
+    // `nullifier_map.txid` is an unconstrained BLOB, and this path runs once
+    // per received note inside the apply transaction — on the engine's own
+    // thread. A corrupt row must surface as an error the caller can handle, not
+    // abort the sync.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let mut probe = ChainBuilder::new(START);
+    probe.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice(), KeyScope::External, 100);
+        });
+    });
+    let probe_batch = detect(&probe, &NullifierSnapshot::default());
+    let nf = probe_batch.received_notes().next().unwrap().nullifier;
+
+    let mut later = ChainBuilder::with_anchor(
+        START + 10,
+        zakura_wallet_core::pool::TreeSizes {
+            orchard: 0,
+            ironwood: 1,
+        },
+    );
+    later.block(|b| {
+        b.tx(|t| {
+            t.spend(PoolId::Ironwood, nf);
+        });
+    });
+    apply(&mut db, &detect(&later, &NullifierSnapshot::default()));
+
+    db.connection()
+        .execute(
+            "UPDATE cache.nullifier_map SET txid = ?1",
+            rusqlite::params![&[9u8; 7][..]],
+        )
+        .unwrap();
+
+    // Applying the funding note links the spend, which is what reads that txid.
+    let err = db
+        .put_batch(&test_params(), &probe_batch)
+        .expect_err("a malformed stored txid must not be accepted");
+    assert!(
+        format!("{err}").contains("malformed"),
+        "the error should name what is wrong, got: {err}"
+    );
+}
+
+#[test]
+fn a_block_request_waits_until_the_wallet_can_anchor_it() {
+    // Re-detecting a block needs the chain state at the block *below* it. Until
+    // the wallet holds that, the request must not be dispatched: asking for the
+    // block anyway reveals which height the wallet cares about, achieves
+    // nothing, and would repeat on every tip. Rows that can never be answered
+    // would also fill the batch and starve the ones that can.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let mut probe = ChainBuilder::new(START);
+    probe.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice(), KeyScope::External, 100);
+        });
+    });
+    let nf = detect(&probe, &NullifierSnapshot::default())
+        .received_notes()
+        .next()
+        .unwrap()
+        .nullifier;
+
+    // The spend sits at START + 10, and START + 9 is not scanned.
+    let mut later = ChainBuilder::with_anchor(
+        START + 10,
+        zakura_wallet_core::pool::TreeSizes {
+            orchard: 0,
+            ironwood: 1,
+        },
+    );
+    later.block(|b| {
+        b.tx(|t| {
+            t.spend(PoolId::Ironwood, nf);
+            t.decoy(PoolId::Ironwood, 40);
+        });
+    });
+    apply(&mut db, &detect(&later, &NullifierSnapshot::default()));
+    apply(&mut db, &detect(&probe, &NullifierSnapshot::default()));
+
+    let everything = zakura_wallet_core::retrieval::LocatorKinds {
+        status: true,
+        transaction: true,
+        action: true,
+        block: true,
+    };
+    let blocks_pending = |db: &WalletDb| -> usize {
+        db.pending_requests(
+            zakura_wallet_store::retrieval::RequestScope::All,
+            everything,
+            h(START + 100),
+            100,
+        )
+        .unwrap()
+        .into_iter()
+        .filter(|r| matches!(r.locator, zakura_wallet_core::retrieval::Locator::Block { .. }))
+        .count()
+    };
+
+    let queued: u32 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM cache.retrieval_queue WHERE kind = 3",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(queued, 1, "the job is recorded");
+    assert_eq!(
+        blocks_pending(&db),
+        0,
+        "but it must not be dispatched while its predecessor is unscanned"
+    );
+
+    // Ordinary scanning reaches the block below, and the job becomes
+    // dispatchable on its own, with nothing having to re-queue it.
+    let mut below = ChainBuilder::with_anchor(
+        START + 9,
+        zakura_wallet_core::pool::TreeSizes {
+            orchard: 0,
+            ironwood: 1,
+        },
+    );
+    below.block(|_| {});
+    apply(&mut db, &detect(&below, &NullifierSnapshot::default()));
+
+    assert_eq!(
+        blocks_pending(&db),
+        1,
+        "once the predecessor is stored the job is dispatchable"
     );
 }

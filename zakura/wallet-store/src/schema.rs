@@ -38,7 +38,7 @@
 pub const DETECTION_VERSION: u32 = 1;
 
 /// Bumping this invalidates the derived tables, which are rebuilt locally.
-pub const LAYOUT_VERSION: u32 = 2;
+pub const LAYOUT_VERSION: u32 = 3;
 
 /// Bumping this invalidates the stored commitment trees.
 pub const TREE_VERSION: u32 = 1;
@@ -354,28 +354,58 @@ pub const DERIVED_DDL: &[&str] = &[
         account_id INTEGER NOT NULL,
         PRIMARY KEY (commitment_tree_position, account_id)
     )",
-    // `routing` is the column private enhancement grows into: NULL, or a
-    // sticky decision to fall back to fetching the whole transaction.
-    // Outstanding questions about a transaction, keyed by the *pair*, because
-    // one transaction can carry two intents with different lifetimes: an
-    // enhancement request is satisfied once and deleted, while a status request
-    // is durable — dormant while the transaction is mined, and reactivating by
-    // itself if a rewind un-mines it. One row per txid cannot express that.
+    // Everything the wallet still needs from outside, keyed by *what is being
+    // asked for* rather than by transaction identifier.
     //
-    // There is deliberately no routing column. The seam a private transport
-    // would replace is `ChainSource::transaction`, not storage.
+    // The key is the pair, because one subject can carry several intents with
+    // different lifetimes: a request for a transaction's bytes is satisfied
+    // once and deleted, while a status request is durable — dormant while the
+    // transaction is mined, and reactivating by itself if a rewind un-mines it.
+    // One row per subject cannot express that.
     //
-    // `last_polled_height` is not in the fork, which does not need it because
-    // its request driver lives in the consuming application. This one runs
-    // inside the sync loop and would otherwise re-ask the same question of the
-    // same server on every step.
-    "CREATE TABLE IF NOT EXISTS tx_requests (
-        txid                    BLOB NOT NULL,
-        query_type              INTEGER NOT NULL,
+    // `locator` is the canonical encoding of a `Locator`: a txid for the two
+    // transaction questions, pool and tree position for an action, height and
+    // hash for a block. It is deliberately the *only* part of a row that ever
+    // reaches a server. A position-keyed request is what private retrieval
+    // sends, and the whole point of it is that the transaction it concerns is
+    // not in the request.
+    //
+    // `subject_txid` is that transaction, held locally so history, rewind
+    // cleanup and the already-fetched guard work the same way for a
+    // position-keyed row as for a txid-keyed one. Null for a block.
+    //
+    // `attempts` bounds retries for the kinds that can be fed bad data
+    // repeatedly. `last_polled_height` is not in the fork, which does not need
+    // it because its request driver lives in the consuming application; this
+    // one runs inside the sync loop and would otherwise re-ask the same
+    // question of the same server on every step.
+    //
+    // `fallback_barred` is all that survives of the fork's three-state routing.
+    // It records one fact that must never be reversed: this transaction was
+    // shown to touch a pool private retrieval cannot serve, so no further
+    // private query may be spent on it. It is sticky across rescans and reorgs
+    // because a later response claiming otherwise cannot re-protect what has
+    // already been disclosed.
+    "CREATE TABLE IF NOT EXISTS retrieval_queue (
+        kind                     INTEGER NOT NULL,
+        locator                  BLOB NOT NULL,
+        subject_txid             BLOB,
+        -- The height a locator names, when it names one, kept out of the blob
+        -- so the queue can be filtered on it. A block request is only worth
+        -- dispatching once the wallet holds the block *below* the one it wants,
+        -- because that is what anchors the re-detection; without this column
+        -- the condition cannot be expressed in SQL, and the alternative is
+        -- fetching the block and discovering it is unusable -- which reveals
+        -- interest in that height, repeatedly, for nothing.
+        locator_height           INTEGER,
         dependent_transaction_id INTEGER REFERENCES transactions(id) ON DELETE CASCADE,
-        last_polled_height      INTEGER,
-        PRIMARY KEY (txid, query_type)
+        last_polled_height       INTEGER,
+        attempts                 INTEGER NOT NULL DEFAULT 0,
+        fallback_barred          INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (kind, locator)
     )",
+    "CREATE INDEX IF NOT EXISTS retrieval_queue_subject
+        ON retrieval_queue(subject_txid)",
 ];
 
 /// The names of every table in the derived database.
@@ -390,6 +420,7 @@ pub const DERIVED_TABLES: &[&str] = &[
     "nullifier_map",
     "received_note_spends",
     "received_notes",
+    "retrieval_queue",
     "scan_queue",
     "transactions",
     "transparent_received_output_spends",
@@ -399,7 +430,6 @@ pub const DERIVED_TABLES: &[&str] = &[
     "tree_checkpoint_marks_removed",
     "tree_checkpoints",
     "tree_shards",
-    "tx_requests",
 ];
 
 /// The names of every table in the durable database.

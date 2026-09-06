@@ -17,7 +17,8 @@ use zakura_wallet_core::{
     pool::PoolId,
 };
 use zakura_wallet_scan::{
-    ScanKeys, enhance::decrypt_transaction, testing::{IRONWOOD_ACTIVATION, test_params},
+    ScanKeys, TransparentWatch, enhance::decrypt_transaction,
+    testing::{IRONWOOD_ACTIVATION, test_params},
 };
 use zakura_wallet_tx::{
     Keys, SpendRequest, anchors, payment, select, spendable_notes,
@@ -97,6 +98,7 @@ fn a_sender_recovers_what_they_sent_and_a_recipient_what_they_received() {
     let sent = decrypt_transaction(
         &test_params(),
         &alice_keys,
+        &TransparentWatch::default(),
         built.txid(),
         height,
         &bytes,
@@ -137,6 +139,7 @@ fn a_sender_recovers_what_they_sent_and_a_recipient_what_they_received() {
     let received = decrypt_transaction(
         &test_params(),
         &bob_keys,
+        &TransparentWatch::default(),
         built.txid(),
         height,
         &bytes,
@@ -202,6 +205,7 @@ fn a_substituted_transaction_is_refused() {
     let err = decrypt_transaction(
         &test_params(),
         &keys,
+        &TransparentWatch::default(),
         wrong,
         anchors.height + 1,
         &raw(&built),
@@ -224,6 +228,7 @@ fn malformed_bytes_are_an_error_not_a_panic() {
     let err = decrypt_transaction(
         &test_params(),
         &keys,
+        &TransparentWatch::default(),
         zcash_protocol::TxId::from_bytes([0u8; 32]),
         BlockHeight::from_u32(IRONWOOD_ACTIVATION + 10),
         &[0u8; 8],
@@ -288,6 +293,7 @@ fn enhancement_grafts_the_memo_without_disturbing_the_scan() {
     let decrypted = decrypt_transaction(
         &test_params(),
         &alice_keys,
+        &TransparentWatch::default(),
         built.txid(),
         anchors.height + 1,
         &raw(&built),
@@ -381,6 +387,7 @@ fn a_transaction_that_touches_nothing_is_stored_nowhere() {
     let decrypted = decrypt_transaction(
         &test_params(),
         &alice_keys,
+        &TransparentWatch::default(),
         built.txid(),
         anchors.height + 1,
         &raw(&built),
@@ -454,7 +461,7 @@ fn a_send_is_recorded_before_it_is_broadcast() {
 
     let alice_keys = ScanKeys::from_accounts([(ALICE, alice.fvk.clone())]);
     let decrypted =
-        decrypt_transaction(&test_params(), &alice_keys, built.txid(), target, &raw(&built))
+        decrypt_transaction(&test_params(), &alice_keys, &TransparentWatch::default(), built.txid(), target, &raw(&built))
             .unwrap();
 
     db.store_sent_transaction(
@@ -531,4 +538,103 @@ fn a_send_is_recorded_before_it_is_broadcast() {
         Some(u32::from(target)),
         "nor forget that this wallet built it"
     );
+}
+
+#[test]
+fn enhancement_sees_the_transparent_side_of_a_transaction() {
+    // Enhancement fetches whole transactions, and a whole transaction carries
+    // its transparent bundle. Parsing only the two shielded bundles throws that
+    // away, so a transaction reached only through enhancement — a shielding
+    // built on another device, a payment to an address this wallet derived —
+    // has its transparent outputs and its spends of the wallet's UTXOs silently
+    // discarded, and they stay invisible until a restore sweep asks the server
+    // about the wallet's addresses by name.
+    use transparent::keys::{AccountPrivKey, NonHardenedChildIndex, TransparentKeyScope};
+
+    let alice = keys_from(1);
+    let recipient_key = AccountPrivKey::from_seed(
+        &zcash_protocol::consensus::MAIN_NETWORK,
+        &[7u8; 32],
+        zip32::AccountId::try_from(0).unwrap(),
+    )
+    .expect("the seed derives a transparent account key");
+    let recipient = transparent::address::TransparentAddress::from_pubkey(
+        &recipient_key
+            .to_account_pubkey()
+            .derive_address_pubkey(
+                TransparentKeyScope::EXTERNAL,
+                NonHardenedChildIndex::from_index(9).unwrap(),
+            )
+            .unwrap(),
+    );
+
+    let mut db = common::funded_wallet(PoolId::Ironwood, 2, 500_000, &alice.fvk);
+    let anchors = zakura_wallet_tx::anchors(&mut db).unwrap();
+    let witnesses =
+        zakura_wallet_tx::spendable_notes(&mut db, ALICE, &alice.fvk, &anchors, false).unwrap();
+
+    let proposal = zakura_wallet_tx::plan_transparent_payment(
+        witnesses.iter().map(|(n, _)| n.clone()).collect(),
+        recipient,
+        Zatoshis::const_from_u64(100_000),
+    )
+    .expect("the wallet's notes cover the payment");
+
+    let built = payment(
+        &SpendRequest {
+            proposal: &proposal,
+            witnesses: &witnesses,
+            keys: &alice,
+            // Unused: the payment leaves transparently. Only the change is
+            // shielded, and that goes to the wallet's own internal address.
+            recipient: alice.fvk.address_at(0u32, Scope::External),
+            anchors: &anchors,
+        },
+        BranchId::Nu6_3,
+        anchors.height + 100,
+        proving_key(),
+        rng(),
+    )
+    .expect("a transparent payment builds");
+
+    let bytes = raw(&built);
+    let keys = ScanKeys::from_accounts([(ALICE, alice.fvk.clone())]);
+
+    // Watching the address that was paid: the receiving wallet's view.
+    let script: transparent::address::Script = recipient.script().into();
+    let watching = TransparentWatch::new([(script, ALICE, 1)], []);
+
+    let seen = decrypt_transaction(
+        &test_params(),
+        &keys,
+        &watching,
+        built.txid(),
+        anchors.height + 1,
+        &bytes,
+    )
+    .expect("the transaction decrypts");
+
+    assert_eq!(
+        seen.transparent_received.len(),
+        1,
+        "the payment to a watched address must be found in the transparent bundle"
+    );
+    assert_eq!(
+        seen.transparent_received[0].txout.value(),
+        Zatoshis::const_from_u64(100_000)
+    );
+    assert!(!seen.is_coinbase, "an ordinary payment is not a coinbase");
+
+    // Watching nothing: the same bytes must yield nothing transparent, so a
+    // stranger's outputs are not accumulated.
+    let blind = decrypt_transaction(
+        &test_params(),
+        &keys,
+        &TransparentWatch::default(),
+        built.txid(),
+        anchors.height + 1,
+        &bytes,
+    )
+    .expect("the transaction decrypts");
+    assert!(blind.transparent_received.is_empty());
 }

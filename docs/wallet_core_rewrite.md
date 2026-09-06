@@ -376,6 +376,20 @@ Neither is built now. Four commitments make both retrofittable without a rescan.
 
 The seam is enhancement, but scanning has to carry the payload.
 
+**Correction, found in the code and not in review.** The guarantee below —
+capture candidates eagerly so that enabling PIR later needs no rescan — did not
+hold in the direction this wallet actually recovers in.
+`collect_enhance_candidates` returns nothing when `funding_accounts` is empty,
+and that set comes from *linked* spends. Descending recovery always meets a send
+before the note that funded it, so a restored wallet recorded **zero**
+candidates for exactly the transactions private enhancement exists to serve. It
+is closed by a `Locator::Block` request queued at the moment the spend links,
+which re-reads that one block against a snapshot that includes already-spent
+notes and applies only its candidates. The spent-inclusive snapshot is
+load-bearing: by then the funding note is marked spent, and an ordinary
+`unspent_nullifiers` snapshot would find no funding and return an empty
+candidate list indistinguishable from a correct one.
+
 `DetectedBatch` carries Ironwood enhance candidates. For every Ironwood action in
 a wallet-funded transaction that the wallet did not decrypt as its own, record
 the tree position, action index, nullifier, cmx, ephemeral key, compact ciphertext
@@ -1451,10 +1465,39 @@ them into one wallet and correlate them with everything else that wallet asks
 for. This is accepted for now, and it is precisely the disclosure Enhance PIR
 exists to remove.
 
-The seam is deliberately not a storage column and not a second `Enhancer`
-implementation: it is `ChainSource::transaction` plus `decrypt_transaction`. A
-private transport produces the same decrypted value from a position rather than
-a txid, and the write path does not change.
+The seam was originally specified as `ChainSource::transaction` plus
+`decrypt_transaction`, on the reasoning that "a private transport produces the
+same decrypted value from a position rather than a txid, and the write path does
+not change". **That was wrong, and it is the one structural thing this document
+got wrong.** A PIR response is not a transaction produced by another route. It
+is one action — an ephemeral key, a 580-byte note ciphertext, a value
+commitment, an 80-byte outgoing ciphertext and a flag byte, the shape in
+`zakura/pir-enhance/src/types.rs`. It carries no expiry height, no bundle-wide
+nullifier list and no mined status, so it cannot produce an `EnhancedTx`, which
+is what the whole write path in `wallet-store/src/enhance.rs` takes.
+`ChainSource::transaction` returns a transaction, and no transport makes an
+action into one.
+
+The seam is therefore a *locator*: what is being asked for, and by which key —
+a txid, a tree position, or a block. `zakura-wallet-core`'s `retrieval` module
+owns `Locator`, `Guard` and `ActionRecord`; `zakura-wallet-sync`'s `Retrieval`
+trait is the backend, with `PublicRetrieval` over an ordinary `ChainSource` and
+`testing::MapRetrieval` as the private stand-in. The queue that was
+`tx_requests` is `retrieval_queue`, keyed on the pair (kind, locator).
+
+What survives of the original reasoning is the important half: there is still no
+routing column in the sense the fork means, and the write path still does not
+change. `Guard` is the type that carries the property the fork enforced by
+discipline — capture `(position, txid, action index)` locally before any network
+I/O, send only the locator, recheck the identity inside the transaction that
+applies the answer.
+
+One boolean does survive from the fork's three-state routing:
+`retrieval_queue.fallback_barred`. It records that a response revealed the
+transaction touches a pool private retrieval cannot serve, so no further private
+query may be spent on it. It is written as a row of its own rather than as a
+flag on rows that happen to exist, and it survives a rewind, because the
+disclosure it represents cannot be taken back.
 
 ### What the recovery direction costs transparent
 

@@ -26,6 +26,7 @@ pub mod block;
 pub mod detected;
 pub mod enhanced;
 pub mod pool;
+pub mod retrieval;
 pub mod scanning;
 
 pub use account::{AccountId, KeyScope};
@@ -35,6 +36,7 @@ pub use detected::{
     DetectedTransparentOutput, DetectedTx, EnhanceCandidate, NullifierSnapshot, PoolCommitments,
 };
 pub use pool::{Ironwood, Orchard, PoolId, PoolVisitor, ShieldedPool, dispatch};
+pub use retrieval::{ActionRecord, Guard, Locator, LocatorKind, LocatorKinds};
 
 /// The ZIP 318 anchor grid this wallet retains checkpoints on.
 ///
