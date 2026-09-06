@@ -14,7 +14,7 @@
 //! task that can be politely interleaved with anything.
 
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -90,6 +90,17 @@ impl Default for SyncProgress {
 }
 
 impl SyncProgress {
+    /// Whether the engine is doing work right now.
+    ///
+    /// A failed sync is not running, whatever phase it stopped in.
+    pub fn is_running(&self) -> bool {
+        !self.failed
+            && matches!(
+                self.phase,
+                SyncPhase::Bootstrapping | SyncPhase::Recovering | SyncPhase::Tracking
+            )
+    }
+
     fn from_status(status: &zakura_wallet_sync::SyncStatus) -> Self {
         // Coverage is per pool; the wallet wants one number. Summing the parts
         // rather than averaging the ratios keeps a pool with a large tree from
@@ -166,6 +177,61 @@ where
             _ = tokio::time::sleep(poll_interval) => {}
             _ = token.cancelled() => return None,
         }
+    }
+}
+
+/// Puts the wallet back however the sync thread leaves.
+///
+/// The engine owns the database while it runs, so a thread that ends without
+/// handing it back leaves the wallet with no writing handle at all — and then
+/// every write is refused as though a sync were still going, forever. That is
+/// not hypothetical: the engine carries debug assertions about what a server is
+/// allowed to return, and one firing against a real server takes the database
+/// down with it.
+///
+/// This runs on the way out whatever happens, including a panic unwinding
+/// through it. If the database did not come back, it is reopened from the files
+/// it was opened from: they are on disk, and a fresh connection is a great deal
+/// better than a wallet that has to be restarted.
+struct SyncExit {
+    writer: Arc<Mutex<Option<WalletDb>>>,
+    finished: Arc<AtomicBool>,
+    failure: Arc<Mutex<Option<String>>>,
+    progress: watch::Sender<SyncProgress>,
+    wallet_path: std::path::PathBuf,
+    cache_path: std::path::PathBuf,
+}
+
+impl Drop for SyncExit {
+    fn drop(&mut self) {
+        {
+            let mut writer = self.writer.lock().expect("the writer lock is never poisoned");
+            if writer.is_none() {
+                match WalletDb::open(&self.wallet_path, &self.cache_path) {
+                    Ok(db) => *writer = Some(db),
+                    Err(e) => {
+                        *self.failure.lock().expect("the failure lock is never poisoned") =
+                            Some(format!("the wallet could not be reopened: {e}"));
+                    }
+                }
+            }
+        }
+
+        // Set after the database is back, so that a caller which sees the sync
+        // has ended finds a wallet it can write to.
+        self.finished.store(true, Ordering::SeqCst);
+
+        let failed = self
+            .failure
+            .lock()
+            .expect("the failure lock is never poisoned")
+            .is_some();
+        let last = *self.progress.borrow();
+        let _ = self.progress.send(SyncProgress {
+            phase: SyncPhase::Stopped,
+            failed,
+            ..last
+        });
     }
 }
 
@@ -267,9 +333,23 @@ impl Wallet {
         let done = Arc::clone(&finished);
         let token = cancel.clone();
 
+        let wallet_path = self.config.wallet_path.clone();
+        let cache_path = self.config.cache_path.clone();
+
         let handle = std::thread::Builder::new()
             .name("zakura-sync".to_owned())
             .spawn(move || {
+                // Constructed first so it runs last, including while a panic is
+                // unwinding through this thread.
+                let _exit = SyncExit {
+                    writer: Arc::clone(&writer),
+                    finished: Arc::clone(&done),
+                    failure: Arc::clone(&failure),
+                    progress: tx.clone(),
+                    wallet_path,
+                    cache_path,
+                };
+
                 let record = |e: String| {
                     *failure.lock().expect("the failure lock is never poisoned") = Some(e);
                 };
@@ -282,71 +362,71 @@ impl Wallet {
                     Err(e) => {
                         record(format!("could not start the sync runtime: {e}"));
                         *writer.lock().expect("the writer lock is never poisoned") = Some(db);
-                        done.store(true, Ordering::SeqCst);
-                        let _ = tx.send(SyncProgress {
-                            phase: SyncPhase::Stopped,
-                            failed: true,
-                            ..SyncProgress::default()
-                        });
                         return;
                     }
                 };
 
-                let publish_final = tx.clone();
-                let db = runtime.block_on(async move {
-                    let source = match LightwalletdSource::connect(&url).await {
-                        Ok(source) => source,
-                        Err(e) => {
-                            record(format!("could not reach {url}: {e}"));
-                            return db;
-                        }
-                    };
-
-                    let mut engine = SyncEngine::new(
-                        source,
-                        params,
-                        db,
-                        keys,
-                        TransparentWatch::default(),
-                        SyncConfig {
-                            budget,
-                            ..SyncConfig::default()
-                        },
-                    );
-
-                    let mut status = engine.status();
-                    let publish = tx.clone();
-                    // Republish the engine's own channel onto ours, so the
-                    // application never sees the core's types.
-                    let forward = tokio::spawn(async move {
-                        while status.changed().await.is_ok() {
-                            let next = SyncProgress::from_status(&status.borrow_and_update());
-                            if publish.send(next).is_err() {
-                                break;
+                // A panic in the engine must not take the wallet with it. The
+                // database it owned is gone either way — `SyncExit` reopens it —
+                // but what went wrong is worth saying, because otherwise the
+                // interface shows a sync that is starting and never will.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    runtime.block_on(async move {
+                        let source = match LightwalletdSource::connect(&url).await {
+                            Ok(source) => source,
+                            Err(e) => {
+                                record(format!("could not reach {url}: {e}"));
+                                return db;
                             }
+                        };
+
+                        let mut engine = SyncEngine::new(
+                            source,
+                            params,
+                            db,
+                            keys,
+                            TransparentWatch::default(),
+                            SyncConfig {
+                                budget,
+                                ..SyncConfig::default()
+                            },
+                        );
+
+                        let mut status = engine.status();
+                        let publish = tx.clone();
+                        // Republish the engine's own channel onto ours, so the
+                        // application never sees the core's types.
+                        let forward = tokio::spawn(async move {
+                            while status.changed().await.is_ok() {
+                                let next = SyncProgress::from_status(&status.borrow_and_update());
+                                if publish.send(next).is_err() {
+                                    break;
+                                }
+                            }
+                        });
+
+                        if let Some(reason) = drive(&mut engine, &token, poll_interval).await {
+                            record(reason);
                         }
-                    });
 
-                    if let Some(reason) = drive(&mut engine, &token, poll_interval).await {
-                        record(reason);
+                        forward.abort();
+                        engine.into_db()
+                    })
+                }));
+
+                match outcome {
+                    Ok(db) => {
+                        *writer.lock().expect("the writer lock is never poisoned") = Some(db);
                     }
-
-                    forward.abort();
-                    engine.into_db()
-                });
-
-                *writer.lock().expect("the writer lock is never poisoned") = Some(db);
-                done.store(true, Ordering::SeqCst);
-
-                let last = *publish_final.borrow();
-                let _ = publish_final.send(SyncProgress {
-                    phase: SyncPhase::Stopped,
-                    failed: failure
-                        .lock()
-                        .expect("the failure lock is never poisoned")
-                        .is_some(),
-                    ..last
-                });
+                    Err(panic) => {
+                        let what = panic
+                            .downcast_ref::<&str>()
+                            .map(|s| (*s).to_owned())
+                            .or_else(|| panic.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "the sync thread panicked".to_owned());
+                        record(format!("synchronisation stopped unexpectedly: {what}"));
+                    }
+                }
             })
             .map_err(|e| Error::Build(format!("could not start the sync thread: {e}")))?;
 

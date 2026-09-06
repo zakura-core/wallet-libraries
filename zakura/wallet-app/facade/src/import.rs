@@ -14,7 +14,7 @@
 
 use zakura_wallet_core::pool::{Orchard, ShieldedPool};
 use zcash_keys::keys::UnifiedFullViewingKey;
-use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::consensus::BlockHeight;
 use zeroize::Zeroizing;
 
 use crate::{Wallet, error::Error};

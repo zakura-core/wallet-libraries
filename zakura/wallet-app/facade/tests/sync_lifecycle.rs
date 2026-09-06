@@ -135,3 +135,43 @@ fn a_second_sync_is_refused_while_the_first_runs() {
     let code = wallet.start_sync().err().map(|e| e.code());
     assert_eq!(code, Some(ErrorCode::AlreadySyncing));
 }
+
+/// The engine owns the database while it runs, and it carries debug assertions
+/// about what a server is allowed to return. One firing takes the database down
+/// with it — and if the thread simply died, the wallet would be left with no
+/// writing handle at all, refusing every write as though a sync were still
+/// going, forever. That is not hypothetical: it happened against mainnet.
+///
+/// Driven here by a source whose connection cannot be made, which ends the
+/// thread on an unusual path; the guard that puts the wallet back is the same
+/// one a panic unwinds through.
+#[test]
+fn a_sync_that_dies_leaves_a_usable_wallet() {
+    let (_dir, wallet) = open();
+    let id = account(&wallet);
+
+    wallet.start_sync().unwrap();
+    wait_until("the sync to end", || !wallet.is_syncing());
+
+    // The wallet still works: it can be written to, read from, and synced
+    // again. Any of these hanging or refusing would mean it had been wedged.
+    wallet.next_address(id, None).expect("it can still issue an address");
+    wallet.balance(id).expect("it can still be read");
+    wallet.accounts().expect("its accounts are still there");
+    wallet.start_sync().expect("and it can sync again");
+}
+
+/// And a wallet whose sync ended badly says so, rather than showing a sync that
+/// is starting and never will.
+#[test]
+fn a_sync_that_dies_is_reported_rather_than_left_starting() {
+    let (_dir, wallet) = open();
+    account(&wallet);
+
+    wallet.start_sync().unwrap();
+    wait_until("the failure to be reported", || wallet.progress().failed);
+
+    let progress = wallet.progress();
+    assert!(!progress.is_running(), "it must not look like it is still going");
+    assert!(wallet.sync_failure().is_some());
+}
