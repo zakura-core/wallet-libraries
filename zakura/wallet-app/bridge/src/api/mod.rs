@@ -1,0 +1,220 @@
+//! The functions Dart calls.
+//!
+//! One open wallet per process, held in a global. An opaque handle passed back
+//! and forth would be tidier, but a wallet is a process-wide thing — it owns
+//! two database files and a thread — and pretending otherwise invites a second
+//! one to be opened over the same files.
+//!
+//! Every function returns `Result<_, ApiError>` so a failure crosses as a code
+//! and a message rather than as a panic. Panicking across a foreign-function
+//! boundary is undefined behaviour in the general case and an unhelpful crash
+//! in the best case.
+
+pub mod types;
+
+use std::sync::{Arc, RwLock};
+
+use zakura_wallet_facade::{
+    NetworkKind, Wallet, WalletConfig,
+    mnemonic::{self},
+};
+
+use types::{
+    ApiAccount, ApiBalance, ApiError, ApiHistoryEntry, ApiSendReceipt, ApiSpendQuote,
+    ApiSyncPhase, ApiSyncProgress,
+};
+
+/// The open wallet.
+static WALLET: RwLock<Option<Arc<Wallet>>> = RwLock::new(None);
+
+/// Returns the open wallet, or an error naming the fact that there is none.
+fn wallet() -> Result<Arc<Wallet>, ApiError> {
+    WALLET
+        .read()
+        .expect("the wallet lock is never poisoned")
+        .clone()
+        .ok_or_else(|| ApiError {
+            // `Storage`, because from the application's side an unopened wallet
+            // is the same class of problem as one that could not be read.
+            code: 1,
+            message: "no wallet is open".to_owned(),
+        })
+}
+
+/// Generates a new seed phrase.
+///
+/// The phrase is the wallet. Whatever receives it is responsible for showing it
+/// once and then storing it where the operating system protects it — this
+/// library does not store it, by design.
+pub fn generate_mnemonic() -> String {
+    mnemonic::generate().to_string()
+}
+
+/// Returns whether a phrase is a valid mnemonic.
+pub fn validate_mnemonic(phrase: String) -> bool {
+    mnemonic::validate(&phrase)
+}
+
+/// Opens or creates the wallet in `directory`.
+///
+/// Replaces any wallet already open, stopping its sync first.
+pub fn open(
+    directory: String,
+    lightwalletd_url: String,
+    mainnet: bool,
+) -> Result<(), ApiError> {
+    let config = WalletConfig::in_dir(
+        if mainnet {
+            NetworkKind::Main
+        } else {
+            NetworkKind::Test
+        },
+        std::path::Path::new(&directory),
+        lightwalletd_url,
+    );
+
+    let opened = Wallet::open(config)?;
+    let mut guard = WALLET.write().expect("the wallet lock is never poisoned");
+    // Dropping the old one stops its sync thread, which holds the database
+    // files the new one is about to open.
+    *guard = None;
+    *guard = Some(Arc::new(opened));
+    Ok(())
+}
+
+/// Creates an account from a seed phrase, and returns its identifier.
+///
+/// The seed is derived, used and dropped. Only the viewing key is stored, so
+/// the ability to spend never sits in the same file as the ability to see.
+pub fn create_account(phrase: String, birthday: u32) -> Result<u32, ApiError> {
+    let wallet = wallet()?;
+    let seed = mnemonic::to_seed(&phrase, "")?;
+    Ok(wallet.create_account(&seed, 0, birthday)?)
+}
+
+/// Returns every account, in creation order.
+pub fn accounts() -> Result<Vec<ApiAccount>, ApiError> {
+    Ok(wallet()?
+        .accounts()?
+        .into_iter()
+        .map(|a| ApiAccount {
+            id: a.id,
+            birthday: a.birthday,
+            can_spend: a.can_spend,
+            hd_account_index: a.hd_account_index,
+        })
+        .collect())
+}
+
+/// Returns an account's balance across every shielded pool.
+///
+/// Transparent value is not included: this build cannot spend it, and a balance
+/// the wallet cannot back is worse than no balance.
+pub fn balance(account: u32) -> Result<ApiBalance, ApiError> {
+    let b = wallet()?.balance(account)?;
+    Ok(ApiBalance {
+        spendable: b.spendable,
+        pending: b.pending,
+        spent_unconfirmed: b.spent_unconfirmed,
+    })
+}
+
+/// Returns an account's transactions, most recent first.
+pub fn history(account: u32, limit: u32) -> Result<Vec<ApiHistoryEntry>, ApiError> {
+    Ok(wallet()?
+        .history(account, limit as usize)?
+        .into_iter()
+        .map(|e| ApiHistoryEntry {
+            txid: e.txid.to_vec(),
+            mined_height: e.mined_height,
+            received: e.received,
+            spent: e.spent,
+            is_change_only: e.is_change_only,
+        })
+        .collect())
+}
+
+/// Issues the next unused receive address.
+///
+/// Two calls return two different addresses: reusing one lets anybody who has
+/// seen it link the payments made to it.
+pub fn next_address(account: u32) -> Result<String, ApiError> {
+    Ok(wallet()?.next_address(account, None)?)
+}
+
+/// Starts synchronising, returning immediately.
+pub fn start_sync() -> Result<(), ApiError> {
+    Ok(wallet()?.start_sync()?)
+}
+
+/// Stops synchronising, waiting for the batch in flight to finish.
+pub fn stop_sync() -> Result<(), ApiError> {
+    wallet()?.stop_sync();
+    Ok(())
+}
+
+/// Returns how far synchronisation has got.
+///
+/// A poll rather than a stream. The engine publishes progress on a lossy
+/// channel by design, so a reader that falls behind should see the latest value
+/// rather than a queue of stale ones, and a poll expresses that directly
+/// instead of marshalling a callback back into another language's runtime.
+pub fn progress() -> Result<ApiSyncProgress, ApiError> {
+    let p = wallet()?.progress();
+    Ok(ApiSyncProgress {
+        phase: match p.phase {
+            zakura_wallet_facade::SyncPhase::Bootstrapping => ApiSyncPhase::Bootstrapping,
+            zakura_wallet_facade::SyncPhase::Recovering => ApiSyncPhase::Recovering,
+            zakura_wallet_facade::SyncPhase::Tracking => ApiSyncPhase::Tracking,
+            zakura_wallet_facade::SyncPhase::Idle => ApiSyncPhase::Idle,
+            zakura_wallet_facade::SyncPhase::Stopped => ApiSyncPhase::Stopped,
+        },
+        fraction: p.fraction,
+        tip: p.tip,
+        scanned_to: p.scanned_to,
+        blocks_remaining: p.blocks_remaining,
+    })
+}
+
+/// Works out what a payment would cost, without proving it.
+pub fn quote(account: u32, to: String, amount: u64) -> Result<ApiSpendQuote, ApiError> {
+    let q = wallet()?.quote(account, &to, amount)?;
+    Ok(ApiSpendQuote {
+        amount: q.amount,
+        fee: q.fee,
+        change: q.change,
+        inputs: q.inputs as u32,
+    })
+}
+
+/// Builds, proves, signs and broadcasts a payment.
+///
+/// Takes seconds. The code generator runs this on a worker rather than on the
+/// interface thread, but whatever calls it should already be saying that
+/// something is happening.
+pub fn send(
+    account: u32,
+    to: String,
+    amount: u64,
+    phrase: String,
+) -> Result<ApiSendReceipt, ApiError> {
+    let wallet = wallet()?;
+    let seed = mnemonic::to_seed(&phrase, "")?;
+    let receipt = wallet.send(account, &to, amount, &seed)?;
+    Ok(ApiSendReceipt {
+        txid: receipt.txid.to_vec(),
+        server_response: receipt.server_response,
+    })
+}
+
+/// Closes the wallet, stopping any sync.
+pub fn close() -> Result<(), ApiError> {
+    let taken = WALLET
+        .write()
+        .expect("the wallet lock is never poisoned")
+        .take();
+    if let Some(wallet) = taken {
+        wallet.stop_sync();
+    }
+    Ok(())
+}

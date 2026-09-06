@@ -1,0 +1,26 @@
+name: zakura_example
+description: A minimal reference wallet over the Zakura wallet app packages.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.9.0
+  flutter: ">=3.29.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^3.0.0
+  zakura_bindings:
+    path: ../bindings
+  zakura_client:
+    path: ../client
+  zakura_state:
+    path: ../state
+  zakura_ui:
+    path: ../ui
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter

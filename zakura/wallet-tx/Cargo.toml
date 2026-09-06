@@ -25,7 +25,8 @@ zcash_primitives = { workspace = true, features = ["circuits"] }
 zcash_protocol.workspace = true
 
 [features]
-# Exposes the proving and verifying keys, which take seconds to build.
+# Test scaffolding. The proving and verifying keys used to live behind this
+# feature; they are in `circuit` now, because a release build needs them too.
 test-dependencies = []
 
 [dev-dependencies]

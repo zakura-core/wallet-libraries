@@ -21,9 +21,18 @@ members = [
     "zakura/wallet-sync",
     "zakura/wallet-lwd",
     "zakura/wallet-tx",
+    "zakura/wallet-app/facade",
+    "zakura/wallet-app/bridge",
 ]
 
 resolver = "2"
+
+# Dependencies are optimised even in debug builds. Flutter's debug builds use
+# Cargo's dev profile, and the proving stack is unusable at opt-level 0 — a
+# single proof takes minutes rather than seconds. This covers dependencies
+# only, so iterating on the crates in this workspace stays fast.
+[profile.dev.package."*"]
+opt-level = 3
 
 [workspace.package]
 edition = "2024"

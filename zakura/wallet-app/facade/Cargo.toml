@@ -1,0 +1,42 @@
+[package]
+name = "zakura-wallet-facade"
+version = "0.1.0"
+description = "The single wallet-facing API over the Zakura wallet core, and what an FFI layer binds to"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "zakura_wallet_facade"
+
+[dependencies]
+# Mnemonics live here rather than in the app, so no other language ever handles
+# entropy or a seed phrase.
+bip0039.workspace = true
+orchard.workspace = true
+rand = { workspace = true, features = ["thread_rng"] }
+rusqlite.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+tokio-util = "0.7"
+zakura-wallet-core = { path = "../../wallet-core" }
+zakura-wallet-lwd = { path = "../../wallet-lwd" }
+zakura-wallet-scan = { path = "../../wallet-scan" }
+zakura-wallet-store = { path = "../../wallet-store" }
+zakura-wallet-sync = { path = "../../wallet-sync" }
+zakura-wallet-tx = { path = "../../wallet-tx" }
+zcash_keys = { workspace = true, features = ["orchard"] }
+zcash_primitives.workspace = true
+zcash_protocol.workspace = true
+zeroize.workspace = true
+zip32.workspace = true
+
+[dev-dependencies]
+assert_matches.workspace = true
+tempfile.workspace = true
+rand = { workspace = true, features = ["thread_rng", "chacha"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "rt-multi-thread"] }
+zakura-wallet-scan = { path = "../../wallet-scan", features = ["test-dependencies"] }
+zakura-wallet-store = { path = "../../wallet-store", features = ["test-dependencies"] }
+zakura-wallet-sync = { path = "../../wallet-sync", features = ["test-dependencies"] }

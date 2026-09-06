@@ -14,6 +14,7 @@
 #![deny(unsafe_code)]
 
 mod build;
+pub mod circuit;
 pub mod crossing;
 mod error;
 pub mod fee;
