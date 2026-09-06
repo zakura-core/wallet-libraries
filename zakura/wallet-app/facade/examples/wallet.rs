@@ -18,6 +18,10 @@ use std::{path::PathBuf, time::Duration};
 
 use zakura_wallet_facade::{NetworkKind, Wallet, WalletConfig, mnemonic};
 
+fn flag(name: &str) -> bool {
+    std::env::args().any(|a| a == name)
+}
+
 fn arg(name: &str) -> Option<String> {
     let mut args = std::env::args();
     while let Some(a) = args.next() {
@@ -53,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // A wallet being restored has history to find, so it starts
                 // where it is told, or from the earliest possible height.
                 Some(_) => wallet.import_wallet(&seed, birthday)?,
-                None if arg("--phrase").is_some() => wallet.import_wallet(&seed, None)?,
+                None if flag("--phrase") => wallet.import_wallet(&seed, None)?,
                 // A new wallet has no history, so it starts at the tip.
                 None => wallet.create_wallet(&seed)?,
             };
@@ -64,7 +68,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!("address   {}", wallet.next_address(account, None)?);
-    println!("watching  {} transparent addresses", wallet.watched_transparent_addresses()?);
+
+    // Transparent funds going unseen looks exactly like having none, so say
+    // what is being looked for and what the server answers.
+    let watched = wallet.transparent_addresses(account)?;
+    println!("watching  {} transparent addresses", watched.len());
+    if flag("--utxos") {
+        for address in &watched {
+            println!("            {address}");
+        }
+        match wallet.transparent_utxos(account) {
+            Ok(utxos) if utxos.is_empty() => {
+                println!("  the server reports nothing unspent at any of them")
+            }
+            Ok(utxos) => {
+                for (address, value, height) in utxos {
+                    println!("  unspent   {value:>12} at {address} (block {height})");
+                }
+            }
+            Err(e) => println!("  the server could not be asked: {e}"),
+        }
+    }
 
     wallet.start_sync()?;
     println!("\nsyncing for {seconds}s…");

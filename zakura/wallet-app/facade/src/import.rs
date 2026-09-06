@@ -83,6 +83,56 @@ impl Wallet {
         self.create_account(seed, 0, birthday.unwrap_or_else(|| self.earliest_birthday()))
     }
 
+    /// Returns the transparent addresses the wallet watches for an account,
+    /// with whatever the server says is unspent at each.
+    ///
+    /// A diagnostic, and one worth having: transparent funds going unseen looks
+    /// exactly like having none, so the only way to tell them apart is to ask
+    /// what the wallet is actually looking for and what the server actually
+    /// answers. A missing address here means the gap limit did not reach it.
+    pub fn transparent_addresses(&self, account: u32) -> Result<Vec<String>, Error> {
+        self.with_reader(|db| Ok(db.transparent_addresses(Self::account_id(account))?))
+    }
+
+    /// Asks the server what is unspent at the wallet's transparent addresses.
+    ///
+    /// This is the same request the recovery sweep makes, run on demand so that
+    /// "no transparent funds" can be told apart from "not looked for".
+    pub fn transparent_utxos(&self, account: u32) -> Result<Vec<(String, u64, u32)>, Error> {
+        let addresses = self.transparent_addresses(account)?;
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let from = self
+            .accounts()?
+            .into_iter()
+            .find(|a| a.id == account)
+            .map(|a| a.birthday)
+            .unwrap_or_else(|| self.earliest_birthday());
+
+        let url = self.config.lightwalletd_url.clone();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::Source(format!("could not start a runtime: {e}")))?;
+
+        runtime.block_on(async move {
+            let source = zakura_wallet_lwd::LightwalletdSource::connect(&url).await?;
+            let utxos = zakura_wallet_sync::ChainSource::address_utxos(
+                &source,
+                addresses,
+                BlockHeight::from_u32(from),
+            )
+            .await
+            .map_err(|e| Error::Source(e.to_string()))?;
+
+            Ok(utxos
+                .into_iter()
+                .map(|u| (u.address, u.value, u32::from(u.height)))
+                .collect())
+        })
+    }
+
     /// Imports a watch-only account from a unified full viewing key.
     ///
     /// The result can see everything and sign nothing, which is what a viewing
