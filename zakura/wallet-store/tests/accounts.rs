@@ -170,10 +170,13 @@ fn issued_addresses_are_recorded() {
     db.next_address(&params(), id, KeyScope::External, Some(h(555)))
         .unwrap();
 
+    // Only the address that was handed out is exposed; the rest of the window
+    // is derived and waiting, which is what makes it a window.
     let (scope, exposed): (u8, Option<u32>) = db
         .connection()
         .query_row(
-            "SELECT key_scope, exposed_at_height FROM cache.addresses",
+            "SELECT key_scope, exposed_at_height FROM cache.addresses
+             WHERE exposed_at_height IS NOT NULL",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -196,11 +199,20 @@ fn the_two_scopes_have_independent_address_sequences() {
 
     // Both start from the beginning of their own space.
     assert_eq!(external, internal);
-    let count: u32 = db
+
+    // One address handed out per scope, and the rest of each window still
+    // waiting. The window is derived when the account is created, because a
+    // transparent output arrives at an address or is never seen at all — so
+    // "how many addresses exist" is not "how many have been issued".
+    let exposed: u32 = db
         .connection()
-        .query_row("SELECT COUNT(*) FROM cache.addresses", [], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM cache.addresses WHERE exposed_at_height IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
-    assert_eq!(count, 2);
+    assert_eq!(exposed, 2, "one issued in each scope");
 }
 
 #[test]
@@ -350,4 +362,67 @@ fn an_empty_account_has_a_zero_balance() {
     let id = db.create_account(&params(), &seed(1), zip32(0), h(100)).unwrap();
     assert_eq!(db.total_balance(id).unwrap(), Default::default());
     assert!(db.history(id, 10).unwrap().is_empty());
+}
+
+#[test]
+fn issuing_an_address_consumes_the_window_rather_than_stepping_over_it() {
+    // The window is a run of addresses the wallet has already derived and is
+    // watching, waiting to be handed out. Issuing has to take the lowest one
+    // that has not been: taking the highest plus one would leave the wallet
+    // watching addresses it never issues, and issuing addresses past where
+    // another wallet restoring the same seed would stop looking — which is how
+    // funds become invisible to the wallet that owns them.
+    let mut db = test_db().unwrap();
+    let id = db.create_account(&params(), &seed(1), zip32(0), h(100)).unwrap();
+
+    let derived: u32 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM cache.addresses WHERE key_scope = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(derived > 1, "creating an account derives a window to hand out");
+
+    // Issue several, and watch them come out consecutively from zero.
+    let mut issued = Vec::new();
+    for _ in 0..3 {
+        let (_, index) = db
+            .next_address(&params(), id, KeyScope::External, Some(h(200)))
+            .unwrap();
+        issued.push(index);
+    }
+
+    let mut expected = zip32::DiversifierIndex::new();
+    for index in &issued {
+        assert_eq!(*index, expected, "addresses are handed out in order from zero");
+        expected.increment().unwrap();
+    }
+
+    // Each one is now exposed, and nothing else is.
+    let exposed: u32 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM cache.addresses
+             WHERE key_scope = 0 AND exposed_at_height IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(exposed, 3, "exactly the three that were handed out");
+
+    // And issuing did not derive a pile of new rows past the window.
+    let after: u32 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM cache.addresses WHERE key_scope = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        after, derived,
+        "issuing consumes the window; widening it is the gap logic's job"
+    );
 }

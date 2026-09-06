@@ -90,18 +90,35 @@ fn the_default_limits_are_below_the_bip44_convention() {
 }
 
 #[test]
-fn a_fresh_account_needs_a_full_window() {
+fn a_fresh_account_starts_with_a_full_window() {
+    // Creating an account derives the window immediately. A transparent output
+    // is recognised only if its address existed before the block carrying it
+    // was scanned, so an account that had to be told to derive first would miss
+    // anything paid to it in the meantime.
     let mut db = test_db().unwrap();
     let id = account(&mut db);
     let limits = GapLimits::default();
 
     let state = db.gap_state(id, KeyScope::External).unwrap();
-    assert_eq!(state.highest_known, None);
-    assert_eq!(state.remaining, 0);
-    assert!(state.needs_widening(limits.external));
+    assert_eq!(
+        state.highest_known,
+        Some(limits.external - 1),
+        "the whole window is derived up front"
+    );
+    assert_eq!(state.highest_used, None, "and none of it has been paid yet");
+    assert!(!state.needs_widening(limits.external));
 
+    assert!(
+        db.addresses_to_generate(id, KeyScope::External, &limits)
+            .unwrap()
+            .is_empty(),
+        "a window that is already full needs nothing generated"
+    );
+
+    // An account with no window at all is what actually needs one.
+    let bare = AccountId(999);
     let to_generate = db
-        .addresses_to_generate(id, KeyScope::External, &limits)
+        .addresses_to_generate(bare, KeyScope::External, &limits)
         .unwrap();
     assert_eq!(to_generate, (0..10).collect::<Vec<_>>());
 }
@@ -187,17 +204,15 @@ fn the_two_scopes_have_independent_windows() {
     let id = account(&mut db);
     let limits = GapLimits::default();
 
-    watch(&mut db, id, KeyScope::External, 10);
-    assert!(
-        db.addresses_to_generate(id, KeyScope::External, &limits)
-            .unwrap()
-            .is_empty()
+    // Both windows are derived at creation, at their own widths.
+    assert_eq!(
+        db.gap_state(id, KeyScope::External).unwrap().highest_known,
+        Some(limits.external - 1)
     );
     assert_eq!(
-        db.addresses_to_generate(id, KeyScope::Internal, &limits)
-            .unwrap(),
-        (0..5).collect::<Vec<_>>(),
-        "the internal scope is untouched by external addresses"
+        db.gap_state(id, KeyScope::Internal).unwrap().highest_known,
+        Some(limits.internal - 1),
+        "the internal window is narrower, and separate"
     );
 }
 
@@ -205,10 +220,7 @@ fn the_two_scopes_have_independent_windows() {
 fn recording_an_address_twice_does_not_duplicate_it() {
     let mut db = test_db().unwrap();
     let id = account(&mut db);
-    watch(&mut db, id, KeyScope::External, 3);
-    watch(&mut db, id, KeyScope::External, 3);
-
-    let count: u32 = db
+    let before: u32 = db
         .connection()
         .query_row(
             "SELECT COUNT(*) FROM cache.addresses WHERE key_scope = 0",
@@ -216,7 +228,22 @@ fn recording_an_address_twice_does_not_duplicate_it() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(count, 3);
+
+    // Recording the same indices again must not add rows. Idempotence is what
+    // lets the window be topped up after every batch without the table growing
+    // a copy of itself each time.
+    watch(&mut db, id, KeyScope::External, 3);
+    watch(&mut db, id, KeyScope::External, 3);
+
+    let after: u32 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM cache.addresses WHERE key_scope = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(after, before, "re-recording derived addresses adds nothing");
 }
 
 

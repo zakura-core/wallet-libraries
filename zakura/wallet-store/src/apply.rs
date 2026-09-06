@@ -229,7 +229,14 @@ fn put_transaction(
             (txid, block_height, tx_index, mined_height)
          VALUES (:txid, :height, :index, :height)
          ON CONFLICT (txid) DO UPDATE SET
-            block_height = :height, tx_index = :index, mined_height = :height"
+            block_height = :height, tx_index = :index, mined_height = :height,
+            -- Cleared whenever a transaction becomes mined. It records proof
+            -- the transaction was *not* mined, the schema forbids holding both,
+            -- and a transaction can be reported missing by a server that has
+            -- not seen it yet and then mined a moment later. Without this the
+            -- scan of the block carrying it fails a CHECK and the range never
+            -- completes.
+            confirmed_unmined_at_height = NULL"
     ))?
     .execute(named_params![
         ":txid": txid.as_ref(),

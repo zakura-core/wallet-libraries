@@ -679,3 +679,86 @@ fn a_provably_dead_spend_gives_its_note_back() {
         .unwrap();
     assert_eq!(spends, 1, "the spend attempt is history, not a mistake to erase");
 }
+
+#[test]
+fn a_transaction_reported_missing_can_still_be_mined() {
+    // The sequence is ordinary, not adversarial: a wallet broadcasts a payment,
+    // asks a server about it before the server has seen it, is told it does not
+    // exist, and the transaction mines a moment later.
+    //
+    // `confirmed_unmined_at_height` records proof the transaction was not
+    // mined, and the schema forbids holding that alongside a mined height. So
+    // whichever write learns the transaction is mined has to retract the proof.
+    // Without that, scanning the block carrying it fails a CHECK constraint and
+    // the range never finishes — the wallet stops syncing entirely.
+    use zakura_wallet_core::enhanced::TransactionStatus;
+
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let alice = fvk_from_seed(1);
+    let keys = ScanKeys::from_accounts([(zakura_wallet_scan::AccountId(1), alice.clone())]);
+
+    let mut chain = ChainBuilder::new(START);
+    let mut txid = None;
+    chain.block(|b| {
+        txid = Some(b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice, KeyScope::External, 100);
+        }));
+    });
+    let txid = zcash_protocol::TxId::from_bytes(txid.unwrap().into());
+
+    // The wallet knows of the transaction before scanning reaches it, and a
+    // server says it does not have it.
+    db.connection()
+        .execute(
+            "INSERT INTO cache.transactions (txid, target_height, expiry_height)
+             VALUES (:txid, :target, :expiry)",
+            rusqlite::named_params![
+                ":txid": txid.as_ref(),
+                ":target": START,
+                ":expiry": START + 40,
+            ],
+        )
+        .unwrap();
+    db.set_transaction_status(txid, TransactionStatus::NotFound, h(START))
+        .unwrap();
+
+    let recorded: Option<u32> = db
+        .connection()
+        .query_row(
+            "SELECT confirmed_unmined_at_height FROM cache.transactions WHERE txid = :txid",
+            rusqlite::named_params![":txid": txid.as_ref()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(recorded, Some(START), "the server's answer was recorded");
+
+    // Now it mines, and scanning finds it.
+    let batch = detect_batch(
+        &test_params(),
+        &keys,
+        &TransparentWatch::default(),
+        &NullifierSnapshot::default(),
+        &chain.anchor(),
+        chain.blocks(),
+    )
+    .unwrap();
+    db.put_batch(&test_params(), &batch)
+        .expect("scanning a transaction previously reported missing must not fail");
+
+    let (mined, unmined_proof): (Option<u32>, Option<u32>) = db
+        .connection()
+        .query_row(
+            "SELECT mined_height, confirmed_unmined_at_height
+             FROM cache.transactions WHERE txid = :txid",
+            rusqlite::named_params![":txid": txid.as_ref()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(mined, Some(START), "it is mined where the chain says");
+    assert_eq!(
+        unmined_proof, None,
+        "and the proof that it was not mined has been retracted"
+    );
+}

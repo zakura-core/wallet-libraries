@@ -34,13 +34,30 @@ pub struct Keys {
     pub sk: SpendingKey,
     /// The full viewing key derived from it.
     pub fvk: FullViewingKey,
+    /// The account's transparent spending key, if it has one.
+    ///
+    /// Absent for a wallet that holds no transparent funds, and for a
+    /// watch-only account. A proposal with transparent inputs is refused rather
+    /// than half-built when this is `None`.
+    pub transparent: Option<transparent::keys::AccountPrivKey>,
 }
 
 impl Keys {
     /// Derives both from a spending key.
     pub fn from_spending_key(sk: SpendingKey) -> Self {
         let fvk = FullViewingKey::from(&sk);
-        Self { sk, fvk }
+        Self {
+            sk,
+            fvk,
+            transparent: None,
+        }
+    }
+
+    /// Adds the transparent spending key, which is what lets transparent
+    /// outputs be spent or shielded.
+    pub fn with_transparent(mut self, key: transparent::keys::AccountPrivKey) -> Self {
+        self.transparent = Some(key);
+        self
     }
 }
 
@@ -291,8 +308,14 @@ pub fn transaction<R: Rng + CryptoRng>(
     mut rng: R,
 ) -> Result<zcash_primitives::transaction::Transaction, Error> {
     let unproven = bundles(request, &mut rng)?;
-    crate::transaction::assemble(
+    // A proposal carrying transparent inputs or a transparent payment produces
+    // a transparent bundle, which has to be present in the transaction *before*
+    // anything is signed: the shielded sighash covers the whole transaction,
+    // and each transparent input signs one computed for itself.
+    let transparent = transparent_bundle(request.proposal, request.keys.transparent.as_ref())?;
+    crate::transaction::assemble_with_transparent(
         unproven,
+        transparent,
         branch_id,
         expiry,
         request.keys,

@@ -78,6 +78,8 @@ pub struct SyncConfig {
     /// Ranges below this are left alone, which is how a caller asks for "just
     /// catch up to the tip" rather than a full recovery.
     pub min_priority: ScanPriority,
+    /// How transparent outputs are discovered.
+    pub transparent_discovery: TransparentDiscovery,
     /// How many transactions one enhancement step may fetch.
     ///
     /// A cap rather than "drain it": a step that ran until the queue emptied
@@ -92,8 +94,31 @@ impl Default for SyncConfig {
             budget: ByteBudget::MOBILE,
             min_priority: ScanPriority::Historic,
             enhance_batch: 16,
+            transparent_discovery: TransparentDiscovery::SweepOnRestore,
         }
     }
+}
+
+/// How the wallet finds transparent outputs it did not see arrive.
+///
+/// Detection from compact blocks needs the address to have been derived before
+/// the block was scanned. Recovery runs from the tip downwards, so a receipt at
+/// a high address index near the tip is met while the window is still narrow,
+/// and the lower-index receipt that would have widened it arrives too late.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransparentDiscovery {
+    /// Match scripts against blocks and nothing else.
+    ///
+    /// Names no address to anybody. The cost is the case above: a restored
+    /// wallet may not see funds at addresses beyond the window it started with.
+    CompactOnly,
+    /// Ask the server once, when recovery completes, then compact-only.
+    ///
+    /// The request names the wallet's addresses, and a server can group them
+    /// into one wallet on that basis. That is a real disclosure, made once at
+    /// restore rather than continuously, in exchange for not silently missing
+    /// funds a restored wallet already holds.
+    SweepOnRestore,
 }
 
 /// What one call to [`SyncEngine::step`] did.
@@ -127,6 +152,8 @@ pub enum Step {
         /// a wallet synchronising. It stays queued and is asked again later.
         failed: usize,
     },
+    /// A transparent UTXO sweep reconciled the wallet's transparent outputs.
+    Swept,
     /// There is nothing left to scan.
     Idle,
     /// The source returned nothing for a range that is still queued.
@@ -192,6 +219,8 @@ pub struct SyncEngine<S: ChainSource, P> {
     db: Option<WalletDb>,
     keys: ScanKeys,
     watch_set: TransparentWatch,
+    /// Whether the transparent sweep has already run in this engine's life.
+    swept: bool,
     config: SyncConfig,
     status: watch::Sender<SyncStatus>,
     /// How far the *next* rewind will go, doubling after each one, and the
@@ -233,6 +262,7 @@ where
             db: Some(db),
             keys,
             watch_set,
+            swept: false,
             config,
             status: watch::Sender::new(SyncStatus::default()),
             rewind_depth: INITIAL_REWIND,
@@ -310,6 +340,13 @@ where
                     // history are recovery, not balance: fetching them ahead of
                     // blocks would delay the number somebody is actually
                     // looking at.
+                    // Recovery is finished: nothing is left to scan. This is
+                    // the one moment the sweep is worth its disclosure, and it
+                    // runs before enhancement so a restored balance is right
+                    // before its history is filled in.
+                    if self.sweep_transparent().await? {
+                        return Ok(Step::Swept);
+                    }
                     if let Some(step) = self.drain_requests(RequestScope::All).await? {
                         return Ok(step);
                     }
@@ -491,14 +528,24 @@ where
                     let covered = batch.blocks[0].height..(batch.end_anchor.height + 1);
                     let notes = batch.received_notes().count();
                     match db.put_batch(&params, &batch) {
-                        Ok(()) => (
-                            db,
-                            Ok(Applied::Scanned {
-                                covered,
-                                notes,
-                                detect,
-                            }),
-                        ),
+                        Ok(()) => {
+                            // Being paid at an address obliges the wallet to
+                            // watch further ahead, and the addresses it has to
+                            // add must exist before the *next* batch is
+                            // detected — a transparent output is matched by
+                            // script or not seen at all.
+                            if let Err(e) = widen_transparent_window(&mut db, &params) {
+                                return (db, Err(e));
+                            }
+                            (
+                                db,
+                                Ok(Applied::Scanned {
+                                    covered,
+                                    notes,
+                                    detect,
+                                }),
+                            )
+                        }
                         Err(e) => (db, Err(Error::from(e))),
                     }
                 }
@@ -618,6 +665,7 @@ where
                     summary.notes += notes;
                 }
                 Step::Rewound { .. } => summary.rewinds += 1,
+                Step::Swept => summary.swept = true,
                 Step::Enhanced {
                     applied, failed, ..
                 } => {
@@ -721,6 +769,88 @@ where
             failed,
         }))
     }
+}
+
+impl<S, P> SyncEngine<S, P>
+where
+    S: ChainSource + Send + Sync + 'static,
+    P: Parameters + Clone + Send + 'static,
+{
+    /// Reconciles transparent outputs against the server, once per run.
+    ///
+    /// Returns whether it did anything, so the caller can report it as a step.
+    async fn sweep_transparent(&mut self) -> Result<bool, Error> {
+        if self.config.transparent_discovery != TransparentDiscovery::SweepOnRestore
+            || self.swept
+        {
+            return Ok(false);
+        }
+        // Marked before the request rather than after: a sweep that fails must
+        // not be retried on every step, because each attempt names the wallet's
+        // addresses to the server again.
+        self.swept = true;
+
+        let Some(tip) = self.db().chain_tip()? else {
+            return Ok(false);
+        };
+
+        let watch = self.db().transparent_watch()?;
+        if watch.addresses.is_empty() {
+            return Ok(false);
+        }
+
+        let params = self.params.clone();
+        let accounts = self.db().accounts(&params)?;
+        let mut acted = false;
+
+        for account in accounts {
+            let addresses = self.db().transparent_addresses(account.id)?;
+            if addresses.is_empty() {
+                continue;
+            }
+            // From the account's birthday: below it there is nothing of this
+            // account's to find, and asking about more than necessary widens
+            // what the server learns for no gain.
+            let from = account.birthday;
+            let utxos = self
+                .source
+                .address_utxos(addresses, from)
+                .await
+                .map_err(|e| Error::Source(SourceError::new(e)))?;
+
+            let swept: Vec<_> = utxos
+                .into_iter()
+                .map(|u| zakura_wallet_store::SweptOutput {
+                    address: u.address,
+                    txid: u.txid,
+                    output_index: u.output_index,
+                    script: u.script,
+                    value: u.value,
+                    height: u.height,
+                })
+                .collect();
+
+            self.db_mut().apply_utxo_sweep(account.id, from, tip, &swept)?;
+            acted = true;
+        }
+
+        Ok(acted)
+    }
+}
+
+/// Keeps every account's window of unused transparent addresses full.
+///
+/// Cheap when nothing moved: the gap query finds the window already wide enough
+/// and derives nothing.
+fn widen_transparent_window<P: Parameters>(
+    db: &mut zakura_wallet_store::WalletDb,
+    params: &P,
+) -> Result<(), Error> {
+    let limits = zakura_wallet_store::GapLimits::default();
+    for account in db.accounts(params)? {
+        db.maintain_transparent_addresses(params, account.id, &limits)?;
+    }
+    Ok(())
 }
 
 /// Combines the caller-supplied watch set with the wallet's stored addresses.
@@ -932,6 +1062,8 @@ pub struct SyncSummary {
     pub notes: usize,
     /// How many times a continuity failure forced a rewind.
     pub rewinds: usize,
+    /// Whether a transparent sweep ran during this run.
+    pub swept: bool,
     /// How many transactions were fetched whole and folded in.
     pub enhanced: usize,
     /// How many transactions the source could not be asked about.

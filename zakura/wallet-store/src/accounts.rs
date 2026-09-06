@@ -252,11 +252,20 @@ pub(crate) fn next_address<P: Parameters>(
 ) -> Result<(UnifiedAddress, DiversifierIndex), Error> {
     let account = get(conn, params, id)?.ok_or(Error::NoSuchAccount { id })?;
 
-    let next: Option<Vec<u8>> = conn
+    // The next address to hand out is the lowest one already derived that has
+    // not been handed out yet. The wallet keeps a window of those precisely so
+    // one is ready, and taking the highest index plus one would step over the
+    // whole window: the wallet would watch addresses it never issues and issue
+    // addresses beyond where another wallet restoring the same seed would look.
+    //
+    // The encoding is big-endian for exactly this reason — byte order is
+    // numeric order, so `MIN` over the blob is `MIN` over the index.
+    let unexposed: Option<Vec<u8>> = conn
         .query_row(
             &format!(
-                "SELECT MAX(diversifier_index_be) FROM {CACHE_SCHEMA}.addresses
-                 WHERE account_id = :account AND key_scope = :scope"
+                "SELECT MIN(diversifier_index_be) FROM {CACHE_SCHEMA}.addresses
+                 WHERE account_id = :account AND key_scope = :scope
+                   AND exposed_at_height IS NULL"
             ),
             named_params![":account": id.0, ":scope": scope.code()],
             |row| row.get(0),
@@ -264,17 +273,36 @@ pub(crate) fn next_address<P: Parameters>(
         .optional()?
         .flatten();
 
-    let start = match next {
-        None => DiversifierIndex::new(),
-        Some(bytes) => {
-            let mut index = decode_diversifier_index(&bytes)?;
-            index.increment().map_err(|_| {
-                Error::Serialization(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "the account has exhausted its diversifier space",
-                ))
-            })?;
-            index
+    let start = match unexposed {
+        Some(bytes) => decode_diversifier_index(&bytes)?,
+        // Nothing unexposed: either the window was never filled, or every
+        // address in it has been handed out. Continue past the highest.
+        None => {
+            let highest: Option<Vec<u8>> = conn
+                .query_row(
+                    &format!(
+                        "SELECT MAX(diversifier_index_be) FROM {CACHE_SCHEMA}.addresses
+                         WHERE account_id = :account AND key_scope = :scope"
+                    ),
+                    named_params![":account": id.0, ":scope": scope.code()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+
+            match highest {
+                None => DiversifierIndex::new(),
+                Some(bytes) => {
+                    let mut index = decode_diversifier_index(&bytes)?;
+                    index.increment().map_err(|_| {
+                        Error::Serialization(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "the account has exhausted its diversifier space",
+                        ))
+                    })?;
+                    index
+                }
+            }
         }
     };
 
@@ -295,7 +323,17 @@ pub(crate) fn next_address<P: Parameters>(
             "INSERT INTO {CACHE_SCHEMA}.addresses
                 (account_id, key_scope, diversifier_index_be, unified_address, exposed_at_height)
              VALUES (:account, :scope, :index, :address, :exposed)
-             ON CONFLICT (account_id, key_scope, diversifier_index_be) DO NOTHING"
+             ON CONFLICT (account_id, key_scope, diversifier_index_be) DO UPDATE SET
+                unified_address = :address,
+                -- Handing out an address is what exposes it, and the row will
+                -- usually already exist because the window derived it first.
+                -- `DO NOTHING` would leave it looking un-issued for ever, so
+                -- the gap would never advance and the same address would be
+                -- handed out again.
+                exposed_at_height = MIN(
+                    IFNULL(exposed_at_height, IFNULL(:exposed, 0)),
+                    IFNULL(:exposed, 0)
+                )"
         ),
         named_params![
             ":account": id.0,

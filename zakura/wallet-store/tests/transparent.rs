@@ -57,13 +57,21 @@ fn an_account_derives_a_full_window_of_watchable_addresses() {
     let (mut db, id) = wallet();
     let limits = GapLimits::default();
 
+    // Creating the account derived the window; there is nothing left to add.
+    // Waiting to be asked would leave a gap between the account existing and
+    // the wallet watching anything, and a payment arriving in that gap is one
+    // it can never recognise afterwards.
     let added = db
         .maintain_transparent_addresses(&params(), id, &limits)
         .expect("the account has a transparent key");
-    assert_eq!(added, (limits.external + limits.internal) as usize);
+    assert_eq!(added, 0, "creating the account already filled the window");
 
     let addresses = watched_addresses(&db);
-    assert_eq!(addresses.len(), added);
+    assert_eq!(
+        addresses.len(),
+        (limits.external + limits.internal) as usize,
+        "both scopes are watched, at their own widths"
+    );
 
     // Real addresses, not placeholders, and all distinct: two indices deriving
     // the same address would mean the derivation is not doing anything.
@@ -75,11 +83,12 @@ fn an_account_derives_a_full_window_of_watchable_addresses() {
         "mainnet transparent addresses are t-addresses"
     );
 
-    // Idempotent: running it again with nothing used adds nothing.
+    // Idempotent, which is what lets it run after every batch.
     let again = db
         .maintain_transparent_addresses(&params(), id, &limits)
         .unwrap();
     assert_eq!(again, 0, "a full window needs no widening");
+    assert_eq!(watched_addresses(&db).len(), addresses.len());
 }
 
 #[test]

@@ -219,6 +219,13 @@ fn put_tx_data(
          ON CONFLICT (txid) DO UPDATE SET
             expiry_height = IFNULL(:expiry, expiry_height),
             mined_height  = IFNULL(:mined, mined_height),
+            -- Cleared only when this write is what mines it. Learning a
+            -- transaction is mined contradicts the earlier proof that it was
+            -- not, and the schema forbids keeping both.
+            confirmed_unmined_at_height = CASE
+                WHEN :mined IS NOT NULL THEN NULL
+                ELSE confirmed_unmined_at_height
+            END,
             target_height = IFNULL(:target, target_height),
             fee           = IFNULL(:fee, fee),
             created_time  = IFNULL(:created, created_time),

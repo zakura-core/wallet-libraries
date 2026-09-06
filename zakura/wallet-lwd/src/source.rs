@@ -5,7 +5,7 @@ use std::{fmt, ops::Range, sync::Arc};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use zakura_wallet_core::{BlockAnchor, CompactBlock};
 use zakura_wallet_sync::{
-    ByteBudget, ChainSource, ChainTip, Direction, FetchedTransaction,
+    ByteBudget, ChainSource, ChainTip, Direction, FetchedTransaction, SweptUtxo,
     SubtreeRoot as SyncSubtreeRoot, estimated_size,
 };
 use zcash_protocol::{TxId, consensus::BlockHeight};
@@ -434,6 +434,14 @@ impl ChainSource for LightwalletdSource {
         Ok(blocks)
     }
 
+    async fn address_utxos(
+        &self,
+        addresses: Vec<String>,
+        start: BlockHeight,
+    ) -> Result<Vec<SweptUtxo>, Self::Error> {
+        self.fetch_address_utxos(addresses, start).await
+    }
+
     async fn transaction(
         &self,
         txid: TxId,
@@ -529,23 +537,6 @@ fn is_unknown_transaction(status: &tonic::Status) -> bool {
         || message.contains("transaction not found")
 }
 
-/// One unspent transparent output, as a server reported it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SweptUtxo {
-    /// The address it pays.
-    pub address: String,
-    /// The transaction that created it.
-    pub txid: TxId,
-    /// Its index in that transaction's outputs.
-    pub output_index: u32,
-    /// The `scriptPubKey`.
-    pub script: Vec<u8>,
-    /// Its value in zatoshis.
-    pub value: u64,
-    /// The height it was mined at.
-    pub height: BlockHeight,
-}
-
 impl LightwalletdSource {
     /// Asks the server which of these addresses currently hold unspent outputs.
     ///
@@ -555,7 +546,7 @@ impl LightwalletdSource {
     /// continuously. What it buys is the one thing local script matching cannot
     /// do: find outputs at addresses the wallet had not yet derived when the
     /// blocks carrying them were scanned.
-    pub async fn address_utxos(
+    async fn fetch_address_utxos(
         &self,
         addresses: Vec<String>,
         start: BlockHeight,

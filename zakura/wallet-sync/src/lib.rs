@@ -27,7 +27,7 @@ pub use engine::{Step, SyncConfig, SyncEngine, SyncSummary, Timings, direction_f
 pub use error::Error;
 pub use progress::{Ratio, SyncPhase, SyncStatus};
 pub use source::{
-    ByteBudget, ChainSource, ChainTip, Direction, FetchedTransaction, SourceError, SubtreeRoot,
+    ByteBudget, ChainSource, ChainTip, Direction, FetchedTransaction, SourceError, SubtreeRoot, SweptUtxo,
     TransactionStatus, estimated_size,
 };
 

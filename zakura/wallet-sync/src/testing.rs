@@ -42,6 +42,7 @@ struct Inner {
     /// Subtree roots the server would serve, by pool.
     roots: std::collections::BTreeMap<zakura_wallet_core::pool::PoolId, Vec<crate::SubtreeRoot>>,
     transactions: std::collections::BTreeMap<zcash_protocol::TxId, crate::FetchedTransaction>,
+    utxos: Vec<crate::SweptUtxo>,
 }
 
 impl InMemoryChain {
@@ -53,6 +54,7 @@ impl InMemoryChain {
                 anchor: Some(anchor),
                 roots: Default::default(),
                 transactions: Default::default(),
+                utxos: Vec::new(),
             })),
             served: Arc::new(AtomicUsize::new(0)),
             tx_served: Arc::new(AtomicUsize::new(0)),
@@ -96,6 +98,14 @@ impl InMemoryChain {
             .expect("the chain lock is not poisoned")
             .transactions
             .insert(txid, crate::FetchedTransaction { raw, status });
+    }
+
+    /// Gives the server unspent transparent outputs to report.
+    pub fn with_utxos(&self, utxos: Vec<crate::SweptUtxo>) {
+        self.inner
+            .lock()
+            .expect("the chain lock is not poisoned")
+            .utxos = utxos;
     }
 
     /// Returns how many transactions have been asked for.
@@ -217,6 +227,20 @@ impl ChainSource for InMemoryChain {
         Ok(out)
     }
 
+    async fn address_utxos(
+        &self,
+        addresses: Vec<String>,
+        _start: BlockHeight,
+    ) -> Result<Vec<crate::SweptUtxo>, Self::Error> {
+        let inner = self.inner.lock().expect("the chain lock is not poisoned");
+        Ok(inner
+            .utxos
+            .iter()
+            .filter(|u| addresses.contains(&u.address))
+            .cloned()
+            .collect())
+    }
+
     async fn transaction(
         &self,
         txid: zcash_protocol::TxId,
@@ -296,6 +320,14 @@ impl ChainSource for IncoherentChain {
         Ok(blocks)
     }
 
+    async fn address_utxos(
+        &self,
+        addresses: Vec<String>,
+        start: BlockHeight,
+    ) -> Result<Vec<crate::SweptUtxo>, Self::Error> {
+        self.inner.address_utxos(addresses, start).await
+    }
+
     async fn transaction(
         &self,
         txid: zcash_protocol::TxId,
@@ -346,6 +378,14 @@ impl ChainSource for FailingChain {
         _budget: ByteBudget,
         _direction: Direction,
     ) -> Result<Vec<CompactBlock>, Self::Error> {
+        Err(Unavailable)
+    }
+
+    async fn address_utxos(
+        &self,
+        _addresses: Vec<String>,
+        _start: BlockHeight,
+    ) -> Result<Vec<crate::SweptUtxo>, Self::Error> {
         Err(Unavailable)
     }
 
@@ -413,6 +453,17 @@ impl ChainSource for UnservedTransactions {
     ) -> Result<Vec<CompactBlock>, Self::Error> {
         self.inner
             .fetch(range, budget, direction)
+            .await
+            .map_err(|_| Unavailable)
+    }
+
+    async fn address_utxos(
+        &self,
+        addresses: Vec<String>,
+        start: BlockHeight,
+    ) -> Result<Vec<crate::SweptUtxo>, Self::Error> {
+        self.inner
+            .address_utxos(addresses, start)
             .await
             .map_err(|_| Unavailable)
     }

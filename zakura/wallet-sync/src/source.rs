@@ -126,6 +126,21 @@ pub trait ChainSource {
         limit: u32,
     ) -> impl Future<Output = Result<Vec<SubtreeRoot>, Self::Error>> + Send;
 
+    /// Returns the unspent transparent outputs at these addresses, from
+    /// `start` onwards.
+    ///
+    /// This is the one request in the wallet that names its own addresses to a
+    /// server, which can group them into a single wallet on that basis alone.
+    /// It exists because local script matching cannot find an output at an
+    /// address the wallet had not yet derived when the block carrying it was
+    /// scanned — the restoring case — and it is meant to be asked once, not
+    /// continuously.
+    fn address_utxos(
+        &self,
+        addresses: Vec<String>,
+        start: BlockHeight,
+    ) -> impl Future<Output = Result<Vec<SweptUtxo>, Self::Error>> + Send;
+
     /// Returns a whole transaction by identifier, or a definite negative.
     ///
     /// This is what enhancement runs on, and it answers both questions the
@@ -198,4 +213,21 @@ impl std::error::Error for SourceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.0.as_ref())
     }
+}
+
+/// One unspent transparent output, as a source reported it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SweptUtxo {
+    /// The address it pays.
+    pub address: String,
+    /// The transaction that created it.
+    pub txid: TxId,
+    /// Its index in that transaction's outputs.
+    pub output_index: u32,
+    /// The `scriptPubKey`.
+    pub script: Vec<u8>,
+    /// Its value in zatoshis.
+    pub value: u64,
+    /// The height it was mined at.
+    pub height: BlockHeight,
 }

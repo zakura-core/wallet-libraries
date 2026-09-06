@@ -250,7 +250,15 @@ impl WalletDb {
         account_index: zip32::AccountId,
         birthday: BlockHeight,
     ) -> Result<zakura_wallet_core::AccountId, Error> {
-        self.transactionally(|tx| accounts::create(tx, params, seed, account_index, birthday))
+        let id = self.transactionally(|tx| {
+            accounts::create(tx, params, seed, account_index, birthday)
+        })?;
+        // A transparent output is recognised only if its address was derived
+        // *before* the block carrying it is scanned — there is no trial
+        // decryption to find one afterwards. An account whose window was never
+        // filled watches nothing, so this is not an optimisation.
+        self.maintain_transparent_addresses(params, id, &GapLimits::default())?;
+        Ok(id)
     }
 
     /// Imports a watch-only account from a unified full viewing key.
@@ -260,7 +268,9 @@ impl WalletDb {
         ufvk: &zcash_keys::keys::UnifiedFullViewingKey,
         birthday: BlockHeight,
     ) -> Result<zakura_wallet_core::AccountId, Error> {
-        self.transactionally(|tx| accounts::import(tx, params, ufvk, birthday))
+        let id = self.transactionally(|tx| accounts::import(tx, params, ufvk, birthday))?;
+        self.maintain_transparent_addresses(params, id, &GapLimits::default())?;
+        Ok(id)
     }
 
     /// Returns an account.
@@ -432,6 +442,28 @@ impl WalletDb {
         })
     }
 
+    /// Returns an account's watched transparent addresses, encoded.
+    ///
+    /// This is what a UTXO sweep names to a server, so it is deliberately one
+    /// account's addresses rather than the whole wallet's: asking about two
+    /// accounts together tells the server they belong to the same person.
+    pub fn transparent_addresses(
+        &self,
+        account: zakura_wallet_core::AccountId,
+    ) -> Result<Vec<String>, Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT transparent_address FROM {schema}.addresses
+             WHERE account_id = :account AND transparent_address IS NOT NULL
+             ORDER BY key_scope, transparent_child_index",
+            schema = schema::CACHE_SCHEMA,
+        ))?;
+        let rows = stmt.query_map(
+            named_params![":account": account.0],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Returns the outpoints of transparent outputs the wallet believes are
     /// still unspent, which is what lets a spend of one be recognised.
     pub(crate) fn unspent_outpoints(&self) -> Result<Vec<transparent::bundle::OutPoint>, Error> {
@@ -551,7 +583,11 @@ impl WalletDb {
                         "INSERT INTO {schema}.transactions (txid, mined_height)
                          VALUES (:txid, :height)
                          ON CONFLICT (txid) DO UPDATE SET
-                            mined_height = IFNULL(mined_height, :height)",
+                            mined_height = IFNULL(mined_height, :height),
+                            -- A sweep only ever reports mined outputs, so this
+                            -- write always contradicts any earlier proof the
+                            -- transaction was unmined.
+                            confirmed_unmined_at_height = NULL",
                         schema = schema::CACHE_SCHEMA,
                     ),
                     rusqlite::named_params![
