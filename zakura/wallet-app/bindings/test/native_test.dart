@@ -49,6 +49,7 @@ void main() {
   });
 
   _failureTests(bindings: () => bindings, dir: () => dir, built: built);
+  _importTests(bindings: () => bindings, dir: () => dir, built: built);
 
   Future<void> open() => bindings.open(
         directory: dir.path,
@@ -209,4 +210,96 @@ void _failureTests({
       expect(await b.syncFailure(), contains('127.0.0.1'));
     },
   );
+}
+
+/// Restoring a wallet, through the real bridge to the real Rust wallet.
+void _importTests({
+  required NativeBindings Function() bindings,
+  required Directory Function() dir,
+  required bool built,
+}) {
+  final skip =
+      !built ? 'run: cargo build -p zakura_wallet_bridge --release' : null;
+
+  test(skip: skip, 'the same phrase restores the same wallet', () async {
+    final b = bindings();
+    await b.open(
+      directory: dir().path,
+      lightwalletdUrl: 'https://127.0.0.1:1/',
+      mainnet: false,
+    );
+    final phrase = await b.generateMnemonic();
+    final id = await b.importAccount(phrase: phrase, birthday: 2500000);
+    final address = await b.nextAddress(id);
+
+    // A second wallet, in its own files, restored from the same words.
+    final other = Directory.systemTemp.createTempSync('zakura-restore-');
+    addTearDown(() => other.deleteSync(recursive: true));
+    await b.open(
+      directory: other.path,
+      lightwalletdUrl: 'https://127.0.0.1:1/',
+      mainnet: false,
+    );
+    final restored = await b.importAccount(phrase: phrase, birthday: 2500000);
+
+    expect(await b.nextAddress(restored), address,
+        reason: 'the same seed must issue the same address');
+  });
+
+  test(skip: skip, 'an unknown birthday scans from the earliest height',
+      () async {
+    final b = bindings();
+    await b.open(
+      directory: dir().path,
+      lightwalletdUrl: 'https://127.0.0.1:1/',
+      mainnet: false,
+    );
+    await b.importAccount(phrase: await b.generateMnemonic());
+
+    final accounts = await b.accounts();
+    expect(accounts.single.birthday, await b.earliestBirthday());
+  });
+
+  /// Two accounts sharing a viewing key would double every balance.
+  test(skip: skip, 'importing the same wallet twice is refused', () async {
+    final b = bindings();
+    await b.open(
+      directory: dir().path,
+      lightwalletdUrl: 'https://127.0.0.1:1/',
+      mainnet: false,
+    );
+    final phrase = await b.generateMnemonic();
+    await b.importAccount(phrase: phrase, birthday: 2500000);
+
+    await expectLater(
+      b.importAccount(phrase: phrase, birthday: 2500000),
+      throwsA(
+        isA<ZakuraException>().having(
+          (e) => e.code,
+          'code',
+          ZakuraErrorCode.accountExists,
+        ),
+      ),
+    );
+    expect((await b.accounts()).length, 1);
+  });
+
+  test(skip: skip, 'a bad phrase is refused', () async {
+    final b = bindings();
+    await b.open(
+      directory: dir().path,
+      lightwalletdUrl: 'https://127.0.0.1:1/',
+      mainnet: false,
+    );
+    await expectLater(
+      b.importAccount(phrase: 'nonsense words here'),
+      throwsA(
+        isA<ZakuraException>().having(
+          (e) => e.code,
+          'code',
+          ZakuraErrorCode.badMnemonic,
+        ),
+      ),
+    );
+  });
 }

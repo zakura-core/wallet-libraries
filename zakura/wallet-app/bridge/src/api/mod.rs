@@ -82,14 +82,66 @@ pub fn open(
     Ok(())
 }
 
-/// Creates an account from a seed phrase, and returns its identifier.
+/// Creates a new wallet from a seed phrase, and returns its account.
+///
+/// For a wallet that has never existed before. Its birthday is the current
+/// chain tip, because an account created now cannot have been paid earlier —
+/// so there is nothing below the tip worth scanning. If the server cannot be
+/// reached the earliest possible height is used instead: slower, and never
+/// wrong in the direction that loses money.
 ///
 /// The seed is derived, used and dropped. Only the viewing key is stored, so
-/// the ability to spend never sits in the same file as the ability to see.
-pub fn create_account(phrase: String, birthday: u32) -> Result<u32, ApiError> {
+/// the ability to spend never sits in the same file as the ability to see —
+/// which is also why the phrase has to be supplied again to send.
+pub fn create_account(phrase: String, birthday: Option<u32>) -> Result<u32, ApiError> {
     let wallet = wallet()?;
     let seed = mnemonic::to_seed(&phrase, "")?;
-    Ok(wallet.create_account(&seed, 0, birthday)?)
+    match birthday {
+        Some(height) => Ok(wallet.create_account(&seed, 0, height)?),
+        None => Ok(wallet.create_wallet(&seed)?),
+    }
+}
+
+/// Restores an existing wallet from its seed phrase.
+///
+/// `birthday` is the height below which the wallet is known to have no history.
+/// Leaving it unset means "not known", and scans from [`earliest_birthday`]
+/// rather than guessing: a guess that is too high skips the blocks the money
+/// arrived in, and the wallet then shows a balance that is simply missing
+/// funds, with nothing to say so.
+///
+/// Fails with the `AccountExists` code if this wallet is already here. Two
+/// accounts sharing a viewing key would see the same notes and double every
+/// balance.
+pub fn import_account(phrase: String, birthday: Option<u32>) -> Result<u32, ApiError> {
+    let wallet = wallet()?;
+    let seed = mnemonic::to_seed(&phrase, "")?;
+    Ok(wallet.import_wallet(&seed, birthday)?)
+}
+
+/// Imports a watch-only account from a unified full viewing key.
+///
+/// It can see everything and sign nothing. Sending from it is refused with the
+/// `WatchOnly` code.
+pub fn import_viewing_key(key: String, birthday: Option<u32>) -> Result<u32, ApiError> {
+    Ok(wallet()?.import_viewing_key(&key, birthday)?)
+}
+
+/// Returns the earliest height an account on this network could have history
+/// at.
+///
+/// What an unknown birthday falls back to, and what to offer somebody who does
+/// not know theirs.
+pub fn earliest_birthday() -> Result<u32, ApiError> {
+    Ok(wallet()?.earliest_birthday())
+}
+
+/// Asks the server for the current chain tip.
+///
+/// Useful for showing somebody restoring what the range of sensible birthdays
+/// is.
+pub fn chain_tip() -> Result<u32, ApiError> {
+    Ok(wallet()?.fetch_chain_tip()?)
 }
 
 /// Returns every account, in creation order.

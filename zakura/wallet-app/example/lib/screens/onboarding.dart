@@ -3,51 +3,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:zakura_state/zakura_state.dart';
 import 'package:zakura_ui/zakura_ui.dart';
 
-/// Creating a wallet, and showing the phrase that is the wallet.
-class OnboardingScreen extends ConsumerStatefulWidget {
+/// Getting into a wallet: a new one, or one that already exists.
+///
+/// Thin by construction. Which of the two paths is showing is the controller's
+/// state, and every message somebody reads comes from there too, so there is
+/// nothing here to get wrong.
+class OnboardingScreen extends ConsumerWidget {
   /// Creates the onboarding screen.
   const OnboardingScreen({super.key});
 
   @override
-  ConsumerState<OnboardingScreen> createState() => _OnboardingScreenState();
-}
-
-class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
-  String? _phrase;
-  bool _busy = false;
-  String? _error;
-
-  Future<void> _generate() async {
-    setState(() => _busy = true);
-    final phrase = await ref.read(walletProvider).generateMnemonic();
-    if (mounted) setState(() => (_phrase = phrase, _busy = false));
-  }
-
-  Future<void> _create() async {
-    final phrase = _phrase;
-    if (phrase == null) return;
-    setState(() => (_busy = true, _error = null));
-
-    final wallet = ref.read(walletProvider);
-    try {
-      await wallet.open(
-        directory: '/tmp/zakura-example',
-        lightwalletdUrl: 'https://us.zec.stardust.rest:443',
-      );
-      // A brand new wallet has no history below the current tip, so its
-      // birthday is now. Restoring an existing one is where a real wallet has
-      // to ask, because guessing too high loses transactions.
-      final id = await wallet.createAccount(phrase: phrase, birthday: 2900000);
-      ref.read(activeAccountProvider.notifier).select(id);
-      await wallet.startSync();
-    } on Object catch (e) {
-      if (mounted) setState(() => (_error = e.toString(), _busy = false));
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = ZakuraTheme.of(context);
+    final state = ref.watch(onboardingControllerProvider);
+    final controller = ref.read(onboardingControllerProvider.notifier);
 
     return SafeArea(
       child: Padding(
@@ -66,38 +35,117 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                   ),
                   SizedBox(height: theme.spacing.sm),
                   Text(
-                    'A minimal wallet built on the Zakura core.',
+                    _subtitle(state),
                     style: theme.typography.body
                         .copyWith(color: theme.colors.textMuted),
                   ),
                   SizedBox(height: theme.spacing.xxl),
-                  if (_error != null) ...[
-                    ZakuraNotice(message: _error!, isError: true),
-                    SizedBox(height: theme.spacing.lg),
-                  ],
-                  if (_phrase == null)
-                    ZakuraButton(
-                      label: 'Create a wallet',
-                      busy: _busy,
-                      expand: true,
-                      onPressed: _busy ? null : _generate,
-                    )
-                  else ...[
-                    SeedPhraseView(words: _phrase!.split(RegExp(r'\s+'))),
-                    SizedBox(height: theme.spacing.lg),
-                    ZakuraButton(
-                      label: 'I have written it down',
-                      busy: _busy,
-                      expand: true,
-                      onPressed: _busy ? null : _create,
-                    ),
-                  ],
+                  switch (state) {
+                    OnboardingIdle() => _Choice(controller: controller),
+                    OnboardingCreated(:final phrase) =>
+                      _Created(phrase: phrase, controller: controller),
+                    OnboardingImporting() =>
+                      _Importing(state: state, controller: controller),
+                    // Replaced by the home screen as soon as the account is
+                    // selected; this is the frame in between.
+                    OnboardingDone() => const ZakuraEmptyState(
+                        title: 'Opening your wallet…',
+                      ),
+                  },
                 ],
               ),
             ),
           ),
         ),
       ),
+    );
+  }
+
+  static String _subtitle(OnboardingState state) => switch (state) {
+        OnboardingCreated() =>
+          'Write these words down before you go on. They are the only way back '
+              'into this wallet.',
+        OnboardingImporting() =>
+          'Enter the seed phrase of a wallet you already have.',
+        _ => 'A minimal wallet built on the Zakura core.',
+      };
+}
+
+class _Choice extends StatelessWidget {
+  const _Choice({required this.controller});
+
+  final OnboardingController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = ZakuraTheme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ZakuraButton(
+          label: 'Create a wallet',
+          expand: true,
+          onPressed: controller.beginCreate,
+        ),
+        SizedBox(height: theme.spacing.md),
+        ZakuraButton(
+          label: 'Restore an existing wallet',
+          kind: ZakuraButtonKind.secondary,
+          expand: true,
+          onPressed: controller.beginImport,
+        ),
+      ],
+    );
+  }
+}
+
+class _Created extends StatelessWidget {
+  const _Created({required this.phrase, required this.controller});
+
+  final String phrase;
+  final OnboardingController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = ZakuraTheme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SeedPhraseView(words: phrase.split(RegExp(r'\s+'))),
+        SizedBox(height: theme.spacing.lg),
+        ZakuraButton(
+          label: 'I have written it down',
+          expand: true,
+          onPressed: controller.confirmCreate,
+        ),
+        SizedBox(height: theme.spacing.md),
+        ZakuraButton(
+          label: 'Back',
+          kind: ZakuraButtonKind.secondary,
+          expand: true,
+          onPressed: controller.reset,
+        ),
+      ],
+    );
+  }
+}
+
+class _Importing extends StatelessWidget {
+  const _Importing({required this.state, required this.controller});
+
+  final OnboardingImporting state;
+  final OnboardingController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return ImportForm(
+      busy: state.busy,
+      error: state.error,
+      earliestBirthday: state.earliestBirthday,
+      chainTip: state.chainTip,
+      onImport: (phrase, birthday) =>
+          controller.import(phrase: phrase, birthday: birthday),
+      onCancel: controller.reset,
     );
   }
 }

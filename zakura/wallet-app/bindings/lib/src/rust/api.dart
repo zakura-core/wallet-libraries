@@ -34,15 +34,58 @@ Future<void> open({
   mainnet: mainnet,
 );
 
-/// Creates an account from a seed phrase, and returns its identifier.
+/// Creates a new wallet from a seed phrase, and returns its account.
+///
+/// For a wallet that has never existed before. Its birthday is the current
+/// chain tip, because an account created now cannot have been paid earlier —
+/// so there is nothing below the tip worth scanning. If the server cannot be
+/// reached the earliest possible height is used instead: slower, and never
+/// wrong in the direction that loses money.
 ///
 /// The seed is derived, used and dropped. Only the viewing key is stored, so
-/// the ability to spend never sits in the same file as the ability to see.
-Future<int> createAccount({required String phrase, required int birthday}) =>
-    RustLib.instance.api.crateApiCreateAccount(
-      phrase: phrase,
-      birthday: birthday,
-    );
+/// the ability to spend never sits in the same file as the ability to see —
+/// which is also why the phrase has to be supplied again to send.
+Future<int> createAccount({required String phrase, int? birthday}) => RustLib
+    .instance
+    .api
+    .crateApiCreateAccount(phrase: phrase, birthday: birthday);
+
+/// Restores an existing wallet from its seed phrase.
+///
+/// `birthday` is the height below which the wallet is known to have no history.
+/// Leaving it unset means "not known", and scans from [`earliest_birthday`]
+/// rather than guessing: a guess that is too high skips the blocks the money
+/// arrived in, and the wallet then shows a balance that is simply missing
+/// funds, with nothing to say so.
+///
+/// Fails with the `AccountExists` code if this wallet is already here. Two
+/// accounts sharing a viewing key would see the same notes and double every
+/// balance.
+Future<int> importAccount({required String phrase, int? birthday}) => RustLib
+    .instance
+    .api
+    .crateApiImportAccount(phrase: phrase, birthday: birthday);
+
+/// Imports a watch-only account from a unified full viewing key.
+///
+/// It can see everything and sign nothing. Sending from it is refused with the
+/// `WatchOnly` code.
+Future<int> importViewingKey({required String key, int? birthday}) =>
+    RustLib.instance.api.crateApiImportViewingKey(key: key, birthday: birthday);
+
+/// Returns the earliest height an account on this network could have history
+/// at.
+///
+/// What an unknown birthday falls back to, and what to offer somebody who does
+/// not know theirs.
+Future<int> earliestBirthday() =>
+    RustLib.instance.api.crateApiEarliestBirthday();
+
+/// Asks the server for the current chain tip.
+///
+/// Useful for showing somebody restoring what the range of sensible birthdays
+/// is.
+Future<int> chainTip() => RustLib.instance.api.crateApiChainTip();
 
 /// Returns every account, in creation order.
 Future<List<ApiAccount>> accounts() => RustLib.instance.api.crateApiAccounts();

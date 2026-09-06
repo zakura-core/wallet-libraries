@@ -74,6 +74,15 @@ enum ZakuraErrorCode {
   /// apart. An arbitrary amount is not one of them.
   notCanonicalDenomination(17),
 
+  /// The wallet already holds this account.
+  ///
+  /// Two accounts sharing a viewing key would see the same notes and double
+  /// every balance, so importing the same wallet twice is refused.
+  accountExists(18),
+
+  /// A unified full viewing key could not be read.
+  badViewingKey(19),
+
   /// A code this build does not know.
   ///
   /// Present so that a newer facade adding a code does not crash an older

@@ -60,6 +60,10 @@ pub enum ErrorCode {
     AlreadySyncing = 16,
     /// The amount cannot leave the Orchard pool in one step.
     NotCanonicalDenomination = 17,
+    /// The wallet already holds this account.
+    AccountExists = 18,
+    /// A unified full viewing key could not be read.
+    BadViewingKey = 19,
 }
 
 impl ErrorCode {
@@ -140,6 +144,14 @@ pub enum Error {
     /// asked for, and a crossing that is nearly the right shape stands out from
     /// the ones that are.
     NotCanonicalDenomination(String),
+    /// The wallet already holds this account.
+    ///
+    /// Two accounts sharing an incoming viewing key would see the same notes,
+    /// and every balance would be counted twice. Importing a phrase the wallet
+    /// already has is a mistake worth naming rather than a second wallet.
+    AccountExists,
+    /// A unified full viewing key could not be read.
+    BadViewingKey(String),
 }
 
 impl Error {
@@ -163,6 +175,8 @@ impl Error {
             Error::Build(_) => ErrorCode::Build,
             Error::AlreadySyncing => ErrorCode::AlreadySyncing,
             Error::NotCanonicalDenomination(_) => ErrorCode::NotCanonicalDenomination,
+            Error::AccountExists => ErrorCode::AccountExists,
+            Error::BadViewingKey(_) => ErrorCode::BadViewingKey,
         }
     }
 }
@@ -207,6 +221,8 @@ impl fmt::Display for Error {
                 f,
                 "that amount cannot be paid from the Orchard pool: {why}"
             ),
+            Error::AccountExists => f.write_str("this wallet has already been imported"),
+            Error::BadViewingKey(e) => write!(f, "that is not a valid viewing key: {e}"),
         }
     }
 }
@@ -225,6 +241,7 @@ impl From<zakura_wallet_store::Error> for Error {
             // them would make an unknown account look like a database failure
             // depending on which method was called.
             StoreError::UnknownAccount(id) => Error::NoSuchAccount(id.0),
+            StoreError::AccountExists => Error::AccountExists,
             other => Error::Storage(other.to_string()),
         }
     }

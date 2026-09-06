@@ -30,6 +30,7 @@ Widget host(
 
 void main() {
   _syncFailureTests();
+  _importTests();
   _transparentAndCrossingTests();
   group('BalanceCard', () {
     testWidgets('shows the spendable figure', (tester) async {
@@ -452,6 +453,144 @@ void _transparentAndCrossingTests() {
       );
       expect(find.textContaining('set amount'), findsOneWidget);
       expect(find.textContaining('Spending 1 note'), findsNothing);
+    });
+  });
+}
+
+/// Restoring a wallet. The birthday is the field somebody can get
+/// catastrophically wrong, so most of this is about that.
+void _importTests() {
+  group('ImportForm', () {
+    ImportForm form({
+      void Function(String, int?)? onImport,
+      bool busy = false,
+      String? error,
+      int? tip,
+      int? earliest,
+    }) =>
+        ImportForm(
+          busy: busy,
+          error: error,
+          chainTip: tip,
+          earliestBirthday: earliest,
+          onImport: onImport,
+        );
+
+    Future<void> type(WidgetTester tester, int field, String text) async {
+      final editables = find.byType(EditableText);
+      final state = tester.state<EditableTextState>(editables.at(field));
+      state.updateEditingValue(TextEditingValue(text: text));
+      await tester.pump();
+    }
+
+    testWidgets('an empty phrase is refused before anything is attempted',
+        (tester) async {
+      var called = false;
+      await tester.pumpWidget(host(form(onImport: (_, _) => called = true)));
+
+      await tester.tap(find.text('Restore wallet'));
+      await tester.pump();
+
+      expect(find.text('Enter your seed phrase'), findsOneWidget);
+      expect(called, isFalse);
+    });
+
+    /// A wrong word count is worth catching here, where it can say what is
+    /// wrong, rather than coming back as a checksum failure.
+    testWidgets('a phrase of the wrong length says so', (tester) async {
+      await tester.pumpWidget(host(form(onImport: (_, _) {})));
+      await type(tester, 0, 'one two three');
+      await tester.tap(find.text('Restore wallet'));
+      await tester.pump();
+
+      expect(find.textContaining('This has 3'), findsOneWidget);
+    });
+
+    testWidgets('a valid phrase with no birthday imports with none',
+        (tester) async {
+      String? phrase;
+      int? birthday = 999;
+      await tester.pumpWidget(
+        host(form(onImport: (p, b) {
+          phrase = p;
+          birthday = b;
+        })),
+      );
+      await type(tester, 0, List.filled(24, 'abandon').join(' '));
+      await tester.tap(find.text('Restore wallet'));
+      await tester.pump();
+
+      expect(phrase, isNotNull);
+      expect(
+        birthday,
+        isNull,
+        reason: 'an unknown birthday must stay unknown, not become a guess',
+      );
+    });
+
+    /// The direction that loses money. A birthday after the money arrived skips
+    /// the blocks it arrived in, and the wallet then shows a balance that is
+    /// simply short, with nothing to say why.
+    testWidgets('a birthday above the tip is refused', (tester) async {
+      var called = false;
+      await tester.pumpWidget(
+        host(form(tip: 3000000, onImport: (_, _) => called = true)),
+      );
+      await type(tester, 0, List.filled(24, 'abandon').join(' '));
+      await type(tester, 1, '4000000');
+      await tester.tap(find.text('Restore wallet'));
+      await tester.pump();
+
+      expect(find.textContaining('above the current block'), findsOneWidget);
+      expect(called, isFalse);
+    });
+
+    testWidgets('a birthday within range is passed through', (tester) async {
+      int? birthday;
+      await tester.pumpWidget(
+        host(form(tip: 3000000, onImport: (_, b) => birthday = b)),
+      );
+      await type(tester, 0, List.filled(24, 'abandon').join(' '));
+      await type(tester, 1, '2500000');
+      await tester.tap(find.text('Restore wallet'));
+      await tester.pump();
+
+      expect(birthday, 2500000);
+    });
+
+    testWidgets('nonsense in the birthday is refused', (tester) async {
+      await tester.pumpWidget(host(form(onImport: (_, _) {})));
+      await type(tester, 0, List.filled(24, 'abandon').join(' '));
+      await type(tester, 1, 'sometime last year');
+      await tester.tap(find.text('Restore wallet'));
+      await tester.pump();
+
+      expect(find.textContaining('Enter a block height'), findsOneWidget);
+    });
+
+    /// Leaving it blank has to read as the safe answer, because it is.
+    testWidgets('blank is offered as safe rather than lazy', (tester) async {
+      await tester.pumpWidget(host(form(earliest: 2800000)));
+      expect(find.textContaining('cannot miss anything'), findsOneWidget);
+      expect(find.textContaining('2800000'), findsOneWidget);
+    });
+
+    testWidgets('an error is shown where it will be read', (tester) async {
+      await tester.pumpWidget(host(form(error: 'Already here')));
+      expect(find.text('Already here'), findsOneWidget);
+    });
+
+    testWidgets('a busy form says what it is doing and cannot be resubmitted',
+        (tester) async {
+      var called = false;
+      await tester.pumpWidget(
+        host(form(busy: true, onImport: (_, _) => called = true)),
+      );
+      expect(find.text('Restoring…'), findsOneWidget);
+
+      await tester.tap(find.text('Restoring…'));
+      await tester.pump();
+      expect(called, isFalse);
     });
   });
 }

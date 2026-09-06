@@ -33,6 +33,7 @@
 
 pub mod address;
 mod config;
+mod import;
 mod error;
 pub mod keys;
 pub mod mnemonic;

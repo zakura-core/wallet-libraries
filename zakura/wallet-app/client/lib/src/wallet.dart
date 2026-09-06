@@ -70,14 +70,38 @@ class ZakuraWallet {
   /// [birthday] is the height below which the account has no history. Too high
   /// loses transactions; too low only costs scanning time, so when in doubt go
   /// lower.
-  Future<int> createAccount({
-    required String phrase,
-    required int birthday,
-  }) async {
+  Future<int> createAccount({required String phrase, int? birthday}) async {
     final id = await _bindings.createAccount(phrase: phrase, birthday: birthday);
     _changed.add(null);
     return id;
   }
+
+  /// Restores an existing wallet from its seed phrase.
+  ///
+  /// [birthday] is the height below which the wallet is known to have no
+  /// history. Leave it unset when it is not known: scanning from the earliest
+  /// possible height costs time, while a birthday that is too high loses
+  /// transactions and does so silently.
+  Future<int> importAccount({required String phrase, int? birthday}) async {
+    final id = await _bindings.importAccount(phrase: phrase, birthday: birthday);
+    _changed.add(null);
+    return id;
+  }
+
+  /// Imports a watch-only account from a unified full viewing key.
+  ///
+  /// It can see everything and sign nothing.
+  Future<int> importViewingKey({required String key, int? birthday}) async {
+    final id = await _bindings.importViewingKey(key: key, birthday: birthday);
+    _changed.add(null);
+    return id;
+  }
+
+  /// The earliest height an account on this network could have history at.
+  Future<int> earliestBirthday() => _bindings.earliestBirthday();
+
+  /// Asks the server for the current chain tip.
+  Future<int> chainTip() => _bindings.chainTip();
 
   /// Returns every account, in creation order.
   Future<List<Account>> accounts() => _bindings.accounts();

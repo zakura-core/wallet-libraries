@@ -15,6 +15,7 @@ export 'src/theme/theme.dart';
 export 'src/theme/tokens.dart';
 export 'src/widgets/balance_card.dart';
 export 'src/widgets/history_list.dart';
+export 'src/widgets/import_form.dart';
 export 'src/widgets/primitives.dart';
 export 'src/widgets/receive_card.dart';
 export 'src/widgets/seed_phrase_view.dart';

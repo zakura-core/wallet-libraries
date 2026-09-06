@@ -61,10 +61,7 @@ class FakeBindings implements ZakuraBindings {
   }
 
   @override
-  Future<int> createAccount({
-    required String phrase,
-    required int birthday,
-  }) async {
+  Future<int> createAccount({required String phrase, int? birthday}) async {
     _maybeThrow();
     if (!await validateMnemonic(phrase)) {
       throw const ZakuraException(
@@ -78,7 +75,7 @@ class FakeBindings implements ZakuraBindings {
     _accounts.add(
       Account(
         id: id,
-        birthday: birthday,
+        birthday: birthday ?? await chainTip(),
         canSpend: true,
         hdAccountIndex: _accounts.length,
       ),
@@ -181,6 +178,57 @@ class FakeBindings implements ZakuraBindings {
 
   @override
   Future<String?> syncFailure() async => failure;
+
+  /// Mirrors the store: the same viewing key cannot be held twice.
+  final Set<String> _imported = {};
+
+  @override
+  Future<int> importAccount({required String phrase, int? birthday}) async {
+    _maybeThrow();
+    if (!await validateMnemonic(phrase)) {
+      throw const ZakuraException(
+        ZakuraErrorCode.badMnemonic,
+        'not a valid seed phrase',
+      );
+    }
+    if (!_imported.add(phrase)) {
+      throw const ZakuraException(
+        ZakuraErrorCode.accountExists,
+        'this wallet has already been imported',
+      );
+    }
+    return createAccount(
+      phrase: phrase,
+      birthday: birthday ?? await earliestBirthday(),
+    );
+  }
+
+  @override
+  Future<int> importViewingKey({required String key, int? birthday}) async {
+    _maybeThrow();
+    if (!key.startsWith('uview')) {
+      throw const ZakuraException(
+        ZakuraErrorCode.badViewingKey,
+        'not a viewing key',
+      );
+    }
+    final id = _accounts.length + 1;
+    _accounts.add(
+      Account(
+        id: id,
+        birthday: birthday ?? await earliestBirthday(),
+        canSpend: false,
+        hdAccountIndex: null,
+      ),
+    );
+    return id;
+  }
+
+  @override
+  Future<int> earliestBirthday() async => 2000000;
+
+  @override
+  Future<int> chainTip() async => 3000000;
 
   @override
   Future<void> close() async {

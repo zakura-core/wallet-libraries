@@ -103,6 +103,20 @@ has nothing to call.
 **Mnemonics.** The core takes a raw seed. Generation, validation and wordlist
 handling stay in Rust so the app never handles entropy.
 
+**A birthday, and the asymmetry around it.** A birthday is the height below
+which an account has no history, and it is the one number a restore can get
+catastrophically wrong: too high and the wallet skips the blocks the money
+arrived in, then shows a balance that is simply short, with nothing on screen to
+suggest anything is missing. Too low only costs scanning time.
+
+That asymmetry is built into the API rather than left to whoever calls it. A new
+wallet is given the chain tip, because an account that did not exist a moment
+ago cannot have been paid earlier. A restore is given the height it is told, and
+the earliest height its pools could hold anything when it is told nothing — an
+unknown birthday stays unknown rather than becoming a guess. Importing a wallet
+the store already holds is refused: two accounts sharing an incoming viewing key
+would see the same notes and count every balance twice.
+
 **A seed to spending keys, and the test that seam has never had.** The store
 derives an account from a seed and drops it, keeping only the viewing key.
 `wallet-tx` needs a `SpendingKey`. Nothing bridges the two, and because every

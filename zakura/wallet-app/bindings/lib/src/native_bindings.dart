@@ -74,13 +74,22 @@ class NativeBindings implements ZakuraBindings {
       );
 
   @override
-  Future<int> createAccount({
-    required String phrase,
-    required int birthday,
-  }) =>
-      _translate(
-        () => rust.createAccount(phrase: phrase, birthday: birthday),
-      );
+  Future<int> createAccount({required String phrase, int? birthday}) =>
+      _translate(() => rust.createAccount(phrase: phrase, birthday: birthday));
+
+  @override
+  Future<int> importAccount({required String phrase, int? birthday}) =>
+      _translate(() => rust.importAccount(phrase: phrase, birthday: birthday));
+
+  @override
+  Future<int> importViewingKey({required String key, int? birthday}) =>
+      _translate(() => rust.importViewingKey(key: key, birthday: birthday));
+
+  @override
+  Future<int> earliestBirthday() => _translate(rust.earliestBirthday);
+
+  @override
+  Future<int> chainTip() => _translate(rust.chainTip);
 
   @override
   Future<List<Account>> accounts() => _translate(() async {

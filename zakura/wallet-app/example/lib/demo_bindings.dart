@@ -45,19 +45,21 @@ class DemoBindings implements ZakuraBindings {
   }) async {}
 
   @override
-  Future<int> createAccount({
-    required String phrase,
-    required int birthday,
-  }) async {
+  Future<int> createAccount({required String phrase, int? birthday}) async {
     if (!await validateMnemonic(phrase)) {
       throw const ZakuraException(
         ZakuraErrorCode.badMnemonic,
         'that is not a valid seed phrase',
       );
     }
-    final id = _accounts.length;
+    final id = _accounts.length + 1;
     _accounts.add(
-      Account(id: id, birthday: birthday, canSpend: true, hdAccountIndex: id),
+      Account(
+        id: id,
+        birthday: birthday ?? await chainTip(),
+        canSpend: true,
+        hdAccountIndex: _accounts.length,
+      ),
     );
     return id;
   }
@@ -198,6 +200,37 @@ class DemoBindings implements ZakuraBindings {
     );
     return SendReceipt(txid: txid, serverResponse: 'accepted');
   }
+
+  @override
+  Future<int> importAccount({required String phrase, int? birthday}) async {
+    if (!await validateMnemonic(phrase)) {
+      throw const ZakuraException(
+        ZakuraErrorCode.badMnemonic,
+        'that is not a valid seed phrase',
+      );
+    }
+    // A restore has history to find, so the demo starts behind the tip and
+    // shows the recovery it would really do.
+    _scanned = 2_900_000;
+    return createAccount(
+      phrase: phrase,
+      birthday: birthday ?? await earliestBirthday(),
+    );
+  }
+
+  @override
+  Future<int> importViewingKey({required String key, int? birthday}) async {
+    throw const ZakuraException(
+      ZakuraErrorCode.badViewingKey,
+      'the demo wallet has no viewing keys',
+    );
+  }
+
+  @override
+  Future<int> earliestBirthday() async => 2_800_000;
+
+  @override
+  Future<int> chainTip() async => _tip;
 
   @override
   Future<String?> syncFailure() async => null;

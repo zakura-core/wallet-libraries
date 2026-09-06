@@ -7,6 +7,7 @@
 library;
 
 export 'src/balance_provider.dart';
+export 'src/onboarding_controller.dart';
 export 'src/send_controller.dart';
 export 'src/sync_provider.dart';
 export 'src/wallet_provider.dart';

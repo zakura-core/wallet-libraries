@@ -84,6 +84,29 @@ reasons are in `docs/wallet_app.md`.
 - **Sending needs the seed**, because the wallet stores only viewing keys. It
   belongs in the platform keystore; the example does not do this.
 
+## Restoring a wallet
+
+Onboarding offers creating and restoring. The difference that matters is the
+birthday — the height below which a wallet has no history:
+
+- A **new** wallet starts at the chain tip. It cannot have been paid before it
+  existed, so there is nothing earlier worth scanning. With no server to ask it
+  falls back to the earliest possible height: slower, never wrong in the
+  direction that loses money.
+- A **restored** wallet takes the birthday it is given, and scans from the
+  earliest possible height when it is not given one. That asymmetry is
+  deliberate and enforced in the facade rather than left to callers: too high
+  and the wallet skips the blocks the money arrived in, then shows a balance
+  that is simply short with nothing on screen to say why. Too low only costs
+  time.
+
+Importing the same wallet twice is refused. Two accounts sharing a viewing key
+would see the same notes and double every balance.
+
+`import_viewing_key` restores a watch-only account from a unified full viewing
+key. It is exposed through the facade, the bridge and the client; the example's
+interface does not offer it.
+
 ## Next
 
 - Platform scaffolding beyond macOS. `example/` has only `macos/`; the other

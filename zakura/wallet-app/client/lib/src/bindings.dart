@@ -29,11 +29,30 @@ abstract interface class ZakuraBindings {
     required bool mainnet,
   });
 
-  /// Creates an account from a seed phrase, and returns its identifier.
-  Future<int> createAccount({
-    required String phrase,
-    required int birthday,
-  });
+  /// Creates a new wallet from a seed phrase, and returns its account.
+  ///
+  /// For a wallet that has never existed. Leaving [birthday] unset uses the
+  /// current chain tip, because an account created now cannot have been paid
+  /// earlier.
+  Future<int> createAccount({required String phrase, int? birthday});
+
+  /// Restores an existing wallet from its seed phrase.
+  ///
+  /// [birthday] is the height below which the wallet is known to have no
+  /// history. Leaving it unset means "not known" and scans from
+  /// [earliestBirthday] rather than guessing — a guess that is too high skips
+  /// the blocks the money arrived in, and the wallet then shows a balance
+  /// that is missing funds with nothing to say so.
+  Future<int> importAccount({required String phrase, int? birthday});
+
+  /// Imports a watch-only account from a unified full viewing key.
+  Future<int> importViewingKey({required String key, int? birthday});
+
+  /// The earliest height an account on this network could have history at.
+  Future<int> earliestBirthday();
+
+  /// Asks the server for the current chain tip.
+  Future<int> chainTip();
 
   /// Returns every account, in creation order.
   Future<List<Account>> accounts();
