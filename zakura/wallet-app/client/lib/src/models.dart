@@ -58,6 +58,65 @@ class Balance {
       Object.hash(spendable, pending, spentUnconfirmed, transparent);
 }
 
+/// Value, by where in the protocol it sat.
+///
+/// A total alone cannot answer what somebody actually wants to know about a
+/// transaction — whether it was private, and if so in which pool.
+class PoolAmounts {
+  /// Value in the Orchard pool.
+  final Zatoshi orchard;
+
+  /// Value in the Ironwood pool.
+  final Zatoshi ironwood;
+
+  /// Value on transparent addresses, which is to say in public.
+  final Zatoshi transparent;
+
+  const PoolAmounts({
+    this.orchard = Zatoshi.zero,
+    this.ironwood = Zatoshi.zero,
+    this.transparent = Zatoshi.zero,
+  });
+
+  /// The sum across every pool.
+  Zatoshi get total => orchard + ironwood + transparent;
+
+  /// Whether nothing moved anywhere.
+  bool get isZero => total.isZero;
+
+  /// The pools involved, in protocol order.
+  List<Pool> get pools => [
+        if (!transparent.isZero) Pool.transparent,
+        if (!orchard.isZero) Pool.orchard,
+        if (!ironwood.isZero) Pool.ironwood,
+      ];
+
+  @override
+  String toString() =>
+      'PoolAmounts(orchard: $orchard, ironwood: $ironwood, '
+      'transparent: $transparent)';
+}
+
+/// Where value sat in the protocol.
+enum Pool {
+  /// In public, on a transparent address.
+  transparent('Transparent'),
+
+  /// Shielded, in the Orchard pool.
+  orchard('Orchard'),
+
+  /// Shielded, in the Ironwood pool.
+  ironwood('Ironwood');
+
+  const Pool(this.label);
+
+  /// What to call it on screen.
+  final String label;
+
+  /// Whether value here is private.
+  bool get isShielded => this != Pool.transparent;
+}
+
 /// One transaction, as it affected this wallet.
 class HistoryEntry {
   /// The transaction's identifier, in protocol byte order.
@@ -78,13 +137,50 @@ class HistoryEntry {
   /// else, and showing it as money coming in would be wrong.
   final bool isChangeOnly;
 
+  /// What the wallet received, by where it landed.
+  final PoolAmounts receivedByPool;
+
+  /// What the wallet spent, by where it came from.
+  final PoolAmounts spentByPool;
+
   const HistoryEntry({
     required this.txid,
     required this.minedHeight,
     required this.received,
     required this.spent,
     required this.isChangeOnly,
+    this.receivedByPool = const PoolAmounts(),
+    this.spentByPool = const PoolAmounts(),
   });
+
+  /// Where this transaction's value moved, for somebody reading the list.
+  ///
+  /// The question behind it is whether the transaction was private, so a
+  /// transparent leg is never hidden behind a shielded one: a payment that
+  /// touched a transparent address was public in that leg however it ended up.
+  ///
+  /// Value leaving one pool and arriving in another is named as the crossing it
+  /// is, rather than as two unrelated facts.
+  String get poolLabel {
+    final from = spentByPool.pools;
+    final to = receivedByPool.pools;
+
+    if (from.isEmpty && to.isEmpty) return '';
+    if (from.isEmpty) return to.map((p) => p.label).join(' and ');
+    if (to.isEmpty) return from.map((p) => p.label).join(' and ');
+
+    // Change coming back to the pool it left is not a crossing, it is the same
+    // pool, and saying "Ironwood → Ironwood" would be noise.
+    if (from.length == 1 && to.length == 1 && from.first == to.first) {
+      return from.first.label;
+    }
+    return '${from.map((p) => p.label).join(' and ')} → '
+        '${to.map((p) => p.label).join(' and ')}';
+  }
+
+  /// Whether any part of this transaction was public.
+  bool get touchedTransparent =>
+      !receivedByPool.transparent.isZero || !spentByPool.transparent.isZero;
 
   /// Whether the chain has recorded this yet.
   bool get isPending => minedHeight == null;

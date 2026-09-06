@@ -738,12 +738,30 @@ impl SseDecode for crate::api::types::ApiHistoryEntry {
         let mut var_received = <u64>::sse_decode(deserializer);
         let mut var_spent = <u64>::sse_decode(deserializer);
         let mut var_isChangeOnly = <bool>::sse_decode(deserializer);
+        let mut var_receivedByPool = <crate::api::types::ApiPoolAmounts>::sse_decode(deserializer);
+        let mut var_spentByPool = <crate::api::types::ApiPoolAmounts>::sse_decode(deserializer);
         return crate::api::types::ApiHistoryEntry {
             txid: var_txid,
             mined_height: var_minedHeight,
             received: var_received,
             spent: var_spent,
             is_change_only: var_isChangeOnly,
+            received_by_pool: var_receivedByPool,
+            spent_by_pool: var_spentByPool,
+        };
+    }
+}
+
+impl SseDecode for crate::api::types::ApiPoolAmounts {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_orchard = <u64>::sse_decode(deserializer);
+        let mut var_ironwood = <u64>::sse_decode(deserializer);
+        let mut var_transparent = <u64>::sse_decode(deserializer);
+        return crate::api::types::ApiPoolAmounts {
+            orchard: var_orchard,
+            ironwood: var_ironwood,
+            transparent: var_transparent,
         };
     }
 }
@@ -1046,6 +1064,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::ApiHistoryEntry {
             self.received.into_into_dart().into_dart(),
             self.spent.into_into_dart().into_dart(),
             self.is_change_only.into_into_dart().into_dart(),
+            self.received_by_pool.into_into_dart().into_dart(),
+            self.spent_by_pool.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1058,6 +1078,28 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::types::ApiHistoryEntry>
     for crate::api::types::ApiHistoryEntry
 {
     fn into_into_dart(self) -> crate::api::types::ApiHistoryEntry {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::ApiPoolAmounts {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.orchard.into_into_dart().into_dart(),
+            self.ironwood.into_into_dart().into_dart(),
+            self.transparent.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::ApiPoolAmounts
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::ApiPoolAmounts>
+    for crate::api::types::ApiPoolAmounts
+{
+    fn into_into_dart(self) -> crate::api::types::ApiPoolAmounts {
         self
     }
 }
@@ -1200,6 +1242,17 @@ impl SseEncode for crate::api::types::ApiHistoryEntry {
         <u64>::sse_encode(self.received, serializer);
         <u64>::sse_encode(self.spent, serializer);
         <bool>::sse_encode(self.is_change_only, serializer);
+        <crate::api::types::ApiPoolAmounts>::sse_encode(self.received_by_pool, serializer);
+        <crate::api::types::ApiPoolAmounts>::sse_encode(self.spent_by_pool, serializer);
+    }
+}
+
+impl SseEncode for crate::api::types::ApiPoolAmounts {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u64>::sse_encode(self.orchard, serializer);
+        <u64>::sse_encode(self.ironwood, serializer);
+        <u64>::sse_encode(self.transparent, serializer);
     }
 }
 

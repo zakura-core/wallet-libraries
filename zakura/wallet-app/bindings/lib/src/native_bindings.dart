@@ -128,9 +128,17 @@ class NativeBindings implements ZakuraBindings {
               received: Zatoshi(e.received.toInt()),
               spent: Zatoshi(e.spent.toInt()),
               isChangeOnly: e.isChangeOnly,
+              receivedByPool: _pools(e.receivedByPool),
+              spentByPool: _pools(e.spentByPool),
             ),
         ];
       });
+
+  static PoolAmounts _pools(rust.ApiPoolAmounts a) => PoolAmounts(
+        orchard: Zatoshi(a.orchard.toInt()),
+        ironwood: Zatoshi(a.ironwood.toInt()),
+        transparent: Zatoshi(a.transparent.toInt()),
+      );
 
   @override
   Future<String> nextAddress(int account) =>

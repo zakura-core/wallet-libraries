@@ -48,6 +48,34 @@ impl Balance {
     }
 }
 
+/// Value, by where in the protocol it sat.
+///
+/// A total alone cannot answer what somebody actually wants to know about a
+/// transaction — whether it was private, and if so in which pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PoolAmounts {
+    /// Value in the Orchard pool.
+    pub orchard: u64,
+    /// Value in the Ironwood pool.
+    pub ironwood: u64,
+    /// Value on transparent addresses, which is to say in public.
+    pub transparent: u64,
+}
+
+impl PoolAmounts {
+    /// Returns the sum across every pool.
+    pub fn total(&self) -> u64 {
+        self.orchard
+            .saturating_add(self.ironwood)
+            .saturating_add(self.transparent)
+    }
+
+    /// Whether nothing moved anywhere.
+    pub fn is_zero(&self) -> bool {
+        self.total() == 0
+    }
+}
+
 /// One transaction, as it affected the wallet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryEntry {
@@ -67,6 +95,10 @@ pub struct HistoryEntry {
     /// A transaction that only returns change is the wallet paying somebody
     /// else, and showing it as an incoming payment would be wrong.
     pub is_change_only: bool,
+    /// What the wallet received, by where it landed.
+    pub received_by_pool: PoolAmounts,
+    /// What the wallet spent, by where it came from.
+    pub spent_by_pool: PoolAmounts,
 }
 
 impl HistoryEntry {
@@ -184,12 +216,21 @@ impl Wallet {
             Ok(db
                 .history(Self::account_id(account), limit)?
                 .into_iter()
-                .map(|e| HistoryEntry {
-                    txid: *e.txid.as_ref(),
-                    mined_height: e.mined_height.map(u32::from),
-                    received: e.received.into_u64(),
-                    spent: e.spent.into_u64(),
-                    is_change_only: e.is_change_only,
+                .map(|e| {
+                    let pools = |a: zakura_wallet_store::PoolAmounts| PoolAmounts {
+                        orchard: a.orchard.into_u64(),
+                        ironwood: a.ironwood.into_u64(),
+                        transparent: a.transparent.into_u64(),
+                    };
+                    HistoryEntry {
+                        txid: *e.txid.as_ref(),
+                        mined_height: e.mined_height.map(u32::from),
+                        received: e.received.into_u64(),
+                        spent: e.spent.into_u64(),
+                        is_change_only: e.is_change_only,
+                        received_by_pool: pools(e.received_by_pool),
+                        spent_by_pool: pools(e.spent_by_pool),
+                    }
                 })
                 .collect())
         })

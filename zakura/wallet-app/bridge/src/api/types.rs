@@ -66,6 +66,17 @@ pub struct ApiAccount {
     pub hd_account_index: Option<u32>,
 }
 
+/// Value, by where in the protocol it sat.
+#[derive(Debug, Clone, Copy)]
+pub struct ApiPoolAmounts {
+    /// Value in the Orchard pool.
+    pub orchard: u64,
+    /// Value in the Ironwood pool.
+    pub ironwood: u64,
+    /// Value on transparent addresses, which is to say in public.
+    pub transparent: u64,
+}
+
 /// One transaction, as it affected the wallet.
 #[derive(Debug, Clone)]
 pub struct ApiHistoryEntry {
@@ -79,6 +90,10 @@ pub struct ApiHistoryEntry {
     pub spent: u64,
     /// Whether everything received was change.
     pub is_change_only: bool,
+    /// What the wallet received, by where it landed.
+    pub received_by_pool: ApiPoolAmounts,
+    /// What the wallet spent, by where it came from.
+    pub spent_by_pool: ApiPoolAmounts,
 }
 
 /// What the engine is doing.

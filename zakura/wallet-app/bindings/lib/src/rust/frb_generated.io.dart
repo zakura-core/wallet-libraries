@@ -35,6 +35,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ApiHistoryEntry dco_decode_api_history_entry(dynamic raw);
 
   @protected
+  ApiPoolAmounts dco_decode_api_pool_amounts(dynamic raw);
+
+  @protected
   ApiSendReceipt dco_decode_api_send_receipt(dynamic raw);
 
   @protected
@@ -105,6 +108,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ApiHistoryEntry sse_decode_api_history_entry(SseDeserializer deserializer);
+
+  @protected
+  ApiPoolAmounts sse_decode_api_pool_amounts(SseDeserializer deserializer);
 
   @protected
   ApiSendReceipt sse_decode_api_send_receipt(SseDeserializer deserializer);
@@ -180,6 +186,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_api_history_entry(
     ApiHistoryEntry self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_api_pool_amounts(
+    ApiPoolAmounts self,
     SseSerializer serializer,
   );
 

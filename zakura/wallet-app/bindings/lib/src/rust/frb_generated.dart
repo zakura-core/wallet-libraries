@@ -751,14 +751,29 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ApiHistoryEntry dco_decode_api_history_entry(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return ApiHistoryEntry(
       txid: dco_decode_list_prim_u_8_strict(arr[0]),
       minedHeight: dco_decode_opt_box_autoadd_u_32(arr[1]),
       received: dco_decode_u_64(arr[2]),
       spent: dco_decode_u_64(arr[3]),
       isChangeOnly: dco_decode_bool(arr[4]),
+      receivedByPool: dco_decode_api_pool_amounts(arr[5]),
+      spentByPool: dco_decode_api_pool_amounts(arr[6]),
+    );
+  }
+
+  @protected
+  ApiPoolAmounts dco_decode_api_pool_amounts(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return ApiPoolAmounts(
+      orchard: dco_decode_u_64(arr[0]),
+      ironwood: dco_decode_u_64(arr[1]),
+      transparent: dco_decode_u_64(arr[2]),
     );
   }
 
@@ -955,12 +970,29 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_received = sse_decode_u_64(deserializer);
     var var_spent = sse_decode_u_64(deserializer);
     var var_isChangeOnly = sse_decode_bool(deserializer);
+    var var_receivedByPool = sse_decode_api_pool_amounts(deserializer);
+    var var_spentByPool = sse_decode_api_pool_amounts(deserializer);
     return ApiHistoryEntry(
       txid: var_txid,
       minedHeight: var_minedHeight,
       received: var_received,
       spent: var_spent,
       isChangeOnly: var_isChangeOnly,
+      receivedByPool: var_receivedByPool,
+      spentByPool: var_spentByPool,
+    );
+  }
+
+  @protected
+  ApiPoolAmounts sse_decode_api_pool_amounts(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_orchard = sse_decode_u_64(deserializer);
+    var var_ironwood = sse_decode_u_64(deserializer);
+    var var_transparent = sse_decode_u_64(deserializer);
+    return ApiPoolAmounts(
+      orchard: var_orchard,
+      ironwood: var_ironwood,
+      transparent: var_transparent,
     );
   }
 
@@ -1181,6 +1213,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_64(self.received, serializer);
     sse_encode_u_64(self.spent, serializer);
     sse_encode_bool(self.isChangeOnly, serializer);
+    sse_encode_api_pool_amounts(self.receivedByPool, serializer);
+    sse_encode_api_pool_amounts(self.spentByPool, serializer);
+  }
+
+  @protected
+  void sse_encode_api_pool_amounts(
+    ApiPoolAmounts self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_64(self.orchard, serializer);
+    sse_encode_u_64(self.ironwood, serializer);
+    sse_encode_u_64(self.transparent, serializer);
   }
 
   @protected

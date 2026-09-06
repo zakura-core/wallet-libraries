@@ -119,6 +119,12 @@ class HistoryTileModel {
   /// Whether the chain has recorded it yet.
   final bool pending;
 
+  /// Where the value moved: which pools, or that it was transparent.
+  final String pools;
+
+  /// Whether any part of it was public.
+  final bool touchedTransparent;
+
   /// Creates the model.
   const HistoryTileModel({
     required this.amount,
@@ -126,5 +132,7 @@ class HistoryTileModel {
     required this.subtitle,
     required this.incoming,
     required this.pending,
+    this.pools = '',
+    this.touchedTransparent = false,
   });
 }

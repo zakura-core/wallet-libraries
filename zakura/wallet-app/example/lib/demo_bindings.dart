@@ -117,6 +117,7 @@ class DemoBindings implements ZakuraBindings {
               received: const Zatoshi(25000000),
               spent: Zatoshi.zero,
               isChangeOnly: false,
+              receivedByPool: const PoolAmounts(ironwood: Zatoshi(25000000)),
             ),
             HistoryEntry(
               txid: List<int>.generate(32, (i) => (i * 13) % 256),
@@ -124,6 +125,9 @@ class DemoBindings implements ZakuraBindings {
               received: const Zatoshi(120000000),
               spent: Zatoshi.zero,
               isChangeOnly: false,
+              // A shielding: value that was public arriving in a pool.
+              receivedByPool: const PoolAmounts(ironwood: Zatoshi(120000000)),
+              spentByPool: const PoolAmounts(transparent: Zatoshi(120015000)),
             ),
             HistoryEntry(
               txid: List<int>.generate(32, (i) => (i * 29) % 256),
@@ -131,6 +135,8 @@ class DemoBindings implements ZakuraBindings {
               received: const Zatoshi(22500000),
               spent: const Zatoshi(40000000),
               isChangeOnly: true,
+              receivedByPool: const PoolAmounts(ironwood: Zatoshi(22500000)),
+              spentByPool: const PoolAmounts(ironwood: Zatoshi(40000000)),
             ),
           ]);
       }
@@ -211,6 +217,7 @@ class DemoBindings implements ZakuraBindings {
         received: Zatoshi.zero,
         spent: quote.total,
         isChangeOnly: false,
+        spentByPool: PoolAmounts(ironwood: quote.total),
       ),
     );
     return SendReceipt(txid: txid, serverResponse: 'accepted');

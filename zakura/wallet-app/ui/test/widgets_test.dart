@@ -30,6 +30,7 @@ Widget host(
 
 void main() {
   _syncFailureTests();
+  _poolTagTests();
   _emptyHistoryTests();
   _syncReasonTests();
   _importTests();
@@ -714,6 +715,79 @@ void _emptyHistoryTests() {
         host(const HistoryList(entries: [])),
       );
       expect(find.text('No transactions yet'), findsOneWidget);
+    });
+  });
+}
+
+/// Whether a payment was private, and in which pool, has to be on the row.
+void _poolTagTests() {
+  HistoryEntry entry({
+    PoolAmounts received = const PoolAmounts(),
+    PoolAmounts spent = const PoolAmounts(),
+  }) =>
+      HistoryEntry(
+        txid: List<int>.filled(32, 0),
+        minedHeight: 5,
+        received: received.total,
+        spent: spent.total,
+        isChangeOnly: false,
+        receivedByPool: received,
+        spentByPool: spent,
+      );
+
+  group('history pools', () {
+    testWidgets('a shielded receipt names its pool', (tester) async {
+      await tester.pumpWidget(
+        host(
+          SizedBox(
+            height: 400,
+            child: HistoryList(
+              entries: [
+                entry(received: const PoolAmounts(ironwood: Zatoshi(100000000))),
+              ],
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Ironwood'), findsOneWidget);
+      expect(find.text('Received'), findsOneWidget);
+    });
+
+    testWidgets('a public receipt is marked as such', (tester) async {
+      await tester.pumpWidget(
+        host(
+          SizedBox(
+            height: 400,
+            child: HistoryList(
+              entries: [
+                entry(
+                  received: const PoolAmounts(transparent: Zatoshi(100000000)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Transparent'), findsOneWidget);
+    });
+
+    testWidgets('a crossing is named as one', (tester) async {
+      await tester.pumpWidget(
+        host(
+          SizedBox(
+            height: 400,
+            child: HistoryList(
+              entries: [
+                entry(
+                  spent: const PoolAmounts(orchard: Zatoshi(100000000)),
+                  received: const PoolAmounts(ironwood: Zatoshi(90000000)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Orchard → Ironwood'), findsOneWidget);
     });
   });
 }

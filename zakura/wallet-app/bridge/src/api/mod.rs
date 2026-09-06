@@ -20,7 +20,7 @@ use zakura_wallet_facade::{
 };
 
 use types::{
-    ApiAccount, ApiBalance, ApiError, ApiHistoryEntry, ApiSendReceipt, ApiSpendQuote,
+    ApiAccount, ApiBalance, ApiError, ApiHistoryEntry, ApiPoolAmounts, ApiSendReceipt, ApiSpendQuote,
     ApiSyncPhase, ApiSyncProgress,
 };
 
@@ -177,12 +177,21 @@ pub fn history(account: u32, limit: u32) -> Result<Vec<ApiHistoryEntry>, ApiErro
     Ok(wallet()?
         .history(account, limit as usize)?
         .into_iter()
-        .map(|e| ApiHistoryEntry {
-            txid: e.txid.to_vec(),
-            mined_height: e.mined_height,
-            received: e.received,
-            spent: e.spent,
-            is_change_only: e.is_change_only,
+        .map(|e| {
+            let pools = |a: zakura_wallet_facade::PoolAmounts| ApiPoolAmounts {
+                orchard: a.orchard,
+                ironwood: a.ironwood,
+                transparent: a.transparent,
+            };
+            ApiHistoryEntry {
+                txid: e.txid.to_vec(),
+                mined_height: e.mined_height,
+                received: e.received,
+                spent: e.spent,
+                is_change_only: e.is_change_only,
+                received_by_pool: pools(e.received_by_pool),
+                spent_by_pool: pools(e.spent_by_pool),
+            }
         })
         .collect())
 }

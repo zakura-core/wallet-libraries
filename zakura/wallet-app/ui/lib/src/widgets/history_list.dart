@@ -40,6 +40,8 @@ class HistoryTile extends StatelessWidget {
           : 'Block ${entry.minedHeight}',
       incoming: incoming,
       pending: entry.isPending,
+      pools: entry.poolLabel,
+      touchedTransparent: entry.touchedTransparent,
     );
 
     final override = ZakuraUiOverridesScope.of(context).historyTile;
@@ -62,13 +64,31 @@ class HistoryTile extends StatelessWidget {
                         theme.typography.body.copyWith(color: theme.colors.text),
                   ),
                   SizedBox(height: theme.spacing.xs),
-                  Text(
-                    model.subtitle,
-                    style: theme.typography.caption.copyWith(
-                      color: model.pending
-                          ? theme.colors.pending
-                          : theme.colors.textMuted,
-                    ),
+                  Row(
+                    children: [
+                      if (model.pools.isNotEmpty) ...[
+                        // Whether a payment was private is the question behind
+                        // reading this list at all, so it is said on the row
+                        // rather than a screen deeper. A transparent leg is
+                        // marked, because it was public whatever else it was.
+                        _PoolTag(
+                          label: model.pools,
+                          public: model.touchedTransparent,
+                        ),
+                        SizedBox(width: theme.spacing.sm),
+                      ],
+                      Flexible(
+                        child: Text(
+                          model.subtitle,
+                          style: theme.typography.caption.copyWith(
+                            color: model.pending
+                                ? theme.colors.pending
+                                : theme.colors.textMuted,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -151,6 +171,40 @@ class HistoryList extends StatelessWidget {
           onTap: onTap == null ? null : () => onTap!(entry),
         );
       },
+    );
+  }
+}
+
+/// Says where a transaction's value sat.
+///
+/// Coloured by whether any of it was public rather than by which pool, because
+/// that is the distinction that matters to somebody scanning the list: the
+/// pools are both private and telling them apart is detail, while transparent
+/// is a different kind of thing entirely.
+class _PoolTag extends StatelessWidget {
+  const _PoolTag({required this.label, required this.public});
+
+  final String label;
+  final bool public;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = ZakuraTheme.of(context);
+    final colour = public ? theme.colors.pending : theme.colors.textMuted;
+
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: theme.spacing.sm,
+        vertical: 1,
+      ),
+      decoration: BoxDecoration(
+        color: colour.withValues(alpha: 0.12),
+        borderRadius: theme.radii.small,
+      ),
+      child: Text(
+        label,
+        style: theme.typography.caption.copyWith(color: colour),
+      ),
     );
   }
 }

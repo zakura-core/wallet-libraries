@@ -43,7 +43,7 @@ mod sync;
 
 pub use config::{NetworkKind, WalletConfig};
 pub use error::{Error, ErrorCode};
-pub use query::{AccountSummary, Balance, HistoryEntry};
+pub use query::{AccountSummary, Balance, HistoryEntry, PoolAmounts};
 pub use send::{SendReceipt, SpendQuote};
 pub use sync::{SyncPhase, SyncProgress};
 

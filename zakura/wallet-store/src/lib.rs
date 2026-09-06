@@ -42,7 +42,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 pub use accounts::Account;
 pub use gap::{GapLimits, GapState};
 pub use apply::{StoredNote, SubtreeRoot};
-pub use report::{Balance, HistoryEntry, SpendableUtxo, TransparentSpendPolicy};
+pub use report::{Balance, HistoryEntry, PoolAmounts, SpendableUtxo, TransparentSpendPolicy};
 pub use error::{Error, TreeError, VersionKind};
 pub use scan_queue::VERIFY_LOOKAHEAD;
 

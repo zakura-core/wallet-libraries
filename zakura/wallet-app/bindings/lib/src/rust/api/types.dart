@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
 
 /// An account the wallet holds.
 class ApiAccount {
@@ -133,12 +133,20 @@ class ApiHistoryEntry {
   /// Whether everything received was change.
   final bool isChangeOnly;
 
+  /// What the wallet received, by where it landed.
+  final ApiPoolAmounts receivedByPool;
+
+  /// What the wallet spent, by where it came from.
+  final ApiPoolAmounts spentByPool;
+
   const ApiHistoryEntry({
     required this.txid,
     this.minedHeight,
     required this.received,
     required this.spent,
     required this.isChangeOnly,
+    required this.receivedByPool,
+    required this.spentByPool,
   });
 
   @override
@@ -147,7 +155,9 @@ class ApiHistoryEntry {
       minedHeight.hashCode ^
       received.hashCode ^
       spent.hashCode ^
-      isChangeOnly.hashCode;
+      isChangeOnly.hashCode ^
+      receivedByPool.hashCode ^
+      spentByPool.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -158,7 +168,40 @@ class ApiHistoryEntry {
           minedHeight == other.minedHeight &&
           received == other.received &&
           spent == other.spent &&
-          isChangeOnly == other.isChangeOnly;
+          isChangeOnly == other.isChangeOnly &&
+          receivedByPool == other.receivedByPool &&
+          spentByPool == other.spentByPool;
+}
+
+/// Value, by where in the protocol it sat.
+class ApiPoolAmounts {
+  /// Value in the Orchard pool.
+  final BigInt orchard;
+
+  /// Value in the Ironwood pool.
+  final BigInt ironwood;
+
+  /// Value on transparent addresses, which is to say in public.
+  final BigInt transparent;
+
+  const ApiPoolAmounts({
+    required this.orchard,
+    required this.ironwood,
+    required this.transparent,
+  });
+
+  @override
+  int get hashCode =>
+      orchard.hashCode ^ ironwood.hashCode ^ transparent.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ApiPoolAmounts &&
+          runtimeType == other.runtimeType &&
+          orchard == other.orchard &&
+          ironwood == other.ironwood &&
+          transparent == other.transparent;
 }
 
 /// What came back from broadcasting.

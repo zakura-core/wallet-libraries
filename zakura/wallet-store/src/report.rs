@@ -190,6 +190,44 @@ pub(crate) fn transparent_balance(
     })
 }
 
+/// Value, by where in the protocol it sat.
+///
+/// A total alone cannot answer the question somebody actually has about a
+/// transaction — whether it was private, and if so in which pool — and a
+/// wallet that cannot say is asking them to take its word for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolAmounts {
+    /// Value in the Orchard pool.
+    pub orchard: Zatoshis,
+    /// Value in the Ironwood pool.
+    pub ironwood: Zatoshis,
+    /// Value on transparent addresses, which is to say in public.
+    pub transparent: Zatoshis,
+}
+
+impl Default for PoolAmounts {
+    fn default() -> Self {
+        Self {
+            orchard: Zatoshis::ZERO,
+            ironwood: Zatoshis::ZERO,
+            transparent: Zatoshis::ZERO,
+        }
+    }
+}
+
+impl PoolAmounts {
+    /// Returns the sum across every pool.
+    pub fn total(&self) -> Zatoshis {
+        (self.orchard + self.ironwood + self.transparent)
+            .expect("a transaction's value fits in a Zatoshis")
+    }
+
+    /// Whether nothing moved anywhere.
+    pub fn is_zero(&self) -> bool {
+        self.total() == Zatoshis::ZERO
+    }
+}
+
 /// One transaction, as it affected the wallet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryEntry {
@@ -206,6 +244,15 @@ pub struct HistoryEntry {
     /// A transaction that only returns change is the wallet paying somebody
     /// else, and presenting it as an incoming payment would be wrong.
     pub is_change_only: bool,
+    /// What the wallet received, by where it landed.
+    pub received_by_pool: PoolAmounts,
+    /// What the wallet spent, by where it came from.
+    ///
+    /// Read together with [`HistoryEntry::received_by_pool`] this says what a
+    /// transaction did: value leaving Orchard and arriving in Ironwood is a
+    /// pool crossing, and value arriving transparent is a payment made in
+    /// public.
+    pub spent_by_pool: PoolAmounts,
 }
 
 impl HistoryEntry {
@@ -233,13 +280,39 @@ pub(crate) fn history(
                 COALESCE((
                     SELECT SUM(n.value) FROM {CACHE_SCHEMA}.received_notes n
                     WHERE n.transaction_id = t.id AND n.account_id = :account
-                ), 0) AS received,
+                      AND n.pool = :orchard
+                ), 0) AS received_orchard,
+                COALESCE((
+                    SELECT SUM(n.value) FROM {CACHE_SCHEMA}.received_notes n
+                    WHERE n.transaction_id = t.id AND n.account_id = :account
+                      AND n.pool = :ironwood
+                ), 0) AS received_ironwood,
+                COALESCE((
+                    SELECT SUM(o.value)
+                    FROM {CACHE_SCHEMA}.transparent_received_outputs o
+                    WHERE o.transaction_id = t.id AND o.account_id = :account
+                ), 0) AS received_transparent,
                 COALESCE((
                     SELECT SUM(n.value)
                     FROM {CACHE_SCHEMA}.received_note_spends s
                     JOIN {CACHE_SCHEMA}.received_notes n ON n.id = s.received_note_id
                     WHERE s.transaction_id = t.id AND n.account_id = :account
-                ), 0) AS spent,
+                      AND n.pool = :orchard
+                ), 0) AS spent_orchard,
+                COALESCE((
+                    SELECT SUM(n.value)
+                    FROM {CACHE_SCHEMA}.received_note_spends s
+                    JOIN {CACHE_SCHEMA}.received_notes n ON n.id = s.received_note_id
+                    WHERE s.transaction_id = t.id AND n.account_id = :account
+                      AND n.pool = :ironwood
+                ), 0) AS spent_ironwood,
+                COALESCE((
+                    SELECT SUM(o.value)
+                    FROM {CACHE_SCHEMA}.transparent_received_output_spends ts
+                    JOIN {CACHE_SCHEMA}.transparent_received_outputs o
+                      ON o.id = ts.output_id
+                    WHERE ts.transaction_id = t.id AND o.account_id = :account
+                ), 0) AS spent_transparent,
                 COALESCE((
                     SELECT MIN(n.is_change) FROM {CACHE_SCHEMA}.received_notes n
                     WHERE n.transaction_id = t.id AND n.account_id = :account
@@ -248,7 +321,9 @@ pub(crate) fn history(
          -- A transaction that only paid somebody, with no change coming back,
          -- touches no note of this wallet's and would otherwise be invisible in
          -- its own history. That shape is common once sends are recorded.
-         WHERE received > 0 OR spent > 0
+         WHERE received_orchard > 0 OR received_ironwood > 0
+            OR received_transparent > 0
+            OR spent_orchard > 0 OR spent_ironwood > 0 OR spent_transparent > 0
             OR EXISTS (SELECT 1 FROM main.sent_outputs so
                         WHERE so.txid = t.txid AND so.from_account_id = :account)
             OR EXISTS (SELECT 1 FROM {CACHE_SCHEMA}.transparent_received_outputs o
@@ -262,7 +337,12 @@ pub(crate) fn history(
          LIMIT :limit"
     ))?;
 
-    let mut rows = stmt.query(named_params![":account": account.0, ":limit": limit])?;
+    let mut rows = stmt.query(named_params![
+        ":account": account.0,
+        ":limit": limit,
+        ":orchard": PoolId::Orchard.code(),
+        ":ironwood": PoolId::Ironwood.code(),
+    ])?;
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
         let txid = <[u8; 32]>::try_from(&row.get::<_, Vec<u8>>(0)?[..]).map_err(|_| {
@@ -271,14 +351,34 @@ pub(crate) fn history(
                 "a stored txid was not 32 bytes",
             ))
         })?;
-        let received = row.get::<_, i64>(2)? as u64;
+        let zats = |i: usize| -> Result<Zatoshis, Error> {
+            Ok(Zatoshis::const_from_u64(row.get::<_, i64>(i)? as u64))
+        };
+        let received_by_pool = PoolAmounts {
+            orchard: zats(2)?,
+            ironwood: zats(3)?,
+            transparent: zats(4)?,
+        };
+        let spent_by_pool = PoolAmounts {
+            orchard: zats(5)?,
+            ironwood: zats(6)?,
+            transparent: zats(7)?,
+        };
+        let received = received_by_pool.total();
+
         out.push(HistoryEntry {
             txid: TxId::from_bytes(txid),
             mined_height: row.get::<_, Option<u32>>(1)?.map(BlockHeight::from),
-            received: Zatoshis::const_from_u64(received),
-            spent: Zatoshis::const_from_u64(row.get::<_, i64>(3)? as u64),
-            // Only meaningful when something was received.
-            is_change_only: received > 0 && row.get::<_, bool>(4)?,
+            received,
+            spent: spent_by_pool.total(),
+            // Only meaningful when something was received, and only about the
+            // shielded side: a transparent receipt is never change, because the
+            // wallet does not pay its own change to a transparent address.
+            is_change_only: received > Zatoshis::ZERO
+                && received_by_pool.transparent == Zatoshis::ZERO
+                && row.get::<_, bool>(8)?,
+            received_by_pool,
+            spent_by_pool,
         });
     }
     Ok(out)
