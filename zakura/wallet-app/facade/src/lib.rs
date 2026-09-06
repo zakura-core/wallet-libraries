@@ -141,13 +141,8 @@ impl Wallet {
             // Derive the transparent addresses the account will be watched on.
             // The scanner matches the scripts the wallet has recorded, so an
             // address that was never derived is one nothing is looking for, and
-            // a payment to it goes unseen. The engine rebuilds its watch set
-            // from these rows on every batch.
-            db.maintain_transparent_addresses(
-                &self.params,
-                id,
-                &zakura_wallet_store::GapLimits::default(),
-            )?;
+            // a payment to it goes unseen.
+            Self::maintain_watch(db, &self.params, id)?;
 
             Ok(id.0)
         })
@@ -221,5 +216,29 @@ impl Wallet {
 
     pub(crate) fn account_id(id: u32) -> AccountId {
         AccountId(id)
+    }
+
+    /// Keeps an account's window of watched transparent addresses full.
+    ///
+    /// The window is consumed by an address being *paid*, not by one being
+    /// issued, so it goes stale as a result of scanning rather than of anything
+    /// the interface does. It is topped up when an account is created and again
+    /// whenever a sync starts, which is the point at which what was found last
+    /// time has been applied.
+    ///
+    /// A window that runs out is a silent failure: the scanner keeps matching
+    /// the addresses it knows and simply never sees a payment to one it does
+    /// not.
+    pub(crate) fn maintain_watch(
+        db: &mut WalletDb,
+        params: &Network,
+        account: AccountId,
+    ) -> Result<(), Error> {
+        db.maintain_transparent_addresses(
+            params,
+            account,
+            &zakura_wallet_store::GapLimits::default(),
+        )?;
+        Ok(())
     }
 }

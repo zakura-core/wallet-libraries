@@ -144,4 +144,9 @@ pub struct ApiSendReceipt {
     /// What the server said. Acceptance means it reached the network, not that
     /// it will be mined.
     pub server_response: String,
+    /// Set when the payment was sent but the wallet could not record it.
+    ///
+    /// Not a failure of the send — the money is gone either way — but the
+    /// balance will not account for it until the next scan finds it.
+    pub warning: Option<String>,
 }

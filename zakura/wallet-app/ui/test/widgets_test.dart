@@ -316,10 +316,15 @@ void main() {
       expect(find.textContaining('Spending 2 notes'), findsOneWidget);
     });
 
-    /// Proving takes seconds, and a silent spinner for that long looks broken.
+    /// Proving takes seconds, and a button showing only an ellipsis for that
+    /// long looks broken. The label is what says the wait is expected.
     testWidgets('says which slow step it is on', (tester) async {
       await tester.pumpWidget(host(const SendForm(stage: SendStage.proving)));
-      expect(find.text('Proving…'), findsNothing, reason: 'busy shows an ellipsis');
+      expect(find.text('Proving…'), findsOneWidget);
+
+      await tester.pumpWidget(host(const SendForm(stage: SendStage.quoting)));
+      expect(find.text('Working out the fee…'), findsOneWidget);
+
       await tester.pumpWidget(host(const SendForm(stage: SendStage.editing)));
       expect(find.text('Continue'), findsOneWidget);
     });

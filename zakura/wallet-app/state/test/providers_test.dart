@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:zakura_client/zakura_client.dart';
@@ -6,6 +8,7 @@ import 'package:zakura_state/zakura_state.dart';
 import 'fake_bindings.dart';
 
 void main() {
+  _sendPhaseTests();
   late FakeBindings bindings;
   late ZakuraWallet wallet;
   late ProviderContainer container;
@@ -151,5 +154,48 @@ void main() {
       controller.reset();
       expect(container.read(sendControllerProvider), isA<SendIdle>());
     });
+  });
+}
+
+/// Added after a review found the send controller claiming to know a phase
+/// boundary the native call does not report.
+void _sendPhaseTests() {
+  test('a send stays in proving rather than claiming to be broadcasting',
+      () async {
+    final bindings = FakeBindings();
+    final wallet = ZakuraWallet(
+      bindings,
+      pollInterval: const Duration(milliseconds: 10),
+    );
+    addTearDown(wallet.close);
+    final container = ProviderContainer(
+      overrides: [walletProvider.overrideWithValue(wallet)],
+    );
+    addTearDown(container.dispose);
+
+    await wallet.open(directory: '/tmp/x', lightwalletdUrl: 'https://x');
+    final id = await wallet.createAccount(
+      phrase: await wallet.generateMnemonic(),
+      birthday: 0,
+    );
+    container.read(activeAccountProvider.notifier).select(id);
+    bindings.setBalance(const Balance(spendable: Zatoshi(1000000)));
+
+    final controller = container.read(sendControllerProvider.notifier);
+    await controller.quote(to: 'utest1a', amount: const Zatoshi(100000));
+
+    // Hold the send open, as proving would.
+    final gate = Completer<void>();
+    bindings.sendGate = gate;
+    final sending = controller.confirm(phrase: 'whatever');
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    // Proving is the seconds-long part, so it is what the interface must be
+    // showing while the call is outstanding.
+    expect(container.read(sendControllerProvider), isA<SendProving>());
+
+    gate.complete();
+    await sending;
+    expect(container.read(sendControllerProvider), isA<SendSent>());
   });
 }

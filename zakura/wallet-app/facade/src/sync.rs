@@ -233,6 +233,14 @@ impl Wallet {
         // rather than in the engine keeps the engine free of the store's
         // account vocabulary, and means an account created since the last sync
         // is picked up by this one.
+        // Top up every account's watch window before scanning. What consumed
+        // it was the last scan, so this is the moment it can be refilled.
+        let mut db = db;
+        if let Err(e) = self.refresh_watch(&mut db) {
+            *self.writer.lock().expect("the writer lock is never poisoned") = Some(db);
+            return Err(e);
+        }
+
         let keys = match self.scan_keys(&db) {
             Ok(keys) => keys,
             Err(e) => {
@@ -407,6 +415,13 @@ impl Wallet {
             .expect("the session lock is never poisoned")
             .as_ref()
             .is_some_and(|s| s.is_running())
+    }
+
+    fn refresh_watch(&self, db: &mut WalletDb) -> Result<(), Error> {
+        for account in db.accounts(&self.params)? {
+            Self::maintain_watch(db, &self.params, account.id)?;
+        }
+        Ok(())
     }
 
     fn scan_keys(&self, db: &WalletDb) -> Result<ScanKeys, Error> {

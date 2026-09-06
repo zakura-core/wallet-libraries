@@ -49,10 +49,12 @@ class SendScreen extends ConsumerWidget {
               ),
               SizedBox(height: theme.spacing.lg),
               if (state case SendSent(:final receipt)) ...[
-                const ZakuraNotice(
-                  message: 'Sent. Reaching the network is not the same as '
-                      'being mined; it will appear as confirmed once a block '
-                      'includes it.',
+                ZakuraNotice(
+                  message: receipt.warning ??
+                      'Sent. Reaching the network is not the same as being '
+                          'mined; it will appear as confirmed once a block '
+                          'includes it.',
+                  isError: receipt.warning != null,
                 ),
                 SizedBox(height: theme.spacing.lg),
                 Text(

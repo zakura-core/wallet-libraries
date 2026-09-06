@@ -170,10 +170,21 @@ class ApiSendReceipt {
   /// it will be mined.
   final String serverResponse;
 
-  const ApiSendReceipt({required this.txid, required this.serverResponse});
+  /// Set when the payment was sent but the wallet could not record it.
+  ///
+  /// Not a failure of the send — the money is gone either way — but the
+  /// balance will not account for it until the next scan finds it.
+  final String? warning;
+
+  const ApiSendReceipt({
+    required this.txid,
+    required this.serverResponse,
+    this.warning,
+  });
 
   @override
-  int get hashCode => txid.hashCode ^ serverResponse.hashCode;
+  int get hashCode =>
+      txid.hashCode ^ serverResponse.hashCode ^ warning.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -181,7 +192,8 @@ class ApiSendReceipt {
       other is ApiSendReceipt &&
           runtimeType == other.runtimeType &&
           txid == other.txid &&
-          serverResponse == other.serverResponse;
+          serverResponse == other.serverResponse &&
+          warning == other.warning;
 }
 
 /// What a payment would cost.

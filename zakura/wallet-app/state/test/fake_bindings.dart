@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:zakura_client/zakura_client.dart';
 
 /// A wallet that exists entirely in memory.
@@ -24,6 +26,9 @@ class FakeBindings implements ZakuraBindings {
 
   /// Set to have the next call throw.
   ZakuraException? nextError;
+
+  /// Held open to observe the state while a send is in flight.
+  Completer<void>? sendGate;
 
   void _maybeThrow() {
     final error = nextError;
@@ -170,6 +175,7 @@ class FakeBindings implements ZakuraBindings {
   }) async {
     _maybeThrow();
     await quote(account: account, to: to, amount: amount);
+    if (sendGate != null) await sendGate!.future;
     return SendReceipt(
       txid: List<int>.generate(32, (i) => i),
       serverResponse: 'accepted',

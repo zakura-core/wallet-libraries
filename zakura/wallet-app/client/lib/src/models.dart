@@ -280,7 +280,19 @@ class SendReceipt {
   /// Acceptance means it reached the network, not that it will be mined.
   final String serverResponse;
 
-  const SendReceipt({required this.txid, required this.serverResponse});
+  /// Set when the payment was sent but the wallet could not record it.
+  ///
+  /// Not a failure of the send — the money is gone either way — but the balance
+  /// and history will not account for it until the next scan finds it, which is
+  /// worth saying rather than leaving somebody to notice a figure that looks
+  /// wrong.
+  final String? warning;
+
+  const SendReceipt({
+    required this.txid,
+    required this.serverResponse,
+    this.warning,
+  });
 
   /// The identifier as it is conventionally displayed.
   String get displayId {

@@ -215,6 +215,7 @@ pub fn send(
     Ok(ApiSendReceipt {
         txid: receipt.txid.to_vec(),
         server_response: receipt.server_response,
+        warning: receipt.warning,
     })
 }
 

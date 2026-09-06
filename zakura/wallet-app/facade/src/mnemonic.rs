@@ -83,16 +83,35 @@ mod tests {
         assert!(to_seed("not a seed phrase at all", "").is_err());
     }
 
-    /// A mnemonic carries a checksum, so a single wrong word is detectable and
+    /// A standard twenty-four word test vector.
+    ///
+    /// Fixed rather than generated, because the property below is only true of
+    /// *most* mutations: a twenty-four word phrase carries eight checksum bits,
+    /// so a randomly wrong word still passes about one time in two hundred and
+    /// fifty six. A generated phrase made this test fail on roughly that
+    /// fraction of runs, which is worse than not having it.
+    const VECTOR: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
+abandon abandon abandon abandon abandon abandon abandon abandon \
+abandon abandon abandon abandon abandon abandon abandon art";
+
+    #[test]
+    fn the_fixed_vector_is_a_valid_phrase() {
+        assert!(validate(VECTOR));
+    }
+
+    /// A mnemonic carries a checksum, so a wrong word is usually detectable and
     /// must be reported rather than silently deriving a different wallet.
     #[test]
     fn one_wrong_word_fails_the_checksum() {
-        let phrase = generate();
-        let mut words: Vec<&str> = phrase.split_whitespace().collect();
-        // "zoo" is in the wordlist, so this fails on the checksum rather than
-        // on an unknown word.
-        let replaced = if words[0] == "zoo" { "abandon" } else { "zoo" };
-        words[0] = replaced;
-        assert!(!validate(&words.join(" ")));
+        for wrong in ["zoo", "zebra", "young", "youth", "zero"] {
+            let mut words: Vec<&str> = VECTOR.split_whitespace().collect();
+            words[0] = wrong;
+            let mutated = words.join(" ");
+            assert!(
+                !validate(&mutated),
+                "replacing the first word with {wrong} was not detected"
+            );
+            assert!(to_seed(&mutated, "").is_err());
+        }
     }
 }

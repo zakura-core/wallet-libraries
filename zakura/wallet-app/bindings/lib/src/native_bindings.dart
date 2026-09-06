@@ -190,6 +190,7 @@ class NativeBindings implements ZakuraBindings {
         return SendReceipt(
           txid: r.txid,
           serverResponse: r.serverResponse,
+          warning: r.warning,
         );
       });
 

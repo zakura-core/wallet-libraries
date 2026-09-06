@@ -39,6 +39,10 @@ class SendProving extends SendState {
 }
 
 /// Proved and signed; talking to the network.
+///
+/// Not produced by [SendController]: the native call proves and broadcasts in
+/// one step and reports nothing between them, so entering this state would be
+/// guessing. It exists for a binding that can say.
 class SendBroadcasting extends SendState {
   const SendBroadcasting();
 }
@@ -133,19 +137,20 @@ class SendController extends Notifier<SendState> {
 
     state = const SendProving();
     try {
-      // Proving and broadcasting are one call on the native side, because the
-      // signature commits to the transaction and there is nothing useful to do
-      // between them. The two states exist because the wait is long enough
-      // that saying which part it is in is worth it.
-      final wallet = ref.read(walletProvider);
-      final future = wallet.send(
-        account: account,
-        to: current.recipient,
-        amount: current.quote.amount,
-        phrase: phrase,
+      // Proving and broadcasting are one call on the native side, and it
+      // reports nothing between them. Moving to [SendBroadcasting] here would
+      // therefore be a guess, and always a wrong one: proving takes seconds and
+      // broadcasting takes a moment, so the interface would spend the whole
+      // wait claiming to be doing the fast part. Staying in [SendProving] until
+      // the answer comes back is what is actually known.
+      state = SendSent(
+        await ref.read(walletProvider).send(
+              account: account,
+              to: current.recipient,
+              amount: current.quote.amount,
+              phrase: phrase,
+            ),
       );
-      state = const SendBroadcasting();
-      state = SendSent(await future);
     } on ZakuraException catch (e) {
       state = SendFailed(e);
     }

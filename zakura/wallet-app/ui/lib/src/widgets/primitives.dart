@@ -100,8 +100,13 @@ class _ZakuraButtonState extends State<ZakuraButton> {
                   ? Border.all(color: theme.colors.border)
                   : null,
             ),
+            // The label is kept while busy rather than replaced by an
+            // ellipsis. A button that is busy for a few seconds is exactly the
+            // one whose label matters most: "Proving…" tells somebody the wait
+            // is expected, and "…" tells them nothing at all. Being busy is
+            // already shown by the dimming above.
             child: Text(
-              widget.busy ? '…' : widget.label,
+              widget.label,
               textAlign: TextAlign.center,
               style: theme.typography.body.copyWith(
                 color: foreground,

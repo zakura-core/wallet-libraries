@@ -621,9 +621,11 @@ impl SseDecode for crate::api::types::ApiSendReceipt {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_txid = <Vec<u8>>::sse_decode(deserializer);
         let mut var_serverResponse = <String>::sse_decode(deserializer);
+        let mut var_warning = <Option<String>>::sse_decode(deserializer);
         return crate::api::types::ApiSendReceipt {
             txid: var_txid,
             server_response: var_serverResponse,
+            warning: var_warning,
         };
     }
 }
@@ -929,6 +931,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::ApiSendReceipt {
         [
             self.txid.into_into_dart().into_dart(),
             self.server_response.into_into_dart().into_dart(),
+            self.warning.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1069,6 +1072,7 @@ impl SseEncode for crate::api::types::ApiSendReceipt {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <Vec<u8>>::sse_encode(self.txid, serializer);
         <String>::sse_encode(self.server_response, serializer);
+        <Option<String>>::sse_encode(self.warning, serializer);
     }
 }
 

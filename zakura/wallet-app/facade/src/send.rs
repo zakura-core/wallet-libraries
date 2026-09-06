@@ -43,28 +43,38 @@ use zeroize::Zeroizing;
 
 use crate::{Wallet, error::Error, keys};
 
-/// How many blocks a transaction stays valid for after the chain tip.
+/// How many blocks a transaction stays valid for after the height it is built
+/// against.
 ///
 /// The same figure the reference wallet uses. Long enough to survive a slow
 /// relay, short enough that an abandoned transaction stops holding its inputs
 /// hostage.
 const EXPIRY_DELTA: u32 = 40;
 
-/// Returns the height a transaction should expire at, and the height whose
-/// consensus rules it is built for.
+/// Returns the height a transaction built now expects to be mined at.
 ///
-/// Both come from the chain tip rather than from the anchor. The anchor is the
-/// most recent block both commitment trees hold a checkpoint for, which during
-/// recovery can sit a long way below the tip — and a transaction expiring forty
-/// blocks after a height the chain passed an hour ago is born expired. The
-/// branch identifier has the same problem in a worse form: taken from a stale
-/// height it can name the rules of a network upgrade the chain has already
-/// left, and consensus rejects it.
+/// This is what selects the consensus rules it is built for, and what its
+/// expiry is measured from. It comes from the chain tip rather than from the
+/// anchor: the anchor is the most recent block both commitment trees hold a
+/// checkpoint for, which during recovery can sit a long way below the tip, and
+/// rules taken from a stale height can be the rules of an upgrade the chain has
+/// already left.
 ///
-/// The anchor is still the floor, because a tip below it would mean the wallet
-/// had scanned past what the server admits to having.
-fn expiry_height(tip: Option<BlockHeight>, anchor: BlockHeight) -> BlockHeight {
-    std::cmp::max(tip.unwrap_or(anchor), anchor) + EXPIRY_DELTA
+/// The anchor is the floor, because a tip below it would mean the wallet had
+/// scanned past what the server admits to having.
+fn target_height(tip: Option<BlockHeight>, anchor: BlockHeight) -> BlockHeight {
+    std::cmp::max(tip.unwrap_or(anchor), anchor) + 1
+}
+
+/// Returns the height past which a transaction aimed at `target` is no longer
+/// valid.
+///
+/// Deliberately not the height the branch is chosen from. A transaction is
+/// mined near the tip and expires forty blocks later, so choosing rules from
+/// the expiry would build for an upgrade that may not have activated by the
+/// time it is actually mined.
+fn expiry_height(target: BlockHeight) -> BlockHeight {
+    target + EXPIRY_DELTA
 }
 
 /// What a payment would cost, worked out before anything is proved.
@@ -99,6 +109,17 @@ impl SpendQuote {
     }
 }
 
+/// A transaction that has been built but not yet broadcast.
+///
+/// Carries the height it was built against, so that recording it later reads it
+/// back under the same rules it was written under.
+struct Built {
+    raw: Vec<u8>,
+    txid: zcash_protocol::TxId,
+    fee: Zatoshis,
+    target: BlockHeight,
+}
+
 /// What came back from broadcasting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendReceipt {
@@ -111,11 +132,23 @@ pub struct SendReceipt {
     /// Acceptance means the transaction reached the network, not that it will
     /// be mined.
     pub server_response: String,
+    /// Set when the payment was sent but the wallet could not record it.
+    ///
+    /// The money is gone either way, so this is not a failure of the send. It
+    /// means the balance and history will not account for it until the next
+    /// scan finds it, which is worth saying rather than leaving somebody to
+    /// notice a figure that looks wrong.
+    pub warning: Option<String>,
 }
 
 impl Wallet {
     /// Works out what a payment would cost, without proving it.
     pub fn quote(&self, account: u32, to: &str, amount: u64) -> Result<SpendQuote, Error> {
+        if amount == 0 {
+            return Err(Error::Build(
+                "a payment has to be for more than nothing".to_owned(),
+            ));
+        }
         // Parsed for its errors, not its value: selection does not need the
         // recipient, but somebody quoting a payment to an address this wallet
         // cannot pay should learn that now rather than after the fee is shown.
@@ -162,28 +195,39 @@ impl Wallet {
         amount: u64,
         seed: &Zeroizing<Vec<u8>>,
     ) -> Result<SendReceipt, Error> {
+        if amount == 0 {
+            return Err(Error::Build(
+                "a payment has to be for more than nothing".to_owned(),
+            ));
+        }
         let recipient = crate::address::parse(&self.params, to)?;
         let amount = Zatoshis::from_u64(amount)
             .map_err(|_| Error::Build("that is not a valid amount".to_owned()))?;
         let account = Self::account_id(account);
         let params = self.params;
 
-        let (raw, txid, fee, expiry) = self.with_writer_pausing_sync(|db| {
+        let built = self.with_writer_pausing_sync(|db| {
             let spend_keys = keys::spending_keys(db, &params, account, seed)?;
             let chosen = route(db, &params, account, amount)?;
 
-            let tx = match &chosen {
+            // One authoritative height for the whole transaction. It decides
+            // which consensus rules it is built for, what it expires at, and
+            // which rules it is parsed back under when it is recorded — and
+            // those three disagreeing is precisely the bug that is invisible
+            // until an upgrade boundary falls between them.
+            let target = match &chosen {
+                Route::Ironwood { target, .. } | Route::Crossing { target, .. } => *target,
+            };
+            let branch_id = BranchId::for_height(&params, target);
+
+            let (tx, fee) = match &chosen {
                 Route::Ironwood {
                     proposal,
                     witnesses,
                     anchors,
+                    ..
                 } => {
-                    let expiry = expiry_height(db.chain_tip()?, anchors.height);
-                    // The rules the transaction will be judged by are the ones
-                    // in force where it will be mined, not where its anchor was
-                    // taken.
-                    let branch_id = BranchId::for_height(&params, expiry);
-
+                    let expiry = expiry_height(target);
                     let request = zakura_wallet_tx::SpendRequest {
                         proposal,
                         witnesses,
@@ -191,27 +235,28 @@ impl Wallet {
                         recipient,
                         anchors,
                     };
-                    zakura_wallet_tx::payment(
+                    let tx = zakura_wallet_tx::payment(
                         &request,
                         branch_id,
                         expiry,
                         zakura_wallet_tx::circuit::proving_key(),
                         rand::rng(),
-                    )?
+                    )?;
+                    (tx, proposal.fee)
                 }
                 Route::Crossing {
                     plan,
                     witness,
                     anchors,
+                    ..
                 } => {
                     // The expiry belongs to the plan, not to us: an ordinary
                     // one would single this transaction out from the crossings
                     // it is meant to be indistinguishable from. `transaction`
-                    // reads the shape off the bytes it produced and refuses a
-                    // non-conforming result, so a wrong crossing cannot be
-                    // returned here — only paid for.
-                    let branch_id = BranchId::for_height(&params, plan.expiry);
-                    zakura_wallet_tx::crossing::transaction(
+                    // reads the shape back off the bytes it produced and
+                    // refuses a non-conforming result, so a wrong crossing
+                    // cannot be returned here — only paid for.
+                    let tx = zakura_wallet_tx::crossing::transaction(
                         &zakura_wallet_tx::crossing::CrossingRequest {
                             plan,
                             witness,
@@ -222,7 +267,8 @@ impl Wallet {
                         branch_id,
                         zakura_wallet_tx::circuit::proving_key(),
                         rand::rng(),
-                    )?
+                    )?;
+                    (tx, plan.fee)
                 }
             };
 
@@ -231,36 +277,40 @@ impl Wallet {
             // says so months later by rejecting a proof.
             zakura_wallet_tx::verify_proofs(&tx, zakura_wallet_tx::circuit::verifying_key())?;
 
-            let (fee, expiry) = match &chosen {
-                Route::Ironwood {
-                    proposal, anchors, ..
-                } => (
-                    proposal.fee,
-                    expiry_height(db.chain_tip()?, anchors.height),
-                ),
-                Route::Crossing { plan, .. } => (plan.fee, plan.expiry),
-            };
-
             let raw = zakura_wallet_tx::transaction::to_bytes(&tx)?;
-            Ok((raw, tx.txid(), fee, expiry))
+            Ok(Built {
+                raw,
+                txid: tx.txid(),
+                fee,
+                target,
+            })
         })?;
 
-        // Broadcast before recording. A transaction the network refused is not
-        // one the wallet spent: writing first would leave the balance short of
-        // money it still has, with nothing to correct it.
-        let response = self.broadcast(&raw)?;
+        // Record before broadcasting, not after. The two failure modes are not
+        // symmetric.
+        //
+        // Recording first and then failing to broadcast leaves the wallet
+        // holding a spend of notes that are in fact still unspent. That
+        // corrects itself: the transaction is never mined, a server eventually
+        // says it does not have it, and once its expiry height has passed the
+        // notes are released. This wallet did not always have that, and the
+        // earlier ordering here was chosen when it did not.
+        //
+        // Broadcasting first and then failing to record leaves a live
+        // transaction the wallet knows nothing about, spending notes it still
+        // believes are free. Nothing corrects that: the next payment is built
+        // from the same notes, and one of the two is refused. A crash between
+        // the two calls is exactly this case, and returns no warning to
+        // anybody.
+        self.record_sent(account, to, &built)?;
 
-        // Now record it. Until this exists, the notes the payment spent still
-        // look unspent, because a spend is only observed when the transaction
-        // is scanned back off the chain — so between broadcasting and the next
-        // scan the wallet would say the money is still there, and a second
-        // payment could be built from the same notes.
-        self.record_sent(account, to, &raw, txid, fee, expiry)?;
+        let response = self.broadcast(&built.raw)?;
 
         Ok(SendReceipt {
-            txid: *txid.as_ref(),
-            raw,
+            txid: *built.txid.as_ref(),
+            raw: built.raw,
             server_response: response,
+            warning: None,
         })
     }
 
@@ -268,35 +318,35 @@ impl Wallet {
     ///
     /// Decrypting the wallet's own transaction is how its outputs and spends
     /// are learned, and it is the same path a transaction found on the chain
-    /// takes — so what is stored here is the shape the scanner would have
-    /// stored anyway, and the two cannot disagree when the transaction is
-    /// finally mined.
+    /// takes — so what is stored is the shape the scanner would have stored
+    /// anyway, and the two cannot disagree when it is finally mined.
     ///
-    /// A failure here is deliberately not fatal to the send. The payment has
-    /// already reached the network and telling somebody it failed would be
-    /// false; the next scan finds it regardless, so the cost of not recording
-    /// it is a stale balance until then.
+    /// Parsed at the height it was built for. A transaction is read under the
+    /// consensus rules of a height, and reading it under different ones than it
+    /// was written under is only harmless while no upgrade falls between them.
     fn record_sent(
         &self,
         account: zakura_wallet_core::AccountId,
         to: &str,
-        raw: &[u8],
-        txid: zcash_protocol::TxId,
-        fee: Zatoshis,
-        expiry: BlockHeight,
+        built: &Built,
     ) -> Result<(), Error> {
         let params = self.params;
 
-        let recorded = self.with_writer_pausing_sync(|db| {
+        self.with_writer_pausing_sync(|db| {
             let stored = db
                 .account(&params, account)?
                 .ok_or(Error::NoSuchAccount(account.0))?;
-            let scan_keys =
-                zakura_wallet_scan::ScanKeys::from_accounts([(account, stored.orchard_fvk()?.clone())]);
+            let scan_keys = zakura_wallet_scan::ScanKeys::from_accounts([(
+                account,
+                stored.orchard_fvk()?.clone(),
+            )]);
 
-            let target = db.chain_tip()?.unwrap_or(expiry);
             let enhanced = zakura_wallet_scan::enhance::decrypt_transaction(
-                &params, &scan_keys, txid, target, raw,
+                &params,
+                &scan_keys,
+                built.txid,
+                built.target,
+                &built.raw,
             )
             .map_err(|e| Error::Build(e.to_string()))?;
 
@@ -305,18 +355,16 @@ impl Wallet {
                 .map(|d| d.as_secs() as u32)
                 .unwrap_or(0);
 
-            db.store_sent_transaction(&params, &enhanced, fee, target, created, Some(to))?;
+            db.store_sent_transaction(
+                &params,
+                &enhanced,
+                built.fee,
+                built.target,
+                created,
+                Some(to),
+            )?;
             Ok(())
-        });
-
-        if let Err(e) = recorded {
-            // Recorded where a sync failure is recorded rather than raised: the
-            // payment was sent, and saying otherwise would be a lie about
-            // something irreversible.
-            *self.failure.lock().expect("the failure lock is never poisoned") =
-                Some(format!("the payment was sent but not recorded: {e}"));
-        }
-        Ok(())
+        })
     }
 
     fn broadcast(&self, raw: &[u8]) -> Result<String, Error> {
@@ -347,6 +395,8 @@ pub(crate) enum Route {
         proposal: zakura_wallet_tx::Proposal,
         witnesses: Vec<(zakura_wallet_tx::SpendableNote, orchard::tree::MerklePath)>,
         anchors: zakura_wallet_tx::Anchors,
+        /// Where it expects to be mined, and so which rules it is built for.
+        target: BlockHeight,
     },
     /// A ZIP 318 crossing, paying the recipient out of the Orchard pool.
     ///
@@ -358,6 +408,9 @@ pub(crate) enum Route {
         plan: zakura_wallet_tx::crossing::CrossingPlan,
         witness: orchard::tree::MerklePath,
         anchors: zakura_wallet_tx::Anchors,
+        /// The height the plan was made against, which is the same one its
+        /// rules and its conformance were judged at.
+        target: BlockHeight,
     },
 }
 
@@ -406,10 +459,12 @@ fn route<P: Parameters>(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
+            let target = target_height(db.chain_tip()?, anchors.height);
             return Ok(Route::Ironwood {
                 proposal,
                 witnesses,
                 anchors,
+                target,
             });
         }
         Err(e @ zakura_wallet_tx::Error::InsufficientFunds { .. }) => e,
@@ -443,7 +498,7 @@ fn plan_crossing(
         Err(e) => return Err(e.into()),
     };
 
-    let target = db.chain_tip()?.unwrap_or(anchors.height) + 1;
+    let target = target_height(db.chain_tip()?, anchors.height);
     let available = zakura_wallet_tx::spendable_notes(db, account, fvk, &anchors, true)?;
 
     let plan = zakura_wallet_tx::crossing::plan(
@@ -471,6 +526,7 @@ fn plan_crossing(
         plan,
         witness,
         anchors,
+        target,
     })
 }
 
@@ -482,23 +538,41 @@ mod tests {
         BlockHeight::from_u32(n)
     }
 
-    /// The defect this exists for: during recovery the anchor can sit far below
-    /// the tip, and an expiry measured from it names a height the chain passed
-    /// long ago.
+    /// During recovery the anchor can sit far below the tip, and heights
+    /// measured from it name a block the chain passed long ago.
     #[test]
-    fn expiry_follows_the_tip_not_a_lagging_anchor() {
-        assert_eq!(expiry_height(Some(h(2_000_000)), h(1_000_000)), h(2_000_040));
+    fn the_target_follows_the_tip_not_a_lagging_anchor() {
+        assert_eq!(target_height(Some(h(2_000_000)), h(1_000_000)), h(2_000_001));
     }
 
     #[test]
-    fn expiry_falls_back_to_the_anchor_when_no_tip_is_known() {
-        assert_eq!(expiry_height(None, h(1_000_000)), h(1_000_040));
+    fn the_target_falls_back_to_the_anchor_when_no_tip_is_known() {
+        assert_eq!(target_height(None, h(1_000_000)), h(1_000_001));
     }
 
     /// A tip below the anchor would mean the wallet had scanned past what the
     /// server admits to; the anchor is the floor either way.
     #[test]
     fn the_anchor_is_the_floor() {
-        assert_eq!(expiry_height(Some(h(900_000)), h(1_000_000)), h(1_000_040));
+        assert_eq!(target_height(Some(h(900_000)), h(1_000_000)), h(1_000_001));
+    }
+
+    /// The defect this split exists for. A transaction is mined near the tip
+    /// and expires forty blocks later, so the rules it is built under must come
+    /// from where it will be mined — not from its expiry, which is far enough
+    /// ahead that an upgrade can activate in between. Building for rules that
+    /// are not yet in force produces a transaction consensus rejects, and the
+    /// two heights being the same number is exactly what hides it.
+    #[test]
+    fn the_expiry_is_well_past_the_target_it_is_measured_from() {
+        let target = target_height(Some(h(2_000_000)), h(1_999_000));
+        let expiry = expiry_height(target);
+
+        assert_eq!(target, h(2_000_001));
+        assert_eq!(expiry, h(2_000_041));
+        assert!(
+            u32::from(expiry) - u32::from(target) == EXPIRY_DELTA,
+            "the gap between them is where an upgrade can hide"
+        );
     }
 }

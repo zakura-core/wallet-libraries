@@ -156,10 +156,29 @@ fn creating_an_account_derives_the_transparent_addresses_to_watch() {
     );
 }
 
-/// Issuing an address may consume the last of the unused window, and a window
-/// that is not topped up silently stops the wallet seeing new payments.
+/// The window is consumed by scanning, not by issuing, so it is topped up as a
+/// sync starts. A window that runs out is a silent failure: the scanner keeps
+/// matching the addresses it knows and never sees a payment to one it does not.
 #[test]
-fn issuing_addresses_keeps_the_watch_window_full() {
+fn starting_a_sync_keeps_the_watch_window_full() {
+    let (_dir, wallet) = open();
+    wallet.create_account(&seed(), 0, 3_000_000).unwrap();
+    let before = wallet.watched_transparent_addresses().unwrap();
+    assert!(before > 0);
+
+    wallet.start_sync().unwrap();
+    wallet.stop_sync();
+
+    assert!(
+        wallet.watched_transparent_addresses().unwrap() >= before,
+        "the window shrank"
+    );
+}
+
+/// Issuing a unified address does not consume the transparent window, and must
+/// not quietly change it either.
+#[test]
+fn issuing_a_unified_address_leaves_the_window_alone() {
     let (_dir, wallet) = open();
     let id = wallet.create_account(&seed(), 0, 3_000_000).unwrap();
     let before = wallet.watched_transparent_addresses().unwrap();
@@ -168,10 +187,7 @@ fn issuing_addresses_keeps_the_watch_window_full() {
         wallet.next_address(id, None).unwrap();
     }
 
-    assert!(
-        wallet.watched_transparent_addresses().unwrap() >= before,
-        "the window shrank"
-    );
+    assert_eq!(wallet.watched_transparent_addresses().unwrap(), before);
 }
 
 /// Transparent value is reported, and kept apart from what can be sent
@@ -185,4 +201,35 @@ fn a_balance_separates_transparent_from_sendable() {
     assert_eq!(balance.transparent, 0);
     assert_eq!(balance.shielded(), 0);
     assert_eq!(balance.total(), 0);
+}
+
+/// A payment of nothing is not a payment, and letting one through would hand
+/// the builder a proposal with no outputs worth making.
+#[test]
+fn a_payment_of_nothing_is_refused() {
+    let (_dir, wallet) = open();
+    let id = wallet.create_account(&seed(), 0, 3_000_000).unwrap();
+
+    let quoted = wallet.quote(id, "u1whatever", 0).err().map(|e| e.code());
+    assert_eq!(quoted, Some(ErrorCode::Build));
+
+    let sent = wallet
+        .send(id, "u1whatever", 0, &seed())
+        .err()
+        .map(|e| e.code());
+    assert_eq!(sent, Some(ErrorCode::Build));
+}
+
+/// An address the wallet cannot pay is refused before any work is done, and is
+/// told apart from a typo: they are different problems for whoever typed it.
+#[test]
+fn an_unpayable_address_is_refused_before_anything_expensive() {
+    let (_dir, wallet) = open();
+    let id = wallet.create_account(&seed(), 0, 3_000_000).unwrap();
+
+    let code = wallet
+        .quote(id, "not an address at all", 100_000)
+        .err()
+        .map(|e| e.code());
+    assert_eq!(code, Some(ErrorCode::BadAddress));
 }

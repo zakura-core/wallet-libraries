@@ -206,17 +206,7 @@ impl Wallet {
     /// from one it merely generated.
     pub fn next_address(&self, account: u32, exposed_at: Option<u32>) -> Result<String, Error> {
         let params = self.params;
-        let id = Self::account_id(account);
         self.with_writer_pausing_sync(|db| {
-            // Issuing an address may consume the last of the unused window, so
-            // top it up in the same breath. An address the wallet has not
-            // derived is one the scanner is not watching for.
-            db.maintain_transparent_addresses(
-                &params,
-                id,
-                &zakura_wallet_store::GapLimits::default(),
-            )?;
-
             let (address, _index) = db.next_address(
                 &params,
                 Self::account_id(account),
