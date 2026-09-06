@@ -92,7 +92,16 @@ class ZakuraExampleApp extends StatelessWidget {
     return WidgetsApp(
       title: 'Zakura',
       color: const Color(0xFF3B5BDB),
-      builder: (context, _) => ZakuraThemeScope(child: _Root(demo: demo)),
+      // `home` is what makes `WidgetsApp` build a Navigator at all: given
+      // none of `home`, `routes` or `onGenerateRoute` it builds no navigator,
+      // and every `Navigator.of` below it has nothing to push onto — which is
+      // exactly what left Receive and Send doing nothing.
+      home: _Root(demo: demo),
+      // The navigator arrives here as `child` and must be passed through. The
+      // theme sits above it so that pushed screens inherit it too.
+      builder: (context, child) => ZakuraThemeScope(
+        child: child ?? const SizedBox.shrink(),
+      ),
       pageRouteBuilder: <T>(settings, builder) => PageRouteBuilder<T>(
         settings: settings,
         pageBuilder: (c, _, _) => builder(c),
