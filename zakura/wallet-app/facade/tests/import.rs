@@ -146,3 +146,38 @@ fn nonsense_is_not_a_viewing_key() {
         .map(|e| e.code());
     assert_eq!(code, Some(ErrorCode::BadViewingKey));
 }
+
+/// The store refuses a duplicate viewing key however it got there, so creating
+/// a wallet and then importing the same phrase is the same mistake as importing
+/// it twice.
+#[test]
+fn a_created_wallet_cannot_then_be_imported() {
+    let (_dir, wallet) = open();
+    let words = phrase();
+    wallet.create_wallet(&seed_of(&words)).unwrap();
+
+    let code = wallet
+        .import_wallet(&seed_of(&words), Some(2_500_000))
+        .err()
+        .map(|e| e.code());
+    assert_eq!(code, Some(ErrorCode::AccountExists));
+}
+
+/// A wallet reopened from the same files still has its account, which is what
+/// lets an application skip onboarding for somebody who already has one.
+#[test]
+fn a_restored_wallet_is_found_again_when_the_wallet_is_reopened() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = WalletConfig::in_dir(NetworkKind::Test, dir.path(), "https://127.0.0.1:1/");
+
+    let id = {
+        let wallet = Wallet::open(config.clone()).unwrap();
+        wallet.import_wallet(&seed_of(&phrase()), Some(2_500_000)).unwrap()
+    };
+
+    let reopened = Wallet::open(config).unwrap();
+    let accounts = reopened.accounts().unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].id, id);
+    assert_eq!(accounts[0].birthday, 2_500_000);
+}

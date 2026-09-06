@@ -23,6 +23,7 @@ class DemoBindings implements ZakuraBindings {
   Balance _balance = const Balance();
   SyncProgress _progress = const SyncProgress();
   Timer? _sync;
+  bool _opened = false;
   int _scanned = 2_900_000;
   int _address = 0;
 
@@ -42,10 +43,21 @@ class DemoBindings implements ZakuraBindings {
     required String directory,
     required String lightwalletdUrl,
     required bool mainnet,
-  }) async {}
+  }) async {
+    _opened = true;
+  }
+
+  /// The real wallet refuses everything until it is opened. The demo does too,
+  /// so that forgetting to open it fails here rather than only on a device.
+  void _requireOpen() {
+    if (!_opened) {
+      throw const ZakuraException(ZakuraErrorCode.storage, 'no wallet is open');
+    }
+  }
 
   @override
   Future<int> createAccount({required String phrase, int? birthday}) async {
+    _requireOpen();
     if (!await validateMnemonic(phrase)) {
       throw const ZakuraException(
         ZakuraErrorCode.badMnemonic,
@@ -65,7 +77,10 @@ class DemoBindings implements ZakuraBindings {
   }
 
   @override
-  Future<List<Account>> accounts() async => List.unmodifiable(_accounts);
+  Future<List<Account>> accounts() async {
+    _requireOpen();
+    return List.unmodifiable(_accounts);
+  }
 
   @override
   Future<Balance> balance(int account) async => _balance;

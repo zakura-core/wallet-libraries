@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:zakura_bindings/zakura_bindings.dart';
@@ -15,6 +17,15 @@ import 'screens/onboarding.dart';
 /// useful for working on the interface without waiting for a chain.
 const _forceDemo = bool.fromEnvironment('ZAKURA_DEMO');
 
+/// Where the wallet's two files live.
+///
+/// Under the home directory rather than a temporary one, because a wallet that
+/// forgets itself when the machine is tidied up is not a wallet.
+String _walletDirectory() {
+  final home = Platform.environment['HOME'] ?? Directory.systemTemp.path;
+  return '$home/.zakura-example';
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -22,11 +33,32 @@ Future<void> main() async {
   // `ZakuraBindings`, so choosing between the real wallet and the demo one is
   // this single expression. Nothing below it knows which it got.
   final (ZakuraBindings bindings, bool demo) = await _bindings();
+  final wallet = ZakuraWallet(bindings);
+
+  // Opened here rather than when a wallet is created, so that a returning user
+  // gets the wallet they already have. Onboarding is for people who have none.
+  int? existing;
+  try {
+    await wallet.open(
+      directory: _walletDirectory(),
+      lightwalletdUrl: 'https://us.zec.stardust.rest:443',
+    );
+    final accounts = await wallet.accounts();
+    if (accounts.isNotEmpty) {
+      existing = accounts.first.id;
+      await wallet.startSync();
+    }
+  } on Object catch (e) {
+    // Nothing to show yet, so this goes to the log and onboarding is offered.
+    // Whatever went wrong will come back the moment a wallet is created.
+    debugPrint('Could not open the wallet: $e');
+  }
 
   runApp(
     ProviderScope(
       overrides: [
-        walletProvider.overrideWithValue(ZakuraWallet(bindings)),
+        walletProvider.overrideWithValue(wallet),
+        initialAccountProvider.overrideWithValue(existing),
       ],
       child: ZakuraExampleApp(demo: demo),
     ),

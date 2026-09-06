@@ -12,6 +12,14 @@ final walletProvider = Provider<ZakuraWallet>((ref) {
   );
 });
 
+/// The account the application found already in the wallet at startup.
+///
+/// Overridden where the wallet is opened. Without it a returning user would be
+/// shown onboarding again over the top of a wallet they already have — and
+/// creating or restoring from there would either add a second account or be
+/// refused as a duplicate.
+final initialAccountProvider = Provider<int?>((ref) => null);
+
 /// The account currently being looked at.
 ///
 /// A single wallet still has an active account, because the rest of the
@@ -25,7 +33,7 @@ final activeAccountProvider = NotifierProvider<ActiveAccount, int?>(
 /// Which account the interface is showing.
 class ActiveAccount extends Notifier<int?> {
   @override
-  int? build() => null;
+  int? build() => ref.watch(initialAccountProvider);
 
   /// Selects an account.
   void select(int id) => state = id;

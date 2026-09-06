@@ -6,6 +6,7 @@ import 'package:zakura_state/zakura_state.dart';
 import 'fake_bindings.dart';
 
 void main() {
+  _returningUserTests();
   late FakeBindings bindings;
   late ZakuraWallet wallet;
   late ProviderContainer container;
@@ -147,5 +148,87 @@ void main() {
       controller().reset();
       expect(state(), isA<OnboardingIdle>());
     });
+  });
+}
+
+/// A wallet that already exists must not be asked for again.
+void _returningUserTests() {
+  test('an account found at startup is the active one', () async {
+    final bindings = FakeBindings();
+    final wallet = ZakuraWallet(bindings);
+    addTearDown(wallet.close);
+    await wallet.open(directory: '/tmp/x', lightwalletdUrl: 'https://x');
+    final id = await wallet.importAccount(
+      phrase: await wallet.generateMnemonic(),
+      birthday: 2500000,
+    );
+
+    // What the application does at startup once it has opened the wallet and
+    // found an account already in it.
+    final container = ProviderContainer(
+      overrides: [
+        walletProvider.overrideWithValue(wallet),
+        initialAccountProvider.overrideWithValue(id),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    expect(
+      container.read(activeAccountProvider),
+      id,
+      reason: 'a returning user must not be shown onboarding again',
+    );
+  });
+
+  test('with no account there is nothing active, and onboarding is right',
+      () async {
+    final bindings = FakeBindings();
+    final wallet = ZakuraWallet(bindings);
+    addTearDown(wallet.close);
+    final container = ProviderContainer(
+      overrides: [
+        walletProvider.overrideWithValue(wallet),
+        initialAccountProvider.overrideWithValue(null),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    expect(container.read(activeAccountProvider), isNull);
+  });
+
+  /// The store refuses a duplicate viewing key however it got there, so
+  /// creating a wallet and then importing the same phrase is the same mistake.
+  test('a created wallet cannot then be imported again', () async {
+    final bindings = FakeBindings();
+    final wallet = ZakuraWallet(bindings);
+    addTearDown(wallet.close);
+    await wallet.open(directory: '/tmp/x', lightwalletdUrl: 'https://x');
+
+    final phrase = await wallet.generateMnemonic();
+    await wallet.createAccount(phrase: phrase);
+
+    await expectLater(
+      wallet.importAccount(phrase: phrase),
+      throwsA(
+        isA<ZakuraException>().having(
+          (e) => e.code,
+          'code',
+          ZakuraErrorCode.accountExists,
+        ),
+      ),
+    );
+  });
+
+  /// A wallet refuses everything until it is opened; a caller that forgets must
+  /// find out here rather than on a device.
+  test('nothing works before the wallet is opened', () async {
+    final bindings = FakeBindings();
+    final wallet = ZakuraWallet(bindings);
+    addTearDown(wallet.close);
+
+    await expectLater(
+      wallet.createAccount(phrase: await wallet.generateMnemonic()),
+      throwsA(isA<ZakuraException>()),
+    );
   });
 }

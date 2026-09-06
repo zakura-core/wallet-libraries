@@ -42,8 +42,12 @@ class OnboardingScreen extends ConsumerWidget {
                   SizedBox(height: theme.spacing.xxl),
                   switch (state) {
                     OnboardingIdle() => _Choice(controller: controller),
-                    OnboardingCreated(:final phrase) =>
-                      _Created(phrase: phrase, controller: controller),
+                    OnboardingCreated(:final phrase, :final error) =>
+                      _Created(
+                        phrase: phrase,
+                        error: error,
+                        controller: controller,
+                      ),
                     OnboardingImporting() =>
                       _Importing(state: state, controller: controller),
                     // Replaced by the home screen as soon as the account is
@@ -100,9 +104,14 @@ class _Choice extends StatelessWidget {
 }
 
 class _Created extends StatelessWidget {
-  const _Created({required this.phrase, required this.controller});
+  const _Created({
+    required this.phrase,
+    required this.controller,
+    this.error,
+  });
 
   final String phrase;
+  final String? error;
   final OnboardingController controller;
 
   @override
@@ -111,6 +120,10 @@ class _Created extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (error != null) ...[
+          ZakuraNotice(message: error!, isError: true),
+          SizedBox(height: theme.spacing.lg),
+        ],
         SeedPhraseView(words: phrase.split(RegExp(r'\s+'))),
         SizedBox(height: theme.spacing.lg),
         ZakuraButton(

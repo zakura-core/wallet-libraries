@@ -33,6 +33,14 @@ class FakeBindings implements ZakuraBindings {
     }
   }
 
+  /// A real wallet refuses everything until it has been opened, and a fake that
+  /// does not is a fake that hides a caller forgetting to.
+  void _requireOpen() {
+    if (!opened) {
+      throw const ZakuraException(ZakuraErrorCode.storage, 'no wallet is open');
+    }
+  }
+
   /// Sets the balance the wallet will report.
   void setBalance(Balance balance) => _balance = balance;
 
@@ -62,6 +70,7 @@ class FakeBindings implements ZakuraBindings {
 
   @override
   Future<int> createAccount({required String phrase, int? birthday}) async {
+    _requireOpen();
     _maybeThrow();
     if (!await validateMnemonic(phrase)) {
       throw const ZakuraException(
@@ -71,6 +80,7 @@ class FakeBindings implements ZakuraBindings {
     }
     // The store numbers accounts from one, not zero. Matching that here stops
     // a caller quietly depending on the first account being account zero.
+    _imported.add(phrase);
     final id = _accounts.length + 1;
     _accounts.add(
       Account(
@@ -84,7 +94,10 @@ class FakeBindings implements ZakuraBindings {
   }
 
   @override
-  Future<List<Account>> accounts() async => List.unmodifiable(_accounts);
+  Future<List<Account>> accounts() async {
+    _requireOpen();
+    return List.unmodifiable(_accounts);
+  }
 
   void _requireAccount(int account) {
     if (!_accounts.any((a) => a.id == account)) {
@@ -111,6 +124,7 @@ class FakeBindings implements ZakuraBindings {
 
   @override
   Future<String> nextAddress(int account) async {
+    _requireOpen();
     _maybeThrow();
     _requireAccount(account);
     return 'utest1address${_addressCounter++}';
@@ -184,6 +198,7 @@ class FakeBindings implements ZakuraBindings {
 
   @override
   Future<int> importAccount({required String phrase, int? birthday}) async {
+    _requireOpen();
     _maybeThrow();
     if (!await validateMnemonic(phrase)) {
       throw const ZakuraException(
@@ -191,7 +206,7 @@ class FakeBindings implements ZakuraBindings {
         'not a valid seed phrase',
       );
     }
-    if (!_imported.add(phrase)) {
+    if (_imported.contains(phrase)) {
       throw const ZakuraException(
         ZakuraErrorCode.accountExists,
         'this wallet has already been imported',

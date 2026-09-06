@@ -18,7 +18,14 @@ class OnboardingCreated extends OnboardingState {
   /// The phrase, which is the wallet.
   final String phrase;
 
-  const OnboardingCreated(this.phrase);
+  /// What went wrong last time, if anything.
+  ///
+  /// A failed creation belongs here rather than on the restore form: the
+  /// person never had a phrase to restore from, and asking them for one
+  /// because saving failed would be nonsense.
+  final String? error;
+
+  const OnboardingCreated(this.phrase, {this.error});
 }
 
 /// Restoring: the form is open.
@@ -113,18 +120,19 @@ class OnboardingController extends Notifier<OnboardingState> {
     final current = state;
     if (current is! OnboardingCreated) return;
 
+    final int id;
     try {
       // No birthday: a wallet that did not exist a moment ago has no history,
       // so the tip is where it starts.
-      final id = await ref
-          .read(walletProvider)
-          .createAccount(phrase: current.phrase);
-      ref.read(activeAccountProvider.notifier).select(id);
-      state = OnboardingDone(id);
-      await ref.read(walletProvider).startSync();
+      id = await ref.read(walletProvider).createAccount(phrase: current.phrase);
     } on ZakuraException catch (e) {
-      state = OnboardingImporting(error: _explain(e));
+      state = OnboardingCreated(current.phrase, error: _explain(e));
+      return;
     }
+
+    ref.read(activeAccountProvider.notifier).select(id);
+    state = OnboardingDone(id);
+    await _beginSyncing();
   }
 
   /// Restores a wallet from a phrase.
@@ -135,15 +143,34 @@ class OnboardingController extends Notifier<OnboardingState> {
         : const OnboardingImporting();
     state = form.copyWith(busy: true, clearError: true);
 
+    final int id;
     try {
-      final id = await ref
+      id = await ref
           .read(walletProvider)
           .importAccount(phrase: phrase, birthday: birthday);
-      ref.read(activeAccountProvider.notifier).select(id);
-      state = OnboardingDone(id);
-      await ref.read(walletProvider).startSync();
     } on ZakuraException catch (e) {
       state = form.copyWith(busy: false, error: _explain(e));
+      return;
+    }
+
+    ref.read(activeAccountProvider.notifier).select(id);
+    state = OnboardingDone(id);
+    await _beginSyncing();
+  }
+
+  /// Starts synchronising, without letting a failure here undo what already
+  /// happened.
+  ///
+  /// The wallet exists by this point. Reporting a failure to start scanning as
+  /// a failure to create or restore would tell somebody their money is not
+  /// there when it is — and scanning is something the wallet retries anyway,
+  /// with its own place to report that it could not.
+  Future<void> _beginSyncing() async {
+    try {
+      await ref.read(walletProvider).startSync();
+    } on ZakuraException {
+      // Deliberately swallowed. `SyncProgress.failed` is where a sync that
+      // could not start belongs, and it is already watched.
     }
   }
 

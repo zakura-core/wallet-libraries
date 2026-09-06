@@ -14,6 +14,19 @@ this is what is built on it. See `docs/wallet_app.md` for the design, and
 | `bindings/` | Dart. Generated glue, the native build, and `NativeBindings`. | Built, 10 native tests |
 | `example/` | Flutter. The minimal reference wallet. | Built, runs on the real wallet |
 
+## A wallet at the command line
+
+```
+cargo run -p zakura-wallet-facade --example wallet -- \
+    --dir /tmp/w --seconds 30 [--phrase "..."] [--birthday 3000000]
+```
+
+Opens, restores, syncs and prints what the wallet is worth, against a real
+server. It exists because a defect in the network path — a wrong endpoint, a
+missing sandbox entitlement, a birthday that skips the money — looks the same
+from inside a test as everything working, and only talking to a real server
+tells them apart.
+
 ## Running the example
 
 ```
