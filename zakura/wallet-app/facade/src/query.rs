@@ -173,7 +173,7 @@ impl Wallet {
     /// from one it merely generated.
     pub fn next_address(&self, account: u32, exposed_at: Option<u32>) -> Result<String, Error> {
         let params = self.params;
-        self.with_writer(|db| {
+        self.with_writer_pausing_sync(|db| {
             let (address, _index) = db.next_address(
                 &params,
                 Self::account_id(account),

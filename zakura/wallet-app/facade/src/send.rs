@@ -30,20 +30,36 @@
 use zakura_wallet_core::pool::PoolId;
 use zakura_wallet_store::WalletDb;
 use zcash_protocol::{
-    consensus::{BranchId, Parameters},
+    consensus::{BlockHeight, BranchId, Parameters},
     value::Zatoshis,
 };
 use zeroize::Zeroizing;
 
 use crate::{Wallet, error::Error, keys};
 
-/// How many blocks a transaction stays valid for after the anchor it was built
-/// against.
+/// How many blocks a transaction stays valid for after the chain tip.
 ///
 /// The same figure the reference wallet uses. Long enough to survive a slow
 /// relay, short enough that an abandoned transaction stops holding its inputs
 /// hostage.
 const EXPIRY_DELTA: u32 = 40;
+
+/// Returns the height a transaction should expire at, and the height whose
+/// consensus rules it is built for.
+///
+/// Both come from the chain tip rather than from the anchor. The anchor is the
+/// most recent block both commitment trees hold a checkpoint for, which during
+/// recovery can sit a long way below the tip — and a transaction expiring forty
+/// blocks after a height the chain passed an hour ago is born expired. The
+/// branch identifier has the same problem in a worse form: taken from a stale
+/// height it can name the rules of a network upgrade the chain has already
+/// left, and consensus rejects it.
+///
+/// The anchor is still the floor, because a tip below it would mean the wallet
+/// had scanned past what the server admits to having.
+fn expiry_height(tip: Option<BlockHeight>, anchor: BlockHeight) -> BlockHeight {
+    std::cmp::max(tip.unwrap_or(anchor), anchor) + EXPIRY_DELTA
+}
 
 /// What a payment would cost, worked out before anything is proved.
 ///
@@ -88,12 +104,14 @@ pub struct SendReceipt {
 impl Wallet {
     /// Works out what a payment would cost, without proving it.
     pub fn quote(&self, account: u32, to: &str, amount: u64) -> Result<SpendQuote, Error> {
-        let recipient = crate::address::parse(&self.params, to)?;
-        let _ = recipient;
+        // Parsed for its errors, not its value: selection does not need the
+        // recipient, but somebody quoting a payment to an address this wallet
+        // cannot pay should learn that now rather than after the fee is shown.
+        crate::address::parse(&self.params, to)?;
         let amount = Zatoshis::from_u64(amount)
             .map_err(|_| Error::Build("that is not a valid amount".to_owned()))?;
 
-        self.with_writer(|db| {
+        self.with_writer_pausing_sync(|db| {
             let (proposal, _) = plan(db, &self.params, Self::account_id(account), amount)?;
             Ok(SpendQuote {
                 amount: proposal.amount.into_u64(),
@@ -126,13 +144,15 @@ impl Wallet {
         let account = Self::account_id(account);
         let params = self.params;
 
-        let (raw, txid) = self.with_writer(|db| {
+        let (raw, txid) = self.with_writer_pausing_sync(|db| {
             let (proposal, witnesses) = plan(db, &params, account, amount)?;
             let spend_keys = keys::spending_keys(db, &params, account, seed)?;
 
             let anchors = zakura_wallet_tx::anchors(db)?;
-            let expiry = anchors.height + EXPIRY_DELTA;
-            let branch_id = BranchId::for_height(&params, anchors.height);
+            let expiry = expiry_height(db.chain_tip()?, anchors.height);
+            // The rules the transaction will be judged by are the ones in force
+            // where it will be mined, not where its anchor was taken.
+            let branch_id = BranchId::for_height(&params, expiry);
 
             let request = zakura_wallet_tx::SpendRequest {
                 proposal: &proposal,
@@ -243,4 +263,33 @@ fn plan<P: Parameters>(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok((proposal, chosen))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn h(n: u32) -> BlockHeight {
+        BlockHeight::from_u32(n)
+    }
+
+    /// The defect this exists for: during recovery the anchor can sit far below
+    /// the tip, and an expiry measured from it names a height the chain passed
+    /// long ago.
+    #[test]
+    fn expiry_follows_the_tip_not_a_lagging_anchor() {
+        assert_eq!(expiry_height(Some(h(2_000_000)), h(1_000_000)), h(2_000_040));
+    }
+
+    #[test]
+    fn expiry_falls_back_to_the_anchor_when_no_tip_is_known() {
+        assert_eq!(expiry_height(None, h(1_000_000)), h(1_000_040));
+    }
+
+    /// A tip below the anchor would mean the wallet had scanned past what the
+    /// server admits to; the anchor is the floor either way.
+    #[test]
+    fn the_anchor_is_the_floor() {
+        assert_eq!(expiry_height(Some(h(900_000)), h(1_000_000)), h(1_000_040));
+    }
 }

@@ -27,6 +27,7 @@ class ZakuraWallet {
   Timer? _poll;
   SyncProgress _last = const SyncProgress();
   bool _closed = false;
+  bool _polling = false;
 
   /// How far synchronisation has got, as it changes.
   ///
@@ -109,6 +110,9 @@ class ZakuraWallet {
     await _tick();
   }
 
+  /// Returns why the last sync stopped, if it stopped because of a failure.
+  Future<String?> syncFailure() => _bindings.syncFailure();
+
   /// Works out what a payment would cost, without proving it.
   Future<SpendQuote> quote({
     required int account,
@@ -139,7 +143,12 @@ class ZakuraWallet {
   }
 
   Future<void> _tick() async {
-    if (_closed) return;
+    // A poll that has not come back yet must not be joined by another. The
+    // timer does not wait, so on a slow call two answers could otherwise land
+    // out of order and the older one would win.
+    if (_closed || _polling) return;
+    _polling = true;
+
     late final SyncProgress next;
     try {
       next = await _bindings.progress();
@@ -147,6 +156,8 @@ class ZakuraWallet {
       // A failed poll is not worth surfacing: the next one is a second away,
       // and tearing down the stream over it would take the interface with it.
       return;
+    } finally {
+      _polling = false;
     }
     if (_closed || next == _last) return;
 

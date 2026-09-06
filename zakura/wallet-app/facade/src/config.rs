@@ -48,6 +48,12 @@ pub struct WalletConfig {
     /// The default is the mobile budget, because the cost of guessing wrong is
     /// asymmetric: too large stalls a phone, too small only costs round trips.
     pub batch_bytes: usize,
+    /// How long to wait, once caught up, before looking for new blocks.
+    ///
+    /// Zcash blocks are about seventy-five seconds apart, so polling much
+    /// faster than this only costs battery and gives a light server a clearer
+    /// picture of when the wallet is awake.
+    pub poll_interval: std::time::Duration,
 }
 
 impl WalletConfig {
@@ -59,6 +65,7 @@ impl WalletConfig {
             cache_path: dir.join("cache.db"),
             lightwalletd_url: lightwalletd_url.into(),
             batch_bytes: zakura_wallet_sync::ByteBudget::MOBILE.bytes(),
+            poll_interval: std::time::Duration::from_secs(20),
         }
     }
 }

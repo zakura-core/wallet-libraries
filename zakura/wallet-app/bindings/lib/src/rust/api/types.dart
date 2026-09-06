@@ -244,12 +244,21 @@ class ApiSyncProgress {
   /// How many blocks remain queued.
   final BigInt blocksRemaining;
 
+  /// Whether the last attempt ended in a failure rather than a finish.
+  ///
+  /// An unreachable server leaves the engine stopped with nothing queued,
+  /// which is what having caught up looks like too. Without this an interface
+  /// cannot tell them apart, and would say a wallet is up to date when it has
+  /// not spoken to a server.
+  final bool failed;
+
   const ApiSyncProgress({
     required this.phase,
     this.fraction,
     this.tip,
     this.scannedTo,
     required this.blocksRemaining,
+    required this.failed,
   });
 
   @override
@@ -258,7 +267,8 @@ class ApiSyncProgress {
       fraction.hashCode ^
       tip.hashCode ^
       scannedTo.hashCode ^
-      blocksRemaining.hashCode;
+      blocksRemaining.hashCode ^
+      failed.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -269,5 +279,6 @@ class ApiSyncProgress {
           fraction == other.fraction &&
           tip == other.tip &&
           scannedTo == other.scannedTo &&
-          blocksRemaining == other.blocksRemaining;
+          blocksRemaining == other.blocksRemaining &&
+          failed == other.failed;
 }

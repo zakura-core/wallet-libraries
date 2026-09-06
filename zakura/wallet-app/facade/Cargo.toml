@@ -18,7 +18,7 @@ bip0039.workspace = true
 orchard.workspace = true
 rand = { workspace = true, features = ["thread_rng"] }
 rusqlite.workspace = true
-tokio = { workspace = true, features = ["rt", "sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tokio-util = "0.7"
 zakura-wallet-core = { path = "../../wallet-core" }
 zakura-wallet-lwd = { path = "../../wallet-lwd" }

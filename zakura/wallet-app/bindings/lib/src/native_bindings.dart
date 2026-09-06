@@ -147,6 +147,7 @@ class NativeBindings implements ZakuraBindings {
           tip: p.tip,
           scannedTo: p.scannedTo,
           blocksRemaining: p.blocksRemaining.toInt(),
+          failed: p.failed,
         );
       });
 
@@ -189,6 +190,9 @@ class NativeBindings implements ZakuraBindings {
           serverResponse: r.serverResponse,
         );
       });
+
+  @override
+  Future<String?> syncFailure() => _translate(rust.syncFailure);
 
   @override
   Future<void> close() => _translate(rust.close);

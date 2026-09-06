@@ -31,6 +31,10 @@ class SyncIndicator extends StatelessWidget {
   /// idle too, so a transient failure to reach the server looks exactly like
   /// having caught up, and only the heights can tell them apart.
   static String describe(SyncProgress progress) {
+    // Checked before anything else. A failed attempt leaves the engine stopped
+    // with nothing queued, which is indistinguishable from having caught up
+    // unless the failure is asked about first.
+    if (progress.failed) return 'Could not reach the server';
     if (progress.isCaughtUp) return 'Up to date';
     return switch (progress.phase) {
       SyncPhase.bootstrapping => 'Starting…',
@@ -62,8 +66,11 @@ class SyncIndicator extends StatelessWidget {
             Expanded(
               child: Text(
                 model.label,
-                style: theme.typography.caption
-                    .copyWith(color: theme.colors.textMuted),
+                style: theme.typography.caption.copyWith(
+                  color: progress.failed
+                      ? theme.colors.danger
+                      : theme.colors.textMuted,
+                ),
               ),
             ),
             if (fraction != null && !progress.isCaughtUp)

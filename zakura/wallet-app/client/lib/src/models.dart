@@ -167,12 +167,21 @@ class SyncProgress {
   /// How many blocks remain queued.
   final int blocksRemaining;
 
+  /// Whether the last attempt ended in a failure rather than a finish.
+  ///
+  /// An unreachable server leaves the engine stopped with nothing queued,
+  /// which is exactly what having caught up looks like. Without this an
+  /// interface would tell somebody their wallet is up to date when it has not
+  /// spoken to a server in an hour.
+  final bool failed;
+
   const SyncProgress({
     this.phase = SyncPhase.stopped,
     this.fraction,
     this.tip,
     this.scannedTo,
     this.blocksRemaining = 0,
+    this.failed = false,
   });
 
   /// Whether the engine is doing work right now.
@@ -186,7 +195,11 @@ class SyncProgress {
   /// Deliberately requires having actually scanned to the tip rather than
   /// trusting [SyncPhase.idle], which an empty fetch also produces.
   bool get isCaughtUp =>
-      tip != null && scannedTo != null && scannedTo! >= tip! && blocksRemaining == 0;
+      !failed &&
+      tip != null &&
+      scannedTo != null &&
+      scannedTo! >= tip! &&
+      blocksRemaining == 0;
 
   @override
   String toString() =>
@@ -199,11 +212,12 @@ class SyncProgress {
       other.fraction == fraction &&
       other.tip == tip &&
       other.scannedTo == scannedTo &&
-      other.blocksRemaining == blocksRemaining;
+      other.blocksRemaining == blocksRemaining &&
+      other.failed == failed;
 
   @override
   int get hashCode =>
-      Object.hash(phase, fraction, tip, scannedTo, blocksRemaining);
+      Object.hash(phase, fraction, tip, scannedTo, blocksRemaining, failed);
 }
 
 /// What a payment would cost, worked out before anything is proved.

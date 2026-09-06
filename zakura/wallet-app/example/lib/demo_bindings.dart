@@ -200,6 +200,9 @@ class DemoBindings implements ZakuraBindings {
   }
 
   @override
+  Future<String?> syncFailure() async => null;
+
+  @override
   Future<void> close() async {
     _sync?.cancel();
     _sync = null;

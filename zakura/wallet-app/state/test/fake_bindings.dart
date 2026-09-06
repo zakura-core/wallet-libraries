@@ -72,13 +72,15 @@ class FakeBindings implements ZakuraBindings {
         'not a valid seed phrase',
       );
     }
-    final id = _accounts.length;
+    // The store numbers accounts from one, not zero. Matching that here stops
+    // a caller quietly depending on the first account being account zero.
+    final id = _accounts.length + 1;
     _accounts.add(
       Account(
         id: id,
         birthday: birthday,
         canSpend: true,
-        hdAccountIndex: id,
+        hdAccountIndex: _accounts.length,
       ),
     );
     return id;
@@ -88,7 +90,7 @@ class FakeBindings implements ZakuraBindings {
   Future<List<Account>> accounts() async => List.unmodifiable(_accounts);
 
   void _requireAccount(int account) {
-    if (account < 0 || account >= _accounts.length) {
+    if (!_accounts.any((a) => a.id == account)) {
       throw ZakuraException(
         ZakuraErrorCode.noSuchAccount,
         'there is no account $account',
@@ -173,6 +175,12 @@ class FakeBindings implements ZakuraBindings {
       serverResponse: 'accepted',
     );
   }
+
+  /// Set to have the wallet report a sync failure.
+  String? failure;
+
+  @override
+  Future<String?> syncFailure() async => failure;
 
   @override
   Future<void> close() async {

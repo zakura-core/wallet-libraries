@@ -81,6 +81,12 @@ abstract interface class ZakuraBindings {
     required String phrase,
   });
 
+  /// Returns why the last sync stopped, if it stopped because of a failure.
+  ///
+  /// Cleared when a new sync starts. The message is for a log or a details
+  /// pane; [SyncProgress.failed] is what an interface branches on.
+  Future<String?> syncFailure();
+
   /// Releases the wallet.
   Future<void> close();
 }

@@ -111,18 +111,14 @@ account created from a seed can spend the notes it finds*. The facade derives
 through ZIP 32 using the stored account index and checks the derived viewing key
 against the stored one. This is the highest-value correctness work here.
 
-**Recording a sent transaction.** After a successful broadcast nothing is
-written. `spent_unconfirmed` is computed from spends of notes joined to an
-unmined transaction row, and that row appears only when the transaction is
-scanned back off the chain. So between broadcast and the next scan, balance and
-history both lie — the wallet says the money is still there. The fix belongs in
-the store, not in a UI-side overlay: the app should not have to maintain a
-shadow copy of what the wallet holds.
-
-**A consensus branch and an expiry.** Both are caller parameters. The facade
-derives them from the chain tip, and for a crossing uses the canonical expiry,
-because an ordinary one would single the transaction out from the crossings it
-is meant to be indistinguishable from.
+**A consensus branch and an expiry.** Both are caller parameters, and both must
+come from the chain tip rather than from the anchor. The anchor is the most
+recent block both commitment trees hold a checkpoint for, which during recovery
+can sit a long way below the tip; an expiry measured from it names a height the
+chain passed an hour ago, and a branch identifier taken from it can name the
+rules of an upgrade the chain has already left. A crossing additionally needs
+the canonical expiry, because an ordinary one would single the transaction out
+from the crossings it is meant to be indistinguishable from.
 
 **The output pool, which is not a choice, and the crossing guard that is
 missing underneath it.** From NU6.3 the Orchard pool prohibits cross-address
@@ -189,6 +185,16 @@ visible, rather than presenting a settled green check.
 balance can report notes as spendable that selection will then withhold. The
 send flow must handle "selected fewer funds than the balance implied" as an
 expected outcome with a real message.
+
+**A sent payment does not show until it is scanned back.** After a successful
+broadcast nothing is written to the wallet. `spent_unconfirmed` is computed from
+spends of notes joined to an unmined transaction row, and that row appears only
+when the transaction is found on the chain. So between broadcasting and the next
+scan, balance and history both say the money is still there. The fix belongs in
+the store rather than in an interface-side overlay — an application should not
+have to keep a shadow copy of what the wallet holds — and it is not built. Until
+it is, an interface should say a payment was sent rather than implying the
+balance it is showing accounts for it.
 
 **There are no memos.** The field is omitted rather than accepted and dropped.
 

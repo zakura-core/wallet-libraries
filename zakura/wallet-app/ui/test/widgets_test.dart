@@ -29,6 +29,7 @@ Widget host(
     );
 
 void main() {
+  _syncFailureTests();
   group('BalanceCard', () {
     testWidgets('shows the spendable figure', (tester) async {
       await tester.pumpWidget(
@@ -327,6 +328,58 @@ void main() {
         host(const SendForm(stage: SendStage.editing, error: 'Nope')),
       );
       expect(find.text('Nope'), findsOneWidget);
+    });
+  });
+}
+
+/// Added after a review found that a failed sync was indistinguishable from a
+/// finished one everywhere above the engine.
+void _syncFailureTests() {
+  group('SyncIndicator failure', () {
+    /// The engine stops with nothing queued whether it caught up or could not
+    /// reach anybody. Reporting the second as the first tells somebody their
+    /// wallet is current when it has not seen a server.
+    testWidgets('a failure is not reported as up to date', (tester) async {
+      await tester.pumpWidget(
+        host(
+          const SyncIndicator(
+            progress: SyncProgress(
+              phase: SyncPhase.stopped,
+              tip: 100,
+              scannedTo: 100,
+              failed: true,
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Up to date'), findsNothing);
+      expect(find.text('Could not reach the server'), findsOneWidget);
+    });
+
+    testWidgets('the same progress without a failure is up to date',
+        (tester) async {
+      await tester.pumpWidget(
+        host(
+          const SyncIndicator(
+            progress: SyncProgress(
+              phase: SyncPhase.stopped,
+              tip: 100,
+              scannedTo: 100,
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Up to date'), findsOneWidget);
+    });
+
+    test('a failed progress is never caught up', () {
+      const failed = SyncProgress(
+        phase: SyncPhase.idle,
+        tip: 100,
+        scannedTo: 100,
+        failed: true,
+      );
+      expect(failed.isCaughtUp, isFalse);
     });
   });
 }

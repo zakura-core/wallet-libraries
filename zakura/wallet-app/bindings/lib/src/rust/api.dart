@@ -81,6 +81,12 @@ Future<void> stopSync() => RustLib.instance.api.crateApiStopSync();
 /// instead of marshalling a callback back into another language's runtime.
 Future<ApiSyncProgress> progress() => RustLib.instance.api.crateApiProgress();
 
+/// Returns why the last sync stopped, if it stopped because of a failure.
+///
+/// Cleared when a new sync starts. The message is for a log or a details pane;
+/// `ApiSyncProgress::failed` is what an interface branches on.
+Future<String?> syncFailure() => RustLib.instance.api.crateApiSyncFailure();
+
 /// Works out what a payment would cost, without proving it.
 Future<ApiSpendQuote> quote({
   required int account,

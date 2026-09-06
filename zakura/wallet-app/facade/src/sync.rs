@@ -13,7 +13,10 @@
 //! engine gets a thread of its own with a current-thread runtime. It is not a
 //! task that can be politely interleaved with anything.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -63,6 +66,14 @@ pub struct SyncProgress {
     pub scanned_to: Option<u32>,
     /// How many blocks remain queued.
     pub blocks_remaining: u64,
+    /// Whether the last attempt ended in a failure rather than a finish.
+    ///
+    /// Without this, an unreachable server is indistinguishable from having
+    /// caught up: both leave the engine stopped with nothing queued. Somebody
+    /// looking at a wallet that says it is up to date, when in fact it has not
+    /// spoken to a server in an hour, is being told something false about their
+    /// own money.
+    pub failed: bool,
 }
 
 impl Default for SyncProgress {
@@ -73,6 +84,7 @@ impl Default for SyncProgress {
             tip: None,
             scanned_to: None,
             blocks_remaining: 0,
+            failed: false,
         }
     }
 }
@@ -100,6 +112,59 @@ impl SyncProgress {
             tip: status.tip.map(u32::from),
             scanned_to: status.scanned_to.map(u32::from),
             blocks_remaining: status.blocks_remaining,
+            failed: false,
+        }
+    }
+}
+
+/// Drives an engine until it is cancelled or cannot continue.
+///
+/// Returns the reason it stopped, or `None` if it was cancelled.
+///
+/// Extracted from the thread so it can be driven against any [`ChainSource`],
+/// including the in-memory one. The two mistakes it exists to not make are both
+/// easy to make and invisible once made: stopping at the tip, and treating a
+/// stall as having caught up.
+pub(crate) async fn drive<S, P>(
+    engine: &mut SyncEngine<S, P>,
+    token: &CancellationToken,
+    poll_interval: std::time::Duration,
+) -> Option<String>
+where
+    // The same bounds the engine itself carries: a fetch runs on its own task
+    // while the batch before it is applied.
+    S: zakura_wallet_sync::ChainSource + Send + Sync + 'static,
+    P: zcash_protocol::consensus::Parameters + Clone + Send + 'static,
+{
+    loop {
+        if token.is_cancelled() {
+            return None;
+        }
+
+        match engine.run(token).await {
+            Ok(summary) if summary.cancelled => return None,
+            Ok(summary) => {
+                // Stalled is not caught up. Work is still queued and the source
+                // would not serve it, and the engine is explicit that a caller
+                // has to be able to tell the two apart.
+                if let Some(range) = summary.stalled {
+                    return Some(format!(
+                        "the server would not serve blocks {} to {}",
+                        u32::from(range.start),
+                        u32::from(range.end),
+                    ));
+                }
+            }
+            Err(e) => return Some(e.to_string()),
+        }
+
+        // Caught up. Wait for the chain to move rather than spinning on a tip
+        // that is not going to change for another minute or so. Without this
+        // loop a wallet syncs once and then goes deaf to every block that
+        // follows, including the one carrying somebody's payment.
+        tokio::select! {
+            _ = tokio::time::sleep(poll_interval) => {}
+            _ = token.cancelled() => return None,
         }
     }
 }
@@ -109,9 +174,20 @@ pub(crate) struct Session {
     cancel: CancellationToken,
     progress: watch::Receiver<SyncProgress>,
     handle: Option<std::thread::JoinHandle<()>>,
+    /// Set by the thread as it exits.
+    ///
+    /// A sync ends on its own as soon as there is nothing left to scan, which
+    /// in ordinary use is most of the time. Without this the session would look
+    /// live forever after the first one finished, and no second sync could ever
+    /// be started.
+    finished: Arc<AtomicBool>,
 }
 
 impl Session {
+    fn is_running(&self) -> bool {
+        !self.finished.load(Ordering::SeqCst)
+    }
+
     fn stop(mut self) {
         self.cancel.cancel();
         if let Some(handle) = self.handle.take() {
@@ -133,6 +209,15 @@ impl Wallet {
     /// latest value instead of a queue of stale ones.
     pub fn start_sync(&self) -> Result<(), Error> {
         let mut session = self.session.lock().expect("the session lock is never poisoned");
+
+        // A sync that has run to completion leaves its session behind. Reap it
+        // rather than refusing: reaching the tip is the ordinary outcome, and a
+        // wallet that could only ever sync once would be useless.
+        if session.as_ref().is_some_and(|s| !s.is_running()) {
+            if let Some(finished) = session.take() {
+                finished.stop();
+            }
+        }
         if session.is_some() {
             return Err(Error::AlreadySyncing);
         }
@@ -146,7 +231,8 @@ impl Wallet {
 
         // The scanner needs one prepared key set per account. Building it here
         // rather than in the engine keeps the engine free of the store's
-        // account vocabulary.
+        // account vocabulary, and means an account created since the last sync
+        // is picked up by this one.
         let keys = match self.scan_keys(&db) {
             Ok(keys) => keys,
             Err(e) => {
@@ -154,6 +240,8 @@ impl Wallet {
                 return Err(e);
             }
         };
+
+        *self.failure.lock().expect("the failure lock is never poisoned") = None;
 
         let cancel = CancellationToken::new();
         let (tx, rx) = watch::channel(SyncProgress {
@@ -164,28 +252,46 @@ impl Wallet {
         let url = self.config.lightwalletd_url.clone();
         let params = self.params;
         let budget = ByteBudget::new(self.config.batch_bytes);
+        let poll_interval = self.config.poll_interval;
         let writer = Arc::clone(&self.writer);
+        let failure = Arc::clone(&self.failure);
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = Arc::clone(&finished);
         let token = cancel.clone();
 
         let handle = std::thread::Builder::new()
             .name("zakura-sync".to_owned())
             .spawn(move || {
+                let record = |e: String| {
+                    *failure.lock().expect("the failure lock is never poisoned") = Some(e);
+                };
+
                 let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                 {
                     Ok(runtime) => runtime,
-                    Err(_) => {
+                    Err(e) => {
+                        record(format!("could not start the sync runtime: {e}"));
                         *writer.lock().expect("the writer lock is never poisoned") = Some(db);
+                        done.store(true, Ordering::SeqCst);
+                        let _ = tx.send(SyncProgress {
+                            phase: SyncPhase::Stopped,
+                            failed: true,
+                            ..SyncProgress::default()
+                        });
                         return;
                     }
                 };
 
-                let finish = tx.clone();
+                let publish_final = tx.clone();
                 let db = runtime.block_on(async move {
                     let source = match LightwalletdSource::connect(&url).await {
                         Ok(source) => source,
-                        Err(_) => return db,
+                        Err(e) => {
+                            record(format!("could not reach {url}: {e}"));
+                            return db;
+                        }
                     };
 
                     let mut engine = SyncEngine::new(
@@ -213,20 +319,26 @@ impl Wallet {
                         }
                     });
 
-                    if engine.update_tip().await.is_ok() {
-                        let _ = engine.run(&token).await;
+                    if let Some(reason) = drive(&mut engine, &token, poll_interval).await {
+                        record(reason);
                     }
 
                     forward.abort();
                     engine.into_db()
                 });
 
-                let last = *finish.borrow();
-                let _ = finish.send(SyncProgress {
+                *writer.lock().expect("the writer lock is never poisoned") = Some(db);
+                done.store(true, Ordering::SeqCst);
+
+                let last = *publish_final.borrow();
+                let _ = publish_final.send(SyncProgress {
                     phase: SyncPhase::Stopped,
+                    failed: failure
+                        .lock()
+                        .expect("the failure lock is never poisoned")
+                        .is_some(),
                     ..last
                 });
-                *writer.lock().expect("the writer lock is never poisoned") = Some(db);
             })
             .map_err(|e| Error::Build(format!("could not start the sync thread: {e}")))?;
 
@@ -234,6 +346,7 @@ impl Wallet {
             cancel,
             progress: rx,
             handle: Some(handle),
+            finished,
         });
         Ok(())
     }
@@ -254,20 +367,46 @@ impl Wallet {
 
     /// Returns how far synchronisation has got.
     pub fn progress(&self) -> SyncProgress {
-        self.session
+        let mut progress = self
+            .session
             .lock()
             .expect("the session lock is never poisoned")
             .as_ref()
             .map(|s| *s.progress.borrow())
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        // The failure outlives the session, so that reaping a finished sync
+        // does not quietly turn a server that could not be reached into a
+        // wallet that looks up to date.
+        progress.failed = self
+            .failure
+            .lock()
+            .expect("the failure lock is never poisoned")
+            .is_some();
+        progress
     }
 
-    /// Returns whether a sync is running.
+    /// Returns why the last sync stopped, if it stopped because of a failure.
+    ///
+    /// Cleared when a new sync starts. The message is for a log or a details
+    /// pane; [`SyncProgress::failed`] is what an interface branches on.
+    pub fn sync_failure(&self) -> Option<String> {
+        self.failure
+            .lock()
+            .expect("the failure lock is never poisoned")
+            .clone()
+    }
+
+    /// Returns whether a sync is running right now.
+    ///
+    /// False once the engine has run out of work, even though the session has
+    /// not been stopped: reaching the tip is a finish, not a pause.
     pub fn is_syncing(&self) -> bool {
         self.session
             .lock()
             .expect("the session lock is never poisoned")
-            .is_some()
+            .as_ref()
+            .is_some_and(|s| s.is_running())
     }
 
     fn scan_keys(&self, db: &WalletDb) -> Result<ScanKeys, Error> {
@@ -293,5 +432,149 @@ impl Drop for Wallet {
         if let Some(session) = session {
             session.stop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use zakura_wallet_core::{KeyScope, pool::PoolId};
+    use zakura_wallet_scan::{
+        ScanKeys,
+        testing::{ChainBuilder, IRONWOOD_ACTIVATION, test_params},
+    };
+    use zakura_wallet_store::testing::test_db;
+    use zakura_wallet_sync::testing::InMemoryChain;
+    use zcash_protocol::consensus::BlockHeight;
+
+    use super::*;
+
+    const START: u32 = IRONWOOD_ACTIVATION + 10;
+
+    /// An engine over an in-memory chain carrying one note, and the account it
+    /// was paid to.
+    ///
+    /// Account identifiers are assigned by the store and do not start at zero,
+    /// so the caller is handed the one it got rather than guessing.
+    fn engine() -> (
+        SyncEngine<InMemoryChain, zcash_protocol::local_consensus::LocalNetwork>,
+        zakura_wallet_core::AccountId,
+    ) {
+        let mut db = test_db().unwrap();
+        let id = db
+            .create_account(
+                &test_params(),
+                &[3u8; 32],
+                zip32::AccountId::try_from(0).unwrap(),
+                BlockHeight::from_u32(START),
+            )
+            .unwrap();
+        let fvk = db
+            .account(&test_params(), id)
+            .unwrap()
+            .unwrap()
+            .orchard_fvk()
+            .unwrap()
+            .clone();
+
+        let mut chain = ChainBuilder::new(START);
+        chain.block(|b| {
+            b.tx(|t| {
+                t.receive(PoolId::Ironwood, &fvk, KeyScope::External, 100_000);
+            });
+        });
+        chain.empty_blocks(3);
+
+        let engine = SyncEngine::new(
+            InMemoryChain::new(chain.anchor(), chain.blocks().to_vec()),
+            test_params(),
+            db,
+            ScanKeys::from_accounts([(id, fvk)]),
+            TransparentWatch::default(),
+            SyncConfig::default(),
+        );
+        (engine, id)
+    }
+
+    /// The defect this exists for: `run` returns the moment there is nothing
+    /// queued, so a single call syncs once and then goes deaf to every block
+    /// that follows. Timed rather than spawned, because the engine owns a
+    /// SQLite connection and so is not `Send` — which is also why the real
+    /// thread drives it with `block_on` rather than a task.
+    #[tokio::test]
+    async fn it_keeps_following_the_chain_after_catching_up() {
+        let (mut engine, _) = engine();
+        let token = CancellationToken::new();
+
+        let canceller = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            canceller.cancel();
+        });
+
+        let started = std::time::Instant::now();
+        let reason = drive(&mut engine, &token, Duration::from_millis(20)).await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(reason, None, "cancelling is not a failure");
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "it stopped at the tip after {elapsed:?} instead of waiting to be cancelled",
+        );
+    }
+
+    /// And it stops promptly when asked, rather than sitting out the poll
+    /// interval first.
+    #[tokio::test]
+    async fn cancelling_ends_it_without_waiting_for_the_next_poll() {
+        let (mut engine, _) = engine();
+        let token = CancellationToken::new();
+
+        let canceller = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            canceller.cancel();
+        });
+
+        let started = std::time::Instant::now();
+        drive(&mut engine, &token, Duration::from_secs(30)).await;
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "it waited out a thirty-second poll instead of cancelling",
+        );
+    }
+
+    /// Cancelling before the first pass does nothing and reports nothing.
+    #[tokio::test]
+    async fn cancelling_first_is_not_a_failure() {
+        let (mut engine, _) = engine();
+        let token = CancellationToken::new();
+        token.cancel();
+
+        assert_eq!(
+            drive(&mut engine, &token, Duration::from_millis(20)).await,
+            None
+        );
+    }
+
+    /// And the wallet really did scan, which is what makes the test above about
+    /// tracking rather than about an engine that never started.
+    #[tokio::test]
+    async fn it_scans_before_it_starts_waiting() {
+        let (mut engine, account) = engine();
+        let token = CancellationToken::new();
+
+        let canceller = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            canceller.cancel();
+        });
+        drive(&mut engine, &token, Duration::from_millis(20)).await;
+
+        let db = engine.into_db();
+        let balance = db.total_balance(account).expect("the account is there");
+        assert_eq!(balance.total().into_u64(), 100_000, "the note was not found");
     }
 }

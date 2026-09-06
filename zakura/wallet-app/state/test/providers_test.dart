@@ -91,7 +91,8 @@ void main() {
       final state = container.read(sendControllerProvider);
       expect(state, isA<SendQuoted>());
       expect((state as SendQuoted).quote.fee, const Zatoshi(15000));
-      expect(id, 0);
+      // Account identifiers come from the store and do not start at zero.
+      expect(id, isPositive);
     });
 
     test('reports insufficient funds in words somebody can act on', () async {

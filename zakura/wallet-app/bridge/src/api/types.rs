@@ -104,6 +104,13 @@ pub struct ApiSyncProgress {
     pub scanned_to: Option<u32>,
     /// How many blocks remain queued.
     pub blocks_remaining: u64,
+    /// Whether the last attempt ended in a failure rather than a finish.
+    ///
+    /// An unreachable server leaves the engine stopped with nothing queued,
+    /// which is what having caught up looks like too. Without this an interface
+    /// cannot tell them apart, and would say a wallet is up to date when it has
+    /// not spoken to a server.
+    pub failed: bool,
 }
 
 /// What a payment would cost.

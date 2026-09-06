@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1810039406;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 759501546;
 
 // Section: executor
 
@@ -478,6 +478,38 @@ fn wire__crate__api__stop_sync_impl(
         },
     )
 }
+fn wire__crate__api__sync_failure_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "sync_failure",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::types::ApiError>((move || {
+                    let output_ok = crate::api::sync_failure()?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__validate_mnemonic_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -633,12 +665,14 @@ impl SseDecode for crate::api::types::ApiSyncProgress {
         let mut var_tip = <Option<u32>>::sse_decode(deserializer);
         let mut var_scannedTo = <Option<u32>>::sse_decode(deserializer);
         let mut var_blocksRemaining = <u64>::sse_decode(deserializer);
+        let mut var_failed = <bool>::sse_decode(deserializer);
         return crate::api::types::ApiSyncProgress {
             phase: var_phase,
             fraction: var_fraction,
             tip: var_tip,
             scanned_to: var_scannedTo,
             blocks_remaining: var_blocksRemaining,
+            failed: var_failed,
         };
     }
 }
@@ -699,6 +733,17 @@ impl SseDecode for Vec<u8> {
             ans_.push(<u8>::sse_decode(deserializer));
         }
         return ans_;
+    }
+}
+
+impl SseDecode for Option<String> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<String>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
     }
 }
 
@@ -772,7 +817,8 @@ fn pde_ffi_dispatcher_primary_impl(
         11 => wire__crate__api__send_impl(port, ptr, rust_vec_len, data_len),
         12 => wire__crate__api__start_sync_impl(port, ptr, rust_vec_len, data_len),
         13 => wire__crate__api__stop_sync_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__validate_mnemonic_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__sync_failure_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__validate_mnemonic_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -949,6 +995,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::ApiSyncProgress {
             self.tip.into_into_dart().into_dart(),
             self.scanned_to.into_into_dart().into_dart(),
             self.blocks_remaining.into_into_dart().into_dart(),
+            self.failed.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1055,6 +1102,7 @@ impl SseEncode for crate::api::types::ApiSyncProgress {
         <Option<u32>>::sse_encode(self.tip, serializer);
         <Option<u32>>::sse_encode(self.scanned_to, serializer);
         <u64>::sse_encode(self.blocks_remaining, serializer);
+        <bool>::sse_encode(self.failed, serializer);
     }
 }
 
@@ -1105,6 +1153,16 @@ impl SseEncode for Vec<u8> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <u8>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<String> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <String>::sse_encode(value, serializer);
         }
     }
 }

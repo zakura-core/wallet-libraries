@@ -76,6 +76,9 @@ reasons are in `docs/wallet_app.md`.
   would work, and would be identifiable.
 - **No transparent anything.** Detected and attributed, but no address
   derivation, no balance query, no spend, no shielding.
+- **A sent payment does not show until it is scanned back.** Nothing is written
+  to the wallet on broadcast, so balance and history both lag until the
+  transaction is found on the chain. Closing it needs a write path in the store.
 - **No memos.**
 - **Sending needs the seed**, because the wallet stores only viewing keys. It
   belongs in the platform keystore; the example does not do this.

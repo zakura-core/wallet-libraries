@@ -173,7 +173,16 @@ pub fn progress() -> Result<ApiSyncProgress, ApiError> {
         tip: p.tip,
         scanned_to: p.scanned_to,
         blocks_remaining: p.blocks_remaining,
+        failed: p.failed,
     })
+}
+
+/// Returns why the last sync stopped, if it stopped because of a failure.
+///
+/// Cleared when a new sync starts. The message is for a log or a details pane;
+/// `ApiSyncProgress::failed` is what an interface branches on.
+pub fn sync_failure() -> Result<Option<String>, ApiError> {
+    Ok(wallet()?.sync_failure())
 }
 
 /// Works out what a payment would cost, without proving it.

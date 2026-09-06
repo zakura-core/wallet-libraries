@@ -68,6 +68,8 @@ pub struct Wallet {
     /// The writer. Held here when idle, moved into the engine while syncing.
     writer: Arc<Mutex<Option<WalletDb>>>,
     session: Mutex<Option<sync::Session>>,
+    /// Why the last sync stopped, when it stopped because of a failure.
+    failure: Arc<Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for Wallet {
@@ -100,6 +102,7 @@ impl Wallet {
             reader: Mutex::new(reader),
             writer: Arc::new(Mutex::new(Some(writer))),
             session: Mutex::new(None),
+            failure: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -127,7 +130,7 @@ impl Wallet {
         let index = zip32::AccountId::try_from(account_index)
             .map_err(|_| Error::Build(format!("{account_index} is not a ZIP 32 account index")))?;
 
-        self.with_writer(|db| {
+        self.with_writer_pausing_sync(|db| {
             let id = db.create_account(
                 &self.params,
                 seed.as_slice(),
@@ -138,13 +141,54 @@ impl Wallet {
         })
     }
 
+    /// Runs `f` against the writing connection, pausing any sync around it.
+    ///
+    /// The engine takes ownership of the writing handle while it runs, so
+    /// everything that writes — creating an account, issuing an address,
+    /// reading the anchors a spend needs — would otherwise be refused for as
+    /// long as the wallet was synchronising, which in ordinary use is most of
+    /// the time. A wallet that cannot be paid into or spent from while it is
+    /// catching up is not a wallet.
+    ///
+    /// Stopping is cheap by construction: a batch is applied in one
+    /// transaction that also marks the scan queue, so cancelling discards
+    /// nothing and resuming is re-reading the queue. Restarting also rebuilds
+    /// the scanner's key set, which is what makes an account created here
+    /// visible to the sync that follows.
+    ///
+    /// The sync is stopped *before* the writer lock is taken. Holding it across
+    /// the join would deadlock: the thread needs that same lock to hand the
+    /// database back.
+    pub(crate) fn with_writer_pausing_sync<T>(
+        &self,
+        f: impl FnOnce(&mut WalletDb) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let was_syncing = self.is_syncing();
+        if was_syncing {
+            self.stop_sync();
+        }
+
+        let result = self.with_writer(f);
+
+        if was_syncing {
+            // A failure to resume is recorded where a failure to sync is
+            // recorded, rather than replacing the caller's result: whatever
+            // they asked for either happened or did not, and that is the
+            // answer they need.
+            let _ = self.start_sync();
+        }
+        result
+    }
+
     /// Runs `f` against the writing connection.
     ///
-    /// Fails with [`Error::AlreadySyncing`] while the engine holds it. Writes
-    /// that change what the scanner must look for — creating an account, or
-    /// issuing an address — cannot be interleaved with a scan that is deciding
-    /// what to look for, so refusing is the honest answer rather than blocking.
-    fn with_writer<T>(&self, f: impl FnOnce(&mut WalletDb) -> Result<T, Error>) -> Result<T, Error> {
+    /// Fails with [`Error::AlreadySyncing`] if the engine holds it. Callers
+    /// that need to write while a sync may be running want
+    /// [`Wallet::with_writer_pausing_sync`].
+    pub(crate) fn with_writer<T>(
+        &self,
+        f: impl FnOnce(&mut WalletDb) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         let mut guard = self.writer.lock().expect("the writer lock is never poisoned");
         match guard.as_mut() {
             Some(db) => f(db),
@@ -153,7 +197,7 @@ impl Wallet {
     }
 
     /// Runs `f` against the reading connection.
-    fn with_reader<T>(&self, f: impl FnOnce(&WalletDb) -> Result<T, Error>) -> Result<T, Error> {
+    pub(crate) fn with_reader<T>(&self, f: impl FnOnce(&WalletDb) -> Result<T, Error>) -> Result<T, Error> {
         let guard = self.reader.lock().expect("the reader lock is never poisoned");
         f(&guard)
     }

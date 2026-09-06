@@ -48,6 +48,8 @@ void main() {
     if (dir.existsSync()) dir.deleteSync(recursive: true);
   });
 
+  _failureTests(bindings: () => bindings, dir: () => dir, built: built);
+
   Future<void> open() => bindings.open(
         directory: dir.path,
         lightwalletdUrl: 'https://testnet.example.invalid:443',
@@ -167,4 +169,44 @@ void main() {
     expect(await bindings.accounts(), hasLength(1));
     await bindings.stopSync();
   });
+}
+
+/// Added after a review found that a failed sync was reported as a finished
+/// one all the way up the stack.
+void _failureTests({
+  required NativeBindings Function() bindings,
+  required Directory Function() dir,
+  required bool built,
+}) {
+  test(
+    skip: !built ? 'run: cargo build -p zakura_wallet_bridge --release' : null,
+    'an unreachable server is reported as a failure, not as being up to date',
+    () async {
+      final b = bindings();
+      await b.open(
+        directory: dir().path,
+        lightwalletdUrl: 'https://127.0.0.1:1/',
+        mainnet: false,
+      );
+      await b.createAccount(
+        phrase: await b.generateMnemonic(),
+        birthday: 3000000,
+      );
+
+      await b.startSync();
+
+      // Waited for rather than slept through: how long a refused connection
+      // takes to give up belongs to the transport and changes with it.
+      final deadline = DateTime.now().add(const Duration(seconds: 60));
+      var progress = await b.progress();
+      while (!progress.failed && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        progress = await b.progress();
+      }
+
+      expect(progress.failed, isTrue, reason: 'the failure did not cross');
+      expect(progress.isCaughtUp, isFalse);
+      expect(await b.syncFailure(), contains('127.0.0.1'));
+    },
+  );
 }
