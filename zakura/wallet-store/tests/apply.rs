@@ -19,6 +19,9 @@ use zakura_wallet_store::{WalletDb, testing::test_db};
 use zcash_protocol::consensus::BlockHeight;
 
 const ALICE: AccountId = AccountId(1);
+
+/// The stored address row the watch set reports a hit against.
+const ADDRESS_ID: i64 = 1;
 const START: u32 = IRONWOOD_ACTIVATION + 10;
 
 fn h(n: u32) -> BlockHeight {
@@ -398,7 +401,7 @@ fn enhance_candidates_are_stored_with_their_funding_accounts() {
 
     let mut rng = test_rng(31);
     let nf = zakura_wallet_scan::testing::random_nullifier(&mut rng);
-    let nfs = NullifierSnapshot::new(0, [(PoolId::Ironwood, nf, ALICE)]);
+    let nfs = NullifierSnapshot::new([(PoolId::Ironwood, nf, ALICE)]);
 
     let mut chain = ChainBuilder::new(START);
     chain.block(|b| {
@@ -436,7 +439,14 @@ fn transparent_activity_is_stored() {
     db.set_birthday(h(START)).unwrap();
 
     let watched = script(3);
-    let watch = TransparentWatch::new([(watched.clone(), ALICE)], []);
+    // The address must exist before anything can be received at it. There is no
+    // trial decryption for transparent outputs: the wallet recognises one only
+    // because it derived the address in advance and was watching for it, and
+    // the foreign key from the output makes that structural rather than a
+    // convention somebody has to remember.
+    register_address(&db, ADDRESS_ID, ALICE, &watched);
+
+    let watch = TransparentWatch::new([(watched.clone(), ALICE, ADDRESS_ID)], []);
 
     let mut chain = ChainBuilder::new(START);
     let mut funding = None;
@@ -722,14 +732,11 @@ fn a_stale_snapshot_is_repaired_when_the_batch_is_applied() {
     apply(&mut db, &batch);
 
     // The spend is detected against an *empty* snapshot, so detection reports
-    // it as unmatched even though the note is already stored.
-    let mut second = ChainBuilder::with_anchor(
-        START + 1,
-        zakura_wallet_core::pool::TreeSizes {
-            orchard: 0,
-            ironwood: 1,
-        },
-    );
+    // it as unmatched even though the note is already stored. The range has to
+    // genuinely continue from the first one: a second chain anchored on an
+    // invented predecessor would be a different chain, and the store rejects
+    // that rather than inserting its commitments where the wallet disagrees.
+    let mut second = ChainBuilder::continuing_from(&first.end_anchor());
     second.block(|b| {
         b.tx(|t| {
             t.spend(PoolId::Ironwood, nf);
@@ -836,4 +843,417 @@ fn every_priority_code_round_trips() {
     let mut expected: Vec<_> = all.iter().map(|(_, p)| *p).collect();
     expected.sort();
     assert_eq!(seen, expected);
+}
+
+#[test]
+fn a_batch_anchored_on_a_different_block_is_rejected() {
+    // A batch is inserted into the trees at the absolute position its anchor
+    // names, so an anchor the wallet can contradict has to be refused. Here the
+    // second range is built on an invented predecessor rather than on the block
+    // the wallet actually scanned, which is what a faulty or hostile source
+    // looks like from the store's side.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let mut first = ChainBuilder::new(START);
+    first.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice(), KeyScope::External, 100);
+        });
+    });
+    apply(&mut db, &detect(&first, &NullifierSnapshot::default()));
+
+    let mut second = ChainBuilder::with_anchor(
+        START + 1,
+        zakura_wallet_core::pool::TreeSizes {
+            orchard: 0,
+            ironwood: 1,
+        },
+    );
+    second.empty_blocks(1);
+    let err = db
+        .put_batch(&test_params(), &detect(&second, &NullifierSnapshot::default()))
+        .expect_err("an anchor naming a block the wallet did not scan must be refused");
+
+    assert_matches!(
+        err,
+        zakura_wallet_store::TreeError::Store(zakura_wallet_store::Error::AnchorHashMismatch {
+            at_height,
+        }) if at_height == h(START)
+    );
+}
+
+#[test]
+fn a_batch_whose_anchor_miscounts_the_tree_is_rejected() {
+    // The hash agrees, so this is the same chain — but the tree size does not.
+    // Accepting it would place every commitment in the batch one position out,
+    // and every witness built from that region would be invalid.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let mut first = ChainBuilder::new(START);
+    first.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice(), KeyScope::External, 100);
+        });
+    });
+    apply(&mut db, &detect(&first, &NullifierSnapshot::default()));
+
+    let mut second = ChainBuilder::continuing_from(&first.end_anchor());
+    second.empty_blocks(1);
+    let mut batch = detect(&second, &NullifierSnapshot::default());
+    batch.start_anchor.tree_sizes.ironwood += 1;
+
+    let err = db
+        .put_batch(&test_params(), &batch)
+        .expect_err("an anchor that miscounts the tree must be refused");
+
+    assert_matches!(
+        err,
+        zakura_wallet_store::TreeError::Store(zakura_wallet_store::Error::AnchorMismatch {
+            pool: PoolId::Ironwood,
+            stored: 1,
+            claimed: 2,
+            ..
+        })
+    );
+}
+
+#[test]
+fn a_batch_that_does_not_meet_the_block_above_it_is_rejected() {
+    // The seam descending recovery actually exercises: a range is scanned, then
+    // a later batch fills in the region beneath it. Nothing is stored *below*
+    // the new batch to check its start against, so the check that matters is
+    // against the block above its end.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    // Scan the upper range first, as descending recovery does.
+    let mut lower = ChainBuilder::new(START);
+    lower.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice(), KeyScope::External, 100);
+        });
+    });
+    let mut upper = ChainBuilder::continuing_from(&lower.end_anchor());
+    upper.block(|b| {
+        b.tx(|t| {
+            t.decoy(PoolId::Ironwood, 5);
+        });
+    });
+    apply(&mut db, &detect(&upper, &NullifierSnapshot::default()));
+
+    // Now the range beneath it, but claiming to end with a tree size that does
+    // not continue into the block already stored above.
+    let mut batch = detect(&lower, &NullifierSnapshot::default());
+    batch.end_anchor.tree_sizes.ironwood += 1;
+
+    let err = db
+        .put_batch(&test_params(), &batch)
+        .expect_err("a batch that does not meet the block above it must be refused");
+
+    assert_matches!(
+        err,
+        zakura_wallet_store::TreeError::Store(zakura_wallet_store::Error::AnchorMismatch {
+            pool: PoolId::Ironwood,
+            ..
+        })
+    );
+}
+
+#[test]
+fn a_partly_filled_shard_has_no_end_height() {
+    // A shard holds 2^16 leaves. Recording an end height for one a handful of
+    // commitments have landed in would tell both consumers — stabilisation and
+    // range widening — that the shard is settled when almost none of it has
+    // been scanned, which is how a note becomes silently unspendable.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let mut chain = ChainBuilder::new(START);
+    chain.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice(), KeyScope::External, 100);
+            t.decoy(PoolId::Ironwood, 7);
+        });
+    });
+    apply(&mut db, &detect(&chain, &NullifierSnapshot::default()));
+
+    let ends: u32 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM cache.tree_shards WHERE subtree_end_height IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        ends, 0,
+        "no shard is complete after two commitments, so none may claim an end height"
+    );
+}
+
+#[test]
+fn a_rewind_clears_a_shard_end_height_it_invalidated() {
+    // The block that completed the shard has just been discarded, so the end
+    // height names a block the wallet no longer holds. Left in place, both
+    // consumers would treat the shard as settled on the strength of it.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let mut chain = ChainBuilder::new(START);
+    chain.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice(), KeyScope::External, 100);
+        });
+    });
+    chain.empty_blocks(5);
+    apply(&mut db, &detect(&chain, &NullifierSnapshot::default()));
+
+    db.connection()
+        .execute(
+            "UPDATE cache.tree_shards SET subtree_end_height = ? WHERE pool = ?",
+            rusqlite::params![START + 4, PoolId::Ironwood.code()],
+        )
+        .unwrap();
+
+    db.truncate_to(h(START + 1)).unwrap();
+
+    let remaining: u32 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM cache.tree_shards WHERE subtree_end_height IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "an end height above the rewind point names a block that no longer exists"
+    );
+}
+
+#[test]
+fn a_grid_boundary_survives_ordinary_pruning() {
+    // A ZIP 318 crossing proves against the tree state at a boundary of the
+    // shared anchor grid, and it is built long after that boundary has passed.
+    // Pruned on the ordinary depth rule, the boundary — and every crossing that
+    // would have anchored there — is lost, and it cannot be recovered: the tree
+    // state at a passed height is not refetchable once the shard has moved on.
+    let grid = zakura_wallet_core::ANCHOR_GRID;
+    let interval = u32::from(grid.block_count());
+
+    let start = u32::from(grid.boundary_at_or_above(h(START))) + 1;
+    let boundary = u32::from(grid.boundary_at_or_above(h(start)));
+    assert!(boundary > start, "the boundary must fall inside the scan");
+
+    // Scan across the boundary and then well past the pruning window.
+    let depth = zakura_wallet_store::PRUNING_DEPTH as u32;
+    let stop = boundary + depth + 10;
+
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(start)).unwrap();
+
+    let mut chain = ChainBuilder::new(start);
+    chain.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Orchard, &alice(), KeyScope::External, 100);
+            t.decoy(PoolId::Ironwood, 1);
+        });
+    });
+    chain.empty_blocks((stop - start) as usize);
+    apply(&mut db, &detect(&chain, &NullifierSnapshot::default()));
+
+    for pool in PoolId::ALL {
+        let retained: u32 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM cache.tree_checkpoints
+                 WHERE pool = ? AND checkpoint_id = ? AND retained_for IS NOT NULL",
+                rusqlite::params![pool.code(), boundary],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            retained, 1,
+            "{pool:?} must still hold the retained boundary at {boundary}, \
+             {depth} blocks or more below the scanned tip"
+        );
+    }
+
+    // And it is the one a crossing would be planned against.
+    assert_eq!(
+        db.grid_anchor_height().unwrap(),
+        Some(h(boundary)),
+        "the retained boundary is what a crossing anchors on"
+    );
+
+    // A non-boundary checkpoint that deep is not retained, so this is not just
+    // "nothing is ever pruned".
+    let unretained: u32 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM cache.tree_checkpoints
+             WHERE retained_for IS NOT NULL AND checkpoint_id % ? != 0",
+            rusqlite::params![interval],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(unretained, 0, "only grid boundaries are retained");
+}
+
+#[test]
+fn retention_does_not_grow_without_bound() {
+    // Retention is bounded by the window in which a crossing's anchor is still
+    // usable. Retaining every boundary ever scanned would add rows forever, and
+    // — the part that actually costs — would stop the tree pruning the marks
+    // beneath them, so a recovering wallet would carry the whole history's worth
+    // of retained subtrees.
+    let grid = zakura_wallet_core::ANCHOR_GRID;
+    let interval = u32::from(grid.block_count());
+    let depth = zakura_wallet_core::ANCHOR_RETENTION_DEPTH;
+
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    // A batch of old blocks spanning several boundaries, applied while the
+    // chain tip is far above them — which is exactly what recovery looks like.
+    let start = u32::from(grid.boundary_at_or_above(h(START))) + 1;
+    let stop = start + interval * 3;
+    let tip = stop + depth + interval;
+
+    db.update_chain_tip(&test_params(), h(tip)).unwrap();
+
+    let mut chain = ChainBuilder::new(start);
+    chain.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Orchard, &alice(), KeyScope::External, 100);
+            t.decoy(PoolId::Ironwood, 1);
+        });
+    });
+    chain.empty_blocks((stop - start) as usize);
+    apply(&mut db, &detect(&chain, &NullifierSnapshot::default()));
+
+    let retained: u32 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM cache.tree_checkpoints WHERE retained_for IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        retained, 0,
+        "boundaries older than the window a crossing could still use are not retained"
+    );
+
+    // And there is no grid anchor to offer, which is the honest answer: the
+    // wallet holds no boundary a crossing could still be built against.
+    assert_eq!(db.grid_anchor_height().unwrap(), None);
+}
+
+/// Gives the wallet the `addresses` row a watched script belongs to.
+fn register_address(
+    db: &zakura_wallet_store::WalletDb,
+    address_id: i64,
+    account: zakura_wallet_core::AccountId,
+    script: &transparent::address::Script,
+) {
+    db.connection()
+        .execute(
+            "INSERT INTO cache.addresses
+                (id, account_id, key_scope, diversifier_index_be,
+                 transparent_child_index, transparent_address, transparent_script)
+             VALUES (:id, :account, 0, :div, 0, :address, :script)",
+            rusqlite::named_params![
+                ":id": address_id,
+                ":account": account.0,
+                ":div": &[0u8; 11][..],
+                ":address": format!("t-test-{address_id}"),
+                ":script": script.0.0.clone(),
+            ],
+        )
+        .expect("the fixture address inserts");
+}
+
+#[test]
+fn a_spend_seen_before_its_output_is_reconciled_when_the_output_arrives() {
+    // Not an edge case: this wallet recovers from the tip downwards, so it
+    // meets the transaction that spent an output *before* the one that created
+    // it more often than not.
+    //
+    // The spend is recorded against an outpoint the wallet does not yet know,
+    // and replayed when the output shows up. Without the replay the output
+    // would sit in the balance as though it were still there — money the wallet
+    // offers and cannot spend.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let watched = script(9);
+    register_address(&db, ADDRESS_ID, ALICE, &watched);
+    let watch = TransparentWatch::new([(watched.clone(), ALICE, ADDRESS_ID)], []);
+
+    // The funding block, built first so its transaction identifier is known,
+    // but applied second.
+    let mut lower = ChainBuilder::new(START);
+    let mut funding = None;
+    lower.block(|b| {
+        funding = Some(b.tx(|t| {
+            t.transparent_out(watched.clone(), 700);
+        }));
+    });
+    let outpoint = transparent::bundle::OutPoint::new(funding.unwrap().into(), 0);
+
+    // The spending block, above it, which descending recovery reaches first.
+    //
+    // The spending transaction also pays the wallet, which is what a real
+    // transparent spend looks like — it has to put the remainder somewhere.
+    // That is also what makes the wallet keep the transaction at all: a
+    // transaction whose only connection to the wallet is an input the wallet
+    // cannot yet recognise is indistinguishable from a stranger's, and is
+    // dropped. Recovering *that* case needs the UTXO sweep, not the block
+    // stream.
+    let mut upper = ChainBuilder::new(START + 1);
+    upper.block(|b| {
+        b.tx(|t| {
+            t.transparent_in(outpoint.clone());
+            t.transparent_out(watched.clone(), 600);
+        });
+    });
+
+    let detect = |chain: &ChainBuilder| {
+        detect_batch(
+            &test_params(),
+            &keys(),
+            &watch,
+            &NullifierSnapshot::default(),
+            &chain.anchor(),
+            chain.blocks(),
+        )
+        .unwrap()
+    };
+
+    apply(&mut db, &detect(&upper));
+
+    assert_eq!(
+        count(&db, "transparent_received_outputs"),
+        1,
+        "only the change the spending transaction paid back to the wallet"
+    );
+    assert_eq!(
+        count(&db, "transparent_spend_map"),
+        1,
+        "but the spend is remembered against its outpoint"
+    );
+    assert_eq!(count(&db, "transparent_received_output_spends"), 0);
+
+    // Now the block below, carrying the output the spend referred to.
+    apply(&mut db, &detect(&lower));
+
+    assert_eq!(count(&db, "transparent_received_outputs"), 2);
+    assert_eq!(
+        count(&db, "transparent_received_output_spends"),
+        1,
+        "the remembered spend must attach itself to the output when it arrives"
+    );
 }

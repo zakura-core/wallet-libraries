@@ -75,6 +75,15 @@ impl ScanKeys {
         self.tags[index]
     }
 
+    /// Returns each account's full viewing key, for outgoing recovery.
+    ///
+    /// Outgoing recovery cannot be batched the way incoming decryption is: it
+    /// needs the outgoing viewing key and the action's outgoing ciphertext, and
+    /// there is no prepared form to amortise across a batch.
+    pub fn outgoing_keys(&self) -> impl Iterator<Item = (AccountId, &FullViewingKey)> {
+        self.fvks.iter().map(|(account, fvk)| (*account, fvk))
+    }
+
     /// Returns the full viewing key for an account, which is needed to derive
     /// the nullifier of a note received by it.
     pub fn fvk(&self, account: AccountId) -> Option<&FullViewingKey> {

@@ -27,7 +27,8 @@ pub use engine::{Step, SyncConfig, SyncEngine, SyncSummary, Timings, direction_f
 pub use error::Error;
 pub use progress::{Ratio, SyncPhase, SyncStatus};
 pub use source::{
-    ByteBudget, ChainSource, ChainTip, Direction, SourceError, SubtreeRoot, estimated_size,
+    ByteBudget, ChainSource, ChainTip, Direction, FetchedTransaction, SourceError, SubtreeRoot,
+    TransactionStatus, estimated_size,
 };
 
 pub use tokio_util::sync::CancellationToken;

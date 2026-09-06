@@ -61,6 +61,32 @@ pub fn assemble<R: Rng + CryptoRng>(
     proving_key: &ProvingKey,
     mut rng: R,
 ) -> Result<Transaction, Error> {
+    assemble_with_transparent(bundles, None, branch_id, expiry, keys, proving_key, &mut rng)
+}
+
+/// Assembles a transaction that may also carry a transparent bundle.
+///
+/// The transparent half is signed differently from the shielded half, and the
+/// difference is not incidental. A shielded bundle signs one sighash covering
+/// the whole transaction; a transparent input signs a sighash computed *for
+/// that input*, because each one commits to the script it is spending. So the
+/// unauthorised transaction has to be assembled first, with the transparent
+/// bundle already in place, and only then can either half be signed — the
+/// shielded sighash would be wrong if a transparent input were added
+/// afterwards.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_with_transparent<R: Rng + CryptoRng>(
+    bundles: UnprovenBundles,
+    transparent: Option<(
+        transparent::bundle::Bundle<transparent::builder::Unauthorized>,
+        transparent::builder::TransparentSigningSet,
+    )>,
+    branch_id: BranchId,
+    expiry: BlockHeight,
+    keys: &Keys,
+    proving_key: &ProvingKey,
+    rng: &mut R,
+) -> Result<Transaction, Error> {
     if bundles.orchard.is_none() && bundles.ironwood.is_none() {
         return Err(Error::Build("a transaction with no bundles".into()));
     }
@@ -80,11 +106,16 @@ pub fn assemble<R: Rng + CryptoRng>(
 
     // Ironwood exists only in v6 transactions, and both pools' bundles are
     // carried by the same one, so the version is not a choice.
+    let (transparent_bundle, signing_set) = match transparent {
+        Some((bundle, set)) => (Some(bundle), Some(set)),
+        None => (None, None),
+    };
+
     let unauthed: TransactionData<Unauthorized> = TransactionData::from_parts_v6(
         branch_id,
         0,
         expiry,
-        None,
+        transparent_bundle.clone(),
         None,
         orchard.clone(),
         ironwood.clone(),
@@ -110,11 +141,31 @@ pub fn assemble<R: Rng + CryptoRng>(
             .transpose()
     };
 
-    let orchard = authorize(orchard, &mut rng, "the Orchard bundle")?;
-    let ironwood = authorize(ironwood, &mut rng, "the Ironwood bundle")?;
+    let orchard = authorize(orchard, &mut *rng, "the Orchard bundle")?;
+    let ironwood = authorize(ironwood, &mut *rng, "the Ironwood bundle")?;
+
+    // One sighash per input, each committing to the script that input spends.
+    let transparent = match (transparent_bundle, signing_set) {
+        (Some(bundle), Some(set)) => Some(
+            bundle
+                .apply_signatures(
+                    |input| {
+                        *signature_hash(
+                            &unauthed,
+                            &SignableInput::Transparent(input),
+                            &txid_parts,
+                        )
+                        .as_ref()
+                    },
+                    &set,
+                )
+                .map_err(|e| Error::Build(format!("transparent signing: {e:?}")))?,
+        ),
+        _ => None,
+    };
 
     let authorized: TransactionData<Authorized> =
-        TransactionData::from_parts_v6(branch_id, 0, expiry, None, None, orchard, ironwood);
+        TransactionData::from_parts_v6(branch_id, 0, expiry, transparent, None, orchard, ironwood);
 
     authorized
         .freeze()

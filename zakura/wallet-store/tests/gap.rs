@@ -32,20 +32,42 @@ fn watch(db: &mut WalletDb, id: AccountId, scope: KeyScope, count: u32) {
     }
 }
 
-/// Marks the address at `index` as having received something.
+/// Marks the address at `index` as having received something in a mined block.
 fn receive_at(db: &WalletDb, index: u32, scope: KeyScope) {
+    receive_at_height(db, index, scope, Some(100));
+}
+
+/// Records a receipt at `index`, mined or still in the mempool.
+///
+/// Goes through the real relationship — a foreign key onto the address row —
+/// rather than fabricating the address string. An earlier version of this
+/// fixture wrote the string by hand, which meant it agreed with itself while
+/// the production writer used a different encoding entirely, and the join
+/// between them could never match in a real wallet.
+fn receive_at_height(db: &WalletDb, index: u32, scope: KeyScope, mined: Option<u32>) {
     let conn = db.connection();
+    let address_id: i64 = conn
+        .query_row(
+            "SELECT id FROM cache.addresses
+             WHERE account_id = 1 AND key_scope = ? AND transparent_child_index = ?",
+            rusqlite::params![scope.code(), index],
+            |row| row.get(0),
+        )
+        .expect("the address must be watched before anything is received at it");
+
+    // A distinct transaction per receipt, so several can coexist.
+    let tx_id = i64::from(index) + 1 + if scope == KeyScope::Internal { 1000 } else { 0 };
     conn.execute(
         "INSERT OR IGNORE INTO cache.transactions (id, txid, mined_height)
-         VALUES (1, X'01', 100)",
-        [],
+         VALUES (?, ?, ?)",
+        rusqlite::params![tx_id, &tx_id.to_le_bytes()[..], mined],
     )
     .unwrap();
     conn.execute(
         "INSERT INTO cache.transparent_received_outputs
-            (transaction_id, output_index, account_id, address, script, value)
-         VALUES (1, ?, 1, ?, X'00', 100)",
-        rusqlite::params![index as i64, format!("t-addr-{scope:?}-{index}")],
+            (transaction_id, output_index, account_id, address_id, script, value)
+         VALUES (?, ?, 1, ?, X'00', 100)",
+        rusqlite::params![tx_id, index as i64, address_id],
     )
     .unwrap();
 }
@@ -195,4 +217,42 @@ fn recording_an_address_twice_does_not_duplicate_it() {
         )
         .unwrap();
     assert_eq!(count, 3);
+}
+
+
+#[test]
+fn only_a_mined_receipt_moves_the_window() {
+    // A payment sitting in the mempool may never be mined. If it advanced the
+    // window, anybody able to put a transaction in the mempool could push a
+    // wallet's addresses forward — and a wallet that then generated addresses
+    // past its real history would be unrecoverable from its seed elsewhere,
+    // because another wallet would stop looking before reaching them.
+    let mut db = test_db().unwrap();
+    let id = account(&mut db);
+    let limits = GapLimits::default();
+    watch(&mut db, id, KeyScope::External, limits.external);
+
+    let before = db.gap_state(id, KeyScope::External).unwrap();
+
+    receive_at_height(&db, 3, KeyScope::External, None);
+    let after_mempool = db.gap_state(id, KeyScope::External).unwrap();
+    assert_eq!(
+        after_mempool, before,
+        "an unmined receipt must not advance the window"
+    );
+
+    // The same transaction is mined, which is what really happens: the output
+    // does not arrive twice.
+    db.connection()
+        .execute(
+            "UPDATE cache.transactions SET mined_height = 100 WHERE id = 4",
+            [],
+        )
+        .unwrap();
+    let after_mined = db.gap_state(id, KeyScope::External).unwrap();
+    assert_eq!(
+        after_mined.highest_used,
+        Some(3),
+        "a mined receipt is what obliges the wallet to look further"
+    );
 }

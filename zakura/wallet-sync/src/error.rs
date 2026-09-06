@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use zakura_wallet_scan::ScanError;
+use zakura_wallet_scan::{EnhanceError, ScanError};
 use zakura_wallet_store::TreeError;
 
 use crate::source::SourceError;
@@ -15,6 +15,14 @@ pub enum Error {
     Source(SourceError),
     /// Storage failed.
     Store(TreeError),
+    /// The source answered an enhancement request with a different transaction
+    /// than the one asked for.
+    ///
+    /// Fatal rather than counted, unlike an unreachable source. A server that
+    /// substitutes transactions is not having a bad day: continuing would mean
+    /// attaching one transaction's memos and recipients to another's record,
+    /// and nothing downstream could detect that it had happened.
+    Enhance(EnhanceError),
     /// A batch could not be interpreted, and rewinding did not help.
     ///
     /// The engine rewinds and retries on a continuity error, doubling the
@@ -45,6 +53,7 @@ impl fmt::Display for Error {
         match self {
             Error::Source(e) => write!(f, "{e}"),
             Error::Store(e) => write!(f, "{e}"),
+            Error::Enhance(e) => write!(f, "{e}"),
             Error::Unrecoverable { cause, rewound_by } => write!(
                 f,
                 "scanning failed after rewinding {rewound_by} blocks: {cause}"
@@ -63,6 +72,7 @@ impl std::error::Error for Error {
         match self {
             Error::Source(e) => Some(e),
             Error::Store(e) => Some(e),
+            Error::Enhance(e) => Some(e),
             Error::Unrecoverable { cause, .. } => Some(cause),
             Error::MissingAnchor { .. } => None,
         }

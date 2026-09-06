@@ -277,7 +277,7 @@ fn the_queue_stays_gapless_across_repeated_tip_updates() {
 // ------------------------------------------------------------ truncation
 
 #[test]
-fn rewinding_discards_everything_above_the_target() {
+fn rewinding_discards_everything_the_chain_can_reproduce() {
     let mut db = test_db().unwrap();
     db.set_birthday(h(START)).unwrap();
 
@@ -320,6 +320,10 @@ fn rewinding_discards_everything_above_the_target() {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
+    // These transactions were found by scanning and nothing else, so the chain
+    // is their only source and a rescan of the winning chain reproduces them
+    // exactly. Deleting them is what keeps a reorged wallet identical to a
+    // freshly scanned one.
     assert_eq!((notes, blocks, txs), (2, 2, 2));
 
     assert_eq!(db.block_height_extrema().unwrap(), Some((h(START), h(START + 1))));
@@ -342,7 +346,7 @@ fn rewinding_discards_everything_above_the_target() {
 }
 
 #[test]
-fn rewinding_frees_the_notes_that_a_discarded_transaction_spent() {
+fn rewinding_frees_the_notes_a_purely_scanned_spend_held() {
     // If the spend record outlived the transaction that made it, the note would
     // stay unspendable forever after a reorg.
     let mut db = test_db().unwrap();
@@ -412,7 +416,11 @@ fn rewinding_frees_the_notes_that_a_discarded_transaction_spent() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!(spends, 0, "the spend must not outlive its transaction");
+    // The spending transaction was known only from the chain that lost, so it
+    // goes, and the note it spent is free again. A wallet that kept the spend
+    // would hold the note against a transaction it can never prove dead,
+    // because nothing outside that discarded chain ever referred to it.
+    assert_eq!(spends, 0, "a spend known only from the losing chain goes with it");
     assert_eq!(notes, 1, "the note itself survives the rewind");
 }
 
@@ -463,4 +471,211 @@ fn rewinding_below_everything_empties_the_wallet_and_requeues_it_all() {
             .unwrap();
         assert_eq!(max, None, "{pool:?}");
     }
+}
+
+#[test]
+fn rewinding_keeps_what_the_chain_cannot_reproduce() {
+    // The other half of the rule. A transaction this wallet built, or whose
+    // bytes an enhancement stored, holds things scanning can never produce
+    // again: the fee, the height it was built for, an outgoing recipient
+    // recovered under an outgoing viewing key, a memo. A reorg says the wallet
+    // was wrong about *where* that transaction is, not that it never happened,
+    // so the row is un-mined rather than deleted.
+    //
+    // Without this a rewind past a pending payment would erase the payment.
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let alice = fvk_from_seed(1);
+    let keys = ScanKeys::from_accounts([(zakura_wallet_scan::AccountId(1), alice.clone())]);
+    let mut chain = ChainBuilder::new(START);
+    for i in 0..2u64 {
+        chain.block(|b| {
+            b.tx(|t| {
+                t.receive(PoolId::Ironwood, &alice, KeyScope::External, 100 + i);
+            });
+        });
+    }
+    let batch = detect_batch(
+        &test_params(),
+        &keys,
+        &TransparentWatch::default(),
+        &NullifierSnapshot::default(),
+        &chain.anchor(),
+        chain.blocks(),
+    )
+    .unwrap();
+    db.put_batch(&test_params(), &batch).unwrap();
+
+    // Mark the upper transaction as one this wallet built, which is what
+    // `target_height` means and what no other installation would ever set.
+    let txid: Vec<u8> = db
+        .connection()
+        .query_row(
+            "SELECT txid FROM cache.transactions WHERE mined_height = :h",
+            rusqlite::named_params![":h": u32::from(h(START + 1))],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.connection()
+        .execute(
+            "UPDATE cache.transactions SET target_height = :h, fee = 5000
+             WHERE txid = :txid",
+            rusqlite::named_params![":h": u32::from(h(START + 2)), ":txid": txid],
+        )
+        .unwrap();
+
+    db.truncate_to(h(START)).unwrap();
+
+    let (txs, mined, fee, notes, positionless): (u32, u32, Option<i64>, u32, u32) = db
+        .connection()
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM cache.transactions),
+                    (SELECT COUNT(*) FROM cache.transactions WHERE mined_height IS NOT NULL),
+                    (SELECT fee FROM cache.transactions WHERE target_height IS NOT NULL),
+                    (SELECT COUNT(*) FROM cache.received_notes),
+                    (SELECT COUNT(*) FROM cache.received_notes
+                     WHERE commitment_tree_position IS NULL)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+
+    assert_eq!(txs, 2, "the locally built transaction survives the rewind");
+    assert_eq!(mined, 1, "and is un-mined, leaving only the one below the rewind");
+    assert_eq!(fee, Some(5000), "its fee is not something a rescan could recover");
+    assert_eq!(notes, 2, "its note keeps its row, and its memo with it");
+    assert_eq!(
+        positionless, 1,
+        "but loses its place in the tree, which a rescan may assign differently"
+    );
+}
+
+#[test]
+fn a_provably_dead_spend_gives_its_note_back() {
+    // The failure this prevents is funds locked forever. A wallet builds a
+    // payment, it never gets mined, and the notes it named are held against a
+    // transaction that can no longer exist.
+    //
+    // The release has to be earned, though. It happens only once a server has
+    // positively said it does not have the transaction, at a height past which
+    // the transaction could no longer be mined. Inferring death from the chain
+    // tip alone would mean releasing notes the wallet simply had not asked
+    // about — and then spending them twice.
+    use zakura_wallet_core::enhanced::TransactionStatus;
+
+    let mut db = test_db().unwrap();
+    db.set_birthday(h(START)).unwrap();
+
+    let alice = fvk_from_seed(1);
+    let keys = ScanKeys::from_accounts([(zakura_wallet_scan::AccountId(1), alice.clone())]);
+
+    let mut probe = ChainBuilder::new(START);
+    probe.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice, KeyScope::External, 100);
+        });
+    });
+    let nf = detect_batch(
+        &test_params(),
+        &keys,
+        &TransparentWatch::default(),
+        &NullifierSnapshot::default(),
+        &probe.anchor(),
+        probe.blocks(),
+    )
+    .unwrap()
+    .received_notes()
+    .next()
+    .unwrap()
+    .nullifier;
+
+    let mut chain = ChainBuilder::new(START);
+    chain.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Ironwood, &alice, KeyScope::External, 100);
+        });
+    });
+    chain.block(|b| {
+        b.tx(|t| {
+            t.spend(PoolId::Ironwood, nf);
+        });
+    });
+    let batch = detect_batch(
+        &test_params(),
+        &keys,
+        &TransparentWatch::default(),
+        &NullifierSnapshot::default(),
+        &chain.anchor(),
+        chain.blocks(),
+    )
+    .unwrap();
+    db.put_batch(&test_params(), &batch).unwrap();
+
+    // Make the spending transaction look like one this wallet sent and that
+    // never landed: unmined, with an expiry height it has now passed.
+    let spending: Vec<u8> = db
+        .connection()
+        .query_row(
+            "SELECT t.txid FROM cache.transactions t
+             JOIN cache.received_note_spends s ON s.transaction_id = t.id",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.connection()
+        .execute(
+            "UPDATE cache.transactions
+             SET mined_height = NULL, block_height = NULL,
+                 target_height = :target, expiry_height = :expiry
+             WHERE txid = :txid",
+            rusqlite::named_params![
+                ":target": START + 2,
+                ":expiry": START + 5,
+                ":txid": spending,
+            ],
+        )
+        .unwrap();
+
+    let txid = zcash_protocol::TxId::from_bytes(spending.clone().try_into().unwrap());
+
+    // The chain tip is now well past the expiry height — and that alone must
+    // not release the note, because the wallet has not asked anybody.
+    assert_eq!(
+        db.spendable_notes(zakura_wallet_core::AccountId(1), false)
+            .unwrap()
+            .len(),
+        0,
+        "passing the expiry height is not proof; the wallet never asked"
+    );
+    assert!(
+        db.has_outstanding_sent_transaction().unwrap(),
+        "the wallet is still waiting on this payment"
+    );
+
+    // Now a server answers. This is the proof, and it is what releases the note.
+    db.set_transaction_status(txid, TransactionStatus::NotFound, h(START + 20))
+        .unwrap();
+
+    assert_eq!(
+        db.spendable_notes(zakura_wallet_core::AccountId(1), false)
+            .unwrap()
+            .len(),
+        1,
+        "a note held by a provably dead transaction must come back"
+    );
+    assert!(
+        !db.has_outstanding_sent_transaction().unwrap(),
+        "and the wallet is no longer waiting on it"
+    );
+
+    // The attempt stays on record. That is the whole reason spends are a
+    // junction table rather than a column on the note.
+    let spends: u32 = db
+        .connection()
+        .query_row("SELECT COUNT(*) FROM cache.received_note_spends", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(spends, 1, "the spend attempt is history, not a mistake to erase");
 }

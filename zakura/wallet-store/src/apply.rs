@@ -11,7 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use incrementalmerkletree::{Address, Level, Position};
 use rusqlite::{OptionalExtension, named_params};
 use zakura_wallet_core::{
-    AccountId, BlockAnchor, BlockHash, DetectedBatch, DetectedBlock, KeyScope, NullifierSnapshot,
+    ANCHOR_GRID, AccountId, BlockAnchor, BlockHash, DetectedBatch, DetectedBlock, KeyScope,
+    NullifierSnapshot,
     pool::{PoolId, TreeSizes},
 };
 use zakura_wallet_core::scanning::{ScanPriority, ScanRange};
@@ -29,23 +30,52 @@ use crate::{
     tree::{PRUNING_DEPTH, WalletShardStore, tree},
 };
 
-/// The request that recovers a transaction's memos and outgoing data.
+/// Transactions above the rewind holding data the chain cannot reproduce.
 ///
-/// Stored as a small integer rather than in an enum table because the set is
-/// fixed by the protocol. The mined-ness query joins it when transaction status
-/// tracking lands.
-pub(crate) const QUERY_ENHANCEMENT: u8 = 0;
+/// A rewind must not destroy what only this wallet knows: the fee and target
+/// height of a transaction it built, an outgoing recipient recovered under an
+/// outgoing viewing key, a memo. None of that comes back from scanning, so
+/// these rows are un-mined and kept.
+///
+/// The three tests are exactly the three ways such data arrives: the wallet
+/// built the transaction (`target_height`), an enhancement stored its bytes,
+/// or an enhancement recorded what it paid.
+const IRREPLACEABLE: &str = "SELECT t.id FROM cache.transactions t
+     WHERE t.mined_height > :height
+       AND (t.target_height IS NOT NULL
+            OR EXISTS (SELECT 1 FROM main.raw_transactions r WHERE r.txid = t.txid)
+            OR EXISTS (SELECT 1 FROM main.sent_outputs s WHERE s.txid = t.txid))";
+
+/// Transactions above the rewind that scanning would rebuild exactly.
+///
+/// These are deleted, and that is what keeps the wallet's state after a reorg
+/// identical to a fresh scan of the winning chain. Keeping them would leave
+/// notes from a chain that lost sitting in the balance, held against a spend
+/// that can never be proved dead because the transaction holding it was only
+/// ever a rumour.
+const REPRODUCIBLE: &str = "SELECT t.id FROM cache.transactions t
+     WHERE t.mined_height > :height
+       AND t.target_height IS NULL
+       AND NOT EXISTS (SELECT 1 FROM main.raw_transactions r WHERE r.txid = t.txid)
+       AND NOT EXISTS (SELECT 1 FROM main.sent_outputs s WHERE s.txid = t.txid)";
 
 /// Applies `batch` and marks its range scanned, in one transaction.
 pub(crate) fn put_batch<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     birthday: Option<BlockHeight>,
+    chain_tip: Option<BlockHeight>,
     batch: &DetectedBatch,
 ) -> Result<(), TreeError> {
     if batch.blocks.is_empty() {
         return Ok(());
     }
+
+    // Before anything is written: the batch is inserted into the trees at the
+    // absolute position its anchor names, so an anchor the wallet can
+    // contradict must be rejected here rather than silently misplacing every
+    // commitment in it.
+    check_anchors(conn, batch)?;
 
     let mut note_positions: Vec<(PoolId, Position)> = Vec::new();
 
@@ -65,7 +95,21 @@ pub(crate) fn put_batch<P: Parameters>(
             }
 
             for output in &tx.transparent_received {
-                put_transparent_output(conn, tx_ref, output)?;
+                // A coinbase is exactly the transaction at index zero, which
+                // the compact form states. Knowing this here is what keeps an
+                // immature coinbase out of the spendable set later; an output
+                // learned from a UTXO snapshot has no index and cannot say.
+                put_transparent_output(conn, tx_ref, output, tx.index == 0, chain_tip, block.height)?;
+            }
+
+            // Every outpoint this transaction spends is remembered, not only
+            // the ones already recognised as the wallet's. Under descending
+            // recovery the output being spent is usually still below the
+            // scanned range, so at this moment the wallet cannot tell that it
+            // owns it; the record is what lets the spend attach itself when the
+            // output finally arrives.
+            for outpoint in &tx.candidate_spends {
+                remember_spend(conn, tx_ref, outpoint)?;
             }
 
             for outpoint in &tx.transparent_spends {
@@ -79,7 +123,12 @@ pub(crate) fn put_batch<P: Parameters>(
             // Anything the wallet touched needs its full transaction fetched,
             // to recover memos and outgoing data the compact form omits. This
             // is the request private enhancement later intercepts.
-            queue_request(conn, tx.txid, QUERY_ENHANCEMENT)?;
+            crate::status::queue_request(
+                conn,
+                tx.txid,
+                crate::status::TxQuery::Enhancement,
+                None,
+            )?;
         }
 
         // Nullifiers that matched nothing are kept, not discarded: under
@@ -123,9 +172,22 @@ pub(crate) fn put_batch<P: Parameters>(
     // values would leave the note unwitnessable.
     update_shard_end_heights(conn, batch)?;
 
+    // Grid boundaries this batch covered are retained against ordinary pruning.
+    // A ZIP 318 crossing proves against the tree state at a boundary block, and
+    // it is built long after that block has passed: pruning it on the plain
+    // depth rule makes the transfer permanently unprovable. Recorded in the
+    // same transaction as the checkpoints it protects, so a boundary cannot be
+    // written and then lost before its retention is.
+    retain_grid_boundaries(conn, batch, chain_tip.unwrap_or(batch.end_anchor.height))?;
+
     let range = batch.blocks[0].height..(batch.end_anchor.height + 1);
     scan_queue::scan_complete(conn, params, birthday, range, &note_positions)?;
-    mark_stabilized_notes(conn, batch.end_anchor.height)?;
+    // Burial is measured against the chain's tip, not this batch's. Using the
+    // batch would make spend eligibility depend on scan order: a wallet that
+    // finished recovery on a historic range would leave notes near the tip
+    // shown in the balance and refused by selection until some unrelated high
+    // batch happened to land.
+    mark_stabilized_notes(conn, chain_tip.unwrap_or(batch.end_anchor.height))?;
 
     Ok(())
 }
@@ -179,11 +241,12 @@ fn put_transaction(
 }
 
 fn tx_ref(conn: &rusqlite::Transaction<'_>, txid: TxId) -> Result<i64, Error> {
-    conn.query_row(
-        &format!("SELECT id FROM {CACHE_SCHEMA}.transactions WHERE txid = :txid"),
-        named_params![":txid": txid.as_ref()],
-        |row| row.get(0),
-    )
+    // Cached: this runs once per transaction in every batch, and re-preparing a
+    // single-row lookup that often costs more than the lookup.
+    conn.prepare_cached(&format!(
+        "SELECT id FROM {CACHE_SCHEMA}.transactions WHERE txid = :txid"
+    ))?
+    .query_row(named_params![":txid": txid.as_ref()], |row| row.get(0))
     .map_err(Error::Query)
 }
 
@@ -330,11 +393,11 @@ fn link_stored_nullifier(
     nf: &orchard::note::Nullifier,
 ) -> Result<(), Error> {
     let spend: Option<(Vec<u8>, u32, u64)> = conn
+        .prepare_cached(&format!(
+            "SELECT txid, block_height, tx_index FROM {CACHE_SCHEMA}.nullifier_map
+             WHERE pool = :pool AND nf = :nf"
+        ))?
         .query_row(
-            &format!(
-                "SELECT txid, block_height, tx_index FROM {CACHE_SCHEMA}.nullifier_map
-                 WHERE pool = :pool AND nf = :nf"
-            ),
             named_params![":pool": pool.code(), ":nf": &nf.to_bytes()[..]],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -346,25 +409,27 @@ fn link_stored_nullifier(
 
     // The spending transaction may have had no wallet activity visible at scan
     // time, so it may need a row of its own before the spend can reference it.
-    conn.execute(
-        &format!(
-            "INSERT INTO {CACHE_SCHEMA}.transactions (txid, block_height, tx_index, mined_height)
-             VALUES (:txid, :height, :index, :height)
-             ON CONFLICT (txid) DO NOTHING"
-        ),
-        named_params![":txid": &txid, ":height": height, ":index": tx_index],
-    )?;
+    // All three statements here run once per received note in a batch, so they
+    // are cached rather than re-prepared each time.
+    conn.prepare_cached(&format!(
+        "INSERT INTO {CACHE_SCHEMA}.transactions (txid, block_height, tx_index, mined_height)
+         VALUES (:txid, :height, :index, :height)
+         ON CONFLICT (txid) DO NOTHING"
+    ))?
+    .execute(named_params![":txid": &txid, ":height": height, ":index": tx_index])?;
 
-    conn.execute(
-        &format!(
-            "INSERT OR IGNORE INTO {CACHE_SCHEMA}.received_note_spends
-                (received_note_id, transaction_id)
-             SELECT n.id, t.id
-             FROM {CACHE_SCHEMA}.received_notes n, {CACHE_SCHEMA}.transactions t
-             WHERE n.pool = :pool AND n.nf = :nf AND t.txid = :txid"
-        ),
-        named_params![":pool": pool.code(), ":nf": &nf.to_bytes()[..], ":txid": &txid],
-    )?;
+    conn.prepare_cached(&format!(
+        "INSERT OR IGNORE INTO {CACHE_SCHEMA}.received_note_spends
+            (received_note_id, transaction_id)
+         SELECT n.id, t.id
+         FROM {CACHE_SCHEMA}.received_notes n, {CACHE_SCHEMA}.transactions t
+         WHERE n.pool = :pool AND n.nf = :nf AND t.txid = :txid"
+    ))?
+    .execute(named_params![
+        ":pool": pool.code(),
+        ":nf": &nf.to_bytes()[..],
+        ":txid": &txid,
+    ])?;
 
     Ok(())
 }
@@ -373,21 +438,106 @@ fn put_transparent_output(
     conn: &rusqlite::Transaction<'_>,
     tx_ref: i64,
     output: &zakura_wallet_core::DetectedTransparentOutput,
+    is_coinbase: bool,
+    unspent_at: Option<BlockHeight>,
+    observed_at: BlockHeight,
 ) -> Result<(), Error> {
     let script = output.txout.script_pubkey().0.0.clone();
     conn.prepare_cached(&format!(
         "INSERT INTO {CACHE_SCHEMA}.transparent_received_outputs
-            (transaction_id, output_index, account_id, address, script, value)
-         VALUES (:tx, :index, :account, :address, :script, :value)
-         ON CONFLICT (transaction_id, output_index) DO UPDATE SET value = :value"
+            (transaction_id, output_index, account_id, address_id, script, value,
+             is_coinbase, max_observed_unspent_height)
+         VALUES (:tx, :index, :account, :address_id, :script, :value,
+                 :is_coinbase, :unspent_at)
+         ON CONFLICT (transaction_id, output_index) DO UPDATE SET
+            value = :value,
+            -- Monotone: a later sighting can only extend how far the wallet
+            -- knows the output was unspent, never retract it.
+            max_observed_unspent_height =
+                MAX(IFNULL(max_observed_unspent_height, 0), IFNULL(:unspent_at, 0)),
+            is_coinbase = IFNULL(is_coinbase, :is_coinbase)"
     ))?
     .execute(named_params![
         ":tx": tx_ref,
         ":index": output.output_index,
         ":account": output.account.0,
-        ":address": hex(&script),
+        ":address_id": output.address_id,
         ":script": script,
         ":value": output.txout.value().into_u64() as i64,
+        // Known exactly here, because a compact block carries the
+        // transaction's index and a coinbase is index zero.
+        ":is_coinbase": is_coinbase,
+        ":unspent_at": unspent_at.map(u32::from),
+    ])?;
+
+    // A spend of this output may already have been seen. Under descending
+    // recovery that is the common case rather than the exception: the wallet
+    // scans downwards, so it meets the transaction that spent an output before
+    // the one that created it. Without this replay the spend would have been
+    // recorded in the map and never acted on, and the output would sit in the
+    // balance as though it were still there.
+    //
+    // Ordered by mined height so that a confirmed spend wins over a competing
+    // unmined one; several conflicting transactions may claim the same output,
+    // which is why the map does not constrain the outpoint to be unique.
+    // Looked up rather than taken from `last_insert_rowid`, which reports the
+    // last row *inserted* and says nothing useful when the statement above
+    // updated an existing row instead.
+    let output_id: i64 = conn
+        .prepare_cached(&format!(
+            "SELECT id FROM {CACHE_SCHEMA}.transparent_received_outputs
+             WHERE transaction_id = :tx AND output_index = :index"
+        ))?
+        .query_row(
+            named_params![":tx": tx_ref, ":index": output.output_index],
+            |row| row.get(0),
+        )?;
+
+    conn.prepare_cached(&format!(
+        "INSERT OR IGNORE INTO {CACHE_SCHEMA}.transparent_received_output_spends
+            (output_id, transaction_id)
+         SELECT :output_id, m.spending_transaction_id
+         FROM {CACHE_SCHEMA}.transparent_spend_map m
+         JOIN {CACHE_SCHEMA}.transactions t ON t.id = m.spending_transaction_id
+         JOIN {CACHE_SCHEMA}.transactions p ON p.id = :tx
+         WHERE m.prevout_txid = p.txid AND m.prevout_output_index = :index
+         ORDER BY t.mined_height IS NULL, t.mined_height
+         LIMIT 1"
+    ))?
+    .execute(named_params![
+        ":output_id": output_id,
+        ":tx": tx_ref,
+        ":index": output.output_index,
+    ])?;
+
+    // Last, because it reads the row just written: being paid at an address is
+    // what obliges the wallet to watch further ahead.
+    crate::gap::observe_use(conn, output.address_id, observed_at)?;
+
+    Ok(())
+}
+
+/// Remembers that a transaction spends an outpoint, whether or not the wallet
+/// knows the output.
+///
+/// Deliberately without a unique constraint on the outpoint alone: several
+/// conflicting transactions may each claim to spend the same output, and only
+/// one of them can be right. Which one is decided when the output is stored,
+/// by preferring a mined spender over an unmined one.
+fn remember_spend(
+    conn: &rusqlite::Transaction<'_>,
+    tx_ref: i64,
+    outpoint: &transparent::bundle::OutPoint,
+) -> Result<(), Error> {
+    conn.prepare_cached(&format!(
+        "INSERT OR IGNORE INTO {CACHE_SCHEMA}.transparent_spend_map
+            (spending_transaction_id, prevout_txid, prevout_output_index)
+         VALUES (:tx, :prevout_txid, :prevout_index)"
+    ))?
+    .execute(named_params![
+        ":tx": tx_ref,
+        ":prevout_txid": &outpoint.hash()[..],
+        ":prevout_index": outpoint.n(),
     ])?;
     Ok(())
 }
@@ -411,18 +561,7 @@ fn mark_transparent_spent(
         ":prevout_index": outpoint.n(),
     ])?;
 
-    // Recorded whether or not the output was found, so a spend seen before its
-    // output can be reconciled when the output arrives.
-    conn.prepare_cached(&format!(
-        "INSERT OR IGNORE INTO {CACHE_SCHEMA}.transparent_spend_map
-            (spending_transaction_id, prevout_txid, prevout_output_index)
-         VALUES (:tx, :prevout_txid, :prevout_index)"
-    ))?
-    .execute(named_params![
-        ":tx": tx_ref,
-        ":prevout_txid": &outpoint.hash()[..],
-        ":prevout_index": outpoint.n(),
-    ])?;
+    remember_spend(conn, tx_ref, outpoint)?;
     Ok(())
 }
 
@@ -436,8 +575,16 @@ fn put_enhance_candidate(
             (commitment_tree_position, transaction_id, action_index,
              nullifier, cmx, ephemeral_key, compact_ciphertext)
          VALUES (:position, :tx, :action, :nf, :cmx, :epk, :ciphertext)
+         -- Every column, not just the identifying pair. A position is only
+         -- reoccupied when a reorg put a different action there, and the
+         -- cryptographic fields are exactly what authenticates a later private
+         -- lookup's response against what was scanned. Carrying one action's
+         -- nullifier, commitment and ciphertext under another's transaction is
+         -- how that authentication would be defeated.
          ON CONFLICT (commitment_tree_position) DO UPDATE SET
-            transaction_id = :tx, action_index = :action"
+            transaction_id = :tx, action_index = :action,
+            nullifier = :nf, cmx = :cmx,
+            ephemeral_key = :epk, compact_ciphertext = :ciphertext"
     ))?
     .execute(named_params![
         ":position": u64::from(candidate.position),
@@ -459,19 +606,6 @@ fn put_enhance_candidate(
             ":account": account.0,
         ])?;
     }
-    Ok(())
-}
-
-fn queue_request(
-    conn: &rusqlite::Transaction<'_>,
-    txid: TxId,
-    query_type: u8,
-) -> Result<(), Error> {
-    conn.prepare_cached(&format!(
-        "INSERT OR IGNORE INTO {CACHE_SCHEMA}.tx_requests (txid, query_type)
-         VALUES (:txid, :query_type)"
-    ))?
-    .execute(named_params![":txid": txid.as_ref(), ":query_type": query_type])?;
     Ok(())
 }
 
@@ -600,11 +734,56 @@ pub(crate) fn truncate_to(
             .map_err(TreeError::Tree)?;
     }
 
-    // Spends recorded by transactions that no longer exist must go, or the
-    // notes they spent would stay unspendable after the rewind.
+    // Spends are kept. A transaction that a rewind un-mined has not been
+    // cancelled — it is unmined, which is where every transaction starts, and
+    // it may well be mined again a block later. Releasing the notes it spends
+    // is expiry's job, and expiry needs proof the transaction is gone. Deleting
+    // the spend here would hand those notes back for a second spend on nothing
+    // more than a one-block reorg.
+
+    // Received notes on a retained transaction are kept, because they carry
+    // memos an enhancement recovered and scanning cannot produce again. What
+    // does not survive is their place in the tree: a rescan may put them
+    // somewhere else, so the position and its stability are cleared.
+    conn.execute(
+        &format!(
+            "UPDATE {CACHE_SCHEMA}.received_notes
+             SET commitment_tree_position = NULL, witness_stabilized = 0
+             WHERE transaction_id IN ({IRREPLACEABLE})"
+        ),
+        named_params![":height": h],
+    )
+    .map_err(Error::Query)?;
+
+    // Everything on a reproducible transaction goes, along with the row itself
+    // below. A rescan of the winning chain rebuilds it exactly if it is there.
     conn.execute(
         &format!(
             "DELETE FROM {CACHE_SCHEMA}.received_note_spends
+             WHERE transaction_id IN ({REPRODUCIBLE})"
+        ),
+        named_params![":height": h],
+    )
+    .map_err(Error::Query)?;
+
+    for table in ["received_notes", "transparent_received_outputs"] {
+        conn.execute(
+            &format!(
+                "DELETE FROM {CACHE_SCHEMA}.{table}
+                 WHERE transaction_id IN ({REPRODUCIBLE})"
+            ),
+            named_params![":height": h],
+        )
+        .map_err(Error::Query)?;
+    }
+
+    // Enhancement candidates are the exception: each one names a tree position
+    // whose occupant the wallet was about to ask about privately. Above the
+    // rewind that position may now hold somebody else's note, and spending a
+    // private request on it would be both wasted and revealing.
+    conn.execute(
+        &format!(
+            "DELETE FROM {CACHE_SCHEMA}.enhance_candidates
              WHERE transaction_id IN (
                 SELECT id FROM {CACHE_SCHEMA}.transactions WHERE mined_height > :height
              )"
@@ -613,22 +792,23 @@ pub(crate) fn truncate_to(
     )
     .map_err(Error::Query)?;
 
-    for table in [
-        "received_notes",
-        "transparent_received_outputs",
-        "enhance_candidates",
-    ] {
-        conn.execute(
-            &format!(
-                "DELETE FROM {CACHE_SCHEMA}.{table}
-                 WHERE transaction_id IN (
-                    SELECT id FROM {CACHE_SCHEMA}.transactions WHERE mined_height > :height
-                 )"
-            ),
-            named_params![":height": h],
-        )
-        .map_err(Error::Query)?;
-    }
+    // A transparent output's unspent-as-of height cannot outlive the rewind.
+    // If the transaction that created it is still mined at or below the new
+    // tip, the wallet knows the output existed and was unspent as of there;
+    // otherwise it knows nothing about it at all.
+    conn.execute(
+        &format!(
+            "UPDATE {CACHE_SCHEMA}.transparent_received_outputs
+             SET max_observed_unspent_height = CASE
+                    WHEN (SELECT mined_height FROM {CACHE_SCHEMA}.transactions t
+                          WHERE t.id = transaction_id) <= :height THEN :height
+                    ELSE NULL
+                 END
+             WHERE max_observed_unspent_height > :height"
+        ),
+        named_params![":height": h],
+    )
+    .map_err(Error::Query)?;
 
     conn.execute(
         &format!("DELETE FROM {CACHE_SCHEMA}.nullifier_map WHERE block_height > :height"),
@@ -636,14 +816,64 @@ pub(crate) fn truncate_to(
     )
     .map_err(Error::Query)?;
 
+    // Transactions are un-mined, not deleted. A rewind says the wallet was
+    // wrong about *where* a transaction is, not that it never existed, and the
+    // row holds things no rescan can reproduce: a fee, the height it was built
+    // for, an outgoing recipient recovered under an outgoing viewing key.
+    //
+    // Clearing `confirmed_unmined_at_height` alongside is what makes a status
+    // request reactivate on its own: the drain skips a mined transaction, so
+    // un-mining one puts it back in the queue with nothing re-queued by hand.
     conn.execute(
-        &format!("DELETE FROM {CACHE_SCHEMA}.transactions WHERE mined_height > :height"),
+        &format!(
+            "UPDATE {CACHE_SCHEMA}.transactions
+             SET block_height = NULL,
+                 mined_height = NULL,
+                 tx_index = NULL,
+                 confirmed_unmined_at_height = NULL
+             WHERE id IN ({IRREPLACEABLE})"
+        ),
+        named_params![":height": h],
+    )
+    .map_err(Error::Query)?;
+
+    conn.execute(
+        &format!(
+            "DELETE FROM {CACHE_SCHEMA}.tx_requests
+             WHERE txid IN (
+                SELECT txid FROM {CACHE_SCHEMA}.transactions WHERE id IN ({REPRODUCIBLE})
+             )"
+        ),
+        named_params![":height": h],
+    )
+    .map_err(Error::Query)?;
+
+    conn.execute(
+        &format!("DELETE FROM {CACHE_SCHEMA}.transactions WHERE id IN ({REPRODUCIBLE})"),
         named_params![":height": h],
     )
     .map_err(Error::Query)?;
 
     conn.execute(
         &format!("DELETE FROM {CACHE_SCHEMA}.blocks WHERE height > :height"),
+        named_params![":height": h],
+    )
+    .map_err(Error::Query)?;
+
+    // A shard whose end height is above the rewind point no longer ends where
+    // it says: the block that completed it has just been discarded. Left in
+    // place it would name a height that does not exist, and both consumers —
+    // stabilisation and range widening — would treat the shard as settled on
+    // the strength of a block the wallet no longer has.
+    //
+    // Shards whose roots came from the server are not affected, because a
+    // server-supplied root describes a shard completed far below any depth the
+    // wallet rewinds to.
+    conn.execute(
+        &format!(
+            "UPDATE {CACHE_SCHEMA}.tree_shards SET subtree_end_height = NULL
+             WHERE subtree_end_height > :height"
+        ),
         named_params![":height": h],
     )
     .map_err(Error::Query)?;
@@ -727,6 +957,92 @@ pub(crate) fn block_anchor(
     .transpose()
 }
 
+/// Checks a batch's anchors against the blocks the wallet already holds.
+///
+/// The batch's commitments are inserted at the absolute position
+/// `start_anchor` names, so that number decides where every note in the batch
+/// lives in the tree. Under ascending recovery it comes from the wallet's own
+/// record and is trivially right. Under descending recovery a range usually
+/// continues from nothing scanned, so it comes from the source instead — and
+/// the scanner's end-of-block check cannot catch a wrong one, because it
+/// compares the batch against block metadata from that same source. A source
+/// that is wrong about both is self-consistent.
+///
+/// So this checks the two seams where local data can contradict the source:
+///
+/// - the block *at* `start_anchor.height`, if scanned, must be the block the
+///   anchor names and must have left the trees the size the anchor claims; and
+/// - the block *above* `end_anchor.height`, if scanned, must have started from
+///   the size the batch ends at — its recorded size less its own actions.
+///
+/// The second is what covers descending recovery: batches descend into a
+/// region whose upper neighbour is already stored, which is exactly where a
+/// misplacement would otherwise go unnoticed.
+fn check_anchors(conn: &rusqlite::Transaction<'_>, batch: &DetectedBatch) -> Result<(), Error> {
+    if let Some(stored) = block_anchor(conn, batch.start_anchor.height)? {
+        if stored.hash != batch.start_anchor.hash {
+            return Err(Error::AnchorHashMismatch {
+                at_height: batch.start_anchor.height,
+            });
+        }
+        for pool in PoolId::ALL {
+            let (stored, claimed) = (
+                stored.tree_sizes.get(pool),
+                batch.start_anchor.tree_sizes.get(pool),
+            );
+            if stored != claimed {
+                return Err(Error::AnchorMismatch {
+                    pool,
+                    at_height: batch.start_anchor.height,
+                    stored,
+                    claimed,
+                });
+            }
+        }
+    }
+
+    let above = batch.end_anchor.height + 1;
+    let Some(sizes) = block_start_sizes(conn, above)? else {
+        return Ok(());
+    };
+    for pool in PoolId::ALL {
+        let (stored, claimed) = (sizes.get(pool), batch.end_anchor.tree_sizes.get(pool));
+        if stored != claimed {
+            return Err(Error::AnchorMismatch {
+                pool,
+                at_height: batch.end_anchor.height,
+                stored,
+                claimed,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Returns the tree sizes the block at `height` *started* from, if it is
+/// stored: its recorded end sizes less the actions it contributed itself.
+fn block_start_sizes(
+    conn: &rusqlite::Connection,
+    height: BlockHeight,
+) -> Result<Option<TreeSizes>, Error> {
+    conn.query_row(
+        &format!(
+            "SELECT orchard_tree_size - orchard_action_count,
+                    ironwood_tree_size - ironwood_action_count
+             FROM {CACHE_SCHEMA}.blocks WHERE height = :height"
+        ),
+        named_params![":height": u32::from(height)],
+        |row| {
+            Ok(TreeSizes {
+                orchard: row.get(0)?,
+                ironwood: row.get(1)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Error::Query)
+}
+
 /// Returns the wallet's unspent nullifiers, for the scanner to match spends
 /// against.
 ///
@@ -735,12 +1051,12 @@ pub(crate) fn block_anchor(
 /// grow the snapshot without bound.
 pub(crate) fn unspent_nullifiers(
     conn: &rusqlite::Connection,
-    epoch: u64,
 ) -> Result<NullifierSnapshot, Error> {
+    let held = crate::status::held_by_live_spend();
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT pool, nf, account_id FROM {CACHE_SCHEMA}.received_notes
          WHERE nf IS NOT NULL
-           AND id NOT IN (SELECT received_note_id FROM {CACHE_SCHEMA}.received_note_spends)"
+           AND id NOT IN ({held})"
     ))?;
     let mut rows = stmt.query([])?;
 
@@ -765,7 +1081,7 @@ pub(crate) fn unspent_nullifiers(
         entries.push((pool, nf, AccountId(row.get::<_, u32>(2)?)));
     }
 
-    Ok(NullifierSnapshot::new(epoch, entries))
+    Ok(NullifierSnapshot::new(entries))
 }
 
 /// Returns how many of a pool's commitments the wallet has scanned, and how
@@ -938,6 +1254,7 @@ pub(crate) fn spendable_notes(
     account: AccountId,
     require_stable: bool,
 ) -> Result<Vec<StoredNote>, Error> {
+    let held = crate::status::held_by_live_spend();
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT pool, key_scope, commitment_tree_position, value,
                 diversifier, rho, rseed, note_version
@@ -945,7 +1262,7 @@ pub(crate) fn spendable_notes(
          WHERE account_id = :account
            AND commitment_tree_position IS NOT NULL
            AND (:any_stability OR witness_stabilized = 1)
-           AND id NOT IN (SELECT received_note_id FROM {CACHE_SCHEMA}.received_note_spends)
+           AND id NOT IN ({held})
          ORDER BY value DESC"
     ))?;
 
@@ -1001,33 +1318,122 @@ pub(crate) fn block_height_extrema(
     .map_err(Error::Query)
 }
 
-/// Records the block height at which each pool's shards end.
+/// Marks the ZIP 318 anchor-grid boundaries this batch covered as retained.
 ///
-/// The scan queue needs this to know how far a shard extends, and it comes from
-/// the blocks that were scanned rather than from the tree itself.
+/// Retention is what keeps a boundary checkpoint alive past [`PRUNING_DEPTH`].
+/// A crossing proves against the tree state at a boundary and is built long
+/// afterwards, so a boundary pruned on the ordinary depth rule takes every
+/// crossing that would have anchored there with it — and the wallet cannot get
+/// it back, because the tree state at a passed height is not refetchable once
+/// the shard has moved on.
+///
+/// Both pools are retained at the same heights. A crossing anchors both bundles
+/// at one height, so a boundary only one pool kept is a boundary neither can
+/// use.
+fn retain_grid_boundaries(
+    conn: &rusqlite::Transaction<'_>,
+    batch: &DetectedBatch,
+    chain_tip: BlockHeight,
+) -> Result<(), TreeError> {
+    let interval = u32::from(ANCHOR_GRID.block_count());
+
+    // Retention is bounded, not perpetual. A crossing's canonical expiry sits
+    // at most `ANCHOR_RETENTION_DEPTH` above the height it targets, so a
+    // boundary older than that cannot back a transfer that would still be valid
+    // by the time it was sent. Retaining every boundary ever crossed would add a
+    // row per interval per pool for the whole history — and, worse, would stop
+    // the tree pruning the marks beneath them, so the cost is in the shards
+    // rather than in the handful of checkpoint rows.
+    let horizon = u32::from(chain_tip).saturating_sub(zakura_wallet_core::ANCHOR_RETENTION_DEPTH);
+
+    let boundaries: Vec<BlockHeight> = batch
+        .blocks
+        .iter()
+        .map(|block| block.height)
+        .filter(|height| u32::from(*height) % interval == 0)
+        .filter(|height| u32::from(*height) >= horizon)
+        .collect();
+
+    for pool in PoolId::ALL {
+        let mut store = WalletShardStore::new(conn, pool);
+        for height in &boundaries {
+            store
+                .add_retained_checkpoint(*height)
+                .map_err(TreeError::Store)?;
+        }
+    }
+
+    // Release boundaries that have fallen out of the window, so ordinary
+    // pruning can reclaim them.
+    conn.execute(
+        &format!(
+            "UPDATE {CACHE_SCHEMA}.tree_checkpoints SET retained_for = NULL
+             WHERE retained_for IS NOT NULL AND checkpoint_id < :horizon"
+        ),
+        named_params![":horizon": horizon],
+    )
+    .map_err(Error::Query)?;
+
+    // Nothing is deleted here. A checkpoint row with a NULL position is not a
+    // spent retention placeholder — it is a checkpoint taken when the tree was
+    // empty, which every block below a pool's first commitment has. Releasing
+    // retention is all that is wanted; pruning the checkpoint itself is the
+    // tree's job, and it knows which of the two it is looking at.
+
+    Ok(())
+}
+
+/// Records the block height at which each pool's shards *complete*.
+///
+/// A shard's end height is the height of the block that appended its final
+/// commitment — the one at position `(shard + 1) << SHARD_HEIGHT - 1`. Nothing
+/// weaker will do, because of what the value is used for: `mark_stabilized_notes`
+/// treats a buried end height as "this shard is settled, its notes are
+/// witnessable", and `scan_queue::extend_range` treats it as "this shard is
+/// covered, the range need not be widened past it". Both are statements about a
+/// *complete* shard.
+///
+/// Recording the last block that merely *touched* a shard would satisfy neither.
+/// A shard holds 2^16 leaves and is filled across many thousands of blocks, so a
+/// partly-filled shard's "end" is an arbitrary point in the middle of it, and
+/// treating that as settled marks notes spendable whose shard still has
+/// unscanned leaves — the silently-unspendable note the design calls out as a
+/// correctness requirement rather than a scheduling one.
+///
+/// The other way a shard's end height becomes known is
+/// [`put_subtree_roots`], where the server describes a shard it has already
+/// completed. That path is authoritative and unaffected by this one.
 fn update_shard_end_heights(
     conn: &rusqlite::Transaction<'_>,
     batch: &DetectedBatch,
 ) -> Result<(), Error> {
     let mut ends: BTreeMap<(PoolId, u64), BlockHeight> = BTreeMap::new();
+    let shard_leaves = 1u64 << crate::tree::SHARD_HEIGHT;
 
     for pool in PoolId::ALL {
         for block in &batch.blocks {
-            // A shard ends at the block containing its last *commitment*. A
-            // block that added none to this pool leaves the boundary where it
-            // was, however far above it sits — extending it would make a note
-            // look buried when its shard is still open.
-            let added = block.commitments(pool).commitments.len() as u32;
+            let added = u64::from(block.commitments(pool).commitments.len() as u32);
             if added == 0 {
                 continue;
             }
-            let size = match pool {
-                PoolId::Orchard => block.tree_sizes.orchard,
-                PoolId::Ironwood => block.tree_sizes.ironwood,
-            };
-            // The shard containing the block's last commitment.
-            let shard = u64::from(size - 1) >> crate::tree::SHARD_HEIGHT;
-            ends.insert((pool, shard), block.height);
+            let end = u64::from(block.tree_sizes.get(pool));
+            let start = end - added;
+
+            // Every shard boundary this block's commitments crossed. A block
+            // can fill more than one shard only if it carried 2^16 actions,
+            // which consensus does not permit, but the loop costs nothing and
+            // does not depend on that.
+            let first = start / shard_leaves;
+            let last = (end - 1) / shard_leaves;
+            for shard in first..=last {
+                // The shard is complete only if its final position — the leaf
+                // one below the next shard's first — is among the commitments
+                // this block appended.
+                let boundary = (shard + 1) * shard_leaves;
+                if boundary <= end {
+                    ends.insert((pool, shard), block.height);
+                }
+            }
         }
     }
 
@@ -1050,14 +1456,11 @@ fn update_shard_end_heights(
 ///
 /// This is the version's lead byte, which is how the protocol identifies it, so
 /// the stored value stays meaningful even read outside this crate.
-fn note_version_code(version: orchard::note::NoteVersion) -> u8 {
+pub(crate) fn note_version_code(version: orchard::note::NoteVersion) -> u8 {
     match version {
         orchard::note::NoteVersion::V2 => 0x02,
         orchard::note::NoteVersion::V3 => 0x03,
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
 

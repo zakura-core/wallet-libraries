@@ -21,6 +21,8 @@ shardtree.workspace = true
 subtle.workspace = true
 zakura-wallet-core = { path = "../wallet-core" }
 zakura-wallet-store = { path = "../wallet-store" }
+transparent = { workspace = true, features = ["transparent-inputs"] }
+secp256k1.workspace = true
 zcash_primitives = { workspace = true, features = ["circuits"] }
 zcash_protocol.workspace = true
 
@@ -30,6 +32,8 @@ zcash_protocol.workspace = true
 test-dependencies = []
 
 [dev-dependencies]
+incrementalmerkletree.workspace = true
+zip32.workspace = true
 assert_matches.workspace = true
 # A cryptographic RNG: bundle construction requires one, and rightly refuses a
 # reproducible non-cryptographic generator.
@@ -37,3 +41,4 @@ rand = { workspace = true, features = ["chacha"] }
 zakura-wallet-tx = { path = ".", features = ["test-dependencies"] }
 zakura-wallet-scan = { path = "../wallet-scan", features = ["test-dependencies"] }
 zakura-wallet-store = { path = "../wallet-store", features = ["test-dependencies"] }
+rusqlite.workspace = true

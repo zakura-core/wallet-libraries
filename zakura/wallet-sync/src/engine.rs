@@ -17,15 +17,20 @@ use std::ops::Range;
 
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use zakura_wallet_core::{
+use zakura_wallet_core::{enhanced::TransactionStatus,
     BlockAnchor,
     pool::PoolId,
     scanning::{ScanPriority, ScanRange},
 };
 use zakura_wallet_scan::{
-    NullifierSnapshot, ScanError, ScanKeys, TransparentWatch, detect_batch,
+    EnhanceError, ScanError, ScanKeys, TransparentWatch, detect_batch,
+    enhance::decrypt_transaction,
 };
-use zakura_wallet_store::{PRUNING_DEPTH, WalletDb};
+use zakura_wallet_store::{
+    PRUNING_DEPTH, WalletDb,
+    enhance::TxMeta,
+    status::RequestScope,
+};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use crate::{
@@ -73,6 +78,12 @@ pub struct SyncConfig {
     /// Ranges below this are left alone, which is how a caller asks for "just
     /// catch up to the tip" rather than a full recovery.
     pub min_priority: ScanPriority,
+    /// How many transactions one enhancement step may fetch.
+    ///
+    /// A cap rather than "drain it": a step that ran until the queue emptied
+    /// would stop reporting progress and stop honouring cancellation for as
+    /// long as it took, which on a recovering wallet is a long time.
+    pub enhance_batch: usize,
 }
 
 impl Default for SyncConfig {
@@ -80,6 +91,7 @@ impl Default for SyncConfig {
         Self {
             budget: ByteBudget::MOBILE,
             min_priority: ScanPriority::Historic,
+            enhance_batch: 16,
         }
     }
 }
@@ -103,27 +115,109 @@ pub enum Step {
         /// What triggered the rewind.
         cause: ScanError,
     },
+    /// Transactions were fetched whole and folded in.
+    Enhanced {
+        /// How many the source supplied.
+        fetched: usize,
+        /// How many touched the wallet and were stored.
+        applied: usize,
+        /// How many the source could not be asked about.
+        ///
+        /// Counted rather than fatal: one unreachable transaction must not stop
+        /// a wallet synchronising. It stays queued and is asked again later.
+        failed: usize,
+    },
     /// There is nothing left to scan.
     Idle,
+    /// The source returned nothing for a range that is still queued.
+    ///
+    /// Distinct from [`Step::Idle`], which means the queue is empty. This means
+    /// there is work outstanding that the source would not serve, so the wallet
+    /// is *not* synced — reporting it as idle would make a transient server
+    /// failure indistinguishable from having caught up, and would leave the
+    /// range silently unscanned.
+    Stalled {
+        /// The range the source declined to serve.
+        range: Range<BlockHeight>,
+    },
     /// The engine was asked to stop.
     Cancelled,
 }
 
+/// A fetch already in flight for a range the engine intends to scan next.
+struct Prefetch<S: ChainSource> {
+    range: ScanRange,
+    #[allow(clippy::type_complexity)]
+    task: tokio::task::JoinHandle<
+        Result<(Vec<zakura_wallet_core::CompactBlock>, Option<BlockAnchor>), S::Error>,
+    >,
+}
+
+/// What detecting and applying one batch produced.
+enum Applied {
+    Scanned {
+        covered: Range<BlockHeight>,
+        notes: usize,
+        /// How much of the blocking work was detection rather than storage.
+        detect: std::time::Duration,
+    },
+    Failed(ScanError),
+}
+
+/// Returns the part of `range` this batch did not cover, if any.
+///
+/// Which end is left over depends on which end was taken: descending recovery
+/// consumes the top of a range, tip-following the bottom.
+fn remainder(
+    range: &ScanRange,
+    blocks: &[zakura_wallet_core::CompactBlock],
+    direction: Direction,
+) -> Option<ScanRange> {
+    let (lowest, highest) = (blocks.first()?.height, blocks.last()?.height);
+    let covered = range.block_range();
+    let rest = match direction {
+        Direction::Descending => covered.start..lowest,
+        Direction::Ascending => (highest + 1)..covered.end,
+    };
+    (rest.start < rest.end).then(|| ScanRange::from_parts(rest, range.priority()))
+}
+
 /// Drives synchronisation of one wallet against one chain source.
-pub struct SyncEngine<S, P> {
-    source: S,
+pub struct SyncEngine<S: ChainSource, P> {
+    // Shared rather than owned, so a fetch can run on its own task while the
+    // engine is busy detecting and applying the batch before it.
+    source: std::sync::Arc<S>,
     params: P,
-    db: WalletDb,
+    // `None` only while a blocking task holds it; see `detect_and_apply`.
+    db: Option<WalletDb>,
     keys: ScanKeys,
     watch_set: TransparentWatch,
     config: SyncConfig,
     status: watch::Sender<SyncStatus>,
-    /// How far the *next* rewind will go, doubling after each one.
+    /// How far the *next* rewind will go, doubling after each one, and the
+    /// height whose repeated failure has been driving that escalation.
+    ///
+    /// Keyed to the height rather than reset on any clean batch. Under
+    /// descending recovery the queue interleaves the reorged range near the tip
+    /// with historic ranges far below it, so a global "reset on success" counter
+    /// is reset by an unrelated historic batch before the reorged range is
+    /// retried — and the doubling never escalates past its first step, which is
+    /// exactly the case the escalation exists for.
     rewind_depth: u32,
+    rewinding_at: Option<BlockHeight>,
     timings: Timings,
+    /// A fetch started while the previous batch was being applied.
+    prefetch: Option<Prefetch<S>>,
 }
 
-impl<S: ChainSource, P: Parameters> SyncEngine<S, P> {
+impl<S, P> SyncEngine<S, P>
+where
+    // `Send + Sync + 'static` is what lets a fetch run on its own task while the
+    // engine applies the batch before it; `P: Clone + Send` is what lets the
+    // network parameters cross into the blocking detect-and-apply task.
+    S: ChainSource + Send + Sync + 'static,
+    P: Parameters + Clone + Send + 'static,
+{
     /// Builds an engine over an open wallet.
     pub fn new(
         source: S,
@@ -134,15 +228,17 @@ impl<S: ChainSource, P: Parameters> SyncEngine<S, P> {
         config: SyncConfig,
     ) -> Self {
         Self {
-            source,
+            source: std::sync::Arc::new(source),
             params,
-            db,
+            db: Some(db),
             keys,
             watch_set,
             config,
             status: watch::Sender::new(SyncStatus::default()),
             rewind_depth: INITIAL_REWIND,
+            rewinding_at: None,
             timings: Timings::default(),
+            prefetch: None,
         }
     }
 
@@ -163,23 +259,25 @@ impl<S: ChainSource, P: Parameters> SyncEngine<S, P> {
 
     /// Returns the wallet this engine is driving.
     pub fn db(&self) -> &WalletDb {
-        &self.db
+        self.db.as_ref().expect("the wallet is present between steps")
     }
 
     /// Returns the wallet this engine is driving, mutably.
     pub fn db_mut(&mut self) -> &mut WalletDb {
-        &mut self.db
+        self.db.as_mut().expect("the wallet is present between steps")
     }
 
     /// Consumes the engine, returning the wallet.
-    pub fn into_db(self) -> WalletDb {
-        self.db
+    pub fn into_db(mut self) -> WalletDb {
+        self.discard_prefetch();
+        self.db.take().expect("the wallet is present between steps")
     }
 
     /// Asks the source for the tip and reconciles the queue with it.
     pub async fn update_tip(&mut self) -> Result<BlockHeight, Error> {
         let tip = self.source.tip().await.map_err(SourceError::new).map_err(Error::Source)?;
-        self.db.update_chain_tip(&self.params, tip.height)?;
+        let params = self.params.clone();
+        self.db_mut().update_chain_tip(&params, tip.height)?;
         self.publish(Some(tip.height))?;
         Ok(tip.height)
     }
@@ -191,14 +289,38 @@ impl<S: ChainSource, P: Parameters> SyncEngine<S, P> {
     /// batch is atomic.
     pub async fn step(&mut self, cancel: &CancellationToken) -> Result<Step, Error> {
         if cancel.is_cancelled() {
+            self.discard_prefetch();
             return Ok(Step::Cancelled);
         }
 
-        let Some(range) = self.next_range()? else {
-            self.publish(None)?;
-            return Ok(Step::Idle);
+        // Watched sends first, and unconditionally. Somebody waiting to see
+        // their payment confirm should not wait behind a historic recovery, and
+        // this set is small: only transactions this installation created.
+        if let Some(step) = self.drain_requests(RequestScope::PendingSends).await? {
+            return Ok(step);
+        }
+
+        // Either a fetch this engine started while applying the previous batch,
+        // or a fresh one for the most urgent range the queue offers.
+        let prefetch = match self.prefetch.take() {
+            Some(prefetch) => prefetch,
+            None => {
+                let Some(range) = self.next_range()? else {
+                    // Only with nothing left to scan. Memos and outgoing
+                    // history are recovery, not balance: fetching them ahead of
+                    // blocks would delay the number somebody is actually
+                    // looking at.
+                    if let Some(step) = self.drain_requests(RequestScope::All).await? {
+                        return Ok(step);
+                    }
+                    self.publish(None)?;
+                    return Ok(Step::Idle);
+                };
+                self.spawn_fetch(range)
+            }
         };
 
+        let range = prefetch.range.clone();
         // Recovery works backwards and tip-following works forwards, so which
         // end of the range is fetched is decided by what the range is *for*.
         // The anchor therefore cannot be resolved until the blocks are in hand:
@@ -206,19 +328,26 @@ impl<S: ChainSource, P: Parameters> SyncEngine<S, P> {
         let direction = direction_for(range.priority());
 
         let fetch_began = std::time::Instant::now();
-        let blocks = self
-            .source
-            .fetch(range.block_range().clone(), self.config.budget, direction)
+        let (blocks, prefetched_anchor) = prefetch
+            .task
             .await
+            .expect("the fetch task does not panic")
             .map_err(SourceError::new)
             .map_err(Error::Source)?;
+        // Only the part actually waited for counts. A fetch that overlapped the
+        // previous batch's work has usually finished by the time it is awaited,
+        // and charging its whole duration here would hide exactly the saving
+        // the overlap exists to produce.
         self.timings.fetch += fetch_began.elapsed();
 
         if blocks.is_empty() {
-            // The source has nothing for this range. Treat it as scanned rather
-            // than spinning on it: a range the source cannot serve will not
-            // become servable by asking again immediately.
-            return Ok(Step::Idle);
+            // The source served nothing for a range that is still queued, so
+            // asking again immediately would spin. Stop, but say why: the range
+            // is not scanned, and reporting this as `Idle` would tell the caller
+            // the wallet had caught up when it has a hole in it.
+            return Ok(Step::Stalled {
+                range: range.block_range().clone(),
+            });
         }
 
         debug_assert!(
@@ -231,45 +360,204 @@ impl<S: ChainSource, P: Parameters> SyncEngine<S, P> {
             "the source must return a contiguous, ascending run whichever end it took",
         );
 
-        let anchor = self.resolve_anchor(blocks[0].height).await?;
+        // Under descending recovery this is a fresh assertion from the source
+        // rather than the wallet's own record, and the scanner cannot check it:
+        // its end-of-block check compares the batch against block metadata from
+        // that same source, so a source wrong about both is self-consistent.
+        //
+        // The check that catches it lives in the store, and the two directions
+        // reach it from opposite sides. Ascending, the block *below* the batch
+        // is already scanned, so the anchor is compared against it directly.
+        // Descending, the batch's own first block is what the *previous* batch
+        // was anchored on — so the block above this one is always already
+        // stored, and the store compares this batch's end against where that
+        // block started. Every batch after the first in either direction is
+        // therefore pinned against something the wallet recorded itself.
+        let anchor_began = std::time::Instant::now();
+        let anchor = self
+            .resolve_anchor(blocks[0].height, prefetched_anchor)
+            .await?;
+        self.timings.anchor += anchor_began.elapsed();
 
-        let nullifiers = self.load_nullifiers()?;
-        let detect_began = std::time::Instant::now();
-        let detected = detect_batch(
-            &self.params,
-            &self.keys,
-            &self.watch_set,
-            &nullifiers,
-            &anchor,
-            &blocks,
-        );
-        self.timings.detect += detect_began.elapsed();
+        // Start the next fetch *before* the CPU and disk work, so the network
+        // and this machine are busy at the same time. This is the whole of the
+        // pipeline: fetch dominates recovery, and detect-plus-apply is what it
+        // overlaps with.
+        //
+        // Only the remainder of the range in hand is prefetched. Asking the
+        // queue for the next range would be wrong, because the queue does not
+        // learn what this batch covered until it commits, so it would hand back
+        // a range overlapping the one being applied.
+        if let Some(next) = remainder(&range, &blocks, direction) {
+            self.prefetch = Some(self.spawn_fetch(next));
+        }
 
-        match detected {
-            Ok(batch) => {
-                let covered = batch.blocks[0].height..(batch.end_anchor.height + 1);
-                let notes = batch.received_notes().count();
-                let apply_began = std::time::Instant::now();
-                self.db.put_batch(&self.params, &batch)?;
-                self.timings.apply += apply_began.elapsed();
-                // A clean batch means the chain is where we thought it was, so
-                // the next failure starts from a shallow rewind again.
-                self.rewind_depth = INITIAL_REWIND;
+        let detect_and_apply_began = std::time::Instant::now();
+        let outcome = self.detect_and_apply(anchor, blocks).await?;
+        let elapsed = detect_and_apply_began.elapsed();
+
+        match outcome {
+            Applied::Scanned {
+                covered,
+                notes,
+                detect,
+            } => {
+                self.timings.detect += detect;
+                self.timings.apply += elapsed.saturating_sub(detect);
+                // The escalation is cleared only when the range that was
+                // failing is the one that succeeded. Clearing it on any clean
+                // batch lets an unrelated historic range reset the counter
+                // between two attempts at a reorged tip, so the depth never
+                // grows and the give-up path is never reached.
+                if matches!(self.rewinding_at, Some(h) if covered.contains(&h)) {
+                    self.rewind_depth = INITIAL_REWIND;
+                    self.rewinding_at = None;
+                }
                 self.publish(None)?;
                 Ok(Step::Scanned {
                     range: covered,
                     notes,
                 })
             }
-            Err(cause) if cause.is_continuity_error() => {
+            Applied::Failed(cause) if cause.is_continuity_error() => {
+                self.timings.detect += elapsed;
+                // Anything already in flight was fetched against the chain the
+                // wallet is about to stop believing in, so it is discarded
+                // rather than applied on top of the rewind.
+                self.discard_prefetch();
                 let to = self.rewind(&cause)?;
                 self.publish(None)?;
                 Ok(Step::Rewound { to, cause })
             }
-            Err(cause) => Err(Error::Unrecoverable {
-                cause,
-                rewound_by: 0,
-            }),
+            Applied::Failed(cause) => {
+                self.discard_prefetch();
+                Err(Error::Unrecoverable {
+                    cause,
+                    rewound_by: 0,
+                })
+            }
+        }
+    }
+
+    /// Detects and applies one batch away from the async runtime.
+    ///
+    /// Both halves are blocking: detection saturates rayon, and applying holds a
+    /// SQLite transaction. Running them on a runtime worker parks it for the
+    /// whole of both, which starves everything sharing that runtime — the fetch
+    /// this engine just started, and, in the destination this core is built for,
+    /// a user interface. `spawn_blocking` moves them to a thread that is allowed
+    /// to block, which is also what makes the overlap real on a single-threaded
+    /// runtime.
+    ///
+    /// The wallet is moved into the task and moved back out, because it holds a
+    /// `rusqlite::Connection` that cannot be shared. `self.db` is `None` only
+    /// for the duration of this call, and `&mut self` means nothing else can
+    /// observe it.
+    async fn detect_and_apply(
+        &mut self,
+        anchor: BlockAnchor,
+        blocks: Vec<zakura_wallet_core::CompactBlock>,
+    ) -> Result<Applied, Error> {
+        let mut db = self.db.take().expect("the wallet is present between steps");
+        let params = self.params.clone();
+        let keys = self.keys.clone();
+        // Any addresses the previous batch obliged the wallet to watch must
+        // exist before this one is detected, or a payment to one of them goes
+        // unseen and there is no second chance: transparent outputs are matched
+        // by script, not decrypted.
+        let watch_seed = self.watch_set.clone();
+
+        let (db, outcome) = tokio::task::spawn_blocking(move || {
+            let nullifiers = match db.unspent_nullifiers() {
+                Ok(nullifiers) => nullifiers,
+                Err(e) => return (db, Err(Error::from(e))),
+            };
+
+            // Rebuilt from storage every batch rather than held as a field.
+            // It is a query over a few hundred rows, and the alternative is a
+            // watch set that silently goes stale as the wallet derives more
+            // addresses — which looks exactly like having no transparent funds.
+            let watch = match db.transparent_watch() {
+                Ok(data) => merge_watch(&watch_seed, data),
+                Err(e) => return (db, Err(Error::from(e))),
+            };
+
+            let detect_began = std::time::Instant::now();
+            let detected = detect_batch(&params, &keys, &watch, &nullifiers, &anchor, &blocks);
+            let detect = detect_began.elapsed();
+
+            match detected {
+                Ok(batch) => {
+                    let covered = batch.blocks[0].height..(batch.end_anchor.height + 1);
+                    let notes = batch.received_notes().count();
+                    match db.put_batch(&params, &batch) {
+                        Ok(()) => (
+                            db,
+                            Ok(Applied::Scanned {
+                                covered,
+                                notes,
+                                detect,
+                            }),
+                        ),
+                        Err(e) => (db, Err(Error::from(e))),
+                    }
+                }
+                Err(cause) => (db, Ok(Applied::Failed(cause))),
+            }
+        })
+        .await
+        .expect("the detect-and-apply task does not panic");
+
+        self.db = Some(db);
+        outcome
+    }
+
+    /// Starts fetching `range` in the background.
+    fn spawn_fetch(&self, range: ScanRange) -> Prefetch<S> {
+        let source = self.source.clone();
+        let budget = self.config.budget;
+        let direction = direction_for(range.priority());
+        let block_range = range.block_range().clone();
+        let task = tokio::spawn(async move {
+            let blocks = source.fetch(block_range, budget, direction).await?;
+
+            // The anchor is fetched here, in the same task, rather than by the
+            // caller once the blocks are in hand. Measured over a 19-batch
+            // recovery it was 56% of accounted time — larger than fetching the
+            // blocks themselves — because it is a full round trip per batch that
+            // overlaps nothing: the batch cannot be detected without it.
+            //
+            // It has to happen after the blocks arrive, because under descending
+            // recovery which block is lowest depends on where the byte budget
+            // ran out. Doing it here still puts it inside the window the caller
+            // spends detecting and applying the *previous* batch.
+            //
+            // Only for descending ranges. Ascending ones continue from a block
+            // the wallet has already scanned, so the anchor comes from local
+            // data and this would be a wasted request.
+            let anchor = match blocks.first() {
+                Some(first)
+                    if direction == Direction::Descending
+                        && u32::from(first.height) > 0 =>
+                {
+                    Some(source.anchor(first.height - 1).await?)
+                }
+                _ => None,
+            };
+
+            Ok((blocks, anchor))
+        });
+        Prefetch { range, task }
+    }
+
+    /// Drops any fetch in flight, aborting it.
+    ///
+    /// Called when what it was fetched against no longer holds: a rewind, an
+    /// unrecoverable failure, or cancellation. The blocks are always safe to
+    /// throw away, because nothing is recorded as scanned until it is applied.
+    fn discard_prefetch(&mut self) {
+        if let Some(prefetch) = self.prefetch.take() {
+            prefetch.task.abort();
         }
     }
 
@@ -282,7 +570,7 @@ impl<S: ChainSource, P: Parameters> SyncEngine<S, P> {
     pub async fn update_subtree_roots(&mut self) -> Result<usize, Error> {
         let mut total = 0;
         for pool in PoolId::ALL {
-            let start = self.db.next_subtree_index(pool)?;
+            let start = self.db().next_subtree_index(pool)?;
             let roots = self
                 .source
                 .subtree_roots(pool, start, SUBTREE_ROOT_BATCH)
@@ -308,7 +596,7 @@ impl<S: ChainSource, P: Parameters> SyncEngine<S, P> {
                 .collect();
 
             total += contiguous.len();
-            self.db.put_subtree_roots(pool, start, &contiguous)?;
+            self.db_mut().put_subtree_roots(pool, start, &contiguous)?;
         }
         Ok(total)
     }
@@ -330,7 +618,21 @@ impl<S: ChainSource, P: Parameters> SyncEngine<S, P> {
                     summary.notes += notes;
                 }
                 Step::Rewound { .. } => summary.rewinds += 1,
+                Step::Enhanced {
+                    applied, failed, ..
+                } => {
+                    summary.enhanced += applied;
+                    summary.enhance_failures += failed;
+                }
                 Step::Idle => return Ok(summary),
+                // Not a successful run: work is still queued and the source
+                // would not serve it. The caller decides whether to retry, back
+                // off or surface it, but it must be able to tell this apart
+                // from having caught up.
+                Step::Stalled { range } => {
+                    summary.stalled = Some(range);
+                    return Ok(summary);
+                }
                 Step::Cancelled => {
                     summary.cancelled = true;
                     return Ok(summary);
@@ -339,10 +641,121 @@ impl<S: ChainSource, P: Parameters> SyncEngine<S, P> {
         }
     }
 
+    /// Asks the source about outstanding transactions and folds in what it says.
+    ///
+    /// Returns `None` when there was nothing to ask, so the caller can get on
+    /// with scanning.
+    ///
+    /// Each transaction is stored in its own database transaction. One that
+    /// fails must not roll back the ones already folded in, and one the source
+    /// will not serve must not stop the wallet synchronising — it is counted
+    /// and asked about again later.
+    async fn drain_requests(&mut self, scope: RequestScope) -> Result<Option<Step>, Error> {
+        let Some(tip) = self.db().chain_tip()? else {
+            return Ok(None);
+        };
+
+        let requests = self.db().tx_requests(scope, tip, self.config.enhance_batch)?;
+        if requests.is_empty() {
+            return Ok(None);
+        }
+
+        let params = self.params.clone();
+        let keys = self.keys.clone();
+        let (mut fetched, mut applied, mut failed) = (0, 0, 0);
+
+        for request in requests {
+            match self.source.transaction(request.txid).await {
+                Ok(Some(tx)) => {
+                    fetched += 1;
+                    // The height the transaction is parsed under. If the source
+                    // says where it is mined, that; otherwise the next tip,
+                    // which is where an unmined transaction would go.
+                    let height = tx.status.height().unwrap_or(tip + 1);
+
+                    match decrypt_transaction(&params, &keys, request.txid, height, &tx.raw) {
+                        Ok(decrypted) => {
+                            let meta = TxMeta {
+                                mined_height: tx.status.height(),
+                                ..TxMeta::default()
+                            };
+                            self.db_mut().put_enhanced_tx(&params, &decrypted, meta)?;
+                            if tx.status.height().is_none() {
+                                self.db_mut().set_transaction_status(
+                                    request.txid,
+                                    tx.status,
+                                    tip,
+                                )?;
+                            }
+                            applied += 1;
+                        }
+                        // A server answering with a different transaction than
+                        // the one asked for is not a transient condition, and
+                        // continuing would mean grafting its data onto the row
+                        // the wallet asked about.
+                        Err(e @ EnhanceError::TxIdMismatch { .. }) => {
+                            return Err(Error::Enhance(e));
+                        }
+                        Err(EnhanceError::Malformed(_)) => failed += 1,
+                    }
+                }
+                // A definite negative, which is what starts the expiry clock.
+                Ok(None) => {
+                    fetched += 1;
+                    self.db_mut()
+                        .set_transaction_status(request.txid, TransactionStatus::NotFound, tip)?;
+                }
+                // A transport failure, which says nothing about the
+                // transaction. Recording it as a negative here would expire
+                // live transactions and hand back the notes they spend.
+                Err(_) => failed += 1,
+            }
+
+            self.db().mark_polled(request.txid, tip)?;
+        }
+
+        self.publish(None)?;
+        Ok(Some(Step::Enhanced {
+            fetched,
+            applied,
+            failed,
+        }))
+    }
+}
+
+/// Combines the caller-supplied watch set with the wallet's stored addresses.
+///
+/// The caller's is kept so that a consumer watching something the wallet did
+/// not derive — an imported key, a test fixture — is not silently dropped.
+fn merge_watch(
+    seed: &TransparentWatch,
+    stored: zakura_wallet_store::TransparentWatchData,
+) -> TransparentWatch {
+    let mut scripts: Vec<_> = stored
+        .addresses
+        .into_iter()
+        .map(|a| {
+            (
+                transparent::address::Script(zcash_script::script::Code(a.script)),
+                a.account,
+                a.address_id,
+            )
+        })
+        .collect();
+    scripts.extend(seed.entries());
+
+    TransparentWatch::new(scripts, stored.unspent.into_iter().chain(seed.outpoints()))
+}
+
+impl<S, P> SyncEngine<S, P>
+where
+    S: ChainSource + Send + Sync + 'static,
+    P: Parameters + Clone + Send + 'static,
+{
     /// Returns the most urgent range still to scan.
     fn next_range(&self) -> Result<Option<ScanRange>, Error> {
         Ok(self
-            .db
+            .db()
             .suggest_scan_ranges(self.config.min_priority)?
             .into_iter()
             .find(|r| !r.is_empty() && r.priority() != ScanPriority::Scanned))
@@ -354,13 +767,26 @@ impl<S: ChainSource, P: Parameters> SyncEngine<S, P> {
     /// actually built from; falls back to the source for a range that does not
     /// continue from anything scanned, which under descending recovery is most
     /// of them.
-    async fn resolve_anchor(&self, start: BlockHeight) -> Result<BlockAnchor, Error> {
+    async fn resolve_anchor(
+        &self,
+        start: BlockHeight,
+        prefetched: Option<BlockAnchor>,
+    ) -> Result<BlockAnchor, Error> {
         if start == BlockHeight::from_u32(0) {
             return Err(Error::MissingAnchor { height: start });
         }
         let below = start - 1;
 
-        if let Some(anchor) = self.db.block_anchor(below)? {
+        // The wallet's own record first, always: it is what the trees were built
+        // from, and it costs nothing.
+        if let Some(anchor) = self.db().block_anchor(below)? {
+            return Ok(anchor);
+        }
+
+        // Then the one the fetch task already asked for, which is the usual case
+        // under descending recovery and has cost nothing here because it
+        // happened while the previous batch was being applied.
+        if let Some(anchor) = prefetched.filter(|a| a.height == below) {
             return Ok(anchor);
         }
 
@@ -371,13 +797,19 @@ impl<S: ChainSource, P: Parameters> SyncEngine<S, P> {
             .map_err(Error::Source)
     }
 
-    /// Loads the wallet's unspent nullifiers.
-    fn load_nullifiers(&self) -> Result<NullifierSnapshot, Error> {
-        Ok(self.db.unspent_nullifiers()?)
-    }
-
     /// Rewinds after a continuity failure, deepening on repeated failures.
     fn rewind(&mut self, cause: &ScanError) -> Result<BlockHeight, Error> {
+        // The depth is *not* reset here, even though the failing height usually
+        // differs from last time. It differs because the previous rewind moved
+        // the range, so treating a new height as a new problem would reset the
+        // escalation on every attempt and the doubling would never leave its
+        // first step — which is how a source that is simply broken, rather than
+        // reorged, would be retried forever.
+        //
+        // Escalation is cleared by progress instead: a batch that applies and
+        // covers the height being rewound at. See `step`.
+        let failed_at = cause.at_height();
+        self.rewinding_at = Some(failed_at);
         let depth = self.rewind_depth;
         if depth > PRUNING_DEPTH as u32 {
             // Beyond the checkpoint window there is nothing to rewind to, so
@@ -389,23 +821,23 @@ impl<S: ChainSource, P: Parameters> SyncEngine<S, P> {
             });
         }
 
-        let target = cause.at_height().saturating_sub(depth);
-        let floor = self.db.birthday()?.map(|b| b.saturating_sub(1));
+        let target = failed_at.saturating_sub(depth);
+        let floor = self.db().birthday()?.map(|b| b.saturating_sub(1));
         let target = match floor {
             Some(floor) if target < floor => floor,
             _ => target,
         };
 
-        self.db.truncate_to(target)?;
+        self.db_mut().truncate_to(target)?;
         self.rewind_depth = depth.saturating_mul(2);
         Ok(target)
     }
 
     /// Publishes a progress snapshot.
     fn publish(&self, tip: Option<BlockHeight>) -> Result<(), Error> {
-        let scanned_to = self.db.block_height_extrema()?.map(|(_, hi)| hi);
+        let scanned_to = self.db().block_height_extrema()?.map(|(_, hi)| hi);
         let remaining: u64 = self
-            .db
+            .db()
             .suggest_scan_ranges(self.config.min_priority)?
             .iter()
             .filter(|r| r.priority() != ScanPriority::Scanned)
@@ -445,7 +877,7 @@ impl<S: ChainSource, P: Parameters> SyncEngine<S, P> {
 
     /// Returns how much of a pool's commitment tree the wallet has covered.
     fn coverage(&self, pool: PoolId) -> Result<Ratio, Error> {
-        let (covered, total) = self.db.commitment_coverage(pool)?;
+        let (covered, total) = self.db().commitment_coverage(pool)?;
         Ok(Ratio {
             numerator: covered,
             denominator: total,
@@ -468,12 +900,19 @@ pub struct Timings {
     pub detect: std::time::Duration,
     /// Time spent writing to storage.
     pub apply: std::time::Duration,
+    /// Time spent resolving a batch's starting anchor.
+    ///
+    /// Under descending recovery this is a `GetTreeState` round trip per batch,
+    /// because a range that continues from nothing scanned has no local
+    /// predecessor. It is a network cost that is *not* part of `fetch`, and it
+    /// does not overlap anything: the batch cannot be detected without it.
+    pub anchor: std::time::Duration,
 }
 
 impl Timings {
     /// Returns the total time accounted for.
     pub fn total(&self) -> std::time::Duration {
-        self.fetch + self.detect + self.apply
+        self.fetch + self.detect + self.apply + self.anchor
     }
 
     /// Returns the time a perfect pipeline could recover: the smaller of the
@@ -485,7 +924,7 @@ impl Timings {
 }
 
 /// What a run of the engine accomplished.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncSummary {
     /// How many batches were applied.
     pub batches: usize,
@@ -493,6 +932,28 @@ pub struct SyncSummary {
     pub notes: usize,
     /// How many times a continuity failure forced a rewind.
     pub rewinds: usize,
+    /// How many transactions were fetched whole and folded in.
+    pub enhanced: usize,
+    /// How many transactions the source could not be asked about.
+    ///
+    /// Not a failure of the run: these stay queued and are asked again. But a
+    /// caller that sees this climbing is talking to a server that will not
+    /// answer, and a wallet with no memos and no outgoing history is the
+    /// symptom.
+    pub enhance_failures: usize,
     /// Whether the run stopped because it was cancelled.
     pub cancelled: bool,
+    /// The range the source would not serve, if that is why the run stopped.
+    ///
+    /// `Some` means the wallet is *not* caught up: this range is still queued.
+    /// Without it a transient server failure would be reported exactly like a
+    /// completed sync.
+    pub stalled: Option<Range<BlockHeight>>,
+}
+
+impl SyncSummary {
+    /// Returns whether the run finished the work that was queued.
+    pub fn is_complete(&self) -> bool {
+        !self.cancelled && self.stalled.is_none()
+    }
 }

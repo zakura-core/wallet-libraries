@@ -20,8 +20,13 @@ incrementalmerkletree.workspace = true
 orchard.workspace = true
 rayon.workspace = true
 transparent.workspace = true
+zcash_script.workspace = true
 zakura-wallet-core = { path = "../wallet-core" }
 zcash_note_encryption.workspace = true
+# Parsing a full transaction, for enhancement. Deliberately without `circuits`:
+# this crate must not pull in the proving stack, which is what keeps it fast to
+# build and test.
+zcash_primitives.workspace = true
 zcash_protocol = { workspace = true, features = ["local-consensus"] }
 
 rand_chacha = { workspace = true, optional = true }

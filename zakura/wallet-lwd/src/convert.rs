@@ -14,6 +14,7 @@ use transparent::{
     address::Script,
     bundle::{OutPoint, TxOut},
 };
+use zakura_wallet_core::enhanced::TransactionStatus;
 use zakura_wallet_core::{
     BlockHash, CompactBlock, CompactTx,
     pool::TreeSizes,
@@ -239,4 +240,57 @@ fn compact_size(bytes: &[u8], cursor: &mut usize) -> Option<u64> {
     let mut buf = [0u8; 8];
     buf[..width].copy_from_slice(slice);
     Some(u64::from_le_bytes(buf))
+}
+
+/// Interprets a `RawTransaction`'s height field.
+///
+/// The field is a `uint64` that carries three different meanings, because the
+/// original protobuf definition could not represent the `-1` that `zcashd`
+/// returns for a transaction mined on a fork. Getting this mapping wrong is not
+/// a cosmetic bug: `NotInMainChain` is positive proof a transaction is not
+/// mined, which is what eventually expires it and releases the notes it spends.
+/// Reading a mined height as a sentinel would release live funds; reading a
+/// sentinel as a height would record a transaction as mined at block zero.
+pub(crate) fn transaction_status(height: u64) -> TransactionStatus {
+    match height {
+        // Absent from the message, which protobuf renders as zero: the
+        // transaction is in the mempool. Known to the server, not mined.
+        0 => TransactionStatus::NotInMainChain,
+        // The remapped `-1`: mined, but on a chain that lost.
+        u64::MAX => TransactionStatus::NotInMainChain,
+        h => match u32::try_from(h) {
+            Ok(h) => TransactionStatus::Mined(BlockHeight::from_u32(h)),
+            // A height above `u32::MAX` that is not the sentinel is a server
+            // talking about a chain this wallet does not understand. Treating
+            // it as unmined would be a guess; it is not representable.
+            Err(_) => TransactionStatus::NotInMainChain,
+        },
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn the_three_sentinels_are_distinguished() {
+        assert_eq!(transaction_status(0), TransactionStatus::NotInMainChain);
+        assert_eq!(transaction_status(u64::MAX), TransactionStatus::NotInMainChain);
+        assert_eq!(
+            transaction_status(3_473_359),
+            TransactionStatus::Mined(BlockHeight::from_u32(3_473_359))
+        );
+    }
+
+    #[test]
+    fn a_mined_height_is_never_read_as_a_sentinel() {
+        // The failure this guards against frees a live transaction's notes.
+        for h in [1u64, 2, 419_200, 3_000_000, u64::from(u32::MAX)] {
+            assert_eq!(
+                transaction_status(h),
+                TransactionStatus::Mined(BlockHeight::from_u32(h as u32)),
+                "height {h} must read as mined"
+            );
+        }
+    }
 }

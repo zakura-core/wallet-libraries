@@ -15,12 +15,15 @@
 
 pub mod accounts;
 mod apply;
+pub mod enhance;
 mod error;
 pub mod gap;
 mod hash;
 mod report;
 pub mod schema;
 mod scan_queue;
+pub mod transparent_keys;
+pub mod status;
 mod tree;
 
 #[cfg(any(test, feature = "test-dependencies"))]
@@ -39,9 +42,16 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 pub use accounts::Account;
 pub use gap::{GapLimits, GapState};
 pub use apply::{StoredNote, SubtreeRoot};
-pub use report::{Balance, HistoryEntry};
+pub use report::{Balance, HistoryEntry, SpendableUtxo, TransparentSpendPolicy};
 pub use error::{Error, TreeError, VersionKind};
 pub use scan_queue::VERIFY_LOOKAHEAD;
+
+/// How deeply a transparent output must be buried before it is spendable.
+///
+/// Shielded notes use witness stability for this, which has no transparent
+/// analogue: there is no commitment tree and nothing to invalidate. Depth is
+/// the whole of the guarantee, so it is stated here rather than implied.
+pub const MIN_TRANSPARENT_CONFIRMATIONS: u32 = 10;
 pub use tree::{CommitmentTree, PRUNING_DEPTH, SHARD_HEIGHT, TREE_DEPTH, WalletShardStore};
 
 use schema::{
@@ -92,11 +102,37 @@ impl WalletDb {
         // Foreign keys are off by default in SQLite, and this schema relies on
         // them: removing a checkpoint depends on the cascade to its marks.
         conn.execute("PRAGMA foreign_keys = ON", [])?;
+
         // WAL lets the reader connections used by the UI run without blocking
         // the writer. `NORMAL` trades a crash-window fsync for throughput,
         // which is the right trade for a database that can be rebuilt.
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        //
+        // Set on *both* schemas. Journal mode and synchronous are per-database,
+        // not per-connection, and `cache` carries essentially all the write
+        // traffic — blocks, notes, and the commitment trees. Setting them on
+        // `main` alone, which is what an unqualified pragma does, left the busy
+        // half of the wallet on the rollback journal.
+        //
+        // An in-memory database reports `memory` and ignores the request; that
+        // is not an error and the tests rely on it.
+        for schema in [None, Some(CACHE_SCHEMA)] {
+            conn.pragma_update(schema, "journal_mode", "WAL")?;
+            conn.pragma_update(schema, "synchronous", "NORMAL")?;
+        }
+
+        // A batch rewrites whole shards — up to 2^16 leaves each — so the page
+        // cache is doing real work between statements. The default of 2 MiB is
+        // sized for a connection that reads a row at a time. Negative means KiB
+        // rather than pages, so this is 64 MiB regardless of page size.
+        conn.pragma_update(None, "cache_size", -65_536)?;
+        // Sorting and the temporary b-trees the shard queries build stay in
+        // memory rather than spilling to a file.
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
+        // Writes are serialised by this type owning the only connection, so
+        // nothing here contends today. The timeout is for the reader connection
+        // a UI will open: without it, the loser of a lock race gets an immediate
+        // `SQLITE_BUSY` rather than waiting the moment the other side needs.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         let mut db = Self { conn };
         db.create_schema()?;
@@ -294,6 +330,135 @@ impl WalletDb {
         gap::indices_to_generate(&self.conn, account, scope, limits)
     }
 
+    /// Derives and records however many transparent addresses are needed to
+    /// keep a full window of unused ones ahead of the used ones.
+    ///
+    /// Must be called before scanning can find anything transparent, and again
+    /// whenever an address is used. There is no trial decryption for a
+    /// transparent output: the wallet sees one only if it derived the address
+    /// first, so an unfilled window is money it will never notice arriving.
+    ///
+    /// Returns how many addresses were added.
+    pub fn maintain_transparent_addresses<P: Parameters>(
+        &mut self,
+        params: &P,
+        account: zakura_wallet_core::AccountId,
+        limits: &GapLimits,
+    ) -> Result<usize, Error> {
+        let Some(stored) = self.account(params, account)? else {
+            return Err(Error::UnknownAccount(account));
+        };
+        let Some(keys) = transparent_keys::TransparentKeys::derive(&stored.ufvk) else {
+            // A watch-only shielded account has no transparent addresses to
+            // watch, which is a legitimate wallet rather than a failure.
+            return Ok(0);
+        };
+
+        let mut added = 0;
+        for scope in [
+            zakura_wallet_core::KeyScope::External,
+            zakura_wallet_core::KeyScope::Internal,
+        ] {
+            let indices = self.addresses_to_generate(account, scope, limits)?;
+            for index in indices {
+                let Some(derived) = keys.address(params, scope, index)? else {
+                    continue;
+                };
+                self.transactionally(|tx| {
+                    gap::record_address(
+                        tx,
+                        account,
+                        scope,
+                        index,
+                        &derived.encoded,
+                        &derived.script,
+                    )
+                })?;
+                added += 1;
+            }
+        }
+        Ok(added)
+    }
+
+    /// Builds the transparent watch set from the wallet's stored addresses.
+    ///
+    /// Every derived address, not just the unused window ahead of them: this
+    /// wallet matches scripts locally, so watching more costs nothing that
+    /// anybody outside can observe. The narrow window the fork watches exists
+    /// because it must *name* its addresses to a server to ask about them, and
+    /// every name it gives is one more address that server can group into the
+    /// same wallet. That constraint does not apply here, and a wider set cannot
+    /// miss what a narrower one would find.
+    ///
+    /// Rows outside the scopes this wallet issues are refused rather than
+    /// skipped. Such a row can only come from a future version, and quietly
+    /// ignoring it would present a balance missing whatever it holds.
+    pub fn transparent_watch(&self) -> Result<TransparentWatchData, Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id, account_id, key_scope, transparent_script
+             FROM {schema}.addresses
+             WHERE transparent_script IS NOT NULL",
+            schema = schema::CACHE_SCHEMA,
+        ))?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, u8>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })?;
+
+        let mut addresses = Vec::new();
+        for row in rows {
+            let (id, account, scope, script) = row?;
+            if zakura_wallet_core::KeyScope::from_code(scope).is_none() {
+                return Err(Error::Corrupt(format!(
+                    "address {id} is in key scope {scope}, which this wallet does not issue; \
+                     treating it as absent would understate the balance"
+                )));
+            }
+            addresses.push(WatchedScript {
+                script,
+                account: zakura_wallet_core::AccountId(account),
+                address_id: id,
+            });
+        }
+
+        Ok(TransparentWatchData {
+            addresses,
+            unspent: self.unspent_outpoints()?,
+        })
+    }
+
+    /// Returns the outpoints of transparent outputs the wallet believes are
+    /// still unspent, which is what lets a spend of one be recognised.
+    pub(crate) fn unspent_outpoints(&self) -> Result<Vec<transparent::bundle::OutPoint>, Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT t.txid, o.output_index
+             FROM {schema}.transparent_received_outputs o
+             JOIN {schema}.transactions t ON t.id = o.transaction_id
+             WHERE o.id NOT IN (SELECT output_id FROM {schema}.transparent_received_output_spends)
+               AND o.observed_spent_at_height IS NULL",
+            schema = schema::CACHE_SCHEMA,
+        ))?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, u32>(1)?))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (txid, index) = row?;
+            let hash: [u8; 32] = txid
+                .try_into()
+                .map_err(|_| Error::Corrupt("a stored txid was not 32 bytes".into()))?;
+            out.push(transparent::bundle::OutPoint::new(hash, index));
+        }
+        Ok(out)
+    }
+
     /// Records a transparent address the wallet is watching.
     pub fn record_transparent_address(
         &mut self,
@@ -308,6 +473,179 @@ impl WalletDb {
         })
     }
 
+    /// Folds the result of a UTXO sweep into the wallet.
+    ///
+    /// Two halves, and the second is the reason a sweep is worth doing at all.
+    ///
+    /// The outputs that came back are stored, if the wallet knows their
+    /// addresses. Those it does not know are refused rather than absorbed: an
+    /// output at an address the wallet never derived means the server answered
+    /// about somebody else's address, and quietly storing it would put another
+    /// person's funds in this balance.
+    ///
+    /// Then the negative information. Any stored output of this account, mined
+    /// in the swept range, that the server did *not* return is marked spent as
+    /// of the tip. That is the only way to learn about a purely transparent
+    /// spend made from another installation of the same seed: it has no
+    /// shielded part and pays this wallet nothing, so nothing in the block
+    /// stream ever identifies it.
+    pub fn apply_utxo_sweep(
+        &mut self,
+        account: zakura_wallet_core::AccountId,
+        swept_from: BlockHeight,
+        tip: BlockHeight,
+        outputs: &[SweptOutput],
+    ) -> Result<(), Error> {
+        self.transactionally(|conn| {
+            // Marked first, cleared second. The obvious shape — store what came
+            // back, then mark everything else — needs a list of exclusions, and
+            // building one as SQL means interpolating a row per output into the
+            // statement. A wallet with a few thousand outputs would produce a
+            // query SQLite refuses on expression depth alone. Inverting it
+            // costs one extra write per returned output and no list at all.
+            conn.execute(
+                &format!(
+                    "UPDATE {schema}.transparent_received_outputs
+                     SET observed_spent_at_height = :tip
+                     WHERE id IN (
+                        SELECT o.id FROM {schema}.transparent_received_outputs o
+                        JOIN {schema}.transactions t ON t.id = o.transaction_id
+                        WHERE o.account_id = :account
+                          AND t.mined_height IS NOT NULL
+                          AND t.mined_height >= :from
+                          AND t.mined_height <= :tip
+                          AND o.observed_spent_at_height IS NULL
+                     )",
+                    schema = schema::CACHE_SCHEMA,
+                ),
+                rusqlite::named_params![
+                    ":account": account.0,
+                    ":from": u32::from(swept_from),
+                    ":tip": u32::from(tip),
+                ],
+            )?;
+
+            for output in outputs {
+                let address_id: i64 = conn
+                    .query_row(
+                        &format!(
+                            "SELECT id FROM {schema}.addresses WHERE transparent_address = :a",
+                            schema = schema::CACHE_SCHEMA,
+                        ),
+                        rusqlite::named_params![":a": &output.address],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .ok_or_else(|| {
+                        Error::Corrupt(format!(
+                            "the server returned an output at {}, which this wallet \
+                             never derived; storing it would credit somebody else's funds",
+                            output.address
+                        ))
+                    })?;
+
+                // A sighting must never un-mine a transaction the wallet
+                // already knows more about.
+                conn.execute(
+                    &format!(
+                        "INSERT INTO {schema}.transactions (txid, mined_height)
+                         VALUES (:txid, :height)
+                         ON CONFLICT (txid) DO UPDATE SET
+                            mined_height = IFNULL(mined_height, :height)",
+                        schema = schema::CACHE_SCHEMA,
+                    ),
+                    rusqlite::named_params![
+                        ":txid": output.txid.as_ref(),
+                        ":height": u32::from(output.height),
+                    ],
+                )?;
+
+                let tx_ref: i64 = conn.query_row(
+                    &format!(
+                        "SELECT id FROM {schema}.transactions WHERE txid = :txid",
+                        schema = schema::CACHE_SCHEMA,
+                    ),
+                    rusqlite::named_params![":txid": output.txid.as_ref()],
+                    |row| row.get(0),
+                )?;
+
+                // `observed_spent_at_height = NULL` on both paths: the server
+                // just said this output is unspent, which overrides the blanket
+                // mark above whether the row is new or already present.
+                conn.execute(
+                    &format!(
+                        "INSERT INTO {schema}.transparent_received_outputs
+                            (transaction_id, output_index, account_id, address_id, script,
+                             value, is_coinbase, max_observed_unspent_height,
+                             observed_spent_at_height)
+                         VALUES (:tx, :index, :account, :address_id, :script, :value,
+                                 -- A sweep carries no transaction index, so
+                                 -- coinbase-ness is unknown. NULL, not false:
+                                 -- guessing false can build a transaction
+                                 -- consensus rejects.
+                                 NULL, :tip, NULL)
+                         ON CONFLICT (transaction_id, output_index) DO UPDATE SET
+                            max_observed_unspent_height =
+                                MAX(IFNULL(max_observed_unspent_height, 0), :tip),
+                            observed_spent_at_height = NULL",
+                        schema = schema::CACHE_SCHEMA,
+                    ),
+                    rusqlite::named_params![
+                        ":tx": tx_ref,
+                        ":index": output.output_index,
+                        ":account": account.0,
+                        ":address_id": address_id,
+                        ":script": &output.script,
+                        ":value": output.value as i64,
+                        ":tip": u32::from(tip),
+                    ],
+                )?;
+
+                gap::observe_use(conn, address_id, output.height)?;
+            }
+
+            Ok(())
+        })
+    }
+
+    /// Returns the transparent outputs an account can spend, largest first.
+    pub fn spendable_utxos(
+        &self,
+        account: zakura_wallet_core::AccountId,
+        policy: report::TransparentSpendPolicy,
+    ) -> Result<Vec<report::SpendableUtxo>, Error> {
+        let Some(tip) = self.chain_tip()? else {
+            // Without a tip nothing can be shown to be buried, and spending an
+            // output that is not is how a reorg turns a payment into a
+            // double spend.
+            return Ok(Vec::new());
+        };
+        report::spendable_utxos(
+            &self.conn,
+            account,
+            policy,
+            MIN_TRANSPARENT_CONFIRMATIONS,
+            tip,
+        )
+    }
+
+    /// Returns an account's transparent balance.
+    ///
+    /// Confirmations are measured against the last tip the wallet was told
+    /// about; without one, nothing is treated as confirmed, which understates
+    /// rather than overstates.
+    pub fn transparent_balance(
+        &self,
+        account: zakura_wallet_core::AccountId,
+    ) -> Result<Balance, Error> {
+        report::transparent_balance(
+            &self.conn,
+            account,
+            MIN_TRANSPARENT_CONFIRMATIONS,
+            self.chain_tip()?,
+        )
+    }
+
     /// Returns an account's balance in one pool.
     pub fn balance(
         &self,
@@ -320,8 +658,16 @@ impl WalletDb {
     /// Returns an account's balance across every pool.
     pub fn total_balance(&self, account: zakura_wallet_core::AccountId) -> Result<Balance, Error> {
         let mut total = Balance::default();
-        for pool in PoolId::ALL {
-            let pool_balance = self.balance(account, pool)?;
+        // The shielded pools, then transparent. Leaving transparent out — which
+        // this did — reports a wallet holding transparent funds as empty.
+        let transparent = self.transparent_balance(account)?;
+        for pool_balance in PoolId::ALL
+            .into_iter()
+            .map(|pool| self.balance(account, pool))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .chain(std::iter::once(transparent))
+        {
             total.spendable = (total.spendable + pool_balance.spendable)
                 .ok_or(Error::Serialization(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -382,6 +728,16 @@ impl WalletDb {
         let birthday = self.birthday()?;
         let max_scanned = apply::block_height_extrema(&self.conn)?.map(|(_, hi)| hi);
         self.transactionally(|tx| {
+            // Recorded, not just used: whether a note's witness is beyond a
+            // reorg's reach is measured against the tip of the *chain*, and the
+            // apply stage has no other way to know where that is. Measuring it
+            // against the batch instead would make spend eligibility depend on
+            // which range happened to be scanned last.
+            tx.execute(
+                "INSERT INTO wallet_meta (key, value) VALUES ('chain_tip', :tip)
+                 ON CONFLICT (key) DO UPDATE SET value = max(value, :tip)",
+                named_params![":tip": u32::from(new_tip)],
+            )?;
             scan_queue::update_chain_tip(
                 tx,
                 params,
@@ -391,6 +747,14 @@ impl WalletDb {
                 PRUNING_DEPTH as u32,
             )
         })
+    }
+
+    /// Returns the highest chain tip the wallet has been told about.
+    ///
+    /// This is the source's view of the chain, not the wallet's own scan
+    /// progress, and it is what burial depth is measured against.
+    pub fn chain_tip(&self) -> Result<Option<BlockHeight>, Error> {
+        Ok(self.meta_u32("chain_tip")?.map(BlockHeight::from))
     }
 
     /// Applies a detected batch and marks its range scanned, atomically.
@@ -404,7 +768,137 @@ impl WalletDb {
         batch: &DetectedBatch,
     ) -> Result<(), TreeError> {
         let birthday = self.birthday()?;
-        self.transactionally(|tx| apply::put_batch(tx, params, birthday, batch))
+        // The tip the source last reported, which is what burial is measured
+        // against. A wallet that has never been told a tip — a test applying a
+        // batch directly — falls back to the batch's own end, which is
+        // conservative rather than wrong: it can only under-report stability.
+        let chain_tip = self.chain_tip()?;
+        self.transactionally(|tx| apply::put_batch(tx, params, birthday, chain_tip, batch))
+    }
+
+    /// Folds a decrypted full transaction into the wallet.
+    ///
+    /// This is what recovers the two things scanning cannot: the memos on
+    /// received notes, and what an outgoing payment paid and to whom. It is
+    /// safe to call on a transaction the wallet has already scanned — every
+    /// write fills a gap rather than replacing what is there — and safe to call
+    /// on a transaction that turns out to be nothing to do with the wallet,
+    /// which is stored nowhere at all.
+    pub fn put_enhanced_tx<P: Parameters>(
+        &mut self,
+        params: &P,
+        tx: &zakura_wallet_core::enhanced::EnhancedTx,
+        meta: enhance::TxMeta,
+    ) -> Result<enhance::PutOutcome, Error> {
+        let chain_tip = self.chain_tip()?;
+        self.transactionally(|conn| enhance::put_enhanced_tx(conn, params, chain_tip, tx, meta))
+    }
+
+    /// Records a transaction this wallet built, before it is broadcast.
+    ///
+    /// Call this *before* handing the bytes to a server, never after. A crash
+    /// in between leaves a transaction spending notes the wallet still believes
+    /// are free, and the next payment it builds will spend them again.
+    ///
+    /// It goes through the same write path enhancement uses, rather than a
+    /// parallel one. The wallet can decrypt its own transaction with its own
+    /// keys, so the change note and the payment out fall out of the same three
+    /// arms that an enhanced transaction does — one write path, not two that
+    /// have to be kept agreeing.
+    ///
+    /// `typed_recipient` is the address the user actually entered, which is not
+    /// necessarily the one the protocol saw: a unified address carrying several
+    /// receivers is recorded by the receiver that was paid. Keeping what they
+    /// typed is the only way history can show them back what they asked for.
+    pub fn store_sent_transaction<P: Parameters>(
+        &mut self,
+        params: &P,
+        tx: &zakura_wallet_core::enhanced::EnhancedTx,
+        fee: zcash_protocol::value::Zatoshis,
+        target_height: BlockHeight,
+        created_time: u32,
+        typed_recipient: Option<&str>,
+    ) -> Result<(), Error> {
+        let chain_tip = self.chain_tip()?;
+        let meta = enhance::TxMeta {
+            // Not mined: it has not even been sent yet.
+            mined_height: None,
+            // The marker that says this installation created it. Nothing else
+            // sets it, so it is what tells a payment somebody is waiting on
+            // apart from one merely observed on the chain.
+            target_height: Some(target_height),
+            created_time: Some(created_time),
+            // Exact, because the wallet chose it rather than inferring it.
+            fee: Some(fee),
+        };
+
+        self.transactionally(|conn| {
+            enhance::put_enhanced_tx(conn, params, chain_tip, tx, meta)?;
+            if let Some(recipient) = typed_recipient {
+                conn.execute(
+                    "INSERT INTO main.user_metadata (txid, key, value)
+                     VALUES (:txid, 'recipient', :value)
+                     ON CONFLICT (txid, key) DO UPDATE SET value = :value",
+                    rusqlite::named_params![
+                        ":txid": tx.txid.as_ref(),
+                        ":value": recipient.as_bytes(),
+                    ],
+                )
+                .map_err(Error::Query)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Returns outstanding questions about transactions, most urgent first.
+    pub fn tx_requests(
+        &self,
+        scope: status::RequestScope,
+        tip: BlockHeight,
+        limit: usize,
+    ) -> Result<Vec<status::TxRequest>, Error> {
+        status::tx_requests(&self.conn, scope, tip, limit)
+    }
+
+    /// Records that a request was asked at this tip, so it is not re-asked
+    /// until the chain has moved.
+    pub fn mark_polled(&self, txid: zcash_protocol::TxId, tip: BlockHeight) -> Result<(), Error> {
+        status::mark_polled(&self.conn, txid, tip)
+    }
+
+    /// Applies what a source said about a transaction.
+    ///
+    /// Only ever call this with an answer a source actually gave. A transport
+    /// failure is not an answer: recording one as `NotFound` would start the
+    /// transaction expiring and eventually hand back the notes it spends.
+    pub fn set_transaction_status(
+        &mut self,
+        txid: zcash_protocol::TxId,
+        status: zakura_wallet_core::enhanced::TransactionStatus,
+        tip: BlockHeight,
+    ) -> Result<(), Error> {
+        self.transactionally(|conn| status::set_transaction_status(conn, txid, status, tip))
+    }
+
+    /// Whether the wallet is waiting on a transaction it created.
+    ///
+    /// A cache rebuild while this is true loses the pending transaction's
+    /// expiry and the record of what it spent, after which the wallet will
+    /// happily spend those notes again.
+    pub fn has_outstanding_sent_transaction(&self) -> Result<bool, Error> {
+        let sql = format!(
+            "SELECT EXISTS (
+                SELECT 1 FROM {schema}.transactions t
+                 WHERE t.target_height IS NOT NULL
+                   AND t.mined_height IS NULL
+                   AND {unexpired}
+             )",
+            schema = schema::CACHE_SCHEMA,
+            unexpired = status::UNEXPIRED,
+        );
+        self.conn
+            .query_row(&sql, [], |row| row.get(0))
+            .map_err(Error::Query)
     }
 
     /// Records server-supplied subtree roots for a pool.
@@ -440,21 +934,10 @@ impl WalletDb {
         apply::block_anchor(&self.conn, height)
     }
 
-    /// Returns the wallet's unspent nullifiers, stamped with an epoch.
-    ///
-    /// The epoch lets the writer tell whether the wallet moved on while a batch
-    /// was in flight; here it is the number of blocks scanned, which changes
-    /// exactly when the note set can have changed.
+    /// Returns the wallet's unspent nullifiers, for the scanner to match spends
+    /// against.
     pub fn unspent_nullifiers(&self) -> Result<zakura_wallet_core::NullifierSnapshot, Error> {
-        let epoch = self
-            .conn
-            .query_row(
-                &format!("SELECT COUNT(*) FROM {CACHE_SCHEMA}.blocks"),
-                [],
-                |row| row.get::<_, u64>(0),
-            )
-            .map_err(Error::Query)?;
-        apply::unspent_nullifiers(&self.conn, epoch)
+        apply::unspent_nullifiers(&self.conn)
     }
 
     /// Returns how many of a pool's commitments the wallet covers, and how many
@@ -501,6 +984,42 @@ impl WalletDb {
             .map_err(Error::Query)
     }
 
+    /// Returns the highest ZIP 318 anchor-grid boundary both pools can prove
+    /// against.
+    ///
+    /// Distinct from [`Self::common_anchor_height`], which returns the most
+    /// recent shared checkpoint and is what an ordinary spend wants. A pool
+    /// crossing may not anchor there: the anonymity set a crossing gets is the
+    /// set of transfers that chose the same boundary, so anchoring anywhere
+    /// else — including somewhere more recent — is what singles a wallet out.
+    ///
+    /// Only retained boundaries qualify. An unretained one is inside the
+    /// pruning window and will be discarded, and a crossing is often built long
+    /// after its anchor height has passed.
+    pub fn grid_anchor_height(&self) -> Result<Option<BlockHeight>, Error> {
+        let interval = u32::from(zakura_wallet_core::ANCHOR_GRID.block_count());
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT MAX(a.checkpoint_id)
+                     FROM {CACHE_SCHEMA}.tree_checkpoints a
+                     JOIN {CACHE_SCHEMA}.tree_checkpoints b
+                        ON b.checkpoint_id = a.checkpoint_id
+                     WHERE a.pool = :orchard AND b.pool = :ironwood
+                       AND a.retained_for IS NOT NULL
+                       AND b.retained_for IS NOT NULL
+                       AND a.checkpoint_id % :interval = 0"
+                ),
+                named_params![
+                    ":orchard": PoolId::Orchard.code(),
+                    ":ironwood": PoolId::Ironwood.code(),
+                    ":interval": interval,
+                ],
+                |row| Ok(row.get::<_, Option<u32>>(0)?.map(BlockHeight::from)),
+            )
+            .map_err(Error::Query)
+    }
+
     /// Returns the lowest and highest scanned block heights.
     pub fn block_height_extrema(&self) -> Result<Option<(BlockHeight, BlockHeight)>, Error> {
         apply::block_height_extrema(&self.conn)
@@ -521,6 +1040,64 @@ impl WalletDb {
 /// The DDL is authored unqualified so it reads as ordinary SQL and can be
 /// checked against a plain SQLite session.
 fn qualify(stmt: &str) -> String {
-    stmt.replacen("CREATE TABLE IF NOT EXISTS ", &format!("CREATE TABLE IF NOT EXISTS {CACHE_SCHEMA}."), 1)
-        .replacen("CREATE INDEX IF NOT EXISTS ", &format!("CREATE INDEX IF NOT EXISTS {CACHE_SCHEMA}."), 1)
+    // Every form the derived DDL uses must appear here. A statement that
+    // matches none of them is not rejected — it is silently created in the
+    // durable database instead, where it references tables that do not exist
+    // there, and the failure surfaces much later as a confusing "no such
+    // table: main.…" from an unrelated query.
+    const PREFIXES: &[&str] = &[
+        "CREATE TABLE IF NOT EXISTS ",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ",
+        "CREATE INDEX IF NOT EXISTS ",
+    ];
+
+    for prefix in PREFIXES {
+        if let Some(rest) = stmt.strip_prefix(prefix) {
+            return format!("{prefix}{CACHE_SCHEMA}.{rest}");
+        }
+    }
+
+    panic!("derived DDL statement has an unrecognised form: {stmt}");
+}
+
+
+/// One address the wallet watches, as plain data.
+///
+/// Deliberately not a scanning type: the store describes what it holds and the
+/// sync engine assembles it into whatever detection wants, so storage does not
+/// depend on the scanner.
+#[derive(Debug, Clone)]
+pub struct WatchedScript {
+    /// The `scriptPubKey` that pays this address.
+    pub script: Vec<u8>,
+    /// Whose address it is.
+    pub account: zakura_wallet_core::AccountId,
+    /// The stored row, handed back on a hit so attribution needs no re-derivation.
+    pub address_id: i64,
+}
+
+/// Everything detection needs to recognise transparent activity.
+#[derive(Debug, Clone, Default)]
+pub struct TransparentWatchData {
+    /// Every address the wallet has derived.
+    pub addresses: Vec<WatchedScript>,
+    /// Outpoints the wallet believes are still unspent.
+    pub unspent: Vec<transparent::bundle::OutPoint>,
+}
+
+/// One unspent transparent output a sweep reported.
+#[derive(Debug, Clone)]
+pub struct SweptOutput {
+    /// The address it pays, which must already be one the wallet derived.
+    pub address: String,
+    /// The transaction that created it.
+    pub txid: zcash_protocol::TxId,
+    /// Its index in that transaction's outputs.
+    pub output_index: u32,
+    /// The `scriptPubKey`.
+    pub script: Vec<u8>,
+    /// Its value in zatoshis.
+    pub value: u64,
+    /// The height it was mined at.
+    pub height: BlockHeight,
 }

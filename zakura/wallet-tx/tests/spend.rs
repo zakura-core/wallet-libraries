@@ -102,7 +102,6 @@ fn selection_covers_the_payment_and_its_fee() {
         available.iter().map(|(n, _)| n.clone()).collect(),
         PoolId::Ironwood,
         Zatoshis::const_from_u64(150_000),
-        KeyScope::Internal,
     )
     .expect("three notes of 100_000 cover a payment of 150_000");
 
@@ -125,7 +124,6 @@ fn selection_prefers_the_fewest_notes() {
         available.iter().map(|(n, _)| n.clone()).collect(),
         PoolId::Ironwood,
         Zatoshis::const_from_u64(50_000),
-        KeyScope::Internal,
     )
     .unwrap();
 
@@ -148,7 +146,6 @@ fn a_payment_larger_than_the_wallet_is_refused() {
         available.iter().map(|(n, _)| n.clone()).collect(),
         PoolId::Ironwood,
         Zatoshis::const_from_u64(1_000_000),
-        KeyScope::Internal,
     )
     .unwrap_err();
 
@@ -170,7 +167,6 @@ fn an_exact_payment_produces_no_change_output() {
         available.iter().map(|(n, _)| n.clone()).collect(),
         PoolId::Ironwood,
         Zatoshis::const_from_u64(90_000),
-        KeyScope::Internal,
     )
     .unwrap();
 
@@ -222,7 +218,6 @@ fn an_ironwood_payment_proves_and_verifies() {
         witnesses.iter().map(|(n, _)| n.clone()).collect(),
         PoolId::Ironwood,
         Zatoshis::const_from_u64(300_000),
-        KeyScope::Internal,
     )
     .unwrap();
 
@@ -268,7 +263,6 @@ fn an_orchard_payment_to_a_stranger_requires_a_crossing() {
         witnesses.iter().map(|(n, _)| n.clone()).collect(),
         PoolId::Orchard,
         Zatoshis::const_from_u64(300_000),
-        KeyScope::Internal,
     )
     .unwrap();
 
@@ -306,7 +300,6 @@ fn an_orchard_spend_that_keeps_its_value_proves_and_verifies() {
         witnesses.iter().map(|(n, _)| n.clone()).collect(),
         PoolId::Orchard,
         Zatoshis::const_from_u64(300_000),
-        KeyScope::Internal,
     )
     .unwrap();
 
@@ -347,7 +340,6 @@ fn an_unbalanced_proposal_is_refused_before_proving() {
         witnesses.iter().map(|(n, _)| n.clone()).collect(),
         PoolId::Ironwood,
         Zatoshis::const_from_u64(100_000),
-        KeyScope::Internal,
     )
     .unwrap();
     // Quietly take the fee away, so inputs no longer equal outputs plus fee.
@@ -406,7 +398,6 @@ fn a_witness_from_the_wrong_position_does_not_verify() {
         witnesses.iter().map(|(n, _)| n.clone()).collect(),
         PoolId::Ironwood,
         Zatoshis::const_from_u64(300_000),
-        KeyScope::Internal,
     )
     .unwrap();
 
@@ -438,4 +429,100 @@ fn a_witness_from_the_wrong_position_does_not_verify() {
             "a bundle built from mismatched witnesses must not verify"
         ),
     }
+}
+
+#[test]
+fn orchard_notes_cannot_quietly_fund_an_ironwood_payment() {
+    // The shape the `CrossingRequired` guard in `build` does not see: the
+    // Orchard bundle carries no output at all, so it never reaches the
+    // "paying a stranger from Orchard" branch. It is spend-only with a positive
+    // value balance, and the Ironwood bundle makes the payment — structurally a
+    // pool crossing, but with ordinary selection's action count, fee, expiry and
+    // anchor rather than the canonical ones. A crossing that is not shaped like
+    // every other crossing identifies its sender.
+    let keys = alice_keys();
+    let mut db = funded_wallet(PoolId::Orchard, 3, 100_000, &keys.fvk);
+    let anchors = anchors(&mut db).expect("the trees have a shared anchor");
+    let available = spendable_notes(&mut db, ALICE, &keys.fvk, &anchors, false).unwrap();
+    assert!(
+        available.iter().all(|(n, _)| n.pool == PoolId::Orchard),
+        "the wallet holds only Orchard notes, which is the situation under test"
+    );
+
+    let err = select(
+        available.iter().map(|(n, _)| n.clone()).collect(),
+        PoolId::Ironwood,
+        Zatoshis::const_from_u64(50_000),
+    )
+    .expect_err("funding an Ironwood payment from Orchard notes is a pool crossing");
+
+    assert_matches!(err, Error::CrossingRequired);
+}
+
+#[test]
+fn a_hand_built_mixed_pool_proposal_is_refused_before_proving() {
+    // `select` refuses the shape, but `Proposal` is a plain struct a caller can
+    // fill in directly, so the builder has to refuse it too. Proving first and
+    // discovering the shape afterwards would pay for the expensive part and
+    // leave the wallet holding something it must not send.
+    let keys = alice_keys();
+    let mut db = funded_wallet(PoolId::Orchard, 2, 200_000, &keys.fvk);
+    let anchors = anchors(&mut db).expect("the trees have a shared anchor");
+    let witnesses = spendable_notes(&mut db, ALICE, &keys.fvk, &anchors, false).unwrap();
+
+    let inputs: Vec<_> = witnesses.iter().map(|(n, _)| n.clone()).collect();
+    let input_value = inputs
+        .iter()
+        .try_fold(Zatoshis::ZERO, |acc, n| acc + n.value())
+        .unwrap();
+    let fee = fee::required(2, 2);
+    let amount = (input_value - fee).unwrap();
+
+    // Orchard inputs, an Ironwood payment: balanced, and still a crossing.
+    let proposal = zakura_wallet_tx::Proposal {
+        inputs,
+        output_pool: PoolId::Ironwood,
+        amount,
+        change: None,
+        fee,
+        transparent_inputs: Vec::new(),
+        transparent_payment: None,
+    };
+    assert!(proposal.balances(), "the proposal balances, so only its shape is wrong");
+
+    let err = zakura_wallet_tx::bundles(
+        &SpendRequest {
+            proposal: &proposal,
+            witnesses: &witnesses,
+            keys: &keys,
+            recipient: keys.fvk.address_at(0u32, Scope::External),
+            anchors: &anchors,
+        },
+        rng(),
+    )
+    // `.err()` rather than `expect_err`: the success type holds bundles that
+    // deliberately do not implement `Debug`, since printing one would dump key
+    // material into a test log.
+    .err()
+    .expect("a mixed-pool proposal is a crossing and must be refused");
+
+    assert_matches!(err, Error::CrossingRequired);
+}
+
+#[test]
+fn notes_from_two_accounts_are_not_spent_together() {
+    // Spending them in one transaction publishes that one wallet holds both,
+    // which is the linkage separate accounts exist to prevent.
+    let keys = alice_keys();
+    let mut db = funded_wallet(PoolId::Ironwood, 2, 100_000, &keys.fvk);
+    let anchors = anchors(&mut db).expect("the trees have a shared anchor");
+    let available = spendable_notes(&mut db, ALICE, &keys.fvk, &anchors, false).unwrap();
+
+    let mut mixed: Vec<_> = available.iter().map(|(n, _)| n.clone()).collect();
+    mixed[1].account = AccountId(2);
+
+    let err = select(mixed, PoolId::Ironwood, Zatoshis::const_from_u64(50_000))
+        .expect_err("notes from two accounts must not be spent together");
+
+    assert_matches!(err, Error::MixedAccounts);
 }

@@ -17,7 +17,8 @@ use zakura_wallet_scan::{
 };
 use zakura_wallet_store::{WalletDb, testing::test_db};
 use zakura_wallet_tx::{
-    Anchors, Error, Keys, action_counts, anchors, crossing, spendable_notes,
+    Anchors, Error, Keys, SpendRequest, action_counts, anchors, crossing, crossing_anchors,
+    payment, select, spendable_notes,
     testing::{proving_key, verifying_key},
     verify_proofs,
 };
@@ -561,4 +562,164 @@ fn a_preparation_spends_no_more_notes_than_its_shape_allows() {
     );
     // Largest first, so four notes of 0.3 ZEC suffice for a 1 ZEC crossing.
     assert_eq!(prep.inputs.len(), 4);
+}
+
+#[test]
+fn the_built_check_catches_what_the_plan_check_cannot() {
+    // The plan-derived evidence answers the shape clauses from constants, so it
+    // restates what `plan` already refused on and cannot see a defect
+    // introduced between planning and building. This is the pair of facts that
+    // shows the built check is doing separate work: the same plan conforms, and
+    // an ordinary payment built from it does not.
+    let keys = alice_keys();
+    let (mut db, boundary) = wallet_on_the_grid(&[150_000_000], &keys.fvk);
+    let anchors = grid_anchors(&mut db, boundary);
+    let available = spendable_notes(&mut db, ALICE, &keys.fvk, &anchors, false).unwrap();
+    let target = boundary + 1;
+
+    let plan = crossing::plan(
+        &available,
+        ONE_ZEC,
+        &anchors,
+        target,
+        &crossing::CrossingParams,
+    )
+    .unwrap();
+
+    // The plan is canonical, and says so.
+    assert!(
+        crossing::conforms(&plan, &anchors, target),
+        "the plan asks for the right shape"
+    );
+
+    let witness = available
+        .iter()
+        .find(|(note, _)| note.position == plan.source.position)
+        .map(|(_, path)| path.clone())
+        .expect("the planned note is one of the available ones");
+
+    // Built properly, the transaction conforms when read off its own bytes.
+    let built = crossing::transaction(
+        &crossing::CrossingRequest {
+            plan: &plan,
+            witness: &witness,
+            keys: &keys,
+            recipient: stranger(),
+            anchors: &anchors,
+        },
+        BranchId::Nu6_3,
+        proving_key(),
+        rng(),
+    )
+    .expect("a canonical crossing builds");
+    assert!(
+        crossing::built_conforms(&built, &anchors, target),
+        "a crossing built from a canonical plan conforms when read off its bytes"
+    );
+
+    // Now the part the plan-derived check is blind to: a transaction built from
+    // the *same wallet and anchors* that is not a crossing at all. The plan
+    // still says "two source actions, one destination action, no other
+    // bundles"; the bytes say otherwise.
+    let ordinary = {
+        let notes: Vec<_> = available.iter().map(|(n, _)| n.clone()).collect();
+        let proposal = select(notes, PoolId::Orchard, Zatoshis::const_from_u64(1_000_000))
+            .expect("an Orchard send-to-self is an ordinary payment");
+        payment(
+            &SpendRequest {
+                proposal: &proposal,
+                witnesses: &available,
+                keys: &keys,
+                // Our own address: an Orchard bundle may not pay a stranger.
+                recipient: keys.fvk.address_at(0u32, Scope::External),
+                anchors: &anchors,
+            },
+            BranchId::Nu6_3,
+            plan.expiry,
+            proving_key(),
+            rng(),
+        )
+        .expect("an ordinary Orchard payment builds")
+    };
+
+    assert!(
+        !crossing::built_conforms(&ordinary, &anchors, target),
+        "an ordinary payment is not a crossing, and reading its bytes must say so"
+    );
+}
+
+#[test]
+fn a_crossing_anchors_on_the_grid_from_a_wallet_that_stopped_anywhere() {
+    // The other tests contrive a chain that ends exactly on a grid boundary, so
+    // the most recent shared checkpoint happens to be one. A real wallet stops
+    // wherever the tip is, and `anchors` then returns a height off the grid that
+    // `plan` must refuse. `crossing_anchors` is what finds the boundary
+    // underneath it — and it can only do so because the apply stage retained
+    // that boundary against pruning as it passed.
+    let keys = alice_keys();
+    let grid = crossing::anchor_grid();
+
+    let start = u32::from(grid.boundary_at_or_above(BlockHeight::from_u32(
+        IRONWOOD_ACTIVATION + 10,
+    )));
+    let boundary = u32::from(grid.boundary_at_or_above(BlockHeight::from_u32(start + 5)));
+    // Stop part way past the boundary, which is where a wallet actually is.
+    let stop = boundary + 37;
+    assert!(!grid.is_boundary(BlockHeight::from_u32(stop)));
+
+    let mut db = test_db().unwrap();
+    db.set_birthday(BlockHeight::from_u32(start)).unwrap();
+
+    let mut chain = ChainBuilder::new(start);
+    chain.block(|b| {
+        b.tx(|t| {
+            t.receive(PoolId::Orchard, &keys.fvk, KeyScope::External, 150_000_000);
+            t.decoy(PoolId::Ironwood, 1);
+        });
+    });
+    chain.empty_blocks((stop - start) as usize);
+
+    let scan_keys = ScanKeys::from_accounts([(ALICE, keys.fvk.clone())]);
+    let batch = detect_batch(
+        &test_params(),
+        &scan_keys,
+        &TransparentWatch::default(),
+        &NullifierSnapshot::default(),
+        &chain.anchor(),
+        chain.blocks(),
+    )
+    .expect("the chain scans cleanly");
+    db.put_batch(&test_params(), &batch).expect("the batch applies");
+
+    // The ordinary anchor is off the grid, so planning against it is refused.
+    let ordinary = anchors(&mut db).expect("both trees have a shared anchor");
+    assert_eq!(ordinary.height, BlockHeight::from_u32(stop));
+    let available = spendable_notes(&mut db, ALICE, &keys.fvk, &ordinary, false).unwrap();
+    assert_matches!(
+        crossing::plan(
+            &available,
+            ONE_ZEC,
+            &ordinary,
+            ordinary.height + 1,
+            &crossing::CrossingParams,
+        ),
+        Err(Error::NotCanonical(_)),
+        "the most recent shared checkpoint is not on the grid"
+    );
+
+    // The grid anchor is, and it is the retained boundary the batch crossed.
+    let grid_anchor = crossing_anchors(&mut db).expect("a retained boundary is available");
+    assert_eq!(grid_anchor.height, BlockHeight::from_u32(boundary));
+    assert!(grid.is_boundary(grid_anchor.height));
+
+    let available = spendable_notes(&mut db, ALICE, &keys.fvk, &grid_anchor, false).unwrap();
+    let plan = crossing::plan(
+        &available,
+        ONE_ZEC,
+        &grid_anchor,
+        grid_anchor.height + 1,
+        &crossing::CrossingParams,
+    )
+    .expect("a crossing plans against the retained grid boundary");
+    assert!(crossing::conforms(&plan, &grid_anchor, grid_anchor.height + 1));
 }

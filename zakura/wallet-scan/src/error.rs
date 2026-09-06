@@ -3,7 +3,7 @@
 use std::fmt;
 
 use zakura_wallet_core::{PoolId, scanning::ScanRange};
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::{TxId, consensus::BlockHeight};
 
 /// A failure encountered while detecting wallet activity in a batch of blocks.
 ///
@@ -153,3 +153,45 @@ impl fmt::Display for ScanError {
 }
 
 impl std::error::Error for ScanError {}
+
+/// Why a full transaction could not be turned into wallet data.
+///
+/// Deliberately separate from [`ScanError`], which is about a batch of blocks:
+/// every one of its variants names a height and says whether the chain moved.
+/// Neither question applies to a transaction fetched by identifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EnhanceError {
+    /// The bytes could not be parsed as a transaction.
+    Malformed(String),
+
+    /// The transaction returned was not the one asked for.
+    ///
+    /// A source is free to say it does not have a transaction. It is not free
+    /// to answer with a different one: the wallet would attach this
+    /// transaction's memos and recipients to the row it asked about, and
+    /// nothing downstream could tell that it had. This is the check that makes
+    /// enhancement safe against a server that substitutes.
+    TxIdMismatch {
+        /// The transaction the wallet asked for.
+        requested: TxId,
+        /// The transaction it was given.
+        received: TxId,
+    },
+}
+
+impl fmt::Display for EnhanceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EnhanceError::Malformed(e) => write!(f, "the transaction could not be parsed: {e}"),
+            EnhanceError::TxIdMismatch {
+                requested,
+                received,
+            } => write!(
+                f,
+                "asked for transaction {requested} and was given {received}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for EnhanceError {}

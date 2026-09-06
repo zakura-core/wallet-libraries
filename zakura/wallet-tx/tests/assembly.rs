@@ -88,7 +88,6 @@ fn signed_payment(expiry_offset: u32) -> (Transaction, Zatoshis) {
         witnesses.iter().map(|(n, _)| n.clone()).collect(),
         PoolId::Ironwood,
         Zatoshis::const_from_u64(300_000),
-        KeyScope::Internal,
     )
     .unwrap();
     let fee = proposal.fee;

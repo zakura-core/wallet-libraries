@@ -30,6 +30,7 @@ pub struct InMemoryChain {
     /// How many blocks were served, so a test can assert the engine did not
     /// re-fetch what it already had.
     served: Arc<AtomicUsize>,
+    tx_served: Arc<AtomicUsize>,
 }
 
 #[derive(Default)]
@@ -40,6 +41,7 @@ struct Inner {
     anchor: Option<BlockAnchor>,
     /// Subtree roots the server would serve, by pool.
     roots: std::collections::BTreeMap<zakura_wallet_core::pool::PoolId, Vec<crate::SubtreeRoot>>,
+    transactions: std::collections::BTreeMap<zcash_protocol::TxId, crate::FetchedTransaction>,
 }
 
 impl InMemoryChain {
@@ -50,8 +52,10 @@ impl InMemoryChain {
                 blocks,
                 anchor: Some(anchor),
                 roots: Default::default(),
+                transactions: Default::default(),
             })),
             served: Arc::new(AtomicUsize::new(0)),
+            tx_served: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -78,6 +82,29 @@ impl InMemoryChain {
             .expect("the chain lock is not poisoned")
             .roots
             .insert(pool, roots);
+    }
+
+    /// Gives the server a transaction to serve when asked for it.
+    pub fn with_transaction(
+        &self,
+        txid: zcash_protocol::TxId,
+        raw: Vec<u8>,
+        status: crate::TransactionStatus,
+    ) {
+        self.inner
+            .lock()
+            .expect("the chain lock is not poisoned")
+            .transactions
+            .insert(txid, crate::FetchedTransaction { raw, status });
+    }
+
+    /// Returns how many transactions have been asked for.
+    ///
+    /// The point of counting is that a wallet must not re-ask the same question
+    /// of the same server on every step; without a count, a driver that polls
+    /// in a loop looks identical to one that does not.
+    pub fn transactions_served(&self) -> usize {
+        self.tx_served.load(Ordering::Relaxed)
     }
 
     /// Returns how many blocks have been served since the chain was built.
@@ -190,6 +217,18 @@ impl ChainSource for InMemoryChain {
         Ok(out)
     }
 
+    async fn transaction(
+        &self,
+        txid: zcash_protocol::TxId,
+    ) -> Result<Option<crate::FetchedTransaction>, Self::Error> {
+        let inner = self.inner.lock().expect("the chain lock is not poisoned");
+        // Absent from the map means the chain positively does not have it,
+        // which is what a source is allowed to say. A source that cannot answer
+        // returns an error instead, and `FailingChain` is what exercises that.
+        self.tx_served.fetch_add(1, Ordering::Relaxed);
+        Ok(inner.transactions.get(&txid).cloned())
+    }
+
     async fn subtree_roots(
         &self,
         pool: zakura_wallet_core::pool::PoolId,
@@ -257,6 +296,13 @@ impl ChainSource for IncoherentChain {
         Ok(blocks)
     }
 
+    async fn transaction(
+        &self,
+        txid: zcash_protocol::TxId,
+    ) -> Result<Option<crate::FetchedTransaction>, Self::Error> {
+        self.inner.transaction(txid).await
+    }
+
     async fn subtree_roots(
         &self,
         pool: zakura_wallet_core::pool::PoolId,
@@ -303,6 +349,16 @@ impl ChainSource for FailingChain {
         Err(Unavailable)
     }
 
+    async fn transaction(
+        &self,
+        _txid: zcash_protocol::TxId,
+    ) -> Result<Option<crate::FetchedTransaction>, Self::Error> {
+        // An error, never `Ok(None)`. The distinction is the whole contract:
+        // `Ok(None)` would tell the wallet this transaction is definitely not
+        // out there, and start it expiring.
+        Err(Unavailable)
+    }
+
     async fn subtree_roots(
         &self,
         _pool: zakura_wallet_core::pool::PoolId,
@@ -310,5 +366,73 @@ impl ChainSource for FailingChain {
         _limit: u32,
     ) -> Result<Vec<crate::SubtreeRoot>, Self::Error> {
         Err(Unavailable)
+    }
+}
+
+/// A chain that serves blocks normally but will not answer about transactions.
+///
+/// This is the case that matters most for enhancement, and it is not the same
+/// as a chain that is simply down. A wallet talking to this source must keep
+/// synchronising, must not treat silence as an answer, and above all must not
+/// retire the request — a transport failure says nothing about whether the
+/// transaction exists, and acting as though it did would expire live
+/// transactions and hand back the notes they spend.
+#[derive(Clone)]
+pub struct UnservedTransactions {
+    inner: InMemoryChain,
+}
+
+impl UnservedTransactions {
+    /// Wraps a chain, refusing only its transaction lookups.
+    pub fn new(inner: InMemoryChain) -> Self {
+        Self { inner }
+    }
+
+    /// The chain underneath, for assertions about what was served.
+    pub fn inner(&self) -> &InMemoryChain {
+        &self.inner
+    }
+}
+
+impl ChainSource for UnservedTransactions {
+    type Error = Unavailable;
+
+    async fn tip(&self) -> Result<ChainTip, Self::Error> {
+        self.inner.tip().await.map_err(|_| Unavailable)
+    }
+
+    async fn anchor(&self, height: BlockHeight) -> Result<BlockAnchor, Self::Error> {
+        self.inner.anchor(height).await.map_err(|_| Unavailable)
+    }
+
+    async fn fetch(
+        &self,
+        range: Range<BlockHeight>,
+        budget: ByteBudget,
+        direction: Direction,
+    ) -> Result<Vec<CompactBlock>, Self::Error> {
+        self.inner
+            .fetch(range, budget, direction)
+            .await
+            .map_err(|_| Unavailable)
+    }
+
+    async fn transaction(
+        &self,
+        _txid: zcash_protocol::TxId,
+    ) -> Result<Option<crate::FetchedTransaction>, Self::Error> {
+        Err(Unavailable)
+    }
+
+    async fn subtree_roots(
+        &self,
+        pool: zakura_wallet_core::pool::PoolId,
+        start_index: u64,
+        limit: u32,
+    ) -> Result<Vec<crate::SubtreeRoot>, Self::Error> {
+        self.inner
+            .subtree_roots(pool, start_index, limit)
+            .await
+            .map_err(|_| Unavailable)
     }
 }

@@ -127,6 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("fetch               {:>7.2}s  ({:.0}%)", t.fetch.as_secs_f64(), pct(t.fetch));
     println!("detect              {:>7.2}s  ({:.0}%)", t.detect.as_secs_f64(), pct(t.detect));
     println!("apply               {:>7.2}s  ({:.0}%)", t.apply.as_secs_f64(), pct(t.apply));
+    println!("anchor              {:>7.2}s  ({:.0}%)", t.anchor.as_secs_f64(), pct(t.anchor));
     println!(
         "pipelining headroom {:>7.2}s  ({:.0}% of accounted time)",
         t.pipelining_headroom().as_secs_f64(),

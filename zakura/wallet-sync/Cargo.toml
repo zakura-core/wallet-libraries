@@ -22,6 +22,8 @@ orchard.workspace = true
 zakura-wallet-core = { path = "../wallet-core" }
 zakura-wallet-scan = { path = "../wallet-scan" }
 zakura-wallet-store = { path = "../wallet-store" }
+transparent = { workspace = true, features = ["transparent-inputs"] }
+zcash_script.workspace = true
 zcash_protocol.workspace = true
 
 [dev-dependencies]

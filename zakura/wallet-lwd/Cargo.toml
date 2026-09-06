@@ -42,7 +42,12 @@ zakura-wallet-lwd = { path = ".", features = ["test-dependencies"] }
 # The one place both wallet stacks legitimately coexist: the benchmark that
 # decides whether this rewrite is worth having. A dev-dependency only.
 zcash_client_backend = { workspace = true, features = ["orchard", "sync"] }
-zcash_client_sqlite = { version = "0.1.0-rc4", package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", features = ["orchard"] }
+zcash_client_sqlite = { version = "0.1.0-rc4", package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", features = ["orchard", "transparent-inputs"] }
+# `transparent-inputs` is asked for here because the wallet crates enable it on
+# `zcash_keys`, and Cargo unifies that across the workspace. The fork gates its
+# own code on its *own* feature of the same name, so with one on and the other
+# off its `UnifiedFullViewingKey::new` call sites disagree with the signature
+# they are calling.
 zcash_keys = { workspace = true, features = ["orchard", "test-dependencies"] }
 secrecy.workspace = true
 zip32.workspace = true

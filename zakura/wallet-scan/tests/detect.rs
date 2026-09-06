@@ -18,6 +18,9 @@ use zakura_wallet_scan::{
 use zcash_protocol::consensus::BlockHeight;
 
 const ALICE: AccountId = AccountId(1);
+
+/// The stored address row the watch set reports a hit against.
+const ADDRESS_ID: i64 = 1;
 const BOB: AccountId = AccountId(2);
 
 /// A chain whose first block sits comfortably above both activation heights.
@@ -81,17 +84,6 @@ fn the_end_anchor_describes_the_last_block() {
     assert_eq!(batch.end_anchor.height, last.height);
     assert_eq!(batch.end_anchor.hash, last.hash);
     assert_eq!(batch.end_anchor.tree_sizes, last.tree_sizes);
-}
-
-#[test]
-fn the_snapshot_epoch_is_carried_through() {
-    let mut chain = ChainBuilder::new(START);
-    chain.empty_blocks(1);
-    let nfs = NullifierSnapshot::new(42, []);
-
-    let batch = detect(&alice_keys(), &nfs, &chain.anchor(), chain.blocks()).unwrap();
-
-    assert_eq!(batch.snapshot_epoch, 42);
 }
 
 // ------------------------------------------------------------- receiving
@@ -223,7 +215,7 @@ fn a_note_paid_to_an_account_that_funded_the_transaction_is_change() {
     let keys = ScanKeys::from_accounts([(ALICE, alice.clone())]);
     let mut rng = test_rng(9);
     let spent_nf = zakura_wallet_scan::testing::random_nullifier(&mut rng);
-    let nfs = NullifierSnapshot::new(0, [(PoolId::Ironwood, spent_nf, ALICE)]);
+    let nfs = NullifierSnapshot::new([(PoolId::Ironwood, spent_nf, ALICE)]);
 
     let mut chain = ChainBuilder::new(START);
     chain.block(|b| {
@@ -491,7 +483,7 @@ fn a_spend_of_a_known_note_is_detected() {
     let keys = alice_keys();
     let mut rng = test_rng(3);
     let nf = zakura_wallet_scan::testing::random_nullifier(&mut rng);
-    let nfs = NullifierSnapshot::new(0, [(PoolId::Ironwood, nf, ALICE)]);
+    let nfs = NullifierSnapshot::new([(PoolId::Ironwood, nf, ALICE)]);
 
     let mut chain = ChainBuilder::new(START);
     chain.block(|b| {
@@ -516,7 +508,7 @@ fn a_nullifier_is_matched_only_within_its_own_pool() {
     let mut rng = test_rng(4);
     let nf = zakura_wallet_scan::testing::random_nullifier(&mut rng);
     // The wallet knows this nullifier as an *Orchard* note's.
-    let nfs = NullifierSnapshot::new(0, [(PoolId::Orchard, nf, ALICE)]);
+    let nfs = NullifierSnapshot::new([(PoolId::Orchard, nf, ALICE)]);
 
     let mut chain = ChainBuilder::new(START);
     chain.block(|b| {
@@ -878,7 +870,7 @@ fn a_block_at_the_activation_height_is_accepted() {
 #[test]
 fn a_transparent_output_to_a_watched_script_is_detected() {
     let watched = script(7);
-    let watch = TransparentWatch::new([(watched.clone(), ALICE)], []);
+    let watch = TransparentWatch::new([(watched.clone(), ALICE, ADDRESS_ID)], []);
 
     let mut chain = ChainBuilder::new(START);
     chain.block(|b| {
@@ -923,7 +915,7 @@ fn a_transparent_spend_of_a_known_output_is_detected() {
         });
     });
 
-    let watch = TransparentWatch::new([(watched, ALICE)], [outpoint.clone()]);
+    let watch = TransparentWatch::new([(watched, ALICE, ADDRESS_ID)], [outpoint.clone()]);
     let batch = detect_batch(
         &test_params(),
         &alice_keys(),
@@ -943,7 +935,7 @@ fn a_transparent_spend_of_a_known_output_is_detected() {
 #[test]
 fn a_transparent_output_created_and_spent_in_one_batch_is_linked() {
     let watched = script(7);
-    let watch = TransparentWatch::new([(watched.clone(), ALICE)], []);
+    let watch = TransparentWatch::new([(watched.clone(), ALICE, ADDRESS_ID)], []);
 
     let mut chain = ChainBuilder::new(START);
     let mut funding = None;
@@ -1030,7 +1022,7 @@ fn enhance_candidates_exclude_actions_we_received() {
     let keys = ScanKeys::from_accounts([(ALICE, alice.clone())]);
     let mut rng = test_rng(11);
     let nf = zakura_wallet_scan::testing::random_nullifier(&mut rng);
-    let nfs = NullifierSnapshot::new(0, [(PoolId::Ironwood, nf, ALICE)]);
+    let nfs = NullifierSnapshot::new([(PoolId::Ironwood, nf, ALICE)]);
 
     let mut chain = ChainBuilder::new(START);
     chain.block(|b| {
@@ -1059,7 +1051,7 @@ fn an_enhance_candidate_records_the_fields_that_authenticate_a_response() {
     let keys = ScanKeys::from_accounts([(ALICE, alice.clone())]);
     let mut rng = test_rng(12);
     let nf = zakura_wallet_scan::testing::random_nullifier(&mut rng);
-    let nfs = NullifierSnapshot::new(0, [(PoolId::Ironwood, nf, ALICE)]);
+    let nfs = NullifierSnapshot::new([(PoolId::Ironwood, nf, ALICE)]);
 
     let mut chain = ChainBuilder::new(START);
     chain.block(|b| {
@@ -1085,7 +1077,7 @@ fn orchard_actions_never_become_enhance_candidates() {
     let keys = ScanKeys::from_accounts([(ALICE, alice.clone())]);
     let mut rng = test_rng(13);
     let nf = zakura_wallet_scan::testing::random_nullifier(&mut rng);
-    let nfs = NullifierSnapshot::new(0, [(PoolId::Orchard, nf, ALICE)]);
+    let nfs = NullifierSnapshot::new([(PoolId::Orchard, nf, ALICE)]);
 
     let mut chain = ChainBuilder::new(START);
     chain.block(|b| {
@@ -1203,15 +1195,12 @@ fn a_snapshot_reports_its_contents_per_pool() {
     let mut rng = test_rng(21);
     let orchard_nf = zakura_wallet_scan::testing::random_nullifier(&mut rng);
     let ironwood_nf = zakura_wallet_scan::testing::random_nullifier(&mut rng);
-    let nfs = NullifierSnapshot::new(
-        7,
-        [
+    let nfs = NullifierSnapshot::new([
             (PoolId::Orchard, orchard_nf, ALICE),
             (PoolId::Ironwood, ironwood_nf, BOB),
         ],
     );
 
-    assert_eq!(nfs.epoch(), 7);
     assert_eq!(nfs.len(PoolId::Orchard), 1);
     assert_eq!(nfs.len(PoolId::Ironwood), 1);
     assert!(!nfs.is_empty(PoolId::Orchard));

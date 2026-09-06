@@ -2,18 +2,19 @@
 
 use std::{fmt, ops::Range, sync::Arc};
 
-use tokio::sync::Mutex;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use zakura_wallet_core::{BlockAnchor, CompactBlock};
 use zakura_wallet_sync::{
-    ByteBudget, ChainSource, ChainTip, Direction, SubtreeRoot as SyncSubtreeRoot, estimated_size,
+    ByteBudget, ChainSource, ChainTip, Direction, FetchedTransaction,
+    SubtreeRoot as SyncSubtreeRoot, estimated_size,
 };
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::{TxId, consensus::BlockHeight};
 
 use crate::{
     convert,
     proto::{
-        BlockId, BlockRange, ChainSpec, GetSubtreeRootsArg, ShieldedProtocol,
+        BlockId, BlockRange, ChainSpec, GetSubtreeRootsArg, PoolType, ShieldedProtocol,
+        TxFilter,
         compact_tx_streamer_client::CompactTxStreamerClient,
     },
 };
@@ -70,12 +71,83 @@ impl std::error::Error for LwdError {
 /// A chain source backed by a lightwalletd server.
 #[derive(Clone)]
 pub struct LightwalletdSource {
-    // gRPC clients need `&mut self` per call, and the engine holds the source
-    // by shared reference. One mutex around the client is the honest way to say
-    // that requests are serialised on this connection; concurrency comes from
-    // opening more than one.
-    client: Arc<Mutex<CompactTxStreamerClient<Channel>>>,
+    // A tonic client is a cheap handle over a `Channel`, and a `Channel`
+    // multiplexes concurrent requests over one HTTP/2 connection. Cloning it per
+    // call is the intended usage, and it is what lets the engine overlap a block
+    // stream with anything else.
+    //
+    // This was a `Mutex` held across the whole of `fetch`, which meant a tip
+    // poll — or a second fetch — waited for an entire batch to download. That
+    // serialisation was not protecting anything: the only shared mutable state
+    // here is the two atomics below.
+    client: CompactTxStreamerClient<Channel>,
+    /// Whether the server honours a non-empty `poolTypes`, established by
+    /// observation at connect time rather than by asking.
+    transparent: bool,
     stats: Arc<Stats>,
+}
+
+/// The pool types to request, given whether the server serves transparent data.
+fn pool_types(transparent: bool) -> Vec<i32> {
+    let mut pools = vec![
+        PoolType::Sapling as i32,
+        PoolType::Orchard as i32,
+        PoolType::Ironwood as i32,
+    ];
+    if transparent {
+        pools.push(PoolType::Transparent as i32);
+    }
+    pools
+}
+
+/// Determines whether the server serves transparent data in compact blocks.
+///
+/// The protocol says a client must verify a server can return transparent data
+/// before asking for it, and offers `lightwalletProtocolVersion` to do so — but
+/// servers that serve it in practice leave that field empty, so the advertised
+/// capability cannot be the gate. This establishes it by observation instead.
+///
+/// One block settles it: every block has a coinbase, and a coinbase always
+/// creates at least one transparent output. So a block whose coinbase has no
+/// outputs is a server that pruned them, whether it rejected the request,
+/// ignored it, or does not implement it. There is no ambiguous answer and no
+/// block for which the probe is inconclusive.
+async fn probe_transparent(
+    client: &mut CompactTxStreamerClient<Channel>,
+) -> Result<bool, LwdError> {
+    let tip = client
+        .get_latest_block(ChainSpec {})
+        .await
+        .map_err(LwdError::Rpc)?
+        .into_inner()
+        .height;
+
+    let request = BlockRange {
+        start: Some(BlockId {
+            height: tip,
+            hash: Vec::new(),
+        }),
+        end: Some(BlockId {
+            height: tip,
+            hash: Vec::new(),
+        }),
+        pool_types: pool_types(true),
+    };
+
+    // A server that rejects the field outright is answering the question, not
+    // failing: it cannot serve transparent data.
+    let mut stream = match client.get_block_range(request).await {
+        Ok(response) => response.into_inner(),
+        Err(_) => return Ok(false),
+    };
+
+    while let Some(block) = stream.message().await.map_err(LwdError::Rpc)? {
+        if let Some(coinbase) = block.vtx.iter().find(|tx| tx.index == 0) {
+            return Ok(!coinbase.vout.is_empty());
+        }
+    }
+
+    Ok(false)
 }
 
 #[derive(Default)]
@@ -97,15 +169,28 @@ impl LightwalletdSource {
 
         let channel = endpoint.connect().await.map_err(LwdError::Connect)?;
 
+        // Compact blocks are small individually but arrive in long runs; the
+        // default 4 MiB message limit is ample, but the stream itself must
+        // not be capped.
+        let mut client =
+            CompactTxStreamerClient::new(channel).max_decoding_message_size(16 * 1024 * 1024);
+
+        let transparent = probe_transparent(&mut client).await?;
+
         Ok(Self {
-            client: Arc::new(Mutex::new(
-                // Compact blocks are small individually but arrive in long
-                // runs; the default 4 MiB message limit is ample, but the
-                // stream itself must not be capped.
-                CompactTxStreamerClient::new(channel).max_decoding_message_size(16 * 1024 * 1024),
-            )),
+            client,
+            transparent,
             stats: Arc::new(Stats::default()),
         })
+    }
+
+    /// Whether this server serves transparent data in compact blocks.
+    ///
+    /// When false, transparent outputs and spends cannot be detected from the
+    /// block stream at all, and a wallet that needs them must say so rather
+    /// than reporting a balance that silently omits every transparent coin.
+    pub fn serves_transparent(&self) -> bool {
+        self.transparent
     }
 
     /// Fetches a range as raw protocol messages.
@@ -122,7 +207,7 @@ impl LightwalletdSource {
             return Ok(Vec::new());
         }
 
-        let mut client = self.client.lock().await;
+        let mut client = self.client.clone();
         let mut stream = client
             .get_block_range(BlockRange {
                 start: Some(BlockId {
@@ -158,7 +243,7 @@ impl LightwalletdSource {
         &self,
         height: BlockHeight,
     ) -> Result<crate::proto::TreeState, LwdError> {
-        let mut client = self.client.lock().await;
+        let mut client = self.client.clone();
         Ok(client
             .get_tree_state(BlockId {
                 height: u64::from(u32::from(height)),
@@ -176,7 +261,7 @@ impl LightwalletdSource {
     /// the network, not that it will be mined: it can still be rejected by
     /// consensus, or simply expire. The wallet learns which by watching for it.
     pub async fn send(&self, tx_bytes: Vec<u8>) -> Result<String, LwdError> {
-        let mut client = self.client.lock().await;
+        let mut client = self.client.clone();
         let response = client
             .send_transaction(crate::proto::RawTransaction {
                 data: tx_bytes,
@@ -217,7 +302,7 @@ impl ChainSource for LightwalletdSource {
     type Error = LwdError;
 
     async fn tip(&self) -> Result<ChainTip, Self::Error> {
-        let mut client = self.client.lock().await;
+        let mut client = self.client.clone();
         let id = client
             .get_latest_block(ChainSpec {})
             .await
@@ -237,7 +322,7 @@ impl ChainSource for LightwalletdSource {
     }
 
     async fn anchor(&self, height: BlockHeight) -> Result<BlockAnchor, Self::Error> {
-        let mut client = self.client.lock().await;
+        let mut client = self.client.clone();
         let state = client
             .get_tree_state(BlockId {
                 height: u64::from(u32::from(height)),
@@ -288,7 +373,7 @@ impl ChainSource for LightwalletdSource {
             Direction::Descending => (high, low),
         };
 
-        let mut client = self.client.lock().await;
+        let mut client = self.client.clone();
         let mut stream = client
             .get_block_range(BlockRange {
                 start: Some(BlockId {
@@ -299,11 +384,19 @@ impl ChainSource for LightwalletdSource {
                     height: last,
                     hash: Vec::new(),
                 }),
-                // Every shielded pool, always. A stream filtered to one pool
-                // cannot establish that a transaction touches no other, which
-                // is a prerequisite for the private-enhancement routing
-                // decision. See `docs/zakura_pir_enhance.md`.
-                pool_types: Vec::new(),
+                // Every pool, always — never a subset.
+                //
+                // An empty list is not "everything": the protocol reads it as
+                // the legacy default, which prunes transparent data and drops
+                // transactions that carry nothing shielded. Asking for all four
+                // is what makes `vin`/`vout` arrive at all.
+                //
+                // Sapling is requested even though this wallet cannot spend it,
+                // because eligibility for private enhancement is decided by a
+                // transaction touching *no* other pool, and a stream that
+                // pruned Sapling would make a Sapling-touching transaction look
+                // Ironwood-only. See `docs/zakura_pir_enhance.md`.
+                pool_types: pool_types(self.transparent),
             })
             .await
             .map_err(LwdError::Rpc)?
@@ -341,13 +434,46 @@ impl ChainSource for LightwalletdSource {
         Ok(blocks)
     }
 
+    async fn transaction(
+        &self,
+        txid: TxId,
+    ) -> Result<Option<FetchedTransaction>, Self::Error> {
+        let mut client = self.client.clone();
+        let response = client
+            .get_transaction(TxFilter {
+                block: None,
+                index: 0,
+                // The wallet always asks by identifier. Asking by block and
+                // index would tell the server which block it is interested in
+                // even when it already has the transaction's identity.
+                hash: txid.as_ref().to_vec(),
+            })
+            .await;
+
+        let raw = match response {
+            Ok(response) => response.into_inner(),
+            // A definite negative, and only a definite negative. Every other
+            // failure is a transport problem and must surface as one: reporting
+            // it as "the server does not have this" would start the expiry
+            // clock on a transaction that is merely unreachable.
+            Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
+            Err(status) if is_unknown_transaction(&status) => return Ok(None),
+            Err(status) => return Err(LwdError::Rpc(status)),
+        };
+
+        Ok(Some(FetchedTransaction {
+            status: crate::convert::transaction_status(raw.height),
+            raw: raw.data,
+        }))
+    }
+
     async fn subtree_roots(
         &self,
         pool: zakura_wallet_core::pool::PoolId,
         start_index: u64,
         limit: u32,
     ) -> Result<Vec<SyncSubtreeRoot>, Self::Error> {
-        let mut client = self.client.lock().await;
+        let mut client = self.client.clone();
         let mut stream = client
             .get_subtree_roots(GetSubtreeRootsArg {
                 start_index: u32::try_from(start_index)
@@ -387,5 +513,94 @@ impl ChainSource for LightwalletdSource {
         }
 
         Ok(roots)
+    }
+}
+
+/// Whether a gRPC failure is `zcashd` saying it has never heard of a
+/// transaction.
+///
+/// Servers ought to answer this with `NOT_FOUND`, and some do. Others pass the
+/// node's own error text through with a generic code, and the difference
+/// matters: read as a transport failure it is retried forever, and the
+/// transaction never expires.
+fn is_unknown_transaction(status: &tonic::Status) -> bool {
+    let message = status.message().to_ascii_lowercase();
+    message.contains("no information available about transaction")
+        || message.contains("transaction not found")
+}
+
+/// One unspent transparent output, as a server reported it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SweptUtxo {
+    /// The address it pays.
+    pub address: String,
+    /// The transaction that created it.
+    pub txid: TxId,
+    /// Its index in that transaction's outputs.
+    pub output_index: u32,
+    /// The `scriptPubKey`.
+    pub script: Vec<u8>,
+    /// Its value in zatoshis.
+    pub value: u64,
+    /// The height it was mined at.
+    pub height: BlockHeight,
+}
+
+impl LightwalletdSource {
+    /// Asks the server which of these addresses currently hold unspent outputs.
+    ///
+    /// This names the wallet's addresses to the server, which can group them
+    /// into one wallet on that basis alone — the only place this wallet does
+    /// that, and the reason it is reserved for restoring rather than run
+    /// continuously. What it buys is the one thing local script matching cannot
+    /// do: find outputs at addresses the wallet had not yet derived when the
+    /// blocks carrying them were scanned.
+    pub async fn address_utxos(
+        &self,
+        addresses: Vec<String>,
+        start: BlockHeight,
+    ) -> Result<Vec<SweptUtxo>, LwdError> {
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut client = self.client.clone();
+        let mut stream = client
+            .get_address_utxos_stream(crate::proto::GetAddressUtxosArg {
+                addresses,
+                start_height: u64::from(u32::from(start)),
+                // Unlimited: a restoring wallet needs everything, and a partial
+                // answer that looked complete would leave funds invisible.
+                max_entries: 0,
+            })
+            .await
+            .map_err(LwdError::Rpc)?
+            .into_inner();
+
+        let mut out = Vec::new();
+        while let Some(utxo) = stream.message().await.map_err(LwdError::Rpc)? {
+            let txid: [u8; 32] = utxo.txid.as_slice().try_into().map_err(|_| {
+                LwdError::Malformed("an unspent output carried a malformed txid".into())
+            })?;
+            let value = u64::try_from(utxo.value_zat).map_err(|_| {
+                LwdError::Malformed("an unspent output carried a negative value".into())
+            })?;
+            let height = u32::try_from(utxo.height).map_err(|_| {
+                LwdError::Malformed("an unspent output carried an out-of-range height".into())
+            })?;
+            let output_index = u32::try_from(utxo.index).map_err(|_| {
+                LwdError::Malformed("an unspent output carried a negative index".into())
+            })?;
+
+            out.push(SweptUtxo {
+                address: utxo.address,
+                txid: TxId::from_bytes(txid),
+                output_index,
+                script: utxo.script,
+                value,
+                height: BlockHeight::from_u32(height),
+            });
+        }
+        Ok(out)
     }
 }

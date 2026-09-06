@@ -8253,6 +8253,7 @@ dependencies = [
  "incrementalmerkletree",
  "rand 0.10.2",
  "rusqlite",
+ "secp256k1",
  "shardtree",
  "subtle",
  "zakura-orchard",
@@ -8262,6 +8263,8 @@ dependencies = [
  "zakura-wallet-store",
  "zakura-wallet-tx",
  "zcash_protocol",
+ "zcash_transparent",
+ "zip32",
 ]
 
 [[package]]

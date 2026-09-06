@@ -348,13 +348,24 @@ pub(crate) fn update_chain_tip<P: Parameters>(
     // NU6.3, so its last shard can end far below Orchard's; following the
     // higher tip would leave Ironwood's final shard incomplete and its notes
     // unwitnessable.
-    let min_shard_tip = PoolId::ALL
-        .into_iter()
-        .map(|pool| tip_shard_end_height(conn, pool))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .min();
+    //
+    // A pool with no completed shard at all is *unknown*, not absent. Dropping
+    // it and taking the minimum of what remains is the same mistake as taking
+    // the maximum: it follows the other pool's tip and leaves this one's final
+    // shard open. So an unknown pool collapses the answer to `None`, and the
+    // planner falls back to a plain linear scan, which cannot strand a shard.
+    let mut min_shard_tip = None;
+    for pool in PoolId::ALL {
+        match tip_shard_end_height(conn, pool)? {
+            None => {
+                min_shard_tip = None;
+                break;
+            }
+            Some(height) => {
+                min_shard_tip = Some(min_shard_tip.map_or(height, |seen| min(seen, height)));
+            }
+        }
+    }
 
     // The fragment of the final shard that runs up to the tip.
     let tip_shard_entry = min_shard_tip.filter(|h| h < &chain_end).map(|h| {

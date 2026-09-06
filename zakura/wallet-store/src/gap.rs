@@ -90,8 +90,14 @@ pub(crate) fn state(
                 (SELECT MAX(a.transparent_child_index)
                  FROM {CACHE_SCHEMA}.addresses a
                  JOIN {CACHE_SCHEMA}.transparent_received_outputs o
-                    ON o.address = a.transparent_address
-                 WHERE a.account_id = :account AND a.key_scope = :scope),
+                    ON o.address_id = a.id
+                 JOIN {CACHE_SCHEMA}.transactions t ON t.id = o.transaction_id
+                 WHERE a.account_id = :account AND a.key_scope = :scope
+                   -- Mined, not merely seen. A transaction in the mempool may
+                   -- never be mined, and letting one advance the window would
+                   -- let anybody who can put a payment in the mempool push the
+                   -- wallet's addresses forward.
+                   AND t.mined_height IS NOT NULL),
                 (SELECT MAX(transparent_child_index) FROM {CACHE_SCHEMA}.addresses
                  WHERE account_id = :account AND key_scope = :scope)"
         ),
@@ -159,13 +165,40 @@ pub(crate) fn record_address(
         named_params![
             ":account": account.0,
             ":scope": scope.code(),
-            // The transparent child index doubles as the diversifier index for
-            // the row's uniqueness, big-endian so byte order is numeric order.
-            ":index_be": index.to_be_bytes().to_vec(),
+            // The same eleven-byte big-endian encoding accounts.rs uses. These
+            // two writers share a uniqueness constraint, so encoding the same
+            // index differently — which they did — makes the unified address
+            // and its transparent receiver two rows that can never be joined.
+            ":index_be": crate::accounts::encode_diversifier_index(
+                zip32::DiversifierIndex::from(index),
+            ),
             ":index": index,
             ":address": address,
             ":script": script,
         ],
+    )?;
+    Ok(())
+}
+
+
+/// Records that an address was used on chain at `height`.
+///
+/// Lowers `exposed_at_height` rather than setting it, because a reorg can
+/// re-mine the same transaction lower and the earliest height an address was
+/// visible is the one that matters. Overwriting would quietly move an address's
+/// exposure later than it really was.
+pub(crate) fn observe_use(
+    conn: &rusqlite::Transaction<'_>,
+    address_id: i64,
+    height: zcash_protocol::consensus::BlockHeight,
+) -> Result<(), Error> {
+    conn.execute(
+        &format!(
+            "UPDATE {CACHE_SCHEMA}.addresses
+             SET exposed_at_height = MIN(IFNULL(exposed_at_height, :height), :height)
+             WHERE id = :id"
+        ),
+        named_params![":id": address_id, ":height": u32::from(height)],
     )?;
     Ok(())
 }

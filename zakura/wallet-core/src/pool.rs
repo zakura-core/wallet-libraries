@@ -130,6 +130,18 @@ pub trait ShieldedPool: Copy + 'static {
     /// decrypted.
     fn domain_for(action: &CompactAction) -> Self::Domain;
 
+    /// Returns the note-encryption domain for one of this pool's full actions.
+    ///
+    /// The compact and full forms need separate constructors because a compact
+    /// action carries the rho it needs directly, while a full action derives it
+    /// from its own nullifier.
+    ///
+    /// Choosing the domain by pool is not a formality: an Orchard action
+    /// decrypted under the Ironwood domain, or the reverse, does not fail
+    /// loudly — it simply decrypts nothing, and a wallet built on that would
+    /// report a transaction as none of its business.
+    fn domain_for_action<T>(action: &orchard::Action<T>) -> Self::Domain;
+
     /// Trial-decrypts a batch of this pool's compact actions.
     ///
     /// Returns one entry per output, in the order given: the decrypted note and
@@ -226,6 +238,10 @@ impl ShieldedPool for Orchard {
         OrchardDomain::for_compact_action(action)
     }
 
+    fn domain_for_action<T>(action: &orchard::Action<T>) -> Self::Domain {
+        OrchardDomain::for_action(action)
+    }
+
     fn batch_decrypt(
         ivks: &[PreparedIncomingViewingKey],
         outputs: &[(Self::Domain, CompactAction)],
@@ -253,6 +269,10 @@ impl ShieldedPool for Ironwood {
 
     fn domain_for(action: &CompactAction) -> Self::Domain {
         IronwoodDomain::for_compact_action(action)
+    }
+
+    fn domain_for_action<T>(action: &orchard::Action<T>) -> Self::Domain {
+        IronwoodDomain::for_action(action)
     }
 
     fn batch_decrypt(

@@ -39,38 +39,30 @@ pub struct BlockAnchor {
 /// The wallet's unspent nullifiers, as of some point in time.
 ///
 /// This is an immutable snapshot rather than a live view, which is what lets
-/// detection be a pure function. It carries an `epoch` so the writer can tell
-/// whether the wallet moved on while the batch was in flight; if it did, the
-/// writer re-runs the cheap nullifier-to-note linking step against current data
-/// inside the same transaction that applies the batch.
+/// detection be a pure function.
+///
+/// It carries no staleness stamp. The design originally gave it an epoch so the
+/// writer could tell whether the wallet had moved on while the batch was in
+/// flight and re-run the nullifier linking if so. The writer now re-runs that
+/// linking unconditionally, driven by the batch's own notes, which is strictly
+/// stronger and costs less than the query the epoch needed. A staleness signal
+/// nobody reads is worse than none: it reads as a guarantee.
 #[derive(Debug, Clone, Default)]
 pub struct NullifierSnapshot {
     // `Nullifier` is `Eq` but not `Hash`, and its byte encoding is canonical,
     // so that is what keys the map.
     orchard: HashMap<[u8; 32], AccountId>,
     ironwood: HashMap<[u8; 32], AccountId>,
-    epoch: u64,
 }
 
 impl NullifierSnapshot {
     /// Builds a snapshot from the wallet's unspent notes.
-    pub fn new(
-        epoch: u64,
-        entries: impl IntoIterator<Item = (PoolId, Nullifier, AccountId)>,
-    ) -> Self {
-        let mut snapshot = Self {
-            epoch,
-            ..Default::default()
-        };
+    pub fn new(entries: impl IntoIterator<Item = (PoolId, Nullifier, AccountId)>) -> Self {
+        let mut snapshot = Self::default();
         for (pool, nf, account) in entries {
             snapshot.insert(pool, nf, account);
         }
         snapshot
-    }
-
-    /// Returns the epoch at which this snapshot was taken.
-    pub fn epoch(&self) -> u64 {
-        self.epoch
     }
 
     /// Records a nullifier discovered mid-batch.
@@ -127,11 +119,6 @@ pub struct DetectedBatch {
     pub blocks: Vec<DetectedBlock>,
     /// The chain state after the last block, ready to anchor the next batch.
     pub end_anchor: BlockAnchor,
-    /// The epoch of the nullifier snapshot detection ran against.
-    ///
-    /// The writer compares this with the wallet's current epoch to decide
-    /// whether spend linking must be redone against fresher data.
-    pub snapshot_epoch: u64,
 }
 
 impl DetectedBatch {
@@ -222,6 +209,18 @@ pub struct DetectedTx {
     pub transparent_received: Vec<DetectedTransparentOutput>,
     /// Transparent outputs of the wallet's that this transaction spent.
     pub transparent_spends: Vec<OutPoint>,
+    /// Every outpoint this transaction spends, wallet's or not.
+    ///
+    /// Only populated for transactions the wallet is keeping anyway, so this is
+    /// bounded by the wallet's own history rather than by the chain.
+    ///
+    /// It exists because this wallet recovers from the tip downwards, so it
+    /// routinely meets the transaction that spent an output before the one that
+    /// created it. At that moment the outpoint means nothing — the output is
+    /// not in the watch set, because the wallet has not scanned far enough down
+    /// to know it owns it — and by the time it does, this transaction is long
+    /// past. Recording the outpoints lets the two be joined up later.
+    pub candidate_spends: Vec<OutPoint>,
     /// Ironwood actions that may hide outgoing data this wallet can recover.
     ///
     /// Captured during scanning because they cannot be reconstructed later
@@ -237,6 +236,8 @@ impl DetectedTx {
             && self.transparent_received.is_empty()
             && self.transparent_spends.is_empty()
             && self.enhance_candidates.is_empty()
+        // `candidate_spends` is deliberately not consulted: every transaction
+        // has inputs, so counting them would make every transaction relevant.
     }
 
     /// Returns `None` if this transaction turned out to hold nothing of the
@@ -297,11 +298,17 @@ pub struct DetectedTransparentOutput {
     /// cannot say whose funds these are, and a multi-account wallet would
     /// attribute every transparent receipt to the same place.
     pub account: AccountId,
-    /// Which of that account's addresses was used, if the watch set knew.
+    /// The stored address row whose script matched.
     ///
-    /// This is what gap-limit maintenance runs on: an address being used is
+    /// The store hands these out with the watch set and gets them back, which
+    /// is what lets a received output be attributed without re-deriving or
+    /// re-encoding anything. Matching on an address *string* instead — which an
+    /// earlier version did — meant the two sides had to agree on an encoding,
+    /// and they did not.
+    ///
+    /// It is also what gap-limit maintenance runs on: an address being used is
     /// what obliges the wallet to look further ahead.
-    pub address_index: Option<u32>,
+    pub address_id: i64,
     /// The output itself.
     pub txout: TxOut,
 }

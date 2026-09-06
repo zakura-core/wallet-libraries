@@ -14,7 +14,9 @@
 use std::{fmt, ops::Range};
 
 use zakura_wallet_core::{BlockAnchor, BlockHash, CompactBlock};
-use zcash_protocol::consensus::BlockHeight;
+
+pub use zakura_wallet_core::enhanced::TransactionStatus;
+use zcash_protocol::{TxId, consensus::BlockHeight};
 
 /// The tip of the chain, as the source sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +125,31 @@ pub trait ChainSource {
         start_index: u64,
         limit: u32,
     ) -> impl Future<Output = Result<Vec<SubtreeRoot>, Self::Error>> + Send;
+
+    /// Returns a whole transaction by identifier, or a definite negative.
+    ///
+    /// This is what enhancement runs on, and it answers both questions the
+    /// wallet asks about a transaction — what it contains, and whether it is
+    /// mined — because over this protocol they are one request.
+    ///
+    /// `Ok(None)` means the source *positively asserts* it cannot supply this
+    /// transaction. A transport failure is `Err` and must never be reported as
+    /// `Ok(None)`: the negative is what starts a transaction's expiry clock, so
+    /// mistaking a timeout for one expires transactions that are still live and
+    /// releases the notes they spend.
+    fn transaction(
+        &self,
+        txid: TxId,
+    ) -> impl Future<Output = Result<Option<FetchedTransaction>, Self::Error>> + Send;
+}
+
+/// A transaction as a source returned it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedTransaction {
+    /// The transaction's bytes.
+    pub raw: Vec<u8>,
+    /// Where the source says it stands.
+    pub status: TransactionStatus,
 }
 
 /// Returns an estimate of a block's in-memory size.

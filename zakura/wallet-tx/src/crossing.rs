@@ -75,6 +75,12 @@ pub struct CrossingPlan {
     pub fee: Zatoshis,
     /// The height the transaction expires at.
     pub expiry: BlockHeight,
+    /// The height the transaction was planned against.
+    ///
+    /// Kept because the canonical expiry is derived from it and the derivation
+    /// has no inverse: checking the built transaction's expiry needs the height
+    /// it was computed from, not the expiry itself.
+    pub target_height: BlockHeight,
 }
 
 impl CrossingPlan {
@@ -156,6 +162,7 @@ pub fn plan(
         change,
         fee,
         expiry: constants.canonical_expiry(target_height),
+        target_height,
     };
     debug_assert!(plan.balances(), "a planned crossing must balance");
     Ok(plan)
@@ -186,6 +193,71 @@ pub fn evidence(plan: &CrossingPlan, anchors: &Anchors, target_height: BlockHeig
         .with_fee_is_canonical(Some(plan.fee == canonical_fee()))
 }
 
+/// Returns the evidence a classifier needs about a crossing that has been
+/// *built*, read off the transaction itself.
+///
+/// [`evidence`] answers the shape clauses from constants, because at plan time
+/// there is nothing else to answer them from. That makes it a restatement of
+/// what [`plan`] already refused on, and it cannot observe a defect introduced
+/// between planning and building — a bundle padded to the wrong width, a
+/// transparent bundle that crept in, a fee that does not match the shape.
+///
+/// This reads them from the assembled transaction instead. Six of the eight
+/// clauses become measurements of the bytes that will actually be broadcast:
+/// both action counts, whether any other bundle is present, the expiry, the
+/// denomination (from the destination bundle's value balance) and the fee (from
+/// the two balances summed). Only the anchor's position on the grid is not
+/// recoverable from the transaction alone, since the anchor is a root rather
+/// than a height, so it is carried from the anchors the bundles were proved
+/// against.
+pub fn evidence_from_transaction(
+    tx: &zcash_primitives::transaction::Transaction,
+    anchors: &Anchors,
+    target_height: BlockHeight,
+) -> Zip318Evidence {
+    let constants = CrossingParams;
+
+    let source_actions = tx.orchard_bundle().map_or(0, |b| b.actions().len());
+    let destination_actions = tx.ironwood_bundle().map_or(0, |b| b.actions().len());
+
+    // No ZIP 318 transaction carries a transparent or Sapling bundle, so either
+    // is a refutation on its own.
+    let other_bundles_present = tx
+        .transparent_bundle()
+        .is_some_and(|b| !b.vin.is_empty() || !b.vout.is_empty())
+        || tx
+            .sapling_bundle()
+            .is_some_and(|b| !b.shielded_spends().is_empty() || !b.shielded_outputs().is_empty());
+
+    // The two bundles are joined by their value balances: the source gives up
+    // the denomination plus the fee, the destination takes the denomination, and
+    // what is left over is what the transaction pays.
+    let source_balance = tx.orchard_bundle().map_or(0i64, |b| (*b.value_balance()).into());
+    let destination_balance = tx.ironwood_bundle().map_or(0i64, |b| (*b.value_balance()).into());
+    let denomination = u64::try_from(-destination_balance)
+        .ok()
+        .and_then(|v| Zatoshis::from_u64(v).ok());
+    let fee = u64::try_from(source_balance + destination_balance)
+        .ok()
+        .and_then(|v| Zatoshis::from_u64(v).ok());
+
+    Zip318Evidence::default()
+        .with_source_actions(Some(source_actions))
+        .with_destination_actions(Some(destination_actions))
+        .with_other_bundles_present(Some(other_bundles_present))
+        // The wallet built the source side to pay itself, and unlike an
+        // observer it knows that rather than inferring it.
+        .with_source_is_send_to_self(Some(true))
+        .with_sole_destination_value(denomination)
+        .with_expiry_is_canonical(Some(
+            constants.is_canonical_expiry(tx.expiry_height(), target_height),
+        ))
+        .with_anchor_on_grid(Some(
+            constants.anchor_bucket_interval().is_boundary(anchors.height),
+        ))
+        .with_fee_is_canonical(Some(fee == Some(canonical_fee())))
+}
+
 /// Returns how a ZIP 318 classifier will read a crossing this wallet built.
 ///
 /// The wallet classifies its own transaction with the same function the network
@@ -201,9 +273,30 @@ pub fn classification(
 }
 
 /// Returns whether a crossing will be indistinguishable from every other one.
+///
+/// This is the *pre-build* check, answered from the plan. It is worth running
+/// before proving, which is the expensive part, but it can only confirm that
+/// the plan asked for the right shape. [`built_conforms`] is what confirms the
+/// wallet produced it.
 pub fn conforms(plan: &CrossingPlan, anchors: &Anchors, target_height: BlockHeight) -> bool {
     classification(plan, anchors, target_height)
         == Zip318Classification::Conforms(Zip318TxKind::Transfer)
+}
+
+/// Returns whether a crossing the wallet has built is indistinguishable from
+/// every other one.
+///
+/// Unlike [`conforms`], this reads the transaction rather than the plan, so it
+/// can fail where the plan was right and the construction was not.
+pub fn built_conforms(
+    tx: &zcash_primitives::transaction::Transaction,
+    anchors: &Anchors,
+    target_height: BlockHeight,
+) -> bool {
+    classify(
+        &evidence_from_transaction(tx, anchors, target_height),
+        &CrossingParams,
+    ) == Zip318Classification::Conforms(Zip318TxKind::Transfer)
 }
 
 /// Returns the anchor grid crossings are proved against.
@@ -290,7 +383,7 @@ pub fn bundles<R: rand::Rng + rand::CryptoRng>(
                 Some(keys.fvk.to_ovk(Scope::Internal)),
                 keys.fvk.address_at(0u32, Scope::Internal),
                 NoteValue::from_raw(plan.change.into_u64()),
-                [0u8; 512],
+                crate::NO_MEMO,
             )
             .map_err(|e| Error::Build(format!("crossing source change: {e:?}")))?;
     }
@@ -318,7 +411,7 @@ pub fn bundles<R: rand::Rng + rand::CryptoRng>(
             Some(keys.fvk.to_ovk(Scope::External)),
             *recipient,
             NoteValue::from_raw(plan.denomination.into_u64()),
-            [0u8; 512],
+            crate::NO_MEMO,
         )
         .map_err(|e| Error::Build(format!("crossing payment: {e:?}")))?;
 
@@ -370,14 +463,33 @@ pub fn transaction<R: rand::Rng + rand::CryptoRng>(
     mut rng: R,
 ) -> Result<zcash_primitives::transaction::Transaction, Error> {
     let unproven = bundles(request, &mut rng)?;
-    crate::transaction::assemble(
+    let tx = crate::transaction::assemble(
         unproven,
         branch_id,
         request.plan.expiry,
         request.keys,
         proving_key,
         &mut rng,
-    )
+    )?;
+
+    // The check that means something: read the shape off the bytes that would
+    // be broadcast, not off the plan they were meant to follow. A crossing that
+    // is nearly the right shape is worse than none — it stands out from the
+    // ones that are — so a non-conforming result is refused rather than
+    // returned with a warning. Refusing here costs a proof already paid for,
+    // which is unfortunate and still much cheaper than sending it.
+    let target_height = request.plan.target_height;
+    if !built_conforms(&tx, request.anchors, target_height) {
+        return Err(Error::NotCanonical(format!(
+            "the built crossing does not conform: {:?}",
+            classify(
+                &evidence_from_transaction(&tx, request.anchors, target_height),
+                &CrossingParams,
+            )
+        )));
+    }
+
+    Ok(tx)
 }
 
 /// A note-preparation transaction: consolidating small notes into one that can
@@ -401,6 +513,12 @@ pub struct PreparationPlan {
     pub fee: Zatoshis,
     /// The height the transaction expires at.
     pub expiry: BlockHeight,
+    /// The height the transaction was planned against.
+    ///
+    /// Kept because the canonical expiry is derived from it and the derivation
+    /// has no inverse: checking the built transaction's expiry needs the height
+    /// it was computed from, not the expiry itself.
+    pub target_height: BlockHeight,
 }
 
 impl PreparationPlan {
@@ -485,6 +603,7 @@ pub fn plan_preparation(
         output,
         fee: prep_fee,
         expiry: constants.canonical_expiry(target_height),
+        target_height,
     };
     debug_assert!(plan.balances(), "a planned preparation must balance");
     Ok(plan)

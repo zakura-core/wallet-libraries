@@ -38,7 +38,7 @@
 pub const DETECTION_VERSION: u32 = 1;
 
 /// Bumping this invalidates the derived tables, which are rebuilt locally.
-pub const LAYOUT_VERSION: u32 = 1;
+pub const LAYOUT_VERSION: u32 = 2;
 
 /// Bumping this invalidates the stored commitment trees.
 pub const TREE_VERSION: u32 = 1;
@@ -134,7 +134,21 @@ pub const DERIVED_DDL: &[&str] = &[
         mined_height       INTEGER,
         min_observed_height INTEGER,
         target_height      INTEGER,
-        fee                INTEGER
+        fee                INTEGER,
+        -- The greatest height at which the wallet has positive proof this
+        -- transaction is not mined: the chain tip when a server said it did not
+        -- recognise it. Not an inference from the tip having passed the expiry
+        -- height, which would only mean the wallet never asked. It is the sole
+        -- basis on which a spend is released, so a wrong value here is a
+        -- double spend.
+        confirmed_unmined_at_height INTEGER,
+        -- Unix seconds. The wallet's own clock when it built the transaction,
+        -- or the block time once mined.
+        created_time       INTEGER,
+        CHECK (confirmed_unmined_at_height IS NULL OR mined_height IS NULL),
+        CHECK (mined_height IS NULL
+               OR min_observed_height IS NULL
+               OR min_observed_height <= mined_height)
     )",
     // One table for both shielded pools, discriminated by `pool`. The reason
     // the fork needs two is that an Orchard action and an Ironwood action in
@@ -164,9 +178,20 @@ pub const DERIVED_DDL: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS received_notes_account
         ON received_notes (account_id, pool)",
+    // Stabilisation runs one UPDATE per applied batch over the notes that are
+    // not yet stable. Partial, because the rows it must visit are exactly the
+    // ones still to be marked, and that set shrinks to nothing on a settled
+    // wallet — a full index would keep every stabilised note in it forever.
+    "CREATE INDEX IF NOT EXISTS received_notes_unstabilized
+        ON received_notes (witness_stabilized) WHERE witness_stabilized = 0",
     // A junction rather than a `spent` column, so that a spend which was
     // created and then expired is still recorded: the note is spendable again,
     // but the attempt is not forgotten.
+    // A rewind filters transactions by mined height four times over, and it is
+    // the one operation that must be quick while the user is waiting to find
+    // out whether their funds are still there.
+    "CREATE INDEX IF NOT EXISTS transactions_mined_height
+        ON transactions (mined_height)",
     "CREATE TABLE IF NOT EXISTS received_note_spends (
         received_note_id INTEGER NOT NULL REFERENCES received_notes(id) ON DELETE CASCADE,
         transaction_id   INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
@@ -187,17 +212,39 @@ pub const DERIVED_DDL: &[&str] = &[
         tx_index     INTEGER NOT NULL,
         PRIMARY KEY (pool, nf)
     )",
+    // `address_id` rather than an address string: the string form was written
+    // one way here and another way in `addresses`, so the join between them
+    // could never match. A foreign key also makes the rule structural — a
+    // transparent output can only be received at an address the wallet already
+    // derived, because unlike a shielded note there is no trial decryption to
+    // discover one after the fact.
+    //
+    // `is_coinbase` is a tri-state, and NULL means *unknown*. Outputs found in
+    // a compact block know the answer exactly, from the transaction's index;
+    // outputs learned from a UTXO snapshot carry no index and cannot. Unknown
+    // is treated as coinbase, because the cost of that is a mature output the
+    // wallet declines to spend, where the opposite error builds a transaction
+    // consensus rejects.
     "CREATE TABLE IF NOT EXISTS transparent_received_outputs (
         id                         INTEGER PRIMARY KEY,
         transaction_id             INTEGER NOT NULL REFERENCES transactions(id),
         output_index               INTEGER NOT NULL,
         account_id                 INTEGER NOT NULL,
-        address                    TEXT NOT NULL,
+        address_id                 INTEGER NOT NULL REFERENCES addresses(id),
         script                     BLOB NOT NULL,
         value                      INTEGER NOT NULL,
+        is_coinbase                INTEGER,
         max_observed_unspent_height INTEGER,
+        -- The height of a UTXO sweep that looked for this output and did not
+        -- find it: the wallet's only evidence that a purely transparent spend
+        -- happened somewhere it cannot see.
+        observed_spent_at_height   INTEGER,
         UNIQUE (transaction_id, output_index)
     )",
+    "CREATE INDEX IF NOT EXISTS transparent_outputs_account
+        ON transparent_received_outputs (account_id)",
+    "CREATE INDEX IF NOT EXISTS transparent_outputs_address
+        ON transparent_received_outputs (address_id)",
     "CREATE TABLE IF NOT EXISTS transparent_received_output_spends (
         output_id      INTEGER NOT NULL REFERENCES transparent_received_outputs(id) ON DELETE CASCADE,
         transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
@@ -213,6 +260,19 @@ pub const DERIVED_DDL: &[&str] = &[
     // `transparent_child_index` duplicates the diversifier index as an integer
     // because gap-limit queries need SQL arithmetic on it, which a big-endian
     // blob does not support.
+    // One row per (account, scope, diversifier index), carrying both the
+    // unified address and the transparent receiver derived at the same index.
+    // They are the same address expressed two ways, and splitting them into
+    // separate rows — which an earlier version did — leaves nothing able to
+    // resolve a received transparent output back to the account that owns it.
+    //
+    // `key_scope`: 0 external, 1 internal, 2 RESERVED for ZIP 320 ephemeral
+    // addresses, which this wallet does not issue. Deliberately not a CHECK
+    // constraint: a wallet restored from a seed that used ephemeral addresses
+    // elsewhere may hold funds at scope 2, and a schema that cannot even
+    // represent such a row would have to change to admit one. Readers filter
+    // explicitly and complain about anything unexpected, rather than skipping
+    // it — treating a row as absent is how a balance comes out wrong.
     "CREATE TABLE IF NOT EXISTS addresses (
         id                      INTEGER PRIMARY KEY,
         account_id              INTEGER NOT NULL,
@@ -223,10 +283,18 @@ pub const DERIVED_DDL: &[&str] = &[
         transparent_address     TEXT,
         transparent_script      BLOB,
         exposed_at_height       INTEGER,
-        UNIQUE (account_id, key_scope, diversifier_index_be)
+        UNIQUE (account_id, key_scope, diversifier_index_be),
+        CHECK (length(diversifier_index_be) = 11),
+        CHECK ((transparent_child_index IS NULL) = (transparent_address IS NULL)),
+        CHECK ((transparent_address IS NULL) = (transparent_script IS NULL))
     )",
-    "CREATE INDEX IF NOT EXISTS addresses_transparent
-        ON addresses (transparent_address)",
+    // UNIQUE, not merely indexed. A transparent address is the hash of a public
+    // key derived at one path, so two rows claiming the same one would mean
+    // either a hash collision or a duplicated account, and both are errors the
+    // wallet should refuse rather than absorb. It is also what lets a received
+    // output resolve to exactly one address.
+    "CREATE UNIQUE INDEX IF NOT EXISTS addresses_transparent
+        ON addresses (transparent_address) WHERE transparent_address IS NOT NULL",
     // The four commitment-tree tables are shaped by `shardtree`'s store
     // interface rather than by choice; what is a choice is that `pool` is a
     // column, so there is one store parameterised by a runtime pool rather than
@@ -288,12 +356,25 @@ pub const DERIVED_DDL: &[&str] = &[
     )",
     // `routing` is the column private enhancement grows into: NULL, or a
     // sticky decision to fall back to fetching the whole transaction.
+    // Outstanding questions about a transaction, keyed by the *pair*, because
+    // one transaction can carry two intents with different lifetimes: an
+    // enhancement request is satisfied once and deleted, while a status request
+    // is durable — dormant while the transaction is mined, and reactivating by
+    // itself if a rewind un-mines it. One row per txid cannot express that.
+    //
+    // There is deliberately no routing column. The seam a private transport
+    // would replace is `ChainSource::transaction`, not storage.
+    //
+    // `last_polled_height` is not in the fork, which does not need it because
+    // its request driver lives in the consuming application. This one runs
+    // inside the sync loop and would otherwise re-ask the same question of the
+    // same server on every step.
     "CREATE TABLE IF NOT EXISTS tx_requests (
-        txid                    BLOB NOT NULL PRIMARY KEY,
+        txid                    BLOB NOT NULL,
         query_type              INTEGER NOT NULL,
         dependent_transaction_id INTEGER REFERENCES transactions(id) ON DELETE CASCADE,
-        request_expiry          INTEGER,
-        routing                 INTEGER
+        last_polled_height      INTEGER,
+        PRIMARY KEY (txid, query_type)
     )",
 ];
 

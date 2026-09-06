@@ -217,6 +217,14 @@ choice rather than a performance one, because it turns SQLite writer
 serialization into a type-level fact instead of a `BUSY` retry loop. Reads for the
 UI use a separate read-only connection in WAL mode.
 
+> **Not built.** This section describes an intention, not the code. As built,
+> `step()` calls `detect_batch` and `put_batch` directly on the async task, so a
+> tokio worker is parked for the whole of both, and `WalletDb` holds one
+> connection with no reader handle. The "engine is sequential" trade-off below
+> covers the missing *pipeline*; this is the separate missing *runtime
+> boundary*, and it is what makes the engine starve a runtime it shares with a
+> UI. See `wallet_core_hardening.md`.
+
 ### Descending recovery by default
 
 The server already supports it: `GetBlockRange` streams in decreasing height
@@ -318,8 +326,11 @@ separate tables is that an Orchard action and an Ironwood action in the same
 transaction can share an `action_index` and would collide, which adding `pool` to
 the key resolves. Fifteen views become none: `v_transactions` is 225 lines of SQL,
 and that aggregation belongs in Rust where it can be tested and profiled. The
-eight ZIP 318 state tables and `zewif` import go entirely. No SQL is built with
-`format!` anywhere.
+eight ZIP 318 state tables and `zewif` import go entirely. No table or column
+name is ever interpolated into SQL from data. (As built, `format!` is used
+throughout to prefix the attached schema name, which is a compile-time constant;
+the original wording of this paragraph claimed `format!` was absent altogether,
+which the code does not bear out.)
 
 Gap limits are not a table. They live in `wallet_meta` as external 10, internal 5,
 ephemeral 10, and the invariant — keep a full gap of unused addresses above the
@@ -397,11 +408,18 @@ cannot help shielded receive detection. Trial decryption has no membership test,
 and only a detection-key scheme in the style of fuzzy message detection would
 change that. Filters buy two things.
 
-The first is transparent discovery, and it is the real prize. Today the wallet
-polls `GetTaddressTxids` per address, which lets a server cluster a wallet's
-addresses — precisely the reason the gap limits are 10/5/10 rather than BIP 44's
-20. A per-block filter over scriptPubKeys removes that leak. The second is
-skipping spend detection in blocks that provably touch none of our nullifiers.
+The first was meant to be transparent discovery, on the reasoning that a wallet
+must poll `GetTaddressTxids` per address and so lets a server cluster its
+addresses. **That reasoning does not apply here, and the claim above was wrong.**
+Compact blocks carry `vin` and `vout`, so this wallet matches scriptPubKeys
+locally and names no address to anybody; see "Transparent detection is local"
+below. The leak filters would have closed is already closed, and by a cheaper
+mechanism.
+
+What remains is the second thing: skipping spend detection in blocks that
+provably touch none of our nullifiers. That is a bandwidth optimisation, not a
+privacy one, which makes BIP-158 a good deal less interesting for this wallet
+than it is for the fork.
 
 The seam is
 `trait BlockPrefilter { async fn candidate_blocks(&self, range, watch) -> Option<BTreeSet<BlockHeight>>; }`
@@ -505,7 +523,7 @@ servers can cluster addresses queried together.
 | M6 ✅ | `zakura-lwd` and descending recovery | **Done, against Zcash mainnet with live Ironwood.** 1.6× faster than the fork on detect-plus-store over identical blocks. See "M6 as built" below. |
 | M7 | Transparent detection and gap limits | A receive to a t-address extends the gap and surfaces the address; the UTXO spends; a reorg unspends it correctly |
 | M8 🔶 | `tx`: selection, fees, build, broadcast | **Mostly done.** Selection, fees, witnesses, proven and verified bundles, and v6 transaction assembly with a real signature hash. **Broadcast is not built.** See "M8 as built" below. |
-| M9 ✅ | ZIP 318 crossing construction | **Done.** A crossing builds, proves and verifies, and the wallet's own `classify` call reports it as conforming. |
+| M9 🔶 | ZIP 318 crossing construction | **Blocked on retention.** A crossing builds, proves and verifies against a fixture. On a wallet that has scanned a chain it cannot be planned: no anchor on the 144-block grid is retained or selected, so `plan` rejects. The conformance check is also assembled from the plan rather than from the built transaction. See `wallet_core_hardening.md`. |
 | M10 | PIR and BIP-158 seams exercised with stubs | `Enhancer` and `BlockPrefilter` each gain a second, stub implementation that compiles and passes M5's suite, proving the seams are real rather than aspirational |
 
 Out of scope for the prototype: Sapling, multi-step and TEX/ZIP 320 ephemeral
@@ -1343,3 +1361,326 @@ To port or study, not to depend on.
 | `zcash_client_sqlite/src/wallet/transparent.rs` | `find_gap_start`, `utxo_query_height` |
 | `zcash_client_sqlite/src/wallet/common.rs` | `TableConstants`, the pattern this design replaces |
 | `docs/zakura_pir_enhance.md` | Correctness requirements for the PIR seam |
+
+## Closing the transparent and enhancement gaps
+
+Two functional baselines this document specified were never built. The plan that
+closes them is in this section; what follows was written before the work, and
+the "as built" notes below record where reality differed.
+
+### The gaps, as found
+
+**Enhancement never ran.** `apply.rs` queued a row into `tx_requests` for every
+wallet transaction and nothing ever read that table. So `received_notes.memo`
+was never populated, `sent_outputs`, `raw_transactions` and `user_metadata` had
+no writers at all, and `transactions.{expiry_height, min_observed_height,
+target_height, fee}` were declared and never written. There was no record of
+what any outgoing payment paid, or to whom.
+
+**Transparent was half-built.** Nothing constructed a watch set from the stored
+addresses, so `TransparentWatch` was always empty in practice. Balance and
+history had no transparent term at all. The transaction builder had no
+transparent bundle, so transparent funds could be neither shielded nor spent.
+
+**Nothing recorded a send.** Broadcast returned a receipt without touching the
+database, so a sent payment was invisible until scanning found it, and its
+inputs were never released if it was never mined.
+
+### Transparent detection is local
+
+The single finding that shapes this work: **compact blocks carry transparent
+data.** `CompactTx.vin` and `CompactTx.vout` are in the lightwallet protocol —
+not an invention of this wallet; the fork vendors the same specification — and
+`vout` carries the full `scriptPubKey`.
+
+This deletes a subsystem. The fork's `transparent_spend_search_queue`,
+`TransactionsInvolvingAddress`, `notify_address_checked` and the `request_at`
+decorrelation hint exist for one reason: upstream compact blocks omit
+transparent data, so the only way to find a transparent payment is to name an
+address to the server and ask. None of it is built here.
+
+It also inverts the fork's privacy argument. There, every address in the watch
+window goes into one `GetAddressUtxos` call and is thereby linked in the
+server's view, which is why its gap limits are 10/5/10 rather than BIP 44's 20.
+Here detection is a local script match, so widening the window costs nothing
+observable. The window a wallet *watches* and the window it *reserves from* are
+therefore separated: watch every address ever derived, reserve at the gap start.
+The watch set is a strict superset of the fork's, so it cannot miss what the
+fork would find.
+
+Spend detection is sound for a reason that does not hold in the fork: **only the
+wallet can spend its own transparent outputs.** A spending transaction is either
+one this wallet built, which is known locally at broadcast, or one another
+instance of the same seed built, which is the restore case.
+
+### The stream must be asked for, and asked for in full
+
+The data is served only on request. `BlockRange.poolTypes` defaults to empty,
+which the protocol reads not as "everything" but as the legacy behaviour:
+shielded pools only, with transparent data pruned and transactions carrying
+nothing shielded dropped entirely. Against mainnet the difference is stark — over
+2000 blocks the legacy stream returned 12,079 transactions and *zero* transparent
+inputs or outputs; requesting the pools returned 22,056 transactions, 46,270
+transparent inputs and 25,192 transparent outputs.
+
+All four pool types are requested, never a subset. Sapling is included even
+though this wallet cannot spend it, because eligibility for private enhancement
+is decided by a transaction touching no *other* pool, and a stream that pruned
+Sapling would make a Sapling-touching transaction look Ironwood-only. That is
+the same footgun `docs/zakura_pir_enhance.md` warns about for Ironwood, and the
+protection is the same: ask for everything.
+
+The protocol says a client must verify a server can return transparent data
+before requesting it, and offers `lightwalletProtocolVersion` for the purpose.
+The public server serves the data and leaves that field **empty**, so the
+advertised capability cannot be the gate. It is established by observation
+instead, and one block settles it: every block has a coinbase, and a coinbase
+always creates at least one transparent output, so a block whose coinbase has no
+outputs is a server that pruned them — whether it rejected the request, ignored
+it, or does not implement it. There is no inconclusive answer.
+
+The cost is real and should not be hidden: the stream carries roughly twice the
+transactions, so the recovery throughput measured earlier in this document was
+measured against a narrower stream than the wallet now requests.
+
+### Enhancement discloses txids, and that is the point of PIR
+
+Enhancement fetches whole transactions by identifier over plain lightwalletd.
+Every wallet-relevant txid is therefore disclosed to the server, which can link
+them into one wallet and correlate them with everything else that wallet asks
+for. This is accepted for now, and it is precisely the disclosure Enhance PIR
+exists to remove.
+
+The seam is deliberately not a storage column and not a second `Enhancer`
+implementation: it is `ChainSource::transaction` plus `decrypt_transaction`. A
+private transport produces the same decrypted value from a position rather than
+a txid, and the write path does not change.
+
+### What the recovery direction costs transparent
+
+Recovery scans from the tip downwards, so the watch window widens *downward in
+time* — the wrong direction. A receipt at a high address index near the tip is
+missed while the window is still narrow, and the lower-index receipt that would
+have widened it arrives after the higher blocks are already marked scanned.
+
+The resolution is one `GetAddressUtxos` sweep when recovery completes, then
+compact-only steady state. The sweep costs the fork's address linkage, but once,
+at restore, rather than continuously. It also supplies negative information:
+every stored output in the swept range that did not come back is marked observed
+spent, which is how a purely transparent send made on another device — which has
+no shielded component and so is never wallet-relevant to the block stream — is
+noticed at all. The residual is that such a spend's transaction identifier stays
+unknown, so history shows the output disappearing without a linked transaction.
+
+### The decryption ladder, and why its order is the logic
+
+Enhancement tries each action against the wallet's keys in a fixed order, and
+the order is not a detail. An external incoming viewing key opening the note
+means somebody paid the wallet; an internal one means it is the wallet's own
+change; and only when neither opens it is the outgoing viewing key tried, which
+succeeds exactly when the wallet was the sender. Trying the outgoing key first
+would label a wallet's own receipts as payments it made, inverting the direction
+of its history.
+
+The third arm is the one that needs the full transaction. It reads the outgoing
+ciphertext, which compact blocks omit entirely, so no amount of rescanning
+produces it.
+
+Two things are checked rather than trusted. The returned transaction's
+identifier is compared against the one asked for **before** anything is
+decrypted: a source is free to say it does not have a transaction, but a source
+that answers with a *different* one would have its memos and recipients grafted
+onto the row the wallet asked about, and nothing downstream could tell. And the
+pairing of bundle to note-encryption domain is exercised by a test, because
+reading an Orchard bundle under the Ironwood domain does not fail loudly — it
+decrypts nothing, and the wallet concludes the transaction was none of its
+business.
+
+The decryption is generic over the domain *version* rather than over the pool,
+which is what the note-encryption crate itself is generic over. `TransferType`
+carries three variants, not the fork's four: its `WalletInternal` covers
+transfers between a wallet's own transparent addresses, cannot arise for a
+shielded output, and is `unreachable!()` on its shielded path — a variant no
+code can construct is one every `match` has to pretend to handle.
+
+### A rewind un-mines what it cannot rebuild, and deletes the rest
+
+The first attempt at this retained every transaction above a rewind, on the
+grounds that a reorg says the wallet was wrong about *where* a transaction is
+rather than that it never happened. That is true, and as a blanket rule it was
+still wrong: it broke the strongest statement the test suite makes, which is
+that after converging on a reorg the wallet holds exactly what scanning the
+winning chain from scratch would produce. Notes from the losing chain stayed in
+the balance, held against a spend that could never be proved dead, because
+nothing outside that discarded chain ever referred to it.
+
+The rule is a split, on whether the chain can rebuild the row:
+
+- **Reproducible** — known only from scanning. Deleted, and a rescan of the
+  winning chain reproduces it exactly if it is there. This is what keeps a
+  reorged wallet identical to a freshly scanned one.
+- **Irreplaceable** — the wallet built it, or an enhancement stored its bytes or
+  recorded what it paid. Un-mined and kept, because the fee, the height it was
+  built for, an outgoing recipient recovered under an outgoing viewing key and
+  any memo have no other source. Its notes keep their rows and lose only their
+  place in the tree, which a rescan may assign differently.
+
+Without the second half, a rewind past a pending payment erases the payment.
+Without the first, a one-block reorg leaves phantom funds in the balance.
+
+### Expiry is proved, never inferred
+
+A note spent by a transaction that is never mined would otherwise be locked
+forever, which is the failure this document warned about and the wallet had.
+Releasing it is easy to get wrong in the dangerous direction.
+
+The tempting rule is "the chain tip has passed the transaction's expiry height,
+so it is dead". That is not proof of anything except that the wallet has not
+asked. A wallet that released notes on that basis would offer funds committed to
+a transaction it simply had not looked up, and spend them twice.
+
+So the rule is a server's positive assertion, recorded as
+`confirmed_unmined_at_height`: the tip at the moment a source said it does not
+have the transaction. A note comes back only when every transaction that spends
+it is provably dead by that measure. The predicate is written once and shared by
+balance, note selection and the nullifier snapshot, because five copies of a
+rule this subtle is how the five come to disagree, and a disagreement between
+"spendable" and "expired" is money.
+
+The spend attempt stays on record throughout. That is what a junction table buys
+over a `spent` column: a transaction that failed is history rather than a
+mistake to erase.
+
+The same distinction runs through the network layer. `Ok(None)` from a source
+means it positively asserts it cannot supply a transaction; a transport failure
+is an error and says nothing at all. Mistaking the second for the first starts
+the expiry clock on transactions that are merely unreachable.
+
+### An output can only arrive at an address the wallet already derived
+
+There is no trial decryption for a transparent output. The wallet recognises
+one only because it derived the address in advance and was watching for the
+script, which makes the completeness of the watch set the whole of transparent
+detection: an address missing from it is money the wallet will never see.
+
+That is now enforced rather than remembered. `transparent_received_outputs`
+carries a foreign key onto the address row instead of an address string, so an
+output that cannot be attributed cannot be stored at all. The string form had
+been written one way by the receiving path and another by the address writer, so
+the join between them could never match in a real wallet — and the test that
+should have caught it fabricated the string by hand, agreeing with itself while
+production disagreed with everything.
+
+Two related fixes fell out of the same change. The unified address and its
+transparent receiver at the same index are now one row rather than two that
+could never be joined, because the two writers had been encoding the diversifier
+index at different widths under a shared uniqueness constraint. And the window
+advances only on a *mined* receipt: a payment in the mempool may never be mined,
+and letting one advance it would let anybody able to reach the mempool push a
+wallet's addresses forward — past the point another wallet restoring the same
+seed would stop looking.
+
+### What descending recovery costs transparent detection, and what it does not
+
+Scanning downwards means routinely meeting the transaction that spent an output
+before the one that created it. At that moment the outpoint means nothing: the
+output is not in the watch set, because the wallet has not scanned far enough
+down to know it owns it. So every outpoint of a transaction the wallet is
+keeping anyway is recorded, and the spend attaches itself when the output
+finally arrives. This is bounded by the wallet's own history rather than by the
+chain, and it needs no request to anybody.
+
+There is one case it genuinely cannot reach, and it is worth stating rather than
+implying coverage. A purely transparent spend of a wallet output, made from
+another installation of the same seed, has no shielded part and pays the wallet
+nothing — so the transaction is indistinguishable from a stranger's and is
+dropped before it is stored. Nothing in the block stream recovers it. That is
+what the restore sweep is for, and the residual after the sweep is that such a
+spend's transaction identifier stays unknown: history shows the output
+disappearing without a linked transaction.
+
+Coinbase-ness is a third state rather than a guess. An output found in a compact
+block knows the answer exactly, from the transaction's index; one learned from a
+UTXO snapshot carries no index and cannot. Unknown is treated as coinbase, which
+costs at worst a mature output the wallet declines to spend — where the opposite
+default, which the fork carries as a live FIXME, builds a transaction consensus
+rejects.
+
+### Spending transparent funds
+
+Three decisions here are about privacy rather than mechanics, and each costs
+something real.
+
+**Shielding goes to Ironwood, not Orchard.** Orchard bundles are built with
+cross-address transfers disabled, so value shielded into Orchard could only
+leave through a ZIP 318 crossing — a second, conspicuous transaction before the
+funds could be spent at all. Ironwood is the pool value can leave. An earlier
+draft of this document said "transparent to Orchard shielding"; that was wrong.
+
+**Shielding takes one address at a time by default.** Sweeping several addresses
+into a single transaction proves publicly and permanently that one person held
+all of them. That is not a disclosure the wallet makes on somebody's behalf to
+save a transaction fee.
+
+**A payment to a transparent address is never funded from Orchard.** It would
+produce a spend-only Orchard bundle with a positive value balance feeding a
+transparent output — a visible exit from the pool that no ordinary transaction
+resembles, marking its sender out precisely when they were trying not to stand
+out. The wallet refuses, and the user crosses to Ironwood first.
+
+The fee module deals in **byte totals rather than input counts**, because ZIP 317
+charges `ceil(total_input_bytes / 150)` and not the sum of each input's own
+ceiling. It also charges the *standard* 150 bytes for a P2PKH input rather than
+its true serialised length, which is one byte shorter — and the proposer and the
+builder must agree on that, or a transaction with enough inputs to cross a
+boundary is costed at one fee and built expecting another, failing as unbalanced
+only after the proving is paid for. `TransparentSizes` is constructible through
+one function and the builder asserts the bundle it produced matches what the fee
+assumed, so the two cannot drift apart.
+
+One bug worth recording because it would have made the whole feature inert:
+`Proposal::balances()` counted only shielded value. Shielding is exactly the
+case where every zatoshi arrives transparently and leaves as a note, so every
+shielding transaction looked unbalanced and was refused before it could be
+built. It surfaced only because a test ran a proposal through the real builder
+rather than checking a guard in isolation.
+
+### A workspace hazard worth knowing about
+
+Cargo unifies features across a workspace, and the vendored fork gates its own
+code on features with the *same names* as the ones its dependencies expose.
+Enabling `zcash_keys/transparent-inputs` for this wallet therefore changed
+`UnifiedFullViewingKey::new`'s arity for the fork, whose own
+`transparent-inputs` feature was still off — so its call sites passed two
+arguments to a three-argument function.
+
+This has now bitten three times in different guises, always the same shape: a
+feature turned on for one crate silently changes a signature in another. The fix
+is for whichever crate pulls the fork in to ask for the matching feature
+explicitly, with a comment saying why, so it is not later tidied away as
+redundant.
+
+### Known limitations of transparent support
+
+**Coinbase outputs are never spendable.** Selection requires `is_coinbase IS 0`,
+so a genuine coinbase — and any output whose coinbase-ness is unknown, which is
+every output a sweep found — is visible in the balance as pending and never
+becomes spendable. Coinbase has its own consensus rules: a hundred-block
+maturity, and a requirement that it be shielded in a single transaction with no
+change and nothing else mixed in. That is a second transaction shape, built for
+a case a non-mining wallet never hits. The conservative default costs a mining
+wallet the ability to spend its rewards through this wallet; the opposite
+default would build transactions consensus rejects.
+
+**A sweep marks first and clears second.** The natural shape — store what came
+back, then mark everything else — needs a list of exclusions, and expressing
+that in SQL means interpolating one row per returned output into the statement.
+A wallet with a few thousand outputs would build a query SQLite refuses on
+expression depth. Inverting it costs one extra write per returned output and
+needs no list.
+
+**A purely transparent spend made elsewhere loses its transaction identifier.**
+The sweep notices the funds are gone, because the server did not mention them,
+but nothing names the transaction that spent them. History shows the output
+disappearing without a linked transaction. Recovering the identifier would need
+per-address transaction queries, which is the disclosure this design avoids.

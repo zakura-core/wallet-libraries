@@ -24,6 +24,7 @@
 pub mod account;
 pub mod block;
 pub mod detected;
+pub mod enhanced;
 pub mod pool;
 pub mod scanning;
 
@@ -34,3 +35,29 @@ pub use detected::{
     DetectedTransparentOutput, DetectedTx, EnhanceCandidate, NullifierSnapshot, PoolCommitments,
 };
 pub use pool::{Ironwood, Orchard, PoolId, PoolVisitor, ShieldedPool, dispatch};
+
+/// The ZIP 318 anchor grid this wallet retains checkpoints on.
+///
+/// A pool crossing proves against the tree state at a boundary of this grid
+/// rather than at the tip, and the anonymity set a crossing gets is exactly the
+/// set of transfers that chose the same boundary. So the interval is not a
+/// tuning parameter: a wallet using a different one is alone in its own set,
+/// and announces itself by anchoring somewhere nobody else did.
+///
+/// It lives here, in the crate both storage and transaction construction
+/// depend on, because those two must agree. Storage retains boundary
+/// checkpoints against pruning and construction anchors to them; a grid known
+/// separately to each would let a wallet retain one set of heights and try to
+/// prove against another, and the failure would appear as a crossing that
+/// cannot be built rather than as a disagreement about a constant.
+pub const ANCHOR_GRID: zcash_protocol::zip318::AnchorBucketInterval =
+    zcash_protocol::zip318::AnchorBucketInterval::ZIP_318;
+
+/// How far below the chain tip a retained anchor is still worth keeping.
+///
+/// A crossing's canonical expiry is at most this far above the height it
+/// targets, so a boundary older than this can no longer back a transfer that
+/// would still be valid when it was broadcast. Retaining beyond it would grow
+/// the checkpoint table without bound and stop the tree ever pruning the marks
+/// below — the retention would outlive every transfer it could serve.
+pub const ANCHOR_RETENTION_DEPTH: u32 = zcash_protocol::zip318::EXPIRY_WINDOW;

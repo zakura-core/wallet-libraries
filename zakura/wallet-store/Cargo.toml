@@ -20,9 +20,18 @@ incrementalmerkletree.workspace = true
 orchard.workspace = true
 rusqlite.workspace = true
 shardtree.workspace = true
-zcash_keys = { workspace = true, features = ["orchard"] }
+# `transparent-inputs` is what compiles in `UnifiedFullViewingKey::transparent`
+# and the BIP 32 derivation beneath it. Without it the wallet can hold a
+# transparent key and be unable to derive a single address from it.
+zcash_keys = { workspace = true, features = ["orchard", "transparent-inputs"] }
+# Encoding a recovered address without going through `zcash_keys`, whose
+# `UnifiedAddress::from_receivers` changes arity with the `sapling` feature —
+# and feature unification with the fork's crates turns that on under
+# `--all-features`.
+zcash_address.workspace = true
 zip32.workspace = true
-transparent.workspace = true
+transparent = { workspace = true, features = ["transparent-inputs"] }
+zcash_script.workspace = true
 zakura-wallet-core = { path = "../wallet-core" }
 zcash_protocol.workspace = true
 

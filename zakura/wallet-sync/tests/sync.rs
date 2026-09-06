@@ -13,7 +13,7 @@ use zakura_wallet_store::{WalletDb, testing::test_db};
 use zakura_wallet_sync::{
     ByteBudget, CancellationToken, ChainSource, Direction, Step, SyncConfig, SyncEngine,
     SyncPhase,
-    testing::{FailingChain, InMemoryChain, IncoherentChain},
+    testing::{FailingChain, InMemoryChain, IncoherentChain, UnservedTransactions},
 };
 use zcash_protocol::consensus::BlockHeight;
 
@@ -40,6 +40,14 @@ fn engine(chain: InMemoryChain) -> SyncEngine<InMemoryChain, Params> {
 }
 
 fn engine_with(chain: InMemoryChain, config: SyncConfig) -> SyncEngine<InMemoryChain, Params> {
+    engine_over(chain, config)
+}
+
+/// Builds an engine over any source, for the doubles that wrap `InMemoryChain`.
+fn engine_over<S: ChainSource + Send + Sync + 'static>(
+    chain: S,
+    config: SyncConfig,
+) -> SyncEngine<S, Params> {
     let mut db = test_db().unwrap();
     db.set_birthday(h(START)).unwrap();
     SyncEngine::new(
@@ -186,6 +194,15 @@ async fn a_step_reports_exactly_what_it_did() {
         engine.step(&cancel).await.unwrap(),
         Step::Scanned { range, notes } if range == (h(START)..h(START + 3)) && notes == 3
     );
+    // With nothing left to scan, the engine asks about the transactions it
+    // found, to recover the memos and outgoing data compact blocks omit. This
+    // chain has no full transactions to give, so it answers that it does not
+    // have them and the requests retire.
+    assert_matches!(
+        engine.step(&cancel).await.unwrap(),
+        Step::Enhanced { fetched, applied, failed }
+            if fetched == 3 && applied == 0 && failed == 0
+    );
     assert_matches!(engine.step(&cancel).await.unwrap(), Step::Idle);
 }
 
@@ -239,6 +256,8 @@ async fn the_byte_budget_bounds_how_much_is_held_at_once() {
                 );
             }
             Step::Idle => break,
+            // Not what these tests are about, but a real step the engine takes.
+            Step::Enhanced { .. } => continue,
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -608,8 +627,11 @@ async fn a_source_failure_is_reported_not_swallowed() {
 }
 
 #[tokio::test]
-async fn a_queued_range_the_source_cannot_serve_does_not_spin() {
-    // A range the source has nothing for must not become an infinite loop.
+async fn a_queued_range_the_source_cannot_serve_is_reported_not_hidden() {
+    // A range the source has nothing for must not become an infinite loop —
+    // and must not be reported as having caught up either. The range is still
+    // queued, so the wallet has a hole in it; calling that `Idle` would make a
+    // transient server failure look exactly like a completed sync.
     let chain = InMemoryChain::new(ChainBuilder::new(START).anchor(), Vec::new());
     let mut db = test_db().unwrap();
     db.set_birthday(h(START)).unwrap();
@@ -630,7 +652,16 @@ async fn a_queued_range_the_source_cannot_serve_does_not_spin() {
     );
 
     let cancel = CancellationToken::new();
-    assert_matches!(engine.step(&cancel).await.unwrap(), Step::Idle);
+    assert_matches!(
+        engine.step(&cancel).await.unwrap(),
+        Step::Stalled { range } if range == (h(START)..h(START + 100))
+    );
+
+    // And a whole run says the same thing, rather than returning a summary
+    // indistinguishable from a successful one.
+    let summary = engine.run(&cancel).await.unwrap();
+    assert!(!summary.is_complete(), "the queued range was never scanned");
+    assert_eq!(summary.stalled, Some(h(START)..h(START + 100)));
 }
 
 #[tokio::test]
@@ -1010,6 +1041,8 @@ async fn recovery_scans_the_newest_blocks_first() {
                 previous = range.start;
             }
             Step::Idle => break,
+            // Not what these tests are about, but a real step the engine takes.
+            Step::Enhanced { .. } => continue,
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -1162,5 +1195,117 @@ async fn a_run_downloads_roots_before_it_scans() {
         engine.db().next_subtree_index(PoolId::Ironwood).unwrap(),
         1,
         "the run should have taken the root without being asked"
+    );
+}
+
+#[tokio::test]
+async fn an_unrelated_batch_does_not_reset_the_rewind_escalation() {
+    // The doubling rewind exists so that a fork the wallet cannot see the
+    // bottom of is eventually given up on. Under descending recovery the queue
+    // interleaves the failing range with historic ranges far below it, so a
+    // counter that reset on *any* successful batch would be reset by an
+    // unrelated one between two attempts at the same fork — and the depth would
+    // never grow past its first step.
+    let (anchor, blocks) = paying_chain(250, 100);
+    let chain = InMemoryChain::new(anchor, blocks);
+    let mut engine = engine(chain.clone());
+    let cancel = CancellationToken::new();
+    engine.run(&cancel).await.unwrap();
+
+    let broken = IncoherentChain::new(chain);
+    let db = engine.into_db();
+    let mut engine = SyncEngine::new(
+        broken,
+        test_params(),
+        db,
+        keys(),
+        TransparentWatch::default(),
+        SyncConfig::default(),
+    );
+    engine.db_mut().truncate_to(h(START + 200)).unwrap();
+
+    // Every attempt fails at a *different* height, because the previous rewind
+    // moved the range. Depth must still escalate: the height moving is a
+    // consequence of the retry, not evidence of a new problem.
+    let mut depths = Vec::new();
+    for _ in 0..12 {
+        match engine.step(&cancel).await {
+            Ok(Step::Rewound { to, .. }) => depths.push(to),
+            Ok(_) => break,
+            Err(zakura_wallet_sync::Error::Unrecoverable { rewound_by, .. }) => {
+                assert!(
+                    rewound_by > zakura_wallet_store::PRUNING_DEPTH as u32,
+                    "gave up at {rewound_by}, which is still inside the checkpoint window"
+                );
+                assert!(
+                    depths.len() > 1,
+                    "it should have escalated through several rewinds first"
+                );
+                return;
+            }
+            Err(other) => panic!("unexpected {other}"),
+        }
+    }
+    panic!("the escalation never reached the give-up point");
+}
+
+// ------------------------------------------------------- enhancement
+
+#[tokio::test]
+async fn a_transaction_the_source_will_not_serve_is_counted_not_fatal() {
+    // One unreachable transaction must not stop a wallet synchronising. It
+    // stays queued, and the wallet keeps working with what it has.
+    let (anchor, blocks) = paying_chain(3, 10);
+    let chain = UnservedTransactions::new(InMemoryChain::new(anchor, blocks));
+    let mut engine = engine_over(chain, SyncConfig::default());
+    let cancel = CancellationToken::new();
+
+    engine.update_tip().await.unwrap();
+    // Scanning works; only the transaction lookups fail.
+    engine.step(&cancel).await.unwrap();
+
+    let step = engine.step(&cancel).await.unwrap();
+    assert_matches!(
+        step,
+        Step::Enhanced { applied, failed, .. } if applied == 0 && failed > 0
+    );
+
+    // Crucially, the requests are still there: a source that could not be
+    // reached has said nothing about these transactions, so the wallet must not
+    // conclude they are gone.
+    let tip = engine.db().chain_tip().unwrap().unwrap();
+    let outstanding = engine
+        .db()
+        .tx_requests(zakura_wallet_store::status::RequestScope::All, tip + 1, 100)
+        .unwrap();
+    assert!(
+        !outstanding.is_empty(),
+        "a transport failure must not retire a request; that would lose the \
+         memo and outgoing data for good"
+    );
+}
+
+#[tokio::test]
+async fn the_same_question_is_not_asked_twice_at_one_tip() {
+    // The engine's step loop runs hot. Without a backoff it would re-ask the
+    // server about every pending transaction on every step, which learns
+    // nothing and tells the server how eager the wallet is.
+    let (anchor, blocks) = paying_chain(3, 10);
+    let chain = InMemoryChain::new(anchor, blocks);
+    let mut engine = engine(chain);
+    let cancel = CancellationToken::new();
+
+    engine.update_tip().await.unwrap();
+    while !matches!(engine.step(&cancel).await.unwrap(), Step::Idle) {}
+
+    let asked = engine.source().transactions_served();
+    assert!(asked > 0, "the engine should have asked about something");
+
+    // Another step at the same tip asks nothing further.
+    assert_matches!(engine.step(&cancel).await.unwrap(), Step::Idle);
+    assert_eq!(
+        engine.source().transactions_served(),
+        asked,
+        "a second step at the same tip must not re-ask"
     );
 }

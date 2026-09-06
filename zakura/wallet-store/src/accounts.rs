@@ -322,7 +322,7 @@ pub(crate) fn change_address<P: Parameters>(
 
 /// Diversifier indices are stored big-endian so that ordering them as bytes
 /// orders them as numbers, which is what the "next unused" query relies on.
-fn encode_diversifier_index(index: DiversifierIndex) -> Vec<u8> {
+pub(crate) fn encode_diversifier_index(index: DiversifierIndex) -> Vec<u8> {
     let mut bytes = *index.as_bytes();
     bytes.reverse();
     bytes.to_vec()

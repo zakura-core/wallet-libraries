@@ -139,3 +139,71 @@ async fn the_byte_budget_is_honoured_over_the_wire() {
         "the budget should have stopped the stream well short of the range"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires network access"]
+async fn fetched_blocks_carry_transparent_data() {
+    // The whole transparent design rests on this. `CompactTx.vin`/`vout` are in
+    // the lightwallet protocol, but a server that omits them is entirely
+    // self-consistent — no tree size disagrees, no scan errors — and the wallet
+    // simply never sees a transparent payment. Nothing else would notice.
+    //
+    // If this fails, transparent detection cannot be done from compact blocks
+    // and has to go back to per-address `GetTaddressTxids` polling.
+    let source = LightwalletdSource::connect(&endpoint()).await.unwrap();
+    let tip = source.tip().await.unwrap();
+
+    let start = tip.height - 2000;
+    let blocks = source
+        .fetch(start..tip.height, ByteBudget::DESKTOP, Direction::Ascending)
+        .await
+        .unwrap();
+
+    assert!(!blocks.is_empty());
+
+    let txs = || blocks.iter().flat_map(|b| b.txs.iter());
+    let vout_total: usize = txs().map(|tx| tx.vout.len()).sum();
+    let vin_total: usize = txs().map(|tx| tx.vin.len()).sum();
+
+    println!(
+        "{} blocks, {} txs: {vin_total} transparent inputs, {vout_total} transparent outputs",
+        blocks.len(),
+        txs().count(),
+    );
+
+    assert!(
+        vout_total > 0,
+        "no transparent outputs in {} blocks below the tip; mainnet always has \
+         transparent activity, so the server is not serving `vout`",
+        blocks.len(),
+    );
+    assert!(
+        vin_total > 0,
+        "no transparent inputs in {} blocks below the tip; the server is not \
+         serving `vin`, so transparent spends cannot be detected locally",
+        blocks.len(),
+    );
+
+    // Every block has a coinbase, and a coinbase is exactly index 0 with no
+    // inputs. `is_coinbase` on a received output is derived from this, and a
+    // wrong answer makes an immature output look spendable.
+    for block in &blocks {
+        let coinbase = block
+            .txs
+            .iter()
+            .find(|tx| tx.index == 0)
+            .unwrap_or_else(|| panic!("block {} has no transaction at index 0", block.height));
+        assert!(
+            coinbase.vin.is_empty(),
+            "the coinbase of block {} carries {} inputs; the protocol says the \
+             null outpoint is omitted, and `is_coinbase` depends on that",
+            block.height,
+            coinbase.vin.len(),
+        );
+        assert!(
+            !coinbase.vout.is_empty(),
+            "the coinbase of block {} has no outputs",
+            block.height,
+        );
+    }
+}

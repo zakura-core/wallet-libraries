@@ -44,6 +44,14 @@ pub enum Error {
     /// crossing, and has to be constructed as one.
     CrossingRequired,
 
+    /// Notes from more than one account were offered for one transaction.
+    ///
+    /// Spending them together publishes that one wallet holds both, which is
+    /// the linkage separate accounts exist to prevent. Selection refuses rather
+    /// than silently picking a subset, because a caller that mixed them did not
+    /// mean to.
+    MixedAccounts,
+
     /// A crossing could not be made canonical.
     ///
     /// A crossing that is nearly the right shape is worse than none: the whole
@@ -93,6 +101,10 @@ impl fmt::Display for Error {
                  from NU6.3 the Orchard pool permits no cross-address transfers, so the \
                  payment has to be made by an Ironwood bundle funded through the \
                  Orchard bundle's value balance",
+            ),
+            Error::MixedAccounts => f.write_str(
+                "the notes offered belong to more than one account; spending them in one \
+                 transaction would publish that a single wallet holds both",
             ),
             Error::NotCanonical(m) => write!(f, "the crossing would not be canonical: {m}"),
             Error::NoSuitableNote { required } => write!(

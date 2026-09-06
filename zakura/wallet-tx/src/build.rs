@@ -121,6 +121,32 @@ pub fn bundles<R: Rng + CryptoRng>(
         ));
     }
 
+    // A proposal whose inputs and output straddle the pools is a pool crossing,
+    // and this function cannot build one canonically. It would produce an
+    // Orchard bundle that is spend-only with a positive value balance and an
+    // Ironwood bundle carrying the payment — structurally a crossing, but with
+    // the wrong action counts, fee, expiry and anchor, and so distinguishable
+    // from every crossing built properly.
+    //
+    // `select` refuses this too. It is repeated here because a `Proposal` is a
+    // plain struct a caller can build by hand, and the guard below — which only
+    // fires when the *Orchard bundle itself* pays a stranger — never sees this
+    // shape.
+    if proposal
+        .inputs
+        .iter()
+        .any(|input| input.pool != proposal.output_pool)
+    {
+        return Err(Error::CrossingRequired);
+    }
+
+    // A ZIP 318 crossing never carries a transparent bundle, and one that did
+    // would be classified as nonconforming — which is worse than not crossing
+    // at all, because it is a transaction announcing that it tried.
+    if !proposal.transparent_inputs.is_empty() && proposal.output_pool == PoolId::Orchard {
+        return Err(Error::CrossingRequired);
+    }
+
     let mut built = UnprovenBundles::default();
 
     for pool in PoolId::ALL {
@@ -201,7 +227,7 @@ pub fn bundles<R: Rng + CryptoRng>(
                         Some(keys.fvk.to_ovk(Scope::External)),
                         recipient,
                         NoteValue::from_raw(proposal.amount.into_u64()),
-                        [0u8; 512],
+                        crate::NO_MEMO,
                     )
                     .map_err(|e| Error::Build(format!("{pool:?} payment: {e:?}")))?;
             } else {
@@ -211,7 +237,7 @@ pub fn bundles<R: Rng + CryptoRng>(
                         Some(keys.fvk.to_ovk(Scope::External)),
                         recipient,
                         NoteValue::from_raw(proposal.amount.into_u64()),
-                        [0u8; 512],
+                        crate::NO_MEMO,
                     )
                     .map_err(|e| Error::Build(format!("{pool:?} payment: {e:?}")))?;
             }
@@ -234,7 +260,7 @@ pub fn bundles<R: Rng + CryptoRng>(
                         Some(keys.fvk.to_ovk(Scope::Internal)),
                         keys.fvk.address_at(0u32, Scope::Internal),
                         NoteValue::from_raw(change.into_u64()),
-                        [0u8; 512],
+                        crate::NO_MEMO,
                     )
                     .map_err(|e| Error::Build(format!("{pool:?} change: {e:?}")))?;
             }
@@ -273,4 +299,86 @@ pub fn transaction<R: Rng + CryptoRng>(
         proving_key,
         &mut rng,
     )
+}
+
+
+/// Builds the transparent half of a transaction, with the keys to sign it.
+///
+/// Returns `None` when there is nothing transparent to build, which is the
+/// ordinary shielded case.
+///
+/// The signing set and the builder are populated together and from the same
+/// derivation, which is what makes them agree: `add_key` hands back the public
+/// key it stored, and that same key goes into the input. Deriving twice — once
+/// for each — would let a mistake in one go unnoticed until a signature failed
+/// to verify.
+pub fn transparent_bundle(
+    proposal: &crate::select::Proposal,
+    transparent_key: Option<&transparent::keys::AccountPrivKey>,
+) -> Result<
+    Option<(
+        transparent::bundle::Bundle<transparent::builder::Unauthorized>,
+        transparent::builder::TransparentSigningSet,
+    )>,
+    Error,
+> {
+    if proposal.transparent_inputs.is_empty() && proposal.transparent_payment.is_none() {
+        return Ok(None);
+    }
+
+    let mut builder = transparent::builder::TransparentBuilder::empty();
+    let mut signing = transparent::builder::TransparentSigningSet::new();
+
+    for utxo in &proposal.transparent_inputs {
+        let key = transparent_key.ok_or_else(|| {
+            Error::Build("a transparent input needs a transparent spending key".into())
+        })?;
+        let index = transparent::keys::NonHardenedChildIndex::from_index(utxo.index)
+            .ok_or_else(|| Error::Build(format!("{} is not a valid address index", utxo.index)))?;
+        let scope = match utxo.scope {
+            zakura_wallet_core::KeyScope::External => {
+                transparent::keys::TransparentKeyScope::EXTERNAL
+            }
+            zakura_wallet_core::KeyScope::Internal => {
+                transparent::keys::TransparentKeyScope::INTERNAL
+            }
+        };
+
+        let sk = key
+            .derive_secret_key(scope, index)
+            .map_err(|e| Error::Build(format!("deriving a transparent key: {e:?}")))?;
+        let pubkey = signing.add_key(sk);
+
+        // Checks up front that this key can actually spend this output, by
+        // comparing its hash against the script being spent. A derivation
+        // mistake fails here rather than at consensus.
+        builder
+            .add_p2pkh_input(pubkey, utxo.outpoint.clone(), utxo.txout.clone())
+            .map_err(|e| Error::Build(format!("adding a transparent input: {e:?}")))?;
+    }
+
+    if let Some((address, value)) = &proposal.transparent_payment {
+        builder
+            .add_output(address, *value)
+            .map_err(|e| Error::Build(format!("adding a transparent output: {e:?}")))?;
+    }
+
+    let bundle = builder
+        .build()
+        .ok_or_else(|| Error::Build("the transparent bundle is empty".into()))?;
+
+    // The fee was computed from the proposal's own view of its transparent
+    // size. If the bundle disagrees, the transaction is about to be built at a
+    // fee it does not owe — which fails as unbalanced only after proving.
+    let built = crate::fee::TransparentSizes::p2pkh(
+        bundle.vin.len(),
+        bundle.vout.len(),
+    );
+    if built != proposal.transparent_sizes() {
+        return Err(Error::Build(
+            "the built transparent bundle is a different size than the fee assumed".into(),
+        ));
+    }
+
+    Ok(Some((bundle, signing)))
 }

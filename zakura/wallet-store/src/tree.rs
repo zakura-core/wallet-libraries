@@ -90,12 +90,14 @@ impl ShardStore for WalletShardStore<'_> {
         &self,
         shard_root: Address,
     ) -> Result<Option<LocatedPrunableTree<Self::H>>, Self::Error> {
+        // Cached: a single `batch_insert` walks many shards, and this is the
+        // read half of every one of those visits.
         self.conn
+            .prepare_cached(&format!(
+                "SELECT shard_data, root_hash FROM {CACHE_SCHEMA}.tree_shards
+                 WHERE pool = :pool AND shard_index = :shard_index"
+            ))?
             .query_row(
-                &format!(
-                    "SELECT shard_data, root_hash FROM {CACHE_SCHEMA}.tree_shards
-                     WHERE pool = :pool AND shard_index = :shard_index"
-                ),
                 named_params![":pool": self.code(), ":shard_index": shard_root.index()],
                 |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
             )
@@ -557,14 +559,18 @@ impl WalletShardStore<'_> {
     /// reached from the tree's root, and every witness past the gap would be
     /// unbuildable.
     fn check_shard_continuity(&self, proposed: Range<u64>) -> Result<(), Error> {
-        let bounds = self.conn.query_row(
-            &format!(
+        // Cached: this runs on *every* `put_shard`, so a batch that touches many
+        // shards re-prepares an aggregate query once per shard written. The
+        // aggregate itself is served from the primary key index.
+        let bounds = self
+            .conn
+            .prepare_cached(&format!(
                 "SELECT MIN(shard_index), MAX(shard_index) FROM {CACHE_SCHEMA}.tree_shards
                  WHERE pool = :pool"
-            ),
-            named_params![":pool": self.code()],
-            |row| Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, Option<u64>>(1)?)),
-        )?;
+            ))?
+            .query_row(named_params![":pool": self.code()], |row| {
+                Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, Option<u64>>(1)?))
+            })?;
 
         if let (Some(min), Some(max)) = bounds {
             let existing = min..(max + 1);

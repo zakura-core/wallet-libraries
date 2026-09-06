@@ -97,7 +97,6 @@ pub fn detect_batch<P: Parameters>(
             start_anchor: anchor.clone(),
             blocks: Vec::new(),
             end_anchor: anchor.clone(),
-            snapshot_epoch: nullifiers.epoch(),
         });
     }
 
@@ -139,7 +138,6 @@ pub fn detect_batch<P: Parameters>(
             hash: last.hash,
             tree_sizes: last.tree_sizes,
         },
-        snapshot_epoch: nullifiers.epoch(),
     })
 }
 
@@ -301,6 +299,10 @@ fn detect_block<P: Parameters>(
             spends: orchard_spends.into_iter().chain(ironwood_spends).collect(),
             transparent_received,
             transparent_spends,
+            // Every outpoint, kept only if the transaction turns out to be the
+            // wallet's for some other reason — which `into_option` decides
+            // immediately below.
+            candidate_spends: tx.vin.clone(),
             enhance_candidates,
         };
         if let Some(detected) = detected.into_option() {
@@ -527,7 +529,7 @@ fn detect_transparent(
 
     let mut received = Vec::new();
     for (output_index, txout) in tx.vout.iter().enumerate() {
-        if let Some(account) = watch.account_for(txout) {
+        if let Some(address) = watch.watched(txout) {
             let output_index = u32::try_from(output_index)
                 .expect("a transaction cannot have more than u32::MAX outputs");
             // Recorded now so that a spend of this output later in the same
@@ -538,8 +540,8 @@ fn detect_transparent(
             ));
             received.push(DetectedTransparentOutput {
                 output_index,
-                account,
-                address_index: watch.index_for(account, txout),
+                account: address.account,
+                address_id: address.address_id,
                 txout: txout.clone(),
             });
         }

@@ -32,9 +32,32 @@ pub struct Anchors {
 
 /// Returns the anchors to prove against, at the most recent height both trees
 /// hold a checkpoint for.
+///
+/// This is for ordinary spends. A pool crossing must not use it — see
+/// [`crossing_anchors`].
 pub fn anchors(db: &mut WalletDb) -> Result<Anchors, Error> {
     let height = db.common_anchor_height()?.ok_or(Error::NoAnchor)?;
+    anchors_at(db, height)
+}
 
+/// Returns the anchors a ZIP 318 crossing proves against.
+///
+/// A crossing anchors on the shared 144-block grid rather than at the most
+/// recent common checkpoint, and the difference is the whole privacy argument:
+/// the anonymity set a crossing gets is exactly the set of transfers that chose
+/// the same boundary. Anchoring at the tip would put the transaction in a set of
+/// one, which is worse than not crossing at all.
+///
+/// Returns [`Error::NoAnchor`] when the wallet holds no retained boundary both
+/// pools reach — a wallet that has not yet scanned across one, or whose
+/// boundaries were pruned before retention was recorded.
+pub fn crossing_anchors(db: &mut WalletDb) -> Result<Anchors, Error> {
+    let height = db.grid_anchor_height()?.ok_or(Error::NoAnchor)?;
+    anchors_at(db, height)
+}
+
+/// Returns both pools' roots at one height.
+fn anchors_at(db: &mut WalletDb, height: BlockHeight) -> Result<Anchors, Error> {
     let mut roots = BTreeMap::new();
     for pool in PoolId::ALL {
         let root = db

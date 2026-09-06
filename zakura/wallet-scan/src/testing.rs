@@ -123,9 +123,39 @@ impl ChainBuilder {
         }
     }
 
+    /// Starts a chain that genuinely continues from `anchor`.
+    ///
+    /// [`Self::with_anchor`] invents a predecessor hash, which is right for a
+    /// range the wallet has no record below. It is wrong for a second range
+    /// applied to a wallet that already scanned the block beneath it: the two
+    /// would describe different chains, and the store rejects that rather than
+    /// inserting commitments at a position the wallet disagrees with. Use this
+    /// when the test means "and then the next range", and `with_anchor` when it
+    /// means "a range starting from nowhere in particular".
+    pub fn continuing_from(anchor: &BlockAnchor) -> Self {
+        let start_height = u32::from(anchor.height) + 1;
+        let mut this = Self::with_anchor(start_height, anchor.tree_sizes);
+        this.prev_hash = anchor.hash;
+        this.anchor = anchor.clone();
+        this
+    }
+
     /// Returns the anchor the first block of this chain must be scanned against.
     pub fn anchor(&self) -> BlockAnchor {
         self.anchor.clone()
+    }
+
+    /// Returns the anchor a range starting immediately above this chain would
+    /// be scanned against.
+    pub fn end_anchor(&self) -> BlockAnchor {
+        match self.blocks.last() {
+            Some(last) => BlockAnchor {
+                height: last.height,
+                hash: last.hash,
+                tree_sizes: last.tree_sizes,
+            },
+            None => self.anchor.clone(),
+        }
     }
 
     /// Appends a block, letting `f` populate its transactions.

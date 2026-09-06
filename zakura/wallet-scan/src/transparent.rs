@@ -20,55 +20,77 @@ use transparent::{
 
 use zakura_wallet_core::AccountId;
 
+/// One of the wallet's addresses, as the watch set knows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchedAddress {
+    /// Whose address it is.
+    pub account: AccountId,
+    /// The stored row it came from.
+    ///
+    /// Opaque here: this crate never reads it, it only hands it back so the
+    /// store can attribute a received output without re-deriving anything.
+    pub address_id: i64,
+}
+
 /// The transparent scripts and outpoints a detection pass matches against.
+///
+/// Unlike a shielded note, a transparent output cannot be recognised by trying
+/// to decrypt it — the only way to know an output is the wallet's is to have
+/// derived its address in advance and to be looking for it. That makes the
+/// completeness of this set the whole of transparent detection: an address
+/// missing from it is money the wallet will never see.
 #[derive(Debug, Clone, Default)]
 pub struct TransparentWatch {
-    scripts: HashMap<Vec<u8>, AccountId>,
-    /// The address index each watched script belongs to, so that a hit can say
-    /// *which* address was used and not merely that one was.
-    indices: HashMap<(AccountId, Vec<u8>), u32>,
+    scripts: HashMap<Vec<u8>, WatchedAddress>,
     utxos: HashSet<OutPoint>,
 }
 
 impl TransparentWatch {
-    /// Builds a watch set from the scripts the wallet is watching and the
-    /// outpoints it believes are currently unspent.
+    /// Builds a watch set from the wallet's addresses and the outpoints it
+    /// believes are currently unspent.
+    ///
+    /// Each script is accompanied by the row it came from, so a hit says *which*
+    /// address was paid and not merely that one was. Keying on the row rather
+    /// than on the account is what lets an external and an internal address be
+    /// told apart; keying on the account alone could not.
     pub fn new(
-        scripts: impl IntoIterator<Item = (Script, AccountId)>,
+        scripts: impl IntoIterator<Item = (Script, AccountId, i64)>,
         utxos: impl IntoIterator<Item = OutPoint>,
     ) -> Self {
         Self {
             scripts: scripts
                 .into_iter()
-                .map(|(script, account)| (script.0.0, account))
+                .map(|(script, account, address_id)| {
+                    (
+                        script.0.0,
+                        WatchedAddress {
+                            account,
+                            address_id,
+                        },
+                    )
+                })
                 .collect(),
-            indices: HashMap::new(),
             utxos: utxos.into_iter().collect(),
         }
     }
 
-    /// Builds a watch set that also knows which address index each script is.
-    pub fn with_indices(
-        scripts: impl IntoIterator<Item = (Script, AccountId, u32)>,
-        utxos: impl IntoIterator<Item = OutPoint>,
-    ) -> Self {
-        let mut watch = Self {
-            scripts: HashMap::new(),
-            indices: HashMap::new(),
-            utxos: utxos.into_iter().collect(),
-        };
-        for (script, account, index) in scripts {
-            watch.scripts.insert(script.0.0.clone(), account);
-            watch.indices.insert((account, script.0.0), index);
-        }
-        watch
+    /// Returns the watched scripts, in the shape [`Self::new`] takes.
+    ///
+    /// Exposed so a caller-supplied watch set can be merged with the wallet's
+    /// stored addresses rather than one silently replacing the other.
+    pub fn entries(&self) -> impl Iterator<Item = (Script, AccountId, i64)> + '_ {
+        self.scripts.iter().map(|(script, watched)| {
+            (
+                Script(zcash_script::script::Code(script.clone())),
+                watched.account,
+                watched.address_id,
+            )
+        })
     }
 
-    /// Returns the address index the script belongs to, if it is known.
-    pub fn index_for(&self, account: AccountId, txout: &TxOut) -> Option<u32> {
-        self.indices
-            .get(&(account, txout.script_pubkey().0.0.clone()))
-            .copied()
+    /// Returns the outpoints being watched for spends.
+    pub fn outpoints(&self) -> impl Iterator<Item = OutPoint> + '_ {
+        self.utxos.iter().cloned()
     }
 
     /// Returns whether there is nothing to match against.
@@ -76,21 +98,9 @@ impl TransparentWatch {
         self.scripts.is_empty() && self.utxos.is_empty()
     }
 
-    /// Returns the account watching `txout`'s script, if any.
-    pub fn account_for(&self, txout: &TxOut) -> Option<AccountId> {
+    /// Returns the wallet address `txout` pays, if it pays one.
+    pub fn watched(&self, txout: &TxOut) -> Option<WatchedAddress> {
         self.scripts.get(&txout.script_pubkey().0.0).copied()
-    }
-
-    /// Returns the highest watched index for `account`, if any.
-    ///
-    /// Gap-limit maintenance needs to know how far an account's addresses run,
-    /// so it can tell whether enough unused ones remain ahead of the used ones.
-    pub fn highest_index(&self, account: AccountId) -> Option<u32> {
-        self.indices
-            .iter()
-            .filter(|((a, _), _)| *a == account)
-            .map(|(_, index)| *index)
-            .max()
     }
 
     /// Returns whether `outpoint` is one of the wallet's unspent outputs.

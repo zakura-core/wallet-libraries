@@ -18,6 +18,7 @@
 #![deny(unsafe_code)]
 
 mod detect;
+pub mod enhance;
 mod error;
 mod keys;
 mod position;
@@ -27,7 +28,7 @@ mod transparent;
 pub mod testing;
 
 pub use detect::detect_batch;
-pub use error::ScanError;
+pub use error::{EnhanceError, ScanError};
 pub use keys::ScanKeys;
 
 // Re-exported so a consumer of the scanner does not have to name `core` as
