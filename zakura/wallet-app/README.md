@@ -70,15 +70,16 @@ component with a builder, so a demo changes one widget without forking.
 Stated here because the interface has to say so rather than fail late. The
 reasons are in `docs/wallet_app.md`.
 
-- **Only Ironwood-funded payments.** An Orchard-funded payment is necessarily a
-  ZIP 318 crossing, and no grid anchor is retained or selected, so it cannot be
-  built canonically. `send` refuses rather than assembling one ad hoc — which
-  would work, and would be identifiable.
-- **No transparent anything.** Detected and attributed, but no address
-  derivation, no balance query, no spend, no shielding.
-- **A sent payment does not show until it is scanned back.** Nothing is written
-  to the wallet on broadcast, so balance and history both lag until the
-  transaction is found on the chain. Closing it needs a write path in the store.
+- **Payments out of Orchard must be a canonical denomination.** Value leaves
+  Orchard only as a ZIP 318 crossing, and every crossing carries one of a fixed
+  set of amounts at a fixed fee so they cannot be told apart. The wallet routes
+  an Orchard-funded payment through a crossing when the amount qualifies and
+  refuses when it does not — refusing is correct, since a crossing that is
+  nearly the right shape stands out from the ones that are. Arbitrary amounts
+  are two steps: cross into Ironwood, then pay from there.
+- **Transparent value is held but not spent directly.** Addresses are derived
+  and watched and the balance reports them, but spending needs shielding first
+  and this build does not drive that.
 - **No memos.**
 - **Sending needs the seed**, because the wallet stores only viewing keys. It
   belongs in the platform keystore; the example does not do this.

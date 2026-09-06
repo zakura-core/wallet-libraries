@@ -30,6 +30,7 @@ Widget host(
 
 void main() {
   _syncFailureTests();
+  _transparentAndCrossingTests();
   group('BalanceCard', () {
     testWidgets('shows the spendable figure', (tester) async {
       await tester.pumpWidget(
@@ -380,6 +381,72 @@ void _syncFailureTests() {
         failed: true,
       );
       expect(failed.isCaughtUp, isFalse);
+    });
+  });
+}
+
+/// Added after transparent value and pool crossings became things the wallet
+/// can actually report.
+void _transparentAndCrossingTests() {
+  group('transparent and crossings', () {
+    /// Transparent funds cannot be sent without shielding first, so showing
+    /// them as spendable would offer money the send path then refuses.
+    testWidgets('transparent value is named as needing a step', (tester) async {
+      await tester.pumpWidget(
+        host(
+          const BalanceCard(
+            balance: Balance(
+              spendable: Zatoshi(100000000),
+              transparent: Zatoshi(50000000),
+            ),
+          ),
+        ),
+      );
+      expect(find.text('1.00'), findsOneWidget);
+      expect(
+        find.textContaining('0.50 ZEC transparent, shield to spend'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('nothing is said when there is no transparent value',
+        (tester) async {
+      await tester.pumpWidget(
+        host(const BalanceCard(balance: Balance(spendable: Zatoshi(1)))),
+      );
+      expect(find.textContaining('transparent'), findsNothing);
+    });
+
+    test('transparent counts toward the total but not toward the sendable', () {
+      const balance = Balance(
+        spendable: Zatoshi(100),
+        pending: Zatoshi(50),
+        transparent: Zatoshi(25),
+      );
+      expect(balance.total, const Zatoshi(175));
+      expect(balance.shielded, const Zatoshi(150));
+    });
+
+    /// A crossing's amount and fee are fixed by the shape every crossing
+    /// shares, so somebody should not be left wondering why they cannot be
+    /// adjusted.
+    testWidgets('a crossing says why its numbers are fixed', (tester) async {
+      await tester.pumpWidget(
+        host(
+          const SendForm(
+            stage: SendStage.quoted,
+            quote: SpendQuote(
+              amount: Zatoshi(100000000),
+              fee: Zatoshi(15000),
+              change: Zatoshi(0),
+              inputs: 1,
+              crossing: true,
+            ),
+          ),
+        ),
+      );
+      expect(find.textContaining('set amount'), findsOneWidget);
+      expect(find.textContaining('Spending 1 note'), findsNothing);
     });
   });
 }

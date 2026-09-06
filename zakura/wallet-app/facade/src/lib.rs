@@ -21,12 +21,12 @@
 //!
 //! # What it refuses
 //!
-//! A payment funded from the Orchard pool is necessarily a ZIP 318 crossing,
-//! and a crossing has a canonical shape it has to be indistinguishable within.
-//! This build cannot produce that shape on a wallet that has scanned a chain,
-//! so rather than assemble one ad hoc — which would work, and would be
-//! identifiable — [`Wallet::send`] refuses with
-//! [`Error::CrossingUnavailable`]. See `docs/wallet_app.md`.
+//! Paying an arbitrary amount out of the Orchard pool. Value leaves Orchard only
+//! as a ZIP 318 crossing, and every crossing carries one of a fixed set of
+//! denominations so that they cannot be told apart; an amount that is not one of
+//! them is refused with [`Error::NotCanonicalDenomination`] rather than adjusted
+//! to fit. See `docs/wallet_app.md`.
+//!
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
@@ -137,6 +137,18 @@ impl Wallet {
                 index,
                 BlockHeight::from_u32(birthday),
             )?;
+
+            // Derive the transparent addresses the account will be watched on.
+            // The scanner matches the scripts the wallet has recorded, so an
+            // address that was never derived is one nothing is looking for, and
+            // a payment to it goes unseen. The engine rebuilds its watch set
+            // from these rows on every batch.
+            db.maintain_transparent_addresses(
+                &self.params,
+                id,
+                &zakura_wallet_store::GapLimits::default(),
+            )?;
+
             Ok(id.0)
         })
     }

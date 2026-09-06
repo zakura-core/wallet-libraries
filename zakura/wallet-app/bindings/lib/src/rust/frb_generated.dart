@@ -607,12 +607,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ApiBalance dco_decode_api_balance(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
     return ApiBalance(
       spendable: dco_decode_u_64(arr[0]),
       pending: dco_decode_u_64(arr[1]),
       spentUnconfirmed: dco_decode_u_64(arr[2]),
+      transparent: dco_decode_u_64(arr[3]),
     );
   }
 
@@ -659,13 +660,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ApiSpendQuote dco_decode_api_spend_quote(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return ApiSpendQuote(
       amount: dco_decode_u_64(arr[0]),
       fee: dco_decode_u_64(arr[1]),
       change: dco_decode_u_64(arr[2]),
       inputs: dco_decode_u_32(arr[3]),
+      crossing: dco_decode_bool(arr[4]),
     );
   }
 
@@ -809,10 +811,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_spendable = sse_decode_u_64(deserializer);
     var var_pending = sse_decode_u_64(deserializer);
     var var_spentUnconfirmed = sse_decode_u_64(deserializer);
+    var var_transparent = sse_decode_u_64(deserializer);
     return ApiBalance(
       spendable: var_spendable,
       pending: var_pending,
       spentUnconfirmed: var_spentUnconfirmed,
+      transparent: var_transparent,
     );
   }
 
@@ -856,11 +860,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_fee = sse_decode_u_64(deserializer);
     var var_change = sse_decode_u_64(deserializer);
     var var_inputs = sse_decode_u_32(deserializer);
+    var var_crossing = sse_decode_bool(deserializer);
     return ApiSpendQuote(
       amount: var_amount,
       fee: var_fee,
       change: var_change,
       inputs: var_inputs,
+      crossing: var_crossing,
     );
   }
 
@@ -1030,6 +1036,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_64(self.spendable, serializer);
     sse_encode_u_64(self.pending, serializer);
     sse_encode_u_64(self.spentUnconfirmed, serializer);
+    sse_encode_u_64(self.transparent, serializer);
   }
 
   @protected
@@ -1072,6 +1079,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_64(self.fee, serializer);
     sse_encode_u_64(self.change, serializer);
     sse_encode_u_32(self.inputs, serializer);
+    sse_encode_bool(self.crossing, serializer);
   }
 
   @protected

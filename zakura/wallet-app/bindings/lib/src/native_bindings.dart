@@ -103,6 +103,7 @@ class NativeBindings implements ZakuraBindings {
           spendable: Zatoshi(b.spendable.toInt()),
           pending: Zatoshi(b.pending.toInt()),
           spentUnconfirmed: Zatoshi(b.spentUnconfirmed.toInt()),
+          transparent: Zatoshi(b.transparent.toInt()),
         );
       });
 
@@ -168,6 +169,7 @@ class NativeBindings implements ZakuraBindings {
           fee: Zatoshi(q.fee.toInt()),
           change: Zatoshi(q.change.toInt()),
           inputs: q.inputs,
+          crossing: q.crossing,
         );
       });
 

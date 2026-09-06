@@ -116,6 +116,7 @@ pub fn balance(account: u32) -> Result<ApiBalance, ApiError> {
         spendable: b.spendable,
         pending: b.pending,
         spent_unconfirmed: b.spent_unconfirmed,
+        transparent: b.transparent,
     })
 }
 
@@ -193,6 +194,7 @@ pub fn quote(account: u32, to: String, amount: u64) -> Result<ApiSpendQuote, Api
         fee: q.fee,
         change: q.change,
         inputs: q.inputs as u32,
+        crossing: q.crossing,
     })
 }
 

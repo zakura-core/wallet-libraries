@@ -67,6 +67,13 @@ enum ZakuraErrorCode {
   /// A sync is already running.
   alreadySyncing(16),
 
+  /// The amount cannot leave the Orchard pool in one step.
+  ///
+  /// Value leaves Orchard only as a ZIP 318 crossing, and every crossing
+  /// carries one of a fixed set of denominations so that they cannot be told
+  /// apart. An arbitrary amount is not one of them.
+  notCanonicalDenomination(17),
+
   /// A code this build does not know.
   ///
   /// Present so that a newer facade adding a code does not crash an older

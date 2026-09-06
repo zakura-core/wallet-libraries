@@ -148,53 +148,51 @@ through a path that silently produces the wrong shape.
 These are properties of the core as it stands, and the app should state them
 rather than discover them.
 
-**Transparent does not work end to end.** Detection, per-account attribution and
-the gap limit are built and tested, but nothing derives an address from the
-indices the gap module asks for, the watch set is empty at every construction
-site in the tree, no query sums the transparent outputs, and the transaction
-builder passes no transparent bundle. There is no transparent address, balance,
-spend or shielding. The first version is shielded-only and shows no transparent
-section at all — a balance the wallet cannot back is worse than no balance.
+**Payments out of the Orchard pool must be canonical.** From NU6.3 the Orchard
+pool prohibits cross-address transfers, so value leaves it only as a ZIP 318
+crossing — and every crossing carries one of a fixed set of denominations, at a
+fixed fee, against an anchor on a shared grid, precisely so that they cannot be
+told apart. The wallet routes an Orchard-funded payment through a crossing when
+the amount is one of those denominations and refuses when it is not. Refusing is
+the correct answer rather than a shortcoming: adjusting to the nearest canonical
+amount would send somebody a different sum than they asked for, and a crossing
+that is nearly the right shape stands out from the ones that are. Paying an
+arbitrary amount out of Orchard is therefore two steps — cross a denomination
+into Ironwood, then pay from there, which is an ordinary payment.
 
-**Receive addresses carry only an Orchard receiver**, which follows from the
-same fact.
+**Transparent value is held but not spent directly.** Addresses are derived and
+watched, receipts are detected and attributed, and the balance reports them. But
+spending them means shielding first, and this build does not drive that, so the
+balance names them as needing a step rather than folding them into what can be
+sent.
 
-**Orchard-funded payments do not work on a real wallet at all.** The crossing
-builds, proves and verifies against a fixture, but on a wallet that has scanned
-a chain it cannot be planned: no anchor on the ZIP 318 grid is retained or
-selected, so `crossing::plan` rejects. Nothing computes the grid and
-`add_retained_checkpoint` is never called outside tests. Separately, there is no
-builder for the preparation transaction the planner can describe. Until the
-retention and grid-selection policies land, **only Ironwood-funded payments are
-available**, and the interface must say so plainly rather than offering a send
-that fails at the end.
+**Receive addresses carry only an Orchard receiver.** Issuance asks for one, so
+a payer with only a transparent or Sapling implementation cannot use the address
+the wallet hands out, even though the wallet would see a payment to a
+transparent address it derived.
+
+**A crossing whose preparation is needed cannot be built.** The planner can say
+what consolidation an Orchard balance would need, and can verify the shape would
+conform, but there is no builder for it. An Orchard-funded payment where no
+single note covers the denomination and the fee is a dead end, and it has to
+surface as a clear message rather than a spinner.
 
 **Selection does not constrain inputs to one account.** Nothing at that boundary
 stops a transaction linking two of the wallet's accounts on chain. The first
 version is single-account, which sidesteps it; a multi-account version must not
 ship before the guard does.
 
-**A sync that reports Idle may not be synced.** An empty fetch returns
-`Step::Idle`, so a transient source failure is indistinguishable from having
-reached the tip, and the range stays unscanned. The interface should treat
-"idle" as "nothing more to do right now" and keep the scanned-to height and tip
-visible, rather than presenting a settled green check.
+**An idle sync is not necessarily a finished one.** An empty fetch reports idle
+too, so a transient failure to reach the server looks exactly like having caught
+up. The wallet records why a sync stopped and reports it separately, and the
+interface checks that before it says "up to date".
 
 **Spendability is measured against the last batch, not the chain**, and
 `subtree_end_height` is read as shard completeness when it is not. Both mean a
-balance can report notes as spendable that selection will then withhold. The
-send flow must handle "selected fewer funds than the balance implied" as an
-expected outcome with a real message.
+balance can report notes as spendable that selection then withholds. The send
+flow treats "selected less than the balance implied" as an expected outcome with
+a real message.
 
-**A sent payment does not show until it is scanned back.** After a successful
-broadcast nothing is written to the wallet. `spent_unconfirmed` is computed from
-spends of notes joined to an unmined transaction row, and that row appears only
-when the transaction is found on the chain. So between broadcasting and the next
-scan, balance and history both say the money is still there. The fix belongs in
-the store rather than in an interface-side overlay — an application should not
-have to keep a shadow copy of what the wallet holds — and it is not built. Until
-it is, an interface should say a payment was sent rather than implying the
-balance it is showing accounts for it.
 
 **There are no memos.** The field is omitted rather than accepted and dropped.
 

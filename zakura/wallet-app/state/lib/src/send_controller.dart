@@ -65,8 +65,13 @@ class SendFailed extends SendState {
         ZakuraErrorCode.insufficientFunds =>
           'Not enough spendable funds. Some of your balance may still be '
               'settling.',
+        ZakuraErrorCode.notCanonicalDenomination =>
+          'Payments out of the Orchard pool can only be made in set amounts, '
+              'so that they cannot be told apart. Try a round figure, or '
+              'shield to Ironwood first.',
         ZakuraErrorCode.crossingUnavailable =>
-          'Your funds are in a pool this version cannot spend from yet.',
+          'This payment would have to leave the Orchard pool in a way this '
+              'version cannot do safely.',
         ZakuraErrorCode.noAnchor =>
           'The wallet has not synchronised far enough to send yet.',
         ZakuraErrorCode.badAddress => 'That address could not be read.',

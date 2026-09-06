@@ -23,11 +23,27 @@ pub struct Balance {
     pub pending: u64,
     /// Committed by a transaction that has not been mined yet.
     pub spent_unconfirmed: u64,
+    /// Value held on transparent addresses.
+    ///
+    /// Kept apart from [`Balance::spendable`] because it cannot be sent
+    /// directly: transparent funds have to be shielded first. Folding the two
+    /// together would offer money the send path would then refuse.
+    pub transparent: u64,
 }
 
 impl Balance {
-    /// Returns everything the account holds, usable or not.
+    /// Returns everything the account holds, however it is held.
+    ///
+    /// Includes transparent value: it is the account's money, even though
+    /// spending it takes an extra step.
     pub fn total(&self) -> u64 {
+        self.spendable
+            .saturating_add(self.pending)
+            .saturating_add(self.transparent)
+    }
+
+    /// Returns the shielded value, which is what can be sent directly.
+    pub fn shielded(&self) -> u64 {
         self.spendable.saturating_add(self.pending)
     }
 }
@@ -114,11 +130,17 @@ impl Wallet {
     pub fn balance(&self, account: u32) -> Result<Balance, Error> {
         self.with_reader(|db| {
             self.require_account(db, account)?;
-            let b = db.total_balance(Self::account_id(account))?;
+            let id = Self::account_id(account);
+            let shielded = db.total_balance(id)?;
+            let transparent = db.transparent_balance(id)?;
             Ok(Balance {
-                spendable: b.spendable.into_u64(),
-                pending: b.pending.into_u64(),
-                spent_unconfirmed: b.spent_unconfirmed.into_u64(),
+                spendable: shielded.spendable.into_u64(),
+                pending: shielded.pending.into_u64(),
+                spent_unconfirmed: shielded.spent_unconfirmed.into_u64(),
+                // Only the settled part. Transparent value that is not yet
+                // confirmed cannot be shielded either, so presenting it as held
+                // would be the same mistake in a different pool.
+                transparent: transparent.spendable.into_u64(),
             })
         })
     }
@@ -137,8 +159,19 @@ impl Wallet {
                 spendable: b.spendable.into_u64(),
                 pending: b.pending.into_u64(),
                 spent_unconfirmed: b.spent_unconfirmed.into_u64(),
+                transparent: 0,
             })
         })
+    }
+
+    /// Returns how many transparent addresses the wallet is watching for.
+    ///
+    /// Exposed because the number being zero is a silent failure rather than a
+    /// visible one: the scanner matches the scripts the wallet has recorded, so
+    /// a wallet watching nothing sees no transparent payments and reports no
+    /// error while doing it.
+    pub fn watched_transparent_addresses(&self) -> Result<usize, Error> {
+        self.with_reader(|db| Ok(db.transparent_watch()?.addresses.len()))
     }
 
     /// Returns an account's transactions, most recent first.
@@ -173,7 +206,17 @@ impl Wallet {
     /// from one it merely generated.
     pub fn next_address(&self, account: u32, exposed_at: Option<u32>) -> Result<String, Error> {
         let params = self.params;
+        let id = Self::account_id(account);
         self.with_writer_pausing_sync(|db| {
+            // Issuing an address may consume the last of the unused window, so
+            // top it up in the same breath. An address the wallet has not
+            // derived is one the scanner is not watching for.
+            db.maintain_transparent_addresses(
+                &params,
+                id,
+                &zakura_wallet_store::GapLimits::default(),
+            )?;
+
             let (address, _index) = db.next_address(
                 &params,
                 Self::account_id(account),

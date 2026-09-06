@@ -88,6 +88,20 @@ class BalanceCard extends StatelessWidget {
               ],
             ),
           ],
+          if (!balance.transparent.isZero) ...[
+            SizedBox(height: theme.spacing.xs),
+            // Named as needing a step rather than folded into the figure above:
+            // transparent funds cannot be sent without being shielded first,
+            // and showing them as spendable would offer money the send path
+            // then refuses.
+            Text(
+              obscured
+                  ? '•••• transparent'
+                  : '${balance.transparent.format()} ZEC transparent, shield to spend',
+              style:
+                  theme.typography.caption.copyWith(color: theme.colors.textMuted),
+            ),
+          ],
           if (!balance.spentUnconfirmed.isZero) ...[
             SizedBox(height: theme.spacing.xs),
             Text(

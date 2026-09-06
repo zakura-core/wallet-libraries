@@ -199,9 +199,16 @@ class _Confirmation extends StatelessWidget {
           ),
           SizedBox(height: theme.spacing.md),
           Text(
-            quote.inputs == 1
-                ? 'Spending 1 note. This takes a few seconds.'
-                : 'Spending ${quote.inputs} notes. This takes a few seconds.',
+            quote.crossing
+                // The amount and the fee are fixed by the shape every crossing
+                // shares, so somebody should not be left wondering why they
+                // cannot be adjusted.
+                ? 'Paid out of the Orchard pool in a set amount and at a set '
+                    'fee, so it cannot be told apart from other such payments. '
+                    'This takes a few seconds.'
+                : quote.inputs == 1
+                    ? 'Spending 1 note. This takes a few seconds.'
+                    : 'Spending ${quote.inputs} notes. This takes a few seconds.',
             style:
                 theme.typography.caption.copyWith(color: theme.colors.textMuted),
           ),

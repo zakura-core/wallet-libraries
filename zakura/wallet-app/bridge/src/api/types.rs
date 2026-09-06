@@ -46,6 +46,11 @@ pub struct ApiBalance {
     pub pending: u64,
     /// Committed by a transaction that has not been mined.
     pub spent_unconfirmed: u64,
+    /// Value held on transparent addresses.
+    ///
+    /// Kept apart from `spendable` because it cannot be sent directly:
+    /// transparent funds have to be shielded first.
+    pub transparent: u64,
 }
 
 /// An account the wallet holds.
@@ -124,6 +129,11 @@ pub struct ApiSpendQuote {
     pub change: u64,
     /// How many notes would be spent, and so how many proofs.
     pub inputs: u32,
+    /// Whether this payment leaves the Orchard pool as a ZIP 318 crossing.
+    ///
+    /// A crossing pays a fixed denomination for a fixed fee, so its numbers are
+    /// not negotiable the way an ordinary payment's are.
+    pub crossing: bool,
 }
 
 /// What came back from broadcasting.

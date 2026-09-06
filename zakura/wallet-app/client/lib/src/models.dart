@@ -17,14 +17,25 @@ class Balance {
   /// Committed by a transaction that has not been mined yet.
   final Zatoshi spentUnconfirmed;
 
+  /// Value held on transparent addresses.
+  ///
+  /// Kept apart from [spendable] because it cannot be sent directly:
+  /// transparent funds have to be shielded first. Folding the two together
+  /// would offer money the send path would then refuse.
+  final Zatoshi transparent;
+
   const Balance({
     this.spendable = Zatoshi.zero,
     this.pending = Zatoshi.zero,
     this.spentUnconfirmed = Zatoshi.zero,
+    this.transparent = Zatoshi.zero,
   });
 
-  /// Everything the account holds, usable or not.
-  Zatoshi get total => spendable + pending;
+  /// Everything the account holds, however it is held.
+  Zatoshi get total => spendable + pending + transparent;
+
+  /// The shielded value, which is what can be sent directly.
+  Zatoshi get shielded => spendable + pending;
 
   /// Whether any of it is waiting on something.
   bool get hasUnsettled => !pending.isZero || !spentUnconfirmed.isZero;
@@ -39,10 +50,12 @@ class Balance {
       other is Balance &&
       other.spendable == spendable &&
       other.pending == pending &&
-      other.spentUnconfirmed == spentUnconfirmed;
+      other.spentUnconfirmed == spentUnconfirmed &&
+      other.transparent == transparent;
 
   @override
-  int get hashCode => Object.hash(spendable, pending, spentUnconfirmed);
+  int get hashCode =>
+      Object.hash(spendable, pending, spentUnconfirmed, transparent);
 }
 
 /// One transaction, as it affected this wallet.
@@ -236,11 +249,18 @@ class SpendQuote {
   /// Each one is a proof, so this is also roughly how long the send will take.
   final int inputs;
 
+  /// Whether this payment leaves the Orchard pool as a ZIP 318 crossing.
+  ///
+  /// A crossing pays a fixed denomination for a fixed fee, so its numbers are
+  /// not negotiable the way an ordinary payment's are.
+  final bool crossing;
+
   const SpendQuote({
     required this.amount,
     required this.fee,
     required this.change,
     required this.inputs,
+    this.crossing = false,
   });
 
   /// What leaves the wallet in total.

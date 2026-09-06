@@ -140,3 +140,49 @@ fn stopping_a_sync_that_never_started_is_harmless() {
     wallet.stop_sync();
     assert!(!wallet.is_syncing());
 }
+
+/// The scanner matches the scripts the wallet has recorded, so an address that
+/// was never derived is one nothing is looking for and a payment to it goes
+/// unseen. Creating an account has to derive them.
+#[test]
+fn creating_an_account_derives_the_transparent_addresses_to_watch() {
+    let (_dir, wallet) = open();
+    wallet.create_account(&seed(), 0, 3_000_000).unwrap();
+
+    let watched = wallet.watched_transparent_addresses().unwrap();
+    assert!(
+        watched > 0,
+        "no transparent address was derived, so nothing is watching for one"
+    );
+}
+
+/// Issuing an address may consume the last of the unused window, and a window
+/// that is not topped up silently stops the wallet seeing new payments.
+#[test]
+fn issuing_addresses_keeps_the_watch_window_full() {
+    let (_dir, wallet) = open();
+    let id = wallet.create_account(&seed(), 0, 3_000_000).unwrap();
+    let before = wallet.watched_transparent_addresses().unwrap();
+
+    for _ in 0..5 {
+        wallet.next_address(id, None).unwrap();
+    }
+
+    assert!(
+        wallet.watched_transparent_addresses().unwrap() >= before,
+        "the window shrank"
+    );
+}
+
+/// Transparent value is reported, and kept apart from what can be sent
+/// directly: spending it needs a shielding step first.
+#[test]
+fn a_balance_separates_transparent_from_sendable() {
+    let (_dir, wallet) = open();
+    let id = wallet.create_account(&seed(), 0, 3_000_000).unwrap();
+
+    let balance = wallet.balance(id).unwrap();
+    assert_eq!(balance.transparent, 0);
+    assert_eq!(balance.shielded(), 0);
+    assert_eq!(balance.total(), 0);
+}

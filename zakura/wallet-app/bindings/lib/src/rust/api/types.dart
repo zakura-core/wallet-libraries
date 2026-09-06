@@ -58,15 +58,25 @@ class ApiBalance {
   /// Committed by a transaction that has not been mined.
   final BigInt spentUnconfirmed;
 
+  /// Value held on transparent addresses.
+  ///
+  /// Kept apart from `spendable` because it cannot be sent directly:
+  /// transparent funds have to be shielded first.
+  final BigInt transparent;
+
   const ApiBalance({
     required this.spendable,
     required this.pending,
     required this.spentUnconfirmed,
+    required this.transparent,
   });
 
   @override
   int get hashCode =>
-      spendable.hashCode ^ pending.hashCode ^ spentUnconfirmed.hashCode;
+      spendable.hashCode ^
+      pending.hashCode ^
+      spentUnconfirmed.hashCode ^
+      transparent.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -75,7 +85,8 @@ class ApiBalance {
           runtimeType == other.runtimeType &&
           spendable == other.spendable &&
           pending == other.pending &&
-          spentUnconfirmed == other.spentUnconfirmed;
+          spentUnconfirmed == other.spentUnconfirmed &&
+          transparent == other.transparent;
 }
 
 /// Why something could not be done.
@@ -187,16 +198,27 @@ class ApiSpendQuote {
   /// How many notes would be spent, and so how many proofs.
   final int inputs;
 
+  /// Whether this payment leaves the Orchard pool as a ZIP 318 crossing.
+  ///
+  /// A crossing pays a fixed denomination for a fixed fee, so its numbers are
+  /// not negotiable the way an ordinary payment's are.
+  final bool crossing;
+
   const ApiSpendQuote({
     required this.amount,
     required this.fee,
     required this.change,
     required this.inputs,
+    required this.crossing,
   });
 
   @override
   int get hashCode =>
-      amount.hashCode ^ fee.hashCode ^ change.hashCode ^ inputs.hashCode;
+      amount.hashCode ^
+      fee.hashCode ^
+      change.hashCode ^
+      inputs.hashCode ^
+      crossing.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -206,7 +228,8 @@ class ApiSpendQuote {
           amount == other.amount &&
           fee == other.fee &&
           change == other.change &&
-          inputs == other.inputs;
+          inputs == other.inputs &&
+          crossing == other.crossing;
 }
 
 /// What the engine is doing.

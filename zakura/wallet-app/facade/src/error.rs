@@ -58,6 +58,8 @@ pub enum ErrorCode {
     Build = 15,
     /// A sync is already running.
     AlreadySyncing = 16,
+    /// The amount cannot leave the Orchard pool in one step.
+    NotCanonicalDenomination = 17,
 }
 
 impl ErrorCode {
@@ -128,6 +130,16 @@ pub enum Error {
     Build(String),
     /// A sync is already running.
     AlreadySyncing,
+    /// The amount cannot leave the Orchard pool in one step.
+    ///
+    /// Value leaves Orchard only as a ZIP 318 crossing, and every crossing
+    /// carries one of a fixed set of denominations so that they cannot be told
+    /// apart. An arbitrary amount is not one of them. This is a property of the
+    /// shape, not a limitation of this wallet: adjusting the amount to the
+    /// nearest canonical one would send somebody a different sum than they
+    /// asked for, and a crossing that is nearly the right shape stands out from
+    /// the ones that are.
+    NotCanonicalDenomination(String),
 }
 
 impl Error {
@@ -150,6 +162,7 @@ impl Error {
             Error::CrossingUnavailable => ErrorCode::CrossingUnavailable,
             Error::Build(_) => ErrorCode::Build,
             Error::AlreadySyncing => ErrorCode::AlreadySyncing,
+            Error::NotCanonicalDenomination(_) => ErrorCode::NotCanonicalDenomination,
         }
     }
 }
@@ -190,6 +203,10 @@ impl fmt::Display for Error {
             ),
             Error::Build(e) => write!(f, "the transaction could not be built: {e}"),
             Error::AlreadySyncing => f.write_str("a sync is already running"),
+            Error::NotCanonicalDenomination(why) => write!(
+                f,
+                "that amount cannot be paid from the Orchard pool: {why}"
+            ),
         }
     }
 }
@@ -204,6 +221,10 @@ impl From<zakura_wallet_store::Error> for Error {
                 Error::VersionMismatch(kind.remedy().to_owned())
             }
             StoreError::NoSuchAccount { id } => Error::NoSuchAccount(id.0),
+            // The store has two spellings of the same fact. Mapping only one of
+            // them would make an unknown account look like a database failure
+            // depending on which method was called.
+            StoreError::UnknownAccount(id) => Error::NoSuchAccount(id.0),
             other => Error::Storage(other.to_string()),
         }
     }

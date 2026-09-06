@@ -576,10 +576,12 @@ impl SseDecode for crate::api::types::ApiBalance {
         let mut var_spendable = <u64>::sse_decode(deserializer);
         let mut var_pending = <u64>::sse_decode(deserializer);
         let mut var_spentUnconfirmed = <u64>::sse_decode(deserializer);
+        let mut var_transparent = <u64>::sse_decode(deserializer);
         return crate::api::types::ApiBalance {
             spendable: var_spendable,
             pending: var_pending,
             spent_unconfirmed: var_spentUnconfirmed,
+            transparent: var_transparent,
         };
     }
 }
@@ -633,11 +635,13 @@ impl SseDecode for crate::api::types::ApiSpendQuote {
         let mut var_fee = <u64>::sse_decode(deserializer);
         let mut var_change = <u64>::sse_decode(deserializer);
         let mut var_inputs = <u32>::sse_decode(deserializer);
+        let mut var_crossing = <bool>::sse_decode(deserializer);
         return crate::api::types::ApiSpendQuote {
             amount: var_amount,
             fee: var_fee,
             change: var_change,
             inputs: var_inputs,
+            crossing: var_crossing,
         };
     }
 }
@@ -864,6 +868,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::ApiBalance {
             self.spendable.into_into_dart().into_dart(),
             self.pending.into_into_dart().into_dart(),
             self.spent_unconfirmed.into_into_dart().into_dart(),
+            self.transparent.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -947,6 +952,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::ApiSpendQuote {
             self.fee.into_into_dart().into_dart(),
             self.change.into_into_dart().into_dart(),
             self.inputs.into_into_dart().into_dart(),
+            self.crossing.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1035,6 +1041,7 @@ impl SseEncode for crate::api::types::ApiBalance {
         <u64>::sse_encode(self.spendable, serializer);
         <u64>::sse_encode(self.pending, serializer);
         <u64>::sse_encode(self.spent_unconfirmed, serializer);
+        <u64>::sse_encode(self.transparent, serializer);
     }
 }
 
@@ -1072,6 +1079,7 @@ impl SseEncode for crate::api::types::ApiSpendQuote {
         <u64>::sse_encode(self.fee, serializer);
         <u64>::sse_encode(self.change, serializer);
         <u32>::sse_encode(self.inputs, serializer);
+        <bool>::sse_encode(self.crossing, serializer);
     }
 }
 
