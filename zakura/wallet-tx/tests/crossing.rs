@@ -12,7 +12,7 @@ use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use rand::SeedableRng;
 use zakura_wallet_core::{AccountId, KeyScope, pool::PoolId};
 use zakura_wallet_scan::{
-    NullifierSnapshot, ScanKeys, TransparentWatch, detect_batch,
+    NullifierSnapshot, ScanKeys, detect_batch,
     testing::{ChainBuilder, IRONWOOD_ACTIVATION, test_params},
 };
 use zakura_wallet_store::{WalletDb, testing::test_db};
@@ -90,7 +90,6 @@ fn wallet_on_the_grid(values: &[u64], fvk: &FullViewingKey) -> (WalletDb, BlockH
     let batch = detect_batch(
         &test_params(),
         &keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),
@@ -683,7 +682,6 @@ fn a_crossing_anchors_on_the_grid_from_a_wallet_that_stopped_anywhere() {
     let batch = detect_batch(
         &test_params(),
         &scan_keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),

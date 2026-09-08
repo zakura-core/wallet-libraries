@@ -205,21 +205,18 @@ pub struct DetectedTx {
     pub received: Vec<DetectedNote>,
     /// Wallet notes this transaction spent.
     pub spends: Vec<DetectedSpend>,
-    /// Transparent outputs paid to addresses the wallet is watching.
-    pub transparent_received: Vec<DetectedTransparentOutput>,
-    /// Transparent outputs of the wallet's that this transaction spent.
-    pub transparent_spends: Vec<OutPoint>,
     /// Every outpoint this transaction spends, wallet's or not.
     ///
     /// Only populated for transactions the wallet is keeping anyway, so this is
     /// bounded by the wallet's own history rather than by the chain.
     ///
-    /// It exists because this wallet recovers from the tip downwards, so it
-    /// routinely meets the transaction that spent an output before the one that
-    /// created it. At that moment the outpoint means nothing — the output is
-    /// not in the watch set, because the wallet has not scanned far enough down
-    /// to know it owns it — and by the time it does, this transaction is long
-    /// past. Recording the outpoints lets the two be joined up later.
+    /// Scanning no longer discovers transparent outputs — the private ledger
+    /// does — but it still records what the transactions it keeps consume.
+    /// That is not discovery: it cannot create an output, only attach a spend
+    /// to one the ledger recovered, and the correction it makes is always
+    /// downwards. Under descending recovery the spend is routinely met long
+    /// before the output it consumes, so the record is what lets the two be
+    /// joined up later.
     pub candidate_spends: Vec<OutPoint>,
     /// Ironwood actions that may hide outgoing data this wallet can recover.
     ///
@@ -231,11 +228,7 @@ pub struct DetectedTx {
 
 impl DetectedTx {
     fn is_empty(&self) -> bool {
-        self.received.is_empty()
-            && self.spends.is_empty()
-            && self.transparent_received.is_empty()
-            && self.transparent_spends.is_empty()
-            && self.enhance_candidates.is_empty()
+        self.received.is_empty() && self.spends.is_empty() && self.enhance_candidates.is_empty()
         // `candidate_spends` is deliberately not consulted: every transaction
         // has inputs, so counting them would make every transaction relevant.
     }

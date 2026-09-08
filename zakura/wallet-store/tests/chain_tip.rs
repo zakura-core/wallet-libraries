@@ -9,7 +9,7 @@ use zakura_wallet_core::{
     scanning::{ScanPriority, ScanRange},
 };
 use zakura_wallet_scan::{
-    KeyScope, NullifierSnapshot, ScanKeys, TransparentWatch, detect_batch,
+    KeyScope, NullifierSnapshot, ScanKeys, detect_batch,
     testing::{ChainBuilder, IRONWOOD_ACTIVATION, ORCHARD_ACTIVATION, fvk_from_seed, test_params},
 };
 use zakura_wallet_store::{PRUNING_DEPTH, VERIFY_LOOKAHEAD, WalletDb, testing::test_db};
@@ -47,7 +47,6 @@ fn scan_blocks(db: &mut WalletDb, count: usize) {
     let batch = detect_batch(
         &test_params(),
         &keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),
@@ -294,7 +293,6 @@ fn rewinding_discards_everything_the_chain_can_reproduce() {
     let batch = detect_batch(
         &test_params(),
         &keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),
@@ -364,7 +362,6 @@ fn rewinding_frees_the_notes_a_purely_scanned_spend_held() {
     let nf = detect_batch(
         &test_params(),
         &keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &probe.anchor(),
         probe.blocks(),
@@ -389,7 +386,6 @@ fn rewinding_frees_the_notes_a_purely_scanned_spend_held() {
     let batch = detect_batch(
         &test_params(),
         &keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),
@@ -499,7 +495,6 @@ fn rewinding_keeps_what_the_chain_cannot_reproduce() {
     let batch = detect_batch(
         &test_params(),
         &keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),
@@ -579,7 +574,6 @@ fn a_provably_dead_spend_gives_its_note_back() {
     let nf = detect_batch(
         &test_params(),
         &keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &probe.anchor(),
         probe.blocks(),
@@ -604,7 +598,6 @@ fn a_provably_dead_spend_gives_its_note_back() {
     let batch = detect_batch(
         &test_params(),
         &keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),
@@ -738,7 +731,6 @@ fn a_transaction_reported_missing_can_still_be_mined() {
     let batch = detect_batch(
         &test_params(),
         &keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),

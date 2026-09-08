@@ -21,7 +21,7 @@ use zakura_wallet_facade::{
 
 use types::{
     ApiAccount, ApiBalance, ApiError, ApiHistoryEntry, ApiPoolAmounts, ApiSendReceipt, ApiSpendQuote,
-    ApiSyncPhase, ApiSyncProgress,
+    ApiSyncPhase, ApiSyncProgress, ApiTransparentCoverage, ApiTransparentUtxo,
 };
 
 /// The open wallet.
@@ -170,6 +170,47 @@ pub fn balance(account: u32) -> Result<ApiBalance, ApiError> {
         spent_unconfirmed: b.spent_unconfirmed,
         transparent: b.transparent,
     })
+}
+
+/// Returns how far the private transparent ledger has read for an account.
+///
+/// Transparent funds are discovered by that ledger and by nothing else, so
+/// this is what lets the interface say "current through block N" rather than
+/// implying the transparent balance is live. See
+/// `docs/zakura_transparent_pir.md`.
+pub fn transparent_coverage(account: u32) -> Result<ApiTransparentCoverage, ApiError> {
+    let c = wallet()?.transparent_coverage(account)?;
+    Ok(ApiTransparentCoverage {
+        settled_through: c.settled_through,
+        covered_through: c.covered_through,
+        unresolved_spends: c.unresolved_spends,
+        provisional_shards: c.provisional_shards,
+    })
+}
+
+/// Returns the transparent addresses the wallet watches for an account.
+///
+/// A diagnostic. An address missing here is one the gap limit did not reach,
+/// and a payment to it is one the ledger will never be asked about.
+pub fn transparent_addresses(account: u32) -> Result<Vec<String>, ApiError> {
+    Ok(wallet()?.transparent_addresses(account)?)
+}
+
+/// Returns every unspent transparent output the ledger holds for an account.
+///
+/// Everything it holds, not only what can be spent: filtering by maturity would
+/// answer "nothing" for a wallet that holds funds it cannot spend yet, which is
+/// the confusion this exists to remove.
+pub fn transparent_utxos(account: u32) -> Result<Vec<ApiTransparentUtxo>, ApiError> {
+    Ok(wallet()?
+        .transparent_utxos(account)?
+        .into_iter()
+        .map(|(address, value, mined_height)| ApiTransparentUtxo {
+            address,
+            value,
+            mined_height,
+        })
+        .collect())
 }
 
 /// Returns an account's transactions, most recent first.

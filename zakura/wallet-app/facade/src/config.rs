@@ -43,6 +43,19 @@ pub struct WalletConfig {
     pub cache_path: PathBuf,
     /// The lightwalletd endpoint, as a URL.
     pub lightwalletd_url: String,
+    /// Where the private transparent ledger reads from.
+    ///
+    /// `None` means the wallet cannot ask, and it says so rather than showing
+    /// a transparent balance of zero — the two are different states and a
+    /// person acts differently on them. Transparent funds are discovered by
+    /// this and by nothing else; see `docs/zakura_transparent_pir.md`.
+    ///
+    /// Two URLs, and deliberately not one. Public filter bytes are identical
+    /// for every wallet and reveal nothing about which one asked; the private
+    /// queries that follow reveal which chain ranges had probable activity.
+    /// One host serving both can join those facts together, and no property of
+    /// the protocol prevents it.
+    pub transparent: Option<zakura_wallet_transparent::Endpoints>,
     /// How many bytes of blocks to fetch at once.
     ///
     /// The default is the mobile budget, because the cost of guessing wrong is
@@ -64,6 +77,7 @@ impl WalletConfig {
             wallet_path: dir.join("wallet.db"),
             cache_path: dir.join("cache.db"),
             lightwalletd_url: lightwalletd_url.into(),
+            transparent: None,
             batch_bytes: zakura_wallet_sync::ByteBudget::MOBILE.bytes(),
             poll_interval: std::time::Duration::from_secs(20),
         }

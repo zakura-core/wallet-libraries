@@ -21,7 +21,7 @@ use rand::SeedableRng;
 use zakura_wallet_core::pool::PoolId;
 use zakura_wallet_lwd::testing::to_wire;
 use zakura_wallet_scan::{
-    AccountId, KeyScope, NullifierSnapshot, ScanKeys, TransparentWatch, detect_batch,
+    AccountId, KeyScope, NullifierSnapshot, ScanKeys, detect_batch,
     testing::{ChainBuilder, IRONWOOD_ACTIVATION, fvk_from_seed, test_params, test_rng},
 };
 use zakura_wallet_store::WalletDb as NewDb;
@@ -181,7 +181,6 @@ fn compare(
         let batch = detect_batch(
             &params,
             &keys,
-            &TransparentWatch::default(),
             &NullifierSnapshot::default(),
             anchor,
             blocks,
@@ -358,7 +357,6 @@ fn both_implementations_agree_about_change_the_wallet_funded() {
     let funding_nf = detect_batch(
         &test_params(),
         &ScanKeys::from_accounts([(AccountId(1), alice.clone())]),
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &probe.anchor(),
         probe.blocks(),

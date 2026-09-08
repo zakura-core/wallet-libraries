@@ -95,25 +95,18 @@ pub(crate) fn put_batch<P: Parameters>(
                 mark_note_spent(conn, tx_ref, spend.pool, &spend.nullifier)?;
             }
 
-            for output in &tx.transparent_received {
-                // A coinbase is exactly the transaction at index zero, which
-                // the compact form states. Knowing this here is what keeps an
-                // immature coinbase out of the spendable set later; an output
-                // learned from a UTXO snapshot has no index and cannot say.
-                put_transparent_output(conn, tx_ref, output, tx.index == 0, chain_tip, block.height)?;
-            }
-
-            // Every outpoint this transaction spends is remembered, not only
-            // the ones already recognised as the wallet's. Under descending
-            // recovery the output being spent is usually still below the
-            // scanned range, so at this moment the wallet cannot tell that it
-            // owns it; the record is what lets the spend attach itself when the
-            // output finally arrives.
+            // Scanning discovers no transparent outputs: the private ledger
+            // in `zakura-wallet-transparent` is the only thing that does, and
+            // it is what a compact block's `vout` used to be read for. See
+            // `docs/zakura_transparent_pir.md`.
+            //
+            // What is still recorded is what this transaction consumed. Every
+            // outpoint, not only those already recognised as the wallet's:
+            // under descending recovery the output being spent is usually
+            // still below the scanned range, so at this moment the wallet
+            // cannot tell that it owns it, and the record is what lets the
+            // spend attach itself when the output finally arrives.
             for outpoint in &tx.candidate_spends {
-                remember_spend(conn, tx_ref, outpoint)?;
-            }
-
-            for outpoint in &tx.transparent_spends {
                 mark_transparent_spent(conn, tx_ref, outpoint)?;
             }
 
@@ -561,6 +554,137 @@ pub(crate) fn put_transparent_output(
     crate::gap::observe_use(conn, output.address_id, observed_at)?;
 
     Ok(())
+}
+
+/// Writes one output the private ledger recovered.
+///
+/// Separate from [`put_transparent_output`] because the two know different
+/// things. That one is handed an output found inside a block the wallet
+/// scanned, so the block row, the transaction row and the address are all
+/// already present. This one is handed an event that names a transaction the
+/// wallet may never have seen, so the transaction row has to be made before
+/// there is anything to point at.
+pub(crate) fn put_recovered_output(
+    conn: &rusqlite::Transaction<'_>,
+    output: &crate::RecoveredOutput,
+    address_id: i64,
+    account: u32,
+) -> Result<(), Error> {
+    let tx_ref = put_recovered_transaction(conn, output.txid, output.mined_height)?;
+
+    conn.prepare_cached(&format!(
+        "INSERT INTO {CACHE_SCHEMA}.transparent_received_outputs
+            (transaction_id, output_index, account_id, address_id, script, value,
+             is_coinbase, max_observed_unspent_height)
+         VALUES (:tx, :index, :account, :address_id, :script, :value,
+                 :is_coinbase, :observed)
+         ON CONFLICT (transaction_id, output_index) DO UPDATE SET
+            value = :value,
+            max_observed_unspent_height =
+                MAX(IFNULL(max_observed_unspent_height, 0), :observed),
+            -- An unknown answer must not overwrite a known one. A row created
+            -- by a transaction this wallet built knows the flag exactly; a
+            -- recovered spend does not know it at all.
+            is_coinbase = IFNULL(:is_coinbase, is_coinbase)"
+    ))?
+    .execute(named_params![
+        ":tx": tx_ref,
+        ":index": output.output_index,
+        ":account": account,
+        ":address_id": address_id,
+        ":script": &output.script,
+        ":value": output.value as i64,
+        ":is_coinbase": output.coinbase,
+        ":observed": u32::from(output.observed_at),
+    ])?;
+
+    // A spend of this output may already be in the map. The ledger replays in
+    // chain order, but a spend recorded when this installation broadcast it
+    // predates any of that, and so does one recorded by scanning a block that
+    // spent it.
+    let output_id: i64 = conn
+        .prepare_cached(&format!(
+            "SELECT id FROM {CACHE_SCHEMA}.transparent_received_outputs
+             WHERE transaction_id = :tx AND output_index = :index"
+        ))?
+        .query_row(
+            named_params![":tx": tx_ref, ":index": output.output_index],
+            |row| row.get(0),
+        )?;
+
+    conn.prepare_cached(&format!(
+        "INSERT OR IGNORE INTO {CACHE_SCHEMA}.transparent_received_output_spends
+            (output_id, transaction_id)
+         SELECT :output_id, m.spending_transaction_id
+         FROM {CACHE_SCHEMA}.transparent_spend_map m
+         JOIN {CACHE_SCHEMA}.transactions t ON t.id = m.spending_transaction_id
+         JOIN {CACHE_SCHEMA}.transactions p ON p.id = :tx
+         WHERE m.prevout_txid = p.txid AND m.prevout_output_index = :index
+         ORDER BY t.mined_height IS NULL, t.mined_height
+         LIMIT 1"
+    ))?
+    .execute(named_params![
+        ":output_id": output_id,
+        ":tx": tx_ref,
+        ":index": output.output_index,
+    ])?;
+
+    crate::gap::observe_use(conn, address_id, output.observed_at)?;
+    Ok(())
+}
+
+/// Writes one spend the private ledger recovered.
+pub(crate) fn put_recovered_spend(
+    conn: &rusqlite::Transaction<'_>,
+    spend: &crate::RecoveredSpend,
+) -> Result<(), Error> {
+    let tx_ref = put_recovered_transaction(conn, spend.spending_txid, Some(spend.height))?;
+    let outpoint =
+        transparent::bundle::OutPoint::new(*spend.spent_txid.as_ref(), spend.spent_output_index);
+    mark_transparent_spent(conn, tx_ref, &outpoint)
+}
+
+/// Inserts the transaction row a recovered event needs, returning its id.
+///
+/// Neither `block_height` nor `tx_index` is written. A recovered event names a
+/// height, not a block row, and `block_height` is a foreign key into `blocks` —
+/// which holds what the wallet *scanned*, and need not hold every height the
+/// ledger read over. `tx_index` is dropped by the ledger's replay before this
+/// sees it, and a zero there would say "coinbase" to anything that read it.
+///
+/// A known height clears any earlier proof the transaction was unmined: the
+/// schema forbids holding both, and a transaction can be reported missing by a
+/// server that had not seen it yet and then mined a moment later.
+fn put_recovered_transaction(
+    conn: &rusqlite::Transaction<'_>,
+    txid: TxId,
+    mined_height: Option<BlockHeight>,
+) -> Result<i64, Error> {
+    match mined_height {
+        Some(height) => conn
+            .prepare_cached(&format!(
+                "INSERT INTO {CACHE_SCHEMA}.transactions (txid, mined_height)
+                 VALUES (:txid, :height)
+                 ON CONFLICT (txid) DO UPDATE SET
+                    mined_height = :height,
+                    confirmed_unmined_at_height = NULL"
+            ))?
+            .execute(named_params![
+                ":txid": txid.as_ref(),
+                ":height": u32::from(height),
+            ])?,
+        // Nothing is asserted about a transaction whose height the run does not
+        // know. `DO NOTHING` rather than an update, so a row that already knows
+        // more is left alone.
+        None => conn
+            .prepare_cached(&format!(
+                "INSERT INTO {CACHE_SCHEMA}.transactions (txid)
+                 VALUES (:txid)
+                 ON CONFLICT (txid) DO NOTHING"
+            ))?
+            .execute(named_params![":txid": txid.as_ref()])?,
+    };
+    tx_ref(conn, txid)
 }
 
 /// Remembers that a transaction spends an outpoint, whether or not the wallet

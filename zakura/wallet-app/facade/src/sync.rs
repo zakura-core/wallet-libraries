@@ -324,6 +324,7 @@ impl Wallet {
         });
 
         let url = self.config.lightwalletd_url.clone();
+        let transparent = self.config.transparent.clone();
         let params = self.params;
         let budget = ByteBudget::new(self.config.batch_bytes);
         let poll_interval = self.config.poll_interval;
@@ -391,6 +392,14 @@ impl Wallet {
                                 ..SyncConfig::default()
                             },
                         );
+                        // Without endpoints the engine still scans, enhances
+                        // and reports; what does not happen is transparent
+                        // coverage advancing, and the interface can say so.
+                        if let Some(endpoints) = transparent {
+                            engine = engine.with_transparent(Arc::new(
+                                zakura_wallet_transparent::TransparentPir::new(endpoints, params),
+                            ));
+                        }
 
                         let mut status = engine.status();
                         let publish = tx.clone();

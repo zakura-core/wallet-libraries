@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
 
 /// An account the wallet holds.
 class ApiAccount {
@@ -368,4 +368,89 @@ class ApiSyncProgress {
           scannedTo == other.scannedTo &&
           blocksRemaining == other.blocksRemaining &&
           failed == other.failed;
+}
+
+/// How far the private transparent ledger has read.
+///
+/// The interface needs this beside the balance, not instead of it. A
+/// transparent balance is true as of a height, and a wallet that has not read
+/// as far as the tip is not the same as one that read the whole chain and found
+/// nothing — but they show the same number.
+class ApiTransparentCoverage {
+  /// The last height covered by sealed shards alone.
+  ///
+  /// Absent when nothing has been read: no transparent service is
+  /// configured, or the wallet has not scanned down to the covered range.
+  /// Absent is not zero, and must not be presented as though it were.
+  final int? settledThrough;
+
+  /// The last height covered, including a shard that can still be replaced.
+  final int? coveredThrough;
+
+  /// Spends the ledger could not resolve to an output it holds.
+  ///
+  /// Non-zero means the balance is too high: an output is still counted that
+  /// something has already consumed. The interface must not call the balance
+  /// synchronized while this is set, however current the coverage looks.
+  final int unresolvedSpends;
+
+  /// How many unsealed shard revisions the coverage rests on.
+  final int provisionalShards;
+
+  const ApiTransparentCoverage({
+    this.settledThrough,
+    this.coveredThrough,
+    required this.unresolvedSpends,
+    required this.provisionalShards,
+  });
+
+  @override
+  int get hashCode =>
+      settledThrough.hashCode ^
+      coveredThrough.hashCode ^
+      unresolvedSpends.hashCode ^
+      provisionalShards.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ApiTransparentCoverage &&
+          runtimeType == other.runtimeType &&
+          settledThrough == other.settledThrough &&
+          coveredThrough == other.coveredThrough &&
+          unresolvedSpends == other.unresolvedSpends &&
+          provisionalShards == other.provisionalShards;
+}
+
+/// One transparent output the ledger holds.
+class ApiTransparentUtxo {
+  /// The address it pays.
+  final String address;
+
+  /// Its value in zatoshis.
+  final BigInt value;
+
+  /// The height it was mined at, where the ledger knows one.
+  ///
+  /// Absent for an output the ledger only ever saw spent: a recovered spend
+  /// carries what it consumed but not the height that was created at.
+  final int? minedHeight;
+
+  const ApiTransparentUtxo({
+    required this.address,
+    required this.value,
+    this.minedHeight,
+  });
+
+  @override
+  int get hashCode => address.hashCode ^ value.hashCode ^ minedHeight.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ApiTransparentUtxo &&
+          runtimeType == other.runtimeType &&
+          address == other.address &&
+          value == other.value &&
+          minedHeight == other.minedHeight;
 }

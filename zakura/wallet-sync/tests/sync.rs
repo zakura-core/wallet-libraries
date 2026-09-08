@@ -1423,3 +1423,87 @@ async fn a_transparent_flag_bars_a_transaction_from_private_retrieval_for_good()
         "the decision must be recorded against the transaction, not the position"
     );
 }
+
+// ------------------------------------------------------ the transparent step
+
+/// A stand-in for the private ledger, counting how often the engine ran it.
+struct CountingTransparent {
+    runs: std::sync::atomic::AtomicUsize,
+    outcome: Result<zakura_wallet_sync::TransparentProgress, String>,
+}
+
+impl zakura_wallet_sync::TransparentSource for CountingTransparent {
+    fn recover(
+        &self,
+        _db: &mut zakura_wallet_store::WalletDb,
+    ) -> Result<
+        zakura_wallet_sync::TransparentProgress,
+        zakura_wallet_sync::transparent::BoxError,
+    > {
+        self.runs
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.outcome.clone().map_err(Into::into)
+    }
+}
+
+#[tokio::test]
+async fn the_transparent_ledger_runs_once_a_pass_and_reports_where_it_reached() {
+    // Once, not once per step: a run that reported a step every time would
+    // never let `run` reach `Idle`, and one that never reported would leave the
+    // caller unable to tell coverage had moved.
+    let (anchor, blocks) = paying_chain(4, 10_000);
+    let source = std::sync::Arc::new(CountingTransparent {
+        runs: std::sync::atomic::AtomicUsize::new(0),
+        outcome: Ok(zakura_wallet_sync::TransparentProgress {
+            outputs: 2,
+            spends: 1,
+            unresolved: 0,
+            settled_through: Some(h(START + 3)),
+            covered_through: Some(h(START + 3)),
+        }),
+    });
+
+    let mut engine = engine(InMemoryChain::new(anchor, blocks)).with_transparent(source.clone());
+    let summary = engine.run(&CancellationToken::new()).await.unwrap();
+
+    assert_eq!(source.runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(summary.transparent_outputs, 2);
+    assert_eq!(summary.transparent_spends, 1);
+    assert_eq!(summary.transparent_covered_through, Some(h(START + 3)));
+
+    // And again on the next pass, because the published shard set grows even
+    // when the wallet's own scan queue does not.
+    engine.run(&CancellationToken::new()).await.unwrap();
+    assert_eq!(source.runs.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn an_engine_with_no_transparent_source_still_syncs() {
+    // The honest state of a wallet with no transparent service configured:
+    // everything else works, and transparent coverage does not move. It is
+    // reported as nothing read, never as a balance of zero.
+    let (anchor, blocks) = paying_chain(4, 10_000);
+    let mut engine = engine(InMemoryChain::new(anchor, blocks));
+
+    let summary = engine.run(&CancellationToken::new()).await.unwrap();
+    assert_eq!(summary.transparent_covered_through, None);
+    assert_eq!(summary.transparent_outputs, 0);
+    assert!(summary.batches > 0, "the rest of the sync is unaffected");
+}
+
+#[tokio::test]
+async fn a_failing_transparent_ledger_fails_the_run_rather_than_reporting_success() {
+    // Not swallowed. A wallet that carried on would report itself synced while
+    // its transparent balance was silently stale, which is the exact failure
+    // the coverage numbers exist to make visible.
+    let (anchor, blocks) = paying_chain(2, 10_000);
+    let source = std::sync::Arc::new(CountingTransparent {
+        runs: std::sync::atomic::AtomicUsize::new(0),
+        outcome: Err("the shard service is unreachable".to_owned()),
+    });
+
+    let mut engine = engine(InMemoryChain::new(anchor, blocks)).with_transparent(source);
+    let err = engine.run(&CancellationToken::new()).await.unwrap_err();
+    assert_matches!(err, zakura_wallet_sync::Error::Transparent(_));
+    assert!(err.to_string().contains("unreachable"), "{err}");
+}

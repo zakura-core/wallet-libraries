@@ -16,6 +16,7 @@ name = "zakura_wallet_store"
 test-dependencies = []
 
 [dependencies]
+hex.workspace = true
 incrementalmerkletree.workspace = true
 orchard.workspace = true
 rusqlite.workspace = true

@@ -25,11 +25,11 @@ use zcash_protocol::{TxId, consensus::Parameters};
 
 use zakura_wallet_core::detected::{
     BlockAnchor, DetectedBatch, DetectedBlock, DetectedNote, DetectedSpend,
-    DetectedTransparentOutput, DetectedTx, EnhanceCandidate, NullifierSnapshot, PoolCommitments,
+    DetectedTx, EnhanceCandidate, NullifierSnapshot, PoolCommitments,
 };
 
 use crate::{
-    error::ScanError, keys::ScanKeys, position::PositionTracker, transparent::TransparentWatch,
+    error::ScanError, keys::ScanKeys, position::PositionTracker,
 };
 
 /// How many compact actions one rayon task trial-decrypts.
@@ -82,7 +82,6 @@ impl PoolDecryptions {
 pub fn detect_batch<P: Parameters>(
     params: &P,
     keys: &ScanKeys,
-    watch: &TransparentWatch,
     nullifiers: &NullifierSnapshot,
     anchor: &BlockAnchor,
     blocks: &[CompactBlock],
@@ -108,7 +107,6 @@ pub fn detect_batch<P: Parameters>(
     // batch, and the spend must still be recognised. The overlay is discarded
     // when the call returns, leaving the caller's snapshot untouched.
     let mut overlay = nullifiers.clone();
-    let mut watch = watch.clone();
 
     let mut prior_sizes = anchor.tree_sizes;
     let mut detected_blocks = Vec::with_capacity(blocks.len());
@@ -117,7 +115,6 @@ pub fn detect_batch<P: Parameters>(
         let detected = detect_block(
             params,
             keys,
-            &mut watch,
             &mut overlay,
             &prior_sizes,
             block,
@@ -222,7 +219,6 @@ fn decrypt_pool<P: ShieldedPool>(keys: &ScanKeys, blocks: &[CompactBlock]) -> Po
 fn detect_block<P: Parameters>(
     params: &P,
     keys: &ScanKeys,
-    watch: &mut TransparentWatch,
     overlay: &mut NullifierSnapshot,
     prior_sizes: &TreeSizes,
     block: &CompactBlock,
@@ -290,15 +286,11 @@ fn detect_block<P: Parameters>(
             &funding_accounts,
         );
 
-        let (transparent_received, transparent_spends) = detect_transparent(watch, tx);
-
         let detected = DetectedTx {
             index: tx.index,
             txid: tx.txid,
             received: orchard_received.into_iter().chain(ironwood_received).collect(),
             spends: orchard_spends.into_iter().chain(ironwood_spends).collect(),
-            transparent_received,
-            transparent_spends,
             // Every outpoint, kept only if the transaction turns out to be the
             // wallet's for some other reason — which `into_option` decides
             // immediately below.
@@ -511,41 +503,3 @@ fn collect_enhance_candidates(
         .collect()
 }
 
-/// Matches a transaction's transparent inputs and outputs against the watch set.
-fn detect_transparent(
-    watch: &mut TransparentWatch,
-    tx: &CompactTx,
-) -> (Vec<DetectedTransparentOutput>, Vec<transparent::bundle::OutPoint>) {
-    if watch.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
-
-    let spends = tx
-        .vin
-        .iter()
-        .filter(|outpoint| watch.spends(outpoint))
-        .cloned()
-        .collect();
-
-    let mut received = Vec::new();
-    for (output_index, txout) in tx.vout.iter().enumerate() {
-        if let Some(address) = watch.watched(txout) {
-            let output_index = u32::try_from(output_index)
-                .expect("a transaction cannot have more than u32::MAX outputs");
-            // Recorded now so that a spend of this output later in the same
-            // batch is recognised rather than deferred to the next pass.
-            watch.add_utxo(transparent::bundle::OutPoint::new(
-                tx.txid.into(),
-                output_index,
-            ));
-            received.push(DetectedTransparentOutput {
-                output_index,
-                account: address.account,
-                address_id: address.address_id,
-                txout: txout.clone(),
-            });
-        }
-    }
-
-    (received, spends)
-}

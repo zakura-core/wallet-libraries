@@ -95,8 +95,7 @@ pub fn decrypt_transaction<P: Parameters>(
     );
 
     let expiry = tx.expiry_height();
-    let (transparent_received, transparent_spends, candidate_spends, is_coinbase) =
-        match_transparent(watch, &tx);
+    let (transparent_received, candidate_spends, is_coinbase) = match_transparent(watch, &tx);
 
     Ok(EnhancedTx {
         txid: tx.txid(),
@@ -105,7 +104,6 @@ pub fn decrypt_transaction<P: Parameters>(
         spent_nullifiers,
         shielded_value_balance,
         transparent_received,
-        transparent_spends,
         candidate_spends,
         is_coinbase,
         raw: raw.to_vec(),
@@ -114,23 +112,21 @@ pub fn decrypt_transaction<P: Parameters>(
 
 /// Matches a transaction's transparent bundle against the wallet's watch set.
 ///
-/// The mirror of `detect::detect_transparent`, over a full bundle rather than a
-/// compact one. It differs in two ways, both because a full transaction says
-/// more than a compact one: coinbase-ness is read from the bundle rather than
-/// inferred from the transaction's index, and there is no need to fold newly
-/// created outputs back into the watch set, because a single transaction cannot
-/// spend an output it creates.
+/// Coinbase-ness is read from the bundle rather than inferred from the
+/// transaction's index, which is the one thing a full transaction says that a
+/// compact one has to guess at.
+///
+/// Inputs are returned whole rather than filtered to the ones the wallet
+/// recognises. Recognising them here would need a set of believed-unspent
+/// outpoints, and the store's spend map already joins an input to the output it
+/// consumes in whichever order the two arrive — which is the case that matters,
+/// since this wallet routinely meets a spend long before the output it spends.
 fn match_transparent(
     watch: &TransparentWatch,
     tx: &Transaction,
-) -> (
-    Vec<DetectedTransparentOutput>,
-    Vec<OutPoint>,
-    Vec<OutPoint>,
-    bool,
-) {
+) -> (Vec<DetectedTransparentOutput>, Vec<OutPoint>, bool) {
     let Some(bundle) = tx.transparent_bundle() else {
-        return (Vec::new(), Vec::new(), Vec::new(), false);
+        return (Vec::new(), Vec::new(), false);
     };
 
     let is_coinbase = bundle.is_coinbase();
@@ -142,12 +138,6 @@ fn match_transparent(
     } else {
         bundle.vin.iter().map(|txin| txin.prevout().clone()).collect()
     };
-
-    let transparent_spends = candidate_spends
-        .iter()
-        .filter(|outpoint| watch.spends(outpoint))
-        .cloned()
-        .collect();
 
     let mut transparent_received = Vec::new();
     for (output_index, txout) in bundle.vout.iter().enumerate() {
@@ -165,7 +155,6 @@ fn match_transparent(
 
     (
         transparent_received,
-        transparent_spends,
         candidate_spends,
         is_coinbase,
     )

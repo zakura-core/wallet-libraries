@@ -53,6 +53,14 @@ pub enum Error {
     /// match what the wallet scanned is counted as a failed attempt and the job
     /// is retried within its bound rather than taking the sync down.
     Rediscovery(String),
+    /// The private transparent ledger could not complete a run.
+    ///
+    /// Carried as text rather than as a typed cause: the source is a trait
+    /// object chosen by the caller, and the engine has no business
+    /// interpreting a PIR transport's failures. Not fatal to the wallet's
+    /// state — a run that fails advances no coverage, so the range it did not
+    /// read stays unread rather than being recorded as empty.
+    Transparent(String),
 }
 
 impl fmt::Display for Error {
@@ -74,6 +82,9 @@ impl fmt::Display for Error {
                 f,
                 "a block fetched to rebuild enhance candidates could not be used: {why}"
             ),
+            Error::Transparent(why) => {
+                write!(f, "the private transparent ledger could not be read: {why}")
+            }
         }
     }
 }
@@ -85,7 +96,7 @@ impl std::error::Error for Error {
             Error::Store(e) => Some(e),
             Error::Enhance(e) => Some(e),
             Error::Unrecoverable { cause, .. } => Some(cause),
-            Error::MissingAnchor { .. } | Error::Rediscovery(_) => None,
+            Error::MissingAnchor { .. } | Error::Rediscovery(_) | Error::Transparent(_) => None,
         }
     }
 }

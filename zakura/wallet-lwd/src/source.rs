@@ -5,7 +5,7 @@ use std::{fmt, ops::Range, sync::Arc};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use zakura_wallet_core::{BlockAnchor, CompactBlock};
 use zakura_wallet_sync::{
-    ByteBudget, ChainSource, ChainTip, Direction, FetchedTransaction, SweptUtxo,
+    ByteBudget, ChainSource, ChainTip, Direction, FetchedTransaction,
     SubtreeRoot as SyncSubtreeRoot, estimated_size,
 };
 use zcash_protocol::{TxId, consensus::BlockHeight};
@@ -88,6 +88,18 @@ pub struct LightwalletdSource {
 }
 
 /// The pool types to request, given whether the server serves transparent data.
+///
+/// All four, never a subset, and this survives transparent discovery moving to
+/// the private ledger. The reason was never transparent detection: eligibility
+/// for private Ironwood enhancement is decided by a transaction touching no
+/// *other* pool, so a stream pruned to Ironwood — or to Ironwood and Orchard —
+/// would make a Sapling-touching transaction look Ironwood-only and hand it to
+/// a private query it must never receive. See `docs/zakura_pir_enhance.md`.
+///
+/// Transparent stays in the list for the same kind of reason: an enhanced
+/// transaction's transparent bundle attributes outputs the wallet already
+/// holds, and `probe_transparent` below is what establishes the server will
+/// serve any of it. Neither is a discovery path.
 fn pool_types(transparent: bool) -> Vec<i32> {
     let mut pools = vec![
         PoolType::Sapling as i32,
@@ -447,14 +459,6 @@ impl ChainSource for LightwalletdSource {
         Ok(blocks)
     }
 
-    async fn address_utxos(
-        &self,
-        addresses: Vec<String>,
-        start: BlockHeight,
-    ) -> Result<Vec<SweptUtxo>, Self::Error> {
-        self.fetch_address_utxos(addresses, start).await
-    }
-
     async fn transaction(
         &self,
         txid: TxId,
@@ -550,61 +554,3 @@ fn is_unknown_transaction(status: &tonic::Status) -> bool {
         || message.contains("transaction not found")
 }
 
-impl LightwalletdSource {
-    /// Asks the server which of these addresses currently hold unspent outputs.
-    ///
-    /// This names the wallet's addresses to the server, which can group them
-    /// into one wallet on that basis alone — the only place this wallet does
-    /// that, and the reason it is reserved for restoring rather than run
-    /// continuously. What it buys is the one thing local script matching cannot
-    /// do: find outputs at addresses the wallet had not yet derived when the
-    /// blocks carrying them were scanned.
-    async fn fetch_address_utxos(
-        &self,
-        addresses: Vec<String>,
-        start: BlockHeight,
-    ) -> Result<Vec<SweptUtxo>, LwdError> {
-        if addresses.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut client = self.client.clone();
-        let mut stream = client
-            .get_address_utxos_stream(crate::proto::GetAddressUtxosArg {
-                addresses,
-                start_height: u64::from(u32::from(start)),
-                // Unlimited: a restoring wallet needs everything, and a partial
-                // answer that looked complete would leave funds invisible.
-                max_entries: 0,
-            })
-            .await
-            .map_err(LwdError::Rpc)?
-            .into_inner();
-
-        let mut out = Vec::new();
-        while let Some(utxo) = stream.message().await.map_err(LwdError::Rpc)? {
-            let txid: [u8; 32] = utxo.txid.as_slice().try_into().map_err(|_| {
-                LwdError::Malformed("an unspent output carried a malformed txid".into())
-            })?;
-            let value = u64::try_from(utxo.value_zat).map_err(|_| {
-                LwdError::Malformed("an unspent output carried a negative value".into())
-            })?;
-            let height = u32::try_from(utxo.height).map_err(|_| {
-                LwdError::Malformed("an unspent output carried an out-of-range height".into())
-            })?;
-            let output_index = u32::try_from(utxo.index).map_err(|_| {
-                LwdError::Malformed("an unspent output carried a negative index".into())
-            })?;
-
-            out.push(SweptUtxo {
-                address: utxo.address,
-                txid: TxId::from_bytes(txid),
-                output_index,
-                script: utxo.script,
-                value,
-                height: BlockHeight::from_u32(height),
-            });
-        }
-        Ok(out)
-    }
-}

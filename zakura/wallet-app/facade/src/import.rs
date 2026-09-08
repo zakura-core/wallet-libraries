@@ -95,42 +95,52 @@ impl Wallet {
         self.with_reader(|db| Ok(db.transparent_addresses(Self::account_id(account))?))
     }
 
-    /// Asks the server what is unspent at the wallet's transparent addresses.
+    /// Returns what the private ledger holds for an account: address, value,
+    /// and the height the output was mined at where that is known.
     ///
-    /// This is the same request the recovery sweep makes, run on demand so that
-    /// "no transparent funds" can be told apart from "not looked for".
-    pub fn transparent_utxos(&self, account: u32) -> Result<Vec<(String, u64, u32)>, Error> {
-        let addresses = self.transparent_addresses(account)?;
-        if addresses.is_empty() {
-            return Ok(Vec::new());
-        }
-        let from = self
+    /// It asks nobody. The whole point of the change this replaced is that a
+    /// wallet no longer names its addresses to a server to find out what it
+    /// holds, so a diagnostic that did would answer a question the wallet no
+    /// longer asks. What it reports is what has been recovered, and
+    /// [`Wallet::transparent_coverage`] says how far that reaches — which is
+    /// the pair a person needs to tell "no transparent funds" from "not yet
+    /// read that far".
+    pub fn transparent_utxos(&self, account: u32) -> Result<Vec<(String, u64, Option<u32>)>, Error> {
+        self.with_reader(|db| {
+            Ok(db
+                .transparent_utxos(Self::account_id(account))?
+                .into_iter()
+                .map(|(address, value, height)| (address, value, height.map(u32::from)))
+                .collect())
+        })
+    }
+
+    /// How far the private transparent ledger has read, and what still
+    /// contradicts it.
+    ///
+    /// A transparent balance is true as of a height, and this is that height.
+    /// `settled_through` rests on sealed shards alone; `covered_through` may
+    /// reach further into a tail that can still be republished. An unresolved
+    /// spend forbids calling the balance synchronized however current the
+    /// coverage looks: it is an output still counted that something has
+    /// already consumed.
+    pub fn transparent_coverage(&self, account: u32) -> Result<TransparentCoverage, Error> {
+        let birthday = self
             .accounts()?
             .into_iter()
             .find(|a| a.id == account)
             .map(|a| a.birthday)
             .unwrap_or_else(|| self.earliest_birthday());
 
-        let url = self.config.lightwalletd_url.clone();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| Error::Source(format!("could not start a runtime: {e}")))?;
-
-        runtime.block_on(async move {
-            let source = zakura_wallet_lwd::LightwalletdSource::connect(&url).await?;
-            let utxos = zakura_wallet_sync::ChainSource::address_utxos(
-                &source,
-                addresses,
-                BlockHeight::from_u32(from),
-            )
-            .await
-            .map_err(|e| Error::Source(e.to_string()))?;
-
-            Ok(utxos
-                .into_iter()
-                .map(|u| (u.address, u.value, u32::from(u.height)))
-                .collect())
+        self.with_reader(|db| {
+            let state =
+                db.transparent_state(Self::account_id(account), BlockHeight::from_u32(birthday))?;
+            Ok(TransparentCoverage {
+                settled_through: state.settled_through.map(u32::from),
+                covered_through: state.covered_through.map(u32::from),
+                unresolved_spends: state.unresolved_spends,
+                provisional_shards: state.provisional_shards,
+            })
         })
     }
 
@@ -154,6 +164,23 @@ impl Wallet {
     }
 }
 
+/// How far the private transparent ledger has read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransparentCoverage {
+    /// The last height covered by sealed shards alone.
+    ///
+    /// `None` when the account watches no transparent script, or when nothing
+    /// has been read yet. Never reported as a height of zero: a wallet that
+    /// could not ask and a wallet that read to genesis are different states.
+    pub settled_through: Option<u32>,
+    /// The last height covered, including any shard still growing.
+    pub covered_through: Option<u32>,
+    /// Spends the ledger could not resolve to an output it holds.
+    pub unresolved_spends: u32,
+    /// How many unsealed shard revisions the current coverage rests on.
+    pub provisional_shards: u32,
+}
+
 /// What a transaction did, read from its own bytes.
 ///
 /// The wallet's own side of a transaction says what it spent and what came
@@ -161,7 +188,6 @@ impl Wallet {
 /// from Ironwood may have left to a transparent address, to another shielded
 /// one, or back to the wallet. Only the bytes say which, and the wallet keeps
 /// them for its own transactions.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionShape {
     /// How many transparent inputs it spends.
     pub transparent_inputs: usize,

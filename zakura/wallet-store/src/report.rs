@@ -165,7 +165,7 @@ pub(crate) fn transparent_balance(
     // Interpolated rather than bound: it is a height this function computed,
     // and binding it would mean every clause had to mention it whether or not
     // it needed it.
-    let unspent = format!("o.id NOT IN ({held}) AND o.observed_spent_at_height IS NULL");
+    let unspent = format!("o.id NOT IN ({held})");
 
     Ok(Balance {
         // Buried deep enough that a reorg is not expected to take it back, and
@@ -447,9 +447,8 @@ pub(crate) fn spendable_utxos(
            AND t.mined_height IS NOT NULL
            AND t.mined_height <= {confirmed_below}
            -- Not already committed to a transaction that might still go
-           -- through, and not observed missing by a sweep.
+           -- through.
            AND o.id NOT IN ({held})
-           AND o.observed_spent_at_height IS NULL
            -- Never an immature coinbase, and never one whose maturity the
            -- wallet cannot establish.
            AND o.is_coinbase IS 0

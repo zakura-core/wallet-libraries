@@ -80,8 +80,6 @@ pub struct SyncConfig {
     /// Ranges below this are left alone, which is how a caller asks for "just
     /// catch up to the tip" rather than a full recovery.
     pub min_priority: ScanPriority,
-    /// How transparent outputs are discovered.
-    pub transparent_discovery: TransparentDiscovery,
     /// How many transactions one enhancement step may fetch.
     ///
     /// A cap rather than "drain it": a step that ran until the queue emptied
@@ -96,31 +94,8 @@ impl Default for SyncConfig {
             budget: ByteBudget::MOBILE,
             min_priority: ScanPriority::Historic,
             enhance_batch: 16,
-            transparent_discovery: TransparentDiscovery::SweepOnRestore,
         }
     }
-}
-
-/// How the wallet finds transparent outputs it did not see arrive.
-///
-/// Detection from compact blocks needs the address to have been derived before
-/// the block was scanned. Recovery runs from the tip downwards, so a receipt at
-/// a high address index near the tip is met while the window is still narrow,
-/// and the lower-index receipt that would have widened it arrives too late.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransparentDiscovery {
-    /// Match scripts against blocks and nothing else.
-    ///
-    /// Names no address to anybody. The cost is the case above: a restored
-    /// wallet may not see funds at addresses beyond the window it started with.
-    CompactOnly,
-    /// Ask the server once, when recovery completes, then compact-only.
-    ///
-    /// The request names the wallet's addresses, and a server can group them
-    /// into one wallet on that basis. That is a real disclosure, made once at
-    /// restore rather than continuously, in exchange for not silently missing
-    /// funds a restored wallet already holds.
-    SweepOnRestore,
 }
 
 /// What one call to [`SyncEngine::step`] did.
@@ -154,8 +129,19 @@ pub enum Step {
         /// a wallet synchronising. It stays queued and is asked again later.
         failed: usize,
     },
-    /// A transparent UTXO sweep reconciled the wallet's transparent outputs.
-    Swept,
+    /// The private transparent ledger read further into the chain.
+    TransparentCovered {
+        /// The lowest settled coverage across the wallet's scripts.
+        settled_through: Option<BlockHeight>,
+        /// The lowest coverage including any unsealed tail.
+        covered_through: Option<BlockHeight>,
+        /// Outputs recovered by this run.
+        outputs: usize,
+        /// Spends recovered by this run.
+        spends: usize,
+        /// Spends the run could not resolve to an output it holds.
+        unresolved: usize,
+    },
     /// There is nothing left to scan.
     Idle,
     /// The source returned nothing for a range that is still queued.
@@ -221,8 +207,18 @@ pub struct SyncEngine<S: ChainSource, P> {
     db: Option<WalletDb>,
     keys: ScanKeys,
     watch_set: TransparentWatch,
-    /// Whether the transparent sweep has already run in this engine's life.
-    swept: bool,
+    /// Where transparent history comes from, when the wallet has one.
+    ///
+    /// `None` is not "no transparent funds": it is "this wallet cannot ask".
+    /// The two are reported differently, because a balance shown as zero
+    /// because nothing could be asked is worse than one that says so.
+    transparent: Option<std::sync::Arc<dyn crate::TransparentSource>>,
+    /// Whether the transparent ledger has already run in this pass.
+    ///
+    /// Per run rather than per engine, unlike the sweep this replaces. A sweep
+    /// disclosed addresses and so was worth doing exactly once; a private run
+    /// discloses nothing new on a repeat, and the published shard set grows.
+    transparent_ran: bool,
     config: SyncConfig,
     status: watch::Sender<SyncStatus>,
     /// How far the *next* rewind will go, doubling after each one, and the
@@ -264,7 +260,8 @@ where
             db: Some(db),
             keys,
             watch_set,
-            swept: false,
+            transparent: None,
+            transparent_ran: false,
             config,
             status: watch::Sender::new(SyncStatus::default()),
             rewind_depth: INITIAL_REWIND,
@@ -272,6 +269,20 @@ where
             timings: Timings::default(),
             prefetch: None,
         }
+    }
+
+    /// Attaches the source of private transparent history.
+    ///
+    /// Without one the engine scans, enhances and reports as usual, and the
+    /// wallet's transparent coverage never advances. That is the honest state
+    /// for a wallet with no transparent service configured, and it is visible
+    /// as such rather than as an empty balance.
+    pub fn with_transparent(
+        mut self,
+        source: std::sync::Arc<dyn crate::TransparentSource>,
+    ) -> Self {
+        self.transparent = Some(source);
+        self
     }
 
     /// Returns a receiver for progress updates.
@@ -342,12 +353,13 @@ where
                     // history are recovery, not balance: fetching them ahead of
                     // blocks would delay the number somebody is actually
                     // looking at.
-                    // Recovery is finished: nothing is left to scan. This is
-                    // the one moment the sweep is worth its disclosure, and it
-                    // runs before enhancement so a restored balance is right
-                    // before its history is filled in.
-                    if self.sweep_transparent().await? {
-                        return Ok(Step::Swept);
+                    // Recovery is finished: nothing is left to scan. The
+                    // transparent ledger runs before enhancement so that a
+                    // restored balance is right before its history is filled
+                    // in, and after scanning because the addresses it asks
+                    // about are the ones scanning has just finished widening.
+                    if let Some(step) = self.recover_transparent().await? {
+                        return Ok(step);
                     }
                     if let Some(step) = self.drain_requests(RequestScope::All).await? {
                         return Ok(step);
@@ -500,29 +512,14 @@ where
         let mut db = self.db.take().expect("the wallet is present between steps");
         let params = self.params.clone();
         let keys = self.keys.clone();
-        // Any addresses the previous batch obliged the wallet to watch must
-        // exist before this one is detected, or a payment to one of them goes
-        // unseen and there is no second chance: transparent outputs are matched
-        // by script, not decrypted.
-        let watch_seed = self.watch_set.clone();
-
         let (db, outcome) = tokio::task::spawn_blocking(move || {
             let nullifiers = match db.unspent_nullifiers() {
                 Ok(nullifiers) => nullifiers,
                 Err(e) => return (db, Err(Error::from(e))),
             };
 
-            // Rebuilt from storage every batch rather than held as a field.
-            // It is a query over a few hundred rows, and the alternative is a
-            // watch set that silently goes stale as the wallet derives more
-            // addresses — which looks exactly like having no transparent funds.
-            let watch = match db.transparent_watch() {
-                Ok(data) => merge_watch(&watch_seed, data),
-                Err(e) => return (db, Err(Error::from(e))),
-            };
-
             let detect_began = std::time::Instant::now();
-            let detected = detect_batch(&params, &keys, &watch, &nullifiers, &anchor, &blocks);
+            let detected = detect_batch(&params, &keys, &nullifiers, &anchor, &blocks);
             let detect = detect_began.elapsed();
 
             match detected {
@@ -532,10 +529,10 @@ where
                     match db.put_batch(&params, &batch) {
                         Ok(()) => {
                             // Being paid at an address obliges the wallet to
-                            // watch further ahead, and the addresses it has to
-                            // add must exist before the *next* batch is
-                            // detected — a transparent output is matched by
-                            // script or not seen at all.
+                            // watch further ahead. Widened here as well as
+                            // before a transparent sync, because a shielding
+                            // this wallet sees arrive can expose an address the
+                            // private ledger has not been asked about yet.
                             if let Err(e) = widen_transparent_window(&mut db, &params) {
                                 return (db, Err(e));
                             }
@@ -654,6 +651,10 @@ where
     ///
     /// Returns how many batches were applied and how many rewinds happened.
     pub async fn run(&mut self, cancel: &CancellationToken) -> Result<SyncSummary, Error> {
+        // Once per pass. A published shard set grows, so unlike the sweep this
+        // replaced there is a reason to come back; unlike a scan step there is
+        // no queue that empties, so something has to say when to stop.
+        self.transparent_ran = false;
         self.update_tip().await?;
         // Before scanning, not after: a note found in the first batch needs the
         // roots of the shards around it in order to be witnessable at all.
@@ -667,7 +668,19 @@ where
                     summary.notes += notes;
                 }
                 Step::Rewound { .. } => summary.rewinds += 1,
-                Step::Swept => summary.swept = true,
+                Step::TransparentCovered {
+                    settled_through,
+                    covered_through,
+                    outputs,
+                    spends,
+                    unresolved,
+                } => {
+                    summary.transparent_settled_through = settled_through;
+                    summary.transparent_covered_through = covered_through;
+                    summary.transparent_outputs += outputs;
+                    summary.transparent_spends += spends;
+                    summary.unresolved_transparent_spends = unresolved;
+                }
                 Step::Enhanced {
                     applied, failed, ..
                 } => {
@@ -847,65 +860,54 @@ where
     S: ChainSource + Send + Sync + 'static,
     P: Parameters + Clone + Send + 'static,
 {
-    /// Reconciles transparent outputs against the server, once per run.
+    /// Reads the private transparent ledger forward, once per run.
     ///
-    /// Returns whether it did anything, so the caller can report it as a step.
-    async fn sweep_transparent(&mut self) -> Result<bool, Error> {
-        if self.config.transparent_discovery != TransparentDiscovery::SweepOnRestore
-            || self.swept
-        {
-            return Ok(false);
+    /// Returns the step to report, or `None` when there is nothing to do:
+    /// no source configured, no script watched, or it has already run in this
+    /// pass. Widening the address window comes first, because a script the
+    /// wallet has not derived is a script the ledger will not be asked about,
+    /// and the ledger is the only thing that would ever find it.
+    async fn recover_transparent(&mut self) -> Result<Option<Step>, Error> {
+        if self.transparent_ran {
+            return Ok(None);
         }
-        // Marked before the request rather than after: a sweep that fails must
-        // not be retried on every step, because each attempt names the wallet's
-        // addresses to the server again.
-        self.swept = true;
-
-        let Some(tip) = self.db().chain_tip()? else {
-            return Ok(false);
+        let Some(source) = self.transparent.clone() else {
+            return Ok(None);
         };
-
-        let watch = self.db().transparent_watch()?;
-        if watch.addresses.is_empty() {
-            return Ok(false);
-        }
+        self.transparent_ran = true;
 
         let params = self.params.clone();
-        let accounts = self.db().accounts(&params)?;
-        let mut acted = false;
+        let mut db = self.db.take().expect("the wallet is present between steps");
 
-        for account in accounts {
-            let addresses = self.db().transparent_addresses(account.id)?;
-            if addresses.is_empty() {
-                continue;
+        let (db, outcome) = tokio::task::spawn_blocking(move || {
+            if let Err(e) = widen_transparent_window(&mut db, &params) {
+                return (db, Err(e));
             }
-            // From the account's birthday: below it there is nothing of this
-            // account's to find, and asking about more than necessary widens
-            // what the server learns for no gain.
-            let from = account.birthday;
-            let utxos = self
-                .source
-                .address_utxos(addresses, from)
-                .await
-                .map_err(|e| Error::Source(SourceError::new(e)))?;
+            // Blocking, and the wallet goes in with it: the PIR client is
+            // CPU-bound, and every check it makes needs the wallet's own state
+            // to check against.
+            //
+            // Whether there is anything to read is the source's decision, not
+            // the engine's. A wallet watching no script and a wallet whose
+            // coverage is already current both produce a run that reads
+            // nothing, and the engine has no business telling them apart.
+            match source.recover(&mut db) {
+                Ok(progress) => (db, Ok(progress)),
+                Err(e) => (db, Err(Error::Transparent(e.to_string()))),
+            }
+        })
+        .await
+        .expect("the transparent task does not panic");
 
-            let swept: Vec<_> = utxos
-                .into_iter()
-                .map(|u| zakura_wallet_store::SweptOutput {
-                    address: u.address,
-                    txid: u.txid,
-                    output_index: u.output_index,
-                    script: u.script,
-                    value: u.value,
-                    height: u.height,
-                })
-                .collect();
-
-            self.db_mut().apply_utxo_sweep(account.id, from, tip, &swept)?;
-            acted = true;
-        }
-
-        Ok(acted)
+        self.db = Some(db);
+        let progress = outcome?;
+        Ok(Some(Step::TransparentCovered {
+            settled_through: progress.settled_through,
+            covered_through: progress.covered_through,
+            outputs: progress.outputs,
+            spends: progress.spends,
+            unresolved: progress.unresolved,
+        }))
     }
 
     /// Re-detects one already-scanned block to recover the enhance candidates
@@ -950,11 +952,9 @@ where
         // and return an empty candidate list indistinguishable from a correct
         // one.
         let nullifiers = self.db().all_nullifiers()?;
-        let watch = merge_watch(&self.watch_set, self.db().transparent_watch()?);
         let detected = detect_batch(
             &self.params,
             &self.keys,
-            &watch,
             &nullifiers,
             &anchor,
             std::slice::from_ref(&block),
@@ -1009,7 +1009,7 @@ pub fn merge_watch(
         .collect();
     scripts.extend(seed.entries());
 
-    TransparentWatch::new(scripts, stored.unspent.into_iter().chain(seed.outpoints()))
+    TransparentWatch::new(scripts)
 }
 
 impl<S, P> SyncEngine<S, P>
@@ -1197,8 +1197,21 @@ pub struct SyncSummary {
     pub notes: usize,
     /// How many times a continuity failure forced a rewind.
     pub rewinds: usize,
-    /// Whether a transparent sweep ran during this run.
-    pub swept: bool,
+    /// The lowest settled transparent coverage the run left behind.
+    pub transparent_settled_through: Option<BlockHeight>,
+    /// The lowest transparent coverage, including any unsealed tail.
+    pub transparent_covered_through: Option<BlockHeight>,
+    /// Transparent outputs the private ledger recovered during this run.
+    pub transparent_outputs: usize,
+    /// Spends of those outputs it recovered.
+    pub transparent_spends: usize,
+    /// Spends the ledger could not resolve.
+    ///
+    /// Non-zero forbids calling the transparent balance synchronized: an
+    /// unresolved spend is an output still counted that something has already
+    /// consumed, so the balance is too high in a way that looks entirely
+    /// ordinary.
+    pub unresolved_transparent_spends: usize,
     /// How many transactions were fetched whole and folded in.
     pub enhanced: usize,
     /// How many transactions the source could not be asked about.

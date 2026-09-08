@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1094798849;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1593956820;
 
 // Section: executor
 
@@ -642,6 +642,105 @@ fn wire__crate__api__sync_failure_impl(
         },
     )
 }
+fn wire__crate__api__transparent_addresses_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "transparent_addresses",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_account = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::types::ApiError>((move || {
+                    let output_ok = crate::api::transparent_addresses(api_account)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__transparent_coverage_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "transparent_coverage",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_account = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::types::ApiError>((move || {
+                    let output_ok = crate::api::transparent_coverage(api_account)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__transparent_utxos_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "transparent_utxos",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_account = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::types::ApiError>((move || {
+                    let output_ok = crate::api::transparent_utxos(api_account)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__validate_mnemonic_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -835,6 +934,36 @@ impl SseDecode for crate::api::types::ApiSyncProgress {
     }
 }
 
+impl SseDecode for crate::api::types::ApiTransparentCoverage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_settledThrough = <Option<u32>>::sse_decode(deserializer);
+        let mut var_coveredThrough = <Option<u32>>::sse_decode(deserializer);
+        let mut var_unresolvedSpends = <u32>::sse_decode(deserializer);
+        let mut var_provisionalShards = <u32>::sse_decode(deserializer);
+        return crate::api::types::ApiTransparentCoverage {
+            settled_through: var_settledThrough,
+            covered_through: var_coveredThrough,
+            unresolved_spends: var_unresolvedSpends,
+            provisional_shards: var_provisionalShards,
+        };
+    }
+}
+
+impl SseDecode for crate::api::types::ApiTransparentUtxo {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_address = <String>::sse_decode(deserializer);
+        let mut var_value = <u64>::sse_decode(deserializer);
+        let mut var_minedHeight = <Option<u32>>::sse_decode(deserializer);
+        return crate::api::types::ApiTransparentUtxo {
+            address: var_address,
+            value: var_value,
+            mined_height: var_minedHeight,
+        };
+    }
+}
+
 impl SseDecode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -853,6 +982,18 @@ impl SseDecode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_i32::<NativeEndian>().unwrap()
+    }
+}
+
+impl SseDecode for Vec<String> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<String>::sse_decode(deserializer));
+        }
+        return ans_;
     }
 }
 
@@ -875,6 +1016,20 @@ impl SseDecode for Vec<crate::api::types::ApiHistoryEntry> {
         let mut ans_ = vec![];
         for idx_ in 0..len_ {
             ans_.push(<crate::api::types::ApiHistoryEntry>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::types::ApiTransparentUtxo> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::types::ApiTransparentUtxo>::sse_decode(
                 deserializer,
             ));
         }
@@ -980,7 +1135,10 @@ fn pde_ffi_dispatcher_primary_impl(
         16 => wire__crate__api__start_sync_impl(port, ptr, rust_vec_len, data_len),
         17 => wire__crate__api__stop_sync_impl(port, ptr, rust_vec_len, data_len),
         18 => wire__crate__api__sync_failure_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__validate_mnemonic_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__transparent_addresses_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__transparent_coverage_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__transparent_utxos_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__validate_mnemonic_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1201,6 +1359,51 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::types::ApiSyncProgress>
         self
     }
 }
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::ApiTransparentCoverage {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.settled_through.into_into_dart().into_dart(),
+            self.covered_through.into_into_dart().into_dart(),
+            self.unresolved_spends.into_into_dart().into_dart(),
+            self.provisional_shards.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::ApiTransparentCoverage
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::ApiTransparentCoverage>
+    for crate::api::types::ApiTransparentCoverage
+{
+    fn into_into_dart(self) -> crate::api::types::ApiTransparentCoverage {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::ApiTransparentUtxo {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.address.into_into_dart().into_dart(),
+            self.value.into_into_dart().into_dart(),
+            self.mined_height.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::ApiTransparentUtxo
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::ApiTransparentUtxo>
+    for crate::api::types::ApiTransparentUtxo
+{
+    fn into_into_dart(self) -> crate::api::types::ApiTransparentUtxo {
+        self
+    }
+}
 
 impl SseEncode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -1311,6 +1514,25 @@ impl SseEncode for crate::api::types::ApiSyncProgress {
     }
 }
 
+impl SseEncode for crate::api::types::ApiTransparentCoverage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Option<u32>>::sse_encode(self.settled_through, serializer);
+        <Option<u32>>::sse_encode(self.covered_through, serializer);
+        <u32>::sse_encode(self.unresolved_spends, serializer);
+        <u32>::sse_encode(self.provisional_shards, serializer);
+    }
+}
+
+impl SseEncode for crate::api::types::ApiTransparentUtxo {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.address, serializer);
+        <u64>::sse_encode(self.value, serializer);
+        <Option<u32>>::sse_encode(self.mined_height, serializer);
+    }
+}
+
 impl SseEncode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1332,6 +1554,16 @@ impl SseEncode for i32 {
     }
 }
 
+impl SseEncode for Vec<String> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <String>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::types::ApiAccount> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1348,6 +1580,16 @@ impl SseEncode for Vec<crate::api::types::ApiHistoryEntry> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::types::ApiHistoryEntry>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::types::ApiTransparentUtxo> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::types::ApiTransparentUtxo>::sse_encode(item, serializer);
         }
     }
 }

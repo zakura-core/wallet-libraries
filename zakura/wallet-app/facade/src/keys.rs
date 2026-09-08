@@ -58,7 +58,7 @@ pub(crate) fn spending_keys<P: Parameters>(
 mod tests {
     use zakura_wallet_core::{KeyScope, pool::PoolId};
     use zakura_wallet_scan::{
-        NullifierSnapshot, ScanKeys, TransparentWatch, detect_batch,
+        NullifierSnapshot, ScanKeys, detect_batch,
         testing::{ChainBuilder, IRONWOOD_ACTIVATION, test_params},
     };
     use zakura_wallet_store::{WalletDb, testing::test_db};
@@ -141,7 +141,6 @@ mod tests {
         let batch = detect_batch(
             &test_params(),
             &ScanKeys::from_accounts([(id, stored_fvk)]),
-            &TransparentWatch::default(),
             &NullifierSnapshot::default(),
             &chain.anchor(),
             chain.blocks(),

@@ -65,7 +65,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1094798849;
+  int get rustContentHash => 1593956820;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -127,6 +127,16 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiStopSync();
 
   Future<String?> crateApiSyncFailure();
+
+  Future<List<String>> crateApiTransparentAddresses({required int account});
+
+  Future<ApiTransparentCoverage> crateApiTransparentCoverage({
+    required int account,
+  });
+
+  Future<List<ApiTransparentUtxo>> crateApiTransparentUtxos({
+    required int account,
+  });
 
   Future<bool> crateApiValidateMnemonic({required String phrase});
 }
@@ -674,6 +684,102 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "sync_failure", argNames: []);
 
   @override
+  Future<List<String>> crateApiTransparentAddresses({required int account}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(account, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 19,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_String,
+          decodeErrorData: sse_decode_api_error,
+        ),
+        constMeta: kCrateApiTransparentAddressesConstMeta,
+        argValues: [account],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTransparentAddressesConstMeta =>
+      const TaskConstMeta(
+        debugName: "transparent_addresses",
+        argNames: ["account"],
+      );
+
+  @override
+  Future<ApiTransparentCoverage> crateApiTransparentCoverage({
+    required int account,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(account, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 20,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_api_transparent_coverage,
+          decodeErrorData: sse_decode_api_error,
+        ),
+        constMeta: kCrateApiTransparentCoverageConstMeta,
+        argValues: [account],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTransparentCoverageConstMeta =>
+      const TaskConstMeta(
+        debugName: "transparent_coverage",
+        argNames: ["account"],
+      );
+
+  @override
+  Future<List<ApiTransparentUtxo>> crateApiTransparentUtxos({
+    required int account,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(account, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 21,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_api_transparent_utxo,
+          decodeErrorData: sse_decode_api_error,
+        ),
+        constMeta: kCrateApiTransparentUtxosConstMeta,
+        argValues: [account],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTransparentUtxosConstMeta => const TaskConstMeta(
+    debugName: "transparent_utxos",
+    argNames: ["account"],
+  );
+
+  @override
   Future<bool> crateApiValidateMnemonic({required String phrase}) {
     return handler.executeNormal(
       NormalTask(
@@ -683,7 +789,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 19,
+            funcId: 22,
             port: port_,
           );
         },
@@ -829,6 +935,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ApiTransparentCoverage dco_decode_api_transparent_coverage(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return ApiTransparentCoverage(
+      settledThrough: dco_decode_opt_box_autoadd_u_32(arr[0]),
+      coveredThrough: dco_decode_opt_box_autoadd_u_32(arr[1]),
+      unresolvedSpends: dco_decode_u_32(arr[2]),
+      provisionalShards: dco_decode_u_32(arr[3]),
+    );
+  }
+
+  @protected
+  ApiTransparentUtxo dco_decode_api_transparent_utxo(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return ApiTransparentUtxo(
+      address: dco_decode_String(arr[0]),
+      value: dco_decode_u_64(arr[1]),
+      minedHeight: dco_decode_opt_box_autoadd_u_32(arr[2]),
+    );
+  }
+
+  @protected
   bool dco_decode_bool(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as bool;
@@ -859,6 +992,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<String> dco_decode_list_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_String).toList();
+  }
+
+  @protected
   List<ApiAccount> dco_decode_list_api_account(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_api_account).toList();
@@ -868,6 +1007,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   List<ApiHistoryEntry> dco_decode_list_api_history_entry(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_api_history_entry).toList();
+  }
+
+  @protected
+  List<ApiTransparentUtxo> dco_decode_list_api_transparent_utxo(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_api_transparent_utxo).toList();
   }
 
   @protected
@@ -1056,6 +1201,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ApiTransparentCoverage sse_decode_api_transparent_coverage(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_settledThrough = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_coveredThrough = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_unresolvedSpends = sse_decode_u_32(deserializer);
+    var var_provisionalShards = sse_decode_u_32(deserializer);
+    return ApiTransparentCoverage(
+      settledThrough: var_settledThrough,
+      coveredThrough: var_coveredThrough,
+      unresolvedSpends: var_unresolvedSpends,
+      provisionalShards: var_provisionalShards,
+    );
+  }
+
+  @protected
+  ApiTransparentUtxo sse_decode_api_transparent_utxo(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_address = sse_decode_String(deserializer);
+    var var_value = sse_decode_u_64(deserializer);
+    var var_minedHeight = sse_decode_opt_box_autoadd_u_32(deserializer);
+    return ApiTransparentUtxo(
+      address: var_address,
+      value: var_value,
+      minedHeight: var_minedHeight,
+    );
+  }
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8() != 0;
@@ -1086,6 +1263,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <String>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_String(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<ApiAccount> sse_decode_list_api_account(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -1107,6 +1296,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var ans_ = <ApiHistoryEntry>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_api_history_entry(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<ApiTransparentUtxo> sse_decode_list_api_transparent_utxo(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ApiTransparentUtxo>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_api_transparent_utxo(deserializer));
     }
     return ans_;
   }
@@ -1277,6 +1480,29 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_api_transparent_coverage(
+    ApiTransparentCoverage self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_opt_box_autoadd_u_32(self.settledThrough, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.coveredThrough, serializer);
+    sse_encode_u_32(self.unresolvedSpends, serializer);
+    sse_encode_u_32(self.provisionalShards, serializer);
+  }
+
+  @protected
+  void sse_encode_api_transparent_utxo(
+    ApiTransparentUtxo self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.address, serializer);
+    sse_encode_u_64(self.value, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.minedHeight, serializer);
+  }
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint8(self ? 1 : 0);
@@ -1307,6 +1533,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_String(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_api_account(
     List<ApiAccount> self,
     SseSerializer serializer,
@@ -1327,6 +1562,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_api_history_entry(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_api_transparent_utxo(
+    List<ApiTransparentUtxo> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_api_transparent_utxo(item, serializer);
     }
   }
 

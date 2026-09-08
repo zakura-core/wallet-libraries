@@ -1,0 +1,6 @@
+# The transparent PIR crates come from a private repository, and cargo's
+# built-in git transport cannot use the credential helper that authenticates
+# it. Fetching through the git CLI is what makes `zakura-wallet-transparent`
+# resolve on a developer machine and in CI without embedding a token here.
+[net]
+git-fetch-with-cli = true

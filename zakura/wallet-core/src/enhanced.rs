@@ -98,16 +98,16 @@ pub struct EnhancedTx {
     /// see these directly. Without them a transaction reached only through
     /// enhancement -- a shielding built on another device, say -- would have
     /// its transparent side silently discarded, and the outputs it created or
-    /// consumed would not be reflected until a restore sweep asked the server
-    /// about the wallet's addresses by name.
+    /// consumed would not be reflected until a shard covering them was
+    /// published and privately retrieved.
     pub transparent_received: Vec<DetectedTransparentOutput>,
-    /// Outpoints of the wallet's that this transaction spends.
-    pub transparent_spends: Vec<OutPoint>,
     /// Every outpoint it spends, wallet's or not.
     ///
-    /// Kept for the same reason scanning keeps them: under descending recovery
-    /// the spend is met before the output it spends, so the association can
-    /// only be made later.
+    /// Not filtered to the wallet's own, because deciding which are the
+    /// wallet's needs a set of believed-unspent outpoints and the store's
+    /// spend map already answers the question without one. Under descending
+    /// recovery the spend is routinely met before the output it consumes, so
+    /// the association can only be made later in any case.
     pub candidate_spends: Vec<OutPoint>,
     /// Whether this is a coinbase transaction.
     ///
@@ -116,21 +116,6 @@ pub struct EnhancedTx {
     pub is_coinbase: bool,
     /// The transaction's own bytes.
     pub raw: Vec<u8>,
-}
-
-impl EnhancedTx {
-    /// Whether the wallet has any reason to store this transaction.
-    ///
-    /// A transaction reached through enhancement is not necessarily the
-    /// wallet's: it may have been fetched because something else depended on
-    /// it. Storing one that touches the wallet nowhere would fill the durable
-    /// database with strangers' transactions.
-    pub fn touches_wallet(&self) -> bool {
-        !self.outputs.is_empty()
-            || !self.spent_nullifiers.is_empty()
-            || !self.transparent_received.is_empty()
-            || !self.transparent_spends.is_empty()
-    }
 }
 
 /// A chain's answer about one transaction.

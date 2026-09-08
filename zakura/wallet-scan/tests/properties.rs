@@ -8,7 +8,7 @@
 use proptest::prelude::*;
 use zakura_wallet_core::pool::{PoolId, TreeSizes};
 use zakura_wallet_scan::{
-    AccountId, DetectedBatch, KeyScope, NullifierSnapshot, ScanError, ScanKeys, TransparentWatch,
+    AccountId, DetectedBatch, KeyScope, NullifierSnapshot, ScanError, ScanKeys,
     detect_batch,
     testing::{ChainBuilder, IRONWOOD_ACTIVATION, fvk_from_seed, test_params},
 };
@@ -99,7 +99,6 @@ fn run(chain: &ChainBuilder, keys: &ScanKeys) -> Result<DetectedBatch, ScanError
     detect_batch(
         &test_params(),
         keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),
@@ -212,11 +211,11 @@ proptest! {
         for split in 0..=blocks.len() {
             let (head, tail) = blocks.split_at(split);
             let first = detect_batch(
-                &test_params(), &keys, &TransparentWatch::default(),
+                &test_params(), &keys,
                 &NullifierSnapshot::default(), &chain.anchor(), head,
             ).expect("the first half detects cleanly");
             let second = detect_batch(
-                &test_params(), &keys, &TransparentWatch::default(),
+                &test_params(), &keys,
                 &NullifierSnapshot::default(), &first.end_anchor, tail,
             ).expect("the second half detects cleanly");
 
@@ -279,7 +278,7 @@ proptest! {
         }
 
         let result = detect_batch(
-            &test_params(), &keys(), &TransparentWatch::default(),
+            &test_params(), &keys(),
             &NullifierSnapshot::default(), &anchor, &blocks,
         );
 

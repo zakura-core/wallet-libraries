@@ -1402,6 +1402,32 @@ inputs were never released if it was never mined.
 
 ### Transparent detection is local
 
+**Superseded on 2026-09-06, and the reasoning below is now history rather than
+description.** Transparent funds are discovered by the private ledger in
+`zakura-wallet-transparent` and by nothing else: public activity filters over
+content-sealed shards, matched locally, then private retrieval from the shards
+that matched. `docs/zakura_transparent_pir.md` is the current account.
+
+What that document does not repeat, and what this section got right, is why the
+fork's address-polling subsystem was never built here. That argument stands; it
+simply stopped being the *only* thing standing. Compact blocks do carry
+transparent data, local matching does name no address, and this wallet did
+watch a strictly wider window than the fork for exactly that reason. What local
+matching could not do is find a payment to an address that had not been derived
+when the block went past, and the mechanism that closed that gap —
+`sweep_transparent` calling `address_utxos` — spent the whole privacy argument
+to do it. The ledger closes the gap without spending it. Both are gone: the
+sweep, and the compact-block matching that was not enough on its own.
+
+Two things the section below still describes correctly. `pool_types` is still
+asked for in full, for the reason given further down rather than for
+transparent detection. And a transaction fetched whole by enhancement still has
+its transparent bundle read, because that transaction's identifier was already
+disclosed to fetch it; that is attribution of a transaction the wallet already
+holds, not discovery, and it cannot find anything the ledger would not.
+
+#### The original reasoning, kept for the record
+
 The single finding that shapes this work: **compact blocks carry transparent
 data.** `CompactTx.vin` and `CompactTx.vout` are in the lightwallet protocol —
 not an invention of this wallet; the fork vendors the same specification — and

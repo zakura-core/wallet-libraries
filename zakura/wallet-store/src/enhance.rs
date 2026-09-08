@@ -86,7 +86,6 @@ pub(crate) fn put_enhanced_tx<P: Parameters>(
     if funding.is_none()
         && tx.outputs.is_empty()
         && tx.transparent_received.is_empty()
-        && tx.transparent_spends.is_empty()
     {
         delete(conn, Locator::Transaction(tx.txid))?;
         return Ok(PutOutcome::Irrelevant);
@@ -122,11 +121,10 @@ pub(crate) fn put_enhanced_tx<P: Parameters>(
         )?;
     }
 
+    // Every input, not only those already recognised as the wallet's. The
+    // statement links the ones that turn out to be, and records all of them in
+    // the spend map so a later-arriving output can find its spender.
     for outpoint in &tx.candidate_spends {
-        crate::apply::remember_spend(conn, tx_ref, outpoint)?;
-    }
-
-    for outpoint in &tx.transparent_spends {
         crate::apply::mark_transparent_spent(conn, tx_ref, outpoint)?;
     }
 

@@ -437,17 +437,15 @@ impl WalletDb {
             });
         }
 
-        Ok(TransparentWatchData {
-            addresses,
-            unspent: self.unspent_outpoints()?,
-        })
+        Ok(TransparentWatchData { addresses })
     }
 
     /// Returns an account's watched transparent addresses, encoded.
     ///
-    /// This is what a UTXO sweep names to a server, so it is deliberately one
-    /// account's addresses rather than the whole wallet's: asking about two
-    /// accounts together tells the server they belong to the same person.
+    /// One account's addresses rather than the whole wallet's. Nothing names
+    /// them to a server any more, so the separation is no longer a privacy
+    /// measure; it is kept because an account is the unit a caller displays and
+    /// merging two would misattribute the result.
     pub fn transparent_addresses(
         &self,
         account: zakura_wallet_core::AccountId,
@@ -465,33 +463,6 @@ impl WalletDb {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Returns the outpoints of transparent outputs the wallet believes are
-    /// still unspent, which is what lets a spend of one be recognised.
-    pub(crate) fn unspent_outpoints(&self) -> Result<Vec<transparent::bundle::OutPoint>, Error> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT t.txid, o.output_index
-             FROM {schema}.transparent_received_outputs o
-             JOIN {schema}.transactions t ON t.id = o.transaction_id
-             WHERE o.id NOT IN (SELECT output_id FROM {schema}.transparent_received_output_spends)
-               AND o.observed_spent_at_height IS NULL",
-            schema = schema::CACHE_SCHEMA,
-        ))?;
-
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, u32>(1)?))
-        })?;
-
-        let mut out = Vec::new();
-        for row in rows {
-            let (txid, index) = row?;
-            let hash: [u8; 32] = txid
-                .try_into()
-                .map_err(|_| Error::Corrupt("a stored txid was not 32 bytes".into()))?;
-            out.push(transparent::bundle::OutPoint::new(hash, index));
-        }
-        Ok(out)
-    }
-
     /// Records a transparent address the wallet is watching.
     pub fn record_transparent_address(
         &mut self,
@@ -506,143 +477,272 @@ impl WalletDb {
         })
     }
 
-    /// Folds the result of a UTXO sweep into the wallet.
+    /// Folds one run of the private transparent ledger into the wallet.
     ///
-    /// Two halves, and the second is the reason a sweep is worth doing at all.
+    /// Everything here arrived from private retrieval, which means it arrived
+    /// without the wallet naming an address, an outpoint or a transaction to
+    /// anybody. What it also means is that none of it was checked by the
+    /// ordinary scanning path, so the checks the scanning path performed
+    /// implicitly are performed explicitly instead.
     ///
-    /// The outputs that came back are stored, if the wallet knows their
-    /// addresses. Those it does not know are refused rather than absorbed: an
-    /// output at an address the wallet never derived means the server answered
-    /// about somebody else's address, and quietly storing it would put another
-    /// person's funds in this balance.
+    /// Outputs at a script the wallet never derived are refused rather than
+    /// absorbed. A recovered event is indexed under the script it was stored
+    /// under, so one naming a script this wallet does not own means the service
+    /// answered about somebody else, and storing it would put another person's
+    /// funds in this balance.
     ///
-    /// Then the negative information. Any stored output of this account, mined
-    /// in the swept range, that the server did *not* return is marked spent as
-    /// of the tip. That is the only way to learn about a purely transparent
-    /// spend made from another installation of the same seed: it has no
-    /// shielded part and pays this wallet nothing, so nothing in the block
-    /// stream ever identifies it.
-    pub fn apply_utxo_sweep(
-        &mut self,
-        account: zakura_wallet_core::AccountId,
-        swept_from: BlockHeight,
-        tip: BlockHeight,
-        outputs: &[SweptOutput],
-    ) -> Result<(), Error> {
+    /// Coverage is written in the same transaction as the events it explains.
+    /// A caller that committed events without their coverage would re-derive
+    /// them on the next run; one that committed coverage without its events
+    /// would never look at that range again.
+    pub fn apply_transparent_ledger(&mut self, ledger: &TransparentLedger) -> Result<(), Error> {
         self.transactionally(|conn| {
-            // Marked first, cleared second. The obvious shape — store what came
-            // back, then mark everything else — needs a list of exclusions, and
-            // building one as SQL means interpolating a row per output into the
-            // statement. A wallet with a few thousand outputs would produce a
-            // query SQLite refuses on expression depth alone. Inverting it
-            // costs one extra write per returned output and no list at all.
+            let mut owners: std::collections::HashMap<Vec<u8>, (i64, u32)> =
+                std::collections::HashMap::new();
+
+            for output in &ledger.outputs {
+                let (address_id, account) = match owners.get(&output.script) {
+                    Some(found) => *found,
+                    None => {
+                        let found = conn
+                            .query_row(
+                                &format!(
+                                    "SELECT id, account_id FROM {schema}.addresses
+                                     WHERE transparent_script = :script",
+                                    schema = schema::CACHE_SCHEMA,
+                                ),
+                                named_params![":script": &output.script],
+                                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u32>(1)?)),
+                            )
+                            .optional()?
+                            .ok_or_else(|| {
+                                Error::Corrupt(format!(
+                                    "the ledger returned an output at script {}, which this \
+                                     wallet never derived; storing it would credit somebody \
+                                     else's funds",
+                                    hex::encode(&output.script)
+                                ))
+                            })?;
+                        owners.insert(output.script.clone(), found);
+                        found
+                    }
+                };
+
+                apply::put_recovered_output(conn, output, address_id, account)?;
+            }
+
+            for spend in &ledger.spends {
+                apply::put_recovered_spend(conn, spend)?;
+            }
+
+            // Replaced wholesale rather than merged. Each of these three is a
+            // statement about the state a run *ended* in, and a row that
+            // survived from an earlier run would assert something the current
+            // one did not: a resolved spend that is still unresolved, or a tail
+            // revision that has since been superseded.
             conn.execute(
                 &format!(
-                    "UPDATE {schema}.transparent_received_outputs
-                     SET observed_spent_at_height = :tip
-                     WHERE id IN (
-                        SELECT o.id FROM {schema}.transparent_received_outputs o
-                        JOIN {schema}.transactions t ON t.id = o.transaction_id
-                        WHERE o.account_id = :account
-                          AND t.mined_height IS NOT NULL
-                          AND t.mined_height >= :from
-                          AND t.mined_height <= :tip
-                          AND o.observed_spent_at_height IS NULL
-                     )",
+                    "DELETE FROM {schema}.transparent_unresolved_spends",
                     schema = schema::CACHE_SCHEMA,
                 ),
-                rusqlite::named_params![
-                    ":account": account.0,
-                    ":from": u32::from(swept_from),
-                    ":tip": u32::from(tip),
-                ],
+                [],
             )?;
-
-            for output in outputs {
-                let address_id: i64 = conn
-                    .query_row(
-                        &format!(
-                            "SELECT id FROM {schema}.addresses WHERE transparent_address = :a",
-                            schema = schema::CACHE_SCHEMA,
-                        ),
-                        rusqlite::named_params![":a": &output.address],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .ok_or_else(|| {
-                        Error::Corrupt(format!(
-                            "the server returned an output at {}, which this wallet \
-                             never derived; storing it would credit somebody else's funds",
-                            output.address
-                        ))
-                    })?;
-
-                // A sighting must never un-mine a transaction the wallet
-                // already knows more about.
+            for spend in &ledger.unresolved {
                 conn.execute(
                     &format!(
-                        "INSERT INTO {schema}.transactions (txid, mined_height)
-                         VALUES (:txid, :height)
-                         ON CONFLICT (txid) DO UPDATE SET
-                            mined_height = IFNULL(mined_height, :height),
-                            -- A sweep only ever reports mined outputs, so this
-                            -- write always contradicts any earlier proof the
-                            -- transaction was unmined.
-                            confirmed_unmined_at_height = NULL",
+                        "INSERT OR REPLACE INTO {schema}.transparent_unresolved_spends
+                            (spending_txid, input_index, spent_txid, spent_output_index,
+                             height, script)
+                         VALUES (:spending, :input, :spent, :index, :height, :script)",
                         schema = schema::CACHE_SCHEMA,
                     ),
-                    rusqlite::named_params![
-                        ":txid": output.txid.as_ref(),
-                        ":height": u32::from(output.height),
+                    named_params![
+                        ":spending": spend.spending_txid.as_ref(),
+                        ":input": spend.input_index,
+                        ":spent": spend.spent_txid.as_ref(),
+                        ":index": spend.spent_output_index,
+                        ":height": u32::from(spend.height),
+                        ":script": &spend.script,
                     ],
                 )?;
+            }
 
-                let tx_ref: i64 = conn.query_row(
-                    &format!(
-                        "SELECT id FROM {schema}.transactions WHERE txid = :txid",
-                        schema = schema::CACHE_SCHEMA,
-                    ),
-                    rusqlite::named_params![":txid": output.txid.as_ref()],
-                    |row| row.get(0),
-                )?;
-
-                // `observed_spent_at_height = NULL` on both paths: the server
-                // just said this output is unspent, which overrides the blanket
-                // mark above whether the row is new or already present.
+            conn.execute(
+                &format!(
+                    "DELETE FROM {schema}.transparent_provisional",
+                    schema = schema::CACHE_SCHEMA,
+                ),
+                [],
+            )?;
+            for revision in &ledger.provisional {
                 conn.execute(
                     &format!(
-                        "INSERT INTO {schema}.transparent_received_outputs
-                            (transaction_id, output_index, account_id, address_id, script,
-                             value, is_coinbase, max_observed_unspent_height,
-                             observed_spent_at_height)
-                         VALUES (:tx, :index, :account, :address_id, :script, :value,
-                                 -- A sweep carries no transaction index, so
-                                 -- coinbase-ness is unknown. NULL, not false:
-                                 -- guessing false can build a transaction
-                                 -- consensus rejects.
-                                 NULL, :tip, NULL)
-                         ON CONFLICT (transaction_id, output_index) DO UPDATE SET
-                            max_observed_unspent_height =
-                                MAX(IFNULL(max_observed_unspent_height, 0), :tip),
-                            observed_spent_at_height = NULL",
+                        "INSERT OR REPLACE INTO {schema}.transparent_provisional
+                            (shard_id, revision, manifest_digest, end_height)
+                         VALUES (:shard, :revision, :digest, :end)",
                         schema = schema::CACHE_SCHEMA,
                     ),
-                    rusqlite::named_params![
-                        ":tx": tx_ref,
-                        ":index": output.output_index,
-                        ":account": account.0,
-                        ":address_id": address_id,
-                        ":script": &output.script,
-                        ":value": output.value as i64,
-                        ":tip": u32::from(tip),
+                    named_params![
+                        ":shard": revision.shard_id as i64,
+                        ":revision": revision.revision,
+                        ":digest": &revision.manifest_digest,
+                        ":end": u32::from(revision.end_height),
                     ],
                 )?;
+            }
 
-                gap::observe_use(conn, address_id, output.height)?;
+            for coverage in &ledger.coverage {
+                conn.execute(
+                    &format!(
+                        "INSERT INTO {schema}.transparent_coverage
+                            (script, account_id, settled_through, covered_through)
+                         VALUES (:script, :account, :settled, :covered)
+                         ON CONFLICT (script) DO UPDATE SET
+                            account_id = :account,
+                            -- Monotone. A run that read a shorter range than an
+                            -- earlier one has not un-read the earlier one, and
+                            -- coverage that could go backwards would let a
+                            -- transient failure quietly re-open a range the
+                            -- wallet already paid to close.
+                            settled_through = MAX(settled_through, :settled),
+                            covered_through = MAX(covered_through, :covered)",
+                        schema = schema::CACHE_SCHEMA,
+                    ),
+                    named_params![
+                        ":script": &coverage.script,
+                        ":account": coverage.account.0,
+                        ":settled": u32::from(coverage.settled_through),
+                        ":covered": u32::from(coverage.covered_through),
+                    ],
+                )?;
             }
 
             Ok(())
         })
+    }
+
+    /// How far the private ledger has read, per script, for one account.
+    ///
+    /// A script with no row has no coverage at all, and is reported at the
+    /// account's birthday rather than omitted: the caller uses this to decide
+    /// where to start reading, and a missing script must start from the
+    /// beginning rather than be skipped.
+    pub fn transparent_coverage(
+        &self,
+        account: zakura_wallet_core::AccountId,
+        birthday: BlockHeight,
+    ) -> Result<Vec<ScriptCoverage>, Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT a.transparent_script, c.settled_through, c.covered_through
+             FROM {schema}.addresses a
+             LEFT JOIN {schema}.transparent_coverage c
+                    ON c.script = a.transparent_script
+             WHERE a.account_id = :account AND a.transparent_script IS NOT NULL",
+            schema = schema::CACHE_SCHEMA,
+        ))?;
+        let rows = stmt.query_map(named_params![":account": account.0], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Option<u32>>(1)?,
+                row.get::<_, Option<u32>>(2)?,
+            ))
+        })?;
+
+        // One below the birthday, because coverage names the last height read
+        // and nothing below the birthday was ever going to be read.
+        let none = BlockHeight::from_u32(u32::from(birthday).saturating_sub(1));
+        let mut out = Vec::new();
+        for row in rows {
+            let (script, settled, covered) = row?;
+            out.push(ScriptCoverage {
+                script,
+                account,
+                settled_through: settled.map_or(none, BlockHeight::from_u32),
+                covered_through: covered.map_or(none, BlockHeight::from_u32),
+            });
+        }
+        Ok(out)
+    }
+
+    /// What the wallet knows about the state of its transparent coverage.
+    ///
+    /// The lowest coverage of any watched script, because a balance is only as
+    /// current as its least current part, together with the contradictions that
+    /// forbid calling it synchronized at all.
+    pub fn transparent_state(
+        &self,
+        account: zakura_wallet_core::AccountId,
+        birthday: BlockHeight,
+    ) -> Result<TransparentState, Error> {
+        let coverage = self.transparent_coverage(account, birthday)?;
+        let settled_through = coverage.iter().map(|c| c.settled_through).min();
+        let covered_through = coverage.iter().map(|c| c.covered_through).min();
+
+        let unresolved: u32 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {schema}.transparent_unresolved_spends",
+                schema = schema::CACHE_SCHEMA,
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        let provisional: u32 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {schema}.transparent_provisional",
+                schema = schema::CACHE_SCHEMA,
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+
+        Ok(TransparentState {
+            settled_through,
+            covered_through,
+            unresolved_spends: unresolved,
+            provisional_shards: provisional,
+        })
+    }
+
+    /// Returns every unspent transparent output an account holds.
+    ///
+    /// Everything, not only what is spendable: a diagnostic that filtered by
+    /// maturity and burial would answer "nothing" for a wallet that holds
+    /// funds it simply cannot spend yet, which is the exact confusion it
+    /// exists to remove. Address, value, and the mined height where the ledger
+    /// knows one.
+    pub fn transparent_utxos(
+        &self,
+        account: zakura_wallet_core::AccountId,
+    ) -> Result<Vec<(String, u64, Option<BlockHeight>)>, Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT a.transparent_address, o.value, t.mined_height
+             FROM {schema}.transparent_received_outputs o
+             JOIN {schema}.addresses a ON a.id = o.address_id
+             JOIN {schema}.transactions t ON t.id = o.transaction_id
+             WHERE o.account_id = :account
+               AND o.id NOT IN (
+                   SELECT output_id FROM {schema}.transparent_received_output_spends)
+             ORDER BY o.value DESC",
+            schema = schema::CACHE_SCHEMA,
+        ))?;
+        let rows = stmt.query_map(named_params![":account": account.0], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<u32>>(2)?,
+            ))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (address, value, height) = row?;
+            out.push((
+                address.unwrap_or_default(),
+                value as u64,
+                height.map(BlockHeight::from_u32),
+            ));
+        }
+        Ok(out)
     }
 
     /// Returns the transparent outputs an account can spend, largest first.
@@ -784,6 +884,38 @@ impl WalletDb {
                 PRUNING_DEPTH as u32,
             )
         })
+    }
+
+    /// Returns the hash the wallet accepted at `height`, if it scanned it.
+    ///
+    /// The wallet's own view of the chain, and the only one it may use to
+    /// decide where something it was handed sits. A service that supplied both
+    /// a range of history and the block hashes that range claims to be on could
+    /// place any history anywhere; this is the other side of that check, and it
+    /// answers `None` rather than guessing when the wallet has not scanned the
+    /// height in question.
+    pub fn accepted_block_hash(
+        &self,
+        height: BlockHeight,
+    ) -> Result<Option<zakura_wallet_core::BlockHash>, Error> {
+        let hash: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT hash FROM {schema}.blocks WHERE height = :height",
+                    schema = schema::CACHE_SCHEMA,
+                ),
+                named_params![":height": u32::from(height)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        hash.map(|bytes| {
+            let bytes: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| Error::Corrupt("a stored block hash was not 32 bytes".into()))?;
+            Ok(zakura_wallet_core::BlockHash(bytes))
+        })
+        .transpose()
     }
 
     /// Returns the highest chain tip the wallet has been told about.
@@ -1175,28 +1307,139 @@ pub struct WatchedScript {
     pub address_id: i64,
 }
 
-/// Everything detection needs to recognise transparent activity.
+/// Every script the wallet watches, and whose it is.
 #[derive(Debug, Clone, Default)]
 pub struct TransparentWatchData {
     /// Every address the wallet has derived.
     pub addresses: Vec<WatchedScript>,
-    /// Outpoints the wallet believes are still unspent.
-    pub unspent: Vec<transparent::bundle::OutPoint>,
 }
 
-/// One unspent transparent output a sweep reported.
+/// One transparent output the private ledger recovered.
 #[derive(Debug, Clone)]
-pub struct SweptOutput {
-    /// The address it pays, which must already be one the wallet derived.
-    pub address: String,
+pub struct RecoveredOutput {
     /// The transaction that created it.
     pub txid: zcash_protocol::TxId,
     /// Its index in that transaction's outputs.
     pub output_index: u32,
-    /// The `scriptPubKey`.
+    /// The `scriptPubKey` the event was indexed under.
+    ///
+    /// The exact raw script, not an address and not a hash of one: it is the
+    /// key the event was stored under, and it is what resolves the output back
+    /// to the address row that owns it.
     pub script: Vec<u8>,
     /// Its value in zatoshis.
     pub value: u64,
-    /// The height it was mined at.
+    /// The height the creating transaction was mined at, when the run knows it.
+    ///
+    /// `None` for an output the run only ever saw *spent*. A recovered spend
+    /// carries the value and script of what it consumed but not the height at
+    /// which that was created, and writing the spend's own height there would
+    /// put a wrong number into the wallet's history in a field nothing could
+    /// later contradict. The row is still written, so the spend has an output
+    /// to attach to and the history shows both halves; what is not written is
+    /// the height nobody knows.
+    pub mined_height: Option<BlockHeight>,
+    /// A height at which this output is known to have existed.
+    ///
+    /// Always known, even when [`Self::mined_height`] is not: an output that
+    /// was spent at some height existed at that height. Used for the gap limit,
+    /// where being late is harmless and being absent is not.
+    pub observed_at: BlockHeight,
+    /// Whether it is a coinbase output, when the run knows.
+    ///
+    /// `None` is *unknown*, and unknown is treated as coinbase downstream: the
+    /// cost of that is a mature output the wallet declines to spend, where the
+    /// opposite error builds a transaction consensus rejects.
+    pub coinbase: Option<bool>,
+}
+
+/// One spend of a recovered output.
+#[derive(Debug, Clone)]
+pub struct RecoveredSpend {
+    /// The transaction that consumed it.
+    pub spending_txid: zcash_protocol::TxId,
+    /// The height that transaction was mined at.
     pub height: BlockHeight,
+    /// The outpoint consumed.
+    pub spent_txid: zcash_protocol::TxId,
+    /// The index of the consumed output.
+    pub spent_output_index: u32,
+}
+
+/// A spend whose consumed output the ledger never saw created.
+///
+/// Recorded rather than absorbed: it means missing coverage, an unsupported
+/// script class, or a bad response, and absorbing it produces a balance that is
+/// too high and looks entirely normal.
+#[derive(Debug, Clone)]
+pub struct UnresolvedSpend {
+    /// The transaction that consumed the unknown output.
+    pub spending_txid: zcash_protocol::TxId,
+    /// Which of its inputs did so.
+    pub input_index: u32,
+    /// The outpoint it claims to consume.
+    pub spent_txid: zcash_protocol::TxId,
+    /// The index of the consumed output.
+    pub spent_output_index: u32,
+    /// The height of the spending transaction.
+    pub height: BlockHeight,
+    /// The script the event was indexed under.
+    pub script: Vec<u8>,
+}
+
+/// How far the ledger has read on behalf of one script.
+#[derive(Debug, Clone)]
+pub struct ScriptCoverage {
+    /// The `scriptPubKey`.
+    pub script: Vec<u8>,
+    /// Whose it is.
+    pub account: zakura_wallet_core::AccountId,
+    /// The last height covered by sealed shards alone.
+    pub settled_through: BlockHeight,
+    /// The last height covered, including any growing tail.
+    pub covered_through: BlockHeight,
+}
+
+/// One unsealed shard revision a run took coverage from.
+#[derive(Debug, Clone)]
+pub struct ProvisionalRevision {
+    /// Which shard.
+    pub shard_id: u64,
+    /// Which published revision of it.
+    pub revision: u32,
+    /// The digest that identifies that revision.
+    pub manifest_digest: String,
+    /// The last height the revision covers.
+    pub end_height: BlockHeight,
+}
+
+/// One run of the private transparent ledger, ready to be committed.
+#[derive(Debug, Clone, Default)]
+pub struct TransparentLedger {
+    /// Outputs recovered.
+    pub outputs: Vec<RecoveredOutput>,
+    /// Spends of recovered outputs.
+    pub spends: Vec<RecoveredSpend>,
+    /// Spends whose output the run never saw.
+    pub unresolved: Vec<UnresolvedSpend>,
+    /// The coverage this run earned, per script.
+    pub coverage: Vec<ScriptCoverage>,
+    /// The unsealed revisions it read from.
+    pub provisional: Vec<ProvisionalRevision>,
+}
+
+/// What the wallet can say about how current its transparent balance is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransparentState {
+    /// The lowest settled coverage across the account's scripts.
+    ///
+    /// `None` when the account watches no transparent script at all.
+    pub settled_through: Option<BlockHeight>,
+    /// The lowest coverage, including growing tails.
+    pub covered_through: Option<BlockHeight>,
+    /// Spends the ledger could not resolve. Non-zero forbids calling the
+    /// balance synchronized.
+    pub unresolved_spends: u32,
+    /// How many unsealed revisions the current coverage rests on.
+    pub provisional_shards: u32,
 }

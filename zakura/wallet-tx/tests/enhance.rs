@@ -602,7 +602,7 @@ fn enhancement_sees_the_transparent_side_of_a_transaction() {
 
     // Watching the address that was paid: the receiving wallet's view.
     let script: transparent::address::Script = recipient.script().into();
-    let watching = TransparentWatch::new([(script, ALICE, 1)], []);
+    let watching = TransparentWatch::new([(script, ALICE, 1)]);
 
     let seen = decrypt_transaction(
         &test_params(),

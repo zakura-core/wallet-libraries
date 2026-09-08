@@ -16,7 +16,7 @@ use prost::Message;
 use secrecy::SecretVec;
 use zakura_wallet_lwd::LightwalletdSource;
 use zakura_wallet_scan::{
-    AccountId, NullifierSnapshot, ScanKeys, TransparentWatch, detect_batch,
+    AccountId, NullifierSnapshot, ScanKeys, detect_batch,
 };
 use zakura_wallet_store::WalletDb as NewDb;
 use zakura_wallet_sync::ChainSource;
@@ -173,7 +173,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let batch = detect_batch(
             &params,
             &keys,
-            &TransparentWatch::default(),
             &NullifierSnapshot::default(),
             &anchor,
             &new_blocks,

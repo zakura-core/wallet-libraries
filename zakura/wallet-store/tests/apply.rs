@@ -12,8 +12,8 @@ use zakura_wallet_core::{
     scanning::{ScanPriority, ScanRange},
 };
 use zakura_wallet_scan::{
-    AccountId, KeyScope, NullifierSnapshot, ScanKeys, TransparentWatch, detect_batch,
-    testing::{ChainBuilder, IRONWOOD_ACTIVATION, fvk_from_seed, script, test_params, test_rng},
+    AccountId, KeyScope, NullifierSnapshot, ScanKeys, detect_batch,
+    testing::{ChainBuilder, IRONWOOD_ACTIVATION, fvk_from_seed, test_params, test_rng},
 };
 use zakura_wallet_store::{WalletDb, testing::test_db};
 use zcash_protocol::consensus::BlockHeight;
@@ -21,7 +21,6 @@ use zcash_protocol::consensus::BlockHeight;
 const ALICE: AccountId = AccountId(1);
 
 /// The stored address row the watch set reports a hit against.
-const ADDRESS_ID: i64 = 1;
 const START: u32 = IRONWOOD_ACTIVATION + 10;
 
 fn h(n: u32) -> BlockHeight {
@@ -41,7 +40,6 @@ fn detect(chain: &ChainBuilder, nfs: &NullifierSnapshot) -> DetectedBatch {
     detect_batch(
         &test_params(),
         &keys(),
-        &TransparentWatch::default(),
         nfs,
         &chain.anchor(),
         chain.blocks(),
@@ -431,53 +429,6 @@ fn enhance_candidates_are_stored_with_their_funding_accounts() {
     // only thing a private lookup may reveal.
     assert_eq!(position, 0);
     assert_eq!((nf_len, cmx_len, epk_len, ct_len), (32, 32, 32, 52));
-}
-
-#[test]
-fn transparent_activity_is_stored() {
-    let mut db = test_db().unwrap();
-    db.set_birthday(h(START)).unwrap();
-
-    let watched = script(3);
-    // The address must exist before anything can be received at it. There is no
-    // trial decryption for transparent outputs: the wallet recognises one only
-    // because it derived the address in advance and was watching for it, and
-    // the foreign key from the output makes that structural rather than a
-    // convention somebody has to remember.
-    register_address(&db, ADDRESS_ID, ALICE, &watched);
-
-    let watch = TransparentWatch::new([(watched.clone(), ALICE, ADDRESS_ID)], []);
-
-    let mut chain = ChainBuilder::new(START);
-    let mut funding = None;
-    chain.block(|b| {
-        funding = Some(b.tx(|t| {
-            t.transparent_out(watched.clone(), 900);
-        }));
-    });
-    let outpoint = transparent::bundle::OutPoint::new(funding.unwrap().into(), 0);
-    chain.block(|b| {
-        b.tx(|t| {
-            t.transparent_in(outpoint.clone());
-        });
-    });
-
-    let batch = detect_batch(
-        &test_params(),
-        &keys(),
-        &watch,
-        &NullifierSnapshot::default(),
-        &chain.anchor(),
-        chain.blocks(),
-    )
-    .unwrap();
-    apply(&mut db, &batch);
-
-    assert_eq!(count(&db, "transparent_received_outputs"), 1);
-    assert_eq!(count(&db, "transparent_received_output_spends"), 1);
-    // The spend is also recorded independently, so a spend seen before its
-    // output can be reconciled later.
-    assert_eq!(count(&db, "transparent_spend_map"), 1);
 }
 
 // --------------------------------------------------------------- trees
@@ -1152,111 +1103,6 @@ fn retention_does_not_grow_without_bound() {
     assert_eq!(db.grid_anchor_height().unwrap(), None);
 }
 
-/// Gives the wallet the `addresses` row a watched script belongs to.
-fn register_address(
-    db: &zakura_wallet_store::WalletDb,
-    address_id: i64,
-    account: zakura_wallet_core::AccountId,
-    script: &transparent::address::Script,
-) {
-    db.connection()
-        .execute(
-            "INSERT INTO cache.addresses
-                (id, account_id, key_scope, diversifier_index_be,
-                 transparent_child_index, transparent_address, transparent_script)
-             VALUES (:id, :account, 0, :div, 0, :address, :script)",
-            rusqlite::named_params![
-                ":id": address_id,
-                ":account": account.0,
-                ":div": &[0u8; 11][..],
-                ":address": format!("t-test-{address_id}"),
-                ":script": script.0.0.clone(),
-            ],
-        )
-        .expect("the fixture address inserts");
-}
-
-#[test]
-fn a_spend_seen_before_its_output_is_reconciled_when_the_output_arrives() {
-    // Not an edge case: this wallet recovers from the tip downwards, so it
-    // meets the transaction that spent an output *before* the one that created
-    // it more often than not.
-    //
-    // The spend is recorded against an outpoint the wallet does not yet know,
-    // and replayed when the output shows up. Without the replay the output
-    // would sit in the balance as though it were still there — money the wallet
-    // offers and cannot spend.
-    let mut db = test_db().unwrap();
-    db.set_birthday(h(START)).unwrap();
-
-    let watched = script(9);
-    register_address(&db, ADDRESS_ID, ALICE, &watched);
-    let watch = TransparentWatch::new([(watched.clone(), ALICE, ADDRESS_ID)], []);
-
-    // The funding block, built first so its transaction identifier is known,
-    // but applied second.
-    let mut lower = ChainBuilder::new(START);
-    let mut funding = None;
-    lower.block(|b| {
-        funding = Some(b.tx(|t| {
-            t.transparent_out(watched.clone(), 700);
-        }));
-    });
-    let outpoint = transparent::bundle::OutPoint::new(funding.unwrap().into(), 0);
-
-    // The spending block, above it, which descending recovery reaches first.
-    //
-    // The spending transaction also pays the wallet, which is what a real
-    // transparent spend looks like — it has to put the remainder somewhere.
-    // That is also what makes the wallet keep the transaction at all: a
-    // transaction whose only connection to the wallet is an input the wallet
-    // cannot yet recognise is indistinguishable from a stranger's, and is
-    // dropped. Recovering *that* case needs the UTXO sweep, not the block
-    // stream.
-    let mut upper = ChainBuilder::new(START + 1);
-    upper.block(|b| {
-        b.tx(|t| {
-            t.transparent_in(outpoint.clone());
-            t.transparent_out(watched.clone(), 600);
-        });
-    });
-
-    let detect = |chain: &ChainBuilder| {
-        detect_batch(
-            &test_params(),
-            &keys(),
-            &watch,
-            &NullifierSnapshot::default(),
-            &chain.anchor(),
-            chain.blocks(),
-        )
-        .unwrap()
-    };
-
-    apply(&mut db, &detect(&upper));
-
-    assert_eq!(
-        count(&db, "transparent_received_outputs"),
-        1,
-        "only the change the spending transaction paid back to the wallet"
-    );
-    assert_eq!(
-        count(&db, "transparent_spend_map"),
-        1,
-        "but the spend is remembered against its outpoint"
-    );
-    assert_eq!(count(&db, "transparent_received_output_spends"), 0);
-
-    // Now the block below, carrying the output the spend referred to.
-    apply(&mut db, &detect(&lower));
-
-    assert_eq!(count(&db, "transparent_received_outputs"), 2);
-    assert_eq!(
-        count(&db, "transparent_received_output_spends"),
-        1,
-        "the remembered spend must attach itself to the output when it arrives"
-    );
-}
 
 // ------------------------------------------------- the discovery back edge
 
@@ -1416,7 +1262,6 @@ fn a_note_learned_only_through_enhancement_can_still_be_seen_spent() {
         spent_nullifiers: Vec::new(),
         shielded_value_balance: 0,
         transparent_received: Vec::new(),
-        transparent_spends: Vec::new(),
         candidate_spends: Vec::new(),
         is_coinbase: false,
         raw: vec![0u8; 4],

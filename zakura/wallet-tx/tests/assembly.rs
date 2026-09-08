@@ -11,7 +11,7 @@ use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use rand::SeedableRng;
 use zakura_wallet_core::{AccountId, KeyScope, pool::PoolId};
 use zakura_wallet_scan::{
-    NullifierSnapshot, ScanKeys, TransparentWatch, detect_batch,
+    NullifierSnapshot, ScanKeys, detect_batch,
     testing::{ChainBuilder, IRONWOOD_ACTIVATION, test_params},
 };
 use zakura_wallet_store::{WalletDb, testing::test_db};
@@ -67,7 +67,6 @@ fn funded_wallet(value: u64, fvk: &FullViewingKey) -> WalletDb {
     let batch = detect_batch(
         &test_params(),
         &keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),

@@ -18,6 +18,7 @@ members = [
     "zakura/wallet-core",
     "zakura/wallet-scan",
     "zakura/wallet-store",
+    "zakura/wallet-transparent",
     "zakura/wallet-sync",
     "zakura/wallet-lwd",
     "zakura/wallet-tx",

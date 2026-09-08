@@ -25,6 +25,7 @@ zakura-wallet-lwd = { path = "../../wallet-lwd" }
 zakura-wallet-scan = { path = "../../wallet-scan" }
 zakura-wallet-store = { path = "../../wallet-store" }
 zakura-wallet-sync = { path = "../../wallet-sync" }
+zakura-wallet-transparent = { path = "../../wallet-transparent" }
 zakura-wallet-tx = { path = "../../wallet-tx" }
 zcash_keys = { workspace = true, features = ["orchard"] }
 zcash_primitives.workspace = true

@@ -52,6 +52,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ApiSyncProgress dco_decode_api_sync_progress(dynamic raw);
 
   @protected
+  ApiTransparentCoverage dco_decode_api_transparent_coverage(dynamic raw);
+
+  @protected
+  ApiTransparentUtxo dco_decode_api_transparent_utxo(dynamic raw);
+
+  @protected
   bool dco_decode_bool(dynamic raw);
 
   @protected
@@ -67,10 +73,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_i_32(dynamic raw);
 
   @protected
+  List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
   List<ApiAccount> dco_decode_list_api_account(dynamic raw);
 
   @protected
   List<ApiHistoryEntry> dco_decode_list_api_history_entry(dynamic raw);
+
+  @protected
+  List<ApiTransparentUtxo> dco_decode_list_api_transparent_utxo(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
@@ -127,6 +139,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ApiSyncProgress sse_decode_api_sync_progress(SseDeserializer deserializer);
 
   @protected
+  ApiTransparentCoverage sse_decode_api_transparent_coverage(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ApiTransparentUtxo sse_decode_api_transparent_utxo(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
@@ -142,10 +164,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
   List<ApiAccount> sse_decode_list_api_account(SseDeserializer deserializer);
 
   @protected
   List<ApiHistoryEntry> sse_decode_list_api_history_entry(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ApiTransparentUtxo> sse_decode_list_api_transparent_utxo(
     SseDeserializer deserializer,
   );
 
@@ -216,6 +246,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_api_transparent_coverage(
+    ApiTransparentCoverage self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_api_transparent_utxo(
+    ApiTransparentUtxo self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
@@ -231,6 +273,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_api_account(
     List<ApiAccount> self,
     SseSerializer serializer,
@@ -239,6 +284,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_api_history_entry(
     List<ApiHistoryEntry> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_api_transparent_utxo(
+    List<ApiTransparentUtxo> self,
     SseSerializer serializer,
   );
 

@@ -11,7 +11,7 @@ use zakura_wallet_core::{
     pool::{PoolId, TreeSizes},
 };
 use zakura_wallet_scan::{
-    AccountId, BlockAnchor, KeyScope, NullifierSnapshot, ScanError, ScanKeys, TransparentWatch,
+    AccountId, BlockAnchor, KeyScope, NullifierSnapshot, ScanError, ScanKeys,
     detect_batch,
     testing::{ChainBuilder, IRONWOOD_ACTIVATION, fvk_from_seed, script, test_params, test_rng},
 };
@@ -20,7 +20,6 @@ use zcash_protocol::consensus::BlockHeight;
 const ALICE: AccountId = AccountId(1);
 
 /// The stored address row the watch set reports a hit against.
-const ADDRESS_ID: i64 = 1;
 const BOB: AccountId = AccountId(2);
 
 /// A chain whose first block sits comfortably above both activation heights.
@@ -42,14 +41,7 @@ fn detect(
     anchor: &BlockAnchor,
     blocks: &[CompactBlock],
 ) -> Result<zakura_wallet_scan::DetectedBatch, ScanError> {
-    detect_batch(
-        &test_params(),
-        keys,
-        &TransparentWatch::default(),
-        nfs,
-        anchor,
-        blocks,
-    )
+    detect_batch(&test_params(), keys, nfs, anchor, blocks)
 }
 
 // ---------------------------------------------------------------- basics
@@ -867,10 +859,16 @@ fn a_block_at_the_activation_height_is_accepted() {
 
 // ----------------------------------------------------------- transparent
 
+/// Scanning is no longer how transparent funds are found.
+///
+/// A payment to a script the wallet watches used to make the transaction the
+/// wallet's. It does not any more: the private ledger discovers transparent
+/// funds, and it is the only thing that can find an output at an address the
+/// wallet had not derived when the block went past. See
+/// `docs/zakura_transparent_pir.md`.
 #[test]
-fn a_transparent_output_to_a_watched_script_is_detected() {
+fn a_payment_to_a_watched_script_is_not_detected_by_scanning() {
     let watched = script(7);
-    let watch = TransparentWatch::new([(watched.clone(), ALICE, ADDRESS_ID)], []);
 
     let mut chain = ChainBuilder::new(START);
     chain.block(|b| {
@@ -880,46 +878,39 @@ fn a_transparent_output_to_a_watched_script_is_detected() {
         });
     });
 
-    let batch = detect_batch(
-        &test_params(),
+    let batch = detect(
         &alice_keys(),
-        &watch,
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),
     )
     .unwrap();
 
-    let outputs = &batch.blocks[0].transactions[0].transparent_received;
-    assert_eq!(outputs.len(), 1);
-    assert_eq!(outputs[0].output_index, 1);
-    assert_eq!(outputs[0].txout.value().into_u64(), 250);
+    assert!(batch.blocks[0].transactions.is_empty());
 }
 
+/// What scanning still records: what a transaction it keeps consumed.
+///
+/// This is not discovery. It cannot create an output, and the store uses it
+/// only to attach a spend to an output the ledger recovered — a correction
+/// that can only lower a balance, never raise one.
 #[test]
-fn a_transparent_spend_of_a_known_output_is_detected() {
-    let watched = script(7);
-    let mut chain = ChainBuilder::new(START);
-    let mut funding = None;
-    chain.block(|b| {
-        funding = Some(b.tx(|t| {
-            t.transparent_out(watched.clone(), 500);
-        }));
-    });
-    let outpoint = transparent::bundle::OutPoint::new(funding.unwrap().into(), 0);
+fn a_transaction_kept_for_its_notes_records_the_outpoints_it_spends() {
+    let alice = fvk_from_seed(1);
+    let keys = ScanKeys::from_accounts([(ALICE, alice.clone())]);
+    let outpoint = transparent::bundle::OutPoint::new([9u8; 32], 3);
 
     let mut chain = ChainBuilder::new(START);
     chain.block(|b| {
         b.tx(|t| {
             t.transparent_in(outpoint.clone());
+            t.receive(PoolId::Ironwood, &alice, KeyScope::External, 1_000);
         });
     });
 
-    let watch = TransparentWatch::new([(watched, ALICE, ADDRESS_ID)], [outpoint.clone()]);
     let batch = detect_batch(
         &test_params(),
-        &alice_keys(),
-        &watch,
+        &keys,
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),
@@ -927,52 +918,21 @@ fn a_transparent_spend_of_a_known_output_is_detected() {
     .unwrap();
 
     assert_eq!(
-        batch.blocks[0].transactions[0].transparent_spends,
+        batch.blocks[0].transactions[0].candidate_spends,
         vec![outpoint]
     );
 }
 
+/// A transaction with only transparent activity is not the wallet's at all.
+///
+/// Its inputs are not recorded either, because nothing keeps the transaction:
+/// every transaction has inputs, so keeping it for them would keep the chain.
 #[test]
-fn a_transparent_output_created_and_spent_in_one_batch_is_linked() {
-    let watched = script(7);
-    let watch = TransparentWatch::new([(watched.clone(), ALICE, ADDRESS_ID)], []);
-
-    let mut chain = ChainBuilder::new(START);
-    let mut funding = None;
-    chain.block(|b| {
-        funding = Some(b.tx(|t| {
-            t.transparent_out(watched.clone(), 500);
-        }));
-    });
-    let outpoint = transparent::bundle::OutPoint::new(funding.unwrap().into(), 0);
-    chain.block(|b| {
-        b.tx(|t| {
-            t.transparent_in(outpoint.clone());
-        });
-    });
-
-    let batch = detect_batch(
-        &test_params(),
-        &alice_keys(),
-        &watch,
-        &NullifierSnapshot::default(),
-        &chain.anchor(),
-        chain.blocks(),
-    )
-    .unwrap();
-
-    assert_eq!(batch.blocks[0].transactions[0].transparent_received.len(), 1);
-    assert_eq!(
-        batch.blocks[1].transactions[0].transparent_spends,
-        vec![outpoint]
-    );
-}
-
-#[test]
-fn transparent_activity_is_ignored_without_a_watch_set() {
+fn a_transaction_with_only_transparent_activity_is_dropped() {
     let mut chain = ChainBuilder::new(START);
     chain.block(|b| {
         b.tx(|t| {
+            t.transparent_in(transparent::bundle::OutPoint::new([1u8; 32], 0));
             t.transparent_out(script(7), 100);
         });
     });

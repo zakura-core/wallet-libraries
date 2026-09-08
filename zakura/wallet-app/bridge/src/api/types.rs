@@ -53,6 +53,46 @@ pub struct ApiBalance {
     pub transparent: u64,
 }
 
+/// How far the private transparent ledger has read.
+///
+/// The interface needs this beside the balance, not instead of it. A
+/// transparent balance is true as of a height, and a wallet that has not read
+/// as far as the tip is not the same as one that read the whole chain and found
+/// nothing — but they show the same number.
+#[derive(Debug, Clone, Copy)]
+pub struct ApiTransparentCoverage {
+    /// The last height covered by sealed shards alone.
+    ///
+    /// Absent when nothing has been read: no transparent service is
+    /// configured, or the wallet has not scanned down to the covered range.
+    /// Absent is not zero, and must not be presented as though it were.
+    pub settled_through: Option<u32>,
+    /// The last height covered, including a shard that can still be replaced.
+    pub covered_through: Option<u32>,
+    /// Spends the ledger could not resolve to an output it holds.
+    ///
+    /// Non-zero means the balance is too high: an output is still counted that
+    /// something has already consumed. The interface must not call the balance
+    /// synchronized while this is set, however current the coverage looks.
+    pub unresolved_spends: u32,
+    /// How many unsealed shard revisions the coverage rests on.
+    pub provisional_shards: u32,
+}
+
+/// One transparent output the ledger holds.
+#[derive(Debug, Clone)]
+pub struct ApiTransparentUtxo {
+    /// The address it pays.
+    pub address: String,
+    /// Its value in zatoshis.
+    pub value: u64,
+    /// The height it was mined at, where the ledger knows one.
+    ///
+    /// Absent for an output the ledger only ever saw spent: a recovered spend
+    /// carries what it consumed but not the height that was created at.
+    pub mined_height: Option<u32>,
+}
+
 /// An account the wallet holds.
 #[derive(Debug, Clone)]
 pub struct ApiAccount {

@@ -39,9 +39,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("ZAKURA_LWD").unwrap_or_else(|_| "https://us.zec.stardust.rest:443".into())
     });
 
-    let wallet = Wallet::open(WalletConfig::in_dir(NetworkKind::Main, &dir, url.clone()))?;
+    let mut config = WalletConfig::in_dir(NetworkKind::Main, &dir, url.clone());
+    // Two services, named separately, because the public and private halves
+    // must not come from one host. Unset means transparent tracking is off and
+    // reported as uncovered, which is a different thing from a zero balance.
+    config.transparent = match (
+        std::env::var("ZAKURA_TRANSPARENT_FILTERS"),
+        std::env::var("ZAKURA_TRANSPARENT_SHARDS"),
+    ) {
+        (Ok(filters), Ok(shards)) => Some(zakura_wallet_transparent::Endpoints::new(
+            filters, shards,
+        )),
+        _ => None,
+    };
+
+    let wallet = Wallet::open(config)?;
     println!("wallet at {}", dir.display());
     println!("server    {url}");
+    match wallet.config().transparent.as_ref() {
+        Some(endpoints) => {
+            println!("filters   {}", endpoints.filters_url);
+            println!("shards    {}", endpoints.shards_url);
+        }
+        None => println!(
+            "transparent tracking is off: set ZAKURA_TRANSPARENT_FILTERS and \
+             ZAKURA_TRANSPARENT_SHARDS"
+        ),
+    }
 
     let account = match wallet.accounts()?.first() {
         Some(existing) => {
@@ -69,8 +93,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("address   {}", wallet.next_address(account, None)?);
 
-    // Transparent funds going unseen looks exactly like having none, so say
-    // what is being looked for and what the server answers.
+    // Transparent funds going unseen looks exactly like having none, so print
+    // what is watched, what the ledger holds, and how far it has read. The
+    // third is the one that tells the two apart.
     let watched = wallet.transparent_addresses(account)?;
     println!("watching  {} transparent addresses", watched.len());
     if flag("--utxos") {
@@ -78,15 +103,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("            {address}");
         }
         match wallet.transparent_utxos(account) {
-            Ok(utxos) if utxos.is_empty() => {
-                println!("  the server reports nothing unspent at any of them")
-            }
+            Ok(utxos) if utxos.is_empty() => println!("  the ledger holds nothing unspent"),
             Ok(utxos) => {
                 for (address, value, height) in utxos {
-                    println!("  unspent   {value:>12} at {address} (block {height})");
+                    let at = height.map_or_else(|| "height unknown".to_owned(), |h| format!("block {h}"));
+                    println!("  unspent   {value:>12} at {address} ({at})");
                 }
             }
-            Err(e) => println!("  the server could not be asked: {e}"),
+            Err(e) => println!("  the ledger could not be read: {e}"),
+        }
+        match wallet.transparent_coverage(account) {
+            Ok(coverage) => match coverage.covered_through {
+                Some(height) => println!(
+                    "  current through block {height} (settled {}), {} unresolved spends",
+                    coverage
+                        .settled_through
+                        .map_or_else(|| "none".to_owned(), |h| h.to_string()),
+                    coverage.unresolved_spends
+                ),
+                None => println!(
+                    "  nothing has been read: no transparent service configured, or the \
+                     wallet has not scanned down to the covered range"
+                ),
+            },
+            Err(e) => println!("  coverage could not be read: {e}"),
         }
     }
 

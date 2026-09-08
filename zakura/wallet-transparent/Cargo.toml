@@ -1,0 +1,46 @@
+[package]
+name = "zakura-wallet-transparent"
+version = "0.1.0"
+description = "The Zakura wallet's private transparent ledger"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+categories.workspace = true
+publish = false
+
+[lib]
+name = "zakura_wallet_transparent"
+
+[features]
+default = ["https-client"]
+# The blocking HTTP transports. Off in a build that supplies its own.
+https-client = ["dep:reqwest"]
+
+[dependencies]
+# The client half of the transparent PIR protocol, from the repository that
+# also serves it. Pinned to a revision rather than tracked: the record layouts
+# and the table geometry are protocol, and a wallet that silently followed a
+# change to either would decode a newer layout as the one it knows.
+transparent-wallet = { git = "https://github.com/valargroup/enhance-pir.git", rev = "c510d2393e9dda1c989b1df1010e961f3c966445" }
+transparent-filter = { git = "https://github.com/valargroup/enhance-pir.git", rev = "c510d2393e9dda1c989b1df1010e961f3c966445" }
+transparent-shard = { git = "https://github.com/valargroup/enhance-pir.git", rev = "c510d2393e9dda1c989b1df1010e961f3c966445" }
+transparent-events = { git = "https://github.com/valargroup/enhance-pir.git", rev = "c510d2393e9dda1c989b1df1010e961f3c966445" }
+
+hex.workspace = true
+# Named directly because the service's init document carries the scheme
+# parameters, and a client that adopted whatever it was handed would decode
+# against a geometry the server chose. They are re-derived and compared.
+ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", rev = "223626ffdd28bd1400dd0b62027a8f366665aa4f" }
+serde.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
+serde_json.workspace = true
+zcash_protocol.workspace = true
+zakura-wallet-core = { path = "../wallet-core" }
+zakura-wallet-store = { path = "../wallet-store" }
+zakura-wallet-sync = { path = "../wallet-sync" }
+
+[dev-dependencies]
+zakura-wallet-store = { path = "../wallet-store", features = ["test-dependencies"] }
+zip32.workspace = true
+rusqlite.workspace = true

@@ -219,12 +219,13 @@ pub const DERIVED_DDL: &[&str] = &[
     // derived, because unlike a shielded note there is no trial decryption to
     // discover one after the fact.
     //
-    // `is_coinbase` is a tri-state, and NULL means *unknown*. Outputs found in
-    // a compact block know the answer exactly, from the transaction's index;
-    // outputs learned from a UTXO snapshot carry no index and cannot. Unknown
-    // is treated as coinbase, because the cost of that is a mature output the
-    // wallet declines to spend, where the opposite error builds a transaction
-    // consensus rejects.
+    // `is_coinbase` is a tri-state, and NULL means *unknown*. A recovered
+    // transparent event carries the flag exactly, so rows written by the
+    // private ledger always know; the column stays nullable because a row can
+    // also be created by a transaction this wallet built, which records its
+    // own change before anything is mined. Unknown is treated as coinbase,
+    // because the cost of that is a mature output the wallet declines to
+    // spend, where the opposite error builds a transaction consensus rejects.
     "CREATE TABLE IF NOT EXISTS transparent_received_outputs (
         id                         INTEGER PRIMARY KEY,
         transaction_id             INTEGER NOT NULL REFERENCES transactions(id),
@@ -234,11 +235,11 @@ pub const DERIVED_DDL: &[&str] = &[
         script                     BLOB NOT NULL,
         value                      INTEGER NOT NULL,
         is_coinbase                INTEGER,
+        -- The height through which the ledger that produced this row had
+        -- coverage. An output is unspent when it has no spend row; this says
+        -- how far the evidence for that reaches, which is a different
+        -- question and one the interface has to be able to answer.
         max_observed_unspent_height INTEGER,
-        -- The height of a UTXO sweep that looked for this output and did not
-        -- find it: the wallet's only evidence that a purely transparent spend
-        -- happened somewhere it cannot see.
-        observed_spent_at_height   INTEGER,
         UNIQUE (transaction_id, output_index)
     )",
     "CREATE INDEX IF NOT EXISTS transparent_outputs_account
@@ -256,6 +257,52 @@ pub const DERIVED_DDL: &[&str] = &[
         prevout_txid            BLOB NOT NULL,
         prevout_output_index    INTEGER NOT NULL,
         PRIMARY KEY (spending_transaction_id, prevout_txid, prevout_output_index)
+    )",
+    // How far the private transparent ledger has read, per script.
+    //
+    // Per script rather than per account, because a script the wallet derived
+    // yesterday has no coverage over the chain before yesterday. An
+    // account-wide number would either force a full re-derivation whenever the
+    // address window widened, or silently grant a new script the coverage its
+    // siblings had earned — and the second failure is invisible, because a
+    // script with no history and a script that was never looked for produce
+    // the same empty answer.
+    //
+    // `settled_through` is coverage from sealed shards alone; `covered_through`
+    // may reach further into a growing tail whose revision can still be
+    // replaced.
+    "CREATE TABLE IF NOT EXISTS transparent_coverage (
+        script          BLOB NOT NULL PRIMARY KEY,
+        account_id      INTEGER NOT NULL,
+        settled_through INTEGER NOT NULL,
+        covered_through INTEGER NOT NULL,
+        CHECK (covered_through >= settled_through)
+    )",
+    // Provisional coverage: the unsealed tail revisions a sync read from.
+    //
+    // Recorded with the digest of the revision that produced it, because a
+    // revision is replaced rather than extended. When a later revision or the
+    // sealed shard appears, the range these rows cover is re-derived.
+    "CREATE TABLE IF NOT EXISTS transparent_provisional (
+        shard_id        INTEGER NOT NULL,
+        revision        INTEGER NOT NULL,
+        manifest_digest TEXT NOT NULL,
+        end_height      INTEGER NOT NULL,
+        PRIMARY KEY (shard_id, revision)
+    )",
+    // Spends of outputs the ledger never saw created.
+    //
+    // Kept rather than absorbed. Absorbing one produces a balance that is too
+    // high and looks entirely normal, so the wallet records the contradiction
+    // and refuses to call itself synchronized while any row is here.
+    "CREATE TABLE IF NOT EXISTS transparent_unresolved_spends (
+        spending_txid        BLOB NOT NULL,
+        input_index          INTEGER NOT NULL,
+        spent_txid           BLOB NOT NULL,
+        spent_output_index   INTEGER NOT NULL,
+        height               INTEGER NOT NULL,
+        script               BLOB NOT NULL,
+        PRIMARY KEY (spending_txid, input_index, spent_txid, spent_output_index)
     )",
     // `transparent_child_index` duplicates the diversifier index as an integer
     // because gap-limit queries need SQL arithmetic on it, which a big-endian
@@ -423,9 +470,12 @@ pub const DERIVED_TABLES: &[&str] = &[
     "retrieval_queue",
     "scan_queue",
     "transactions",
+    "transparent_coverage",
+    "transparent_provisional",
     "transparent_received_output_spends",
     "transparent_received_outputs",
     "transparent_spend_map",
+    "transparent_unresolved_spends",
     "tree_cap",
     "tree_checkpoint_marks_removed",
     "tree_checkpoints",

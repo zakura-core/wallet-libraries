@@ -97,6 +97,30 @@ Future<List<ApiAccount>> accounts() => RustLib.instance.api.crateApiAccounts();
 Future<ApiBalance> balance({required int account}) =>
     RustLib.instance.api.crateApiBalance(account: account);
 
+/// Returns how far the private transparent ledger has read for an account.
+///
+/// Transparent funds are discovered by that ledger and by nothing else, so
+/// this is what lets the interface say "current through block N" rather than
+/// implying the transparent balance is live. See
+/// `docs/zakura_transparent_pir.md`.
+Future<ApiTransparentCoverage> transparentCoverage({required int account}) =>
+    RustLib.instance.api.crateApiTransparentCoverage(account: account);
+
+/// Returns the transparent addresses the wallet watches for an account.
+///
+/// A diagnostic. An address missing here is one the gap limit did not reach,
+/// and a payment to it is one the ledger will never be asked about.
+Future<List<String>> transparentAddresses({required int account}) =>
+    RustLib.instance.api.crateApiTransparentAddresses(account: account);
+
+/// Returns every unspent transparent output the ledger holds for an account.
+///
+/// Everything it holds, not only what can be spent: filtering by maturity would
+/// answer "nothing" for a wallet that holds funds it cannot spend yet, which is
+/// the confusion this exists to remove.
+Future<List<ApiTransparentUtxo>> transparentUtxos({required int account}) =>
+    RustLib.instance.api.crateApiTransparentUtxos(account: account);
+
 /// Returns an account's transactions, most recent first.
 Future<List<ApiHistoryEntry>> history({
   required int account,

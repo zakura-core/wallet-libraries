@@ -8,7 +8,7 @@
 
 use zakura_wallet_core::{KeyScope, pool::PoolId};
 use zakura_wallet_scan::{
-    NullifierSnapshot, ScanKeys, TransparentWatch, detect_batch,
+    NullifierSnapshot, ScanKeys, detect_batch,
     testing::{ChainBuilder, IRONWOOD_ACTIVATION, test_params},
 };
 use zakura_wallet_store::{WalletDb, testing::test_db};
@@ -69,7 +69,6 @@ fn an_account_finds_the_notes_paid_to_it_and_reports_them() {
     let batch = detect_batch(
         &test_params(),
         &keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),
@@ -123,7 +122,6 @@ fn a_spend_shows_in_the_history_as_value_leaving() {
     let nf = detect_batch(
         &test_params(),
         &keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &probe.anchor(),
         probe.blocks(),
@@ -151,7 +149,6 @@ fn a_spend_shows_in_the_history_as_value_leaving() {
     let batch = detect_batch(
         &test_params(),
         &keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),
@@ -201,7 +198,6 @@ fn history_is_bounded_and_most_recent_first() {
     let batch = detect_batch(
         &test_params(),
         &keys,
-        &TransparentWatch::default(),
         &NullifierSnapshot::default(),
         &chain.anchor(),
         chain.blocks(),
