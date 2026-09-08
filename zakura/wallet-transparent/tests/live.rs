@@ -6,6 +6,7 @@
 //! ```text
 //! ZAKURA_TRANSPARENT_FILTERS=https://enhance-pir.valargroup.dev \
 //! ZAKURA_TRANSPARENT_SHARDS=https://transparent-pir.valargroup.dev \
+//! ZAKURA_ACCEPTED_CHAIN=/path/to/independent-chain.json \
 //!   cargo test -p zakura-wallet-transparent --test live -- --ignored --nocapture
 //! ```
 //!
@@ -172,23 +173,31 @@ fn a_fresh_wallet_recovers_from_its_birthday() {
     // advance to the end of what the wallet could verify.
     let (mut db, id) = wallet();
 
-    // The map's own shards are what the wallet checks against its accepted
-    // chain, and a fresh test wallet has scanned nothing. Accept the published
-    // boundaries so the run has something to work with; a real wallet reaches
-    // this state by scanning, which is why the engine runs this step after
-    // scanning rather than before.
-    let mut filters = HttpFilterSource::new(&endpoints().filters_url, &options()).unwrap();
-    let (bytes, _) = filters.shard_map().unwrap();
-    let map: transparent_filter::ShardMap = serde_json::from_slice(&bytes).unwrap();
-    // Only what a real wallet would have: nothing below its birthday.
-    for entry in &map.shards {
-        if entry.start_height >= BIRTHDAY {
-            accept(&db, entry.start_height - 1, &entry.parent_block_hash);
-        }
-        if entry.end_height >= BIRTHDAY {
-            accept(&db, entry.end_height, &entry.terminal_block_hash);
+    // Capture these hashes from the wallet's accepted chain (or an independent
+    // node for this operator test), never from the publisher's assertions.
+    // Format: {"target_height": N, "blocks": [{"height": N, "hash": "..."}]}.
+    let path = std::env::var("ZAKURA_ACCEPTED_CHAIN")
+        .expect("fresh recovery requires ZAKURA_ACCEPTED_CHAIN with independent block hashes");
+    #[derive(serde::Deserialize)]
+    struct AcceptedChain {
+        target_height: u32,
+        blocks: Vec<AcceptedBlock>,
+    }
+    #[derive(serde::Deserialize)]
+    struct AcceptedBlock {
+        height: u32,
+        hash: String,
+    }
+    let chain: AcceptedChain = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(chain.blocks.iter().any(|b| b.height == chain.target_height));
+    for block in chain.blocks {
+        assert!(block.height <= chain.target_height);
+        if u64::from(block.height) >= BIRTHDAY.saturating_sub(1) {
+            accept(&db, u64::from(block.height), &block.hash);
         }
     }
+    let last = u64::from(chain.target_height);
+    println!("independently accepted target: {last}");
 
     let pir =
         TransparentPir::new(endpoints(), Network::MainNetwork).with_limits(WorkLimits::UNLIMITED);
@@ -206,12 +215,11 @@ fn a_fresh_wallet_recovers_from_its_birthday() {
         progress.completion,
     );
 
-    let last = map.shards.last().expect("the map has shards").end_height;
     assert_eq!(progress.completion, TransparentCompletion::Complete);
     assert_eq!(
         progress.covered_through,
         Some(BlockHeight::from_u32(last as u32)),
-        "coverage reaches the end of the published map"
+        "coverage reaches the independently accepted target"
     );
     assert_eq!(
         progress.unresolved, 0,
@@ -236,7 +244,7 @@ fn a_fresh_wallet_recovers_from_its_birthday() {
     assert_eq!(again.completion, TransparentCompletion::Complete);
 }
 
-/// Records the wallet as having accepted the block the map names at `height`.
+/// Records an independently supplied accepted block at `height`.
 fn accept(db: &WalletDb, height: u64, display_hash: &str) {
     let hash = transparent_filter::BlockHash::from_display_hex(display_hash).unwrap();
     db.connection()

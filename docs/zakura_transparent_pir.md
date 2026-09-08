@@ -228,8 +228,18 @@ readable without scanning the chain from genesis.
 ```text
 ZAKURA_TRANSPARENT_FILTERS=https://enhance-pir.valargroup.dev \
 ZAKURA_TRANSPARENT_SHARDS=https://transparent-pir.valargroup.dev \
+ZAKURA_ACCEPTED_CHAIN=/path/to/independent-chain.json \
   cargo test -p zakura-wallet-transparent --test live -- --ignored --nocapture
 ```
+
+The fresh-wallet live case requires an independently supplied accepted chain:
+`{"target_height": N, "blocks": [{"height": N, "hash": "<display hash>"}]}`.
+Include the target and relevant shard boundary heights at or after the test
+wallet's birthday. Fetch hashes from the wallet's accepted chain or an independent
+node, and verify the target hash again after capture. The published map can select
+which heights to request; its asserted hashes must not be used as the answer.
+Other live probes do not require this file. The fresh-wallet fixture has no
+expected funds, so passing it does not verify a particular user's payment.
 
 `tests/recover.rs` exercises everything else against the same shard server run
 in process over a synthetic chain paying the wallet's own scripts: real private
