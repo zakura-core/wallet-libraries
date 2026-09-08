@@ -29,6 +29,7 @@ class BalanceCard extends StatelessWidget {
       spendable: balance.spendable.format(),
       pending: balance.pending.isZero ? null : balance.pending.format(),
       obscured: obscured,
+      transparentStatus: balance.coverage.status,
     );
     if (override != null) return override(context, model);
 
@@ -38,8 +39,9 @@ class BalanceCard extends StatelessWidget {
         children: [
           Text(
             'Spendable',
-            style:
-                theme.typography.caption.copyWith(color: theme.colors.textMuted),
+            style: theme.typography.caption.copyWith(
+              color: theme.colors.textMuted,
+            ),
           ),
           SizedBox(height: theme.spacing.xs),
           Row(
@@ -49,8 +51,9 @@ class BalanceCard extends StatelessWidget {
               Flexible(
                 child: Text(
                   obscured ? '••••••' : model.spendable,
-                  style: theme.typography.display
-                      .copyWith(color: theme.colors.text),
+                  style: theme.typography.display.copyWith(
+                    color: theme.colors.text,
+                  ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -58,8 +61,9 @@ class BalanceCard extends StatelessWidget {
               SizedBox(width: theme.spacing.sm),
               Text(
                 'ZEC',
-                style: theme.typography.body
-                    .copyWith(color: theme.colors.textMuted),
+                style: theme.typography.body.copyWith(
+                  color: theme.colors.textMuted,
+                ),
               ),
             ],
           ),
@@ -81,13 +85,21 @@ class BalanceCard extends StatelessWidget {
                     obscured
                         ? '•••• settling'
                         : '${model.pending} ZEC still settling',
-                    style: theme.typography.caption
-                        .copyWith(color: theme.colors.textMuted),
+                    style: theme.typography.caption.copyWith(
+                      color: theme.colors.textMuted,
+                    ),
                   ),
                 ),
               ],
             ),
           ],
+          SizedBox(height: theme.spacing.xs),
+          Text(
+            balance.coverage.status,
+            style: theme.typography.caption.copyWith(
+              color: theme.colors.textMuted,
+            ),
+          ),
           if (!balance.transparent.isZero) ...[
             SizedBox(height: theme.spacing.xs),
             // Named as needing a step rather than folded into the figure above:
@@ -98,8 +110,9 @@ class BalanceCard extends StatelessWidget {
               obscured
                   ? '•••• transparent'
                   : '${balance.transparent.format()} ZEC transparent, shield to spend',
-              style:
-                  theme.typography.caption.copyWith(color: theme.colors.textMuted),
+              style: theme.typography.caption.copyWith(
+                color: theme.colors.textMuted,
+              ),
             ),
           ],
           if (!balance.spentUnconfirmed.isZero) ...[
@@ -108,8 +121,9 @@ class BalanceCard extends StatelessWidget {
               obscured
                   ? '•••• on its way out'
                   : '${balance.spentUnconfirmed.format()} ZEC sent, not yet mined',
-              style:
-                  theme.typography.caption.copyWith(color: theme.colors.textMuted),
+              style: theme.typography.caption.copyWith(
+                color: theme.colors.textMuted,
+              ),
             ),
           ],
         ],

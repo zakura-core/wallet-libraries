@@ -24,14 +24,24 @@ Future<bool> validateMnemonic({required String phrase}) =>
 /// Opens or creates the wallet in `directory`.
 ///
 /// Replaces any wallet already open, stopping its sync first.
+///
+/// The two transparent services are named separately and both are needed:
+/// public filter bytes reveal nothing about who asked, private queries reveal
+/// which chain ranges had probable activity, and one host serving both can
+/// join those facts. With either absent, transparent tracking is off and is
+/// reported as uncovered — a different state from a zero balance.
 Future<void> open({
   required String directory,
   required String lightwalletdUrl,
   required bool mainnet,
+  String? transparentFiltersUrl,
+  String? transparentShardsUrl,
 }) => RustLib.instance.api.crateApiOpen(
   directory: directory,
   lightwalletdUrl: lightwalletdUrl,
   mainnet: mainnet,
+  transparentFiltersUrl: transparentFiltersUrl,
+  transparentShardsUrl: transparentShardsUrl,
 );
 
 /// Creates a new wallet from a seed phrase, and returns its account.

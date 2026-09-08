@@ -73,11 +73,14 @@ class BalanceCardModel {
   /// Whether the figures should be hidden.
   final bool obscured;
 
+  final String? transparentStatus;
+
   /// Creates the model.
   const BalanceCardModel({
     required this.spendable,
     required this.pending,
     required this.obscured,
+    this.transparentStatus,
   });
 }
 

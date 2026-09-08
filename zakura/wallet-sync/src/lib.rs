@@ -27,12 +27,12 @@ pub mod testing;
 
 pub use engine::{Step, SyncConfig, SyncEngine, SyncSummary, Timings, direction_for, merge_watch};
 pub use error::Error;
-pub use retrieval::{PublicRetrieval, Request, Retrieval, Retrieved};
-pub use transparent::{TransparentProgress, TransparentSource};
 pub use progress::{Ratio, SyncPhase, SyncStatus};
+pub use retrieval::{PublicRetrieval, Request, Retrieval, Retrieved};
 pub use source::{
     ByteBudget, ChainSource, ChainTip, Direction, FetchedTransaction, SourceError, SubtreeRoot,
     TransactionStatus, estimated_size,
 };
+pub use transparent::{TransparentCompletion, TransparentProgress, TransparentSource};
 
 pub use tokio_util::sync::CancellationToken;

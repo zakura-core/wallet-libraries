@@ -105,6 +105,8 @@ abstract class RustLibApi extends BaseApi {
     required String directory,
     required String lightwalletdUrl,
     required bool mainnet,
+    String? transparentFiltersUrl,
+    String? transparentShardsUrl,
   });
 
   Future<ApiSyncProgress> crateApiProgress();
@@ -470,6 +472,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required String directory,
     required String lightwalletdUrl,
     required bool mainnet,
+    String? transparentFiltersUrl,
+    String? transparentShardsUrl,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -478,6 +482,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(directory, serializer);
           sse_encode_String(lightwalletdUrl, serializer);
           sse_encode_bool(mainnet, serializer);
+          sse_encode_opt_String(transparentFiltersUrl, serializer);
+          sse_encode_opt_String(transparentShardsUrl, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -490,7 +496,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_api_error,
         ),
         constMeta: kCrateApiOpenConstMeta,
-        argValues: [directory, lightwalletdUrl, mainnet],
+        argValues: [
+          directory,
+          lightwalletdUrl,
+          mainnet,
+          transparentFiltersUrl,
+          transparentShardsUrl,
+        ],
         apiImpl: this,
       ),
     );
@@ -498,7 +510,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiOpenConstMeta => const TaskConstMeta(
     debugName: "open",
-    argNames: ["directory", "lightwalletdUrl", "mainnet"],
+    argNames: [
+      "directory",
+      "lightwalletdUrl",
+      "mainnet",
+      "transparentFiltersUrl",
+      "transparentShardsUrl",
+    ],
   );
 
   @override
@@ -831,13 +849,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ApiBalance dco_decode_api_balance(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return ApiBalance(
       spendable: dco_decode_u_64(arr[0]),
       pending: dco_decode_u_64(arr[1]),
       spentUnconfirmed: dco_decode_u_64(arr[2]),
       transparent: dco_decode_u_64(arr[3]),
+      coverage: dco_decode_api_transparent_coverage(arr[4]),
     );
   }
 
@@ -938,13 +957,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ApiTransparentCoverage dco_decode_api_transparent_coverage(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return ApiTransparentCoverage(
       settledThrough: dco_decode_opt_box_autoadd_u_32(arr[0]),
       coveredThrough: dco_decode_opt_box_autoadd_u_32(arr[1]),
       unresolvedSpends: dco_decode_u_32(arr[2]),
       provisionalShards: dco_decode_u_32(arr[3]),
+      pendingPages: dco_decode_u_32(arr[4]),
+      anchorHeight: dco_decode_opt_box_autoadd_u_32(arr[5]),
+      completion: dco_decode_opt_String(arr[6]),
     );
   }
 
@@ -1092,11 +1114,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_pending = sse_decode_u_64(deserializer);
     var var_spentUnconfirmed = sse_decode_u_64(deserializer);
     var var_transparent = sse_decode_u_64(deserializer);
+    var var_coverage = sse_decode_api_transparent_coverage(deserializer);
     return ApiBalance(
       spendable: var_spendable,
       pending: var_pending,
       spentUnconfirmed: var_spentUnconfirmed,
       transparent: var_transparent,
+      coverage: var_coverage,
     );
   }
 
@@ -1209,11 +1233,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_coveredThrough = sse_decode_opt_box_autoadd_u_32(deserializer);
     var var_unresolvedSpends = sse_decode_u_32(deserializer);
     var var_provisionalShards = sse_decode_u_32(deserializer);
+    var var_pendingPages = sse_decode_u_32(deserializer);
+    var var_anchorHeight = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_completion = sse_decode_opt_String(deserializer);
     return ApiTransparentCoverage(
       settledThrough: var_settledThrough,
       coveredThrough: var_coveredThrough,
       unresolvedSpends: var_unresolvedSpends,
       provisionalShards: var_provisionalShards,
+      pendingPages: var_pendingPages,
+      anchorHeight: var_anchorHeight,
+      completion: var_completion,
     );
   }
 
@@ -1399,6 +1429,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_64(self.pending, serializer);
     sse_encode_u_64(self.spentUnconfirmed, serializer);
     sse_encode_u_64(self.transparent, serializer);
+    sse_encode_api_transparent_coverage(self.coverage, serializer);
   }
 
   @protected
@@ -1489,6 +1520,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_box_autoadd_u_32(self.coveredThrough, serializer);
     sse_encode_u_32(self.unresolvedSpends, serializer);
     sse_encode_u_32(self.provisionalShards, serializer);
+    sse_encode_u_32(self.pendingPages, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.anchorHeight, serializer);
+    sse_encode_opt_String(self.completion, serializer);
   }
 
   @protected

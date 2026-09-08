@@ -1,16 +1,21 @@
-//! Deriving transparent addresses, and committing a private ledger.
+//! Deriving transparent addresses, and the private ledger's memory.
 //!
 //! The ledger is the only thing that discovers transparent funds — see
 //! `docs/zakura_transparent_pir.md` — so everything it gets wrong is invisible
 //! rather than merely late. The cases below are the ones where a plausible
 //! implementation is silently wrong: an output at a script the wallet never
-//! derived, a spend of an output the run never saw, and coverage that advances
-//! past what was actually read.
+//! derived, a retry that differs from what was kept, a rewind that leaves
+//! coverage above the blocks it rested on, and a script whose required height
+//! quietly moves forward.
 
 use zakura_wallet_core::AccountId;
 use zakura_wallet_store::{
-    GapLimits, ProvisionalRevision, RecoveredOutput, RecoveredSpend, ScriptCoverage,
-    TransparentLedger, UnresolvedSpend, WalletDb, testing::test_db,
+    GapLimits, RecoveredOutput, RecoveredSpend, WalletDb,
+    testing::test_db,
+    transparent::{
+        CommitError, CoverageKind, EventKey, LedgerEvent, PendingPages, ShardCommit,
+        TransparentAnchor, TransparentScript,
+    },
 };
 use zcash_protocol::{
     TxId,
@@ -78,8 +83,7 @@ fn an_account_derives_a_full_window_of_watchable_addresses() {
 
     // Real addresses, not placeholders, and all distinct: two indices deriving
     // the same address would mean the derivation is not doing anything.
-    let encoded: std::collections::BTreeSet<_> =
-        addresses.iter().map(|(_, a)| a.clone()).collect();
+    let encoded: std::collections::BTreeSet<_> = addresses.iter().map(|(_, a)| a.clone()).collect();
     assert_eq!(encoded.len(), addresses.len(), "every address is distinct");
     assert!(
         addresses.iter().all(|(_, a)| a.starts_with('t')),
@@ -108,19 +112,20 @@ fn the_watch_set_covers_every_derived_address() {
     );
 }
 
-
 // ------------------------------------------------------ the private ledger
 
-/// The script of the account's first watched address, with its row id.
-fn first_script(db: &WalletDb) -> (i64, Vec<u8>) {
+/// The scripts of the account's watched addresses, in derivation order.
+fn scripts(db: &WalletDb) -> Vec<Vec<u8>> {
     db.connection()
-        .query_row(
-            "SELECT id, transparent_script FROM cache.addresses
+        .prepare(
+            "SELECT transparent_script FROM cache.addresses
              WHERE transparent_script IS NOT NULL
-             ORDER BY key_scope, transparent_child_index LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+             ORDER BY key_scope, transparent_child_index",
         )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
         .unwrap()
 }
 
@@ -136,34 +141,141 @@ fn count(db: &WalletDb, table: &str) -> i64 {
         .unwrap()
 }
 
-fn covering(script: &[u8], account: AccountId, settled: u32, covered: u32) -> ScriptCoverage {
-    ScriptCoverage {
-        script: script.to_vec(),
-        account,
-        settled_through: h(settled),
-        covered_through: h(covered),
+/// An opaque event record: what the protocol encodes, which this crate never
+/// reads. The real encoding carries the value, so a differing value is a
+/// differing record; this stands in for that.
+fn record(tag: u8, value: u64) -> Vec<u8> {
+    let mut bytes = vec![tag; 96];
+    bytes[..8].copy_from_slice(&value.to_le_bytes());
+    bytes
+}
+
+fn receive(
+    script: &[u8],
+    tx: u8,
+    index: u32,
+    value: u64,
+    height: u32,
+) -> (LedgerEvent, RecoveredOutput) {
+    (
+        LedgerEvent {
+            key: EventKey::Receive {
+                txid: txid(tx),
+                output_index: index,
+            },
+            script: script.to_vec(),
+            height: h(height),
+            record: record(tx, value),
+            shard_id: 0,
+            revision_digest: "r0".into(),
+        },
+        RecoveredOutput {
+            txid: txid(tx),
+            output_index: index,
+            script: script.to_vec(),
+            value,
+            mined_height: Some(h(height)),
+            observed_at: h(height),
+            coinbase: Some(false),
+        },
+    )
+}
+
+fn spend(
+    script: &[u8],
+    spender: u8,
+    spent: u8,
+    spent_index: u32,
+    height: u32,
+) -> (LedgerEvent, RecoveredSpend) {
+    (
+        LedgerEvent {
+            key: EventKey::Spend {
+                spending_txid: txid(spender),
+                input_index: 0,
+                spent_txid: txid(spent),
+                spent_output_index: spent_index,
+            },
+            script: script.to_vec(),
+            height: h(height),
+            record: record(spender, 0),
+            shard_id: 0,
+            revision_digest: "r0".into(),
+        },
+        RecoveredSpend {
+            spending_txid: txid(spender),
+            height: h(height),
+            spent_txid: txid(spent),
+            spent_output_index: spent_index,
+        },
+    )
+}
+
+fn commit(
+    shard_id: u64,
+    revision: &str,
+    sealed: bool,
+    range: (u32, u32),
+    covered: Vec<Vec<u8>>,
+) -> ShardCommit {
+    ShardCommit {
+        shard_id,
+        revision_digest: revision.into(),
+        sealed,
+        start_height: h(range.0),
+        end_height: h(range.1),
+        terminal_block_hash: format!("{:064x}", range.1),
+        source_anchor: None,
+        events: Vec::new(),
+        outputs: Vec::new(),
+        spends: Vec::new(),
+        covered_scripts: covered,
+        pending_upsert: Vec::new(),
+        pending_complete: Vec::new(),
     }
 }
 
-#[test]
-fn a_recovered_output_becomes_a_balance_and_a_coverage() {
-    let (mut db, id) = wallet();
-    let (_, script) = first_script(&db);
+fn with_receive(mut commit: ShardCommit, event: (LedgerEvent, RecoveredOutput)) -> ShardCommit {
+    let (mut event, output) = event;
+    event.shard_id = commit.shard_id;
+    event.revision_digest = commit.revision_digest.clone();
+    commit.events.push(event);
+    commit.outputs.push(output);
+    commit
+}
 
-    db.apply_transparent_ledger(&TransparentLedger {
-        outputs: vec![RecoveredOutput {
-            txid: txid(1),
-            output_index: 0,
-            script: script.clone(),
-            value: 250_000,
-            mined_height: Some(h(500)),
-            observed_at: h(500),
-            coinbase: Some(false),
-        }],
-        coverage: vec![covering(&script, id, 900, 900)],
-        ..Default::default()
-    })
-    .expect("the ledger applies");
+fn with_spend(mut commit: ShardCommit, event: (LedgerEvent, RecoveredSpend)) -> ShardCommit {
+    let (mut event, spend) = event;
+    event.shard_id = commit.shard_id;
+    event.revision_digest = commit.revision_digest.clone();
+    commit.events.push(event);
+    commit.spends.push(spend);
+    commit
+}
+
+fn registered(db: &mut WalletDb, id: AccountId, script: &[u8], from: u32) {
+    db.add_transparent_scripts(&[TransparentScript {
+        script: script.to_vec(),
+        account: id,
+        imported: false,
+        required_from: h(from),
+    }])
+    .unwrap();
+}
+
+#[test]
+fn a_committed_receive_is_a_balance_and_a_coverage_together() {
+    let (mut db, id) = wallet();
+    let script = scripts(&db)[0].clone();
+    registered(&mut db, id, &script, 100);
+
+    let first = db
+        .commit_transparent_shard(&with_receive(
+            commit(0, "r0", true, (100, 899), vec![script.clone()]),
+            receive(&script, 1, 0, 250_000, 500),
+        ))
+        .expect("the commit applies");
+    assert_eq!(first, 1);
 
     let balance = db.transparent_balance(id).unwrap();
     assert_eq!(balance.total().into_u64(), 250_000);
@@ -173,35 +285,110 @@ fn a_recovered_output_becomes_a_balance_and_a_coverage() {
         "a recovered event states coinbase-ness exactly, so maturity is decidable"
     );
 
+    let mine = db
+        .transparent_coverage(id, h(100))
+        .unwrap()
+        .into_iter()
+        .find(|c| c.script == script)
+        .unwrap();
+    assert_eq!(mine.covered_through, h(899));
+    assert_eq!(mine.settled_through, h(899));
+
+    // The other scripts were not asked about, and say so: the account's
+    // coverage is its least-read script, one below the birthday.
     let state = db.transparent_state(id, h(100)).unwrap();
-    assert_eq!(state.covered_through, Some(h(100 - 1)), "one script covered, the rest not");
+    assert_eq!(state.covered_through, Some(h(99)));
     assert_eq!(state.unresolved_spends, 0);
+    assert_eq!(state.anchor, None, "no sync has accepted an anchor");
 }
 
 #[test]
-fn a_recovered_spend_removes_the_output_it_consumed() {
+fn a_repeated_commit_writes_nothing_new_and_a_differing_one_is_refused_whole() {
     let (mut db, id) = wallet();
-    let (_, script) = first_script(&db);
+    let script = scripts(&db)[0].clone();
+    registered(&mut db, id, &script, 100);
+    let once = with_receive(
+        commit(0, "r0", true, (100, 899), vec![script.clone()]),
+        receive(&script, 1, 0, 250_000, 500),
+    );
+    db.commit_transparent_shard(&once).unwrap();
+    let events = db.transparent_events().unwrap();
+    let outputs = count(&db, "transparent_received_outputs");
 
-    db.apply_transparent_ledger(&TransparentLedger {
-        outputs: vec![RecoveredOutput {
-            txid: txid(1),
-            output_index: 0,
-            script: script.clone(),
-            value: 250_000,
-            mined_height: Some(h(500)),
-            observed_at: h(500),
-            coinbase: Some(false),
-        }],
-        spends: vec![RecoveredSpend {
-            spending_txid: txid(2),
-            height: h(600),
-            spent_txid: txid(1),
+    // The same again: a new commit id, nothing else.
+    let again = db.commit_transparent_shard(&once).unwrap();
+    assert_eq!(again, 2);
+    assert_eq!(db.transparent_events().unwrap(), events);
+    assert_eq!(count(&db, "transparent_received_outputs"), outputs);
+
+    // The same outpoint with other contents, beside a perfectly good new
+    // receive: neither is written.
+    let other = scripts(&db)[1].clone();
+    registered(&mut db, id, &other, 100);
+    let mut differing = with_receive(
+        commit(
+            0,
+            "r0",
+            true,
+            (100, 899),
+            vec![script.clone(), other.clone()],
+        ),
+        receive(&script, 1, 0, 999, 500),
+    );
+    differing = with_receive(differing, receive(&other, 3, 0, 1, 600));
+    match db.commit_transparent_shard(&differing) {
+        Err(CommitError::ConflictingReceive {
+            output_index: 0, ..
+        }) => {}
+        other => panic!("expected a conflicting receive, got {other:?}"),
+    }
+    assert_eq!(
+        db.transparent_events().unwrap(),
+        events,
+        "nothing was written"
+    );
+    assert!(db.transparent_coverage_of(&other).unwrap().is_empty());
+    assert_eq!(
+        db.transparent_balance(id).unwrap().total().into_u64(),
+        250_000
+    );
+
+    // The same output spent by two transactions is a double spend.
+    let double = with_spend(
+        commit(1, "r1", true, (900, 999), vec![script.clone()]),
+        spend(&script, 7, 1, 0, 950),
+    );
+    db.commit_transparent_shard(&double).unwrap();
+    let twice = with_spend(
+        commit(1, "r1", true, (900, 999), vec![script.clone()]),
+        spend(&script, 8, 1, 0, 951),
+    );
+    match db.commit_transparent_shard(&twice) {
+        Err(CommitError::DoubleSpend {
             spent_output_index: 0,
-        }],
-        coverage: vec![covering(&script, id, 900, 900)],
-        ..Default::default()
-    })
+            ..
+        }) => {}
+        other => panic!("expected a double spend, got {other:?}"),
+    }
+    assert_eq!(db.transparent_last_commit().unwrap(), 3);
+}
+
+#[test]
+fn a_spend_resolves_against_a_receive_kept_by_an_earlier_commit() {
+    // The case a one-shot sync cannot handle and the store exists for: the
+    // receive was found last month, the spend is found today.
+    let (mut db, id) = wallet();
+    let script = scripts(&db)[0].clone();
+    registered(&mut db, id, &script, 100);
+    db.commit_transparent_shard(&with_receive(
+        commit(0, "r0", true, (100, 499), vec![script.clone()]),
+        receive(&script, 1, 0, 250_000, 300),
+    ))
+    .unwrap();
+    db.commit_transparent_shard(&with_spend(
+        commit(1, "r1", true, (500, 899), vec![script.clone()]),
+        spend(&script, 2, 1, 0, 600),
+    ))
     .unwrap();
 
     assert_eq!(count(&db, "transparent_received_output_spends"), 1);
@@ -210,52 +397,44 @@ fn a_recovered_spend_removes_the_output_it_consumed() {
         0,
         "the output is spent, so it is not in the balance"
     );
+    let state = db.transparent_state(id, h(100)).unwrap();
+    assert_eq!(state.unresolved_spends, 0);
 }
 
 #[test]
-fn an_output_the_run_only_saw_spent_is_stored_without_a_height_it_does_not_know() {
-    // A confirmed spend carries the value and script of what it consumed and
-    // not the height that output was created at. Writing the spend's own
-    // height there would put a wrong number into the history that nothing
-    // could later contradict.
+fn a_spend_of_an_output_never_seen_is_counted_not_absorbed() {
+    // Absorbing one leaves an output in the balance that something has already
+    // consumed: too high, and looking entirely ordinary. And it attaches the
+    // moment the output arrives, however much later that is.
     let (mut db, id) = wallet();
-    let (_, script) = first_script(&db);
-
-    db.apply_transparent_ledger(&TransparentLedger {
-        outputs: vec![RecoveredOutput {
-            txid: txid(1),
-            output_index: 0,
-            script: script.clone(),
-            value: 250_000,
-            mined_height: None,
-            observed_at: h(600),
-            coinbase: None,
-        }],
-        spends: vec![RecoveredSpend {
-            spending_txid: txid(2),
-            height: h(600),
-            spent_txid: txid(1),
-            spent_output_index: 0,
-        }],
-        coverage: vec![covering(&script, id, 900, 900)],
-        ..Default::default()
-    })
+    let script = scripts(&db)[0].clone();
+    registered(&mut db, id, &script, 100);
+    db.commit_transparent_shard(&with_spend(
+        commit(1, "r1", true, (500, 899), vec![script.clone()]),
+        spend(&script, 2, 1, 0, 600),
+    ))
     .unwrap();
+    assert_eq!(
+        db.transparent_state(id, h(100)).unwrap().unresolved_spends,
+        1
+    );
+    assert_eq!(count(&db, "transparent_received_outputs"), 0);
 
-    let mined: Option<u32> = db
-        .connection()
-        .query_row(
-            "SELECT mined_height FROM cache.transactions WHERE txid = ?1",
-            [&[1u8; 32][..]],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(mined, None, "the creating height is unknown, and stays unknown");
+    db.commit_transparent_shard(&with_receive(
+        commit(0, "r0", true, (100, 499), vec![script.clone()]),
+        receive(&script, 1, 0, 250_000, 300),
+    ))
+    .unwrap();
+    assert_eq!(
+        db.transparent_state(id, h(100)).unwrap().unresolved_spends,
+        0
+    );
     assert_eq!(
         count(&db, "transparent_received_output_spends"),
         1,
-        "but the spend still attaches, which is the reason to store the row at all"
+        "the spend kept from before attaches to the output that arrived after it"
     );
+    assert_eq!(db.transparent_balance(id).unwrap().total().into_u64(), 0);
 }
 
 #[test]
@@ -263,94 +442,224 @@ fn an_output_at_a_script_the_wallet_never_derived_is_refused() {
     // Not something to absorb quietly: the service answered about somebody
     // else, and storing it would credit another person's funds to this wallet.
     let (mut db, id) = wallet();
-    let (_, script) = first_script(&db);
-
+    let script = scripts(&db)[0].clone();
+    registered(&mut db, id, &script, 100);
+    let foreign = vec![0x76, 0xa9, 0x14, 0xff];
     let err = db
-        .apply_transparent_ledger(&TransparentLedger {
-            outputs: vec![RecoveredOutput {
-                txid: txid(9),
-                output_index: 0,
-                script: vec![0x76, 0xa9, 0x14, 0xff],
-                value: 100_000,
-                mined_height: Some(h(500)),
-                observed_at: h(500),
-                coinbase: Some(false),
-            }],
-            coverage: vec![covering(&script, id, 900, 900)],
-            ..Default::default()
-        })
+        .commit_transparent_shard(&with_receive(
+            commit(0, "r0", true, (100, 899), vec![script.clone()]),
+            receive(&foreign, 9, 0, 100_000, 500),
+        ))
         .expect_err("an unknown script must be refused");
     assert!(
         format!("{err}").contains("never derived"),
         "the error should say why it was refused, got: {err}"
     );
+    assert!(
+        db.transparent_events().unwrap().is_empty(),
+        "nothing was written"
+    );
+    assert!(db.transparent_coverage_of(&script).unwrap().is_empty());
 }
 
 #[test]
-fn an_unresolved_spend_is_recorded_rather_than_absorbed() {
-    // Absorbing one leaves an output in the balance that something has already
-    // consumed: too high, and looking entirely ordinary.
+fn a_required_height_is_never_raised() {
+    // Moving the birthday forward cannot substitute for retaining an old
+    // receive: the spend found later needs it.
     let (mut db, id) = wallet();
-    let (_, script) = first_script(&db);
+    let script = scripts(&db)[0].clone();
+    registered(&mut db, id, &script, 100);
+    registered(&mut db, id, &script, 500);
+    let kept = db
+        .transparent_scripts()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.script == script)
+        .unwrap();
+    assert_eq!(kept.required_from, h(100));
 
-    db.apply_transparent_ledger(&TransparentLedger {
-        unresolved: vec![UnresolvedSpend {
-            spending_txid: txid(4),
-            input_index: 1,
-            spent_txid: txid(3),
-            spent_output_index: 0,
-            height: h(700),
-            script: script.clone(),
-        }],
-        coverage: vec![covering(&script, id, 900, 900)],
-        ..Default::default()
-    })
-    .unwrap();
-
-    assert_eq!(db.transparent_state(id, h(100)).unwrap().unresolved_spends, 1);
-
-    // A later run that resolved it must clear it: these three sets describe the
-    // state a run *ended* in, not everything ever seen.
-    db.apply_transparent_ledger(&TransparentLedger {
-        coverage: vec![covering(&script, id, 950, 950)],
-        ..Default::default()
-    })
-    .unwrap();
-    assert_eq!(db.transparent_state(id, h(100)).unwrap().unresolved_spends, 0);
+    registered(&mut db, id, &script, 50);
+    let lowered = db
+        .transparent_scripts()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.script == script)
+        .unwrap();
+    assert_eq!(
+        lowered.required_from,
+        h(50),
+        "lowering is allowed; it only asks for more"
+    );
 }
 
 #[test]
-fn coverage_never_moves_backwards() {
-    // A run that read a shorter range has not un-read the longer one. Coverage
-    // that could retreat would let a transient failure quietly re-open a range
-    // the wallet already paid private queries to close.
+fn a_rollback_removes_the_suffix_from_the_ledger_and_the_balance_alike() {
     let (mut db, id) = wallet();
-    let (_, script) = first_script(&db);
-
-    db.apply_transparent_ledger(&TransparentLedger {
-        coverage: vec![covering(&script, id, 900, 950)],
-        ..Default::default()
-    })
+    let script = scripts(&db)[0].clone();
+    registered(&mut db, id, &script, 100);
+    let mut old = with_receive(
+        commit(0, "r0", true, (100, 499), vec![script.clone()]),
+        receive(&script, 1, 0, 250_000, 300),
+    );
+    old = with_receive(old, receive(&script, 3, 0, 1_000, 450));
+    db.commit_transparent_shard(&old).unwrap();
+    let mut tail = with_spend(
+        commit(1, "r1", false, (500, 599), vec![script.clone()]),
+        spend(&script, 2, 1, 0, 550),
+    );
+    tail = with_receive(tail, receive(&script, 4, 0, 5_000, 560));
+    tail.pending_upsert.push(PendingPages {
+        id: None,
+        shard_id: 1,
+        revision_digest: "r1".into(),
+        script: script.clone(),
+        first_page: 0,
+        page_count: 2,
+        total_events: 9,
+        inline: Vec::new(),
+        next_ordinal: 0,
+        attempts: 0,
+        validated_events: 0,
+        target_anchor: None,
+    });
+    db.commit_transparent_shard(&tail).unwrap();
+    db.commit_transparent_anchor(
+        &TransparentAnchor {
+            height: h(599),
+            hash: "tail".into(),
+        },
+        h(499),
+        h(599),
+    )
     .unwrap();
-    db.apply_transparent_ledger(&TransparentLedger {
-        coverage: vec![covering(&script, id, 500, 500)],
-        ..Default::default()
-    })
-    .unwrap();
+    assert_eq!(
+        db.transparent_balance(id).unwrap().total().into_u64(),
+        6_000
+    );
+    assert_eq!(db.transparent_pending().unwrap().len(), 1);
 
-    let coverage = db.transparent_coverage(id, h(100)).unwrap();
-    let mine = coverage
-        .iter()
+    db.rollback_transparent_above(h(499), "tail replaced")
+        .unwrap();
+
+    assert_eq!(
+        db.transparent_events().unwrap().len(),
+        2,
+        "the tail's events are gone"
+    );
+    assert_eq!(
+        db.transparent_balance(id).unwrap().total().into_u64(),
+        251_000,
+        "the spend above the cut is released and the receive above it is gone"
+    );
+    let ranges = db.transparent_coverage_of(&script).unwrap();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].end_height, h(499));
+    assert_eq!(ranges[0].kind, CoverageKind::Settled);
+    assert!(db.transparent_provisional_coverage().unwrap().is_empty());
+    assert!(
+        db.transparent_pending().unwrap().is_empty(),
+        "pending work of the replaced revision is gone with it"
+    );
+    assert!(
+        db.transparent_anchor().unwrap().is_none(),
+        "an unscanned rollback height cannot establish an anchor"
+    );
+}
+
+#[test]
+fn the_wallets_own_rewind_rolls_the_ledger_back_with_everything_else() {
+    // A rewind is the wallet saying the blocks above a height are gone. Coverage
+    // that rested on them would name a height nothing re-reads; the ledger
+    // follows the cut in the same transaction.
+    let (mut db, id) = wallet();
+    let script = scripts(&db)[0].clone();
+    registered(&mut db, id, &script, 100);
+    db.commit_transparent_shard(&with_receive(
+        commit(0, "r0", true, (100, 499), vec![script.clone()]),
+        receive(&script, 1, 0, 250_000, 300),
+    ))
+    .unwrap();
+    db.commit_transparent_shard(&with_receive(
+        commit(1, "r1", true, (500, 899), vec![script.clone()]),
+        receive(&script, 2, 0, 1_000, 700),
+    ))
+    .unwrap();
+    assert_eq!(
+        db.transparent_state(id, h(100)).unwrap().covered_through,
+        Some(h(99))
+    );
+    let mine = |db: &WalletDb| {
+        db.transparent_coverage(id, h(100))
+            .unwrap()
+            .into_iter()
+            .find(|c| c.script == script)
+            .unwrap()
+            .covered_through
+    };
+    assert_eq!(mine(&db), h(899));
+
+    db.truncate_to(h(499)).unwrap();
+
+    assert_eq!(mine(&db), h(499), "coverage ends where the chain now ends");
+    assert_eq!(db.transparent_events().unwrap().len(), 1);
+    assert_eq!(
+        db.transparent_balance(id).unwrap().total().into_u64(),
+        250_000
+    );
+}
+
+#[test]
+fn coverage_is_read_contiguously_from_the_required_height() {
+    // A range that does not join the one before it is not coverage the wallet
+    // can rely on: a gap between them is history nobody read.
+    let (mut db, id) = wallet();
+    let script = scripts(&db)[0].clone();
+    registered(&mut db, id, &script, 100);
+    db.commit_transparent_shard(&commit(0, "r0", true, (100, 299), vec![script.clone()]))
+        .unwrap();
+    db.commit_transparent_shard(&commit(2, "r2", false, (500, 599), vec![script.clone()]))
+        .unwrap();
+    let mine = db
+        .transparent_coverage(id, h(100))
+        .unwrap()
+        .into_iter()
         .find(|c| c.script == script)
-        .expect("the script has a coverage row");
-    assert_eq!(mine.settled_through, h(900));
-    assert_eq!(mine.covered_through, h(950));
+        .unwrap();
+    assert_eq!(mine.covered_through, h(299), "the gap at 300 stops it");
+
+    db.commit_transparent_shard(&commit(1, "r1", true, (300, 499), vec![script.clone()]))
+        .unwrap();
+    let mine = db
+        .transparent_coverage(id, h(100))
+        .unwrap()
+        .into_iter()
+        .find(|c| c.script == script)
+        .unwrap();
+    assert_eq!(mine.covered_through, h(599));
+    assert_eq!(mine.settled_through, h(499), "the tail is provisional");
+    assert_eq!(
+        db.transparent_state(id, h(100)).unwrap().provisional_shards,
+        1
+    );
+
+    db.promote_transparent_provisional(2, "r2").unwrap();
+    let mine = db
+        .transparent_coverage(id, h(100))
+        .unwrap()
+        .into_iter()
+        .find(|c| c.script == script)
+        .unwrap();
+    assert_eq!(mine.settled_through, h(599));
+    assert_eq!(
+        db.transparent_state(id, h(100)).unwrap().provisional_shards,
+        0
+    );
 }
 
 #[test]
 fn a_script_never_read_reports_coverage_below_the_birthday() {
-    // Reported rather than omitted: the caller uses this to decide where to
-    // start reading, and a missing script must start from the beginning rather
+    // Reported rather than omitted: the caller uses this to decide whether the
+    // balance is current, and a missing script must count as unread rather
     // than be skipped.
     let (mut db, id) = wallet();
     db.maintain_transparent_addresses(&params(), id, &GapLimits::default())
@@ -364,40 +673,58 @@ fn a_script_never_read_reports_coverage_below_the_birthday() {
             .all(|c| c.covered_through == h(99) && c.settled_through == h(99)),
         "a script with no row starts one below the birthday"
     );
+    let state = db.transparent_state(id, h(100)).unwrap();
+    assert_eq!(state.completion, None, "no sync has run");
+    assert_eq!(state.pending_pages, 0);
 }
 
 #[test]
-fn provisional_coverage_is_replaced_by_the_run_that_supersedes_it() {
-    // A revision replaces its predecessor rather than extending it, so the
-    // rows describing which revisions the current coverage rests on cannot
-    // accumulate.
+fn the_reason_a_sync_stopped_is_kept_beside_the_balance() {
     let (mut db, id) = wallet();
-    let (_, script) = first_script(&db);
-
-    db.apply_transparent_ledger(&TransparentLedger {
-        coverage: vec![covering(&script, id, 900, 950)],
-        provisional: vec![ProvisionalRevision {
-            shard_id: 7,
-            revision: 1,
-            manifest_digest: "abc".into(),
-            end_height: h(950),
-        }],
-        ..Default::default()
-    })
-    .unwrap();
+    db.put_transparent_completion("query-budget").unwrap();
     assert_eq!(
-        db.transparent_state(id, h(100)).unwrap().provisional_shards,
-        1
+        db.transparent_state(id, h(100))
+            .unwrap()
+            .completion
+            .as_deref(),
+        Some("query-budget")
     );
-
-    db.apply_transparent_ledger(&TransparentLedger {
-        coverage: vec![covering(&script, id, 960, 960)],
-        ..Default::default()
-    })
-    .unwrap();
+    assert!(
+        db.transparent_set().unwrap().is_none(),
+        "recording a reason does not bind the store to a lineage"
+    );
+    db.put_transparent_completion("complete").unwrap();
     assert_eq!(
-        db.transparent_state(id, h(100)).unwrap().provisional_shards,
-        0,
-        "coverage that is now settled rests on no revision"
+        db.transparent_completion().unwrap().as_deref(),
+        Some("complete")
     );
+}
+
+#[test]
+fn schema_three_is_rejected_without_erasing_wallet_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let wallet = dir.path().join("wallet.db");
+    let cache = dir.path().join("cache.db");
+    let mut db = WalletDb::open(&wallet, &cache).unwrap();
+    db.set_meta_u32("layout_version", 3).unwrap();
+    db.set_meta_u32("preserved_marker", 42).unwrap();
+    drop(db);
+    assert!(matches!(
+        WalletDb::open(&wallet, &cache),
+        Err(zakura_wallet_store::Error::VersionMismatch {
+            found: 3,
+            expected: 4,
+            ..
+        })
+    ));
+    let connection = rusqlite::Connection::open(&wallet).unwrap();
+    let marker: u32 = connection
+        .query_row(
+            "SELECT value FROM wallet_meta WHERE key = 'preserved_marker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(marker, 42);
+    assert!(cache.exists());
 }

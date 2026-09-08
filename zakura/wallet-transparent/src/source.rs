@@ -2,30 +2,46 @@
 //!
 //! The order of what follows is load-bearing, so it is stated once here.
 //!
-//! 1. Take the shard map and cut it down to the shards whose boundaries this
-//!    wallet has accepted. Anything past that is unverifiable, and a map is
-//!    gapless, so an unverifiable shard makes every later one unreachable.
+//! 1. Capture the wallet's accepted scanned target independently of the map.
+//!    Keep it fixed throughout the run. A larger published shard can be read
+//!    whole while only its accepted prefix is committed.
 //! 2. Take the service's declared geometry and refuse it if it is not the
-//!    schema this build reads.
-//! 3. Group the account's scripts by where each has already been read to, and
-//!    run once per group.
-//! 4. Commit each run's events and the coverage that explains them together.
+//!    schema this build reads, or not the chain the map describes.
+//! 3. Keep every account's window of unused addresses full, read every derived
+//!    script with the height it needs, and sync the ledger — the library
+//!    continues whatever the store already holds, detects a reorg against the
+//!    wallet's own chain, and stops at the work limits.
+//! 4. If the sync found activity, the gap limit may have moved: widen again,
+//!    and if that produced new scripts, sync again so they are read over their
+//!    whole required range. Bounded, so a wallet whose every new address is
+//!    used cannot loop forever inside one run.
 //!
-//! Step 4 is the one that is easy to get subtly wrong. Committing events
-//! without coverage means paying to re-derive them; committing coverage without
-//! events means never looking at that range again. Coverage advances only for a
-//! run that completed, so a failure anywhere above leaves the range unread
-//! rather than recorded as empty.
+//! Everything a shard yields is committed by the store as it is retrieved, so
+//! a failure anywhere leaves coverage exactly where the last commit put it. A
+//! sync that stops short says why, and that reason is kept beside the balance
+//! so the interface can show it.
 
-use serde::Deserialize;
+use std::collections::BTreeSet;
 
-use transparent_wallet::sync::ServiceGeometry;
-use transparent_wallet::transport::{FilterSource, ShardTransport};
+use transparent_wallet::{
+    Completion, IncompleteReason, ServiceGeometry, StaticScripts, SyncReport, WorkLimits,
+    sync_into,
+    transport::{FilterSource, ShardTransport},
+};
 use zakura_wallet_store::WalletDb;
-use zakura_wallet_sync::{TransparentProgress, TransparentSource, transparent::BoxError};
-use zcash_protocol::consensus::Parameters;
+use zakura_wallet_sync::{
+    TransparentCompletion, TransparentProgress, TransparentSource, transparent::BoxError,
+};
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-use crate::{Endpoints, Error, chain, ledger, scripts};
+use crate::{ChainSnapshot, Endpoints, Error, PirStore, scripts};
+
+/// How many times one run will widen the address window and sync again.
+///
+/// Each pass exists because the one before it found activity at the edge of
+/// the window. Sixteen is more than any ordinary wallet needs and small enough
+/// that a wallet paid at every fresh address in turn still returns.
+const MAX_PASSES: usize = 16;
 
 /// The wallet's transparent ledger, over a pair of services.
 ///
@@ -36,17 +52,34 @@ use crate::{Endpoints, Error, chain, ledger, scripts};
 pub struct TransparentPir<P> {
     endpoints: Endpoints,
     params: P,
+    limits: WorkLimits,
 }
 
 impl<P: Parameters + Send + Sync + 'static> TransparentPir<P> {
-    /// Points the ledger at a filter service and a shard service.
+    /// Points the ledger at a filter service and a shard service, with the
+    /// mobile work limits.
     pub fn new(endpoints: Endpoints, params: P) -> Self {
-        Self { endpoints, params }
+        Self {
+            endpoints,
+            params,
+            limits: crate::MOBILE_LIMITS,
+        }
+    }
+
+    /// Bounds the private work one run may do.
+    pub fn with_limits(mut self, limits: WorkLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// The services this reads from.
     pub fn endpoints(&self) -> &Endpoints {
         &self.endpoints
+    }
+
+    /// The limits one run works under.
+    pub fn limits(&self) -> &WorkLimits {
+        &self.limits
     }
 
     /// Runs one recovery against caller-supplied transports.
@@ -60,86 +93,162 @@ impl<P: Parameters + Send + Sync + 'static> TransparentPir<P> {
         filters: &mut impl FilterSource,
         transport: &mut impl ShardTransport,
     ) -> Result<TransparentProgress, Error> {
+        db.put_transparent_completion("sync-in-progress")?;
         let (map_bytes, map_cost) = filters
             .shard_map()
             .map_err(|e| Error::Transport(format!("shard map: {e}")))?;
-        let mut map: transparent_filter::ShardMap = serde_json::from_slice(&map_bytes)
+        let map: transparent_filter::ShardMap = serde_json::from_slice(&map_bytes)
             .map_err(|e| Error::Invalid(format!("shard map: {e}")))?;
 
-        let kept = chain::accepted_prefix(&mut map, db)?;
-        if kept == 0 {
-            // Not an error, and not an empty balance either. The wallet has not
-            // scanned down to the range the shards cover, so there is nothing
-            // it could yet check an answer against.
-            return Ok(TransparentProgress::default());
-        }
+        map.check_shape()
+            .map_err(|e| Error::Invalid(format!("shard map: {e}")))?;
+        let Some((_, scanned)) = db.block_height_extrema()? else {
+            let reason = format!(
+                "chain-unknown:{}",
+                map.shards
+                    .first()
+                    .map_or(map.start_height, |s| s.end_height)
+            );
+            db.put_transparent_completion(&reason)?;
+            return Ok(TransparentProgress {
+                completion: TransparentCompletion::Incomplete(reason),
+                ..TransparentProgress::default()
+            });
+        };
+        let target_height = u64::from(u32::from(scanned));
+        let target_hash = db
+            .accepted_block_hash(scanned)?
+            .ok_or_else(|| Error::Invalid("accepted scan tip has no hash".into()))?;
+        let target = transparent_wallet::Anchor {
+            height: target_height,
+            hash: transparent_filter::BlockHash::from_internal_bytes(target_hash.0)
+                .to_display_hex(),
+        };
 
         let (init_bytes, _) = transport
             .init()
             .map_err(|e| Error::Transport(format!("shard service init: {e}")))?;
         let geometry = geometry_of(&init_bytes, &map)?;
 
-        let accounts = db.accounts(&self.params)?;
-        let mut progress = TransparentProgress::default();
+        let (receives_before, spends_before) = db.transparent_event_counts()?;
+        let mut last: Option<SyncReport> = None;
+        let mut rolled_back_to: Option<BlockHeight> = None;
+        let mut outside_coverage = 0;
+        let mut asked: BTreeSet<Vec<u8>> = BTreeSet::new();
+        // Set when the window was still moving after the last allowed pass:
+        // scripts exist that no sync has read, and the run must say so.
+        let mut unbounded = false;
 
-        for account in accounts {
-            let watched = scripts::watched_scripts(db, account.id, account.birthday)?;
+        for pass in 0..=MAX_PASSES {
+            widen_windows(db, &self.params)?;
+            let watched = scripts::watched_scripts(db, &self.params, map.start_height)?;
+            outside_coverage = watched.outside_coverage;
             if watched.is_empty() {
-                continue;
+                break;
             }
+            let now: BTreeSet<Vec<u8>> = watched.entries.iter().map(|e| e.script.clone()).collect();
+            if now == asked {
+                // The last sync moved no gap limit: nothing new to read.
+                break;
+            }
+            if pass == MAX_PASSES {
+                unbounded = true;
+                break;
+            }
+            asked = now;
 
-            for (start, group) in &watched.groups {
-                let outcome = transparent_wallet::sync(
+            // The snapshot is taken before the store borrows the wallet, and
+            // covers exactly the heights the sync can ask about.
+            let snapshot = ChainSnapshot::load_at(db, &map, &target)?;
+            let report = {
+                let mut store = PirStore::new(db, watched.owners);
+                let mut provider = StaticScripts(watched.entries);
+                sync_into(
+                    &mut store,
                     &map,
                     map_cost,
                     &geometry,
+                    &snapshot,
+                    &mut provider,
                     filters,
                     transport,
-                    group,
-                    *start,
-                )
-                .map_err(|e| Error::Sync(e.to_string()))?;
-
-                let recovered = ledger::into_ledger(&outcome, account.id, group);
-                progress.outputs += recovered.outputs.len();
-                progress.spends += recovered.spends.len();
-                db.apply_transparent_ledger(&recovered)?;
+                    &self.limits,
+                    &target,
+                )?
+            };
+            if let Some(height) = report.rolled_back_to {
+                let height = self::height(height)?;
+                rolled_back_to = Some(rolled_back_to.map_or(height, |held| held.min(height)));
             }
-
-            let state = db.transparent_state(account.id, account.birthday)?;
-            progress.unresolved += state.unresolved_spends as usize;
-            progress.settled_through = min_option(progress.settled_through, state.settled_through);
-            progress.covered_through = min_option(progress.covered_through, state.covered_through);
+            let complete = report.completion == Completion::Complete;
+            last = Some(report);
+            if !complete {
+                break;
+            }
         }
 
-        Ok(progress)
+        let (receives_after, spends_after) = db.transparent_event_counts()?;
+        let completion = if unbounded {
+            TransparentCompletion::Incomplete("discovery-unbounded".into())
+        } else {
+            match &last {
+                Some(report) => completion_of(&report.completion),
+                None => TransparentCompletion::Complete,
+            }
+        };
+        db.put_transparent_completion(&completion.to_string())?;
+
+        Ok(TransparentProgress {
+            // Net of any rollback the run made: a replaced tail or a reorg can
+            // leave the ledger holding fewer events than it started with.
+            outputs: receives_after.saturating_sub(receives_before) as usize,
+            spends: spends_after.saturating_sub(spends_before) as usize,
+            unresolved: last.as_ref().map_or(0, |r| r.ledger.unresolved().len()),
+            settled_through: last
+                .as_ref()
+                .map(|r| height(r.settled_through))
+                .transpose()?,
+            covered_through: last
+                .as_ref()
+                .map(|r| height(r.covered_through))
+                .transpose()?,
+            completion,
+            pending: db.transparent_pending()?.len(),
+            rolled_back_to,
+            outside_coverage,
+        })
     }
 }
 
 #[cfg(feature = "https-client")]
 impl<P: Parameters + Send + Sync + 'static> TransparentSource for TransparentPir<P> {
     fn recover(&self, db: &mut WalletDb) -> Result<TransparentProgress, BoxError> {
-        let mut filters = crate::http::HttpFilters::new(&self.endpoints.filters_url)?;
-        let mut shards = crate::http::HttpShards::new(&self.endpoints.shards_url)?;
+        use transparent_wallet::http::{HttpFilterSource, HttpOptions, HttpShardTransport};
+        // Generous, because a private query is evaluated over a whole table
+        // and a mobile connection is not fast. A wallet that timed out mid-run
+        // keeps what it committed, but pays for the request again.
+        let options = HttpOptions {
+            timeout: std::time::Duration::from_secs(120),
+            ..HttpOptions::default()
+        };
+        let mut filters = HttpFilterSource::new(&self.endpoints.filters_url, &options)?;
+        let mut shards = HttpShardTransport::new(&self.endpoints.shards_url, &options)?;
         Ok(self.recover_with(db, &mut filters, &mut shards)?)
     }
 }
 
-/// What the shard service says about itself.
+/// Keeps every account's window of unused transparent addresses full.
 ///
-/// Only the fields a wallet has to check or re-derive from. The scheme
-/// parameters are here because they are checked against the pinned geometry,
-/// not because they are adopted.
-#[derive(Deserialize)]
-struct Init {
-    schema: String,
-    profile: String,
-    network: String,
-    genesis_hash: String,
-    directory_scheme: ipir_sp::YpirSchemeParams,
-    directory_setup_seed: u64,
-    pages_scheme: ipir_sp::YpirSchemeParams,
-    pages_setup_seed: u64,
+/// Cheap when nothing moved: the gap query finds the window already wide
+/// enough and derives nothing. Here rather than in the engine, because the
+/// window moves *during* a run — a recovered receive marks its address used —
+/// and the scripts that produces have to be read in the same run.
+fn widen_windows<P: Parameters>(db: &mut WalletDb, params: &P) -> Result<(), Error> {
+    let limits = zakura_wallet_store::GapLimits::default();
+    for account in db.accounts(params)? {
+        db.maintain_transparent_addresses(params, account.id, &limits)?;
+    }
+    Ok(())
 }
 
 /// Reads the service's geometry, and refuses one that does not match the map.
@@ -147,46 +256,61 @@ struct Init {
 /// The chain identity, the range profile and the schema are all checked before
 /// a query is prepared. Two services that disagreed about any of them would
 /// still each answer, and the answers would be rows from different partitions
-/// of different chains, decoded as though they were one.
+/// of different chains, decoded as though they were one. The library checks
+/// the schema again and every geometry against its registry; what it cannot
+/// check is that the map came from the same chain, because it only ever sees
+/// the two documents together.
 fn geometry_of(bytes: &[u8], map: &transparent_filter::ShardMap) -> Result<ServiceGeometry, Error> {
-    let init: Init =
-        serde_json::from_slice(bytes).map_err(|e| Error::Invalid(format!("init: {e}")))?;
-
-    if init.schema != crate::SCHEMA {
+    let geometry =
+        transparent_wallet::parse_init(bytes).map_err(|e| Error::Invalid(format!("init: {e}")))?;
+    if geometry.schema != crate::SCHEMA {
         return Err(Error::Schema {
-            served: init.schema,
+            served: geometry.schema,
             expected: crate::SCHEMA,
         });
     }
-    if init.genesis_hash != map.genesis_hash {
+    let init: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| Error::Invalid(format!("init: {e}")))?;
+    let field = |name: &str| init[name].as_str().unwrap_or_default().to_owned();
+    if field("genesis_hash") != map.genesis_hash {
         return Err(Error::Invalid(
             "the shard service and the shard map describe different chains".into(),
         ));
     }
-    if init.network != map.network || init.profile != map.profile {
+    if field("network") != map.network || field("profile") != map.profile {
         return Err(Error::Invalid(format!(
             "the shard service serves {}/{} and the map is {}/{}",
-            init.network, init.profile, map.network, map.profile
+            field("network"),
+            field("profile"),
+            map.network,
+            map.profile
         )));
     }
-
-    Ok(ServiceGeometry {
-        schema: init.schema,
-        directory_scheme: init.directory_scheme,
-        directory_setup_seed: init.directory_setup_seed,
-        pages_scheme: init.pages_scheme,
-        pages_setup_seed: init.pages_setup_seed,
-    })
+    Ok(geometry)
 }
 
-/// The lower of two coverages, treating absence as "no constraint".
-///
-/// A balance is only as current as its least current part, so coverage across
-/// accounts is a minimum rather than a maximum or an average.
-fn min_option<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) => Some(a),
-        (None, b) => b,
+/// The library's completion, in the words the interface shows.
+fn completion_of(completion: &Completion) -> TransparentCompletion {
+    match completion {
+        Completion::Complete => TransparentCompletion::Complete,
+        Completion::Incomplete { reason, .. } => TransparentCompletion::Incomplete(match reason {
+            IncompleteReason::QueryBudget => "query-budget".into(),
+            IncompleteReason::ByteBudget => "byte-budget".into(),
+            IncompleteReason::PendingLimit => "pending-limit".into(),
+            IncompleteReason::Overloaded { shard_id } => format!("overloaded:{shard_id}"),
+            IncompleteReason::ChainUnknown { height } => format!("chain-unknown:{height}"),
+            IncompleteReason::PublicationBehind { height } => {
+                format!("publication-behind:{height}")
+            }
+            IncompleteReason::UnresolvedSpends => "unresolved-spends".into(),
+            IncompleteReason::DiscoveryUnbounded => "discovery-unbounded".into(),
+        }),
     }
+}
+
+/// Reject heights the wallet cannot represent.
+fn height(value: u64) -> Result<BlockHeight, Error> {
+    u32::try_from(value)
+        .map(BlockHeight::from_u32)
+        .map_err(|_| Error::Invalid("height exceeds chain range".into()))
 }

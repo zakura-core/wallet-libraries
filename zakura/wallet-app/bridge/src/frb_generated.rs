@@ -26,7 +26,7 @@
 // Section: imports
 
 use flutter_rust_bridge::for_generated::byteorder::{NativeEndian, ReadBytesExt, WriteBytesExt};
-use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
+use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
 use flutter_rust_bridge::{Handler, IntoIntoDart};
 
 // Section: boilerplate
@@ -432,11 +432,18 @@ fn wire__crate__api__open_impl(
             let api_directory = <String>::sse_decode(&mut deserializer);
             let api_lightwalletd_url = <String>::sse_decode(&mut deserializer);
             let api_mainnet = <bool>::sse_decode(&mut deserializer);
+            let api_transparent_filters_url = <Option<String>>::sse_decode(&mut deserializer);
+            let api_transparent_shards_url = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, crate::api::types::ApiError>((move || {
-                    let output_ok =
-                        crate::api::open(api_directory, api_lightwalletd_url, api_mainnet)?;
+                    let output_ok = crate::api::open(
+                        api_directory,
+                        api_lightwalletd_url,
+                        api_mainnet,
+                        api_transparent_filters_url,
+                        api_transparent_shards_url,
+                    )?;
                     Ok(output_ok)
                 })())
             }
@@ -808,11 +815,14 @@ impl SseDecode for crate::api::types::ApiBalance {
         let mut var_pending = <u64>::sse_decode(deserializer);
         let mut var_spentUnconfirmed = <u64>::sse_decode(deserializer);
         let mut var_transparent = <u64>::sse_decode(deserializer);
+        let mut var_coverage =
+            <crate::api::types::ApiTransparentCoverage>::sse_decode(deserializer);
         return crate::api::types::ApiBalance {
             spendable: var_spendable,
             pending: var_pending,
             spent_unconfirmed: var_spentUnconfirmed,
             transparent: var_transparent,
+            coverage: var_coverage,
         };
     }
 }
@@ -941,11 +951,17 @@ impl SseDecode for crate::api::types::ApiTransparentCoverage {
         let mut var_coveredThrough = <Option<u32>>::sse_decode(deserializer);
         let mut var_unresolvedSpends = <u32>::sse_decode(deserializer);
         let mut var_provisionalShards = <u32>::sse_decode(deserializer);
+        let mut var_pendingPages = <u32>::sse_decode(deserializer);
+        let mut var_anchorHeight = <Option<u32>>::sse_decode(deserializer);
+        let mut var_completion = <Option<String>>::sse_decode(deserializer);
         return crate::api::types::ApiTransparentCoverage {
             settled_through: var_settledThrough,
             covered_through: var_coveredThrough,
             unresolved_spends: var_unresolvedSpends,
             provisional_shards: var_provisionalShards,
+            pending_pages: var_pendingPages,
+            anchor_height: var_anchorHeight,
+            completion: var_completion,
         };
     }
 }
@@ -1185,6 +1201,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::ApiBalance {
             self.pending.into_into_dart().into_dart(),
             self.spent_unconfirmed.into_into_dart().into_dart(),
             self.transparent.into_into_dart().into_dart(),
+            self.coverage.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1367,6 +1384,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::ApiTransparentCoverage
             self.covered_through.into_into_dart().into_dart(),
             self.unresolved_spends.into_into_dart().into_dart(),
             self.provisional_shards.into_into_dart().into_dart(),
+            self.pending_pages.into_into_dart().into_dart(),
+            self.anchor_height.into_into_dart().into_dart(),
+            self.completion.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1429,6 +1449,7 @@ impl SseEncode for crate::api::types::ApiBalance {
         <u64>::sse_encode(self.pending, serializer);
         <u64>::sse_encode(self.spent_unconfirmed, serializer);
         <u64>::sse_encode(self.transparent, serializer);
+        <crate::api::types::ApiTransparentCoverage>::sse_encode(self.coverage, serializer);
     }
 }
 
@@ -1521,6 +1542,9 @@ impl SseEncode for crate::api::types::ApiTransparentCoverage {
         <Option<u32>>::sse_encode(self.covered_through, serializer);
         <u32>::sse_encode(self.unresolved_spends, serializer);
         <u32>::sse_encode(self.provisional_shards, serializer);
+        <u32>::sse_encode(self.pending_pages, serializer);
+        <Option<u32>>::sse_encode(self.anchor_height, serializer);
+        <Option<String>>::sse_encode(self.completion, serializer);
     }
 }
 
@@ -1671,7 +1695,7 @@ mod io {
     use flutter_rust_bridge::for_generated::byteorder::{
         NativeEndian, ReadBytesExt, WriteBytesExt,
     };
-    use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
+    use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
     use flutter_rust_bridge::{Handler, IntoIntoDart};
 
     // Section: boilerplate
@@ -1695,7 +1719,7 @@ mod web {
     };
     use flutter_rust_bridge::for_generated::wasm_bindgen;
     use flutter_rust_bridge::for_generated::wasm_bindgen::prelude::*;
-    use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
+    use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
     use flutter_rust_bridge::{Handler, IntoIntoDart};
 
     // Section: boilerplate

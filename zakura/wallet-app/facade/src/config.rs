@@ -56,6 +56,12 @@ pub struct WalletConfig {
     /// One host serving both can join those facts together, and no property of
     /// the protocol prevents it.
     pub transparent: Option<zakura_wallet_transparent::Endpoints>,
+    /// How much private work one transparent sync may do before it stops and
+    /// keeps the rest for the next one.
+    ///
+    /// The mobile bound by default. A sync that reaches it is reported as
+    /// incomplete with its reason, never as a synchronized balance.
+    pub transparent_limits: zakura_wallet_transparent::WorkLimits,
     /// How many bytes of blocks to fetch at once.
     ///
     /// The default is the mobile budget, because the cost of guessing wrong is
@@ -78,6 +84,7 @@ impl WalletConfig {
             cache_path: dir.join("cache.db"),
             lightwalletd_url: lightwalletd_url.into(),
             transparent: None,
+            transparent_limits: zakura_wallet_transparent::MOBILE_LIMITS,
             batch_bytes: zakura_wallet_sync::ByteBudget::MOBILE.bytes(),
             poll_interval: std::time::Duration::from_secs(20),
         }

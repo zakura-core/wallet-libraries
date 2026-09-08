@@ -64,14 +64,13 @@ class NativeBindings implements ZakuraBindings {
     required String directory,
     required String lightwalletdUrl,
     required bool mainnet,
-  }) =>
-      _translate(
-        () => rust.open(
-          directory: directory,
-          lightwalletdUrl: lightwalletdUrl,
-          mainnet: mainnet,
-        ),
-      );
+  }) => _translate(
+    () => rust.open(
+      directory: directory,
+      lightwalletdUrl: lightwalletdUrl,
+      mainnet: mainnet,
+    ),
+  );
 
   @override
   Future<int> createAccount({required String phrase, int? birthday}) =>
@@ -93,28 +92,36 @@ class NativeBindings implements ZakuraBindings {
 
   @override
   Future<List<Account>> accounts() => _translate(() async {
-        final accounts = await rust.accounts();
-        return [
-          for (final a in accounts)
-            Account(
-              id: a.id,
-              birthday: a.birthday,
-              canSpend: a.canSpend,
-              hdAccountIndex: a.hdAccountIndex,
-            ),
-        ];
-      });
+    final accounts = await rust.accounts();
+    return [
+      for (final a in accounts)
+        Account(
+          id: a.id,
+          birthday: a.birthday,
+          canSpend: a.canSpend,
+          hdAccountIndex: a.hdAccountIndex,
+        ),
+    ];
+  });
 
   @override
   Future<Balance> balance(int account) => _translate(() async {
-        final b = await rust.balance(account: account);
-        return Balance(
-          spendable: Zatoshi(b.spendable.toInt()),
-          pending: Zatoshi(b.pending.toInt()),
-          spentUnconfirmed: Zatoshi(b.spentUnconfirmed.toInt()),
-          transparent: Zatoshi(b.transparent.toInt()),
-        );
-      });
+    final b = await rust.balance(account: account);
+    return Balance(
+      spendable: Zatoshi(b.spendable.toInt()),
+      pending: Zatoshi(b.pending.toInt()),
+      spentUnconfirmed: Zatoshi(b.spentUnconfirmed.toInt()),
+      transparent: Zatoshi(b.transparent.toInt()),
+      coverage: TransparentCoverage(
+        coveredThrough: b.coverage.coveredThrough,
+        settledThrough: b.coverage.settledThrough,
+        anchorHeight: b.coverage.anchorHeight,
+        completion: b.coverage.completion,
+        unresolvedSpends: b.coverage.unresolvedSpends,
+        pendingPages: b.coverage.pendingPages,
+      ),
+    );
+  });
 
   @override
   Future<List<HistoryEntry>> history(int account, int limit) =>
@@ -136,10 +143,10 @@ class NativeBindings implements ZakuraBindings {
       });
 
   static PoolAmounts _pools(rust.ApiPoolAmounts a) => PoolAmounts(
-        orchard: Zatoshi(a.orchard.toInt()),
-        ironwood: Zatoshi(a.ironwood.toInt()),
-        transparent: Zatoshi(a.transparent.toInt()),
-      );
+    orchard: Zatoshi(a.orchard.toInt()),
+    ironwood: Zatoshi(a.ironwood.toInt()),
+    transparent: Zatoshi(a.transparent.toInt()),
+  );
 
   @override
   Future<String> nextAddress(int account) =>
@@ -153,43 +160,42 @@ class NativeBindings implements ZakuraBindings {
 
   @override
   Future<SyncProgress> progress() => _translate(() async {
-        final p = await rust.progress();
-        return SyncProgress(
-          phase: switch (p.phase) {
-            rust.ApiSyncPhase.bootstrapping => SyncPhase.bootstrapping,
-            rust.ApiSyncPhase.recovering => SyncPhase.recovering,
-            rust.ApiSyncPhase.tracking => SyncPhase.tracking,
-            rust.ApiSyncPhase.idle => SyncPhase.idle,
-            rust.ApiSyncPhase.stopped => SyncPhase.stopped,
-          },
-          fraction: p.fraction,
-          tip: p.tip,
-          scannedTo: p.scannedTo,
-          blocksRemaining: p.blocksRemaining.toInt(),
-          failed: p.failed,
-        );
-      });
+    final p = await rust.progress();
+    return SyncProgress(
+      phase: switch (p.phase) {
+        rust.ApiSyncPhase.bootstrapping => SyncPhase.bootstrapping,
+        rust.ApiSyncPhase.recovering => SyncPhase.recovering,
+        rust.ApiSyncPhase.tracking => SyncPhase.tracking,
+        rust.ApiSyncPhase.idle => SyncPhase.idle,
+        rust.ApiSyncPhase.stopped => SyncPhase.stopped,
+      },
+      fraction: p.fraction,
+      tip: p.tip,
+      scannedTo: p.scannedTo,
+      blocksRemaining: p.blocksRemaining.toInt(),
+      failed: p.failed,
+    );
+  });
 
   @override
   Future<SpendQuote> quote({
     required int account,
     required String to,
     required int amount,
-  }) =>
-      _translate(() async {
-        final q = await rust.quote(
-          account: account,
-          to: to,
-          amount: BigInt.from(amount),
-        );
-        return SpendQuote(
-          amount: Zatoshi(q.amount.toInt()),
-          fee: Zatoshi(q.fee.toInt()),
-          change: Zatoshi(q.change.toInt()),
-          inputs: q.inputs,
-          crossing: q.crossing,
-        );
-      });
+  }) => _translate(() async {
+    final q = await rust.quote(
+      account: account,
+      to: to,
+      amount: BigInt.from(amount),
+    );
+    return SpendQuote(
+      amount: Zatoshi(q.amount.toInt()),
+      fee: Zatoshi(q.fee.toInt()),
+      change: Zatoshi(q.change.toInt()),
+      inputs: q.inputs,
+      crossing: q.crossing,
+    );
+  });
 
   @override
   Future<SendReceipt> send({
@@ -197,20 +203,19 @@ class NativeBindings implements ZakuraBindings {
     required String to,
     required int amount,
     required String phrase,
-  }) =>
-      _translate(() async {
-        final r = await rust.send(
-          account: account,
-          to: to,
-          amount: BigInt.from(amount),
-          phrase: phrase,
-        );
-        return SendReceipt(
-          txid: r.txid,
-          serverResponse: r.serverResponse,
-          warning: r.warning,
-        );
-      });
+  }) => _translate(() async {
+    final r = await rust.send(
+      account: account,
+      to: to,
+      amount: BigInt.from(amount),
+      phrase: phrase,
+    );
+    return SendReceipt(
+      txid: r.txid,
+      serverResponse: r.serverResponse,
+      warning: r.warning,
+    );
+  });
 
   @override
   Future<String?> syncFailure() => _translate(rust.syncFailure);

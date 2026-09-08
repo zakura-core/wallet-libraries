@@ -37,6 +37,7 @@ zakura-wallet-core = { path = "../wallet-core" }
 zcash_protocol.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 assert_matches.workspace = true
 zip32.workspace = true
 orchard.workspace = true

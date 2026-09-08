@@ -68,7 +68,12 @@ fn paying_chain(count: usize, value: u64) -> (BlockAnchor, Vec<CompactBlock>) {
     for i in 0..count {
         chain.block(|b| {
             b.tx(|t| {
-                t.receive(PoolId::Ironwood, &alice(), KeyScope::External, value + i as u64);
+                t.receive(
+                    PoolId::Ironwood,
+                    &alice(),
+                    KeyScope::External,
+                    value + i as u64,
+                );
             });
         });
     }
@@ -172,10 +177,7 @@ async fn a_second_run_finds_nothing_left_to_do() {
 
 #[tokio::test]
 async fn an_empty_chain_leaves_an_empty_wallet() {
-    let chain = InMemoryChain::new(
-        ChainBuilder::new(START).anchor(),
-        Vec::new(),
-    );
+    let chain = InMemoryChain::new(ChainBuilder::new(START).anchor(), Vec::new());
     let mut engine = engine(chain);
 
     let summary = engine.run(&CancellationToken::new()).await.unwrap();
@@ -264,7 +266,10 @@ async fn the_byte_budget_bounds_how_much_is_held_at_once() {
         }
     }
 
-    assert!(steps >= 4, "eight blocks at two a batch is at least four steps");
+    assert!(
+        steps >= 4,
+        "eight blocks at two a batch is at least four steps"
+    );
     assert_eq!(note_count(engine.db()), 8);
 }
 
@@ -639,7 +644,10 @@ async fn a_queued_range_the_source_cannot_serve_is_reported_not_hidden() {
     db.set_birthday(h(START)).unwrap();
     db.connection()
         .execute(
-            &format!("INSERT INTO cache.scan_queue VALUES ({START}, {}, 20)", START + 100),
+            &format!(
+                "INSERT INTO cache.scan_queue VALUES ({START}, {}, 20)",
+                START + 100
+            ),
             [],
         )
         .unwrap();
@@ -717,10 +725,7 @@ async fn an_incoherent_source_is_eventually_given_up_on() {
 
     // Force a range the source does hold to be re-verified, so every attempt
     // fetches real blocks and fails their continuity check.
-    engine
-        .db_mut()
-        .truncate_to(h(START + 200))
-        .unwrap();
+    engine.db_mut().truncate_to(h(START + 200)).unwrap();
 
     let mut rewinds = 0;
     for _ in 0..12 {
@@ -799,10 +804,7 @@ async fn a_range_starting_at_genesis_has_no_anchor() {
         SyncConfig::default(),
     );
 
-    let err = engine
-        .step(&CancellationToken::new())
-        .await
-        .unwrap_err();
+    let err = engine.step(&CancellationToken::new()).await.unwrap_err();
     assert_matches!(
         err,
         zakura_wallet_sync::Error::MissingAnchor { height } if height == h(0)
@@ -881,9 +883,7 @@ fn every_error_renders_and_exposes_its_cause() {
     use std::error::Error as _;
     use zakura_wallet_sync::{Error, SourceError};
 
-    let source = Error::Source(SourceError::new(
-        zakura_wallet_sync::testing::Unavailable,
-    ));
+    let source = Error::Source(SourceError::new(zakura_wallet_sync::testing::Unavailable));
     assert!(source.to_string().contains("chain source"), "{source}");
     assert!(source.source().is_some());
 
@@ -970,12 +970,11 @@ fn a_boxed_source_error_keeps_its_cause() {
 fn storage_errors_convert_into_engine_errors() {
     use zakura_wallet_sync::Error;
 
-    let from_tree: Error = zakura_wallet_store::TreeError::Store(
-        zakura_wallet_store::Error::CheckpointConflict {
+    let from_tree: Error =
+        zakura_wallet_store::TreeError::Store(zakura_wallet_store::Error::CheckpointConflict {
             checkpoint_id: h(1),
-        },
-    )
-    .into();
+        })
+        .into();
     assert_matches!(from_tree, Error::Store(_));
 
     let from_store: Error = zakura_wallet_store::Error::CheckpointConflict {
@@ -1088,15 +1087,27 @@ async fn a_descending_fetch_returns_blocks_in_chain_order() {
     let chain = InMemoryChain::new(anchor, blocks);
 
     let descending = chain
-        .fetch(h(START)..h(START + 10), ByteBudget::new(400), Direction::Descending)
+        .fetch(
+            h(START)..h(START + 10),
+            ByteBudget::new(400),
+            Direction::Descending,
+        )
         .await
         .unwrap();
     let ascending = chain
-        .fetch(h(START)..h(START + 10), ByteBudget::new(400), Direction::Ascending)
+        .fetch(
+            h(START)..h(START + 10),
+            ByteBudget::new(400),
+            Direction::Ascending,
+        )
         .await
         .unwrap();
 
-    assert!(descending.windows(2).all(|w| w[1].height == w[0].height + 1));
+    assert!(
+        descending
+            .windows(2)
+            .all(|w| w[1].height == w[0].height + 1)
+    );
     assert!(ascending.windows(2).all(|w| w[1].height == w[0].height + 1));
     assert_eq!(
         descending.last().unwrap().height,
@@ -1164,9 +1175,17 @@ async fn roots_that_would_leave_a_hole_are_not_inserted() {
     chain.with_subtree_roots(
         PoolId::Ironwood,
         vec![
-            SubtreeRoot { index: 0, end_height: h(START), root },
+            SubtreeRoot {
+                index: 0,
+                end_height: h(START),
+                root,
+            },
             // Index 1 is missing.
-            SubtreeRoot { index: 2, end_height: h(START + 1), root },
+            SubtreeRoot {
+                index: 2,
+                end_height: h(START + 1),
+                root,
+            },
         ],
     );
 
@@ -1436,12 +1455,9 @@ impl zakura_wallet_sync::TransparentSource for CountingTransparent {
     fn recover(
         &self,
         _db: &mut zakura_wallet_store::WalletDb,
-    ) -> Result<
-        zakura_wallet_sync::TransparentProgress,
-        zakura_wallet_sync::transparent::BoxError,
-    > {
-        self.runs
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    ) -> Result<zakura_wallet_sync::TransparentProgress, zakura_wallet_sync::transparent::BoxError>
+    {
+        self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.outcome.clone().map_err(Into::into)
     }
 }
@@ -1460,6 +1476,7 @@ async fn the_transparent_ledger_runs_once_a_pass_and_reports_where_it_reached() 
             unresolved: 0,
             settled_through: Some(h(START + 3)),
             covered_through: Some(h(START + 3)),
+            ..Default::default()
         }),
     });
 
@@ -1470,6 +1487,10 @@ async fn the_transparent_ledger_runs_once_a_pass_and_reports_where_it_reached() 
     assert_eq!(summary.transparent_outputs, 2);
     assert_eq!(summary.transparent_spends, 1);
     assert_eq!(summary.transparent_covered_through, Some(h(START + 3)));
+    assert_eq!(
+        summary.transparent_completion,
+        Some(zakura_wallet_sync::TransparentCompletion::Complete)
+    );
 
     // And again on the next pass, because the published shard set grows even
     // when the wallet's own scan queue does not.
@@ -1489,6 +1510,37 @@ async fn an_engine_with_no_transparent_source_still_syncs() {
     assert_eq!(summary.transparent_covered_through, None);
     assert_eq!(summary.transparent_outputs, 0);
     assert!(summary.batches > 0, "the rest of the sync is unaffected");
+}
+
+#[tokio::test]
+async fn a_transparent_run_that_stops_short_is_reported_not_failed() {
+    // A budget or an outage leaves work owed, and the engine says so. It does
+    // not fail the pass — everything the run committed is kept and the next
+    // pass continues it — and it does not call the balance synchronized.
+    let (anchor, blocks) = paying_chain(2, 10_000);
+    let source = std::sync::Arc::new(CountingTransparent {
+        runs: std::sync::atomic::AtomicUsize::new(0),
+        outcome: Ok(zakura_wallet_sync::TransparentProgress {
+            completion: zakura_wallet_sync::TransparentCompletion::Incomplete(
+                "query-budget".into(),
+            ),
+            pending: 3,
+            covered_through: Some(h(START)),
+            settled_through: Some(h(START)),
+            ..Default::default()
+        }),
+    });
+
+    let mut engine = engine(InMemoryChain::new(anchor, blocks)).with_transparent(source);
+    let summary = engine.run(&CancellationToken::new()).await.unwrap();
+    assert_eq!(
+        summary.transparent_completion,
+        Some(zakura_wallet_sync::TransparentCompletion::Incomplete(
+            "query-budget".into()
+        ))
+    );
+    assert_eq!(summary.transparent_pending, 3);
+    assert!(summary.batches > 0, "the rest of the pass ran");
 }
 
 #[tokio::test]

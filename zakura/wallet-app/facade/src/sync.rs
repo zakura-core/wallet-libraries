@@ -205,12 +205,18 @@ struct SyncExit {
 impl Drop for SyncExit {
     fn drop(&mut self) {
         {
-            let mut writer = self.writer.lock().expect("the writer lock is never poisoned");
+            let mut writer = self
+                .writer
+                .lock()
+                .expect("the writer lock is never poisoned");
             if writer.is_none() {
                 match WalletDb::open(&self.wallet_path, &self.cache_path) {
                     Ok(db) => *writer = Some(db),
                     Err(e) => {
-                        *self.failure.lock().expect("the failure lock is never poisoned") =
+                        *self
+                            .failure
+                            .lock()
+                            .expect("the failure lock is never poisoned") =
                             Some(format!("the wallet could not be reopened: {e}"));
                     }
                 }
@@ -274,15 +280,17 @@ impl Wallet {
     /// channel is lossy by design, so a reader that falls behind sees the
     /// latest value instead of a queue of stale ones.
     pub fn start_sync(&self) -> Result<(), Error> {
-        let mut session = self.session.lock().expect("the session lock is never poisoned");
+        let mut session = self
+            .session
+            .lock()
+            .expect("the session lock is never poisoned");
 
         // A sync that has run to completion leaves its session behind. Reap it
         // rather than refusing: reaching the tip is the ordinary outcome, and a
         // wallet that could only ever sync once would be useless.
-        if session.as_ref().is_some_and(|s| !s.is_running()) {
-            if let Some(finished) = session.take() {
+        if session.as_ref().is_some_and(|s| !s.is_running())
+            && let Some(finished) = session.take() {
                 finished.stop();
-            }
         }
         if session.is_some() {
             return Err(Error::AlreadySyncing);
@@ -303,19 +311,28 @@ impl Wallet {
         // it was the last scan, so this is the moment it can be refilled.
         let mut db = db;
         if let Err(e) = self.refresh_watch(&mut db) {
-            *self.writer.lock().expect("the writer lock is never poisoned") = Some(db);
+            *self
+                .writer
+                .lock()
+                .expect("the writer lock is never poisoned") = Some(db);
             return Err(e);
         }
 
         let keys = match self.scan_keys(&db) {
             Ok(keys) => keys,
             Err(e) => {
-                *self.writer.lock().expect("the writer lock is never poisoned") = Some(db);
+                *self
+                    .writer
+                    .lock()
+                    .expect("the writer lock is never poisoned") = Some(db);
                 return Err(e);
             }
         };
 
-        *self.failure.lock().expect("the failure lock is never poisoned") = None;
+        *self
+            .failure
+            .lock()
+            .expect("the failure lock is never poisoned") = None;
 
         let cancel = CancellationToken::new();
         let (tx, rx) = watch::channel(SyncProgress {
@@ -325,6 +342,7 @@ impl Wallet {
 
         let url = self.config.lightwalletd_url.clone();
         let transparent = self.config.transparent.clone();
+        let transparent_limits = self.config.transparent_limits;
         let params = self.params;
         let budget = ByteBudget::new(self.config.batch_bytes);
         let poll_interval = self.config.poll_interval;
@@ -397,7 +415,8 @@ impl Wallet {
                         // coverage advancing, and the interface can say so.
                         if let Some(endpoints) = transparent {
                             engine = engine.with_transparent(Arc::new(
-                                zakura_wallet_transparent::TransparentPir::new(endpoints, params),
+                                zakura_wallet_transparent::TransparentPir::new(endpoints, params)
+                                    .with_limits(transparent_limits),
                             ));
                         }
 
@@ -679,6 +698,10 @@ mod tests {
 
         let db = engine.into_db();
         let balance = db.total_balance(account).expect("the account is there");
-        assert_eq!(balance.total().into_u64(), 100_000, "the note was not found");
+        assert_eq!(
+            balance.total().into_u64(),
+            100_000,
+            "the note was not found"
+        );
     }
 }

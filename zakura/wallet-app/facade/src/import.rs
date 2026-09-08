@@ -12,8 +12,8 @@
 //! wallet's pools activated at, below which nothing can be its money — and not
 //! a guess.
 
-use zakura_wallet_core::pool::{Orchard, ShieldedPool};
 use rusqlite::OptionalExtension;
+use zakura_wallet_core::pool::{Orchard, ShieldedPool};
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_protocol::consensus::BlockHeight;
 use zeroize::Zeroizing;
@@ -62,7 +62,9 @@ impl Wallet {
     /// cannot be reached the earliest possible height is used instead: slower,
     /// and never wrong in the direction that loses money.
     pub fn create_wallet(&self, seed: &Zeroizing<Vec<u8>>) -> Result<u32, Error> {
-        let birthday = self.fetch_chain_tip().unwrap_or_else(|_| self.earliest_birthday());
+        let birthday = self
+            .fetch_chain_tip()
+            .unwrap_or_else(|_| self.earliest_birthday());
         self.create_account(seed, 0, birthday)
     }
 
@@ -81,7 +83,11 @@ impl Wallet {
         seed: &Zeroizing<Vec<u8>>,
         birthday: Option<u32>,
     ) -> Result<u32, Error> {
-        self.create_account(seed, 0, birthday.unwrap_or_else(|| self.earliest_birthday()))
+        self.create_account(
+            seed,
+            0,
+            birthday.unwrap_or_else(|| self.earliest_birthday()),
+        )
     }
 
     /// Returns the transparent addresses the wallet watches for an account,
@@ -105,7 +111,10 @@ impl Wallet {
     /// [`Wallet::transparent_coverage`] says how far that reaches — which is
     /// the pair a person needs to tell "no transparent funds" from "not yet
     /// read that far".
-    pub fn transparent_utxos(&self, account: u32) -> Result<Vec<(String, u64, Option<u32>)>, Error> {
+    pub fn transparent_utxos(
+        &self,
+        account: u32,
+    ) -> Result<Vec<(String, u64, Option<u32>)>, Error> {
         self.with_reader(|db| {
             Ok(db
                 .transparent_utxos(Self::account_id(account))?
@@ -140,6 +149,9 @@ impl Wallet {
                 covered_through: state.covered_through.map(u32::from),
                 unresolved_spends: state.unresolved_spends,
                 provisional_shards: state.provisional_shards,
+                pending_pages: state.pending_pages,
+                anchor_height: state.anchor.map(|anchor| u32::from(anchor.height)),
+                completion: state.completion,
             })
         })
     }
@@ -179,6 +191,23 @@ pub struct TransparentCoverage {
     pub unresolved_spends: u32,
     /// How many unsealed shard revisions the current coverage rests on.
     pub provisional_shards: u32,
+    /// Page retrievals the ledger still owes.
+    ///
+    /// Work a sync stopped before finishing — a budget, an outage — and will
+    /// resume. Non-zero means the coverage numbers describe what has been read
+    /// so far, not what the wallet is responsible for.
+    pub pending_pages: u32,
+    /// The height the ledger last accepted as the end of complete coverage.
+    ///
+    /// Committed only by a sync that finished everything it set out to read.
+    pub anchor_height: Option<u32>,
+    /// Why the last sync stopped, in the ledger's own words: `complete`, or
+    /// the reason it stopped short (`query-budget`, `byte-budget`,
+    /// `pending-limit`, `overloaded:<shard>`, `chain-unknown:<height>`,
+    /// `discovery-unbounded`). `None` before any sync. The balance is
+    /// synchronized only when this is `complete` and `unresolved_spends` is
+    /// zero.
+    pub completion: Option<String>,
 }
 
 /// What a transaction did, read from its own bytes.
@@ -258,9 +287,8 @@ impl Wallet {
             Ok(Some(TransactionShape {
                 transparent_inputs: transparent.map_or(0, |b| b.vin.len()),
                 transparent_outputs: transparent.map_or(0, |b| b.vout.len()),
-                transparent_out_value: transparent.map_or(0, |b| {
-                    b.vout.iter().map(|o| o.value.into_u64()).sum()
-                }),
+                transparent_out_value: transparent
+                    .map_or(0, |b| b.vout.iter().map(|o| o.value().into_u64()).sum()),
                 orchard_actions: tx.orchard_bundle().map_or(0, |b| b.actions().len()),
                 ironwood_actions: tx.ironwood_bundle().map_or(0, |b| b.actions().len()),
                 orchard_value_balance: tx

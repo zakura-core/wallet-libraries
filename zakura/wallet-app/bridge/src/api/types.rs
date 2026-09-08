@@ -38,7 +38,7 @@ impl std::fmt::Display for ApiError {
 impl std::error::Error for ApiError {}
 
 /// What an account is worth, in zatoshis.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ApiBalance {
     /// Received, unspent, and settled: what can be sent right now.
     pub spendable: u64,
@@ -51,6 +51,8 @@ pub struct ApiBalance {
     /// Kept apart from `spendable` because it cannot be sent directly:
     /// transparent funds have to be shielded first.
     pub transparent: u64,
+    /// Completeness read in the same database snapshot as the amounts.
+    pub coverage: ApiTransparentCoverage,
 }
 
 /// How far the private transparent ledger has read.
@@ -59,7 +61,7 @@ pub struct ApiBalance {
 /// transparent balance is true as of a height, and a wallet that has not read
 /// as far as the tip is not the same as one that read the whole chain and found
 /// nothing — but they show the same number.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ApiTransparentCoverage {
     /// The last height covered by sealed shards alone.
     ///
@@ -77,6 +79,19 @@ pub struct ApiTransparentCoverage {
     pub unresolved_spends: u32,
     /// How many unsealed shard revisions the coverage rests on.
     pub provisional_shards: u32,
+    /// Page retrievals the ledger still owes from a sync that stopped short.
+    ///
+    /// Non-zero means the coverage describes what has been read so far, and
+    /// the next sync continues it.
+    pub pending_pages: u32,
+    /// The height the ledger last accepted as the end of complete coverage.
+    pub anchor_height: Option<u32>,
+    /// Why the last sync stopped: `complete`, or the reason it stopped short
+    /// (`query-budget`, `byte-budget`, `pending-limit`, `overloaded:<shard>`,
+    /// `chain-unknown:<height>`, `discovery-unbounded`). Absent before any
+    /// sync. The interface may call the transparent balance synchronized only
+    /// when this is `complete` and `unresolved_spends` is zero.
+    pub completion: Option<String>,
 }
 
 /// One transparent output the ledger holds.

@@ -59,3 +59,17 @@ impl From<zakura_wallet_store::Error> for Error {
         Error::Store(e)
     }
 }
+
+impl From<transparent_wallet::SyncError> for Error {
+    fn from(e: transparent_wallet::SyncError) -> Self {
+        use transparent_wallet::SyncError;
+        match e {
+            SyncError::Schema { served, expected } => Error::Schema { served, expected },
+            SyncError::Transport(why) => Error::Transport(why),
+            // Everything else means the service, the map, the manifest or the
+            // store disagree with each other or with this build. The library
+            // says which, and a retry would say it again.
+            other => Error::Sync(other.to_string()),
+        }
+    }
+}

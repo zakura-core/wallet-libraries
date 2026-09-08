@@ -17,21 +17,17 @@ use std::ops::Range;
 
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use zakura_wallet_core::{enhanced::TransactionStatus,
+use zakura_wallet_core::{
     BlockAnchor,
+    enhanced::TransactionStatus,
     pool::PoolId,
     retrieval::Locator,
     scanning::{ScanPriority, ScanRange},
 };
 use zakura_wallet_scan::{
-    EnhanceError, ScanError, ScanKeys, TransparentWatch, detect_batch,
-    enhance::decrypt_transaction,
+    EnhanceError, ScanError, ScanKeys, TransparentWatch, detect_batch, enhance::decrypt_transaction,
 };
-use zakura_wallet_store::{
-    PRUNING_DEPTH, WalletDb,
-    enhance::TxMeta,
-    retrieval::RequestScope,
-};
+use zakura_wallet_store::{PRUNING_DEPTH, WalletDb, enhance::TxMeta, retrieval::RequestScope};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use crate::{
@@ -141,6 +137,12 @@ pub enum Step {
         spends: usize,
         /// Spends the run could not resolve to an output it holds.
         unresolved: usize,
+        /// Whether the run finished, and if not, why.
+        completion: crate::TransparentCompletion,
+        /// Page retrievals still owed after the run.
+        pending: usize,
+        /// Scripts the private tables cannot index.
+        outside_coverage: usize,
     },
     /// There is nothing left to scan.
     Idle,
@@ -302,12 +304,16 @@ where
 
     /// Returns the wallet this engine is driving.
     pub fn db(&self) -> &WalletDb {
-        self.db.as_ref().expect("the wallet is present between steps")
+        self.db
+            .as_ref()
+            .expect("the wallet is present between steps")
     }
 
     /// Returns the wallet this engine is driving, mutably.
     pub fn db_mut(&mut self) -> &mut WalletDb {
-        self.db.as_mut().expect("the wallet is present between steps")
+        self.db
+            .as_mut()
+            .expect("the wallet is present between steps")
     }
 
     /// Consumes the engine, returning the wallet.
@@ -318,7 +324,12 @@ where
 
     /// Asks the source for the tip and reconciles the queue with it.
     pub async fn update_tip(&mut self) -> Result<BlockHeight, Error> {
-        let tip = self.source.tip().await.map_err(SourceError::new).map_err(Error::Source)?;
+        let tip = self
+            .source
+            .tip()
+            .await
+            .map_err(SourceError::new)
+            .map_err(Error::Source)?;
         let params = self.params.clone();
         self.db_mut().update_chain_tip(&params, tip.height)?;
         self.publish(Some(tip.height))?;
@@ -530,7 +541,7 @@ where
                         Ok(()) => {
                             // Being paid at an address obliges the wallet to
                             // watch further ahead. Widened here as well as
-                            // before a transparent sync, because a shielding
+                            // inside a transparent sync, because a shielding
                             // this wallet sees arrive can expose an address the
                             // private ledger has not been asked about yet.
                             if let Err(e) = widen_transparent_window(&mut db, &params) {
@@ -583,8 +594,7 @@ where
             // data and this would be a wasted request.
             let anchor = match blocks.first() {
                 Some(first)
-                    if direction == Direction::Descending
-                        && u32::from(first.height) > 0 =>
+                    if direction == Direction::Descending && u32::from(first.height) > 0 =>
                 {
                     Some(source.anchor(first.height - 1).await?)
                 }
@@ -674,12 +684,18 @@ where
                     outputs,
                     spends,
                     unresolved,
+                    completion,
+                    pending,
+                    outside_coverage,
                 } => {
                     summary.transparent_settled_through = settled_through;
                     summary.transparent_covered_through = covered_through;
                     summary.transparent_outputs += outputs;
                     summary.transparent_spends += spends;
                     summary.unresolved_transparent_spends = unresolved;
+                    summary.transparent_completion = Some(completion);
+                    summary.transparent_pending = pending;
+                    summary.transparent_outside_coverage = outside_coverage;
                 }
                 Step::Enhanced {
                     applied, failed, ..
@@ -721,9 +737,9 @@ where
         let backend = PublicRetrieval::new(std::sync::Arc::clone(&self.source));
         let serves = backend.serves();
 
-        let requests =
-            self.db()
-                .pending_requests(scope, serves, tip, self.config.enhance_batch)?;
+        let requests = self
+            .db()
+            .pending_requests(scope, serves, tip, self.config.enhance_batch)?;
         if requests.is_empty() {
             return Ok(None);
         }
@@ -863,10 +879,14 @@ where
     /// Reads the private transparent ledger forward, once per run.
     ///
     /// Returns the step to report, or `None` when there is nothing to do:
-    /// no source configured, no script watched, or it has already run in this
-    /// pass. Widening the address window comes first, because a script the
-    /// wallet has not derived is a script the ledger will not be asked about,
-    /// and the ledger is the only thing that would ever find it.
+    /// no source configured, or it has already run in this pass. Widening the
+    /// address window is the source's job, because the window moves during a
+    /// run — a recovered receive marks its address used — and the scripts that
+    /// produces have to be read in the same run.
+    ///
+    /// A run that stops short is a reported state, not a failure: what it
+    /// committed is kept and the next pass continues it. Only a run that could
+    /// not proceed at all fails the pass.
     async fn recover_transparent(&mut self) -> Result<Option<Step>, Error> {
         if self.transparent_ran {
             return Ok(None);
@@ -876,13 +896,9 @@ where
         };
         self.transparent_ran = true;
 
-        let params = self.params.clone();
         let mut db = self.db.take().expect("the wallet is present between steps");
 
         let (db, outcome) = tokio::task::spawn_blocking(move || {
-            if let Err(e) = widen_transparent_window(&mut db, &params) {
-                return (db, Err(e));
-            }
             // Blocking, and the wallet goes in with it: the PIR client is
             // CPU-bound, and every check it makes needs the wallet's own state
             // to check against.
@@ -907,6 +923,9 @@ where
             outputs: progress.outputs,
             spends: progress.spends,
             unresolved: progress.unresolved,
+            completion: progress.completion,
+            pending: progress.pending,
+            outside_coverage: progress.outside_coverage,
         }))
     }
 
@@ -976,7 +995,8 @@ where
 /// Keeps every account's window of unused transparent addresses full.
 ///
 /// Cheap when nothing moved: the gap query finds the window already wide enough
-/// and derives nothing.
+/// and derives nothing. The transparent source widens again during its own run,
+/// because a recovered receive moves the window too.
 fn widen_transparent_window<P: Parameters>(
     db: &mut zakura_wallet_store::WalletDb,
     params: &P,
@@ -1212,6 +1232,17 @@ pub struct SyncSummary {
     /// consumed, so the balance is too high in a way that looks entirely
     /// ordinary.
     pub unresolved_transparent_spends: usize,
+    /// Whether the transparent run finished, and if not, why.
+    ///
+    /// `None` when no transparent source is configured. A run that stopped
+    /// short kept everything it committed and left the rest owed; the balance
+    /// is a partial view until a later run completes it.
+    pub transparent_completion: Option<crate::TransparentCompletion>,
+    /// Page retrievals the transparent ledger still owes.
+    pub transparent_pending: usize,
+    /// Transparent scripts the private tables cannot index, whose history this
+    /// path cannot recover. Not empty: unknown.
+    pub transparent_outside_coverage: usize,
     /// How many transactions were fetched whole and folded in.
     pub enhanced: usize,
     /// How many transactions the source could not be asked about.

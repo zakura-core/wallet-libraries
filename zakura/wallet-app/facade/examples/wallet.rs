@@ -47,9 +47,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("ZAKURA_TRANSPARENT_FILTERS"),
         std::env::var("ZAKURA_TRANSPARENT_SHARDS"),
     ) {
-        (Ok(filters), Ok(shards)) => Some(zakura_wallet_transparent::Endpoints::new(
-            filters, shards,
-        )),
+        (Ok(filters), Ok(shards)) => {
+            Some(zakura_wallet_transparent::Endpoints::new(filters, shards))
+        }
         _ => None,
     };
 
@@ -106,7 +106,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(utxos) if utxos.is_empty() => println!("  the ledger holds nothing unspent"),
             Ok(utxos) => {
                 for (address, value, height) in utxos {
-                    let at = height.map_or_else(|| "height unknown".to_owned(), |h| format!("block {h}"));
+                    let at = height
+                        .map_or_else(|| "height unknown".to_owned(), |h| format!("block {h}"));
                     println!("  unspent   {value:>12} at {address} ({at})");
                 }
             }
@@ -115,11 +116,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match wallet.transparent_coverage(account) {
             Ok(coverage) => match coverage.covered_through {
                 Some(height) => println!(
-                    "  current through block {height} (settled {}), {} unresolved spends",
+                    "  current through block {height} (settled {}), {} unresolved spends, \
+                     {} pages owed, last sync {}",
                     coverage
                         .settled_through
                         .map_or_else(|| "none".to_owned(), |h| h.to_string()),
-                    coverage.unresolved_spends
+                    coverage.unresolved_spends,
+                    coverage.pending_pages,
+                    coverage.completion.as_deref().unwrap_or("never ran"),
                 ),
                 None => println!(
                     "  nothing has been read: no transparent service configured, or the \
@@ -144,7 +148,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             p.fraction
                 .map(|f| format!("{:.1}%", f * 100.0))
                 .unwrap_or_else(|| "-".into()),
-            p.scanned_to.map(|h| h.to_string()).unwrap_or_else(|| "-".into()),
+            p.scanned_to
+                .map(|h| h.to_string())
+                .unwrap_or_else(|| "-".into()),
             p.tip.map(|h| h.to_string()).unwrap_or_else(|| "-".into()),
             p.blocks_remaining,
             if p.failed { "  FAILED" } else { "" },
@@ -193,7 +199,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|h| h.to_string())
                 .unwrap_or_else(|| "unmined".into()),
             entry.net(),
-            if entry.is_change_only { "(change only)" } else { "" },
+            if entry.is_change_only {
+                "(change only)"
+            } else {
+                ""
+            },
         );
         if !entry.spent_by_pool.is_zero() {
             println!("      spent    {}", pools(&entry.spent_by_pool));

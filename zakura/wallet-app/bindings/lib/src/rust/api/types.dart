@@ -64,11 +64,15 @@ class ApiBalance {
   /// transparent funds have to be shielded first.
   final BigInt transparent;
 
+  /// Completeness read in the same database snapshot as the amounts.
+  final ApiTransparentCoverage coverage;
+
   const ApiBalance({
     required this.spendable,
     required this.pending,
     required this.spentUnconfirmed,
     required this.transparent,
+    required this.coverage,
   });
 
   @override
@@ -76,7 +80,8 @@ class ApiBalance {
       spendable.hashCode ^
       pending.hashCode ^
       spentUnconfirmed.hashCode ^
-      transparent.hashCode;
+      transparent.hashCode ^
+      coverage.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -86,7 +91,8 @@ class ApiBalance {
           spendable == other.spendable &&
           pending == other.pending &&
           spentUnconfirmed == other.spentUnconfirmed &&
-          transparent == other.transparent;
+          transparent == other.transparent &&
+          coverage == other.coverage;
 }
 
 /// Why something could not be done.
@@ -397,11 +403,30 @@ class ApiTransparentCoverage {
   /// How many unsealed shard revisions the coverage rests on.
   final int provisionalShards;
 
+  /// Page retrievals the ledger still owes from a sync that stopped short.
+  ///
+  /// Non-zero means the coverage describes what has been read so far, and
+  /// the next sync continues it.
+  final int pendingPages;
+
+  /// The height the ledger last accepted as the end of complete coverage.
+  final int? anchorHeight;
+
+  /// Why the last sync stopped: `complete`, or the reason it stopped short
+  /// (`query-budget`, `byte-budget`, `pending-limit`, `overloaded:<shard>`,
+  /// `chain-unknown:<height>`, `discovery-unbounded`). Absent before any
+  /// sync. The interface may call the transparent balance synchronized only
+  /// when this is `complete` and `unresolved_spends` is zero.
+  final String? completion;
+
   const ApiTransparentCoverage({
     this.settledThrough,
     this.coveredThrough,
     required this.unresolvedSpends,
     required this.provisionalShards,
+    required this.pendingPages,
+    this.anchorHeight,
+    this.completion,
   });
 
   @override
@@ -409,7 +434,10 @@ class ApiTransparentCoverage {
       settledThrough.hashCode ^
       coveredThrough.hashCode ^
       unresolvedSpends.hashCode ^
-      provisionalShards.hashCode;
+      provisionalShards.hashCode ^
+      pendingPages.hashCode ^
+      anchorHeight.hashCode ^
+      completion.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -419,7 +447,10 @@ class ApiTransparentCoverage {
           settledThrough == other.settledThrough &&
           coveredThrough == other.coveredThrough &&
           unresolvedSpends == other.unresolvedSpends &&
-          provisionalShards == other.provisionalShards;
+          provisionalShards == other.provisionalShards &&
+          pendingPages == other.pendingPages &&
+          anchorHeight == other.anchorHeight &&
+          completion == other.completion;
 }
 
 /// One transparent output the ledger holds.

@@ -38,7 +38,7 @@
 pub const DETECTION_VERSION: u32 = 1;
 
 /// Bumping this invalidates the derived tables, which are rebuilt locally.
-pub const LAYOUT_VERSION: u32 = 3;
+pub const LAYOUT_VERSION: u32 = 4;
 
 /// Bumping this invalidates the stored commitment trees.
 pub const TREE_VERSION: u32 = 1;
@@ -258,51 +258,132 @@ pub const DERIVED_DDL: &[&str] = &[
         prevout_output_index    INTEGER NOT NULL,
         PRIMARY KEY (spending_transaction_id, prevout_txid, prevout_output_index)
     )",
-    // How far the private transparent ledger has read, per script.
+    // The private transparent ledger's own memory: what it has recovered,
+    // which scripts it is responsible for and over which ranges each is
+    // covered, what it accepted as the chain's anchor, and what private work
+    // it still owes. These tables are the wallet's implementation of the
+    // upstream `WalletStore` contract; the shape mirrors the reference SQLite
+    // store in `enhance-pir` so the two cannot drift in what they promise.
+    //
+    // They are kept apart from `transparent_received_outputs`, which is the
+    // wallet's *projection* of them: that table is also written by a send this
+    // installation built and by a transaction enhancement fetched whole, and
+    // neither of those may feed the library's ledger back to it.
+    //
+    // One row: the publication lineage the store is bound to, the anchor it
+    // accepted, the coverage summary that anchor carries, and why the last
+    // sync stopped. `anchor_hash` is display hex; it is emptied by a rollback
+    // that lowers the anchor, because the block it named is gone.
+    "CREATE TABLE IF NOT EXISTS transparent_set (
+        id              INTEGER PRIMARY KEY CHECK (id = 1),
+        set_digest      TEXT NOT NULL,
+        identity_json   TEXT NOT NULL,
+        anchor_height   INTEGER,
+        anchor_hash     TEXT,
+        settled_through INTEGER,
+        covered_through INTEGER,
+        completion      TEXT
+    )",
+    // Which scripts the ledger is responsible for, and the first height each
+    // one needs covered. `required_from` is never raised: coverage once
+    // required stays required, because an old receive is what makes a recent
+    // spend resolvable, and forgetting it turns that spend into a contradiction.
+    "CREATE TABLE IF NOT EXISTS transparent_scripts (
+        script        BLOB NOT NULL PRIMARY KEY,
+        account_id    INTEGER NOT NULL,
+        imported      INTEGER NOT NULL DEFAULT 0,
+        required_from INTEGER NOT NULL
+    )",
+    // How far the ledger has read, per script and per shard.
     //
     // Per script rather than per account, because a script the wallet derived
-    // yesterday has no coverage over the chain before yesterday. An
-    // account-wide number would either force a full re-derivation whenever the
-    // address window widened, or silently grant a new script the coverage its
-    // siblings had earned — and the second failure is invisible, because a
-    // script with no history and a script that was never looked for produce
-    // the same empty answer.
-    //
-    // `settled_through` is coverage from sealed shards alone; `covered_through`
-    // may reach further into a growing tail whose revision can still be
-    // replaced.
+    // yesterday has no coverage over the chain before yesterday. Per shard
+    // rather than merged into runs, because each range carries the block hash
+    // its coverage rests on, and a reorg is found by asking the wallet's own
+    // chain about those hashes newest first. `kind` is `settled` for a sealed
+    // shard and `provisional` for an unsealed tail, which is replaced rather
+    // than extended when the tail is republished.
     "CREATE TABLE IF NOT EXISTS transparent_coverage (
-        script          BLOB NOT NULL PRIMARY KEY,
-        account_id      INTEGER NOT NULL,
-        settled_through INTEGER NOT NULL,
-        covered_through INTEGER NOT NULL,
-        CHECK (covered_through >= settled_through)
+        script              BLOB NOT NULL,
+        start_height        INTEGER NOT NULL,
+        end_height          INTEGER NOT NULL,
+        kind                TEXT NOT NULL,
+        shard_id            INTEGER NOT NULL,
+        revision_digest     TEXT NOT NULL,
+        terminal_block_hash TEXT NOT NULL,
+        source_height INTEGER,
+        source_hash TEXT,
+        PRIMARY KEY (script, start_height)
     )",
-    // Provisional coverage: the unsealed tail revisions a sync read from.
-    //
-    // Recorded with the digest of the revision that produced it, because a
-    // revision is replaced rather than extended. When a later revision or the
-    // sealed shard appears, the range these rows cover is re-derived.
-    "CREATE TABLE IF NOT EXISTS transparent_provisional (
+    // The events themselves, keyed by their stable identities so a retried
+    // commit inserts nothing new and a retry that differs is caught before it
+    // writes. `event` is the protocol's fixed-width record, opaque here; the
+    // columns beside it are what this crate needs to key, count and roll back.
+    "CREATE TABLE IF NOT EXISTS transparent_receive_events (
+        txid            BLOB NOT NULL,
+        output_index    INTEGER NOT NULL,
+        script          BLOB NOT NULL,
+        height          INTEGER NOT NULL,
+        event           BLOB NOT NULL,
         shard_id        INTEGER NOT NULL,
-        revision        INTEGER NOT NULL,
-        manifest_digest TEXT NOT NULL,
-        end_height      INTEGER NOT NULL,
-        PRIMARY KEY (shard_id, revision)
+        revision_digest TEXT NOT NULL,
+        PRIMARY KEY (txid, output_index)
     )",
-    // Spends of outputs the ledger never saw created.
-    //
-    // Kept rather than absorbed. Absorbing one produces a balance that is too
-    // high and looks entirely normal, so the wallet records the contradiction
-    // and refuses to call itself synchronized while any row is here.
-    "CREATE TABLE IF NOT EXISTS transparent_unresolved_spends (
-        spending_txid        BLOB NOT NULL,
-        input_index          INTEGER NOT NULL,
-        spent_txid           BLOB NOT NULL,
-        spent_output_index   INTEGER NOT NULL,
-        height               INTEGER NOT NULL,
-        script               BLOB NOT NULL,
-        PRIMARY KEY (spending_txid, input_index, spent_txid, spent_output_index)
+    "CREATE TABLE IF NOT EXISTS transparent_spend_events (
+        spending_txid      BLOB NOT NULL,
+        input_index        INTEGER NOT NULL,
+        spent_txid         BLOB NOT NULL,
+        spent_output_index INTEGER NOT NULL,
+        script             BLOB NOT NULL,
+        height             INTEGER NOT NULL,
+        event              BLOB NOT NULL,
+        shard_id           INTEGER NOT NULL,
+        revision_digest    TEXT NOT NULL,
+        PRIMARY KEY (spending_txid, input_index, spent_txid, spent_output_index),
+        UNIQUE (spent_txid, spent_output_index)
+    )",
+    // Page retrievals still owed. The directory has been read and the pages
+    // located; some have not been fetched. Durable so an exhausted budget or an
+    // outage leaves resumable work, never a synchronized balance.
+    "CREATE TABLE IF NOT EXISTS transparent_pending_pages (
+        id              INTEGER PRIMARY KEY,
+        shard_id        INTEGER NOT NULL,
+        revision_digest TEXT NOT NULL,
+        script          BLOB NOT NULL,
+        first_page      INTEGER NOT NULL,
+        page_count      INTEGER NOT NULL,
+        total_events    INTEGER NOT NULL,
+        inline          BLOB NOT NULL,
+        next_ordinal    INTEGER NOT NULL,
+        attempts        INTEGER NOT NULL,
+        validated_events INTEGER NOT NULL,
+        target_height INTEGER,
+        target_hash TEXT
+    )",
+    // Published setup parameters, keyed by everything they were derived under.
+    // Anything less would reuse parameters against bytes they were not derived
+    // from.
+    "CREATE TABLE IF NOT EXISTS transparent_setup_cache (
+        set_digest           TEXT NOT NULL,
+        revision_digest      TEXT NOT NULL,
+        tbl                  TEXT NOT NULL,
+        segment              INTEGER NOT NULL,
+        public_params_base64 TEXT NOT NULL,
+        public_params_sha256 TEXT NOT NULL,
+        PRIMARY KEY (set_digest, revision_digest, tbl, segment)
+    )",
+    "CREATE TABLE IF NOT EXISTS transparent_filter_cache (
+        revision_digest TEXT NOT NULL PRIMARY KEY,
+        filter_hash     TEXT NOT NULL,
+        sealed          INTEGER NOT NULL,
+        bytes           BLOB NOT NULL
+    )",
+    // One row per commit, so a sync can say how many it made and a retry can
+    // be told apart from a no-op.
+    "CREATE TABLE IF NOT EXISTS transparent_commits (
+        id     INTEGER PRIMARY KEY,
+        kind   TEXT NOT NULL,
+        detail TEXT NOT NULL
     )",
     // `transparent_child_index` duplicates the diversifier index as an integer
     // because gap-limit queries need SQL arithmetic on it, which a big-endian
@@ -470,12 +551,18 @@ pub const DERIVED_TABLES: &[&str] = &[
     "retrieval_queue",
     "scan_queue",
     "transactions",
+    "transparent_commits",
     "transparent_coverage",
-    "transparent_provisional",
+    "transparent_filter_cache",
+    "transparent_pending_pages",
+    "transparent_receive_events",
     "transparent_received_output_spends",
     "transparent_received_outputs",
+    "transparent_scripts",
+    "transparent_set",
+    "transparent_setup_cache",
+    "transparent_spend_events",
     "transparent_spend_map",
-    "transparent_unresolved_spends",
     "tree_cap",
     "tree_checkpoint_marks_removed",
     "tree_checkpoints",

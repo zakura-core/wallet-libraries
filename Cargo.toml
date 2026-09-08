@@ -35,6 +35,20 @@ resolver = "2"
 [profile.dev.package."*"]
 opt-level = 3
 
+# The lattice arithmetic behind private transparent retrieval reduces modulo a
+# 64-bit modulus by letting products wrap, which is correct by construction and
+# an overflow to the checker. Upstream (`valargroup/enhance-pir`) builds it the
+# same way; without this the in-process shard server the transparent tests run
+# panics on its first query. A named package entry does not inherit from
+# `package."*"`, so the optimisation level is repeated.
+[profile.dev.package.valar-spiral-rs]
+overflow-checks = false
+opt-level = 3
+
+[profile.test.package.valar-spiral-rs]
+overflow-checks = false
+opt-level = 3
+
 [workspace.package]
 edition = "2024"
 rust-version = "1.91"

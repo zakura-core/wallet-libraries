@@ -6,13 +6,15 @@
 //! be placed on a branch the wallet never accepted, and there would be nothing
 //! in the event to notice it with.
 //!
-//! So the binding happens once per shard, against the wallet's own `blocks`
-//! table, before a single private query is spent on it. A shard whose
-//! boundaries the wallet cannot confirm is not read from, and coverage stops
-//! below it rather than skipping past it: the map is gapless, so a shard that
-//! cannot be confirmed makes every later shard unreachable too.
+//! The snapshot includes the fixed accepted target, published endpoints and
+//! every anchor retained by coverage or pending pages. Missing hashes remain
+//! unknown. Publication refresh cannot advance this snapshot's target.
+
+use std::collections::BTreeMap;
 
 use transparent_filter::{BlockHash, ShardMap};
+use transparent_wallet::{Acceptance, Anchor, ChainView};
+use zakura_wallet_store::WalletDb;
 use zcash_protocol::consensus::BlockHeight;
 
 use crate::Error;
@@ -23,7 +25,7 @@ pub trait AcceptedBlocks {
     fn accepted(&self, height: u64) -> Result<Option<[u8; 32]>, Error>;
 }
 
-impl AcceptedBlocks for zakura_wallet_store::WalletDb {
+impl AcceptedBlocks for WalletDb {
     fn accepted(&self, height: u64) -> Result<Option<[u8; 32]>, Error> {
         let Ok(height) = u32::try_from(height) else {
             return Ok(None);
@@ -34,61 +36,109 @@ impl AcceptedBlocks for zakura_wallet_store::WalletDb {
     }
 }
 
-/// Truncates `map` to the shards whose boundaries this wallet has accepted.
+/// The wallet's accepted chain at the heights one sync will ask about.
 ///
-/// Returns the number of shards kept. Zero means nothing can be read yet, which
-/// is the ordinary state of a wallet that has not scanned down to the range the
-/// shards cover.
-///
-/// A mismatch is not the same as an absence and is not treated as one. A height
-/// the wallet has not scanned yet simply stops the prefix; a height it *has*
-/// scanned, whose hash is not the one the map claims, means the map describes a
-/// different chain, and is refused outright rather than truncated around,
-/// because every later shard in that map is then suspect as well.
-pub fn accepted_prefix(map: &mut ShardMap, chain: &impl AcceptedBlocks) -> Result<usize, Error> {
-    map.check_shape()
-        .map_err(|why| Error::Invalid(format!("shard map is malformed: {why}")))?;
-
-    let mut kept = 0;
-    for shard in &map.shards {
-        let parent = shard.start_height.saturating_sub(1);
-        if !confirms(chain, parent, &shard.parent_block_hash)?
-            || !confirms(chain, shard.end_height, &shard.terminal_block_hash)?
-        {
-            break;
-        }
-        kept += 1;
-    }
-
-    map.shards.truncate(kept);
-    Ok(kept)
+/// A snapshot rather than a live view, because the sync holds the wallet as
+/// its store for the whole run and a second borrow of it is not available. The
+/// heights are knowable in advance: every shard boundary in the map, every
+/// block the ledger's coverage rests on, and the anchor. Anything else is
+/// `Unknown`, which the library turns into an incomplete sync rather than a
+/// guess.
+#[derive(Debug, Clone)]
+pub struct ChainSnapshot {
+    hashes: BTreeMap<u64, String>,
+    target: Anchor,
 }
 
-/// Whether the wallet's accepted chain agrees with a hash the map states.
-///
-/// `false` when the wallet has not scanned the height. An error when it has and
-/// they differ.
-fn confirms(
-    chain: &impl AcceptedBlocks,
-    height: u64,
-    claimed: &str,
-) -> Result<bool, Error> {
-    // The block before shard zero is below the covered range, and a wallet is
-    // not required to have scanned it in order to read shard zero.
-    if height < crate::START_HEIGHT.saturating_sub(1) {
-        return Ok(true);
+impl ChainSnapshot {
+    /// Reads the wallet's hashes at every height `map` and the ledger name.
+    fn load(db: &WalletDb, map: &ShardMap, target: &Anchor) -> Result<Self, Error> {
+        let mut heights: Vec<u64> = Vec::new();
+        for shard in &map.shards {
+            heights.push(shard.start_height.saturating_sub(1));
+            heights.push(shard.end_height);
+        }
+        for (height, _) in db.transparent_coverage_terminals()? {
+            heights.push(u64::from(u32::from(height)));
+        }
+        if let Some(anchor) = db.transparent_anchor()? {
+            heights.push(u64::from(u32::from(anchor.height)));
+        }
+        let mut hashes = BTreeMap::new();
+        for height in heights {
+            if let Some(bytes) = db.accepted(height)? {
+                hashes.insert(
+                    height,
+                    BlockHash::from_internal_bytes(bytes).to_display_hex(),
+                );
+            }
+        }
+        Ok(Self {
+            hashes,
+            target: target.clone(),
+        })
     }
-    let Some(accepted) = chain.accepted(height)? else {
-        return Ok(false);
-    };
-    let claimed = BlockHash::from_display_hex(claimed)
-        .map_err(|e| Error::Invalid(format!("a shard names a malformed block hash: {e}")))?;
-    if claimed.internal_bytes() != &accepted {
-        return Err(Error::Invalid(format!(
-            "the shard map claims block {claimed:?} at height {height}, and this \
-             wallet accepted a different block there; the map describes a chain \
-             this wallet is not on"
-        )));
+
+    /// Binds one run to an explicit wallet-accepted target, independently of publication.
+    pub fn load_at(db: &WalletDb, map: &ShardMap, target: &Anchor) -> Result<Self, Error> {
+        let mut snapshot = Self::load(db, map, target)?;
+        let mut anchors = vec![target.clone()];
+        for range in db
+            .transparent_scripts()?
+            .iter()
+            .map(|s| db.transparent_coverage_of(&s.script))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+        {
+            if let Some(anchor) = range.source_anchor {
+                anchors.push(Anchor {
+                    height: u64::from(u32::from(anchor.height)),
+                    hash: anchor.hash,
+                });
+            }
+        }
+        for pending in db.transparent_pending()? {
+            if let Some(anchor) = pending.target_anchor {
+                anchors.push(Anchor {
+                    height: u64::from(u32::from(anchor.height)),
+                    hash: anchor.hash,
+                });
+            }
+        }
+        for anchor in anchors {
+            if let Some(bytes) = db.accepted(anchor.height)? {
+                snapshot.hashes.insert(
+                    anchor.height,
+                    BlockHash::from_internal_bytes(bytes).to_display_hex(),
+                );
+            }
+        }
+        snapshot.target = target.clone();
+        Ok(snapshot)
     }
-    Ok(true)
+
+    /// The heights the snapshot can answer for.
+    pub fn len(&self) -> usize {
+        self.hashes.len()
+    }
+
+    /// Whether the snapshot can answer for nothing at all.
+    pub fn is_empty(&self) -> bool {
+        self.hashes.is_empty()
+    }
+}
+
+impl ChainView for ChainSnapshot {
+    fn is_accepted(&self, height: u64, hash: &str) -> Acceptance {
+        match self.hashes.get(&height) {
+            Some(known) if known == hash => Acceptance::Accepted,
+            Some(_) => Acceptance::Rejected,
+            None => Acceptance::Unknown,
+        }
+    }
+
+    fn tip(&self) -> Option<Anchor> {
+        Some(self.target.clone())
+    }
 }

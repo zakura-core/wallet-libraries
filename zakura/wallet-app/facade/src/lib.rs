@@ -33,8 +33,8 @@
 
 pub mod address;
 mod config;
-mod import;
 mod error;
+mod import;
 pub mod keys;
 pub mod mnemonic;
 mod query;
@@ -42,11 +42,14 @@ mod send;
 mod sync;
 
 pub use config::{NetworkKind, WalletConfig};
-pub use import::TransactionShape;
 pub use error::{Error, ErrorCode};
+pub use import::TransactionShape;
 pub use query::{AccountSummary, Balance, HistoryEntry, PoolAmounts};
 pub use send::{SendReceipt, SpendQuote};
 pub use sync::{SyncPhase, SyncProgress};
+pub use zakura_wallet_transparent::{
+    Endpoints as TransparentEndpoints, WorkLimits as TransparentWorkLimits,
+};
 
 use std::sync::{Arc, Mutex};
 
@@ -198,7 +201,10 @@ impl Wallet {
         &self,
         f: impl FnOnce(&mut WalletDb) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        let mut guard = self.writer.lock().expect("the writer lock is never poisoned");
+        let mut guard = self
+            .writer
+            .lock()
+            .expect("the writer lock is never poisoned");
         match guard.as_mut() {
             Some(db) => f(db),
             None => Err(Error::AlreadySyncing),
@@ -206,8 +212,14 @@ impl Wallet {
     }
 
     /// Runs `f` against the reading connection.
-    pub(crate) fn with_reader<T>(&self, f: impl FnOnce(&WalletDb) -> Result<T, Error>) -> Result<T, Error> {
-        let guard = self.reader.lock().expect("the reader lock is never poisoned");
+    pub(crate) fn with_reader<T>(
+        &self,
+        f: impl FnOnce(&WalletDb) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let guard = self
+            .reader
+            .lock()
+            .expect("the reader lock is never poisoned");
         f(&guard)
     }
 

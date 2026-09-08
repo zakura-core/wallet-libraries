@@ -14,26 +14,21 @@ name = "zakura_wallet_transparent"
 
 [features]
 default = ["https-client"]
-# The blocking HTTP transports. Off in a build that supplies its own.
-https-client = ["dep:reqwest"]
+# The reference blocking HTTP transports. Off in a build that supplies its own.
+https-client = ["transparent-wallet/reqwest"]
 
 [dependencies]
 # The client half of the transparent PIR protocol, from the repository that
 # also serves it. Pinned to a revision rather than tracked: the record layouts
 # and the table geometry are protocol, and a wallet that silently followed a
 # change to either would decode a newer layout as the one it knows.
-transparent-wallet = { git = "https://github.com/valargroup/enhance-pir.git", rev = "c510d2393e9dda1c989b1df1010e961f3c966445" }
-transparent-filter = { git = "https://github.com/valargroup/enhance-pir.git", rev = "c510d2393e9dda1c989b1df1010e961f3c966445" }
-transparent-shard = { git = "https://github.com/valargroup/enhance-pir.git", rev = "c510d2393e9dda1c989b1df1010e961f3c966445" }
-transparent-events = { git = "https://github.com/valargroup/enhance-pir.git", rev = "c510d2393e9dda1c989b1df1010e961f3c966445" }
+transparent-wallet = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
+transparent-filter = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
+transparent-shard = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
+transparent-events = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
 
 hex.workspace = true
-# Named directly because the service's init document carries the scheme
-# parameters, and a client that adopted whatever it was handed would decode
-# against a geometry the server chose. They are re-derived and compared.
-ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", rev = "223626ffdd28bd1400dd0b62027a8f366665aa4f" }
 serde.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
 serde_json.workspace = true
 zcash_protocol.workspace = true
 zakura-wallet-core = { path = "../wallet-core" }
@@ -42,5 +37,14 @@ zakura-wallet-sync = { path = "../wallet-sync" }
 
 [dev-dependencies]
 zakura-wallet-store = { path = "../wallet-store", features = ["test-dependencies"] }
+transparent-wallet = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec", features = ["reqwest", "testing"] }
+# The real shard service, run in-process by the tests so private retrieval,
+# budgets, tail replacement and reorgs are exercised against what will serve
+# them rather than against a stand-in.
+transparent-shard-server = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
+axum = "0.7"
+sha2.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros"] }
 zip32.workspace = true
 rusqlite.workspace = true

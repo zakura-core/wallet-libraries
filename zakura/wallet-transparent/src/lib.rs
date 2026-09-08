@@ -8,10 +8,22 @@
 //! does and does not hide.
 //!
 //! The protocol lives in `valargroup/enhance-pir` and is used, not reimplemented
-//! here. What this crate adds is everything that needs the wallet: which
-//! scripts to ask about, where each of them has already been read to, which
-//! block hashes the wallet has actually accepted, and how a recovered ledger
-//! becomes rows in `wallet.db`.
+//! here. What this crate adds is everything that needs the wallet: the durable
+//! store the library syncs into, which scripts to ask about and from which
+//! height each, which block hashes the wallet has actually accepted, and when
+//! to ask again because the gap limit moved.
+//!
+//! # A returning wallet
+//!
+//! The library's [`sync_into`](transparent_wallet::sync_into) continues what an
+//! earlier sync left in a [`WalletStore`](transparent_wallet::WalletStore).
+//! This crate's [`store::PirStore`] is that store, over the wallet's own
+//! database: every shard commits atomically with its projection into the
+//! balance, a retry is idempotent, a retry that differs is refused, and the
+//! wallet's own rewind rolls the ledger back with everything else. A sync that
+//! stops short — a budget, an outage, a chain the wallet has not scanned to —
+//! leaves its work pending and says so, and the interface must not call the
+//! balance synchronized until a later sync completes it.
 //!
 //! # Two sources, never one
 //!
@@ -24,22 +36,21 @@
 //!
 //! # The deployment
 //!
-//! Verified live on 2026-09-07, and the split is the one [`Endpoints`] requires
-//! rather than a coincidence:
+//! The split is the one [`Endpoints`] requires rather than a coincidence:
 //!
 //! - filters — `https://enhance-pir.valargroup.dev`, serving
 //!   `GET /v1/filters/shards` and `GET /v1/filters/shards/{id}/filter`;
 //! - shards — `https://transparent-pir.valargroup.dev`, serving
-//!   `GET /v1/shards/init`, `GET /v1/shards/{id}/setup/{table}/{segment}` and
+//!   `GET /v1/shards/init`, `GET /v1/shards/{id}/revisions/{digest}/manifest`,
+//!   `GET /v1/shards/{id}/setup/{table}/{segment}` and
 //!   `POST /v1/shards/{id}/query/{table}`.
 //!
 //! Neither is a default here. A wallet is told where to look, because a default
 //! is a host it talks to because nobody chose otherwise, and the whole point of
 //! two URLs is that the choice is made deliberately.
 //!
-//! The published set covers Ironwood activation to 3,473,474 in three shards,
-//! the last of them a growing tail. `tests/live.rs` exercises all of it against
-//! the real services, including one real private query.
+//! `tests/live.rs` exercises all of it against the real services, including a
+//! real private query.
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
@@ -47,18 +58,17 @@
 pub mod chain;
 pub mod endpoints;
 pub mod files;
-#[cfg(feature = "https-client")]
-pub mod http;
-pub mod ledger;
 pub mod scripts;
 pub mod source;
+pub mod store;
 
-pub use chain::AcceptedBlocks;
+pub use chain::{AcceptedBlocks, ChainSnapshot};
 pub use endpoints::Endpoints;
 pub use error::Error;
-pub use ledger::into_ledger;
 pub use scripts::{WatchedScripts, watched_scripts};
 pub use source::TransparentPir;
+pub use store::PirStore;
+pub use transparent_wallet::WorkLimits;
 
 mod error;
 
@@ -71,9 +81,15 @@ mod error;
 /// this.
 pub const SCHEMA: &str = transparent_shard::SCHEMA;
 
-/// The first height the published shard sets cover.
+/// The private work one sync may do on a phone before it stops and keeps the
+/// rest for later.
 ///
-/// A wallet whose birthday is below this is not served: its earlier transparent
-/// history is not in any shard, and a run that started at shard zero would
-/// report coverage it does not have.
-pub const START_HEIGHT: u64 = transparent_filter::START_HEIGHT;
+/// A directory query costs on the order of 150 KB up and down, so 256 of them
+/// is tens of megabytes: enough to recover an ordinary history in one sync, and
+/// a bound rather than a budget. Someone else can create a large history by
+/// sending to a wallet, and a sync that reached this leaves its remaining work
+/// pending rather than a balance that looks finished.
+pub const MOBILE_LIMITS: WorkLimits = WorkLimits {
+    max_queries: Some(256),
+    max_private_bytes: Some(64 * 1024 * 1024),
+};

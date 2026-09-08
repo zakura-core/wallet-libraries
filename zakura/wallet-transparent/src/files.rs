@@ -34,9 +34,8 @@ impl PublishedFilters {
             if !path.is_dir() {
                 continue;
             }
-            let manifest: ShardManifest = serde_json::from_slice(&std::fs::read(
-                path.join("manifest.json"),
-            )?)?;
+            let manifest: ShardManifest =
+                serde_json::from_slice(&std::fs::read(path.join("manifest.json"))?)?;
             filters.insert(manifest.shard_id, std::fs::read(path.join("filter.bin"))?);
         }
         Ok(Self {

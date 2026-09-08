@@ -12,21 +12,20 @@ Widget host(
   ZakuraColors? colors,
   FormFactor? formFactor,
   ZakuraUiOverrides overrides = ZakuraUiOverrides.none,
-}) =>
-    Directionality(
-      textDirection: TextDirection.ltr,
-      child: MediaQuery(
-        data: const MediaQueryData(size: Size(400, 800)),
-        child: ZakuraThemeScope(
-          colors: colors,
-          formFactor: formFactor,
-          child: ZakuraUiOverridesScope(
-            overrides: overrides,
-            child: Center(child: child),
-          ),
-        ),
+}) => Directionality(
+  textDirection: TextDirection.ltr,
+  child: MediaQuery(
+    data: const MediaQueryData(size: Size(400, 800)),
+    child: ZakuraThemeScope(
+      colors: colors,
+      formFactor: formFactor,
+      child: ZakuraUiOverridesScope(
+        overrides: overrides,
+        child: Center(child: child),
       ),
-    );
+    ),
+  ),
+);
 
 void main() {
   _syncFailureTests();
@@ -36,12 +35,52 @@ void main() {
   _importTests();
   _transparentAndCrossingTests();
   group('BalanceCard', () {
-    testWidgets('shows the spendable figure', (tester) async {
+    testWidgets('zero transparent value still reports publication lag', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         host(
           const BalanceCard(
-            balance: Balance(spendable: Zatoshi(150000000)),
+            balance: Balance(
+              coverage: TransparentCoverage(
+                coveredThrough: 3473686,
+                completion: 'publication-behind:3476067',
+              ),
+            ),
           ),
+        ),
+      );
+      expect(
+        find.textContaining('Transparent coverage through block 3473686'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Waiting for publication through block 3476067'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('unresolved spends never appear synchronized', (tester) async {
+      const coverage = TransparentCoverage(
+        coveredThrough: 200,
+        anchorHeight: 200,
+        completion: 'complete',
+        unresolvedSpends: 1,
+      );
+      expect(coverage.synchronized, isFalse);
+      await tester.pumpWidget(
+        host(const BalanceCard(balance: Balance(coverage: coverage))),
+      );
+      expect(
+        find.textContaining('Transaction history is incomplete'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('shows the spendable figure', (tester) async {
+      await tester.pumpWidget(
+        host(
+          const BalanceCard(balance: Balance(spendable: Zatoshi(150000000))),
         ),
       );
       expect(find.text('Spendable'), findsOneWidget);
@@ -65,7 +104,9 @@ void main() {
       expect(find.textContaining('0.50 ZEC still settling'), findsOneWidget);
     });
 
-    testWidgets('says nothing about pending when there is none', (tester) async {
+    testWidgets('says nothing about pending when there is none', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         host(const BalanceCard(balance: Balance(spendable: Zatoshi(1)))),
       );
@@ -107,7 +148,9 @@ void main() {
     /// tell somebody they were up to date when the server was unreachable.
     testWidgets('idle alone is not called up to date', (tester) async {
       await tester.pumpWidget(
-        host(const SyncIndicator(progress: SyncProgress(phase: SyncPhase.idle))),
+        host(
+          const SyncIndicator(progress: SyncProgress(phase: SyncPhase.idle)),
+        ),
       );
       expect(find.text('Up to date'), findsNothing);
       expect(find.text('Waiting for new blocks'), findsOneWidget);
@@ -131,8 +174,9 @@ void main() {
     /// Recovery works downwards from the tip, so the highest scanned block sits
     /// at the tip from the first batch and "block X of Y" reads as finished
     /// while there is an hour of work left. The queue is what moves.
-    testWidgets('during recovery it counts down the queue, not the height',
-        (tester) async {
+    testWidgets('during recovery it counts down the queue, not the height', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         host(
           const SyncIndicator(
@@ -151,8 +195,9 @@ void main() {
       expect(find.text('25%'), findsOneWidget);
     });
 
-    testWidgets('with nothing queued it falls back to the heights',
-        (tester) async {
+    testWidgets('with nothing queued it falls back to the heights', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         host(
           const SyncIndicator(
@@ -167,7 +212,9 @@ void main() {
       expect(find.text('Block 50 of 200'), findsOneWidget);
     });
 
-    testWidgets('recovery says what it is doing in plain terms', (tester) async {
+    testWidgets('recovery says what it is doing in plain terms', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         host(
           const SyncIndicator(
@@ -197,17 +244,17 @@ void main() {
       int spent = 0,
       bool changeOnly = false,
       int? height,
-    }) =>
-        HistoryEntry(
-          txid: List<int>.filled(32, 0),
-          minedHeight: height,
-          received: Zatoshi(received),
-          spent: Zatoshi(spent),
-          isChangeOnly: changeOnly,
-        );
+    }) => HistoryEntry(
+      txid: List<int>.filled(32, 0),
+      minedHeight: height,
+      received: Zatoshi(received),
+      spent: Zatoshi(spent),
+      isChangeOnly: changeOnly,
+    );
 
-    testWidgets('explains an empty history rather than showing nothing',
-        (tester) async {
+    testWidgets('explains an empty history rather than showing nothing', (
+      tester,
+    ) async {
       await tester.pumpWidget(host(const HistoryList(entries: [])));
       expect(find.text('No transactions yet'), findsOneWidget);
     });
@@ -217,7 +264,9 @@ void main() {
         host(
           SizedBox(
             height: 400,
-            child: HistoryList(entries: [entry(received: 100000000, height: 5)]),
+            child: HistoryList(
+              entries: [entry(received: 100000000, height: 5)],
+            ),
           ),
         ),
       );
@@ -235,7 +284,12 @@ void main() {
             height: 400,
             child: HistoryList(
               entries: [
-                entry(received: 90000000, spent: 100000000, changeOnly: true, height: 5),
+                entry(
+                  received: 90000000,
+                  spent: 100000000,
+                  changeOnly: true,
+                  height: 5,
+                ),
               ],
             ),
           ),
@@ -259,8 +313,9 @@ void main() {
   });
 
   group('theme', () {
-    testWidgets('form factor follows the room available, not the platform',
-        (tester) async {
+    testWidgets('form factor follows the room available, not the platform', (
+      tester,
+    ) async {
       late ZakuraThemeData captured;
       await tester.pumpWidget(
         host(
@@ -399,8 +454,9 @@ void _syncFailureTests() {
       expect(find.text('Synchronisation stopped'), findsOneWidget);
     });
 
-    testWidgets('the same progress without a failure is up to date',
-        (tester) async {
+    testWidgets('the same progress without a failure is up to date', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         host(
           const SyncIndicator(
@@ -451,8 +507,9 @@ void _transparentAndCrossingTests() {
       );
     });
 
-    testWidgets('nothing is said when there is no transparent value',
-        (tester) async {
+    testWidgets('nothing is said when there is no transparent value', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         host(const BalanceCard(balance: Balance(spendable: Zatoshi(1)))),
       );
@@ -503,14 +560,13 @@ void _importTests() {
       String? error,
       int? tip,
       int? earliest,
-    }) =>
-        ImportForm(
-          busy: busy,
-          error: error,
-          chainTip: tip,
-          earliestBirthday: earliest,
-          onImport: onImport,
-        );
+    }) => ImportForm(
+      busy: busy,
+      error: error,
+      chainTip: tip,
+      earliestBirthday: earliest,
+      onImport: onImport,
+    );
 
     Future<void> type(WidgetTester tester, int field, String text) async {
       final editables = find.byType(EditableText);
@@ -519,8 +575,9 @@ void _importTests() {
       await tester.pump();
     }
 
-    testWidgets('an empty phrase is refused before anything is attempted',
-        (tester) async {
+    testWidgets('an empty phrase is refused before anything is attempted', (
+      tester,
+    ) async {
       var called = false;
       await tester.pumpWidget(host(form(onImport: (_, _) => called = true)));
 
@@ -542,15 +599,20 @@ void _importTests() {
       expect(find.textContaining('This has 3'), findsOneWidget);
     });
 
-    testWidgets('a valid phrase with no birthday imports with none',
-        (tester) async {
+    testWidgets('a valid phrase with no birthday imports with none', (
+      tester,
+    ) async {
       String? phrase;
       int? birthday = 999;
       await tester.pumpWidget(
-        host(form(onImport: (p, b) {
-          phrase = p;
-          birthday = b;
-        })),
+        host(
+          form(
+            onImport: (p, b) {
+              phrase = p;
+              birthday = b;
+            },
+          ),
+        ),
       );
       await type(tester, 0, List.filled(24, 'abandon').join(' '));
       await tester.tap(find.text('Restore wallet'));
@@ -616,8 +678,9 @@ void _importTests() {
       expect(find.text('Already here'), findsOneWidget);
     });
 
-    testWidgets('a busy form says what it is doing and cannot be resubmitted',
-        (tester) async {
+    testWidgets('a busy form says what it is doing and cannot be resubmitted', (
+      tester,
+    ) async {
       var called = false;
       await tester.pumpWidget(
         host(form(busy: true, onImport: (_, _) => called = true)),
@@ -671,7 +734,10 @@ void _syncReasonTests() {
       await tester.pumpWidget(
         host(
           SyncIndicator(
-            progress: const SyncProgress(phase: SyncPhase.stopped, failed: true),
+            progress: const SyncProgress(
+              phase: SyncPhase.stopped,
+              failed: true,
+            ),
             onRetry: () => retried = true,
           ),
         ),
@@ -701,8 +767,9 @@ void _syncReasonTests() {
 /// somebody concludes their money is gone.
 void _emptyHistoryTests() {
   group('HistoryList while searching', () {
-    testWidgets('a recovery in progress says it is still looking',
-        (tester) async {
+    testWidgets('a recovery in progress says it is still looking', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         host(const HistoryList(entries: [], searching: true)),
       );
@@ -711,9 +778,7 @@ void _emptyHistoryTests() {
     });
 
     testWidgets('a finished sync says there is nothing', (tester) async {
-      await tester.pumpWidget(
-        host(const HistoryList(entries: [])),
-      );
+      await tester.pumpWidget(host(const HistoryList(entries: [])));
       expect(find.text('No transactions yet'), findsOneWidget);
     });
   });
@@ -724,16 +789,15 @@ void _poolTagTests() {
   HistoryEntry entry({
     PoolAmounts received = const PoolAmounts(),
     PoolAmounts spent = const PoolAmounts(),
-  }) =>
-      HistoryEntry(
-        txid: List<int>.filled(32, 0),
-        minedHeight: 5,
-        received: received.total,
-        spent: spent.total,
-        isChangeOnly: false,
-        receivedByPool: received,
-        spentByPool: spent,
-      );
+  }) => HistoryEntry(
+    txid: List<int>.filled(32, 0),
+    minedHeight: 5,
+    received: received.total,
+    spent: spent.total,
+    isChangeOnly: false,
+    receivedByPool: received,
+    spentByPool: spent,
+  );
 
   group('history pools', () {
     testWidgets('a shielded receipt names its pool', (tester) async {
@@ -743,7 +807,9 @@ void _poolTagTests() {
             height: 400,
             child: HistoryList(
               entries: [
-                entry(received: const PoolAmounts(ironwood: Zatoshi(100000000))),
+                entry(
+                  received: const PoolAmounts(ironwood: Zatoshi(100000000)),
+                ),
               ],
             ),
           ),

@@ -1,473 +1,1101 @@
-//! Everything on this side of the protocol: which shards a wallet will read,
-//! which scripts it asks about, and what a run leaves in the database.
+//! Recovery against the real shard service, run in process.
 //!
-//! The private retrieval itself is upstream's, and upstream tests it end to end
-//! against a real server with real PIR. What is only testable here is the part
-//! that needs a wallet — and it is the part where being wrong is invisible, so
-//! the cases below are the ones a plausible implementation gets wrong quietly:
-//! a shard placed on a chain this wallet is not on, a script that inherits
-//! coverage it never earned, and coverage advancing over a range nothing read.
-//!
-//! The filters here deliberately match nothing, which is what lets these run
-//! without a PIR service: a shard with no match costs no private query, and the
-//! transport asserts that by refusing to answer one.
+//! Every case that reads events ends by comparing the ledger the wallet keeps
+//! with an independent traversal of the same events, and every recovery path —
+//! a budget, a restart, the wallet's own rewind, a replaced tail, a reorg —
+//! has to reach that equality. The cases that read nothing assert the other
+//! half of the design: that a wallet whose filters matched nothing spends no
+//! private query, and that a wallet which could not check an answer reports
+//! itself unread rather than empty.
 
-use transparent_filter::{
-    BlockHash, ScriptBytes, SealParameters, ShardKey, ShardMap, ShardMapEntry, build_range_filter,
-    filter_hash,
-};
-use transparent_wallet::client::Table;
-use transparent_wallet::transport::{BoxError, FilterSource, ShardTransport};
-use zakura_wallet_store::{WalletDb, testing::test_db};
-use zakura_wallet_transparent::{Endpoints, TransparentPir};
-use zcash_protocol::consensus::{BlockHeight, Network};
+mod common;
 
-const START: u64 = zakura_wallet_transparent::START_HEIGHT;
-const SPAN: u64 = 100;
-const SHARDS: u64 = 3;
+use common::*;
+use transparent_events::{ReceiveEvent, TransparentEvent};
+use transparent_filter::{BlockHash, ScriptBytes, filter_hash};
+use transparent_shard::layout::{RECENT_4K, RECENT_8K};
+use transparent_wallet::WorkLimits;
+use zakura_wallet_core::KeyScope;
+use zakura_wallet_store::GapLimits;
+use zakura_wallet_store::transparent_keys::TransparentKeys;
+use zakura_wallet_sync::TransparentCompletion;
 
-fn params() -> Network {
-    Network::MainNetwork
+fn complete(progress: &zakura_wallet_sync::TransparentProgress) {
+    assert_eq!(
+        progress.completion,
+        TransparentCompletion::Complete,
+        "{progress:?}"
+    );
 }
 
-/// A deterministic, distinct block hash for a height.
-fn hash_at(height: u64) -> BlockHash {
-    let mut bytes = [0u8; 32];
-    bytes[..8].copy_from_slice(&height.to_le_bytes());
-    BlockHash::from_internal_bytes(bytes)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wallet_that_matches_nothing_advances_coverage_without_a_private_query() {
+    // The case the whole design is meant to make cheap, so it must not cost a
+    // query — or, worse, fail and leave the wallet re-reading the same range.
+    let (db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &decoys());
+    let base = serve(dir.path()).await;
+
+    let (db, transport, progress) =
+        recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    let progress = progress.expect("a run with no matches succeeds");
+    complete(&progress);
+    assert_eq!(
+        transport.queries, 0,
+        "nothing matched, so nothing was asked"
+    );
+    assert!(transport.opened.is_empty());
+    assert_eq!(progress.outputs, 0);
+    assert_eq!(progress.unresolved, 0);
+    assert_eq!(progress.pending, 0);
+
+    let (_, last) = shard_bounds(SHARDS - 1);
+    let (_, last_sealed) = shard_bounds(SHARDS - 2);
+    assert_eq!(progress.covered_through, Some(h(last)));
+    assert_eq!(
+        progress.settled_through,
+        Some(h(last_sealed)),
+        "the last shard is a growing tail, and coverage from it is provisional"
+    );
+    let state = state(&db, account);
+    assert_eq!(state.covered_through, Some(h(last)));
+    assert_eq!(state.provisional_shards, 1);
+    assert_eq!(state.completion.as_deref(), Some("complete"));
+    assert_eq!(state.anchor.map(|a| a.height), Some(h(last)));
 }
 
-fn shard_bounds(id: u64) -> (u64, u64) {
-    (START + id * SPAN, START + (id + 1) * SPAN - 1)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wallet_with_history_recovers_it_exactly() {
+    let (db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let mine = my_scripts(&db, account);
+    let all = chain(&mine);
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &all);
+    let base = serve(dir.path()).await;
+
+    let (mut db, transport, progress) =
+        recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    let progress = progress.expect("recovery completes");
+    complete(&progress);
+    assert!(
+        transport.queries > 0,
+        "the wallet's scripts matched, so it retrieved"
+    );
+    assert!(
+        transport.manifests > 0,
+        "every matched shard's manifest is verified before it is read"
+    );
+    assert_eq!(progress.unresolved, 0);
+    assert_eq!(progress.spends, 1);
+
+    compare(&store_ledger(&mut db), &traverse(&all, &mine));
+    assert_eq!(
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        full_balance(),
+        "the balance is the projection of the same events"
+    );
+    let state = state(&db, account);
+    assert_eq!(state.unresolved_spends, 0);
+    assert_eq!(state.covered_through, Some(h(shard_bounds(SHARDS - 1).1)));
 }
 
-/// A published map of [`SHARDS`] shards, each carrying one decoy script.
-///
-/// The decoys are not the wallet's, so every filter is a true negative and the
-/// run needs no private query to be correct.
-fn published() -> (ShardMap, Vec<Vec<u8>>) {
-    let genesis = BlockHash::from_display_hex(transparent_filter::MAINNET_GENESIS_DISPLAY).unwrap();
-    let mut shards = Vec::new();
-    let mut filters = Vec::new();
+#[tokio::test(flavor = "multi_thread")]
+async fn a_spend_synced_later_resolves_against_a_receive_persisted_earlier() {
+    // The case a one-shot sync cannot handle and the store exists for.
+    let (db, account) = wallet();
+    let mine = my_scripts(&db, account);
+    let all = chain(&mine);
+    let dir_a = tempfile::tempdir().unwrap();
+    let map_a = publish(dir_a.path(), &all[..2]);
+    let dir_b = tempfile::tempdir().unwrap();
+    let map_b = publish(dir_b.path(), &all);
+    assert_eq!(
+        map_a.shards[1].manifest_digest, map_b.shards[1].manifest_digest,
+        "the sealed prefix is the same publication"
+    );
 
-    for id in 0..SHARDS {
-        let (start, end) = shard_bounds(id);
-        let terminal = hash_at(end);
-        let key = ShardKey::derive(
-            transparent_filter::RANGE_PROFILE,
-            genesis,
-            id,
-            start,
-            end,
-            terminal,
-        );
-        let decoy = ScriptBytes::new(vec![0x76, 0xa9, 0x14, id as u8, 0x88, 0xac]);
-        let bytes = build_range_filter(key, &[decoy]).unwrap();
+    accept_through(&db, 2);
+    let base_a = serve(dir_a.path()).await;
+    let (db, _, progress) = recover(db, base_a, dir_a.path(), &map_a, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+    assert_eq!(
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        50_000 + 7_000 + 11 * long_history(),
+        "the receive is held, and nothing has spent it yet"
+    );
 
-        shards.push(ShardMapEntry {
-            shard_id: id,
-            start_height: start,
-            end_height: end,
-            parent_block_hash: hash_at(start - 1).to_display_hex(),
-            terminal_block_hash: terminal.to_display_hex(),
-            filter_hash: filter_hash(bytes.as_slice()).to_display_hex(),
-            scripts: 1,
-            page_rows: 0,
-            txids: 0,
-            directory_segments: 1,
-            page_segments: 1,
-            manifest_digest: format!("{id:064x}"),
-            revision: 0,
-            sealed: true,
-        });
-        filters.push(bytes.as_slice().to_vec());
-    }
-
-    (
-        ShardMap {
-            genesis_hash: transparent_filter::MAINNET_GENESIS_DISPLAY.to_owned(),
-            network: transparent_filter::NETWORK.to_owned(),
-            profile: transparent_filter::RANGE_PROFILE.to_owned(),
-            range_envelope_version: transparent_filter::RANGE_ENVELOPE_VERSION,
-            start_height: START,
-            seal: SealParameters {
-                max_scripts: 1,
-                max_page_rows: 1,
-                max_txids: 1,
-            },
-            shards,
-        },
-        filters,
-    )
+    // The chain grows, the wallet scans it, the set is republished.
+    accept_through(&db, SHARDS);
+    let base_b = serve(dir_b.path()).await;
+    let (mut db, _, progress) =
+        recover(db, base_b, dir_b.path(), &map_b, WorkLimits::UNLIMITED).await;
+    let progress = progress.unwrap();
+    complete(&progress);
+    assert_eq!(progress.spends, 1);
+    assert_eq!(
+        progress.unresolved, 0,
+        "the old receive resolves the new spend"
+    );
+    compare(&store_ledger(&mut db), &traverse(&all, &mine));
+    assert_eq!(
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        full_balance()
+    );
 }
 
-struct Filters {
-    map: Vec<u8>,
-    filters: Vec<Vec<u8>>,
-}
+#[tokio::test(flavor = "multi_thread")]
+async fn a_query_budget_stops_between_pages_and_resumes_exactly() {
+    let (db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let mine = my_scripts(&db, account);
+    let all = chain(&mine);
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &all);
+    let base = serve(dir.path()).await;
 
-impl FilterSource for Filters {
-    fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
-        Ok((self.map.clone(), self.map.len() as u64))
-    }
-
-    fn filter(&mut self, shard_id: u64) -> Result<(Vec<u8>, u64), BoxError> {
-        let bytes = self
-            .filters
-            .get(shard_id as usize)
-            .ok_or("no such shard")?
-            .clone();
-        let len = bytes.len() as u64;
-        Ok((bytes, len))
-    }
-}
-
-/// A shard service that will answer its init document and nothing else.
-///
-/// Refusing the rest is the assertion: a wallet whose filters matched nothing
-/// must spend no private query, and a wallet that asked anyway would be
-/// telling the service which ranges it cares about for no reason at all.
-struct NoQueries {
-    init: Vec<u8>,
-}
-
-impl ShardTransport for NoQueries {
-    fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
-        Ok((self.init.clone(), self.init.len() as u64))
-    }
-
-    fn setup(&mut self, _: u64, _: Table, _: u32) -> Result<(Vec<u8>, u64), BoxError> {
-        panic!("a shard nothing matched must not be opened");
-    }
-
-    fn query(&mut self, _: u64, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
-        panic!("a shard nothing matched must not be queried");
-    }
-}
-
-/// The init document a correctly configured service would publish.
-fn init_doc(map: &ShardMap) -> Vec<u8> {
-    let scheme = |rows: u64, row_bytes: u64| {
-        ipir_sp::params_for_simplepir(rows, row_bytes * 8)
-            .expect("the pinned geometry has parameters")
-            .1
+    // Enough for the directory rows and a page or two, not the whole history.
+    let budget = WorkLimits {
+        max_queries: Some(6),
+        max_private_bytes: None,
     };
-    serde_json::to_vec(&serde_json::json!({
-        "schema": zakura_wallet_transparent::SCHEMA,
-        "profile": map.profile,
-        "network": map.network,
-        "genesis_hash": map.genesis_hash,
-        "directory_scheme": scheme(
-            transparent_shard::DIRECTORY_ROWS as u64,
-            transparent_shard::DIRECTORY_ROW_BYTES as u64,
-        ),
-        "directory_setup_seed": 1u64,
-        "pages_scheme": scheme(
-            transparent_shard::PAGE_ROWS as u64,
-            transparent_shard::PAGE_ROW_BYTES as u64,
-        ),
-        "pages_setup_seed": 2u64,
-    }))
-    .unwrap()
+    let (db, first, progress) = recover(db, base.clone(), dir.path(), &map, budget).await;
+    let progress = progress.unwrap();
+    assert_eq!(
+        progress.completion,
+        TransparentCompletion::Incomplete("query-budget".into())
+    );
+    assert!(
+        progress.pending > 0,
+        "the pages not yet fetched are owed, durably"
+    );
+    assert!(first.queries <= 6);
+    let state_after_budget = state(&db, account);
+    assert_eq!(
+        state_after_budget.completion.as_deref(),
+        Some("query-budget")
+    );
+    assert_eq!(
+        state_after_budget.anchor, None,
+        "no anchor for a sync that stopped short"
+    );
+    let owed_before = db.transparent_pending().unwrap();
+
+    let (mut db, second, progress) =
+        recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    let progress = progress.unwrap();
+    complete(&progress);
+    assert_eq!(progress.pending, 0);
+    assert!(db.transparent_pending().unwrap().is_empty());
+    compare(&store_ledger(&mut db), &traverse(&all, &mine));
+    assert_eq!(
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        full_balance()
+    );
+
+    // Resumption fetched what was owed and no more: a fresh wallet doing it
+    // all at once asks at least as much as the two runs together minus the
+    // directory rows the resumed run had to re-read.
+    let (fresh, fresh_account) = wallet();
+    accept_through(&fresh, SHARDS);
+    assert_eq!(
+        my_scripts(&fresh, fresh_account),
+        mine,
+        "same seed, same scripts"
+    );
+    let base = serve(dir.path()).await;
+    let (_, whole, progress) = recover(fresh, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+    let owed_pages: u64 = owed_before
+        .iter()
+        .map(|p| u64::from(p.page_count - p.next_ordinal))
+        .sum();
+    assert!(
+        second.queries <= whole.queries,
+        "resuming ({}) cost no more than starting over ({})",
+        second.queries,
+        whole.queries
+    );
+    assert!(
+        second.queries >= owed_pages,
+        "every owed page ({owed_pages}) was fetched, in {} queries",
+        second.queries
+    );
 }
 
-/// A wallet with one account, born at the first covered height.
-fn wallet() -> (WalletDb, zakura_wallet_core::AccountId) {
-    let mut db = test_db().unwrap();
-    let id = db
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_wallet_continues_from_its_commits_without_refetching() {
+    let dir = tempfile::tempdir().unwrap();
+    let wallet_path = dir.path().join("wallet.db");
+    let cache_path = dir.path().join("cache.db");
+    let mut db = zakura_wallet_store::WalletDb::open(&wallet_path, &cache_path).unwrap();
+    let account = db
         .create_account(
             &params(),
             &[7u8; 32],
             zip32::AccountId::try_from(0).unwrap(),
-            BlockHeight::from_u32(START as u32),
+            h(FIRST),
         )
         .unwrap();
-    (db, id)
-}
-
-/// Records the wallet as having accepted `hash` at `height`.
-fn accept(db: &WalletDb, height: u64, hash: BlockHash) {
-    db.connection()
-        .execute(
-            "INSERT OR REPLACE INTO cache.blocks
-                (height, hash, time, orchard_tree_size, ironwood_tree_size,
-                 orchard_action_count, ironwood_action_count)
-             VALUES (?1, ?2, 0, 0, 0, 0, 0)",
-            rusqlite::params![height as u32, &hash.internal_bytes()[..]],
-        )
-        .unwrap();
-}
-
-/// Accepts every boundary of the first `count` shards.
-fn accept_through(db: &WalletDb, count: u64) {
-    accept(db, START - 1, hash_at(START - 1));
-    for id in 0..count {
-        let (start, end) = shard_bounds(id);
-        accept(db, start - 1, hash_at(start - 1));
-        accept(db, end, hash_at(end));
-    }
-}
-
-fn pir() -> TransparentPir<Network> {
-    TransparentPir::new(
-        Endpoints::new("https://filters.invalid", "https://shards.invalid"),
-        params(),
-    )
-}
-
-#[test]
-fn a_run_over_shards_that_match_nothing_still_advances_coverage() {
-    // The case the whole design is meant to make cheap, so it must not
-    // accidentally cost a query — or, worse, fail and leave the wallet
-    // re-reading the same range forever.
-    let (mut db, id) = wallet();
-    let (map, filters) = published();
     accept_through(&db, SHARDS);
+    let mine = my_scripts(&db, account);
+    let all = chain(&mine);
+    let set = tempfile::tempdir().unwrap();
+    let map = publish(set.path(), &all);
+    let base = serve(set.path()).await;
 
-    let mut source = Filters {
-        map: serde_json::to_vec(&map).unwrap(),
-        filters,
-    };
-    let mut transport = NoQueries {
-        init: init_doc(&map),
-    };
+    let (db, first, progress) =
+        recover(db, base.clone(), set.path(), &map, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+    let commits = db.transparent_last_commit().unwrap();
+    let events = db.transparent_events().unwrap();
+    drop(db);
 
-    let progress = pir()
-        .recover_with(&mut db, &mut source, &mut transport)
-        .expect("a run with no matches succeeds");
-
-    assert_eq!(progress.outputs, 0);
-    assert_eq!(progress.spends, 0);
-    assert_eq!(progress.unresolved, 0);
-
-    let (_, last) = shard_bounds(SHARDS - 1);
+    // The process forgets everything; the file does not.
+    let db = zakura_wallet_store::WalletDb::open(&wallet_path, &cache_path).unwrap();
+    assert_eq!(db.transparent_events().unwrap(), events);
+    let (mut db, second, progress) =
+        recover(db, base, set.path(), &map, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
     assert_eq!(
-        progress.covered_through,
-        Some(BlockHeight::from_u32(last as u32)),
-        "every watched script has been read to the end of the map"
+        second.queries, 0,
+        "everything was already held; nothing was asked again"
     );
+    assert_eq!(second.opened.len(), 0);
+    assert!(first.queries > 0);
     assert_eq!(
-        progress.settled_through, progress.covered_through,
-        "a map of sealed shards leaves no provisional coverage"
+        db.transparent_last_commit().unwrap(),
+        commits + 1,
+        "only the anchor is committed again"
     );
-
-    let state = db
-        .transparent_state(id, BlockHeight::from_u32(START as u32))
-        .unwrap();
-    assert_eq!(state.provisional_shards, 0);
-    assert_eq!(state.unresolved_spends, 0);
+    compare(&store_ledger(&mut db), &traverse(&all, &mine));
 }
 
-#[test]
-fn coverage_stops_where_the_wallet_stopped_scanning() {
-    // A shard whose boundaries the wallet has not accepted cannot be checked
-    // against anything, and a map is gapless, so it also makes every later
-    // shard unreachable. Reading past it would mean believing a service about
-    // where its own data sits.
-    let (mut db, id) = wallet();
-    let (map, filters) = published();
-    accept_through(&db, 1);
-
-    let mut source = Filters {
-        map: serde_json::to_vec(&map).unwrap(),
-        filters,
-    };
-    let mut transport = NoQueries {
-        init: init_doc(&map),
-    };
-
-    let progress = pir()
-        .recover_with(&mut db, &mut source, &mut transport)
-        .expect("a truncated map is not an error");
-
-    let (_, first_end) = shard_bounds(0);
-    assert_eq!(
-        progress.covered_through,
-        Some(BlockHeight::from_u32(first_end as u32)),
-        "coverage stops at the last shard the wallet could confirm"
-    );
-    let _ = id;
-}
-
-#[test]
-fn a_wallet_that_has_scanned_nothing_reads_nothing_and_does_not_fail() {
-    let (mut db, id) = wallet();
-    let (map, filters) = published();
-
-    let mut source = Filters {
-        map: serde_json::to_vec(&map).unwrap(),
-        filters,
-    };
-    let mut transport = NoQueries {
-        init: init_doc(&map),
-    };
-
-    let progress = pir()
-        .recover_with(&mut db, &mut source, &mut transport)
-        .expect("nothing to check against is not a failure");
-    assert_eq!(progress.covered_through, None);
-
-    let state = db
-        .transparent_state(id, BlockHeight::from_u32(START as u32))
-        .unwrap();
-    assert_eq!(
-        state.covered_through,
-        Some(BlockHeight::from_u32(START as u32 - 1)),
-        "reported as uncovered, never as an empty balance"
-    );
-}
-
-#[test]
-fn a_map_on_a_different_chain_is_refused_rather_than_truncated() {
-    // The wallet has scanned this height and accepted a different block there.
-    // That is not a shard it cannot check; it is a shard it has checked and
-    // rejected, and every later shard in the map chains to it.
-    let (mut db, _) = wallet();
-    let (map, filters) = published();
+#[tokio::test(flavor = "multi_thread")]
+async fn the_wallets_own_rewind_rolls_the_ledger_back_and_the_next_sync_rereads_it() {
+    // A rewind is the wallet saying the blocks above a height are gone. The
+    // ledger follows: coverage above the cut is dropped along with the events
+    // under it, and the next sync reads that range again, because coverage that
+    // outlived its blocks would name a range nothing re-reads.
+    let (db, account) = wallet();
     accept_through(&db, SHARDS);
-    let (_, end) = shard_bounds(0);
-    accept(&db, end, BlockHash::from_internal_bytes([0xab; 32]));
+    let mine = my_scripts(&db, account);
+    let all = chain(&mine);
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &all);
+    let base = serve(dir.path()).await;
+    let (mut db, _, progress) =
+        recover(db, base.clone(), dir.path(), &map, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+    assert_eq!(
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        full_balance()
+    );
 
-    let mut source = Filters {
-        map: serde_json::to_vec(&map).unwrap(),
-        filters,
-    };
-    let mut transport = NoQueries {
-        init: init_doc(&map),
-    };
+    let (_, end_of_first) = shard_bounds(0);
+    db.truncate_to(h(end_of_first)).unwrap();
+    let cut = state(&db, account);
+    assert_eq!(
+        cut.covered_through,
+        Some(h(end_of_first)),
+        "coverage ends where the chain now ends"
+    );
+    assert_eq!(
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        50_000,
+        "only the receive in shard 0 survives; the spend in shard 2 is gone with its block"
+    );
 
-    let err = pir()
-        .recover_with(&mut db, &mut source, &mut transport)
-        .expect_err("a map on another chain must be refused");
+    // The wallet scans the same chain again and the ledger reads it again.
+    accept_through(&db, SHARDS);
+    let (mut db, again, progress) =
+        recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    let progress = progress.unwrap();
+    complete(&progress);
     assert!(
-        format!("{err}").contains("not on"),
-        "the error should say the map is for another chain, got: {err}"
+        again.queries > 0,
+        "the discarded range is read again, not remembered"
     );
-}
-
-#[test]
-fn a_service_serving_another_schema_is_refused_before_anything_is_decoded() {
-    let (mut db, _) = wallet();
-    let (map, filters) = published();
-    accept_through(&db, SHARDS);
-
-    let mut init: serde_json::Value = serde_json::from_slice(&init_doc(&map)).unwrap();
-    init["schema"] = serde_json::json!("transparent-shard-v99");
-
-    let mut source = Filters {
-        map: serde_json::to_vec(&map).unwrap(),
-        filters,
-    };
-    let mut transport = NoQueries {
-        init: serde_json::to_vec(&init).unwrap(),
-    };
-
-    let err = pir()
-        .recover_with(&mut db, &mut source, &mut transport)
-        .expect_err("a schema this build does not read must be refused");
-    assert!(format!("{err}").contains("transparent-shard-v99"), "got: {err}");
-}
-
-#[test]
-fn a_filter_that_does_not_match_its_published_digest_is_refused() {
-    let (mut db, _) = wallet();
-    let (map, mut filters) = published();
-    accept_through(&db, SHARDS);
-    filters[1] = filters[0].clone();
-
-    let mut source = Filters {
-        map: serde_json::to_vec(&map).unwrap(),
-        filters,
-    };
-    let mut transport = NoQueries {
-        init: init_doc(&map),
-    };
-
-    let err = pir()
-        .recover_with(&mut db, &mut source, &mut transport)
-        .expect_err("bytes that are not what the map committed to must be refused");
-    assert!(format!("{err}").contains("digest"), "got: {err}");
-}
-
-/// A transport that records the shards a run opened, and refuses to serve them.
-///
-/// Refusing is the point of the second assertion: a run that fails part way
-/// through must leave coverage exactly where it was, because the alternative
-/// records a range as read when it was not, and nothing later re-reads it.
-struct RecordingShards {
-    init: Vec<u8>,
-    opened: std::cell::RefCell<Vec<u64>>,
-}
-
-impl ShardTransport for RecordingShards {
-    fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
-        Ok((self.init.clone(), self.init.len() as u64))
-    }
-
-    fn setup(&mut self, shard_id: u64, _: Table, _: u32) -> Result<(Vec<u8>, u64), BoxError> {
-        self.opened.borrow_mut().push(shard_id);
-        Err("the shard service is unreachable".into())
-    }
-
-    fn query(&mut self, _: u64, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
-        panic!("a shard that could not be opened must not be queried");
-    }
-}
-
-#[test]
-fn a_matching_script_opens_exactly_the_shard_it_matched_and_no_other() {
-    // The leak this design accepts, stated as a test: the service learns which
-    // ranges had probable activity, and it must learn no more than that. A
-    // wallet that opened every shard would pay for nothing; one that opened a
-    // shard it did not match would be disclosing a range for no reason.
-    let (mut db, id) = wallet();
-    accept_through(&db, SHARDS);
-
-    // The wallet's own first script, placed in the middle shard's filter.
-    let mine = db.transparent_watch().unwrap().addresses[0].script.clone();
-    let genesis = BlockHash::from_display_hex(transparent_filter::MAINNET_GENESIS_DISPLAY).unwrap();
-    let (mut map, mut filters) = published();
-
-    let matched = 1u64;
-    let (start, end) = shard_bounds(matched);
-    let key = ShardKey::derive(
-        transparent_filter::RANGE_PROFILE,
-        genesis,
-        matched,
-        start,
-        end,
-        hash_at(end),
+    assert!(
+        !again.opened.contains(&0),
+        "shard 0 survived the cut and is not re-read"
     );
-    let bytes = build_range_filter(key, &[ScriptBytes::new(mine)]).unwrap();
-    map.shards[matched as usize].filter_hash = filter_hash(bytes.as_slice()).to_display_hex();
-    filters[matched as usize] = bytes.as_slice().to_vec();
-
-    let mut source = Filters {
-        map: serde_json::to_vec(&map).unwrap(),
-        filters,
-    };
-    let mut transport = RecordingShards {
-        init: init_doc(&map),
-        opened: std::cell::RefCell::new(Vec::new()),
-    };
-
-    let err = pir()
-        .recover_with(&mut db, &mut source, &mut transport)
-        .expect_err("an unreachable shard service fails the run");
-    assert!(format!("{err}").contains("unreachable"), "got: {err}");
-
+    compare(&store_ledger(&mut db), &traverse(&all, &mine));
     assert_eq!(
-        transport.opened.borrow().as_slice(),
-        &[matched],
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        full_balance()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replaced_provisional_tail_is_truncated_and_re_derived_then_settled() {
+    let (db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let mine = my_scripts(&db, account);
+    let before = chain(&mine);
+    let dir_a = tempfile::tempdir().unwrap();
+    let map_a = publish(dir_a.path(), &before);
+    let base_a = serve(dir_a.path()).await;
+    let (db, _, progress) = recover(db, base_a, dir_a.path(), &map_a, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+    assert_eq!(state(&db, account).provisional_shards, 1);
+    let tail_digest = map_a.shards[SHARDS as usize - 1].manifest_digest.clone();
+
+    // The tail grows: a new receive lands in it, and it is republished as
+    // revision 1 superseding revision 0.
+    let mut after = before.clone();
+    let late = FIRST + 3 * SPAN + 150;
+    after[3].push((
+        mine[1].clone(),
+        TransparentEvent::Receive(ReceiveEvent {
+            height: late as u32,
+            txid: txid(999),
+            transaction_index: 0,
+            output_index: 0,
+            value: 600,
+            coinbase: false,
+        }),
+    ));
+    let dir_b = tempfile::tempdir().unwrap();
+    let map_b = publish_with(
+        dir_b.path(),
+        &after,
+        |_| &RECENT_8K,
+        1,
+        &tail_digest,
+        hash_at,
+    );
+    assert_ne!(map_b.shards[3].manifest_digest, tail_digest);
+    let base_b = serve(dir_b.path()).await;
+    let (mut db, _, progress) =
+        recover(db, base_b, dir_b.path(), &map_b, WorkLimits::UNLIMITED).await;
+    let progress = progress.unwrap();
+    complete(&progress);
+    let (tail_start, _) = shard_bounds(SHARDS - 1);
+    assert_eq!(
+        progress.rolled_back_to,
+        Some(h(tail_start - 1)),
+        "coverage from the replaced revision is truncated, not appended to"
+    );
+    compare(&store_ledger(&mut db), &traverse(&after, &mine));
+    assert_eq!(
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        full_balance() + 600
+    );
+    let provisional = db.transparent_provisional_coverage().unwrap();
+    assert!(
+        provisional
+            .iter()
+            .all(|r| r.revision_digest == map_b.shards[3].manifest_digest),
+        "what remains provisional rests on the new revision only"
+    );
+
+    // Then the set grows past it: the tail is sealed and a new one opens.
+    let mut sealed = after.clone();
+    sealed.push(Vec::new());
+    let dir_c = tempfile::tempdir().unwrap();
+    let map_c = publish(dir_c.path(), &sealed);
+    assert!(map_c.shards[3].sealed);
+    let (_, end) = shard_bounds(SHARDS);
+    accept(&db, end, hash_at(end));
+    let base_c = serve(dir_c.path()).await;
+    let (mut db, _, progress) =
+        recover(db, base_c, dir_c.path(), &map_c, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+    compare(&store_ledger(&mut db), &traverse(&sealed, &mine));
+    let state = state(&db, account);
+    assert_eq!(state.settled_through, Some(h(shard_bounds(SHARDS - 1).1)));
+    assert_eq!(state.covered_through, Some(h(end)));
+    assert_eq!(
+        state.provisional_shards, 1,
+        "only the new empty tail is provisional"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reorg_in_the_wallets_chain_rolls_back_to_the_accepted_ancestor() {
+    // The service did not tell the wallet about this; the wallet's own chain
+    // did. Every block the coverage rests on is asked of it, newest first, and
+    // the first one it rejects rolls back to the highest one it still accepts.
+    let (db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let mine = my_scripts(&db, account);
+    let all = chain(&mine);
+    let dir_a = tempfile::tempdir().unwrap();
+    let map_a = publish(dir_a.path(), &all);
+    let base_a = serve(dir_a.path()).await;
+    let (mut db, _, progress) =
+        recover(db, base_a, dir_a.path(), &map_a, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+
+    // The chain forks at the start of shard 2. The spend of the first script
+    // is on the losing branch; the winning one carries a different receive.
+    let (fork, _) = shard_bounds(2);
+    let mut forked: Events = all.clone();
+    forked[2].retain(|(_, event)| !matches!(event, TransparentEvent::Spend(_)));
+    forked[2].push((
+        mine[0].clone(),
+        TransparentEvent::Receive(ReceiveEvent {
+            height: (fork + 50) as u32,
+            txid: txid(4_242),
+            transaction_index: 0,
+            output_index: 1,
+            value: 900,
+            coinbase: false,
+        }),
+    ));
+    let forked_hash = hash_forked(fork);
+    let dir_b = tempfile::tempdir().unwrap();
+    let map_b = publish_with(dir_b.path(), &forked, |_| &RECENT_8K, 0, "", &forked_hash);
+    assert_eq!(
+        map_b.shards[1].manifest_digest,
+        map_a.shards[1].manifest_digest
+    );
+    assert_ne!(
+        map_b.shards[2].manifest_digest,
+        map_a.shards[2].manifest_digest
+    );
+
+    // The wallet rewinds and rescans the winning branch, as the engine would.
+    db.truncate_to(h(fork - 1)).unwrap();
+    accept_through_with(&db, SHARDS, &forked_hash);
+    let base_b = serve(dir_b.path()).await;
+    let (mut db, transport, progress) =
+        recover(db, base_b, dir_b.path(), &map_b, WorkLimits::UNLIMITED).await;
+    let progress = progress.unwrap();
+    complete(&progress);
+    assert!(
+        !transport.opened.contains(&0) && !transport.opened.contains(&1),
+        "the shards below the fork are still covered and are not re-read"
+    );
+    compare(&store_ledger(&mut db), &traverse(&forked, &mine));
+    assert_eq!(
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        50_000 + 900 + 7_000 + 7_001 + 11 * long_history(),
+        "the spend on the losing branch is gone and the receive on the winning one is held"
+    );
+    assert_eq!(state(&db, account).unresolved_spends, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reorg_the_wallet_learns_of_between_syncs_is_found_by_the_ledger_itself() {
+    // Without a rewind: the wallet's chain view changed under the ledger, and
+    // the ledger notices because the block its coverage rests on is one the
+    // wallet now rejects.
+    let (db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let mine = my_scripts(&db, account);
+    let all = chain(&mine);
+    let dir_a = tempfile::tempdir().unwrap();
+    let map_a = publish(dir_a.path(), &all);
+    let base_a = serve(dir_a.path()).await;
+    let (db, _, progress) = recover(db, base_a, dir_a.path(), &map_a, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+
+    let (fork, _) = shard_bounds(3);
+    let forked_hash = hash_forked(fork);
+    let dir_b = tempfile::tempdir().unwrap();
+    let map_b = publish_with(dir_b.path(), &all, |_| &RECENT_8K, 0, "", &forked_hash);
+    accept_through_with(&db, SHARDS, &forked_hash);
+    let base_b = serve(dir_b.path()).await;
+    let (mut db, _, progress) =
+        recover(db, base_b, dir_b.path(), &map_b, WorkLimits::UNLIMITED).await;
+    let progress = progress.unwrap();
+    complete(&progress);
+    assert_eq!(progress.rolled_back_to, Some(h(fork - 1)));
+    compare(&store_ledger(&mut db), &traverse(&all, &mine));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_accounts_and_a_gap_advance_are_read_in_one_run() {
+    // Regression for the wholesale delete the old code made per script group:
+    // the second account's run must not erase what the first one found, and a
+    // payment at the edge of the address window must widen it and read the new
+    // scripts in the same run.
+    let (mut db, first) = wallet();
+    let second = db
+        .create_account(
+            &params(),
+            &[8u8; 32],
+            zip32::AccountId::try_from(1).unwrap(),
+            h(FIRST),
+        )
+        .unwrap();
+    accept_through(&db, SHARDS);
+    let mine = my_scripts(&db, first);
+    let theirs = my_scripts(&db, second);
+    let window = GapLimits::default().external as usize;
+    let edge = mine[window - 1].clone();
+
+    let mut all = chain(&mine);
+    all[0].push((
+        theirs[0].clone(),
+        TransparentEvent::Receive(ReceiveEvent {
+            height: (FIRST + 9) as u32,
+            txid: txid(77),
+            transaction_index: 0,
+            output_index: 0,
+            value: 4_000,
+            coinbase: false,
+        }),
+    ));
+    all[1].push((
+        edge.clone(),
+        TransparentEvent::Receive(ReceiveEvent {
+            height: (FIRST + SPAN + 90) as u32,
+            txid: txid(78),
+            transaction_index: 0,
+            output_index: 0,
+            value: 300,
+            coinbase: false,
+        }),
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &all);
+    let base = serve(dir.path()).await;
+    let watched_before = db.transparent_watch().unwrap().addresses.len();
+
+    let (mut db, _, progress) = recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    let progress = progress.unwrap();
+    complete(&progress);
+    let watched_after = db.transparent_watch().unwrap().addresses.len();
+    assert!(
+        watched_after > watched_before,
+        "a payment at the window's edge widened it ({watched_before} -> {watched_after})"
+    );
+
+    let mut everyone = mine.clone();
+    everyone.extend(theirs.iter().cloned());
+    compare(&store_ledger(&mut db), &traverse(&all, &everyone));
+    assert_eq!(
+        db.transparent_balance(first).unwrap().total().into_u64(),
+        full_balance() + 300
+    );
+    assert_eq!(
+        db.transparent_balance(second).unwrap().total().into_u64(),
+        4_000
+    );
+
+    let last = shard_bounds(SHARDS - 1).1;
+    for account in [first, second] {
+        let state = state(&db, account);
+        assert_eq!(
+            state.covered_through,
+            Some(h(last)),
+            "every script of account {account:?}, the newly derived ones included, is covered"
+        );
+        assert_eq!(state.unresolved_spends, 0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_matching_script_opens_exactly_the_shard_it_matched_and_no_other() {
+    // The leak this design accepts, stated as a test: the service learns which
+    // ranges had probable activity, and it must learn no more than that.
+    let (db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let mine = my_scripts(&db, account);
+    let mut all = decoys();
+    all[1].push((
+        mine[0].clone(),
+        TransparentEvent::Receive(ReceiveEvent {
+            height: (FIRST + SPAN + 1) as u32,
+            txid: txid(5),
+            transaction_index: 0,
+            output_index: 0,
+            value: 1_234,
+            coinbase: false,
+        }),
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &all);
+    let base = serve(dir.path()).await;
+    let (db, transport, progress) =
+        recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+    assert_eq!(
+        transport.opened,
+        vec![1],
         "only the shard whose filter matched is opened"
     );
+    assert_eq!(
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        1_234
+    );
+}
 
-    let state = db
-        .transparent_state(id, BlockHeight::from_u32(START as u32))
-        .unwrap();
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wallet_that_has_scanned_nothing_reads_nothing_and_says_so() {
+    let (db, account) = wallet();
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &decoys());
+    let base = serve(dir.path()).await;
+    let (db, transport, progress) =
+        recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    let progress = progress.expect("nothing to check against is not a failure");
+    assert_eq!(progress.covered_through, None);
+    assert_eq!(
+        progress.completion,
+        TransparentCompletion::Incomplete(format!("chain-unknown:{}", shard_bounds(0).1))
+    );
+    assert_eq!(transport.queries, 0);
+    let state = state(&db, account);
     assert_eq!(
         state.covered_through,
-        Some(BlockHeight::from_u32(START as u32 - 1)),
-        "a run that failed part way through advances no coverage at all"
+        Some(h(FIRST - 1)),
+        "reported as uncovered, never as an empty balance"
     );
+    assert_eq!(
+        state.completion.as_deref(),
+        Some(format!("chain-unknown:{}", shard_bounds(0).1).as_str())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn coverage_stops_where_the_wallet_stopped_scanning() {
+    let (db, account) = wallet();
+    accept_through(&db, 1);
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &decoys());
+    let base = serve(dir.path()).await;
+    let (db, _, progress) = recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    let progress = progress.expect("a truncated map is not an error");
+    complete(&progress);
+    assert_eq!(progress.covered_through, Some(h(shard_bounds(0).1)));
+    assert_eq!(
+        state(&db, account).covered_through,
+        Some(h(shard_bounds(0).1))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_map_on_a_different_chain_is_refused_rather_than_truncated() {
+    let (db, _) = wallet();
+    accept_through(&db, SHARDS);
+    accept(
+        &db,
+        shard_bounds(0).1,
+        BlockHash::from_internal_bytes([0xab; 32]),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &decoys());
+    let base = serve(dir.path()).await;
+    let (_, _, progress) = recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    let err = progress.expect_err("a map on another chain must be refused");
+    assert!(
+        format!("{err}").contains("rejected by wallet chain"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_service_serving_another_schema_is_refused_before_anything_is_decoded() {
+    let (db, _) = wallet();
+    accept_through(&db, SHARDS);
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &decoys());
+    let base = serve(dir.path()).await;
+    let filters = Filters::load(dir.path(), &map);
+    let (_, transport, progress) = recover_with(
+        db,
+        base.clone(),
+        filters,
+        WorkLimits::UNLIMITED,
+        move |mut t| {
+            let (raw, _) = transparent_wallet::ShardTransport::init(&mut t).unwrap();
+            let mut init: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            init["schema"] = serde_json::json!("transparent-shard-v99");
+            t.init_override = Some(serde_json::to_vec(&init).unwrap());
+            t
+        },
+    )
+    .await;
+    let err = progress.expect_err("a schema this build does not read must be refused");
+    assert!(
+        format!("{err}").contains("transparent-shard-v99"),
+        "got: {err}"
+    );
+    assert_eq!(transport.queries, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_filter_that_does_not_match_its_published_digest_is_refused() {
+    let (db, _) = wallet();
+    accept_through(&db, SHARDS);
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &decoys());
+    let base = serve(dir.path()).await;
+    let mut filters = Filters::load(dir.path(), &map);
+    let swapped = filters.filters[&0].clone();
+    assert_ne!(
+        filter_hash(&swapped).to_display_hex(),
+        map.shards[1].filter_hash
+    );
+    filters.filters.insert(1, swapped);
+    let (_, _, progress) = recover_with(db, base, filters, WorkLimits::UNLIMITED, |t| t).await;
+    let err = progress.expect_err("bytes the map does not commit to must be refused");
+    assert!(
+        format!("{err}").to_lowercase().contains("digest")
+            || format!("{err}").contains("filter")
+            || format!("{err}").contains("without offering a live revision"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_script_the_private_tables_cannot_index_is_reported_not_hidden() {
+    let (mut db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let long = vec![0x51; transparent_shard::MAX_SCRIPT_BYTES + 1];
+    db.record_transparent_address(
+        account,
+        zakura_wallet_core::KeyScope::External,
+        900,
+        "t1longscript",
+        &long,
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &decoys());
+    let base = serve(dir.path()).await;
+    let (db, _, progress) = recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    let progress = progress.unwrap();
+    complete(&progress);
+    assert_eq!(progress.outside_coverage, 1);
+    let mine = db
+        .transparent_coverage(account, h(FIRST))
+        .unwrap()
+        .into_iter()
+        .find(|c| c.script == long)
+        .unwrap();
+    assert_eq!(
+        mine.covered_through,
+        h(FIRST - 1),
+        "never read, and reported as never read rather than as empty"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_reference_filter_reader_serves_a_published_set() {
+    // The file-backed source this crate ships, over what the publisher wrote.
+    let (db, _) = wallet();
+    accept_through(&db, SHARDS);
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &decoys());
+    let base = serve(dir.path()).await;
+    let published =
+        zakura_wallet_transparent::files::PublishedFilters::load(dir.path(), &map).unwrap();
+    let (db, progress) = tokio::task::spawn_blocking(move || {
+        let mut db = db;
+        let mut published = published;
+        let mut transport = Counting::new(&base);
+        let progress = pir().recover_with(&mut db, &mut published, &mut transport);
+        (db, progress)
+    })
+    .await
+    .unwrap();
+    complete(&progress.unwrap());
+    drop(db);
+    let _ = ScriptBytes::new(vec![]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replaced_tail_with_fewer_events_is_a_rollback_not_a_panic() {
+    // The events a run holds can go down as well as up: a republished tail
+    // that lost a receive is truncated and re-read, and the run reports that
+    // as zero recovered rather than failing on the way out.
+    let (db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let mine = my_scripts(&db, account);
+    let before = chain(&mine);
+    let dir_a = tempfile::tempdir().unwrap();
+    let map_a = publish(dir_a.path(), &before);
+    let base_a = serve(dir_a.path()).await;
+    let (db, _, progress) = recover(db, base_a, dir_a.path(), &map_a, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+    let tail_digest = map_a.shards[SHARDS as usize - 1].manifest_digest.clone();
+
+    // Revision 1 of the tail no longer carries the second receive of mine[1].
+    let mut after = before.clone();
+    after[3].retain(|(s, _)| s.as_slice() != mine[1].as_slice());
+    let dir_b = tempfile::tempdir().unwrap();
+    let map_b = publish_with(
+        dir_b.path(),
+        &after,
+        |_| &RECENT_8K,
+        1,
+        &tail_digest,
+        hash_at,
+    );
+    let base_b = serve(dir_b.path()).await;
+    let (mut db, _, progress) =
+        recover(db, base_b, dir_b.path(), &map_b, WorkLimits::UNLIMITED).await;
+    let progress = progress.expect("fewer events than before is not a failure");
+    complete(&progress);
+    assert_eq!(progress.outputs, 0, "nothing new was recovered");
+    assert_eq!(
+        progress.rolled_back_to,
+        Some(h(shard_bounds(SHARDS - 1).0 - 1))
+    );
+    compare(&store_ledger(&mut db), &traverse(&after, &mine));
+    assert_eq!(
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        full_balance() - 7_001
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_that_keeps_moving_is_reported_unbounded_and_finished_by_the_next_run() {
+    // Someone pays every fresh address in turn, so each pass widens the window
+    // and the next pass has more to read. One run stops after its bound and
+    // says so rather than calling a balance with unread scripts synchronized;
+    // the run after it picks the work up where it stopped.
+    let (db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let ufvk = db.accounts(&params()).unwrap()[0].ufvk.clone();
+    let keys = TransparentKeys::derive(&ufvk).unwrap();
+    let gap = GapLimits::default().external;
+    let mut all = decoys();
+    // The address at the edge of each successive window: paying it moves the
+    // window by one gap, seventeen times over.
+    let mut paid = Vec::new();
+    for k in 1..=17u32 {
+        let index = k * gap - 1;
+        let script = keys
+            .address(&params(), KeyScope::External, index)
+            .unwrap()
+            .unwrap()
+            .script;
+        paid.push(ScriptBytes::new(script.clone()));
+        all[0].push((
+            ScriptBytes::new(script),
+            TransparentEvent::Receive(ReceiveEvent {
+                height: (FIRST + u64::from(k)) as u32,
+                txid: txid(9_000 + u64::from(k)),
+                transaction_index: 0,
+                output_index: 0,
+                value: 100,
+                coinbase: false,
+            }),
+        ));
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &all);
+    let base = serve(dir.path()).await;
+
+    let (db, _, progress) =
+        recover(db, base.clone(), dir.path(), &map, WorkLimits::UNLIMITED).await;
+    let progress = progress.unwrap();
+    assert_eq!(
+        progress.completion,
+        TransparentCompletion::Incomplete("discovery-unbounded".into())
+    );
+    assert_eq!(
+        state(&db, account).completion.as_deref(),
+        Some("discovery-unbounded")
+    );
+    assert!(
+        db.transparent_balance(account).unwrap().total().into_u64() < 1_700,
+        "the last addresses paid were not yet read"
+    );
+
+    let (mut db, _, progress) = recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+    compare(&store_ledger(&mut db), &traverse(&all, &paid));
+    assert_eq!(
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        1_700
+    );
+    assert_eq!(
+        state(&db, account).covered_through,
+        Some(h(shard_bounds(SHARDS - 1).1))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rewind_inside_a_shard_re_reads_that_shard_whole() {
+    // An unscanned cut has no hash to bind clipped coverage. Drop the crossing
+    // range and re-read it; never attach the old endpoint hash to the new height.
+    let (db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let mine = my_scripts(&db, account);
+    let all = chain(&mine);
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &all);
+    let base = serve(dir.path()).await;
+    let (mut db, _, progress) =
+        recover(db, base.clone(), dir.path(), &map, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+
+    let (start_of_second, _) = shard_bounds(1);
+    let cut = start_of_second + 50;
+    db.truncate_to(h(cut)).unwrap();
+    assert_eq!(
+        state(&db, account).covered_through,
+        Some(h(start_of_second - 1))
+    );
+
+    accept_through(&db, SHARDS);
+    let (mut db, again, progress) =
+        recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    let progress = progress.unwrap();
+    complete(&progress);
+    assert_eq!(
+        progress.rolled_back_to, None,
+        "the wallet rewind already removed unverifiable coverage"
+    );
+    assert!(!again.queried.contains(&0), "shard 0 is still covered");
+    assert!(
+        again.queried.contains(&1),
+        "the cut shard is read again whole"
+    );
+    compare(&store_ledger(&mut db), &traverse(&all, &mine));
+    assert_eq!(
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        full_balance()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_set_of_mixed_geometries_is_read_shard_by_shard() {
+    // The deployed set is two tiers with different table shapes. Each shard's
+    // geometry comes from its verified manifest, and the library re-derives
+    // the scheme per shard rather than assuming one for the set.
+    let (db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let mine = my_scripts(&db, account);
+    let all = chain(&mine);
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish_with(
+        dir.path(),
+        &all,
+        |shard| if shard < 2 { &RECENT_4K } else { &RECENT_8K },
+        0,
+        "",
+        hash_at,
+    );
+    assert_ne!(map.shards[0].geometry, map.shards[3].geometry);
+    let base = serve(dir.path()).await;
+    let (mut db, transport, progress) =
+        recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+    assert!(transport.queried.contains(&0) && transport.queried.contains(&2));
+    compare(&store_ledger(&mut db), &traverse(&all, &mine));
+    assert_eq!(
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        full_balance()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wallet_born_inside_the_set_reads_from_its_birthday_without_the_blocks_below() {
+    // An archive begins far below any wallet of this generation. The shards
+    // below the birthday cannot be checked against blocks the wallet never
+    // scanned and are not needed; the one straddling it is bound by its
+    // terminal, and reading starts at the birthday.
+    let mut db = zakura_wallet_store::testing::test_db().unwrap();
+    let birthday = FIRST + SPAN + 50;
+    let account = db
+        .create_account(
+            &params(),
+            &[7u8; 32],
+            zip32::AccountId::try_from(0).unwrap(),
+            h(birthday),
+        )
+        .unwrap();
+    // Nothing below the birthday: only the boundaries a real wallet would hold.
+    for id in 1..SHARDS {
+        let (start, end) = shard_bounds(id);
+        if start >= birthday {
+            accept(&db, start - 1, hash_at(start - 1));
+        }
+        accept(&db, end, hash_at(end));
+    }
+    let mine = my_scripts(&db, account);
+    let all = chain(&mine);
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &all);
+    let base = serve(dir.path()).await;
+    let (mut db, transport, progress) =
+        recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    let progress = progress.unwrap();
+    assert_eq!(
+        progress.completion,
+        TransparentCompletion::Incomplete("unresolved-spends".into())
+    );
+    assert!(
+        !transport.queried.contains(&0),
+        "the shard below the birthday is not read"
+    );
+    assert!(transport.queried.contains(&1), "the shard straddling it is");
+    // A shard is read whole: what it holds for a script from before the
+    // birthday is history the wallet has, not history it filters out.
+    compare(&store_ledger(&mut db), &traverse(&all[1..], &mine));
+    let state = state(&db, account);
+    assert_eq!(state.covered_through, Some(h(shard_bounds(SHARDS - 1).1)));
+    assert_eq!(
+        state.unresolved_spends, 1,
+        "the spend of a receive from before the birthday is unresolved, and says so"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_behind_the_wallet_target_never_reports_an_empty_complete_balance() {
+    let (db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let mine = my_scripts(&db, account);
+    let all = chain(&mine);
+    let old = tempfile::tempdir().unwrap();
+    let old_map = publish(old.path(), &all[..3]);
+    let old_base = serve(old.path()).await;
+    let (db, transport, progress) =
+        recover(db, old_base, old.path(), &old_map, WorkLimits::UNLIMITED).await;
+    let progress = progress.unwrap();
+    assert_eq!(
+        progress.completion,
+        TransparentCompletion::Incomplete(format!("publication-behind:{}", shard_bounds(3).1))
+    );
+    assert_eq!(transport.queries, 0);
+    assert!(db.transparent_anchor().unwrap().is_none());
+    let current = tempfile::tempdir().unwrap();
+    let map = publish(current.path(), &all);
+    let base = serve(current.path()).await;
+    let (mut db, _, progress) =
+        recover(db, base, current.path(), &map, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+    compare(&store_ledger(&mut db), &traverse(&all, &mine));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_publication_ahead_of_the_wallet_commits_only_the_accepted_prefix() {
+    let (db, account) = wallet();
+    accept_through(&db, 3);
+    let target = shard_bounds(3).0 + 5; // The tail payment is two blocks later.
+    accept(&db, target, hash_at(target));
+    let mine = my_scripts(&db, account);
+    let all = chain(&mine);
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &all);
+    let base = serve(dir.path()).await;
+    let (db, _, progress) =
+        recover(db, base.clone(), dir.path(), &map, WorkLimits::UNLIMITED).await;
+    let progress = progress.unwrap();
+    complete(&progress);
+    assert_eq!(progress.covered_through, Some(h(target)));
+    assert!(
+        db.transparent_events()
+            .unwrap()
+            .iter()
+            .all(|e| u64::from(u32::from(e.height)) <= target)
+    );
+    assert_eq!(
+        db.transparent_anchor().unwrap().unwrap().hash,
+        hash_at(target).to_display_hex()
+    );
+    accept_through(&db, SHARDS);
+    let (mut db, _, progress) = recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+    compare(&store_ledger(&mut db), &traverse(&all, &mine));
 }

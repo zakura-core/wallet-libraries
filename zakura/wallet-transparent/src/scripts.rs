@@ -1,4 +1,4 @@
-//! Which scripts to ask about, and where each has already been read to.
+//! Which scripts to ask about, and from which height each.
 //!
 //! Filter elements are raw locking scripts. Not addresses, not address text,
 //! not hashes of either: the exact `scriptPubKey` bytes as they appear in the
@@ -7,62 +7,70 @@
 //! two sides agreeing on an encoding is a class of bug this avoids by not
 //! having two sides.
 //!
-//! Coverage is per script, and the grouping below is why. A script the wallet
-//! derived yesterday has no coverage over the chain before yesterday. An
-//! account-wide start height would either re-read everything whenever the
-//! address window widened, or hand a new script the coverage its siblings
-//! earned — and the second is invisible, because a script with no history and a
-//! script that was never looked for return the same empty answer.
+//! Each script carries the first height the wallet needs it covered from: its
+//! account's birthday, or the first height the published set covers if that is
+//! later.
+//! The library keeps that height per script and never raises it, which is what
+//! lets a script the gap limit only just reached be read over the whole range
+//! its siblings were, rather than inheriting coverage it never earned.
 
 use std::collections::BTreeMap;
 
 use transparent_filter::ScriptBytes;
+use transparent_wallet::{ScriptEntry, ScriptOrigin};
 use zakura_wallet_core::AccountId;
-use zcash_protocol::consensus::BlockHeight;
+use zakura_wallet_store::WalletDb;
+use zcash_protocol::consensus::Parameters;
 
 use crate::Error;
 
-/// The scripts of one account, grouped by where reading must start.
+/// The wallet's scripts, as the library wants them.
 #[derive(Debug, Clone, Default)]
 pub struct WatchedScripts {
-    /// Groups of scripts that share a start height, keyed by that height.
-    pub groups: BTreeMap<u64, Vec<ScriptBytes>>,
-    /// Scripts longer than the private tables index.
+    /// Every script the ledger is asked about, with its required height.
+    pub entries: Vec<ScriptEntry>,
+    /// Which account each of them belongs to.
+    pub owners: BTreeMap<Vec<u8>, AccountId>,
+    /// How many scripts are longer than the private tables index.
     ///
-    /// Carried rather than dropped. Such a script can still match a filter and
-    /// will still have no directory entry, and reading that miss as "no
-    /// history" would be wrong in the direction that hides funds.
-    pub outside_coverage: Vec<ScriptBytes>,
+    /// Counted rather than dropped silently. Such a script can still match a
+    /// filter and will still have no directory entry, and reading that miss as
+    /// "no history" would be wrong in the direction that hides funds. The
+    /// interface says they exist; it does not say they are empty.
+    pub outside_coverage: usize,
 }
 
 impl WatchedScripts {
     /// Whether there is nothing to ask about.
     pub fn is_empty(&self) -> bool {
-        self.groups.is_empty()
-    }
-
-    /// How many scripts are covered by the private tables.
-    pub fn covered(&self) -> usize {
-        self.groups.values().map(Vec::len).sum()
+        self.entries.is_empty()
     }
 }
 
-/// Reads one account's watched scripts and groups them by start height.
+/// Reads every account's watched scripts with the height each needs.
 ///
-/// The start height for a script is one above where its coverage reaches, and
-/// coverage for a script never read is one below the account's birthday, so a
-/// fresh account produces a single group at its birthday.
-pub fn watched_scripts(
-    db: &zakura_wallet_store::WalletDb,
-    account: AccountId,
-    birthday: BlockHeight,
+/// Every account at once, because the store is one ledger over one set and
+/// the library's coverage is per script rather than per account; which account
+/// a recovered output belongs to is settled when it is projected, by the
+/// address it was paid to. `set_start` is the first height the published set
+/// covers: a birthday below it is clamped there, because a run that started
+/// lower would report coverage over a range no shard describes.
+pub fn watched_scripts<P: Parameters>(
+    db: &WalletDb,
+    params: &P,
+    set_start: u64,
 ) -> Result<WatchedScripts, Error> {
-    let mut out = WatchedScripts::default();
+    let birthdays: BTreeMap<AccountId, u64> = db
+        .accounts(params)?
+        .into_iter()
+        .map(|account| (account.id, u64::from(u32::from(account.birthday))))
+        .collect();
 
-    for coverage in db.transparent_coverage(account, birthday)? {
-        let script = ScriptBytes::new(coverage.script);
+    let mut out = WatchedScripts::default();
+    for watched in db.transparent_watch()?.addresses {
+        let script = ScriptBytes::new(watched.script);
         if script.as_slice().len() > transparent_shard::MAX_SCRIPT_BYTES {
-            out.outside_coverage.push(script);
+            out.outside_coverage += 1;
             continue;
         }
         // An empty or `OP_RETURN` script is not in any filter, so asking about
@@ -70,12 +78,19 @@ pub fn watched_scripts(
         if !script.is_filter_element() {
             continue;
         }
-        let start = u64::from(u32::from(coverage.covered_through)) + 1;
-        // Never below where coverage begins: a start under it would make the
-        // run report coverage over a range no shard describes.
-        let start = start.max(crate::START_HEIGHT);
-        out.groups.entry(start).or_default().push(script);
+        let Some(birthday) = birthdays.get(&watched.account) else {
+            // An address whose account is gone is not the ledger's to ask
+            // about; the address row is stale, and the balance it could feed
+            // has no owner to be shown to.
+            continue;
+        };
+        let bytes = script.as_slice().to_vec();
+        out.owners.insert(bytes.clone(), watched.account);
+        out.entries.push(ScriptEntry {
+            script: bytes,
+            origin: ScriptOrigin::Derived,
+            required_from: (*birthday).max(set_start),
+        });
     }
-
     Ok(out)
 }

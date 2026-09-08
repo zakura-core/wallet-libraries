@@ -24,11 +24,14 @@ class Balance {
   /// would offer money the send path would then refuse.
   final Zatoshi transparent;
 
+  final TransparentCoverage coverage;
+
   const Balance({
     this.spendable = Zatoshi.zero,
     this.pending = Zatoshi.zero,
     this.spentUnconfirmed = Zatoshi.zero,
     this.transparent = Zatoshi.zero,
+    this.coverage = const TransparentCoverage(),
   });
 
   /// Everything the account holds, however it is held.
@@ -51,11 +54,70 @@ class Balance {
       other.spendable == spendable &&
       other.pending == pending &&
       other.spentUnconfirmed == spentUnconfirmed &&
-      other.transparent == transparent;
+      other.transparent == transparent &&
+      other.coverage == coverage;
 
   @override
   int get hashCode =>
-      Object.hash(spendable, pending, spentUnconfirmed, transparent);
+      Object.hash(spendable, pending, spentUnconfirmed, transparent, coverage);
+}
+
+/// Coverage is independent of the amount recovered and of shielded scanning.
+class TransparentCoverage {
+  final int? coveredThrough;
+  final int? settledThrough;
+  final int? anchorHeight;
+  final String? completion;
+  final int unresolvedSpends;
+  final int pendingPages;
+  const TransparentCoverage({
+    this.coveredThrough,
+    this.settledThrough,
+    this.anchorHeight,
+    this.completion,
+    this.unresolvedSpends = 0,
+    this.pendingPages = 0,
+  });
+
+  bool get synchronized =>
+      completion == 'complete' &&
+      coveredThrough != null &&
+      anchorHeight != null &&
+      coveredThrough! >= anchorHeight! &&
+      unresolvedSpends == 0 &&
+      pendingPages == 0;
+
+  String get status {
+    final coverage = coveredThrough == null
+        ? 'Transparent coverage not yet established'
+        : 'Transparent coverage through block $coveredThrough';
+    if (synchronized) return coverage;
+    if (completion?.startsWith('publication-behind:') ?? false) {
+      return '$coverage. Waiting for publication through block ${completion!.split(':').last}.';
+    }
+    if (unresolvedSpends > 0)
+      return '$coverage. Transaction history is incomplete.';
+    return '$coverage. Transparent sync is incomplete.';
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is TransparentCoverage &&
+      coveredThrough == other.coveredThrough &&
+      settledThrough == other.settledThrough &&
+      anchorHeight == other.anchorHeight &&
+      completion == other.completion &&
+      unresolvedSpends == other.unresolvedSpends &&
+      pendingPages == other.pendingPages;
+  @override
+  int get hashCode => Object.hash(
+    coveredThrough,
+    settledThrough,
+    anchorHeight,
+    completion,
+    unresolvedSpends,
+    pendingPages,
+  );
 }
 
 /// Value, by where in the protocol it sat.
@@ -86,10 +148,10 @@ class PoolAmounts {
 
   /// The pools involved, in protocol order.
   List<Pool> get pools => [
-        if (!transparent.isZero) Pool.transparent,
-        if (!orchard.isZero) Pool.orchard,
-        if (!ironwood.isZero) Pool.ironwood,
-      ];
+    if (!transparent.isZero) Pool.transparent,
+    if (!orchard.isZero) Pool.orchard,
+    if (!ironwood.isZero) Pool.ironwood,
+  ];
 
   @override
   String toString() =>

@@ -20,8 +20,8 @@ use zakura_wallet_facade::{
 };
 
 use types::{
-    ApiAccount, ApiBalance, ApiError, ApiHistoryEntry, ApiPoolAmounts, ApiSendReceipt, ApiSpendQuote,
-    ApiSyncPhase, ApiSyncProgress, ApiTransparentCoverage, ApiTransparentUtxo,
+    ApiAccount, ApiBalance, ApiError, ApiHistoryEntry, ApiPoolAmounts, ApiSendReceipt,
+    ApiSpendQuote, ApiSyncPhase, ApiSyncProgress, ApiTransparentCoverage, ApiTransparentUtxo,
 };
 
 /// The open wallet.
@@ -58,12 +58,20 @@ pub fn validate_mnemonic(phrase: String) -> bool {
 /// Opens or creates the wallet in `directory`.
 ///
 /// Replaces any wallet already open, stopping its sync first.
+///
+/// The two transparent services are named separately and both are needed:
+/// public filter bytes reveal nothing about who asked, private queries reveal
+/// which chain ranges had probable activity, and one host serving both can
+/// join those facts. With either absent, transparent tracking is off and is
+/// reported as uncovered — a different state from a zero balance.
 pub fn open(
     directory: String,
     lightwalletd_url: String,
     mainnet: bool,
+    transparent_filters_url: Option<String>,
+    transparent_shards_url: Option<String>,
 ) -> Result<(), ApiError> {
-    let config = WalletConfig::in_dir(
+    let mut config = WalletConfig::in_dir(
         if mainnet {
             NetworkKind::Main
         } else {
@@ -72,6 +80,12 @@ pub fn open(
         std::path::Path::new(&directory),
         lightwalletd_url,
     );
+    config.transparent = match (transparent_filters_url, transparent_shards_url) {
+        (Some(filters), Some(shards)) => Some(zakura_wallet_facade::TransparentEndpoints::new(
+            filters, shards,
+        )),
+        _ => None,
+    };
 
     let opened = Wallet::open(config)?;
     let mut guard = WALLET.write().expect("the wallet lock is never poisoned");
@@ -158,17 +172,25 @@ pub fn accounts() -> Result<Vec<ApiAccount>, ApiError> {
         .collect())
 }
 
-/// Returns an account's balance across every shielded pool.
-///
-/// Transparent value is not included: this build cannot spend it, and a balance
-/// the wallet cannot back is worse than no balance.
+/// Returns shielded amounts, transparent value, and transparent coverage from
+/// one database snapshot. Transparent value stays separate from spendable
+/// shielded funds; incomplete coverage also qualifies a zero amount.
 pub fn balance(account: u32) -> Result<ApiBalance, ApiError> {
-    let b = wallet()?.balance(account)?;
+    let (b, c) = wallet()?.balance_with_coverage(account)?;
     Ok(ApiBalance {
         spendable: b.spendable,
         pending: b.pending,
         spent_unconfirmed: b.spent_unconfirmed,
         transparent: b.transparent,
+        coverage: ApiTransparentCoverage {
+            settled_through: c.settled_through,
+            covered_through: c.covered_through,
+            unresolved_spends: c.unresolved_spends,
+            provisional_shards: c.provisional_shards,
+            pending_pages: c.pending_pages,
+            anchor_height: c.anchor_height,
+            completion: c.completion,
+        },
     })
 }
 
@@ -185,6 +207,9 @@ pub fn transparent_coverage(account: u32) -> Result<ApiTransparentCoverage, ApiE
         covered_through: c.covered_through,
         unresolved_spends: c.unresolved_spends,
         provisional_shards: c.provisional_shards,
+        pending_pages: c.pending_pages,
+        anchor_height: c.anchor_height,
+        completion: c.completion,
     })
 }
 

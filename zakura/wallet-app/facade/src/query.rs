@@ -144,7 +144,11 @@ impl Wallet {
     /// a balance of zero rather than an error. A zero balance for an account
     /// that does not exist is indistinguishable from a real one, which turns a
     /// caller's bug into a wallet that quietly shows nothing.
-    fn require_account(&self, db: &zakura_wallet_store::WalletDb, account: u32) -> Result<(), Error> {
+    fn require_account(
+        &self,
+        db: &zakura_wallet_store::WalletDb,
+        account: u32,
+    ) -> Result<(), Error> {
         db.account(self.params(), Self::account_id(account))?
             .map(|_| ())
             .ok_or(Error::NoSuchAccount(account))
@@ -186,6 +190,55 @@ impl Wallet {
                 // would be the same mistake in a different pool.
                 transparent: transparent.spendable.into_u64(),
             })
+        })
+    }
+
+    /// Reads value and its transparent completeness in one SQLite snapshot.
+    pub fn balance_with_coverage(
+        &self,
+        account: u32,
+    ) -> Result<(Balance, crate::import::TransparentCoverage), Error> {
+        self.with_reader(|db| {
+            let _snapshot = db
+                .connection()
+                .unchecked_transaction()
+                .map_err(zakura_wallet_store::Error::Query)?;
+            self.require_account(db, account)?;
+            let id = Self::account_id(account);
+            let birthday = db
+                .accounts(self.params())?
+                .into_iter()
+                .find(|a| a.id == id)
+                .ok_or(Error::NoSuchAccount(account))?
+                .birthday;
+            let shielded = db.total_balance(id)?;
+            let transparent = db.transparent_balance(id)?;
+            let state = db.transparent_state(id, birthday)?;
+            let scanned = db.block_height_extrema()?.map(|(_, hi)| hi);
+            let completion = if state.completion.as_deref() == Some("complete")
+                && scanned.is_some_and(|tip| state.anchor.as_ref().is_none_or(|a| a.height < tip))
+            {
+                Some("scan-ahead".into())
+            } else {
+                state.completion
+            };
+            Ok((
+                Balance {
+                    spendable: shielded.spendable.into_u64(),
+                    pending: shielded.pending.into_u64(),
+                    spent_unconfirmed: shielded.spent_unconfirmed.into_u64(),
+                    transparent: transparent.spendable.into_u64(),
+                },
+                crate::import::TransparentCoverage {
+                    settled_through: state.settled_through.map(u32::from),
+                    covered_through: state.covered_through.map(u32::from),
+                    unresolved_spends: state.unresolved_spends,
+                    provisional_shards: state.provisional_shards,
+                    pending_pages: state.pending_pages,
+                    anchor_height: state.anchor.map(|a| u32::from(a.height)),
+                    completion,
+                },
+            ))
         })
     }
 

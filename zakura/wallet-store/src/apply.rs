@@ -10,13 +10,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use incrementalmerkletree::{Address, Level, Position};
 use rusqlite::{OptionalExtension, named_params};
+use zakura_wallet_core::retrieval::Locator;
+use zakura_wallet_core::scanning::{ScanPriority, ScanRange};
 use zakura_wallet_core::{
     ANCHOR_GRID, AccountId, BlockAnchor, BlockHash, DetectedBatch, DetectedBlock, KeyScope,
     NullifierSnapshot,
     pool::{PoolId, TreeSizes},
 };
-use zakura_wallet_core::retrieval::Locator;
-use zakura_wallet_core::scanning::{ScanPriority, ScanRange};
 use zcash_protocol::{
     TxId,
     consensus::{BlockHeight, Parameters},
@@ -26,8 +26,8 @@ use shardtree::store::{Checkpoint, ShardStore, TreeState};
 
 use crate::{
     error::{Error, TreeError},
-    schema::CACHE_SCHEMA,
     scan_queue,
+    schema::CACHE_SCHEMA,
     tree::{PRUNING_DEPTH, WalletShardStore, tree},
 };
 
@@ -641,6 +641,11 @@ pub(crate) fn put_recovered_spend(
     let tx_ref = put_recovered_transaction(conn, spend.spending_txid, Some(spend.height))?;
     let outpoint =
         transparent::bundle::OutPoint::new(*spend.spent_txid.as_ref(), spend.spent_output_index);
+    // Remembered as well as marked. The output this consumes may arrive in a
+    // later commit — a page fetched after a budget ran out, or an old receive
+    // found for a script the gap limit only just reached — and the map is what
+    // lets `put_recovered_output` attach this spend to it then.
+    remember_spend(conn, tx_ref, &outpoint)?;
     mark_transparent_spent(conn, tx_ref, &outpoint)
 }
 
@@ -886,6 +891,29 @@ fn mark_stabilized_notes(
     Ok(())
 }
 
+/// A transparent output's unspent-as-of height cannot outlive a cut at
+/// `height`. If the transaction that created it is still mined at or below
+/// the cut, the wallet knows the output existed and was unspent as of there;
+/// otherwise it knows nothing about it at all.
+pub(crate) fn clamp_unspent_observation(
+    conn: &rusqlite::Transaction<'_>,
+    height: BlockHeight,
+) -> Result<(), Error> {
+    conn.execute(
+        &format!(
+            "UPDATE {CACHE_SCHEMA}.transparent_received_outputs
+             SET max_observed_unspent_height = CASE
+                    WHEN (SELECT mined_height FROM {CACHE_SCHEMA}.transactions t
+                          WHERE t.id = transaction_id) <= :height THEN :height
+                    ELSE NULL
+                 END
+             WHERE max_observed_unspent_height > :height"
+        ),
+        named_params![":height": u32::from(height)],
+    )?;
+    Ok(())
+}
+
 /// Rewinds the wallet to `height`, discarding everything above it.
 pub(crate) fn truncate_to(
     conn: &rusqlite::Transaction<'_>,
@@ -983,23 +1011,7 @@ pub(crate) fn truncate_to(
     )
     .map_err(Error::Query)?;
 
-    // A transparent output's unspent-as-of height cannot outlive the rewind.
-    // If the transaction that created it is still mined at or below the new
-    // tip, the wallet knows the output existed and was unspent as of there;
-    // otherwise it knows nothing about it at all.
-    conn.execute(
-        &format!(
-            "UPDATE {CACHE_SCHEMA}.transparent_received_outputs
-             SET max_observed_unspent_height = CASE
-                    WHEN (SELECT mined_height FROM {CACHE_SCHEMA}.transactions t
-                          WHERE t.id = transaction_id) <= :height THEN :height
-                    ELSE NULL
-                 END
-             WHERE max_observed_unspent_height > :height"
-        ),
-        named_params![":height": h],
-    )
-    .map_err(Error::Query)?;
+    clamp_unspent_observation(conn, height)?;
 
     conn.execute(
         &format!("DELETE FROM {CACHE_SCHEMA}.nullifier_map WHERE block_height > :height"),
@@ -1101,6 +1113,12 @@ pub(crate) fn truncate_to(
     )
     .map_err(Error::Query)?;
 
+    // The private transparent ledger's own state follows the same cut, in
+    // the same transaction: its coverage rested on blocks that are now gone,
+    // and a coverage row that outlived its block would mean a range nothing
+    // re-reads.
+    crate::transparent::rollback_above(conn, height, "rewind").map_err(TreeError::Store)?;
+
     if let Some(previous_tip) = previous_tip.filter(|t| *t > height) {
         let requeue = (height + 1)..(previous_tip + 1);
         scan_queue::replace_queue_entries(
@@ -1152,7 +1170,7 @@ pub(crate) fn put_rediscovered_candidates(
     let stored = block_anchor(conn, height)?.ok_or_else(|| {
         Error::Corrupt("a rediscovered block is not one the wallet has scanned".into())
     })?;
-    if &stored.hash != hash || &stored.hash != &block.hash {
+    if &stored.hash != hash || stored.hash != block.hash {
         return Err(Error::Corrupt(
             "a rediscovered block does not match the one the wallet scanned".into(),
         ));
@@ -1325,9 +1343,7 @@ fn block_start_sizes(
 /// A note with a spend recorded against it is excluded: the scanner has no use
 /// for a nullifier that has already been seen on chain, and carrying it would
 /// grow the snapshot without bound.
-pub(crate) fn unspent_nullifiers(
-    conn: &rusqlite::Connection,
-) -> Result<NullifierSnapshot, Error> {
+pub(crate) fn unspent_nullifiers(conn: &rusqlite::Connection) -> Result<NullifierSnapshot, Error> {
     nullifier_snapshot(conn, false)
 }
 
@@ -1415,10 +1431,7 @@ pub(crate) fn commitment_coverage(
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
 
-    Ok((
-        covered.unwrap_or(0) as u64,
-        u64::from(total.unwrap_or(0)),
-    ))
+    Ok((covered.unwrap_or(0) as u64, u64::from(total.unwrap_or(0))))
 }
 
 /// A commitment tree root the server supplied for a shard the wallet has not
@@ -1505,10 +1518,7 @@ pub(crate) fn put_subtree_roots(
 ///
 /// Backfill asks the server for roots from here on, rather than refetching
 /// what it already holds.
-pub(crate) fn next_subtree_index(
-    conn: &rusqlite::Connection,
-    pool: PoolId,
-) -> Result<u64, Error> {
+pub(crate) fn next_subtree_index(conn: &rusqlite::Connection, pool: PoolId) -> Result<u64, Error> {
     conn.query_row(
         &format!(
             "SELECT COALESCE(MAX(shard_index) + 1, 0) FROM {CACHE_SCHEMA}.tree_shards
@@ -1767,5 +1777,3 @@ pub(crate) fn note_version_code(version: orchard::note::NoteVersion) -> u8 {
         orchard::note::NoteVersion::V3 => 0x03,
     }
 }
-
-
