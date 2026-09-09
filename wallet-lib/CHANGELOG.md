@@ -7,6 +7,15 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc5] - 2026-09-09
+
+### Changed
+- Updated the complete Zakura cryptography stack to the stable 1.2 release
+  family.
+- Updated the Zakura wallet crates to `zakura-pczt 0.1.0-rc3`,
+  `zakura-client-backend 0.1.0-rc5`, and
+  `zakura-client-sqlite 0.1.0-rc5`.
+
 ## [0.1.0-rc4] - 2026-08-28
 
 ### Changed

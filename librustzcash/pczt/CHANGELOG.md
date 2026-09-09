@@ -10,6 +10,12 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc3] - 2026-09-09
+
+### Changed
+- Updated the Zakura proving and protocol dependencies to the stable 1.2
+  release family.
+
 ## [0.1.0-rc2] - 2026-08-28
 
 ### Changed
