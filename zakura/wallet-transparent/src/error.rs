@@ -27,6 +27,21 @@ pub enum Error {
     Store(zakura_wallet_store::Error),
 }
 
+impl Error {
+    /// Whether this is the wallet's own stop rather than a failure.
+    ///
+    /// A stopped run ends through a transport that refused its next request,
+    /// so it arrives as a transport error; this is how a caller tells it
+    /// apart from a server that could not be reached.
+    ///
+    /// The refusal surfaces as a transport error or, when it happened inside
+    /// a private query, wrapped in the client's own error; both carry the
+    /// marker.
+    pub fn is_stopped(&self) -> bool {
+        matches!(self, Error::Transport(why) | Error::Sync(why) if why.contains(crate::stop::STOPPED))
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

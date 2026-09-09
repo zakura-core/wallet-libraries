@@ -208,12 +208,14 @@ impl WalletStore for PirStore<'_> {
     fn add_scripts(&mut self, entries: &[ScriptEntry]) -> Result<usize, StoreError> {
         let mut scripts = Vec::with_capacity(entries.len());
         for entry in entries {
+            // The script is not named: this message reaches logs, and a
+            // script is an address.
             let account = *self.owners.get(&entry.script).ok_or_else(|| {
-                StoreError::Corrupt(format!(
-                    "script {} is not one this wallet derived; the ledger cannot be \
-                     responsible for it",
-                    hex::encode(&entry.script)
-                ))
+                StoreError::Corrupt(
+                    "a script the library asked about is not one this wallet derived; the \
+                     ledger cannot be responsible for it"
+                        .into(),
+                )
             })?;
             scripts.push(rows::TransparentScript {
                 script: entry.script.clone(),

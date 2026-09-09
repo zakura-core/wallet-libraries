@@ -643,9 +643,8 @@ async fn a_wallet_that_has_scanned_nothing_reads_nothing_and_says_so() {
     assert_eq!(transport.queries, 0);
     let state = state(&db, account);
     assert_eq!(
-        state.covered_through,
-        Some(h(FIRST - 1)),
-        "reported as uncovered, never as an empty balance"
+        state.covered_through, None,
+        "no coverage at all, never an empty balance and never a height"
     );
     assert_eq!(
         state.completion.as_deref(),
@@ -1098,4 +1097,133 @@ async fn a_publication_ahead_of_the_wallet_commits_only_the_accepted_prefix() {
     let (mut db, _, progress) = recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
     complete(&progress.unwrap());
     compare(&store_ledger(&mut db), &traverse(&all, &mine));
+}
+
+/// A transport that raises the wallet's stop signal after a number of
+/// private queries, as a wallet being closed mid-recovery would.
+struct StopAfter {
+    inner: Counting,
+    signal: zakura_wallet_transparent::StopSignal,
+    after: u64,
+}
+
+impl transparent_wallet::transport::ShardTransport for StopAfter {
+    fn init(&mut self) -> Result<(Vec<u8>, u64), transparent_wallet::transport::BoxError> {
+        self.inner.init()
+    }
+    fn manifest(
+        &mut self,
+        shard_id: u64,
+        revision: &str,
+    ) -> Result<(Vec<u8>, u64), transparent_wallet::transport::BoxError> {
+        self.inner.manifest(shard_id, revision)
+    }
+    fn setup(
+        &mut self,
+        shard_id: u64,
+        revision: &str,
+        table: transparent_wallet::client::Table,
+        segment: u32,
+    ) -> Result<(Vec<u8>, u64), transparent_wallet::transport::BoxError> {
+        self.inner.setup(shard_id, revision, table, segment)
+    }
+    fn query(
+        &mut self,
+        shard_id: u64,
+        revision: &str,
+        table: transparent_wallet::client::Table,
+        body: &[u8],
+    ) -> Result<Vec<u8>, transparent_wallet::transport::BoxError> {
+        let answer = self.inner.query(shard_id, revision, table, body)?;
+        if self.inner.queries >= self.after {
+            self.signal.stop();
+        }
+        Ok(answer)
+    }
+}
+
+/// Closing the wallet in the middle of a recovery ends the run at the next
+/// request, keeps every shard committed before it, records `stopped` rather
+/// than a budget reason, and the next run finishes the job exactly.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_run_keeps_its_commits_and_the_next_run_finishes() {
+    let (db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let mine = my_scripts(&db, account);
+    let all = chain(&mine);
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &all);
+    let base = serve(dir.path()).await;
+
+    let signal = zakura_wallet_transparent::StopSignal::new();
+    let stopper = signal.clone();
+    let filters = Filters::load(dir.path(), &map);
+    let base_for_run = base.clone();
+    let (db, stopped, result) = tokio::task::spawn_blocking(move || {
+        let mut db = db;
+        let mut filters = filters;
+        let mut transport = StopAfter {
+            inner: Counting::new(&base_for_run),
+            signal: stopper,
+            after: 3,
+        };
+        let result = pir()
+            .with_stop(signal)
+            .recover_with(&mut db, &mut filters, &mut transport);
+        (db, transport.inner, result)
+    })
+    .await
+    .unwrap();
+
+    let error = result.expect_err("a stopped run does not report a completion");
+    assert!(error.is_stopped(), "{error}");
+    assert!(
+        stopped.queries >= 3 && stopped.queries < 20,
+        "the stop landed at the next request, after {} queries",
+        stopped.queries
+    );
+    let state = state(&db, account);
+    assert_eq!(
+        state.completion.as_deref(),
+        Some("stopped"),
+        "the wallet says why it is incomplete"
+    );
+    assert_eq!(state.anchor, None, "nothing was accepted as complete");
+    let kept = db.transparent_last_commit().unwrap();
+    assert!(kept > 0, "shards committed before the stop are kept");
+
+    let (mut db, second, progress) =
+        recover(db, base, dir.path(), &map, WorkLimits::UNLIMITED).await;
+    complete(&progress.unwrap());
+    assert!(second.queries > 0);
+    assert!(
+        db.transparent_last_commit().unwrap() > kept,
+        "the second run continued rather than starting over"
+    );
+    compare(&store_ledger(&mut db), &traverse(&all, &mine));
+    assert_eq!(
+        db.transparent_balance(account).unwrap().total().into_u64(),
+        full_balance()
+    );
+}
+
+/// A run that fails for any other reason leaves `failed` beside the balance,
+/// never `sync-in-progress`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_run_does_not_leave_the_wallet_looking_busy() {
+    let (db, account) = wallet();
+    accept_through(&db, SHARDS);
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(dir.path(), &decoys());
+    let (db, _, result) = recover_with(
+        db,
+        "http://127.0.0.1:1".to_owned(),
+        Filters::load(dir.path(), &map),
+        WorkLimits::UNLIMITED,
+        |t| t,
+    )
+    .await;
+    let error = result.unwrap_err();
+    assert!(!error.is_stopped());
+    assert_eq!(state(&db, account).completion.as_deref(), Some("failed"));
 }

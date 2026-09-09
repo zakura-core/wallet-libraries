@@ -60,6 +60,7 @@ pub mod endpoints;
 pub mod files;
 pub mod scripts;
 pub mod source;
+pub mod stop;
 pub mod store;
 
 pub use chain::{AcceptedBlocks, ChainSnapshot};
@@ -67,6 +68,7 @@ pub use endpoints::Endpoints;
 pub use error::Error;
 pub use scripts::{WatchedScripts, watched_scripts};
 pub use source::TransparentPir;
+pub use stop::{StopSignal, Stoppable};
 pub use store::PirStore;
 pub use transparent_wallet::WorkLimits;
 

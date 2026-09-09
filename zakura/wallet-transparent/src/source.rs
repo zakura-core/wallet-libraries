@@ -34,7 +34,10 @@ use zakura_wallet_sync::{
 };
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-use crate::{ChainSnapshot, Endpoints, Error, PirStore, scripts};
+use crate::{
+    ChainSnapshot, Endpoints, Error, PirStore, scripts,
+    stop::{StopSignal, Stoppable},
+};
 
 /// How many times one run will widen the address window and sync again.
 ///
@@ -53,6 +56,7 @@ pub struct TransparentPir<P> {
     endpoints: Endpoints,
     params: P,
     limits: WorkLimits,
+    stop: StopSignal,
 }
 
 impl<P: Parameters + Send + Sync + 'static> TransparentPir<P> {
@@ -63,7 +67,19 @@ impl<P: Parameters + Send + Sync + 'static> TransparentPir<P> {
             endpoints,
             params,
             limits: crate::MOBILE_LIMITS,
+            stop: StopSignal::new(),
         }
+    }
+
+    /// Lets `signal` end a run between requests.
+    ///
+    /// A run that is stopped keeps every shard it committed and records
+    /// `stopped` as the reason it fell short; the next run continues from
+    /// there. Without a signal a run ends only when it finishes or fails,
+    /// and the wallet's own stop waits for it.
+    pub fn with_stop(mut self, signal: StopSignal) -> Self {
+        self.stop = signal;
+        self
     }
 
     /// Bounds the private work one run may do.
@@ -93,6 +109,30 @@ impl<P: Parameters + Send + Sync + 'static> TransparentPir<P> {
         filters: &mut impl FilterSource,
         transport: &mut impl ShardTransport,
     ) -> Result<TransparentProgress, Error> {
+        let mut filters = Stoppable::new(filters, self.stop.clone());
+        let mut transport = Stoppable::new(transport, self.stop.clone());
+        let result = self.run(db, &mut filters, &mut transport);
+        if result.is_err() {
+            // A run that did not finish must not leave `sync-in-progress`
+            // beside the balance, which would read as a sync still running.
+            // The reason is a fixed word rather than the error: the error
+            // names hosts, and this is kept in the wallet and shown.
+            let reason = if self.stop.is_stopped() {
+                "stopped"
+            } else {
+                "failed"
+            };
+            db.put_transparent_completion(reason)?;
+        }
+        result
+    }
+
+    fn run(
+        &self,
+        db: &mut WalletDb,
+        filters: &mut impl FilterSource,
+        transport: &mut impl ShardTransport,
+    ) -> Result<TransparentProgress, Error> {
         db.put_transparent_completion("sync-in-progress")?;
         let (map_bytes, map_cost) = filters
             .shard_map()
@@ -102,6 +142,7 @@ impl<P: Parameters + Send + Sync + 'static> TransparentPir<P> {
 
         map.check_shape()
             .map_err(|e| Error::Invalid(format!("shard map: {e}")))?;
+        check_map_chain(&map, &self.params)?;
         let Some((_, scanned)) = db.block_height_extrema()? else {
             let reason = format!(
                 "chain-unknown:{}",
@@ -140,6 +181,9 @@ impl<P: Parameters + Send + Sync + 'static> TransparentPir<P> {
         let mut unbounded = false;
 
         for pass in 0..=MAX_PASSES {
+            if self.stop.is_stopped() {
+                return Err(Error::Transport(crate::stop::STOPPED.into()));
+            }
             widen_windows(db, &self.params)?;
             let watched = scripts::watched_scripts(db, &self.params, map.start_height)?;
             outside_coverage = watched.outside_coverage;
@@ -247,6 +291,39 @@ fn widen_windows<P: Parameters>(db: &mut WalletDb, params: &P) -> Result<(), Err
     let limits = zakura_wallet_store::GapLimits::default();
     for account in db.accounts(params)? {
         db.maintain_transparent_addresses(params, account.id, &limits)?;
+    }
+    Ok(())
+}
+
+/// Refuses a map that describes a chain other than the wallet's.
+///
+/// The service and the map are checked against each other further down; this
+/// checks both against the wallet. Without it a mainnet wallet handed a
+/// testnet set would find every boundary hash unknown and stop short with
+/// `chain-unknown`, which is true and useless: the configuration is wrong, and
+/// the wallet should say so rather than wait for a chain it will never scan.
+fn check_map_chain<P: Parameters>(
+    map: &transparent_filter::ShardMap,
+    params: &P,
+) -> Result<(), Error> {
+    use zcash_protocol::consensus::NetworkType;
+    let expected = match params.network_type() {
+        NetworkType::Main => "main",
+        NetworkType::Test => "test",
+        NetworkType::Regtest => "regtest",
+    };
+    if map.network != expected {
+        return Err(Error::Invalid(format!(
+            "the shard map describes the {} chain and this wallet is on {expected}",
+            map.network
+        )));
+    }
+    if params.network_type() == NetworkType::Main
+        && map.genesis_hash != transparent_filter::MAINNET_GENESIS_DISPLAY
+    {
+        return Err(Error::Invalid(
+            "the shard map names a genesis block that is not mainnet's".into(),
+        ));
     }
     Ok(())
 }
