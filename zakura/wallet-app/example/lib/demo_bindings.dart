@@ -29,6 +29,28 @@ class DemoBindings implements ZakuraBindings {
 
   static const _tip = 3_000_000;
 
+  /// The demo is a demonstration, and says so: it can "send" in the sense
+  /// that a number goes down, and no real build reports this.
+  @override
+  Future<BuildInfo> buildInfo() async => const BuildInfo(
+        sendEnabled: true,
+        transparentSchema: 'demo',
+        layoutVersion: 0,
+      );
+
+  @override
+  Future<NetworkIdentity> networkIdentity({
+    required String lightwalletdUrl,
+  }) async =>
+      NetworkIdentity(
+        chainName: lightwalletdUrl.contains('testnet') ? 'test' : 'main',
+        saplingActivationHeight: 419200,
+        consensusBranchId: 'demo',
+        blockHeight: _tip,
+        vendor: 'demo',
+        version: '0',
+      );
+
   @override
   Future<String> generateMnemonic() async => _phrase;
 

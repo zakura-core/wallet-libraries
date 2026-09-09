@@ -1,122 +1,95 @@
-import 'dart:io';
-
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:zakura_bindings/zakura_bindings.dart';
-import 'package:zakura_client/zakura_client.dart';
 import 'package:zakura_state/zakura_state.dart';
 import 'package:zakura_ui/zakura_ui.dart';
 
-import 'demo_bindings.dart';
+import 'mode.dart';
+import 'screens/failure.dart';
 import 'screens/home.dart';
 import 'screens/onboarding.dart';
+import 'startup.dart';
 
-/// Whether the demo wallet was asked for explicitly.
-///
-/// `--dart-define=ZAKURA_DEMO=true` runs against the in-memory wallet, which is
-/// useful for working on the interface without waiting for a chain.
-const _forceDemo = bool.fromEnvironment('ZAKURA_DEMO');
-
-/// Where the wallet's two files live.
-///
-/// Under the home directory rather than a temporary one, because a wallet that
-/// forgets itself when the machine is tidied up is not a wallet.
-String _walletDirectory() {
-  final home = Platform.environment['HOME'] ?? Directory.systemTemp.path;
-  return '$home/.zakura-example';
-}
-
-/// Where the private transparent ledger reads from, given at build time:
+/// The mode this build is in, and what it should talk to, from
+/// `--dart-define`s. See [BetaConfig] for the names.
 ///
 /// ```text
-/// fvm flutter run -d macos \
+/// fvm flutter build macos --release \
+///   --dart-define=ZAKURA_MODE=recovery \
 ///   --dart-define=ZAKURA_TRANSPARENT_FILTERS=https://... \
 ///   --dart-define=ZAKURA_TRANSPARENT_SHARDS=https://...
 /// ```
+final BetaConfig _config = BetaConfig.fromEnvironment();
+
+/// The mode this build is in, or null when it was not told.
 ///
-/// Two, and deliberately not defaulted. Unset means transparent tracking is
-/// off, which the balance card shows as coverage not established rather than
-/// as a zero.
-const _filtersDefine = String.fromEnvironment('ZAKURA_TRANSPARENT_FILTERS');
-const _shardsDefine = String.fromEnvironment('ZAKURA_TRANSPARENT_SHARDS');
-final String? _transparentFiltersUrl =
-    _filtersDefine.isEmpty ? null : _filtersDefine;
-final String? _transparentShardsUrl =
-    _shardsDefine.isEmpty ? null : _shardsDefine;
+/// Read once here so that every screen can ask, and so that a build without
+/// a mode has nowhere to hide it.
+final currentModeProvider = Provider<ZakuraMode?>((ref) => null);
+
+/// What was learned bringing the wallet up, for the diagnostics screen.
+final startupProvider = Provider<StartupReady?>((ref) => null);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // The whole of the rest of this application is written against
-  // `ZakuraBindings`, so choosing between the real wallet and the demo one is
-  // this single expression. Nothing below it knows which it got.
-  final (ZakuraBindings bindings, bool demo) = await _bindings();
-  final wallet = ZakuraWallet(bindings);
-
-  // Opened here rather than when a wallet is created, so that a returning user
-  // gets the wallet they already have. Onboarding is for people who have none.
-  int? existing;
-  try {
-    await wallet.open(
-      directory: _walletDirectory(),
-      lightwalletdUrl: 'https://us.zec.stardust.rest:443',
-      transparentFiltersUrl: _transparentFiltersUrl,
-      transparentShardsUrl: _transparentShardsUrl,
-    );
-    final accounts = await wallet.accounts();
-    if (accounts.isNotEmpty) {
-      existing = accounts.first.id;
-      await wallet.startSync();
-    }
-  } on Object catch (e) {
-    // Nothing to show yet, so this goes to the log and onboarding is offered.
-    // Whatever went wrong will come back the moment a wallet is created.
-    debugPrint('Could not open the wallet: $e');
-  }
-
-  runApp(
-    ProviderScope(
-      overrides: [
-        walletProvider.overrideWithValue(wallet),
-        initialAccountProvider.overrideWithValue(existing),
-      ],
-      child: ZakuraExampleApp(demo: demo),
-    ),
-  );
+  runApp(ZakuraStartupGate(startup: await startUp(_config)));
 }
 
-Future<(ZakuraBindings, bool)> _bindings() async {
-  if (_forceDemo) return (DemoBindings(), true);
-  try {
-    return (await NativeBindings.load(), false);
-  } on Object catch (e) {
-    // The native library is built by Cargokit as part of a normal Flutter
-    // build, so failing to load it means something is wrong with the build
-    // rather than with the wallet. Falling back keeps the example runnable and
-    // says so on screen, rather than presenting a demo as the real thing.
-    debugPrint('Native wallet unavailable, falling back to the demo: $e');
-    return (DemoBindings(), true);
+/// Shows the wallet, or the reason there is none.
+///
+/// Two outcomes and no third: a beta mode that could not come up is a screen
+/// that says what is wrong, never the demonstration.
+class ZakuraStartupGate extends StatelessWidget {
+  /// How the application came up.
+  final Startup startup;
+
+  /// Creates the gate.
+  const ZakuraStartupGate({required this.startup, super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return switch (startup) {
+      StartupReady(:final wallet, :final existingAccount, :final mode) =>
+        ProviderScope(
+          overrides: [
+            walletProvider.overrideWithValue(wallet),
+            initialAccountProvider.overrideWithValue(existingAccount),
+            currentModeProvider.overrideWithValue(mode),
+            startupProvider.overrideWithValue(startup as StartupReady),
+          ],
+          child: ZakuraExampleApp(mode: mode),
+        ),
+      StartupFailed(:final mode, :final step, :final problems) =>
+        ProviderScope(
+          overrides: [currentModeProvider.overrideWithValue(mode)],
+          child: ZakuraExampleApp(
+            mode: mode,
+            failure: FailureScreen(mode: mode, step: step, problems: problems),
+          ),
+        ),
+    };
   }
 }
 
-/// The example wallet.
+/// The recovery wallet.
 class ZakuraExampleApp extends StatelessWidget {
-  /// Whether this is running against the in-memory demo wallet.
-  final bool demo;
+  /// The mode this build is in, or null when it was not told one.
+  final ZakuraMode? mode;
+
+  /// What to show instead of a wallet, when there is none.
+  final Widget? failure;
 
   /// Creates the app.
-  const ZakuraExampleApp({this.demo = false, super.key});
+  const ZakuraExampleApp({required this.mode, this.failure, super.key});
 
   @override
   Widget build(BuildContext context) {
     return WidgetsApp(
-      title: 'Zakura',
+      title: 'Zakura Recovery Beta',
       color: const Color(0xFF3B5BDB),
       // `home` is what makes `WidgetsApp` build a Navigator at all: given
       // none of `home`, `routes` or `onGenerateRoute` it builds no navigator,
-      // and every `Navigator.of` below it has nothing to push onto — which is
-      // exactly what left Receive and Send doing nothing.
-      home: _Root(demo: demo),
+      // and every `Navigator.of` below it has nothing to push onto.
+      home: _Root(mode: mode, failure: failure),
       // The navigator arrives here as `child` and must be passed through. The
       // theme sits above it so that pushed screens inherit it too.
       builder: (context, child) => ZakuraThemeScope(
@@ -131,41 +104,61 @@ class ZakuraExampleApp extends StatelessWidget {
 }
 
 class _Root extends ConsumerWidget {
-  const _Root({required this.demo});
+  const _Root({required this.mode, required this.failure});
 
-  final bool demo;
+  final ZakuraMode? mode;
+  final Widget? failure;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = ZakuraTheme.of(context);
-    final account = ref.watch(activeAccountProvider);
+    final failure = this.failure;
 
     return Container(
       color: theme.colors.background,
       child: Column(
         children: [
-          if (demo)
-            SafeArea(
-              bottom: false,
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(
-                  theme.spacing.lg,
-                  theme.spacing.sm,
-                  theme.spacing.lg,
-                  0,
-                ),
-                child: const ZakuraNotice(
-                  message: 'Demo wallet: nothing here touches a chain, and no '
-                      'money is real.',
-                ),
-              ),
-            ),
+          ModeBanner(mode: mode),
           Expanded(
-            child: account == null
-                ? const OnboardingScreen()
-                : const HomeScreen(),
+            child: failure ??
+                (ref.watch(activeAccountProvider) == null
+                    ? const OnboardingScreen()
+                    : const HomeScreen()),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Says which mode the build is in, on every screen, all the time.
+///
+/// A demonstration that could be mistaken for a wallet, or a recovery build
+/// that could be mistaken for one that sends, is the mistake this exists to
+/// make impossible.
+class ModeBanner extends StatelessWidget {
+  /// The mode, or null when the build was not told one.
+  final ZakuraMode? mode;
+
+  /// Creates the banner.
+  const ModeBanner({required this.mode, super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = ZakuraTheme.of(context);
+    return SafeArea(
+      bottom: false,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          theme.spacing.lg,
+          theme.spacing.sm,
+          theme.spacing.lg,
+          0,
+        ),
+        child: ZakuraNotice(
+          message: mode?.banner ?? 'No mode configured: this build cannot run.',
+          isError: mode == null,
+        ),
       ),
     );
   }

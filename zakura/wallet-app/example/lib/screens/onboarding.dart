@@ -3,6 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:zakura_state/zakura_state.dart';
 import 'package:zakura_ui/zakura_ui.dart';
 
+import '../main.dart';
+import '../mode.dart';
+
 /// Getting into a wallet: a new one, or one that already exists.
 ///
 /// Thin by construction. Which of the two paths is showing is the controller's
@@ -17,6 +20,7 @@ class OnboardingScreen extends ConsumerWidget {
     final theme = ZakuraTheme.of(context);
     final state = ref.watch(onboardingControllerProvider);
     final controller = ref.read(onboardingControllerProvider.notifier);
+    final mode = ref.watch(currentModeProvider) ?? ZakuraMode.demo;
 
     return SafeArea(
       child: Padding(
@@ -35,13 +39,14 @@ class OnboardingScreen extends ConsumerWidget {
                   ),
                   SizedBox(height: theme.spacing.sm),
                   Text(
-                    _subtitle(state),
+                    _subtitle(state, mode),
                     style: theme.typography.body
                         .copyWith(color: theme.colors.textMuted),
                   ),
                   SizedBox(height: theme.spacing.xxl),
                   switch (state) {
-                    OnboardingIdle() => _Choice(controller: controller),
+                    OnboardingIdle() =>
+                      _Choice(controller: controller, mode: mode),
                     OnboardingCreated(:final phrase, :final error) =>
                       _Created(
                         phrase: phrase,
@@ -65,20 +70,29 @@ class OnboardingScreen extends ConsumerWidget {
     );
   }
 
-  static String _subtitle(OnboardingState state) => switch (state) {
+  static String _subtitle(OnboardingState state, ZakuraMode mode) =>
+      switch (state) {
         OnboardingCreated() =>
           'Write these words down before you go on. They are the only way back '
               'into this wallet.',
         OnboardingImporting() =>
-          'Enter the seed phrase of a wallet you already have.',
+          'Enter the seed phrase of a wallet you already have. It is used to '
+              'derive viewing keys and is not stored.',
+        _ when mode.isBeta =>
+          'Recovery only: restore a wallet you already have and read what it '
+              'holds. This build cannot send.',
         _ => 'A minimal wallet built on the Zakura core.',
       };
 }
 
+/// Create, or restore. A beta mode offers restore alone: a recovery build has
+/// nothing to do with a wallet that has no history, and a phrase it generated
+/// would be one more secret for somebody to keep.
 class _Choice extends StatelessWidget {
-  const _Choice({required this.controller});
+  const _Choice({required this.controller, required this.mode});
 
   final OnboardingController controller;
+  final ZakuraMode mode;
 
   @override
   Widget build(BuildContext context) {
@@ -86,15 +100,19 @@ class _Choice extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ZakuraButton(
-          label: 'Create a wallet',
-          expand: true,
-          onPressed: controller.beginCreate,
-        ),
-        SizedBox(height: theme.spacing.md),
+        if (!mode.isBeta) ...[
+          ZakuraButton(
+            label: 'Create a wallet',
+            expand: true,
+            onPressed: controller.beginCreate,
+          ),
+          SizedBox(height: theme.spacing.md),
+        ],
         ZakuraButton(
           label: 'Restore an existing wallet',
-          kind: ZakuraButtonKind.secondary,
+          kind: mode.isBeta
+              ? ZakuraButtonKind.primary
+              : ZakuraButtonKind.secondary,
           expand: true,
           onPressed: controller.beginImport,
         ),
