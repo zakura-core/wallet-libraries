@@ -31,10 +31,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ApiBalance dco_decode_api_balance(dynamic raw);
 
   @protected
+  ApiBuildInfo dco_decode_api_build_info(dynamic raw);
+
+  @protected
   ApiError dco_decode_api_error(dynamic raw);
 
   @protected
   ApiHistoryEntry dco_decode_api_history_entry(dynamic raw);
+
+  @protected
+  ApiNetworkIdentity dco_decode_api_network_identity(dynamic raw);
 
   @protected
   ApiPoolAmounts dco_decode_api_pool_amounts(dynamic raw);
@@ -118,10 +124,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ApiBalance sse_decode_api_balance(SseDeserializer deserializer);
 
   @protected
+  ApiBuildInfo sse_decode_api_build_info(SseDeserializer deserializer);
+
+  @protected
   ApiError sse_decode_api_error(SseDeserializer deserializer);
 
   @protected
   ApiHistoryEntry sse_decode_api_history_entry(SseDeserializer deserializer);
+
+  @protected
+  ApiNetworkIdentity sse_decode_api_network_identity(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ApiPoolAmounts sse_decode_api_pool_amounts(SseDeserializer deserializer);
@@ -213,11 +227,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_api_balance(ApiBalance self, SseSerializer serializer);
 
   @protected
+  void sse_encode_api_build_info(ApiBuildInfo self, SseSerializer serializer);
+
+  @protected
   void sse_encode_api_error(ApiError self, SseSerializer serializer);
 
   @protected
   void sse_encode_api_history_entry(
     ApiHistoryEntry self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_api_network_identity(
+    ApiNetworkIdentity self,
     SseSerializer serializer,
   );
 

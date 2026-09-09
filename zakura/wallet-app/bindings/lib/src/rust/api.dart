@@ -9,6 +9,24 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `wallet`
 
+/// What this native build is.
+///
+/// The one question an application has to ask before it trusts the mode it
+/// thinks it is in: the Dart side knows what it was told to be, and this is
+/// what the native side actually is.
+Future<ApiBuildInfo> buildInfo() => RustLib.instance.api.crateApiBuildInfo();
+
+/// Asks a lightwalletd server which chain it serves, with no wallet open.
+///
+/// What an application checks before it opens anything: a mainnet wallet
+/// pointed at a testnet server scans a chain its keys were never paid on and
+/// reports an honest, wrong zero. The sync checks again every time it
+/// connects; this is for saying so on screen before that.
+Future<ApiNetworkIdentity> networkIdentity({required String lightwalletdUrl}) =>
+    RustLib.instance.api.crateApiNetworkIdentity(
+      lightwalletdUrl: lightwalletdUrl,
+    );
+
 /// Generates a new seed phrase.
 ///
 /// The phrase is the wallet. Whatever receives it is responsible for showing it
@@ -187,6 +205,9 @@ Future<ApiSpendQuote> quote({
 /// Takes seconds. The code generator runs this on a worker rather than on the
 /// interface thread, but whatever calls it should already be saying that
 /// something is happening.
+///
+/// In a build without the `send` feature this is refused with `SendDisabled`
+/// before the phrase is read; see [`build_info`].
 Future<ApiSendReceipt> send({
   required int account,
   required String to,

@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
 
 /// An account the wallet holds.
 class ApiAccount {
@@ -93,6 +93,40 @@ class ApiBalance {
           spentUnconfirmed == other.spentUnconfirmed &&
           transparent == other.transparent &&
           coverage == other.coverage;
+}
+
+/// What this native build is.
+class ApiBuildInfo {
+  /// Whether the build can send. A recovery build cannot, and says so here
+  /// rather than only when asked to send.
+  final bool sendEnabled;
+
+  /// The transparent protocol schema this build reads.
+  final String transparentSchema;
+
+  /// The derived database layout this build writes.
+  final int layoutVersion;
+
+  const ApiBuildInfo({
+    required this.sendEnabled,
+    required this.transparentSchema,
+    required this.layoutVersion,
+  });
+
+  @override
+  int get hashCode =>
+      sendEnabled.hashCode ^
+      transparentSchema.hashCode ^
+      layoutVersion.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ApiBuildInfo &&
+          runtimeType == other.runtimeType &&
+          sendEnabled == other.sendEnabled &&
+          transparentSchema == other.transparentSchema &&
+          layoutVersion == other.layoutVersion;
 }
 
 /// Why something could not be done.
@@ -186,6 +220,57 @@ class ApiHistoryEntry {
           receivedByPool == other.receivedByPool &&
           spentByPool == other.spentByPool &&
           paidToTransparent == other.paidToTransparent;
+}
+
+/// What a lightwalletd server says it is.
+class ApiNetworkIdentity {
+  /// `main` or `test`, as the server names its chain.
+  final String chainName;
+
+  /// Where Sapling activated on that chain.
+  final BigInt saplingActivationHeight;
+
+  /// The consensus branch the server is on, in its own encoding.
+  final String consensusBranchId;
+
+  /// The latest block the server holds.
+  final BigInt blockHeight;
+
+  /// The server software.
+  final String vendor;
+
+  /// Its version.
+  final String version;
+
+  const ApiNetworkIdentity({
+    required this.chainName,
+    required this.saplingActivationHeight,
+    required this.consensusBranchId,
+    required this.blockHeight,
+    required this.vendor,
+    required this.version,
+  });
+
+  @override
+  int get hashCode =>
+      chainName.hashCode ^
+      saplingActivationHeight.hashCode ^
+      consensusBranchId.hashCode ^
+      blockHeight.hashCode ^
+      vendor.hashCode ^
+      version.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ApiNetworkIdentity &&
+          runtimeType == other.runtimeType &&
+          chainName == other.chainName &&
+          saplingActivationHeight == other.saplingActivationHeight &&
+          consensusBranchId == other.consensusBranchId &&
+          blockHeight == other.blockHeight &&
+          vendor == other.vendor &&
+          version == other.version;
 }
 
 /// Value, by where in the protocol it sat.

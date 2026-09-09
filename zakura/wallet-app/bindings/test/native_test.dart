@@ -22,9 +22,16 @@ import 'package:zakura_client/zakura_client.dart';
 ///
 /// Tagged so an ordinary `flutter test` skips it: the rest of the suite is
 /// meant to run with no Rust toolchain present.
+/// Transparent services the tests name and never reach. A recovery build
+/// refuses to open without both, over TLS, on separate hosts; nothing here
+/// connects to them, because nothing here syncs against a reachable server.
+const filters = 'https://filters.example.invalid';
+const shards = 'https://shards.example.invalid';
+
 void main() {
   final root = Directory.current.path.split('/zakura/wallet-app').first;
-  final library = '$root/target/release/libzakura_wallet_bridge.dylib';
+  final library = Platform.environment['ZAKURA_BRIDGE_LIBRARY'] ??
+      '$root/target/release/libzakura_wallet_bridge.dylib';
 
   late NativeBindings bindings;
   late Directory dir;
@@ -50,11 +57,14 @@ void main() {
 
   _failureTests(bindings: () => bindings, dir: () => dir, built: built);
   _importTests(bindings: () => bindings, dir: () => dir, built: built);
+  _recoveryOnlyTests(bindings: () => bindings, dir: () => dir, built: built);
 
   Future<void> open() => bindings.open(
         directory: dir.path,
         lightwalletdUrl: 'https://testnet.example.invalid:443',
         mainnet: false,
+        transparentFiltersUrl: filters,
+        transparentShardsUrl: shards,
       );
 
   test(skip: !built ? 'run: cargo build -p zakura_wallet_bridge --release' : null, 'a phrase is generated and validated by the real BIP 39', () async {
@@ -188,6 +198,8 @@ void _failureTests({
         directory: dir().path,
         lightwalletdUrl: 'https://127.0.0.1:1/',
         mainnet: false,
+        transparentFiltersUrl: filters,
+        transparentShardsUrl: shards,
       );
       await b.createAccount(
         phrase: await b.generateMnemonic(),
@@ -231,6 +243,8 @@ void _importTests({
       directory: dir().path,
       lightwalletdUrl: 'https://127.0.0.1:1/',
       mainnet: false,
+        transparentFiltersUrl: filters,
+        transparentShardsUrl: shards,
     );
     final phrase = await b.generateMnemonic();
     await b.importAccount(phrase: phrase, birthday: 2500000);
@@ -252,6 +266,8 @@ void _importTests({
       directory: dir().path,
       lightwalletdUrl: 'https://127.0.0.1:1/',
       mainnet: false,
+        transparentFiltersUrl: filters,
+        transparentShardsUrl: shards,
     );
     final phrase = await b.generateMnemonic();
     final id = await b.importAccount(phrase: phrase, birthday: 2500000);
@@ -264,6 +280,8 @@ void _importTests({
       directory: other.path,
       lightwalletdUrl: 'https://127.0.0.1:1/',
       mainnet: false,
+        transparentFiltersUrl: filters,
+        transparentShardsUrl: shards,
     );
     final restored = await b.importAccount(phrase: phrase, birthday: 2500000);
 
@@ -278,6 +296,8 @@ void _importTests({
       directory: dir().path,
       lightwalletdUrl: 'https://127.0.0.1:1/',
       mainnet: false,
+        transparentFiltersUrl: filters,
+        transparentShardsUrl: shards,
     );
     await b.importAccount(phrase: await b.generateMnemonic());
 
@@ -292,6 +312,8 @@ void _importTests({
       directory: dir().path,
       lightwalletdUrl: 'https://127.0.0.1:1/',
       mainnet: false,
+        transparentFiltersUrl: filters,
+        transparentShardsUrl: shards,
     );
     final phrase = await b.generateMnemonic();
     await b.importAccount(phrase: phrase, birthday: 2500000);
@@ -315,6 +337,8 @@ void _importTests({
       directory: dir().path,
       lightwalletdUrl: 'https://127.0.0.1:1/',
       mainnet: false,
+        transparentFiltersUrl: filters,
+        transparentShardsUrl: shards,
     );
     await expectLater(
       b.importAccount(phrase: 'nonsense words here'),
@@ -325,6 +349,103 @@ void _importTests({
           ZakuraErrorCode.badMnemonic,
         ),
       ),
+    );
+  });
+}
+
+/// What a recovery build is, through the real bridge.
+///
+/// Built without the bridge's `send` feature, the native library refuses to
+/// send whatever it is given, refuses to open without both transparent
+/// services, and says so when asked. These are the properties the beta's
+/// custody boundary rests on, so they are checked against the real library
+/// rather than a fake.
+void _recoveryOnlyTests({
+  required NativeBindings Function() bindings,
+  required Directory Function() dir,
+  required bool built,
+}) {
+  final skip =
+      !built ? 'run: cargo build -p zakura_wallet_bridge --release' : null;
+
+  test(skip: skip, 'the native build identifies itself as recovery-only',
+      () async {
+    final info = await bindings().buildInfo();
+    expect(info.sendEnabled, isFalse,
+        reason: 'the bridge was built with the send feature');
+    expect(info.transparentSchema, isNotEmpty);
+    expect(info.layoutVersion, 4);
+  });
+
+  test(skip: skip, 'opening without transparent services is refused', () async {
+    final b = bindings();
+    await expectLater(
+      b.open(
+        directory: dir().path,
+        lightwalletdUrl: 'https://testnet.example.invalid:443',
+        mainnet: false,
+      ),
+      throwsA(isA<ZakuraException>()
+          .having((e) => e.code, 'code', ZakuraErrorCode.configuration)
+          .having((e) => e.message, 'message', contains('not an empty history'))),
+    );
+    expect(File('${dir().path}/wallet.db').existsSync(), isFalse,
+        reason: 'a refused open left a file behind');
+  });
+
+  test(skip: skip, 'one host for both services is refused', () async {
+    await expectLater(
+      bindings().open(
+        directory: dir().path,
+        lightwalletdUrl: 'https://testnet.example.invalid:443',
+        mainnet: false,
+        transparentFiltersUrl: 'https://one.example.invalid/a',
+        transparentShardsUrl: 'https://one.example.invalid/b',
+      ),
+      throwsA(isA<ZakuraException>()
+          .having((e) => e.code, 'code', ZakuraErrorCode.configuration)),
+    );
+  });
+
+  test(skip: skip, 'a direct send is refused before the phrase is read',
+      () async {
+    final b = bindings();
+    await b.open(
+      directory: dir().path,
+      lightwalletdUrl: 'https://testnet.example.invalid:443',
+      mainnet: false,
+      transparentFiltersUrl: filters,
+      transparentShardsUrl: shards,
+    );
+    final id = await b.createAccount(
+      phrase: await b.generateMnemonic(),
+      birthday: 3000000,
+    );
+    // A phrase that is not one: a build that read it would say so. This one
+    // refuses first.
+    await expectLater(
+      b.send(account: id, to: 'not an address', amount: 1, phrase: 'nonsense'),
+      throwsA(isA<ZakuraException>()
+          .having((e) => e.code, 'code', ZakuraErrorCode.sendDisabled)),
+    );
+    await expectLater(
+      b.quote(account: id, to: 'not an address', amount: 1),
+      throwsA(isA<ZakuraException>()
+          .having((e) => e.code, 'code', ZakuraErrorCode.sendDisabled)),
+    );
+    // Reading still works.
+    final balance = await b.balance(id);
+    expect(balance.total.value, 0);
+    expect(balance.coverage.coveredThrough, isNull,
+        reason: 'nothing read is not a height');
+    expect(balance.coverage.synchronized, isFalse);
+  });
+
+  test(skip: skip, 'a server that cannot be reached has no identity', () async {
+    await expectLater(
+      bindings().networkIdentity(lightwalletdUrl: 'https://127.0.0.1:1/'),
+      throwsA(isA<ZakuraException>()
+          .having((e) => e.code, 'code', ZakuraErrorCode.source)),
     );
   });
 }

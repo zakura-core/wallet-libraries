@@ -53,6 +53,32 @@ class NativeBindings implements ZakuraBindings {
   }
 
   @override
+  Future<BuildInfo> buildInfo() => _translate(() async {
+    final info = await rust.buildInfo();
+    return BuildInfo(
+      sendEnabled: info.sendEnabled,
+      transparentSchema: info.transparentSchema,
+      layoutVersion: info.layoutVersion,
+    );
+  });
+
+  @override
+  Future<NetworkIdentity> networkIdentity({required String lightwalletdUrl}) =>
+      _translate(() async {
+        final identity = await rust.networkIdentity(
+          lightwalletdUrl: lightwalletdUrl,
+        );
+        return NetworkIdentity(
+          chainName: identity.chainName,
+          saplingActivationHeight: identity.saplingActivationHeight.toInt(),
+          consensusBranchId: identity.consensusBranchId,
+          blockHeight: identity.blockHeight.toInt(),
+          vendor: identity.vendor,
+          version: identity.version,
+        );
+      });
+
+  @override
   Future<String> generateMnemonic() => _translate(rust.generateMnemonic);
 
   @override

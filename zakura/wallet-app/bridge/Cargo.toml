@@ -19,6 +19,15 @@ name = "zakura_wallet_bridge"
 # `lib` so the crate's own tests can link it.
 crate-type = ["cdylib", "staticlib", "lib"]
 
+[features]
+# Sending is compiled out unless asked for. The recovery beta is built without
+# it, so a direct call to `send` or `quote` through the generated bridge is
+# refused by the facade whatever it is given, and `build_info` says so. Nothing
+# in the generated surface changes with the feature: the functions exist either
+# way and answer `SendDisabled` (code 20) when it is off.
+default = []
+send = []
+
 [dependencies]
 # Pinned exactly. The generated Dart and the generated Rust are two halves of
 # one artefact, and a version skew between them fails at runtime rather than at

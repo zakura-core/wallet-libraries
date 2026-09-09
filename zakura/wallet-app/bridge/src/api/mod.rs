@@ -20,9 +20,46 @@ use zakura_wallet_facade::{
 };
 
 use types::{
-    ApiAccount, ApiBalance, ApiError, ApiHistoryEntry, ApiPoolAmounts, ApiSendReceipt,
-    ApiSpendQuote, ApiSyncPhase, ApiSyncProgress, ApiTransparentCoverage, ApiTransparentUtxo,
+    ApiAccount, ApiBalance, ApiBuildInfo, ApiError, ApiHistoryEntry, ApiNetworkIdentity,
+    ApiPoolAmounts, ApiSendReceipt, ApiSpendQuote, ApiSyncPhase, ApiSyncProgress,
+    ApiTransparentCoverage, ApiTransparentUtxo,
 };
+
+/// Whether this build can send at all. Decided when the library is compiled,
+/// not when the wallet is opened, so nothing an application passes at run
+/// time turns a recovery build into a spending one.
+const SEND_ENABLED: bool = cfg!(feature = "send");
+
+/// What this native build is.
+///
+/// The one question an application has to ask before it trusts the mode it
+/// thinks it is in: the Dart side knows what it was told to be, and this is
+/// what the native side actually is.
+pub fn build_info() -> ApiBuildInfo {
+    ApiBuildInfo {
+        send_enabled: SEND_ENABLED,
+        transparent_schema: zakura_wallet_facade::TRANSPARENT_SCHEMA.to_owned(),
+        layout_version: zakura_wallet_facade::LAYOUT_VERSION,
+    }
+}
+
+/// Asks a lightwalletd server which chain it serves, with no wallet open.
+///
+/// What an application checks before it opens anything: a mainnet wallet
+/// pointed at a testnet server scans a chain its keys were never paid on and
+/// reports an honest, wrong zero. The sync checks again every time it
+/// connects; this is for saying so on screen before that.
+pub fn network_identity(lightwalletd_url: String) -> Result<ApiNetworkIdentity, ApiError> {
+    let identity = zakura_wallet_facade::network_identity(&lightwalletd_url)?;
+    Ok(ApiNetworkIdentity {
+        chain_name: identity.chain_name,
+        sapling_activation_height: identity.sapling_activation_height,
+        consensus_branch_id: identity.consensus_branch_id,
+        block_height: identity.block_height,
+        vendor: identity.vendor,
+        version: identity.version,
+    })
+}
 
 /// The open wallet.
 static WALLET: RwLock<Option<Arc<Wallet>>> = RwLock::new(None);
@@ -86,6 +123,10 @@ pub fn open(
         )),
         _ => None,
     };
+    // A build without sending is a recovery-only wallet, and the facade
+    // holds it to what a recovery requires: both transparent services, over
+    // TLS, on separate hosts. Not an argument, so nothing can pass otherwise.
+    config.recovery_only = !SEND_ENABLED;
 
     let opened = Wallet::open(config)?;
     let mut guard = WALLET.write().expect("the wallet lock is never poisoned");
@@ -340,6 +381,9 @@ pub fn quote(account: u32, to: String, amount: u64) -> Result<ApiSpendQuote, Api
 /// Takes seconds. The code generator runs this on a worker rather than on the
 /// interface thread, but whatever calls it should already be saying that
 /// something is happening.
+///
+/// In a build without the `send` feature this is refused with `SendDisabled`
+/// before the phrase is read; see [`build_info`].
 pub fn send(
     account: u32,
     to: String,
@@ -347,6 +391,11 @@ pub fn send(
     phrase: String,
 ) -> Result<ApiSendReceipt, ApiError> {
     let wallet = wallet()?;
+    if !SEND_ENABLED {
+        // The facade refuses too; refusing here keeps the phrase from being
+        // turned into a seed at all in a build that can do nothing with one.
+        return Err(zakura_wallet_facade::Error::SendDisabled.into());
+    }
     let seed = mnemonic::to_seed(&phrase, "")?;
     let receipt = wallet.send(account, &to, amount, &seed)?;
     Ok(ApiSendReceipt {

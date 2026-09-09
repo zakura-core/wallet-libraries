@@ -225,3 +225,32 @@ pub struct ApiSendReceipt {
     /// balance will not account for it until the next scan finds it.
     pub warning: Option<String>,
 }
+
+/// What this native build is.
+#[derive(Debug, Clone)]
+pub struct ApiBuildInfo {
+    /// Whether the build can send. A recovery build cannot, and says so here
+    /// rather than only when asked to send.
+    pub send_enabled: bool,
+    /// The transparent protocol schema this build reads.
+    pub transparent_schema: String,
+    /// The derived database layout this build writes.
+    pub layout_version: u32,
+}
+
+/// What a lightwalletd server says it is.
+#[derive(Debug, Clone)]
+pub struct ApiNetworkIdentity {
+    /// `main` or `test`, as the server names its chain.
+    pub chain_name: String,
+    /// Where Sapling activated on that chain.
+    pub sapling_activation_height: u64,
+    /// The consensus branch the server is on, in its own encoding.
+    pub consensus_branch_id: String,
+    /// The latest block the server holds.
+    pub block_height: u64,
+    /// The server software.
+    pub vendor: String,
+    /// Its version.
+    pub version: String,
+}
