@@ -18,18 +18,29 @@ class BalanceCard extends StatelessWidget {
   /// Whether to hide the figures, as when the screen may be overlooked.
   final bool obscured;
 
+  /// The chain tip the wallet's server reports, if known. Transparent
+  /// coverage within a few blocks of it is shown as current rather than as
+  /// incomplete; see [TransparentCoverage.statusAgainst].
+  final int? chainTip;
+
   /// Creates a balance card.
-  const BalanceCard({required this.balance, this.obscured = false, super.key});
+  const BalanceCard({
+    required this.balance,
+    this.obscured = false,
+    this.chainTip,
+    super.key,
+  });
 
   @override
   Widget build(BuildContext context) {
     final theme = ZakuraTheme.of(context);
     final override = ZakuraUiOverridesScope.of(context).balanceCard;
+    final transparentStatus = balance.coverage.statusAgainst(chainTip);
     final model = BalanceCardModel(
       spendable: balance.spendable.format(),
       pending: balance.pending.isZero ? null : balance.pending.format(),
       obscured: obscured,
-      transparentStatus: balance.coverage.status,
+      transparentStatus: transparentStatus,
     );
     if (override != null) return override(context, model);
 
@@ -95,7 +106,7 @@ class BalanceCard extends StatelessWidget {
           ],
           SizedBox(height: theme.spacing.xs),
           Text(
-            balance.coverage.status,
+            transparentStatus,
             style: theme.typography.caption.copyWith(
               color: theme.colors.textMuted,
             ),

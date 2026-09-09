@@ -20,6 +20,29 @@ use zeroize::Zeroizing;
 
 use crate::{Wallet, error::Error};
 
+/// Asks a lightwalletd server for its current chain tip.
+///
+/// No wallet is needed: this is the one question about a server a person
+/// asks before trusting it with anything, and it is also what a diagnostic
+/// screen shows beside each environment's endpoint. The server answers for
+/// whichever chain it serves, so the caller pairs the height with the
+/// environment it expects the URL to be.
+pub fn live_height(lightwalletd_url: &str) -> Result<u32, Error> {
+    let url = lightwalletd_url.to_owned();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Error::Source(format!("could not start a runtime: {e}")))?;
+
+    runtime.block_on(async move {
+        let source = zakura_wallet_lwd::LightwalletdSource::connect(&url).await?;
+        let tip = zakura_wallet_sync::ChainSource::tip(&source)
+            .await
+            .map_err(|e| Error::Source(e.to_string()))?;
+        Ok(u32::from(tip.height))
+    })
+}
+
 impl Wallet {
     /// Returns the earliest height an account on this network could have
     /// history at.
@@ -40,19 +63,7 @@ impl Wallet {
     /// Used to give a brand-new wallet a birthday: an account created now has
     /// no history before now, so starting anywhere earlier only costs time.
     pub fn fetch_chain_tip(&self) -> Result<u32, Error> {
-        let url = self.config.lightwalletd_url.clone();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| Error::Source(format!("could not start a runtime: {e}")))?;
-
-        runtime.block_on(async move {
-            let source = zakura_wallet_lwd::LightwalletdSource::connect(&url).await?;
-            let tip = zakura_wallet_sync::ChainSource::tip(&source)
-                .await
-                .map_err(|e| Error::Source(e.to_string()))?;
-            Ok(u32::from(tip.height))
-        })
+        live_height(&self.config.lightwalletd_url)
     }
 
     /// Creates a wallet that has no history, and returns its account.

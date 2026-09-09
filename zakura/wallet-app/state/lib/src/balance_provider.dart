@@ -28,6 +28,24 @@ final historyProvider = FutureProvider<List<HistoryEntry>>((ref) async {
 /// Refreshing this provider issues a new one. That is the intended way to get
 /// another: two calls returning the same address would let anybody who has seen
 /// it link the payments made to it.
+/// Whether balances and amounts are hidden on screen.
+///
+/// A person showing their wallet to someone else, or in public, wants the
+/// figures gone and everything else still working. Held in memory: it is a
+/// choice about this screen now, not about the wallet.
+final balanceObscuredProvider = NotifierProvider<BalanceObscured, bool>(
+  BalanceObscured.new,
+);
+
+/// The notifier behind [balanceObscuredProvider].
+class BalanceObscured extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  /// Flips between hidden and shown.
+  void toggle() => state = !state;
+}
+
 final receiveAddressProvider = FutureProvider<String>((ref) async {
   final account = ref.watch(activeAccountProvider);
   if (account == null) {

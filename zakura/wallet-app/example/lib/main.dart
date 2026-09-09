@@ -26,6 +26,24 @@ String _walletDirectory() {
   return '$home/.zakura-example';
 }
 
+/// Where the private transparent ledger reads from, given at build time:
+///
+/// ```text
+/// fvm flutter run -d macos \
+///   --dart-define=ZAKURA_TRANSPARENT_FILTERS=https://... \
+///   --dart-define=ZAKURA_TRANSPARENT_SHARDS=https://...
+/// ```
+///
+/// Two, and deliberately not defaulted. Unset means transparent tracking is
+/// off, which the balance card shows as coverage not established rather than
+/// as a zero.
+const _filtersDefine = String.fromEnvironment('ZAKURA_TRANSPARENT_FILTERS');
+const _shardsDefine = String.fromEnvironment('ZAKURA_TRANSPARENT_SHARDS');
+final String? _transparentFiltersUrl =
+    _filtersDefine.isEmpty ? null : _filtersDefine;
+final String? _transparentShardsUrl =
+    _shardsDefine.isEmpty ? null : _shardsDefine;
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -42,6 +60,8 @@ Future<void> main() async {
     await wallet.open(
       directory: _walletDirectory(),
       lightwalletdUrl: 'https://us.zec.stardust.rest:443',
+      transparentFiltersUrl: _transparentFiltersUrl,
+      transparentShardsUrl: _transparentShardsUrl,
     );
     final accounts = await wallet.accounts();
     if (accounts.isNotEmpty) {

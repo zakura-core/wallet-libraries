@@ -64,11 +64,15 @@ class NativeBindings implements ZakuraBindings {
     required String directory,
     required String lightwalletdUrl,
     required bool mainnet,
+    String? transparentFiltersUrl,
+    String? transparentShardsUrl,
   }) => _translate(
     () => rust.open(
       directory: directory,
       lightwalletdUrl: lightwalletdUrl,
       mainnet: mainnet,
+      transparentFiltersUrl: transparentFiltersUrl,
+      transparentShardsUrl: transparentShardsUrl,
     ),
   );
 
@@ -89,6 +93,10 @@ class NativeBindings implements ZakuraBindings {
 
   @override
   Future<int> chainTip() => _translate(rust.chainTip);
+
+  @override
+  Future<int> liveHeight({required String lightwalletdUrl}) =>
+      _translate(() => rust.liveHeight(lightwalletdUrl: lightwalletdUrl));
 
   @override
   Future<List<Account>> accounts() => _translate(() async {

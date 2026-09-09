@@ -87,16 +87,41 @@ class TransparentCoverage {
       unresolvedSpends == 0 &&
       pendingPages == 0;
 
-  String get status {
+  /// How far behind the chain tip coverage may sit before it is called out.
+  ///
+  /// The publisher republishes the tail a moment after each block and the
+  /// wallet reads it a moment after that, so coverage trails the tip by a
+  /// block or two whenever the chain is moving. Naming that as incomplete
+  /// would flag every wallet all the time; a lag past this is something
+  /// else — a stalled publisher, a stopped sync — and is named.
+  static const int tolerableLag = 10;
+
+  String get status => statusAgainst(null);
+
+  /// The status as shown beside the balance, judged against [chainTip], the
+  /// height the wallet's own server reports.
+  ///
+  /// Without a tip, any state short of synchronized is called incomplete.
+  /// With one, coverage within [tolerableLag] of it is reported as current
+  /// unless something the wallet holds contradicts that: an unresolved spend
+  /// or page work still owed is incomplete however close the height is.
+  String statusAgainst(int? chainTip) {
     final coverage = coveredThrough == null
         ? 'Transparent coverage not yet established'
         : 'Transparent coverage through block $coveredThrough';
     if (synchronized) return coverage;
+    if (unresolvedSpends > 0) {
+      return '$coverage. Transaction history is incomplete.';
+    }
+    if (pendingPages > 0) return '$coverage. Transparent sync is incomplete.';
+    if (coveredThrough != null &&
+        chainTip != null &&
+        chainTip - coveredThrough! <= tolerableLag) {
+      return coverage;
+    }
     if (completion?.startsWith('publication-behind:') ?? false) {
       return '$coverage. Waiting for publication through block ${completion!.split(':').last}.';
     }
-    if (unresolvedSpends > 0)
-      return '$coverage. Transaction history is incomplete.';
     return '$coverage. Transparent sync is incomplete.';
   }
 

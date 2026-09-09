@@ -158,6 +158,15 @@ pub fn chain_tip() -> Result<u32, ApiError> {
     Ok(wallet()?.fetch_chain_tip()?)
 }
 
+/// Asks a lightwalletd server for its current chain tip, with no wallet open.
+///
+/// For a diagnostic screen that shows each environment's endpoint beside the
+/// height it reports. The server answers for whichever chain it serves; the
+/// caller pairs the height with the environment it expects the URL to be.
+pub fn live_height(lightwalletd_url: String) -> Result<u32, ApiError> {
+    Ok(zakura_wallet_facade::live_height(&lightwalletd_url)?)
+}
+
 /// Returns every account, in creation order.
 pub fn accounts() -> Result<Vec<ApiAccount>, ApiError> {
     Ok(wallet()?

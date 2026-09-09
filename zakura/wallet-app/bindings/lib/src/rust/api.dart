@@ -97,6 +97,14 @@ Future<int> earliestBirthday() =>
 /// is.
 Future<int> chainTip() => RustLib.instance.api.crateApiChainTip();
 
+/// Asks a lightwalletd server for its current chain tip, with no wallet open.
+///
+/// For a diagnostic screen that shows each environment's endpoint beside the
+/// height it reports. The server answers for whichever chain it serves; the
+/// caller pairs the height with the environment it expects the URL to be.
+Future<int> liveHeight({required String lightwalletdUrl}) =>
+    RustLib.instance.api.crateApiLiveHeight(lightwalletdUrl: lightwalletdUrl);
+
 /// Returns every account, in creation order.
 Future<List<ApiAccount>> accounts() => RustLib.instance.api.crateApiAccounts();
 

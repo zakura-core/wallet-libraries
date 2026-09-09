@@ -23,10 +23,18 @@ abstract interface class ZakuraBindings {
   Future<bool> validateMnemonic(String phrase);
 
   /// Opens or creates the wallet in [directory].
+  ///
+  /// The two transparent services are named separately and both are needed:
+  /// public filter bytes reveal nothing about who asked, private queries
+  /// reveal which chain ranges had probable activity, and one host serving
+  /// both can join those facts. With either absent, transparent tracking is
+  /// off and reported as uncovered, which is not a zero balance.
   Future<void> open({
     required String directory,
     required String lightwalletdUrl,
     required bool mainnet,
+    String? transparentFiltersUrl,
+    String? transparentShardsUrl,
   });
 
   /// Creates a new wallet from a seed phrase, and returns its account.
@@ -53,6 +61,14 @@ abstract interface class ZakuraBindings {
 
   /// Asks the server for the current chain tip.
   Future<int> chainTip();
+
+  /// Asks the lightwalletd server at [lightwalletdUrl] for its current chain
+  /// tip, with no wallet involved.
+  ///
+  /// For a diagnostic view of each environment's endpoint. The server answers
+  /// for whichever chain it serves; the caller pairs the height with the
+  /// environment it expects the URL to be.
+  Future<int> liveHeight({required String lightwalletdUrl});
 
   /// Returns every account, in creation order.
   Future<List<Account>> accounts();

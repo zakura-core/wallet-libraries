@@ -43,6 +43,8 @@ class DemoBindings implements ZakuraBindings {
     required String directory,
     required String lightwalletdUrl,
     required bool mainnet,
+    String? transparentFiltersUrl,
+    String? transparentShardsUrl,
   }) async {
     _opened = true;
   }
@@ -256,6 +258,10 @@ class DemoBindings implements ZakuraBindings {
 
   @override
   Future<int> chainTip() async => _tip;
+
+  @override
+  Future<int> liveHeight({required String lightwalletdUrl}) async =>
+      lightwalletdUrl.contains('testnet') ? 4_300_000 : _tip;
 
   @override
   Future<String?> syncFailure() async => null;

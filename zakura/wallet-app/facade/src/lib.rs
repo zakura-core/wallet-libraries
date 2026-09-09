@@ -45,7 +45,7 @@ mod sync;
 pub use config::{NetworkKind, WalletConfig};
 pub use destroy::destroy;
 pub use error::{Error, ErrorCode};
-pub use import::TransactionShape;
+pub use import::{TransactionShape, live_height};
 pub use query::{AccountSummary, Balance, HistoryEntry, PoolAmounts};
 pub use send::{SendReceipt, SpendQuote};
 pub use sync::{SyncPhase, SyncProgress};

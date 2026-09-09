@@ -71,6 +71,8 @@ class FakeBindings implements ZakuraBindings {
     required String directory,
     required String lightwalletdUrl,
     required bool mainnet,
+    String? transparentFiltersUrl,
+    String? transparentShardsUrl,
   }) async {
     _maybeThrow();
     opened = true;
@@ -259,6 +261,9 @@ class FakeBindings implements ZakuraBindings {
 
   @override
   Future<int> chainTip() async => 3000000;
+
+  @override
+  Future<int> liveHeight({required String lightwalletdUrl}) async => 3000000;
 
   @override
   Future<void> close() async {

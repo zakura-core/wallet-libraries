@@ -5,6 +5,7 @@ import 'package:zakura_state/zakura_state.dart';
 import 'package:zakura_ui/zakura_ui.dart';
 
 import 'forget.dart';
+import 'heights.dart';
 import 'receive.dart';
 import 'send.dart';
 
@@ -27,6 +28,7 @@ class HomeScreen extends ConsumerWidget {
     // Two providers so that a widget redrawing at sixty hertz is only ever the
     // bar itself.
     final display = ref.watch(syncDisplayProgressProvider);
+    final obscured = ref.watch(balanceObscuredProvider);
 
     return SafeArea(
       child: Center(
@@ -42,7 +44,19 @@ class HomeScreen extends ConsumerWidget {
                 onRetry: () => ref.read(retrySyncProvider)(),
               ),
               SizedBox(height: theme.spacing.lg),
-              BalanceCard(balance: balance.value ?? const Balance()),
+              BalanceCard(
+                balance: balance.value ?? const Balance(),
+                obscured: obscured,
+                chainTip: progress.value?.tip,
+              ),
+              SizedBox(height: theme.spacing.sm),
+              ZakuraButton(
+                label: obscured ? 'Show balances' : 'Hide balances',
+                kind: ZakuraButtonKind.secondary,
+                expand: true,
+                onPressed: () =>
+                    ref.read(balanceObscuredProvider.notifier).toggle(),
+              ),
               SizedBox(height: theme.spacing.lg),
               Row(
                 children: [
@@ -74,11 +88,22 @@ class HomeScreen extends ConsumerWidget {
               HistoryList(
                 entries: history.value ?? const [],
                 shrinkWrap: true,
+                obscured: obscured,
                 // Before a recovery finishes, an empty list means "not found
                 // yet" rather than "there is nothing here".
                 searching: !(progress.value ?? const SyncProgress()).isCaughtUp,
               ),
               SizedBox(height: theme.spacing.xl),
+              // What the servers say the chain is at, per environment. The
+              // sync bar shows this wallet's own progress against one server;
+              // this shows the servers themselves.
+              ZakuraButton(
+                label: 'Live chain heights',
+                kind: ZakuraButtonKind.secondary,
+                expand: true,
+                onPressed: () => _push(context, const HeightsScreen()),
+              ),
+              SizedBox(height: theme.spacing.md),
               // The store holds one account, so this is the way to another
               // wallet, and the way to run a recovery again.
               ZakuraButton(

@@ -58,11 +58,15 @@ class ZakuraWallet {
     required String directory,
     required String lightwalletdUrl,
     bool mainnet = true,
+    String? transparentFiltersUrl,
+    String? transparentShardsUrl,
   }) =>
       _bindings.open(
         directory: directory,
         lightwalletdUrl: lightwalletdUrl,
         mainnet: mainnet,
+        transparentFiltersUrl: transparentFiltersUrl,
+        transparentShardsUrl: transparentShardsUrl,
       );
 
   /// Creates an account from a seed phrase.
@@ -102,6 +106,10 @@ class ZakuraWallet {
 
   /// Asks the server for the current chain tip.
   Future<int> chainTip() => _bindings.chainTip();
+
+  /// Asks the lightwalletd server at [lightwalletdUrl] for its chain tip.
+  Future<int> liveHeight({required String lightwalletdUrl}) =>
+      _bindings.liveHeight(lightwalletdUrl: lightwalletdUrl);
 
   /// Returns every account, in creation order.
   Future<List<Account>> accounts() => _bindings.accounts();

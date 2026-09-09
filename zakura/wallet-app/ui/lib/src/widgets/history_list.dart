@@ -13,8 +13,16 @@ class HistoryTile extends StatelessWidget {
   /// What to do when it is tapped.
   final VoidCallback? onTap;
 
+  /// Whether to hide the amount, following the balance card.
+  final bool obscured;
+
   /// Creates a history row.
-  const HistoryTile({required this.entry, this.onTap, super.key});
+  const HistoryTile({
+    required this.entry,
+    this.onTap,
+    this.obscured = false,
+    super.key,
+  });
 
   /// Describes what a transaction was, from the wallet's side.
   ///
@@ -95,7 +103,7 @@ class HistoryTile extends StatelessWidget {
             ),
             SizedBox(width: theme.spacing.md),
             Text(
-              model.amount,
+              obscured ? '••••' : model.amount,
               style: theme.typography.body.copyWith(
                 color: incoming ? theme.colors.positive : theme.colors.text,
                 fontWeight: FontWeight.w600,
@@ -133,8 +141,12 @@ class HistoryList extends StatelessWidget {
     this.onTap,
     this.shrinkWrap = false,
     this.searching = false,
+    this.obscured = false,
     super.key,
   });
+
+  /// Whether to hide the amounts, following the balance card.
+  final bool obscured;
 
   @override
   Widget build(BuildContext context) {
@@ -168,6 +180,7 @@ class HistoryList extends StatelessWidget {
         final entry = entries[index];
         return HistoryTile(
           entry: entry,
+          obscured: obscured,
           onTap: onTap == null ? null : () => onTap!(entry),
         );
       },
