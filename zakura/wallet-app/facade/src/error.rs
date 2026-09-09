@@ -64,6 +64,10 @@ pub enum ErrorCode {
     AccountExists = 18,
     /// A unified full viewing key could not be read.
     BadViewingKey = 19,
+    /// This wallet was opened to recover only, and cannot send.
+    SendDisabled = 20,
+    /// The wallet's configuration is one it refuses to run under.
+    Configuration = 21,
 }
 
 impl ErrorCode {
@@ -152,6 +156,17 @@ pub enum Error {
     AccountExists,
     /// A unified full viewing key could not be read.
     BadViewingKey(String),
+    /// This wallet was opened to recover only, and cannot send.
+    ///
+    /// Not a temporary state and not a missing key: the wallet was
+    /// configured never to build or broadcast a transaction, and no argument
+    /// to the send path changes that.
+    SendDisabled,
+    /// The wallet's configuration is one it refuses to run under.
+    ///
+    /// Carries what is wrong with it. Raised at open, before any file is
+    /// created, so a misconfigured wallet leaves nothing behind.
+    Configuration(String),
 }
 
 impl Error {
@@ -177,6 +192,8 @@ impl Error {
             Error::NotCanonicalDenomination(_) => ErrorCode::NotCanonicalDenomination,
             Error::AccountExists => ErrorCode::AccountExists,
             Error::BadViewingKey(_) => ErrorCode::BadViewingKey,
+            Error::SendDisabled => ErrorCode::SendDisabled,
+            Error::Configuration(_) => ErrorCode::Configuration,
         }
     }
 }
@@ -217,12 +234,15 @@ impl fmt::Display for Error {
             ),
             Error::Build(e) => write!(f, "the transaction could not be built: {e}"),
             Error::AlreadySyncing => f.write_str("a sync is already running"),
-            Error::NotCanonicalDenomination(why) => write!(
-                f,
-                "that amount cannot be paid from the Orchard pool: {why}"
-            ),
+            Error::NotCanonicalDenomination(why) => {
+                write!(f, "that amount cannot be paid from the Orchard pool: {why}")
+            }
             Error::AccountExists => f.write_str("this wallet has already been imported"),
             Error::BadViewingKey(e) => write!(f, "that is not a valid viewing key: {e}"),
+            Error::SendDisabled => {
+                f.write_str("this wallet recovers only; sending is disabled in this build")
+            }
+            Error::Configuration(why) => write!(f, "the wallet cannot run as configured: {why}"),
         }
     }
 }

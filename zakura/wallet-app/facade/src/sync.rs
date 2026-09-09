@@ -166,6 +166,10 @@ where
                     ));
                 }
             }
+            // A stop lands as an error when it interrupts the transparent
+            // ledger — its transport refuses the next request — and that is
+            // the wallet's own doing, not a failure to report.
+            Err(_) if token.is_cancelled() => return None,
             Err(e) => return Some(e.to_string()),
         }
 
@@ -244,6 +248,10 @@ impl Drop for SyncExit {
 /// A running sync.
 pub(crate) struct Session {
     cancel: CancellationToken,
+    /// Ends a transparent run between requests. The engine's own token is
+    /// checked between batches, and a transparent run is one blocking step
+    /// that can last minutes; without this, stopping waited for all of it.
+    stop_transparent: zakura_wallet_transparent::StopSignal,
     progress: watch::Receiver<SyncProgress>,
     handle: Option<std::thread::JoinHandle<()>>,
     /// Set by the thread as it exits.
@@ -261,6 +269,7 @@ impl Session {
     }
 
     fn stop(mut self) {
+        self.stop_transparent.stop();
         self.cancel.cancel();
         if let Some(handle) = self.handle.take() {
             // Cancellation is checked between batches, and a batch is applied
@@ -289,8 +298,9 @@ impl Wallet {
         // rather than refusing: reaching the tip is the ordinary outcome, and a
         // wallet that could only ever sync once would be useless.
         if session.as_ref().is_some_and(|s| !s.is_running())
-            && let Some(finished) = session.take() {
-                finished.stop();
+            && let Some(finished) = session.take()
+        {
+            finished.stop();
         }
         if session.is_some() {
             return Err(Error::AlreadySyncing);
@@ -335,6 +345,8 @@ impl Wallet {
             .expect("the failure lock is never poisoned") = None;
 
         let cancel = CancellationToken::new();
+        let stop_transparent = zakura_wallet_transparent::StopSignal::new();
+        let stop_signal = stop_transparent.clone();
         let (tx, rx) = watch::channel(SyncProgress {
             phase: SyncPhase::Bootstrapping,
             ..SyncProgress::default()
@@ -344,6 +356,7 @@ impl Wallet {
         let transparent = self.config.transparent.clone();
         let transparent_limits = self.config.transparent_limits;
         let params = self.params;
+        let network = self.config.network;
         let budget = ByteBudget::new(self.config.batch_bytes);
         let poll_interval = self.config.poll_interval;
         let writer = Arc::clone(&self.writer);
@@ -398,6 +411,26 @@ impl Wallet {
                                 return db;
                             }
                         };
+                        // The server has to be serving this wallet's chain.
+                        // Checked on every connection rather than once at
+                        // open, because the URL is the same either way and
+                        // what answers it is not under the wallet's control.
+                        match source.server_info().await {
+                            Ok(info) => {
+                                let expected = crate::import::chain_name(network);
+                                if info.chain_name != expected {
+                                    record(format!(
+                                        "{url} serves the {} chain and this wallet is on {expected}",
+                                        info.chain_name
+                                    ));
+                                    return db;
+                                }
+                            }
+                            Err(e) => {
+                                record(format!("{url} would not say which chain it serves: {e}"));
+                                return db;
+                            }
+                        }
 
                         let mut engine = SyncEngine::new(
                             source,
@@ -416,7 +449,8 @@ impl Wallet {
                         if let Some(endpoints) = transparent {
                             engine = engine.with_transparent(Arc::new(
                                 zakura_wallet_transparent::TransparentPir::new(endpoints, params)
-                                    .with_limits(transparent_limits),
+                                    .with_limits(transparent_limits)
+                                    .with_stop(stop_signal),
                             ));
                         }
 
@@ -460,6 +494,7 @@ impl Wallet {
 
         *session = Some(Session {
             cancel,
+            stop_transparent,
             progress: rx,
             handle: Some(handle),
             finished,

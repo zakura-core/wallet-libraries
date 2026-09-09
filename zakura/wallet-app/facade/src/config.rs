@@ -73,6 +73,15 @@ pub struct WalletConfig {
     /// faster than this only costs battery and gives a light server a clearer
     /// picture of when the wallet is awake.
     pub poll_interval: std::time::Duration,
+    /// Whether this wallet may only recover: restore, synchronise, and read.
+    ///
+    /// When set, [`crate::Wallet::quote`] and [`crate::Wallet::send`] refuse
+    /// with [`crate::Error::SendDisabled`] whatever they are given, and
+    /// opening refuses a configuration a recovery cannot be honest under:
+    /// no transparent services, one host serving both, or either over
+    /// plaintext. A build that is only meant to recover sets this at open
+    /// and nothing later can unset it.
+    pub recovery_only: bool,
 }
 
 impl WalletConfig {
@@ -87,6 +96,45 @@ impl WalletConfig {
             transparent_limits: zakura_wallet_transparent::MOBILE_LIMITS,
             batch_bytes: zakura_wallet_sync::ByteBudget::MOBILE.bytes(),
             poll_interval: std::time::Duration::from_secs(20),
+            recovery_only: false,
         }
+    }
+
+    /// What a recovery-only wallet requires of its configuration, or why it
+    /// cannot be opened.
+    ///
+    /// A recovery that cannot ask about transparent history would show a
+    /// transparent balance of nothing and call it recovered; a pair of
+    /// services on one host lets that host join what the filters do not
+    /// reveal to what the queries do; and a private query over plaintext is
+    /// not private. None of these is a state to run in quietly.
+    pub fn recovery_requirements(&self) -> Result<(), String> {
+        if !self.recovery_only {
+            return Ok(());
+        }
+        let Some(endpoints) = &self.transparent else {
+            return Err(
+                "no transparent services are configured; a recovery cannot read transparent \
+                 history without them, and their absence is not an empty history"
+                    .to_owned(),
+            );
+        };
+        for (what, url) in [
+            ("filter service", &endpoints.filters_url),
+            ("shard service", &endpoints.shards_url),
+            ("light server", &self.lightwalletd_url),
+        ] {
+            if !url.starts_with("https://") {
+                return Err(format!("the {what} is not reached over TLS"));
+            }
+        }
+        if endpoints.shares_a_host() {
+            return Err(
+                "the filter service and the shard service are one host, which could join \
+                 the public filter reads to the private queries"
+                    .to_owned(),
+            );
+        }
+        Ok(())
     }
 }

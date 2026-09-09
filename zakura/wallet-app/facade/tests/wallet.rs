@@ -307,3 +307,162 @@ fn a_forgotten_wallet_accepts_the_same_seed_again() {
     reopened.import_wallet(&seed, Some(3_000_000)).unwrap();
     assert_eq!(reopened.accounts().unwrap().len(), 1);
 }
+
+// ------------------------------------------------- recovery-only (M2)
+
+fn recovery_config(dir: &std::path::Path) -> WalletConfig {
+    let mut config = WalletConfig::in_dir(
+        NetworkKind::Test,
+        dir,
+        "https://testnet.example.invalid:443",
+    );
+    config.recovery_only = true;
+    config.transparent = Some(zakura_wallet_facade::TransparentEndpoints::new(
+        "https://filters.example.invalid",
+        "https://shards.example.invalid",
+    ));
+    config
+}
+
+/// A recovery-only wallet refuses to send before it looks at anything it was
+/// given: not the address, not the amount, and not the seed.
+#[test]
+fn a_recovery_only_wallet_cannot_send_or_quote() {
+    let dir = tempfile::tempdir().unwrap();
+    let wallet = Wallet::open(recovery_config(dir.path())).unwrap();
+    let id = wallet.create_account(&seed(), 0, 3_000_000).unwrap();
+
+    // An address that would otherwise be refused as unreadable, and an amount
+    // that would otherwise be refused as nothing: neither is reached.
+    let quoted = wallet
+        .quote(id, "not an address", 0)
+        .err()
+        .map(|e| e.code());
+    assert_eq!(quoted, Some(ErrorCode::SendDisabled));
+    let sent = wallet
+        .send(id, "not an address", 0, &seed())
+        .err()
+        .map(|e| e.code());
+    assert_eq!(sent, Some(ErrorCode::SendDisabled));
+    assert_eq!(ErrorCode::SendDisabled.as_u32(), 20);
+
+    // Everything a recovery needs still works.
+    assert_eq!(wallet.accounts().unwrap().len(), 1);
+    assert_eq!(wallet.balance(id).unwrap().total(), 0);
+    assert!(wallet.history(id, 10).unwrap().is_empty());
+    let (_, coverage) = wallet.balance_with_coverage(id).unwrap();
+    assert_eq!(coverage.covered_through, None, "nothing read, and not zero");
+}
+
+/// A recovery with no transparent services would recover a transparent
+/// balance of nothing and call it recovered. It is refused at open, and
+/// leaves no files behind to be found by the next attempt.
+#[test]
+fn a_recovery_only_wallet_needs_both_transparent_services() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = recovery_config(dir.path());
+    config.transparent = None;
+    let error = Wallet::open(config).expect_err("refused");
+    assert_eq!(error.code(), ErrorCode::Configuration);
+    assert_eq!(ErrorCode::Configuration.as_u32(), 21);
+    assert!(
+        error.to_string().contains("not an empty history"),
+        "{error}"
+    );
+    assert!(!dir.path().join("wallet.db").exists(), "a file was created");
+    assert!(!dir.path().join("cache.db").exists());
+}
+
+/// One host serving both halves could join the public filter reads to the
+/// private queries; a recovery does not run that way.
+#[test]
+fn a_recovery_only_wallet_refuses_one_host_for_both_services() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = recovery_config(dir.path());
+    config.transparent = Some(zakura_wallet_facade::TransparentEndpoints::new(
+        "https://one.example.invalid/filters",
+        "https://one.example.invalid/shards",
+    ));
+    let error = Wallet::open(config).expect_err("refused");
+    assert_eq!(error.code(), ErrorCode::Configuration);
+    assert!(error.to_string().contains("one host"), "{error}");
+}
+
+/// A private query over plaintext is not private, and a light server over
+/// plaintext hands the wallet's whole scan to the path.
+#[test]
+fn a_recovery_only_wallet_refuses_plaintext_services() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = recovery_config(dir.path());
+    config.transparent = Some(zakura_wallet_facade::TransparentEndpoints::new(
+        "http://filters.example.invalid",
+        "https://shards.example.invalid",
+    ));
+    let error = Wallet::open(config).expect_err("refused");
+    assert_eq!(error.code(), ErrorCode::Configuration);
+    assert!(error.to_string().contains("TLS"), "{error}");
+
+    let mut config = recovery_config(dir.path());
+    config.lightwalletd_url = "http://lwd.example.invalid:9067".to_owned();
+    let error = Wallet::open(config).expect_err("refused");
+    assert_eq!(error.code(), ErrorCode::Configuration);
+}
+
+/// The same configuration with recovery off is the library's ordinary one,
+/// and nothing about it is refused: the requirements belong to the mode.
+#[test]
+fn an_ordinary_wallet_is_not_held_to_the_recovery_requirements() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = recovery_config(dir.path());
+    config.recovery_only = false;
+    config.transparent = None;
+    let wallet = Wallet::open(config).unwrap();
+    let id = wallet.create_account(&seed(), 0, 3_000_000).unwrap();
+    assert_ne!(
+        wallet
+            .quote(id, "not an address", 1)
+            .err()
+            .map(|e| e.code()),
+        Some(ErrorCode::SendDisabled)
+    );
+}
+
+/// A wallet another build wrote is refused with the remedy and left alone.
+#[test]
+fn an_unsupported_layout_is_refused_and_left_as_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = recovery_config(dir.path());
+    let wallet = Wallet::open(config.clone()).unwrap();
+    wallet.create_account(&seed(), 0, 3_000_000).unwrap();
+    drop(wallet);
+    {
+        let conn = rusqlite::Connection::open(dir.path().join("wallet.db")).unwrap();
+        conn.execute(
+            "UPDATE wallet_meta SET value = 3 WHERE key = 'layout_version'",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+    }
+    let before = std::fs::read(dir.path().join("wallet.db")).unwrap();
+    let error = Wallet::open(config).expect_err("refused");
+    assert_eq!(error.code(), ErrorCode::VersionMismatch);
+    assert!(error.to_string().contains("rebuild"), "{error}");
+    assert_eq!(std::fs::read(dir.path().join("wallet.db")).unwrap(), before);
+}
+
+/// The chain a server names is compared with the one the wallet is on.
+#[test]
+fn a_server_is_judged_by_the_chain_it_names() {
+    let identity = zakura_wallet_facade::NetworkIdentity {
+        chain_name: "main".into(),
+        sapling_activation_height: 419_200,
+        consensus_branch_id: "c8e71055".into(),
+        block_height: 3_477_098,
+        vendor: "test".into(),
+        version: "0".into(),
+    };
+    assert!(identity.serves(NetworkKind::Main));
+    assert!(!identity.serves(NetworkKind::Test));
+}

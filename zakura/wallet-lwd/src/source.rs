@@ -13,8 +13,7 @@ use zcash_protocol::{TxId, consensus::BlockHeight};
 use crate::{
     convert,
     proto::{
-        BlockId, BlockRange, ChainSpec, GetSubtreeRootsArg, PoolType, ShieldedProtocol,
-        TxFilter,
+        BlockId, BlockRange, ChainSpec, GetSubtreeRootsArg, PoolType, ShieldedProtocol, TxFilter,
         compact_tx_streamer_client::CompactTxStreamerClient,
     },
 };
@@ -162,6 +161,26 @@ async fn probe_transparent(
     Ok(false)
 }
 
+/// What a lightwalletd server says about itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerInfo {
+    /// `main` or `test`, as the server names its chain.
+    pub chain_name: String,
+    /// Where Sapling activated on that chain, which also tells the chains
+    /// apart when the name is missing.
+    pub sapling_activation_height: u64,
+    /// The consensus branch the server is on, in its own encoding.
+    pub consensus_branch_id: String,
+    /// The latest block the server holds.
+    pub block_height: u64,
+    /// Who wrote the server software.
+    pub vendor: String,
+    /// Its version.
+    pub version: String,
+    /// Whether it offers address lookups, which this wallet never uses.
+    pub serves_transparent_addresses: bool,
+}
+
 #[derive(Default)]
 struct Stats {
     blocks: std::sync::atomic::AtomicU64,
@@ -205,6 +224,31 @@ impl LightwalletdSource {
         self.transparent
     }
 
+    /// Asks the server what it is: which chain it serves, how far it has
+    /// got, and what software answers.
+    ///
+    /// The chain name is the one fact a wallet has to check before trusting a
+    /// server with anything: a mainnet wallet pointed at a testnet server
+    /// scans a chain its keys have never been paid on and reports an honest,
+    /// wrong zero.
+    pub async fn server_info(&self) -> Result<ServerInfo, LwdError> {
+        let mut client = self.client.clone();
+        let info = client
+            .get_lightd_info(crate::proto::Empty {})
+            .await
+            .map_err(LwdError::Rpc)?
+            .into_inner();
+        Ok(ServerInfo {
+            chain_name: info.chain_name,
+            sapling_activation_height: info.sapling_activation_height,
+            consensus_branch_id: info.consensus_branch_id,
+            block_height: info.block_height,
+            vendor: info.vendor,
+            version: info.version,
+            serves_transparent_addresses: info.taddr_support,
+        })
+    }
+
     /// Fetches a range as raw protocol messages.
     ///
     /// Exposed for the benchmark that compares this wallet against the forked
@@ -244,9 +288,7 @@ impl LightwalletdSource {
     }
 
     /// Converts a raw protocol block into the wallet's own type.
-    pub fn convert_block(
-        block: crate::proto::CompactBlock,
-    ) -> Result<CompactBlock, LwdError> {
+    pub fn convert_block(block: crate::proto::CompactBlock) -> Result<CompactBlock, LwdError> {
         convert::block(block)
     }
 
@@ -323,9 +365,8 @@ impl ChainSource for LightwalletdSource {
 
         let height = u32::try_from(id.height)
             .map_err(|_| LwdError::Malformed("the tip height exceeded u32".into()))?;
-        let hash = zakura_wallet_core::BlockHash::from_slice(&id.hash).ok_or_else(|| {
-            LwdError::Malformed("the tip hash was not 32 bytes".into())
-        })?;
+        let hash = zakura_wallet_core::BlockHash::from_slice(&id.hash)
+            .ok_or_else(|| LwdError::Malformed("the tip hash was not 32 bytes".into()))?;
 
         Ok(ChainTip {
             height: BlockHeight::from_u32(height),
@@ -459,10 +500,7 @@ impl ChainSource for LightwalletdSource {
         Ok(blocks)
     }
 
-    async fn transaction(
-        &self,
-        txid: TxId,
-    ) -> Result<Option<FetchedTransaction>, Self::Error> {
+    async fn transaction(&self, txid: TxId) -> Result<Option<FetchedTransaction>, Self::Error> {
         let mut client = self.client.clone();
         let response = client
             .get_transaction(TxFilter {
@@ -518,9 +556,7 @@ impl ChainSource for LightwalletdSource {
         while let Some(root) = stream.message().await.map_err(LwdError::Rpc)? {
             let hash = <[u8; 32]>::try_from(&root.root_hash[..])
                 .ok()
-                .and_then(|b| {
-                    Option::from(orchard::tree::MerkleHashOrchard::from_bytes(&b))
-                })
+                .and_then(|b| Option::from(orchard::tree::MerkleHashOrchard::from_bytes(&b)))
                 .ok_or_else(|| {
                     LwdError::Malformed(format!("subtree root {index} was not a valid hash"))
                 })?;
@@ -553,4 +589,3 @@ fn is_unknown_transaction(status: &tonic::Status) -> bool {
     message.contains("no information available about transaction")
         || message.contains("transaction not found")
 }
-

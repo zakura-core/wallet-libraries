@@ -45,13 +45,18 @@ mod sync;
 pub use config::{NetworkKind, WalletConfig};
 pub use destroy::destroy;
 pub use error::{Error, ErrorCode};
-pub use import::{TransactionShape, live_height};
+pub use import::{NetworkIdentity, TransactionShape, live_height, network_identity};
 pub use query::{AccountSummary, Balance, HistoryEntry, PoolAmounts};
 pub use send::{SendReceipt, SpendQuote};
 pub use sync::{SyncPhase, SyncProgress};
 pub use zakura_wallet_transparent::{
     Endpoints as TransparentEndpoints, WorkLimits as TransparentWorkLimits,
 };
+
+/// The transparent protocol schema this build reads.
+pub const TRANSPARENT_SCHEMA: &str = zakura_wallet_transparent::SCHEMA;
+/// The derived database layout this build writes.
+pub const LAYOUT_VERSION: u32 = zakura_wallet_store::LAYOUT_VERSION;
 
 use std::sync::{Arc, Mutex};
 
@@ -95,6 +100,9 @@ impl Wallet {
     /// to rebuild the cache costs a rescan, which on a phone is a decision with
     /// a visible price, so it belongs to whoever can ask.
     pub fn open(config: WalletConfig) -> Result<Self, Error> {
+        config
+            .recovery_requirements()
+            .map_err(Error::Configuration)?;
         if let Some(dir) = config.wallet_path.parent() {
             std::fs::create_dir_all(dir)
                 .map_err(|e| Error::Storage(format!("could not create {}: {e}", dir.display())))?;

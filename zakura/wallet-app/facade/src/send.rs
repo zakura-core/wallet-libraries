@@ -144,6 +144,9 @@ pub struct SendReceipt {
 impl Wallet {
     /// Works out what a payment would cost, without proving it.
     pub fn quote(&self, account: u32, to: &str, amount: u64) -> Result<SpendQuote, Error> {
+        if self.config.recovery_only {
+            return Err(Error::SendDisabled);
+        }
         if amount == 0 {
             return Err(Error::Build(
                 "a payment has to be for more than nothing".to_owned(),
@@ -195,6 +198,11 @@ impl Wallet {
         amount: u64,
         seed: &Zeroizing<Vec<u8>>,
     ) -> Result<SendReceipt, Error> {
+        // First, before the seed is so much as looked at. A recovery-only
+        // wallet has no business deriving a spending key.
+        if self.config.recovery_only {
+            return Err(Error::SendDisabled);
+        }
         if amount == 0 {
             return Err(Error::Build(
                 "a payment has to be for more than nothing".to_owned(),
@@ -552,7 +560,10 @@ mod tests {
     /// measured from it name a block the chain passed long ago.
     #[test]
     fn the_target_follows_the_tip_not_a_lagging_anchor() {
-        assert_eq!(target_height(Some(h(2_000_000)), h(1_000_000)), h(2_000_001));
+        assert_eq!(
+            target_height(Some(h(2_000_000)), h(1_000_000)),
+            h(2_000_001)
+        );
     }
 
     #[test]

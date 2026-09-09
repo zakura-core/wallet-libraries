@@ -43,6 +43,65 @@ pub fn live_height(lightwalletd_url: &str) -> Result<u32, Error> {
     })
 }
 
+/// What a lightwalletd server says it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkIdentity {
+    /// `main` or `test`, as the server names its chain.
+    pub chain_name: String,
+    /// Where Sapling activated on that chain.
+    pub sapling_activation_height: u64,
+    /// The consensus branch the server is on, in its own encoding.
+    pub consensus_branch_id: String,
+    /// The latest block the server holds.
+    pub block_height: u64,
+    /// The server software, for a diagnostic screen.
+    pub vendor: String,
+    /// Its version.
+    pub version: String,
+}
+
+impl NetworkIdentity {
+    /// Whether the server serves the chain `network` names.
+    pub fn serves(&self, network: crate::NetworkKind) -> bool {
+        self.chain_name == chain_name(network)
+    }
+}
+
+/// The name lightwalletd gives a chain.
+pub(crate) fn chain_name(network: crate::NetworkKind) -> &'static str {
+    match network {
+        crate::NetworkKind::Main => "main",
+        crate::NetworkKind::Test => "test",
+    }
+}
+
+/// Asks a lightwalletd server which chain it serves, with no wallet open.
+///
+/// A wallet on one chain pointed at a server for another scans blocks its
+/// keys were never paid on and reports an honest, wrong zero; this is what an
+/// application checks before it opens anything, and what the sync checks again
+/// every time it connects.
+pub fn network_identity(lightwalletd_url: &str) -> Result<NetworkIdentity, Error> {
+    let url = lightwalletd_url.to_owned();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Error::Source(format!("could not start a runtime: {e}")))?;
+
+    runtime.block_on(async move {
+        let source = zakura_wallet_lwd::LightwalletdSource::connect(&url).await?;
+        let info = source.server_info().await?;
+        Ok(NetworkIdentity {
+            chain_name: info.chain_name,
+            sapling_activation_height: info.sapling_activation_height,
+            consensus_branch_id: info.consensus_branch_id,
+            block_height: info.block_height,
+            vendor: info.vendor,
+            version: info.version,
+        })
+    })
+}
+
 impl Wallet {
     /// Returns the earliest height an account on this network could have
     /// history at.

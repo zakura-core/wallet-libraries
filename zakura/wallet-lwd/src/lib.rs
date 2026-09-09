@@ -25,4 +25,4 @@ pub mod proto {
 #[cfg(any(test, feature = "test-dependencies"))]
 pub mod testing;
 
-pub use source::{LightwalletdSource, LwdError};
+pub use source::{LightwalletdSource, LwdError, ServerInfo};
