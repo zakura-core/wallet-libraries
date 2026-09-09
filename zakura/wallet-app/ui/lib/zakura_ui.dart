@@ -14,6 +14,7 @@ export 'src/overrides.dart';
 export 'src/theme/theme.dart';
 export 'src/theme/tokens.dart';
 export 'src/widgets/balance_card.dart';
+export 'src/widgets/coverage_details.dart';
 export 'src/widgets/history_list.dart';
 export 'src/widgets/import_form.dart';
 export 'src/widgets/primitives.dart';

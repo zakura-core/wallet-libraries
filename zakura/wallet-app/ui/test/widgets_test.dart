@@ -513,7 +513,9 @@ void _transparentAndCrossingTests() {
       await tester.pumpWidget(
         host(const BalanceCard(balance: Balance(spendable: Zatoshi(1)))),
       );
-      expect(find.textContaining('transparent'), findsNothing);
+      // The coverage sentence may mention the word; the figure line is what
+      // must be absent.
+      expect(find.textContaining('ZEC transparent'), findsNothing);
     });
 
     test('transparent counts toward the total but not toward the sendable', () {

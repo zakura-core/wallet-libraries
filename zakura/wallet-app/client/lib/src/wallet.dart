@@ -46,6 +46,13 @@ class ZakuraWallet {
   /// its own precisely so that it cannot be stale.
   Stream<void> get changed => _changed.stream;
 
+  /// What the native build is.
+  Future<BuildInfo> buildInfo() => _bindings.buildInfo();
+
+  /// Asks the lightwalletd server at [lightwalletdUrl] which chain it serves.
+  Future<NetworkIdentity> networkIdentity({required String lightwalletdUrl}) =>
+      _bindings.networkIdentity(lightwalletdUrl: lightwalletdUrl);
+
   /// Generates a new seed phrase.
   Future<String> generateMnemonic() => _bindings.generateMnemonic();
 

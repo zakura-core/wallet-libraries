@@ -62,14 +62,35 @@ class Balance {
       Object.hash(spendable, pending, spentUnconfirmed, transparent, coverage);
 }
 
+/// How far the private transparent ledger has read, and what forbids calling
+/// the transparent balance synchronized.
+///
 /// Coverage is independent of the amount recovered and of shielded scanning.
+/// A transparent balance is true as of [coveredThrough]; [anchorHeight] is the
+/// target the last complete sync accepted; [completion] is why the last sync
+/// stopped, in the ledger's own words; [pendingPages] is work still owed; and
+/// [unresolvedSpends] are spends of outputs the ledger has never seen, each
+/// of which means the balance is too high.
 class TransparentCoverage {
+  /// The last height covered, including a shard that can still be replaced.
+  /// Null when nothing has been read, which is not a height of zero.
   final int? coveredThrough;
+
+  /// The last height covered by sealed shards alone.
   final int? settledThrough;
+
+  /// The target the last complete sync accepted.
   final int? anchorHeight;
+
+  /// Why the last sync stopped: `complete`, or a reason. Null before any sync.
   final String? completion;
+
+  /// Spends whose receive the ledger has never seen.
   final int unresolvedSpends;
+
+  /// Page retrievals still owed.
   final int pendingPages;
+
   const TransparentCoverage({
     this.coveredThrough,
     this.settledThrough,
@@ -79,6 +100,9 @@ class TransparentCoverage {
     this.pendingPages = 0,
   });
 
+  /// Whether the transparent balance may be called synchronized: the last
+  /// sync completed to its accepted target and nothing the ledger holds
+  /// contradicts it.
   bool get synchronized =>
       completion == 'complete' &&
       coveredThrough != null &&
@@ -86,6 +110,9 @@ class TransparentCoverage {
       coveredThrough! >= anchorHeight! &&
       unresolvedSpends == 0 &&
       pendingPages == 0;
+
+  /// Whether anything has been read at all.
+  bool get established => coveredThrough != null;
 
   /// How far behind the chain tip coverage may sit before it is called out.
   ///
@@ -96,32 +123,95 @@ class TransparentCoverage {
   /// else — a stalled publisher, a stopped sync — and is named.
   static const int tolerableLag = 10;
 
+  /// Whether [completion] is one of the reasons that only describe coverage
+  /// trailing a moving chain, as opposed to a sync that stopped short.
+  ///
+  /// `scan-ahead` is the wallet having scanned past the ledger's accepted
+  /// target; `publication-behind` is the publisher not yet having reached
+  /// it. Within [tolerableLag] of the tip these are the ordinary state of a
+  /// wallet that is keeping up. Everything else — a budget, an outage, a
+  /// chain the wallet has not scanned, a stopped or failed run, a sync still
+  /// in progress — is a reason the balance is incomplete, and is shown
+  /// however close to the tip the coverage sits.
+  bool get isTrailingReason =>
+      completion == 'scan-ahead' ||
+      (completion?.startsWith('publication-behind:') ?? false);
+
+  /// A sentence for [completion], or null when it needs no explaining.
+  String? get reasonDescription {
+    final reason = completion;
+    if (reason == null) return 'No transparent sync has run yet.';
+    if (reason == 'complete') return null;
+    if (reason == 'scan-ahead') {
+      return 'The wallet has scanned past the last accepted target.';
+    }
+    if (reason == 'sync-in-progress') return 'A transparent sync is running.';
+    if (reason == 'stopped') return 'The last transparent sync was stopped.';
+    if (reason == 'failed') return 'The last transparent sync failed.';
+    if (reason == 'chain-rewound') {
+      return 'The chain was rewound and coverage was rolled back.';
+    }
+    if (reason == 'query-budget') {
+      return 'The last sync reached its private query budget.';
+    }
+    if (reason == 'byte-budget') {
+      return 'The last sync reached its private byte budget.';
+    }
+    if (reason == 'pending-limit') {
+      return 'The last sync reached the limit on work it may carry.';
+    }
+    if (reason == 'unresolved-spends') {
+      return 'Spends were found whose receives are not yet covered.';
+    }
+    if (reason == 'discovery-unbounded') {
+      return 'New addresses kept being discovered; the next sync continues.';
+    }
+    if (reason.startsWith('overloaded:')) {
+      return 'The service was at capacity (shard ${reason.split(':').last}).';
+    }
+    if (reason.startsWith('chain-unknown:')) {
+      return 'The wallet has not scanned block ${reason.split(':').last} yet.';
+    }
+    if (reason.startsWith('publication-behind:')) {
+      return 'Waiting for publication through block ${reason.split(':').last}.';
+    }
+    return 'The last sync stopped: $reason.';
+  }
+
   String get status => statusAgainst(null);
 
   /// The status as shown beside the balance, judged against [chainTip], the
   /// height the wallet's own server reports.
   ///
-  /// Without a tip, any state short of synchronized is called incomplete.
-  /// With one, coverage within [tolerableLag] of it is reported as current
-  /// unless something the wallet holds contradicts that: an unresolved spend
-  /// or page work still owed is incomplete however close the height is.
+  /// Coverage that is [synchronized] is reported as its height. Anything
+  /// short of that is reported with why, with one exception: coverage that
+  /// merely trails a moving chain — a [isTrailingReason] within
+  /// [tolerableLag] of the tip — is reported as current, because naming that
+  /// would flag every wallet all the time. A reason that is not a trailing
+  /// one is never suppressed by proximity to the tip: a sync that ran out
+  /// of budget one block from the tip is still a sync that ran out of budget.
+  /// Nothing read at all is never a height.
   String statusAgainst(int? chainTip) {
     final coverage = coveredThrough == null
         ? 'Transparent coverage not yet established'
         : 'Transparent coverage through block $coveredThrough';
     if (synchronized) return coverage;
     if (unresolvedSpends > 0) {
-      return '$coverage. Transaction history is incomplete.';
+      return '$coverage. Transaction history is incomplete: '
+          '$unresolvedSpends unresolved spend${unresolvedSpends == 1 ? '' : 's'}.';
     }
-    if (pendingPages > 0) return '$coverage. Transparent sync is incomplete.';
+    if (pendingPages > 0) {
+      return '$coverage. Transparent sync is incomplete: '
+          '$pendingPages page${pendingPages == 1 ? '' : 's'} still owed.';
+    }
     if (coveredThrough != null &&
         chainTip != null &&
+        isTrailingReason &&
         chainTip - coveredThrough! <= tolerableLag) {
       return coverage;
     }
-    if (completion?.startsWith('publication-behind:') ?? false) {
-      return '$coverage. Waiting for publication through block ${completion!.split(':').last}.';
-    }
+    final reason = reasonDescription;
+    if (reason != null) return '$coverage. $reason';
     return '$coverage. Transparent sync is incomplete.';
   }
 
@@ -511,4 +601,69 @@ class SendReceipt {
     }
     return buffer.toString();
   }
+}
+
+/// What the native build is.
+///
+/// The one question an application asks before trusting the mode it thinks
+/// it is in: the Dart side knows what it was told to be, and this is what the
+/// native side actually is.
+class BuildInfo {
+  /// Whether the native build can send at all.
+  ///
+  /// A recovery build cannot, and says so here rather than only when asked.
+  final bool sendEnabled;
+
+  /// The transparent protocol schema the build reads.
+  final String transparentSchema;
+
+  /// The derived database layout the build writes.
+  final int layoutVersion;
+
+  const BuildInfo({
+    required this.sendEnabled,
+    required this.transparentSchema,
+    required this.layoutVersion,
+  });
+
+  @override
+  String toString() =>
+      'BuildInfo(send: $sendEnabled, schema: $transparentSchema, '
+      'layout: $layoutVersion)';
+}
+
+/// What a lightwalletd server says it is.
+class NetworkIdentity {
+  /// `main` or `test`, as the server names its chain.
+  final String chainName;
+
+  /// Where Sapling activated on that chain.
+  final int saplingActivationHeight;
+
+  /// The consensus branch the server is on, in its own encoding.
+  final String consensusBranchId;
+
+  /// The latest block the server holds.
+  final int blockHeight;
+
+  /// The server software.
+  final String vendor;
+
+  /// Its version.
+  final String version;
+
+  const NetworkIdentity({
+    required this.chainName,
+    required this.saplingActivationHeight,
+    required this.consensusBranchId,
+    required this.blockHeight,
+    required this.vendor,
+    required this.version,
+  });
+
+  /// Whether the server serves mainnet.
+  bool get isMainnet => chainName == 'main';
+
+  @override
+  String toString() => 'NetworkIdentity($chainName at $blockHeight)';
 }

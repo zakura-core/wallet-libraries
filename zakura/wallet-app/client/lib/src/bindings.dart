@@ -13,6 +13,18 @@ import 'models.dart';
 ///
 /// Every method may throw [ZakuraException].
 abstract interface class ZakuraBindings {
+  /// What the native build is: whether it can send, and which protocol
+  /// schema and database layout it carries.
+  Future<BuildInfo> buildInfo();
+
+  /// Asks the lightwalletd server at [lightwalletdUrl] which chain it
+  /// serves, with no wallet open.
+  ///
+  /// What an application checks before it opens anything: a mainnet wallet
+  /// pointed at a testnet server scans a chain its keys were never paid on
+  /// and reports an honest, wrong zero.
+  Future<NetworkIdentity> networkIdentity({required String lightwalletdUrl});
+
   /// Generates a new seed phrase.
   ///
   /// The phrase is the wallet. Whoever receives it is responsible for showing
@@ -109,6 +121,9 @@ abstract interface class ZakuraBindings {
   ///
   /// Takes seconds. The seed phrase is needed because the wallet stores only
   /// viewing keys; it is used to derive the spending key and then dropped.
+  ///
+  /// A recovery-only build refuses with [ZakuraErrorCode.sendDisabled]
+  /// before it reads the phrase; see [buildInfo].
   Future<SendReceipt> send({
     required int account,
     required String to,

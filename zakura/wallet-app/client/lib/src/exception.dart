@@ -83,6 +83,19 @@ enum ZakuraErrorCode {
   /// A unified full viewing key could not be read.
   badViewingKey(19),
 
+  /// The wallet was opened to recover only, and cannot send.
+  ///
+  /// Not a temporary state and not a missing key: the native build was
+  /// configured never to build or broadcast a transaction.
+  sendDisabled(20),
+
+  /// The wallet's configuration is one it refuses to run under.
+  ///
+  /// Raised at open, before any file is created. The message says what is
+  /// wrong: a missing transparent service, one host serving both, or a
+  /// service reached over plaintext.
+  configuration(21),
+
   /// A code this build does not know.
   ///
   /// Present so that a newer facade adding a code does not crash an older

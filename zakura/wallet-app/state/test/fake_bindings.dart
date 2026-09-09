@@ -59,6 +59,26 @@ class FakeBindings implements ZakuraBindings {
   void addHistory(HistoryEntry entry) => _history.insert(0, entry);
 
   @override
+  Future<BuildInfo> buildInfo() async => const BuildInfo(
+        sendEnabled: true,
+        transparentSchema: 'fake',
+        layoutVersion: 0,
+      );
+
+  @override
+  Future<NetworkIdentity> networkIdentity({
+    required String lightwalletdUrl,
+  }) async =>
+      NetworkIdentity(
+        chainName: lightwalletdUrl.contains('testnet') ? 'test' : 'main',
+        saplingActivationHeight: 419200,
+        consensusBranchId: 'fake',
+        blockHeight: 3000000,
+        vendor: 'fake',
+        version: '0',
+      );
+
+  @override
   Future<String> generateMnemonic() async => mnemonic;
 
   @override

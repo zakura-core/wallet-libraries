@@ -23,11 +23,18 @@ class BalanceCard extends StatelessWidget {
   /// incomplete; see [TransparentCoverage.statusAgainst].
   final int? chainTip;
 
+  /// What to say after a transparent figure.
+  ///
+  /// The default names the step ordinary transparent funds need before they
+  /// can be sent. A build that cannot send says something else.
+  final String transparentSuffix;
+
   /// Creates a balance card.
   const BalanceCard({
     required this.balance,
     this.obscured = false,
     this.chainTip,
+    this.transparentSuffix = 'shield to spend',
     super.key,
   });
 
@@ -120,7 +127,7 @@ class BalanceCard extends StatelessWidget {
             Text(
               obscured
                   ? '•••• transparent'
-                  : '${balance.transparent.format()} ZEC transparent, shield to spend',
+                  : '${balance.transparent.format()} ZEC transparent, $transparentSuffix',
               style: theme.typography.caption.copyWith(
                 color: theme.colors.textMuted,
               ),
