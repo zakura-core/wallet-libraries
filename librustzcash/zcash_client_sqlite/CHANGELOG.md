@@ -10,6 +10,13 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc5] - 2026-09-09
+
+### Changed
+- Updated the Zakura wallet and protocol dependencies to the stable 1.2
+  release family, including `zakura-client-backend 0.1.0-rc5` and
+  `zakura-pczt 0.1.0-rc3`.
+
 ## [0.1.0-rc4] - 2026-08-28
 
 ### Changed
