@@ -202,6 +202,22 @@ class ZakuraWallet {
     _changed.add(null);
   }
 
+  /// Forgets the wallet: deletes its files and leaves it open and empty.
+  ///
+  /// Polling stops first, because a poll landing between the delete and the
+  /// reopen would report progress for a wallet that no longer exists. Progress
+  /// is reset to nothing, and [changed] fires so that balance and history are
+  /// read again and found empty.
+  Future<void> reset() async {
+    _poll?.cancel();
+    _poll = null;
+    await _bindings.reset();
+    _last = const SyncProgress();
+    if (_closed) return;
+    _progress.add(_last);
+    _changed.add(null);
+  }
+
   /// Closes the wallet and stops polling.
   Future<void> close() async {
     if (_closed) return;

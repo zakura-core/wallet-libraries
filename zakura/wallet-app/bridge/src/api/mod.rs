@@ -15,7 +15,7 @@ pub mod types;
 use std::sync::{Arc, RwLock};
 
 use zakura_wallet_facade::{
-    NetworkKind, Wallet, WalletConfig,
+    NetworkKind, Wallet, WalletConfig, destroy,
     mnemonic::{self},
 };
 
@@ -356,5 +356,27 @@ pub fn close() -> Result<(), ApiError> {
     if let Some(wallet) = taken {
         wallet.stop_sync();
     }
+    Ok(())
+}
+
+/// Forgets the wallet: deletes its files and reopens it empty.
+///
+/// The only way to change wallets while the store holds one account. The
+/// sync is stopped first, because its thread holds the files; then the files
+/// go, and the same configuration is opened again so that a create or restore
+/// can follow with no second `open`. If that reopen fails no wallet is left
+/// open, and the error says so.
+pub fn reset() -> Result<(), ApiError> {
+    let mut guard = WALLET.write().expect("the wallet lock is never poisoned");
+    let wallet = guard.take().ok_or_else(|| ApiError {
+        code: 1,
+        message: "no wallet is open".to_owned(),
+    })?;
+    let config = wallet.config().clone();
+    wallet.stop_sync();
+    drop(wallet);
+
+    destroy(&config)?;
+    *guard = Some(Arc::new(Wallet::open(config)?));
     Ok(())
 }

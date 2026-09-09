@@ -23,11 +23,14 @@ Thin on purpose. Every figure comes from a provider and every component from
 `zakura_ui`, so there is little here to get wrong — if a screen needs real
 logic, that logic belongs a layer down where it is tested.
 
-Two things a real wallet must do that this does not:
+One thing a real wallet must do that this does not:
 
 - **Keep the seed properly.** `send` here passes a freshly generated phrase,
   which is a placeholder. The wallet stores only viewing keys by design, so
   spending needs the seed supplied again, and it belongs in the platform
   keychain.
-- **Ask for a birthday when restoring.** Onboarding hardcodes one. Guessing too
-  high silently loses transactions.
+
+The store holds one account, so there is no switcher. Changing wallets is
+**Forget this wallet** on the home screen, which deletes the app's copy and
+returns to onboarding; restoring the same phrase again from there is how a
+recovery is re-run with a lower birthday.

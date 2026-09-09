@@ -113,6 +113,52 @@ void main() {
     await sub.cancel();
   });
 
+  /// Forgetting is the one operation after which everything on screen is
+  /// stale at once, so it has to say so.
+  test('forgetting the wallet announces a change and reaches the bindings',
+      () async {
+    await anAccount();
+    final changes = <void>[];
+    final sub = wallet.changed.listen(changes.add);
+
+    await wallet.reset();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(bindings.resets, 1);
+    expect(changes, hasLength(1));
+    expect(await wallet.accounts(), isEmpty);
+    await sub.cancel();
+  });
+
+  /// A poll landing between the delete and the reopen would report progress
+  /// for a wallet that no longer exists.
+  test('forgetting the wallet stops polling', () async {
+    await anAccount();
+    await wallet.startSync();
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(bindings.progressCalls, greaterThan(1), reason: 'polling ran');
+
+    await wallet.reset();
+    final after = bindings.progressCalls;
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+
+    expect(bindings.progressCalls, after, reason: 'polling continued');
+  });
+
+  test('forgetting the wallet clears the last progress', () async {
+    await anAccount();
+    await wallet.startSync();
+    bindings.setProgress(
+      const SyncProgress(phase: SyncPhase.recovering, tip: 100, scannedTo: 50),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(wallet.lastProgress.scannedTo, 50);
+
+    await wallet.reset();
+
+    expect(wallet.lastProgress, const SyncProgress());
+  });
+
   test('creating an account announces a change', () async {
     await wallet.open(directory: '/tmp/x', lightwalletdUrl: 'https://x');
     final changes = <void>[];

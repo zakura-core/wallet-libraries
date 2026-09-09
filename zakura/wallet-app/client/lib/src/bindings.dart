@@ -106,6 +106,13 @@ abstract interface class ZakuraBindings {
   /// pane; [SyncProgress.failed] is what an interface branches on.
   Future<String?> syncFailure();
 
+  /// Forgets the wallet: deletes its files and leaves it open and empty.
+  ///
+  /// The only way to change wallets while the store holds one account. What
+  /// follows is a create or a restore, exactly as on first launch; restoring
+  /// the same phrase again is how a recovery is re-run with a lower birthday.
+  Future<void> reset();
+
   /// Releases the wallet.
   Future<void> close();
 }

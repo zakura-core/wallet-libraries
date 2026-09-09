@@ -4,6 +4,7 @@ import 'package:zakura_client/zakura_client.dart';
 import 'package:zakura_state/zakura_state.dart';
 import 'package:zakura_ui/zakura_ui.dart';
 
+import 'forget.dart';
 import 'receive.dart';
 import 'send.dart';
 
@@ -76,6 +77,15 @@ class HomeScreen extends ConsumerWidget {
                 // Before a recovery finishes, an empty list means "not found
                 // yet" rather than "there is nothing here".
                 searching: !(progress.value ?? const SyncProgress()).isCaughtUp,
+              ),
+              SizedBox(height: theme.spacing.xl),
+              // The store holds one account, so this is the way to another
+              // wallet, and the way to run a recovery again.
+              ZakuraButton(
+                label: 'Forget this wallet',
+                kind: ZakuraButtonKind.secondary,
+                expand: true,
+                onPressed: () => _push(context, const ForgetScreen()),
               ),
             ],
           ),

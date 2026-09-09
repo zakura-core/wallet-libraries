@@ -33,6 +33,7 @@
 
 pub mod address;
 mod config;
+mod destroy;
 mod error;
 mod import;
 pub mod keys;
@@ -42,6 +43,7 @@ mod send;
 mod sync;
 
 pub use config::{NetworkKind, WalletConfig};
+pub use destroy::destroy;
 pub use error::{Error, ErrorCode};
 pub use import::TransactionShape;
 pub use query::{AccountSummary, Balance, HistoryEntry, PoolAmounts};

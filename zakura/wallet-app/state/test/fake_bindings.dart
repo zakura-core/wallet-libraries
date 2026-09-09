@@ -264,4 +264,20 @@ class FakeBindings implements ZakuraBindings {
   Future<void> close() async {
     closed = true;
   }
+
+  /// How many times the wallet has been forgotten.
+  int resets = 0;
+
+  @override
+  Future<void> reset() async {
+    _requireOpen();
+    _maybeThrow();
+    resets++;
+    _accounts.clear();
+    // A forgotten wallet is not "already here": the same phrase restores.
+    _imported.clear();
+    _history.clear();
+    _balance = const Balance();
+    _progress = const SyncProgress();
+  }
 }

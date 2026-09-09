@@ -1,13 +1,16 @@
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:zakura_client/zakura_client.dart';
 import 'package:zakura_state/zakura_state.dart';
+import 'package:zakura_ui/zakura_ui.dart';
 import 'package:zakura_example/demo_bindings.dart';
 import 'package:zakura_example/main.dart';
 
 void main() {
   _restoreTests();
   _navigationTests();
+  _forgetTests();
   testWidgets('the app starts at onboarding and creates a wallet',
       (tester) async {
     final wallet = ZakuraWallet(DemoBindings());
@@ -55,6 +58,33 @@ void main() {
     expect(find.text('1'), findsOneWidget);
     expect(find.text('24'), findsOneWidget);
   });
+}
+
+/// An open demo wallet with no account yet.
+Future<ZakuraWallet> openedWallet(WidgetTester tester) async {
+  final wallet = ZakuraWallet(DemoBindings());
+  addTearDown(wallet.close);
+  await wallet.open(directory: '/tmp/x', lightwalletdUrl: 'https://x');
+  return wallet;
+}
+
+/// Creates an account and starts the app on its home screen, as a returning
+/// user would find it.
+Future<void> intoWallet(WidgetTester tester, ZakuraWallet wallet) async {
+  final id = await wallet.createAccount(
+    phrase: await wallet.generateMnemonic(),
+  );
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        walletProvider.overrideWithValue(wallet),
+        initialAccountProvider.overrideWithValue(id),
+      ],
+      child: const ZakuraExampleApp(demo: true),
+    ),
+  );
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 50));
 }
 
 /// Restoring is offered alongside creating, and reaches a form that asks for
@@ -111,30 +141,6 @@ void _restoreTests() {
 /// has nothing to push onto, and a button wired to one is inert — no error, no
 /// screen, nothing. Only tapping it finds that out, which is why these exist.
 void _navigationTests() {
-  Future<ZakuraWallet> openedWallet(WidgetTester tester) async {
-    final wallet = ZakuraWallet(DemoBindings());
-    addTearDown(wallet.close);
-    await wallet.open(directory: '/tmp/x', lightwalletdUrl: 'https://x');
-    return wallet;
-  }
-
-  Future<void> intoWallet(WidgetTester tester, ZakuraWallet wallet) async {
-    final id = await wallet.createAccount(
-      phrase: await wallet.generateMnemonic(),
-    );
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          walletProvider.overrideWithValue(wallet),
-          initialAccountProvider.overrideWithValue(id),
-        ],
-        child: const ZakuraExampleApp(demo: true),
-      ),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 50));
-  }
-
   testWidgets('the home screen offers Receive and Send', (tester) async {
     final wallet = await openedWallet(tester);
     await intoWallet(tester, wallet);
@@ -176,5 +182,97 @@ void _navigationTests() {
 
     expect(find.text('To'), findsOneWidget);
     expect(find.text('Amount (ZEC)'), findsOneWidget);
+  });
+}
+
+/// The store holds one account, so there was no way to import a different
+/// wallet, or to import the same one again with a lower birthday, without
+/// deleting files by hand. Forgetting is that way.
+void _forgetTests() {
+  Future<void> type(WidgetTester tester, int field, String text) async {
+    final editables = find.byType(EditableText);
+    final state = tester.state<EditableTextState>(editables.at(field));
+    state.updateEditingValue(TextEditingValue(text: text));
+    await tester.pump();
+  }
+
+  testWidgets('the home screen offers forgetting the wallet', (tester) async {
+    final wallet = await openedWallet(tester);
+    await intoWallet(tester, wallet);
+
+    // Below the history, so scroll to it before asserting it is visible.
+    await tester.scrollUntilVisible(find.text('Forget this wallet'), 200);
+    await tester.tap(find.text('Forget this wallet'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('‹ Back'), findsOneWidget);
+    expect(find.textContaining('seed phrase is the only way back'),
+        findsOneWidget);
+    // The title and the confirming button share a label.
+    expect(find.text('Forget this wallet'), findsNWidgets(2));
+  });
+
+  testWidgets('Back leaves the wallet alone', (tester) async {
+    final wallet = await openedWallet(tester);
+    await intoWallet(tester, wallet);
+
+    await tester.scrollUntilVisible(find.text('Forget this wallet'), 200);
+    await tester.tap(find.text('Forget this wallet'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('‹ Back'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Activity'), findsOneWidget);
+    expect(await wallet.accounts(), hasLength(1));
+  });
+
+  testWidgets('confirming returns to onboarding with nothing left',
+      (tester) async {
+    final wallet = await openedWallet(tester);
+    await intoWallet(tester, wallet);
+
+    await tester.scrollUntilVisible(find.text('Forget this wallet'), 200);
+    await tester.tap(find.text('Forget this wallet'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ZakuraButton, 'Forget this wallet'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Create a wallet'), findsOneWidget);
+    expect(find.text('Restore an existing wallet'), findsOneWidget);
+    expect(find.text('Activity'), findsNothing);
+    expect(await wallet.accounts(), isEmpty);
+  });
+
+  /// The point of forgetting: a restore afterwards lands in a wallet.
+  testWidgets('a wallet can be restored after forgetting', (tester) async {
+    final wallet = await openedWallet(tester);
+    await intoWallet(tester, wallet);
+
+    await tester.scrollUntilVisible(find.text('Forget this wallet'), 200);
+    await tester.tap(find.text('Forget this wallet'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ZakuraButton, 'Forget this wallet'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Restore an existing wallet'));
+    await tester.pump();
+    await tester.pump();
+    await type(tester, 0, await wallet.generateMnemonic());
+    await tester.ensureVisible(find.text('Restore wallet'));
+    await tester.tap(find.text('Restore wallet'));
+    // Restoring starts the demo's sync, whose timers would keep a
+    // `pumpAndSettle` waiting, so the frames are pumped by hand and the sync
+    // is stopped before the test ends, whatever happens in between.
+    try {
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(find.text('Activity'), findsOneWidget);
+      expect(await wallet.accounts(), hasLength(1));
+    } finally {
+      await wallet.stopSync();
+      await tester.pump();
+    }
   });
 }

@@ -196,6 +196,13 @@ stops a transaction linking two of the wallet's accounts on chain. The first
 version is single-account, which sidesteps it; a multi-account version must not
 ship before the guard does.
 
+**One wallet at a time, then.** Because the store holds one account, changing
+wallets is forgetting this one and restoring another: the facade deletes both
+database files and reopens them empty, and the application returns to
+onboarding. The same path re-runs a recovery whose birthday turned out to be
+too high, since a forgotten wallet is not "already here" when its phrase is
+restored again.
+
 **An idle sync is not necessarily a finished one.** An empty fetch reports idle
 too, so a transient failure to reach the server looks exactly like having caught
 up. The wallet records why a sync stopped and reports it separately, and the

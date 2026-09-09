@@ -221,6 +221,31 @@ void _importTests({
   final skip =
       !built ? 'run: cargo build -p zakura_wallet_bridge --release' : null;
 
+  /// Forgetting is the only way to change wallets while the store holds one
+  /// account. The files go, the wallet is empty, and the same phrase is no
+  /// longer "already here".
+  test(skip: skip, 'forgetting empties the wallet and frees the phrase',
+      () async {
+    final b = bindings();
+    await b.open(
+      directory: dir().path,
+      lightwalletdUrl: 'https://127.0.0.1:1/',
+      mainnet: false,
+    );
+    final phrase = await b.generateMnemonic();
+    await b.importAccount(phrase: phrase, birthday: 2500000);
+    expect(File('${dir().path}/wallet.db').existsSync(), isTrue);
+
+    await b.reset();
+
+    expect(await b.accounts(), isEmpty);
+    // Reopened at once, so the next open is not up to the application: the
+    // files exist again and are empty.
+    expect(File('${dir().path}/wallet.db').existsSync(), isTrue);
+    final again = await b.importAccount(phrase: phrase, birthday: 2500000);
+    expect((await b.accounts()).single.id, again);
+  });
+
   test(skip: skip, 'the same phrase restores the same wallet', () async {
     final b = bindings();
     await b.open(

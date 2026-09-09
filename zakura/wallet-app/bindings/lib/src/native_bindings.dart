@@ -221,5 +221,8 @@ class NativeBindings implements ZakuraBindings {
   Future<String?> syncFailure() => _translate(rust.syncFailure);
 
   @override
+  Future<void> reset() => _translate(rust.reset);
+
+  @override
   Future<void> close() => _translate(rust.close);
 }

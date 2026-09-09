@@ -1,6 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:zakura_client/zakura_client.dart';
 
+import 'onboarding_controller.dart';
+
 /// The open wallet.
 ///
 /// Overridden at the top of the application, because constructing it needs a
@@ -41,6 +43,25 @@ class ActiveAccount extends Notifier<int?> {
   /// Clears the selection, as on lock or reset.
   void clear() => state = null;
 }
+
+/// Forgets the open wallet and returns the application to onboarding.
+///
+/// The wallet's files are deleted and it is reopened empty, so what follows is
+/// a create or a restore, exactly as on first launch. That is the only way to
+/// change wallets while the store holds one account, and it is also how a
+/// recovery is re-run with a lower birthday.
+///
+/// The wallet goes first and the selection second, deliberately: if forgetting
+/// fails the person is still in the wallet they had, with nothing on screen
+/// claiming otherwise. The failure is thrown for the caller to show.
+final forgetWalletProvider = Provider<Future<void> Function()>((ref) {
+  final wallet = ref.watch(walletProvider);
+  return () async {
+    await wallet.reset();
+    ref.read(activeAccountProvider.notifier).clear();
+    ref.read(onboardingControllerProvider.notifier).reset();
+  };
+});
 
 /// Every account the wallet holds.
 final accountsProvider = FutureProvider<List<Account>>((ref) async {

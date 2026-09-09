@@ -100,10 +100,9 @@ Future<int> chainTip() => RustLib.instance.api.crateApiChainTip();
 /// Returns every account, in creation order.
 Future<List<ApiAccount>> accounts() => RustLib.instance.api.crateApiAccounts();
 
-/// Returns an account's balance across every shielded pool.
-///
-/// Transparent value is not included: this build cannot spend it, and a balance
-/// the wallet cannot back is worse than no balance.
+/// Returns shielded amounts, transparent value, and transparent coverage from
+/// one database snapshot. Transparent value stays separate from spendable
+/// shielded funds; incomplete coverage also qualifies a zero amount.
 Future<ApiBalance> balance({required int account}) =>
     RustLib.instance.api.crateApiBalance(account: account);
 
@@ -194,3 +193,12 @@ Future<ApiSendReceipt> send({
 
 /// Closes the wallet, stopping any sync.
 Future<void> close() => RustLib.instance.api.crateApiClose();
+
+/// Forgets the wallet: deletes its files and reopens it empty.
+///
+/// The only way to change wallets while the store holds one account. The
+/// sync is stopped first, because its thread holds the files; then the files
+/// go, and the same configuration is opened again so that a create or restore
+/// can follow with no second `open`. If that reopen fails no wallet is left
+/// open, and the error says so.
+Future<void> reset() => RustLib.instance.api.crateApiReset();

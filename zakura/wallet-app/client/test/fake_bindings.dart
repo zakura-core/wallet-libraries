@@ -146,8 +146,14 @@ class FakeBindings implements ZakuraBindings {
     );
   }
 
+  /// How many times progress has been polled.
+  int progressCalls = 0;
+
   @override
-  Future<SyncProgress> progress() async => _progress;
+  Future<SyncProgress> progress() async {
+    progressCalls++;
+    return _progress;
+  }
 
   @override
   Future<SpendQuote> quote({
@@ -248,5 +254,21 @@ class FakeBindings implements ZakuraBindings {
   @override
   Future<void> close() async {
     closed = true;
+  }
+
+  /// How many times the wallet has been forgotten.
+  int resets = 0;
+
+  @override
+  Future<void> reset() async {
+    _requireOpen();
+    _maybeThrow();
+    resets++;
+    _accounts.clear();
+    // A forgotten wallet is not "already here": the same phrase restores.
+    _imported.clear();
+    _history.clear();
+    _balance = const Balance();
+    _progress = const SyncProgress();
   }
 }

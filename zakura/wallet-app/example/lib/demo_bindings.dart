@@ -261,6 +261,19 @@ class DemoBindings implements ZakuraBindings {
   Future<String?> syncFailure() async => null;
 
   @override
+  Future<void> reset() async {
+    _requireOpen();
+    _sync?.cancel();
+    _sync = null;
+    _accounts.clear();
+    _history.clear();
+    _balance = const Balance();
+    _progress = const SyncProgress();
+    _scanned = 2_900_000;
+    _address = 0;
+  }
+
+  @override
   Future<void> close() async {
     _sync?.cancel();
     _sync = null;

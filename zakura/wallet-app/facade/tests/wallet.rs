@@ -233,3 +233,77 @@ fn an_unpayable_address_is_refused_before_anything_expensive() {
         .map(|e| e.code());
     assert_eq!(code, Some(ErrorCode::BadAddress));
 }
+
+/// Forgetting a wallet leaves nothing on disk, and the next open is empty.
+#[test]
+fn destroy_removes_the_wallet_and_a_reopen_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = WalletConfig::in_dir(
+        NetworkKind::Test,
+        dir.path(),
+        "https://testnet.example.invalid:443",
+    );
+
+    {
+        let wallet = Wallet::open(config.clone()).unwrap();
+        wallet.create_account(&seed(), 0, 3_000_000).unwrap();
+    }
+
+    zakura_wallet_facade::destroy(&config).unwrap();
+
+    for name in ["wallet.db", "cache.db"] {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let path = dir.path().join(format!("{name}{suffix}"));
+            assert!(!path.exists(), "{} survived", path.display());
+        }
+    }
+
+    let reopened = Wallet::open(config).unwrap();
+    assert!(reopened.accounts().unwrap().is_empty());
+}
+
+/// A wallet that was never created, or was already forgotten, is fine to
+/// forget again.
+#[test]
+fn destroy_of_a_wallet_that_is_not_there_is_ok() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = WalletConfig::in_dir(
+        NetworkKind::Test,
+        dir.path(),
+        "https://testnet.example.invalid:443",
+    );
+
+    zakura_wallet_facade::destroy(&config).unwrap();
+    zakura_wallet_facade::destroy(&config).unwrap();
+}
+
+/// The re-import guarantee: a forgotten wallet is not "already here".
+#[test]
+fn a_forgotten_wallet_accepts_the_same_seed_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = WalletConfig::in_dir(
+        NetworkKind::Test,
+        dir.path(),
+        "https://testnet.example.invalid:443",
+    );
+    let seed = seed();
+
+    {
+        let wallet = Wallet::open(config.clone()).unwrap();
+        wallet.import_wallet(&seed, Some(3_000_000)).unwrap();
+        assert_eq!(
+            wallet
+                .import_wallet(&seed, Some(3_000_000))
+                .unwrap_err()
+                .code(),
+            ErrorCode::AccountExists,
+            "the second import of a live wallet is refused"
+        );
+    }
+
+    zakura_wallet_facade::destroy(&config).unwrap();
+
+    let reopened = Wallet::open(config).unwrap();
+    reopened.import_wallet(&seed, Some(3_000_000)).unwrap();
+    assert_eq!(reopened.accounts().unwrap().len(), 1);
+}
