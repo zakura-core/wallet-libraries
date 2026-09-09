@@ -77,8 +77,15 @@ final accountsProvider = FutureProvider<List<Account>>((ref) async {
 /// Balance, history and accounts all watch this. Keeping it separate is what
 /// lets them refresh independently of the progress bar, which changes far more
 /// often and matters far less.
-final _changeTickProvider = StreamProvider<void>((ref) {
-  return ref.watch(walletProvider).changed;
+///
+/// Each tick carries a count rather than nothing. A provider only notifies its
+/// dependents when its new value differs from the old one, and every empty
+/// event is equal to the last, so a stream of nothing would refresh the
+/// balance exactly once and never again — which is what a card stuck on the
+/// first height it ever showed looks like.
+final _changeTickProvider = StreamProvider<int>((ref) {
+  var ticks = 0;
+  return ref.watch(walletProvider).changed.map((_) => ++ticks);
 });
 
 /// Ticks whenever the wallet's contents may have changed.

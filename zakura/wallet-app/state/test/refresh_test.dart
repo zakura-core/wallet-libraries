@@ -52,5 +52,17 @@ void main() {
       const Zatoshi(500),
       reason: 'the balance never refreshed on the change signal',
     );
+
+    // And a third time, with the balance changing between signals: the
+    // second refresh is the one a signal that carries nothing would lose,
+    // because every empty tick is equal to the last.
+    bindings.setBalance(const Balance(spendable: Zatoshi(900)));
+    bindings.setProgress(const SyncProgress(scannedTo: 30));
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+    expect(
+      (await container.read(balanceProvider.future)).spendable,
+      const Zatoshi(900),
+      reason: 'the balance refreshed once and then stopped listening',
+    );
   });
 }
