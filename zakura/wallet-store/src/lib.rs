@@ -57,9 +57,8 @@ pub use transparent::{ScriptCoverage, TransparentState};
 pub const MIN_TRANSPARENT_CONFIRMATIONS: u32 = 10;
 pub use tree::{CommitmentTree, PRUNING_DEPTH, SHARD_HEIGHT, TREE_DEPTH, WalletShardStore};
 
-use schema::{
-    CACHE_SCHEMA, DERIVED_DDL, DETECTION_VERSION, DURABLE_DDL, LAYOUT_VERSION, TREE_VERSION,
-};
+pub use schema::LAYOUT_VERSION;
+use schema::{CACHE_SCHEMA, DERIVED_DDL, DETECTION_VERSION, DURABLE_DDL, TREE_VERSION};
 
 /// A wallet database: the durable file, with the derived file attached.
 pub struct WalletDb {
@@ -83,6 +82,7 @@ impl WalletDb {
     /// rebuild the cache is the caller's, because on a phone it is a decision
     /// with a visible cost.
     pub fn open(wallet_path: &Path, cache_path: &Path) -> Result<Self, Error> {
+        Self::preflight(wallet_path)?;
         let conn = Connection::open(wallet_path)?;
         conn.execute(
             "ATTACH DATABASE :path AS cache",
@@ -90,6 +90,67 @@ impl WalletDb {
         )?;
         Self::from_connection(conn)
     }
+
+    /// Refuses a wallet whose schema versions are not this build's before
+    /// anything opens it for writing.
+    ///
+    /// Opening creates the tables that are missing and switches both files to
+    /// write-ahead logging, and it did that *before* it read the versions. A
+    /// wallet written by another build was therefore altered on the way to
+    /// being refused: not destroyed, but not left as it was found either. A
+    /// build that is going to say "not mine" has to say it without touching
+    /// the file, so the versions are read first, through a read-only
+    /// connection, and only a wallet that passes is opened at all.
+    ///
+    /// A wallet file that does not exist, or that has no `wallet_meta` yet, is
+    /// a new one and passes: there is nothing to disagree with.
+    pub fn preflight(wallet_path: &Path) -> Result<(), Error> {
+        if !wallet_path.exists() {
+            return Ok(());
+        }
+        let conn = Connection::open_with_flags(
+            wallet_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let has_meta: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wallet_meta')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_meta {
+            return Ok(());
+        }
+        for (key, expected, kind) in Self::VERSIONS {
+            let found: Option<u32> = conn
+                .query_row(
+                    "SELECT value FROM wallet_meta WHERE key = :key",
+                    named_params![":key": key],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(found) = found
+                && found != expected
+            {
+                return Err(Error::VersionMismatch {
+                    kind,
+                    found,
+                    expected,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The schema versions this build writes, with the remedy each carries.
+    const VERSIONS: [(&'static str, u32, VersionKind); 3] = [
+        (
+            "detection_version",
+            DETECTION_VERSION,
+            VersionKind::Detection,
+        ),
+        ("layout_version", LAYOUT_VERSION, VersionKind::Layout),
+        ("tree_version", TREE_VERSION, VersionKind::Tree),
+    ];
 
     /// Opens a wallet held entirely in memory.
     ///
@@ -158,15 +219,7 @@ impl WalletDb {
     }
 
     fn check_versions(&mut self) -> Result<(), Error> {
-        for (key, expected, kind) in [
-            (
-                "detection_version",
-                DETECTION_VERSION,
-                VersionKind::Detection,
-            ),
-            ("layout_version", LAYOUT_VERSION, VersionKind::Layout),
-            ("tree_version", TREE_VERSION, VersionKind::Tree),
-        ] {
+        for (key, expected, kind) in Self::VERSIONS {
             match self.meta_u32(key)? {
                 Some(found) if found != expected => {
                     return Err(Error::VersionMismatch {
