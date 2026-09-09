@@ -426,6 +426,95 @@ fn coverage_of(conn: &rusqlite::Connection, script: &[u8]) -> Result<Vec<Coverag
     Ok(out)
 }
 
+/// The row one script holds at `start`, if any.
+fn coverage_at(
+    conn: &rusqlite::Connection,
+    script: &[u8],
+    start: BlockHeight,
+) -> Result<Option<CoverageRange>, Error> {
+    let row = conn
+        .query_row(
+            &format!(
+                "SELECT end_height, kind, shard_id, revision_digest, terminal_block_hash, source_height, source_hash
+                 FROM {CACHE_SCHEMA}.transparent_coverage
+                 WHERE script = :script AND start_height = :start"
+            ),
+            named_params![":script": script, ":start": u32::from(start)],
+            |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    read_anchor(row, 5, 6)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|(end, kind, shard, revision, terminal, source_anchor)| {
+        Ok(CoverageRange {
+            script: script.to_vec(),
+            start_height: start,
+            end_height: BlockHeight::from_u32(end),
+            kind: CoverageKind::parse(&kind)?,
+            shard_id: shard as u64,
+            revision_digest: revision,
+            terminal_block_hash: terminal,
+            source_anchor,
+        })
+    })
+    .transpose()
+}
+
+/// Adds one range. The caller has established that no row shares its start.
+fn insert_coverage(tx: &Transaction<'_>, range: &CoverageRange) -> Result<(), Error> {
+    tx.execute(
+        &format!(
+            "INSERT INTO {CACHE_SCHEMA}.transparent_coverage
+                (script, start_height, end_height, kind, shard_id, revision_digest,
+                 terminal_block_hash, source_height, source_hash)
+             VALUES (:script, :start, :end, :kind, :shard, :revision, :terminal, :source_height, :source_hash)"
+        ),
+        named_params![
+            ":script": &range.script,
+            ":start": u32::from(range.start_height),
+            ":end": u32::from(range.end_height),
+            ":kind": range.kind.as_str(),
+            ":shard": range.shard_id as i64,
+            ":revision": &range.revision_digest,
+            ":terminal": &range.terminal_block_hash,
+            ":source_height": range.source_anchor.as_ref().map(|a| u32::from(a.height)),
+            ":source_hash": range.source_anchor.as_ref().map(|a| a.hash.as_str()),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Rewrites the one row at `range`'s start, in place.
+fn replace_coverage(tx: &Transaction<'_>, range: &CoverageRange) -> Result<(), Error> {
+    tx.execute(
+        &format!(
+            "UPDATE {CACHE_SCHEMA}.transparent_coverage
+             SET end_height = :end, kind = :kind, shard_id = :shard, revision_digest = :revision,
+                 terminal_block_hash = :terminal, source_height = :source_height, source_hash = :source_hash
+             WHERE script = :script AND start_height = :start"
+        ),
+        named_params![
+            ":script": &range.script,
+            ":start": u32::from(range.start_height),
+            ":end": u32::from(range.end_height),
+            ":kind": range.kind.as_str(),
+            ":shard": range.shard_id as i64,
+            ":revision": &range.revision_digest,
+            ":terminal": &range.terminal_block_hash,
+            ":source_height": range.source_anchor.as_ref().map(|a| u32::from(a.height)),
+            ":source_hash": range.source_anchor.as_ref().map(|a| a.hash.as_str()),
+        ],
+    )?;
+    Ok(())
+}
+
 /// Rewrites one script's ranges: sorted, exact repeats dropped, kept per shard.
 ///
 /// Per shard rather than merged into runs, deliberately: each range carries the
@@ -445,25 +534,7 @@ fn write_coverage(
         named_params![":script": script],
     )?;
     for range in &ranges {
-        tx.execute(
-            &format!(
-                "INSERT INTO {CACHE_SCHEMA}.transparent_coverage
-                    (script, start_height, end_height, kind, shard_id, revision_digest,
-                     terminal_block_hash, source_height, source_hash)
-                 VALUES (:script, :start, :end, :kind, :shard, :revision, :terminal, :source_height, :source_hash)"
-            ),
-            named_params![
-                ":script": script,
-                ":start": u32::from(range.start_height),
-                ":end": u32::from(range.end_height),
-                ":kind": range.kind.as_str(),
-                ":shard": range.shard_id as i64,
-                ":revision": &range.revision_digest,
-                ":terminal": &range.terminal_block_hash,
-                ":source_height": range.source_anchor.as_ref().map(|a| u32::from(a.height)),
-                ":source_hash": range.source_anchor.as_ref().map(|a| a.hash.as_str()),
-            ],
-        )?;
+        insert_coverage(tx, range)?;
     }
     Ok(())
 }
@@ -1034,7 +1105,6 @@ impl WalletDb {
                 CoverageKind::Provisional
             };
             for script in &commit.covered_scripts {
-                let mut ranges = coverage_of(tx, script)?;
                 let range = CoverageRange {
                     script: script.clone(),
                     start_height: commit.start_height,
@@ -1045,13 +1115,42 @@ impl WalletDb {
                     terminal_block_hash: commit.terminal_block_hash.clone(),
                     source_anchor: commit.source_anchor.clone(),
                 };
-                // Re-reading the same shard at a later accepted target extends
-                // its clipped prefix; replace the earlier start-keyed row.
-                ranges.retain(|old| !(old.shard_id == range.shard_id && old.start_height == range.start_height && old.end_height <= range.end_height));
-                if !ranges.contains(&range) {
-                    ranges.push(range);
+                // Rows are keyed by script and start height, so only the row
+                // at this start can be affected by this commit. It is read
+                // alone: the ordinary append — a shard this script has no row
+                // for yet — touches nothing else, so the cost of the Nth
+                // checkpoint does not grow with N. Reading every range and
+                // rewriting them all, as this once did, made a long recovery
+                // quadratic in its own progress.
+                match coverage_at(tx, script, range.start_height)? {
+                    None => insert_coverage(tx, &range)?,
+                    // An identical retry: the row is already what it would be.
+                    Some(old) if old == range => {}
+                    // Re-reading the same shard at a later accepted target
+                    // extends its clipped prefix; the start-keyed row is
+                    // replaced in place.
+                    Some(old)
+                        if old.shard_id == range.shard_id
+                            && old.end_height <= range.end_height =>
+                    {
+                        replace_coverage(tx, &range)?;
+                    }
+                    // Anything else keeps the historical rewrite path and its
+                    // exact semantics, including the refusal of a second range
+                    // at the same start.
+                    Some(_) => {
+                        let mut ranges = coverage_of(tx, script)?;
+                        ranges.retain(|old| {
+                            !(old.shard_id == range.shard_id
+                                && old.start_height == range.start_height
+                                && old.end_height <= range.end_height)
+                        });
+                        if !ranges.contains(&range) {
+                            ranges.push(range);
+                        }
+                        write_coverage(tx, script, ranges)?;
+                    }
                 }
-                write_coverage(tx, script, ranges)?;
             }
 
             for id in &commit.pending_complete {
@@ -1122,13 +1221,16 @@ impl WalletDb {
                                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u32>(1)?)),
                             )
                             .optional()?
+                            // The script itself is deliberately not named:
+                            // this message reaches logs and screens, and a
+                            // script is an address.
                             .ok_or_else(|| {
-                                Error::Corrupt(format!(
-                                    "the ledger returned an output at script {}, which this \
-                                     wallet never derived; storing it would credit somebody \
-                                     else's funds",
-                                    hex::encode(&output.script)
-                                ))
+                                Error::Corrupt(
+                                    "the ledger returned an output at a script this wallet \
+                                     never derived; storing it would credit somebody else's \
+                                     funds"
+                                        .to_owned(),
+                                )
                             })?;
                         owners.insert(output.script.clone(), found);
                         found
@@ -1430,9 +1532,24 @@ impl WalletDb {
             [],
             |row| row.get(0),
         )?;
+        // A script never read reports one below its required height, which
+        // keeps a partly read account from looking current. A wallet in which
+        // *nothing* has been read is a different state from one read through
+        // the block before its birthday, and it is reported as no coverage at
+        // all rather than as a height: a height on screen reads as progress.
+        let anything_read: bool = self.conn.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {CACHE_SCHEMA}.transparent_coverage)"),
+            [],
+            |row| row.get(0),
+        )?;
+        let lowest = |pick: fn(&ScriptCoverage) -> BlockHeight| {
+            anything_read
+                .then(|| coverage.iter().map(pick).min())
+                .flatten()
+        };
         Ok(TransparentState {
-            settled_through: coverage.iter().map(|c| c.settled_through).min(),
-            covered_through: coverage.iter().map(|c| c.covered_through).min(),
+            settled_through: lowest(|c| c.settled_through),
+            covered_through: lowest(|c| c.covered_through),
             unresolved_spends: unresolved,
             provisional_shards: provisional,
             pending_pages: pending,
@@ -1448,7 +1565,6 @@ fn txid_of(bytes: &[u8]) -> Result<TxId, Error> {
         .map_err(|_| Error::Corrupt("a stored transaction id was not 32 bytes".into()))?;
     Ok(TxId::from_bytes(bytes))
 }
-
 
 fn read_anchor(
     row: &rusqlite::Row<'_>,

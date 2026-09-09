@@ -676,6 +676,19 @@ fn a_script_never_read_reports_coverage_below_the_birthday() {
     let state = db.transparent_state(id, h(100)).unwrap();
     assert_eq!(state.completion, None, "no sync has run");
     assert_eq!(state.pending_pages, 0);
+    // The account as a whole has no coverage, not coverage through block 99:
+    // a height on screen reads as progress, and none has been made.
+    assert_eq!(state.covered_through, None);
+    assert_eq!(state.settled_through, None);
+
+    // Once one script has been read, the account's coverage is the lowest of
+    // its scripts, and the unread ones hold it below the birthday.
+    let script = scripts(&db)[0].clone();
+    registered(&mut db, id, &script, 100);
+    db.commit_transparent_shard(&commit(0, "r0", true, (100, 199), vec![script]))
+        .unwrap();
+    let state = db.transparent_state(id, h(100)).unwrap();
+    assert_eq!(state.covered_through, Some(h(99)));
 }
 
 #[test]
@@ -727,4 +740,267 @@ fn schema_three_is_rejected_without_erasing_wallet_data() {
         .unwrap();
     assert_eq!(marker, 42);
     assert!(cache.exists());
+}
+
+// ---------------------------------------------------- append cost (M2)
+
+/// SQLite's count of rows changed on this connection so far.
+fn total_changes(db: &WalletDb) -> u64 {
+    db.connection()
+        .query_row("SELECT total_changes()", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// M0 measured `2N + 2` row changes for the checkpoint after N: every append
+/// read the script's whole coverage, deleted it and wrote it back, so a long
+/// recovery paid for its own progress twice over. An append is now one row
+/// plus the commit record, whatever came before it.
+#[test]
+fn appending_a_checkpoint_writes_only_its_own_row() {
+    for prior in [0u32, 10, 100, 1_000] {
+        let (mut db, id) = wallet();
+        let script = scripts(&db)[0].clone();
+        registered(&mut db, id, &script, 100);
+        for i in 0..prior {
+            db.commit_transparent_shard(&commit(
+                u64::from(i),
+                "m2",
+                true,
+                (100 + i, 100 + i),
+                vec![script.clone()],
+            ))
+            .unwrap();
+        }
+
+        let before = total_changes(&db);
+        let started = std::time::Instant::now();
+        db.commit_transparent_shard(&commit(
+            u64::from(prior),
+            "m2",
+            true,
+            (100 + prior, 100 + prior),
+            vec![script.clone()],
+        ))
+        .unwrap();
+        let elapsed = started.elapsed().as_nanos();
+        let changes = total_changes(&db) - before;
+        let rows = db.transparent_coverage_of(&script).unwrap();
+        println!(
+            "M2_COVERAGE {{\"prior_checkpoints\":{prior},\"sql_row_changes\":{changes},\"elapsed_ns\":{elapsed},\"coverage_rows\":{}}}",
+            rows.len()
+        );
+        assert!(
+            changes <= 3,
+            "the append after {prior} checkpoints changed {changes} rows"
+        );
+        assert_eq!(rows.len(), prior as usize + 1);
+        assert_eq!(rows.first().unwrap().start_height, h(100));
+        assert_eq!(rows.last().unwrap().end_height, h(100 + prior));
+        // Contiguous from the required height: nothing was lost on the way.
+        let mine = db
+            .transparent_coverage(id, h(100))
+            .unwrap()
+            .into_iter()
+            .find(|c| c.script == script)
+            .unwrap();
+        assert_eq!(mine.covered_through, h(100 + prior));
+    }
+}
+
+/// The three ways a start-keyed row can already exist, and what each costs.
+#[test]
+fn a_retry_writes_nothing_and_an_extension_replaces_one_row() {
+    let (mut db, id) = wallet();
+    let script = scripts(&db)[0].clone();
+    registered(&mut db, id, &script, 100);
+    for i in 0..50u32 {
+        db.commit_transparent_shard(&commit(
+            u64::from(i),
+            "r",
+            true,
+            (100 + i * 10, 109 + i * 10),
+            vec![script.clone()],
+        ))
+        .unwrap();
+    }
+    // The tail: an unsealed shard whose accepted prefix will grow.
+    db.commit_transparent_shard(&commit(
+        50,
+        "tail-a",
+        false,
+        (600, 640),
+        vec![script.clone()],
+    ))
+    .unwrap();
+    let held = db.transparent_coverage_of(&script).unwrap();
+    assert_eq!(held.len(), 51);
+
+    // An identical retry: only the commit record is written.
+    let before = total_changes(&db);
+    db.commit_transparent_shard(&commit(
+        50,
+        "tail-a",
+        false,
+        (600, 640),
+        vec![script.clone()],
+    ))
+    .unwrap();
+    assert_eq!(total_changes(&db) - before, 1, "a retry rewrote coverage");
+    assert_eq!(db.transparent_coverage_of(&script).unwrap(), held);
+
+    // The same shard read to a later target: its row is replaced in place.
+    let before = total_changes(&db);
+    db.commit_transparent_shard(&commit(
+        50,
+        "tail-b",
+        false,
+        (600, 680),
+        vec![script.clone()],
+    ))
+    .unwrap();
+    assert_eq!(
+        total_changes(&db) - before,
+        2,
+        "an extension rewrote coverage"
+    );
+    let now = db.transparent_coverage_of(&script).unwrap();
+    assert_eq!(now.len(), 51);
+    assert_eq!(
+        now[..50],
+        held[..50],
+        "the fifty settled rows are untouched"
+    );
+    assert_eq!(now[50].end_height, h(680));
+    assert_eq!(now[50].revision_digest, "tail-b");
+    assert_eq!(
+        db.transparent_coverage(id, h(100))
+            .unwrap()
+            .into_iter()
+            .find(|c| c.script == script)
+            .unwrap()
+            .covered_through,
+        h(680)
+    );
+
+    // A rollback inside the tail, then the re-read at the lower target:
+    // still one row, and the accepted ancestor's hash is what it rests on.
+    db.rollback_transparent_to(
+        &TransparentAnchor {
+            height: h(650),
+            hash: format!("{:064x}", 650),
+        },
+        "reorg",
+    )
+    .unwrap();
+    let rolled = db.transparent_coverage_of(&script).unwrap();
+    assert_eq!(rolled[50].end_height, h(650));
+    assert_eq!(rolled[50].terminal_block_hash, format!("{:064x}", 650));
+    let before = total_changes(&db);
+    db.commit_transparent_shard(&commit(
+        50,
+        "tail-c",
+        false,
+        (600, 650),
+        vec![script.clone()],
+    ))
+    .unwrap();
+    assert_eq!(total_changes(&db) - before, 2);
+    assert_eq!(db.transparent_coverage_of(&script).unwrap().len(), 51);
+}
+
+// ---------------------------------------------------- layouts and messages
+
+/// A wallet another build wrote is refused before this one writes to it.
+/// Opening used to create the tables it was missing and switch it to WAL
+/// first, and only then read the version: a wallet that was going to be
+/// refused was altered on the way.
+#[test]
+fn an_unsupported_layout_is_refused_before_the_files_are_touched() {
+    let dir = tempfile::tempdir().unwrap();
+    let wallet = dir.path().join("wallet.db");
+    let cache = dir.path().join("cache.db");
+    let mut db = WalletDb::open(&wallet, &cache).unwrap();
+    db.set_meta_u32("layout_version", 3).unwrap();
+    db.set_meta_u32("preserved_marker", 42).unwrap();
+    drop(db);
+    // Fold the write-ahead logs into the files so the bytes on disk are the
+    // whole database, then remember them.
+    {
+        let conn = rusqlite::Connection::open(&wallet).unwrap();
+        conn.execute("ATTACH DATABASE ?1 AS cache", [cache.to_string_lossy()])
+            .unwrap();
+        conn.execute_batch(
+            "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA cache.wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+    }
+    let wallet_before = std::fs::read(&wallet).unwrap();
+    let cache_before = std::fs::read(&cache).unwrap();
+    let wal_len = |base: &std::path::Path| {
+        let mut name = base.as_os_str().to_owned();
+        name.push("-wal");
+        std::fs::metadata(name).map(|m| m.len()).unwrap_or(0)
+    };
+    assert_eq!(wal_len(&wallet), 0);
+    assert_eq!(wal_len(&cache), 0);
+
+    assert!(matches!(
+        WalletDb::open(&wallet, &cache),
+        Err(zakura_wallet_store::Error::VersionMismatch {
+            found: 3,
+            expected: 4,
+            ..
+        })
+    ));
+    assert!(matches!(
+        WalletDb::preflight(&wallet),
+        Err(zakura_wallet_store::Error::VersionMismatch { found: 3, .. })
+    ));
+
+    assert_eq!(
+        std::fs::read(&wallet).unwrap(),
+        wallet_before,
+        "wallet.db changed"
+    );
+    assert_eq!(
+        std::fs::read(&cache).unwrap(),
+        cache_before,
+        "cache.db changed"
+    );
+    assert_eq!(wal_len(&wallet), 0, "wallet.db-wal was written");
+    assert_eq!(wal_len(&cache), 0, "cache.db-wal was written");
+}
+
+/// A wallet that does not exist yet, or has no versions yet, passes: there is
+/// nothing to disagree with.
+#[test]
+fn a_new_wallet_passes_the_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let wallet = dir.path().join("wallet.db");
+    WalletDb::preflight(&wallet).unwrap();
+    let cache = dir.path().join("cache.db");
+    let db = WalletDb::open(&wallet, &cache).unwrap();
+    drop(db);
+    WalletDb::preflight(&wallet).unwrap();
+}
+
+/// The message that refuses somebody else's output reaches logs and screens,
+/// so the script — an address — must not be in it.
+#[test]
+fn a_refused_script_is_not_named_in_the_error() {
+    let (mut db, id) = wallet();
+    let script = scripts(&db)[0].clone();
+    registered(&mut db, id, &script, 100);
+    let foreign = vec![0x76, 0xa9, 0x14, 0xde, 0xad, 0xbe, 0xef, 0x88, 0xac];
+    let commit = with_receive(
+        commit(0, "r0", true, (100, 199), vec![script]),
+        receive(&foreign, 1, 0, 1, 150),
+    );
+    let error = db
+        .commit_transparent_shard(&commit)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("never derived"), "{error}");
+    assert!(!error.contains("deadbeef"), "the script leaked: {error}");
+    assert!(!error.contains("76a914"), "the script leaked: {error}");
 }
