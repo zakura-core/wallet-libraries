@@ -224,9 +224,24 @@ impl<P: Parameters + Send + Sync + 'static> TransparentPir<P> {
                 let height = self::height(height)?;
                 rolled_back_to = Some(rolled_back_to.map_or(height, |held| held.min(height)));
             }
-            let complete = report.completion == Completion::Complete;
+            // Discovery continues while coverage is complete. A spend whose
+            // receive lies below the wallet's floor leaves the balance
+            // unresolved, and says so, but every script in scope has been
+            // read over its whole range: the window can still move, and a
+            // receive at its edge is money the wallet should know about now
+            // rather than after another run. Any other stop is short
+            // coverage, and widening over it would read the new scripts
+            // over less than they need.
+            let coverage_complete = matches!(
+                report.completion,
+                Completion::Complete
+                    | Completion::Incomplete {
+                        reason: IncompleteReason::UnresolvedSpends,
+                        ..
+                    }
+            );
             last = Some(report);
-            if !complete {
+            if !coverage_complete {
                 break;
             }
         }
