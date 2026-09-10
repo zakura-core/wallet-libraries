@@ -442,6 +442,9 @@ pub(crate) fn spendable_utxos(
          JOIN {CACHE_SCHEMA}.transactions t ON t.id = o.transaction_id
          WHERE o.account_id = :account
            {address_clause}
+           -- Only addresses this wallet holds a key for. An imported script
+           -- is watched and counted, and cannot be signed for.
+           AND a.key_scope IN (0, 1)
            -- Mined and buried. There is no witness to stabilise here, so depth
            -- is the whole of the guarantee.
            AND t.mined_height IS NOT NULL
@@ -461,20 +464,17 @@ pub(crate) fn spendable_utxos(
         marginal = 5_000u64,
     ))?;
 
-    let rows = stmt.query_map(
-        named_params![":account": account.0],
-        |row| {
-            Ok((
-                row.get::<_, u8>(0)?,
-                row.get::<_, u32>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
-                row.get::<_, u32>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, Vec<u8>>(6)?,
-            ))
-        },
-    )?;
+    let rows = stmt.query_map(named_params![":account": account.0], |row| {
+        Ok((
+            row.get::<_, u8>(0)?,
+            row.get::<_, u32>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, Vec<u8>>(3)?,
+            row.get::<_, u32>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, Vec<u8>>(6)?,
+        ))
+    })?;
 
     let mut out = Vec::new();
     for row in rows {

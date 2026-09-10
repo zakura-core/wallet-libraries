@@ -137,7 +137,9 @@ impl fmt::Display for Error {
         match self {
             Error::Query(e) => write!(f, "wallet database query failed: {e}"),
             Error::Serialization(e) => write!(f, "tree data could not be encoded or decoded: {e}"),
-            Error::Corrupt(what) => write!(f, "the derived database holds something unusable: {what}"),
+            Error::Corrupt(what) => {
+                write!(f, "the derived database holds something unusable: {what}")
+            }
             Error::ShardDiscontinuity {
                 attempted,
                 existing,

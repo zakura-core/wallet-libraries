@@ -228,9 +228,7 @@ pub(crate) fn list<P: Parameters>(
 ///
 /// Scanning below it can produce nothing for any account, so it is the floor
 /// for every range the wallet ever queues.
-pub(crate) fn earliest_birthday(
-    conn: &rusqlite::Connection,
-) -> Result<Option<BlockHeight>, Error> {
+pub(crate) fn earliest_birthday(conn: &rusqlite::Connection) -> Result<Option<BlockHeight>, Error> {
     conn.query_row("SELECT MIN(birthday_height) FROM accounts", [], |row| {
         Ok(row.get::<_, Option<u32>>(0)?.map(BlockHeight::from))
     })

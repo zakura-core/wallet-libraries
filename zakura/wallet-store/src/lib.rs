@@ -44,7 +44,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 pub use accounts::Account;
 pub use apply::{StoredNote, SubtreeRoot};
 pub use error::{Error, TreeError, VersionKind};
-pub use gap::{GapLimits, GapState};
+pub use gap::{GapLimits, GapState, IMPORTED_SCOPE_CODE};
 pub use report::{Balance, HistoryEntry, PoolAmounts, SpendableUtxo, TransparentSpendPolicy};
 pub use scan_queue::VERIFY_LOOKAHEAD;
 pub use transparent::{ScriptCoverage, TransparentState};
@@ -476,7 +476,8 @@ impl WalletDb {
         let mut addresses = Vec::new();
         for row in rows {
             let (id, account, scope, script) = row?;
-            if zakura_wallet_core::KeyScope::from_code(scope).is_none() {
+            let imported = scope == gap::IMPORTED_SCOPE_CODE;
+            if !imported && zakura_wallet_core::KeyScope::from_code(scope).is_none() {
                 return Err(Error::Corrupt(format!(
                     "address {id} is in key scope {scope}, which this wallet does not issue; \
                      treating it as absent would understate the balance"
@@ -486,6 +487,7 @@ impl WalletDb {
                 script,
                 account: zakura_wallet_core::AccountId(account),
                 address_id: id,
+                imported,
             });
         }
 
@@ -512,6 +514,23 @@ impl WalletDb {
             row.get::<_, String>(0)
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Records a transparent script the user imported into `account`.
+    ///
+    /// Watched like a derived address and attributed to the account, but in
+    /// its own scope: it moves no gap-limit window, and it is never offered
+    /// as spendable, because no key of this wallet signs for it. The ledger
+    /// reads it from the first height its set covers rather than from the
+    /// account's birthday, since an imported script's history may begin
+    /// anywhere.
+    pub fn import_transparent_script(
+        &mut self,
+        account: zakura_wallet_core::AccountId,
+        address: &str,
+        script: &[u8],
+    ) -> Result<(), Error> {
+        self.transactionally(|tx| gap::record_imported(tx, account, address, script))
     }
 
     /// Records a transparent address the wallet is watching.
@@ -1128,6 +1147,9 @@ pub struct WatchedScript {
     pub account: zakura_wallet_core::AccountId,
     /// The stored row, handed back on a hit so attribution needs no re-derivation.
     pub address_id: i64,
+    /// Imported by the user rather than derived from the account's key. Its
+    /// history may begin anywhere, and nothing of this wallet's can spend it.
+    pub imported: bool,
 }
 
 /// Every script the wallet watches, and whose it is.

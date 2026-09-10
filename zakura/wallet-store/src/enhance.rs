@@ -13,10 +13,10 @@ use orchard::note::Nullifier;
 use rusqlite::{OptionalExtension, named_params};
 use zakura_wallet_core::{
     AccountId,
-    retrieval::Locator,
     account::KeyScope,
     enhanced::{EnhancedTx, TransferType},
     pool::PoolId,
+    retrieval::Locator,
 };
 use zcash_address::{
     ToAddress, ZcashAddress,
@@ -31,8 +31,8 @@ use zcash_protocol::{
 use crate::{
     apply::note_version_code,
     error::Error,
-    schema::CACHE_SCHEMA,
     retrieval::{clear_private_work, delete, queue},
+    schema::CACHE_SCHEMA,
 };
 
 /// What the wallet knows about a transaction from outside its bytes.
@@ -83,10 +83,7 @@ pub(crate) fn put_enhanced_tx<P: Parameters>(
     // the durable database. A transaction reached through enhancement is not
     // necessarily the wallet's; without this the wallet accumulates strangers'
     // transactions in the one file it never drops.
-    if funding.is_none()
-        && tx.outputs.is_empty()
-        && tx.transparent_received.is_empty()
-    {
+    if funding.is_none() && tx.outputs.is_empty() && tx.transparent_received.is_empty() {
         delete(conn, Locator::Transaction(tx.txid))?;
         return Ok(PutOutcome::Irrelevant);
     }

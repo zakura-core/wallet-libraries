@@ -107,7 +107,10 @@ impl TransparentProgress {
     /// Whether the transparent balance may be called synchronized: the run
     /// completed and nothing it holds contradicts itself.
     pub fn is_synchronized(&self) -> bool {
-        self.completion.is_complete() && self.unresolved == 0 && self.pending == 0
+        self.completion.is_complete()
+            && self.unresolved == 0
+            && self.pending == 0
+            && self.outside_coverage == 0
     }
 }
 

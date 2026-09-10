@@ -223,7 +223,10 @@ pub fn estimated_size(block: &CompactBlock) -> usize {
                 TX_OVERHEAD
                     + (tx.orchard_actions.len() + tx.ironwood_actions.len()) * ACTION_BYTES
                     + tx.vin.len() * 36
-                    + tx.vout.iter().map(|o| 8 + o.script_pubkey().0.0.len()).sum::<usize>()
+                    + tx.vout
+                        .iter()
+                        .map(|o| 8 + o.script_pubkey().0.0.len())
+                        .sum::<usize>()
             })
             .sum::<usize>()
 }
@@ -251,4 +254,3 @@ impl std::error::Error for SourceError {
         Some(self.0.as_ref())
     }
 }
-

@@ -246,7 +246,6 @@ fn recording_an_address_twice_does_not_duplicate_it() {
     assert_eq!(after, before, "re-recording derived addresses adds nothing");
 }
 
-
 #[test]
 fn only_a_mined_receipt_moves_the_window() {
     // A payment sitting in the mempool may never be mined. If it advanced the

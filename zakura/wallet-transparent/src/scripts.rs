@@ -9,7 +9,8 @@
 //!
 //! Each script carries the first height the wallet needs it covered from: its
 //! account's birthday, or the first height the published set covers if that is
-//! later.
+//! later. An imported script's history may begin anywhere, so it is read from
+//! the set's first height whatever the account's birthday.
 //! The library keeps that height per script and never raises it, which is what
 //! lets a script the gap limit only just reached be read over the whole range
 //! its siblings were, rather than inheriting coverage it never earned.
@@ -23,6 +24,13 @@ use zakura_wallet_store::WalletDb;
 use zcash_protocol::consensus::Parameters;
 
 use crate::Error;
+
+// The wallet counts scripts outside coverage from its own rows, with a limit
+// it states itself; it must be the limit the shard layout actually has.
+const _: () = assert!(
+    zakura_wallet_store::transparent::MAX_INDEXABLE_SCRIPT_BYTES
+        == transparent_shard::MAX_SCRIPT_BYTES
+);
 
 /// The wallet's scripts, as the library wants them.
 #[derive(Debug, Clone, Default)]
@@ -86,10 +94,15 @@ pub fn watched_scripts<P: Parameters>(
         };
         let bytes = script.as_slice().to_vec();
         out.owners.insert(bytes.clone(), watched.account);
+        let (origin, required_from) = if watched.imported {
+            (ScriptOrigin::Imported, set_start)
+        } else {
+            (ScriptOrigin::Derived, (*birthday).max(set_start))
+        };
         out.entries.push(ScriptEntry {
             script: bytes,
-            origin: ScriptOrigin::Derived,
-            required_from: (*birthday).max(set_start),
+            origin,
+            required_from,
         });
     }
     Ok(out)

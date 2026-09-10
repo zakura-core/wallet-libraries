@@ -1004,3 +1004,175 @@ fn a_refused_script_is_not_named_in_the_error() {
     assert!(!error.contains("deadbeef"), "the script leaked: {error}");
     assert!(!error.contains("76a914"), "the script leaked: {error}");
 }
+
+// ------------------------------------------------------- imported scripts
+
+fn p2pkh(tag: u8) -> Vec<u8> {
+    let mut script = vec![0x76, 0xa9, 0x14];
+    script.extend_from_slice(&[tag; 20]);
+    script.extend_from_slice(&[0x88, 0xac]);
+    script
+}
+
+#[test]
+fn an_imported_script_is_watched_in_its_own_scope_and_moves_no_window() {
+    let (mut db, id) = wallet();
+    let limits = GapLimits::default();
+    let before = watched_addresses(&db).len();
+    let script = p2pkh(0xc3);
+    db.import_transparent_script(id, "t1imported", &script)
+        .unwrap();
+
+    let watch = db.transparent_watch().unwrap();
+    assert_eq!(watch.addresses.len(), before + 1);
+    let imported: Vec<_> = watch.addresses.iter().filter(|a| a.imported).collect();
+    assert_eq!(imported.len(), 1, "exactly the imported script is marked");
+    assert_eq!(imported[0].script, script);
+    assert_eq!(imported[0].account, id);
+    assert!(
+        watch.addresses.iter().filter(|a| !a.imported).count() == before,
+        "derived addresses are not marked imported"
+    );
+
+    // The window is measured over derivation scopes alone: an imported row
+    // at any index neither widens nor satisfies it.
+    assert!(
+        db.addresses_to_generate(id, zakura_wallet_core::KeyScope::External, &limits)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        db.addresses_to_generate(id, zakura_wallet_core::KeyScope::Internal, &limits)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        db.maintain_transparent_addresses(&params(), id, &limits)
+            .unwrap(),
+        0
+    );
+
+    // A second import takes the next index in the same scope.
+    db.import_transparent_script(id, "t1imported2", &p2pkh(0xc4))
+        .unwrap();
+    let scopes: Vec<(u8, u32)> = db
+        .connection()
+        .prepare(
+            "SELECT key_scope, transparent_child_index FROM cache.addresses
+             WHERE key_scope = ?1 ORDER BY transparent_child_index",
+        )
+        .unwrap()
+        .query_map([zakura_wallet_store::IMPORTED_SCOPE_CODE], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        scopes,
+        vec![
+            (zakura_wallet_store::IMPORTED_SCOPE_CODE, 0),
+            (zakura_wallet_store::IMPORTED_SCOPE_CODE, 1)
+        ]
+    );
+}
+
+#[test]
+fn an_imported_script_receives_into_the_balance_and_is_never_spendable() {
+    let (mut db, id) = wallet();
+    let derived = scripts(&db)[0].clone();
+    let imported = p2pkh(0xc5);
+    db.import_transparent_script(id, "t1imported", &imported)
+        .unwrap();
+    registered(&mut db, id, &derived, 100);
+    db.add_transparent_scripts(&[TransparentScript {
+        script: imported.clone(),
+        account: id,
+        imported: true,
+        required_from: h(1),
+    }])
+    .unwrap();
+    assert!(
+        db.transparent_scripts()
+            .unwrap()
+            .iter()
+            .any(|s| s.script == imported && s.imported && s.required_from == h(1)),
+        "the imported script keeps its origin and its own required height"
+    );
+
+    let shard = with_receive(
+        with_receive(
+            commit(
+                0,
+                "r0",
+                true,
+                (1, 200),
+                vec![derived.clone(), imported.clone()],
+            ),
+            receive(&imported, 1, 0, 40_000, 150),
+        ),
+        receive(&derived, 2, 0, 30_000, 160),
+    );
+    db.commit_transparent_shard(&shard).unwrap();
+
+    assert_eq!(
+        db.transparent_balance(id).unwrap().total().into_u64(),
+        70_000,
+        "an output at an imported script is the account's money"
+    );
+    let shown = db.transparent_utxos(id).unwrap();
+    assert_eq!(shown.len(), 2);
+    assert!(
+        shown
+            .iter()
+            .any(|(address, value, _)| address == "t1imported" && *value == 40_000)
+    );
+
+    let spendable = db
+        .spendable_utxos(id, zakura_wallet_store::TransparentSpendPolicy::AnyAddress)
+        .unwrap();
+    assert_eq!(
+        spendable.len(),
+        1,
+        "only the derived output can be signed for"
+    );
+    assert_eq!(spendable[0].scope, zakura_wallet_core::KeyScope::External);
+    assert_eq!(spendable[0].txout.value().into_u64(), 30_000);
+}
+
+#[test]
+fn a_script_too_long_to_index_is_counted_outside_coverage() {
+    let (mut db, id) = wallet();
+    let state = db.transparent_state(id, h(100)).unwrap();
+    assert_eq!(state.outside_coverage, 0);
+
+    let long = vec![0x51; zakura_wallet_store::transparent::MAX_INDEXABLE_SCRIPT_BYTES + 1];
+    db.record_transparent_address(
+        id,
+        zakura_wallet_core::KeyScope::External,
+        900,
+        "t1long",
+        &long,
+    )
+    .unwrap();
+    let state = db.transparent_state(id, h(100)).unwrap();
+    assert_eq!(
+        state.outside_coverage, 1,
+        "counted from the rows, before any sync and after any restart"
+    );
+
+    // Exactly the limit is still indexable.
+    let at_limit = vec![0x51; zakura_wallet_store::transparent::MAX_INDEXABLE_SCRIPT_BYTES];
+    db.record_transparent_address(
+        id,
+        zakura_wallet_core::KeyScope::External,
+        901,
+        "t1limit",
+        &at_limit,
+    )
+    .unwrap();
+    assert_eq!(
+        db.transparent_state(id, h(100)).unwrap().outside_coverage,
+        1
+    );
+}

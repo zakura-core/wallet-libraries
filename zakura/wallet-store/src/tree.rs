@@ -52,8 +52,7 @@ pub const SHARD_HEIGHT: u8 = TREE_DEPTH / 2;
 pub const PRUNING_DEPTH: usize = 100;
 
 /// The commitment tree type this wallet uses, for either pool.
-pub type CommitmentTree<'a> =
-    ShardTree<WalletShardStore<'a>, TREE_DEPTH, SHARD_HEIGHT>;
+pub type CommitmentTree<'a> = ShardTree<WalletShardStore<'a>, TREE_DEPTH, SHARD_HEIGHT>;
 
 /// A `shardtree` store backed by the wallet's unified tree tables.
 ///
@@ -108,8 +107,8 @@ impl ShardStore for WalletShardStore<'_> {
                 // holding the server-supplied root hash, so this never has to
                 // reconstruct one from nothing.
                 let shard_tree = read_shard(&mut Cursor::new(shard_data))?;
-                let located = LocatedPrunableTree::from_parts(shard_root, shard_tree)
-                    .map_err(|addr| {
+                let located =
+                    LocatedPrunableTree::from_parts(shard_root, shard_tree).map_err(|addr| {
                         Error::Serialization(io::Error::new(
                             io::ErrorKind::InvalidData,
                             format!("stored shard contains invalid data at address {addr:?}"),
@@ -299,9 +298,7 @@ impl ShardStore for WalletShardStore<'_> {
     fn checkpoint_count(&self) -> Result<usize, Self::Error> {
         self.conn
             .query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM {CACHE_SCHEMA}.tree_checkpoints WHERE pool = :pool"
-                ),
+                &format!("SELECT COUNT(*) FROM {CACHE_SCHEMA}.tree_checkpoints WHERE pool = :pool"),
                 named_params![":pool": self.code()],
                 |row| row.get(0),
             )
@@ -394,10 +391,7 @@ impl ShardStore for WalletShardStore<'_> {
         }
     }
 
-    fn remove_checkpoint(
-        &mut self,
-        checkpoint_id: &Self::CheckpointId,
-    ) -> Result<(), Self::Error> {
+    fn remove_checkpoint(&mut self, checkpoint_id: &Self::CheckpointId) -> Result<(), Self::Error> {
         // The cascade on `tree_checkpoint_marks_removed` clears the marks, but
         // only if foreign keys are enforced; the connection enables them.
         self.conn.execute(
@@ -536,10 +530,7 @@ impl WalletShardStore<'_> {
             .transpose()
     }
 
-    fn read_marks_removed(
-        &self,
-        checkpoint_id: BlockHeight,
-    ) -> Result<BTreeSet<Position>, Error> {
+    fn read_marks_removed(&self, checkpoint_id: BlockHeight) -> Result<BTreeSet<Position>, Error> {
         let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT mark_removed_position FROM {CACHE_SCHEMA}.tree_checkpoint_marks_removed
              WHERE pool = :pool AND checkpoint_id = :checkpoint_id"

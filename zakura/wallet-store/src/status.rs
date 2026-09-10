@@ -50,7 +50,6 @@ pub const UNEXPIRED: &str = "(
         AND t.confirmed_unmined_at_height < COALESCE(t.min_observed_height, 0) + 140)
 )";
 
-
 /// Applies what a source said about a transaction.
 pub(crate) fn set_transaction_status(
     conn: &rusqlite::Transaction<'_>,

@@ -144,10 +144,7 @@ pub(crate) fn delete(conn: &rusqlite::Connection, locator: Locator) -> Result<()
 /// would have recovered is already in hand, so continuing to ask would be a
 /// query spent on nothing — and each one still costs whatever a private
 /// backend's query volume reveals.
-pub(crate) fn clear_private_work(
-    conn: &rusqlite::Connection,
-    subject: TxId,
-) -> Result<(), Error> {
+pub(crate) fn clear_private_work(conn: &rusqlite::Connection, subject: TxId) -> Result<(), Error> {
     conn.execute(
         &format!(
             "DELETE FROM {CACHE_SCHEMA}.retrieval_queue
@@ -225,7 +222,9 @@ pub(crate) fn is_barred(conn: &rusqlite::Connection, subject: TxId) -> Result<bo
             "SELECT 1 FROM {CACHE_SCHEMA}.retrieval_queue
              WHERE subject_txid = :subject AND fallback_barred = 1 LIMIT 1"
         ))?
-        .query_row(named_params![":subject": subject.as_ref()], |row| row.get(0))
+        .query_row(named_params![":subject": subject.as_ref()], |row| {
+            row.get(0)
+        })
         .optional()?;
     Ok(barred.unwrap_or(false))
 }
@@ -371,10 +370,7 @@ pub(crate) fn mark_polled(
 /// Separate from polling because the two bound different things: polling stops
 /// the same question being asked twice at one tip, while attempts stop a
 /// request that can never succeed being retried forever.
-pub(crate) fn mark_attempted(
-    conn: &rusqlite::Connection,
-    locator: Locator,
-) -> Result<(), Error> {
+pub(crate) fn mark_attempted(conn: &rusqlite::Connection, locator: Locator) -> Result<(), Error> {
     conn.execute(
         &format!(
             "UPDATE {CACHE_SCHEMA}.retrieval_queue SET attempts = attempts + 1

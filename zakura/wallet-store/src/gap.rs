@@ -53,6 +53,15 @@ impl GapLimits {
     }
 }
 
+/// The `key_scope` code of a transparent script the user imported.
+///
+/// Not a derivation scope: nothing derives an imported script, no gap limit
+/// applies to it, and no key of this wallet can spend from it. It lives in the
+/// address table so a recovered output at it resolves to an account, under a
+/// code the gap-limit queries never select. Codes 0 and 1 are the derivation
+/// scopes and 2 is reserved for ZIP 320 ephemeral addresses.
+pub const IMPORTED_SCOPE_CODE: u8 = 3;
+
 /// Where an account's addresses currently stand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GapState {
@@ -151,6 +160,39 @@ pub(crate) fn record_address(
     address: &str,
     script: &[u8],
 ) -> Result<(), Error> {
+    record_address_in_scope(conn, account, scope.code(), index, address, script)
+}
+
+/// Records an imported script at the next free index of the imported scope.
+///
+/// The index has no meaning beyond keeping the row unique; nothing derives
+/// from it and no window is measured against it.
+pub(crate) fn record_imported(
+    conn: &rusqlite::Transaction<'_>,
+    account: AccountId,
+    address: &str,
+    script: &[u8],
+) -> Result<(), Error> {
+    let next: u32 = conn.query_row(
+        &format!(
+            "SELECT COALESCE(MAX(transparent_child_index) + 1, 0)
+             FROM {CACHE_SCHEMA}.addresses
+             WHERE account_id = :account AND key_scope = :scope"
+        ),
+        named_params![":account": account.0, ":scope": IMPORTED_SCOPE_CODE],
+        |row| row.get(0),
+    )?;
+    record_address_in_scope(conn, account, IMPORTED_SCOPE_CODE, next, address, script)
+}
+
+fn record_address_in_scope(
+    conn: &rusqlite::Transaction<'_>,
+    account: AccountId,
+    scope: u8,
+    index: u32,
+    address: &str,
+    script: &[u8],
+) -> Result<(), Error> {
     conn.execute(
         &format!(
             "INSERT INTO {CACHE_SCHEMA}.addresses
@@ -164,7 +206,7 @@ pub(crate) fn record_address(
         ),
         named_params![
             ":account": account.0,
-            ":scope": scope.code(),
+            ":scope": scope,
             // The same eleven-byte big-endian encoding accounts.rs uses. These
             // two writers share a uniqueness constraint, so encoding the same
             // index differently — which they did — makes the unified address
@@ -179,7 +221,6 @@ pub(crate) fn record_address(
     )?;
     Ok(())
 }
-
 
 /// Records that an address was used on chain at `height`.
 ///

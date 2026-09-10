@@ -33,7 +33,10 @@ fn an_account_derived_from_a_seed_can_be_read_back() {
         .create_account(&params(), &seed(1), zip32(0), h(1_000_000))
         .unwrap();
 
-    let account = db.account(&params(), id).unwrap().expect("the account exists");
+    let account = db
+        .account(&params(), id)
+        .unwrap()
+        .expect("the account exists");
     assert_eq!(account.id, id);
     assert_eq!(account.birthday, h(1_000_000));
     assert!(account.has_spend_key, "a seed-derived account can spend");
@@ -57,16 +60,32 @@ fn the_same_seed_and_index_derive_the_same_key() {
         .unwrap();
 
     assert_eq!(
-        first.account(&params(), a).unwrap().unwrap().orchard_fvk().unwrap().to_bytes(),
-        second.account(&params(), b).unwrap().unwrap().orchard_fvk().unwrap().to_bytes()
+        first
+            .account(&params(), a)
+            .unwrap()
+            .unwrap()
+            .orchard_fvk()
+            .unwrap()
+            .to_bytes(),
+        second
+            .account(&params(), b)
+            .unwrap()
+            .unwrap()
+            .orchard_fvk()
+            .unwrap()
+            .to_bytes()
     );
 }
 
 #[test]
 fn different_account_indices_are_different_accounts() {
     let mut db = test_db().unwrap();
-    let a = db.create_account(&params(), &seed(1), zip32(0), h(100)).unwrap();
-    let b = db.create_account(&params(), &seed(1), zip32(1), h(100)).unwrap();
+    let a = db
+        .create_account(&params(), &seed(1), zip32(0), h(100))
+        .unwrap();
+    let b = db
+        .create_account(&params(), &seed(1), zip32(1), h(100))
+        .unwrap();
 
     assert_ne!(a, b);
     let keys: Vec<_> = db
@@ -141,7 +160,9 @@ fn each_address_issued_is_a_new_one() {
     // Reusing an address lets anybody who has seen it link the payments made
     // to it.
     let mut db = test_db().unwrap();
-    let id = db.create_account(&params(), &seed(1), zip32(0), h(100)).unwrap();
+    let id = db
+        .create_account(&params(), &seed(1), zip32(0), h(100))
+        .unwrap();
 
     let mut seen = Vec::new();
     for _ in 0..5 {
@@ -155,7 +176,11 @@ fn each_address_issued_is_a_new_one() {
     let mut unique = encoded.clone();
     unique.sort();
     unique.dedup();
-    assert_eq!(unique.len(), encoded.len(), "every address must be distinct");
+    assert_eq!(
+        unique.len(),
+        encoded.len(),
+        "every address must be distinct"
+    );
 
     // And the diversifier indices advance rather than restarting.
     for pair in seen.windows(2) {
@@ -166,7 +191,9 @@ fn each_address_issued_is_a_new_one() {
 #[test]
 fn issued_addresses_are_recorded() {
     let mut db = test_db().unwrap();
-    let id = db.create_account(&params(), &seed(1), zip32(0), h(100)).unwrap();
+    let id = db
+        .create_account(&params(), &seed(1), zip32(0), h(100))
+        .unwrap();
     db.next_address(&params(), id, KeyScope::External, Some(h(555)))
         .unwrap();
 
@@ -188,7 +215,9 @@ fn issued_addresses_are_recorded() {
 #[test]
 fn the_two_scopes_have_independent_address_sequences() {
     let mut db = test_db().unwrap();
-    let id = db.create_account(&params(), &seed(1), zip32(0), h(100)).unwrap();
+    let id = db
+        .create_account(&params(), &seed(1), zip32(0), h(100))
+        .unwrap();
 
     let (_, external) = db
         .next_address(&params(), id, KeyScope::External, None)
@@ -229,7 +258,9 @@ fn change_goes_to_the_internal_address() {
     // Which is what makes it recognisable as change on a later scan, whatever
     // order the blocks arrive in.
     let mut db = test_db().unwrap();
-    let id = db.create_account(&params(), &seed(1), zip32(0), h(100)).unwrap();
+    let id = db
+        .create_account(&params(), &seed(1), zip32(0), h(100))
+        .unwrap();
     let account = db.account(&params(), id).unwrap().unwrap();
 
     let change = db.change_address(&params(), id).unwrap();
@@ -298,7 +329,9 @@ fn balance_separates_what_can_be_spent_from_what_cannot() {
     // The three figures are the same funds at different stages of becoming
     // usable. A wallet showing only one of them will confuse somebody.
     let mut db = test_db().unwrap();
-    let id = db.create_account(&params(), &seed(1), zip32(0), h(100)).unwrap();
+    let id = db
+        .create_account(&params(), &seed(1), zip32(0), h(100))
+        .unwrap();
 
     plant_note(&db, id, PoolId::Ironwood, 100, true, 0, None);
     plant_note(&db, id, PoolId::Ironwood, 200, false, 1, None);
@@ -322,7 +355,9 @@ fn balance_separates_what_can_be_spent_from_what_cannot() {
 #[test]
 fn balance_is_per_pool_and_sums_across_them() {
     let mut db = test_db().unwrap();
-    let id = db.create_account(&params(), &seed(1), zip32(0), h(100)).unwrap();
+    let id = db
+        .create_account(&params(), &seed(1), zip32(0), h(100))
+        .unwrap();
 
     plant_note(&db, id, PoolId::Orchard, 700, true, 0, None);
     plant_note(&db, id, PoolId::Ironwood, 300, true, 1, None);
@@ -344,8 +379,12 @@ fn balance_is_per_pool_and_sums_across_them() {
 #[test]
 fn one_accounts_notes_are_not_anothers() {
     let mut db = test_db().unwrap();
-    let a = db.create_account(&params(), &seed(1), zip32(0), h(100)).unwrap();
-    let b = db.create_account(&params(), &seed(2), zip32(0), h(100)).unwrap();
+    let a = db
+        .create_account(&params(), &seed(1), zip32(0), h(100))
+        .unwrap();
+    let b = db
+        .create_account(&params(), &seed(2), zip32(0), h(100))
+        .unwrap();
 
     plant_note(&db, a, PoolId::Ironwood, 500, true, 0, None);
 
@@ -359,7 +398,9 @@ fn one_accounts_notes_are_not_anothers() {
 #[test]
 fn an_empty_account_has_a_zero_balance() {
     let mut db = test_db().unwrap();
-    let id = db.create_account(&params(), &seed(1), zip32(0), h(100)).unwrap();
+    let id = db
+        .create_account(&params(), &seed(1), zip32(0), h(100))
+        .unwrap();
     assert_eq!(db.total_balance(id).unwrap(), Default::default());
     assert!(db.history(id, 10).unwrap().is_empty());
 }
@@ -373,7 +414,9 @@ fn issuing_an_address_consumes_the_window_rather_than_stepping_over_it() {
     // another wallet restoring the same seed would stop looking — which is how
     // funds become invisible to the wallet that owns them.
     let mut db = test_db().unwrap();
-    let id = db.create_account(&params(), &seed(1), zip32(0), h(100)).unwrap();
+    let id = db
+        .create_account(&params(), &seed(1), zip32(0), h(100))
+        .unwrap();
 
     let derived: u32 = db
         .connection()
@@ -383,7 +426,10 @@ fn issuing_an_address_consumes_the_window_rather_than_stepping_over_it() {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(derived > 1, "creating an account derives a window to hand out");
+    assert!(
+        derived > 1,
+        "creating an account derives a window to hand out"
+    );
 
     // Issue several, and watch them come out consecutively from zero.
     let mut issued = Vec::new();
@@ -396,7 +442,10 @@ fn issuing_an_address_consumes_the_window_rather_than_stepping_over_it() {
 
     let mut expected = zip32::DiversifierIndex::new();
     for index in &issued {
-        assert_eq!(*index, expected, "addresses are handed out in order from zero");
+        assert_eq!(
+            *index, expected,
+            "addresses are handed out in order from zero"
+        );
         expected.increment().unwrap();
     }
 

@@ -763,6 +763,15 @@ async fn a_script_the_private_tables_cannot_index_is_reported_not_hidden() {
     let progress = progress.unwrap();
     complete(&progress);
     assert_eq!(progress.outside_coverage, 1);
+    assert!(
+        !progress.is_synchronized(),
+        "a script outside coverage forbids calling the balance synchronized"
+    );
+    assert_eq!(
+        state(&db, account).outside_coverage,
+        1,
+        "the count is persisted in the wallet's own rows, not only reported by the run"
+    );
     let mine = db
         .transparent_coverage(account, h(FIRST))
         .unwrap()

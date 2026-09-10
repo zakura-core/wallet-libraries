@@ -125,10 +125,9 @@ fn close_to_the_tip_the_gap_is_chain_tip_priority() {
 
     let queued = ranges(&db);
     assert!(
-        queued
-            .iter()
-            .any(|r| r.priority() == ScanPriority::ChainTip
-                && r.block_range().end == h(new_tip + 1)),
+        queued.iter().any(
+            |r| r.priority() == ScanPriority::ChainTip && r.block_range().end == h(new_tip + 1)
+        ),
         "{queued:?}"
     );
 }
@@ -181,10 +180,7 @@ fn the_tip_shard_range_follows_the_lagging_pool() {
     let queued = ranges(&db);
     let tip_shard = queued
         .iter()
-        .find(|r| {
-            r.priority() == ScanPriority::ChainTip
-                && r.block_range().end == h(START + 1_001)
-        })
+        .find(|r| r.priority() == ScanPriority::ChainTip && r.block_range().end == h(START + 1_001))
         .unwrap_or_else(|| panic!("expected a tip-shard range in {queued:?}"));
 
     assert_eq!(
@@ -235,10 +231,8 @@ fn without_shard_metadata_the_gap_is_a_plain_historic_range() {
 
     let queued = ranges(&db);
     assert!(
-        queued
-            .iter()
-            .any(|r| r.priority() == ScanPriority::Historic
-                && r.block_range() == &(h(START + 3)..h(START + 501))),
+        queued.iter().any(|r| r.priority() == ScanPriority::Historic
+            && r.block_range() == &(h(START + 3)..h(START + 501))),
         "{queued:?}"
     );
 }
@@ -302,7 +296,9 @@ fn rewinding_discards_everything_the_chain_can_reproduce() {
 
     let notes_before: u32 = db
         .connection()
-        .query_row("SELECT COUNT(*) FROM cache.received_notes", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM cache.received_notes", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(notes_before, 4);
 
@@ -324,7 +320,10 @@ fn rewinding_discards_everything_the_chain_can_reproduce() {
     // freshly scanned one.
     assert_eq!((notes, blocks, txs), (2, 2, 2));
 
-    assert_eq!(db.block_height_extrema().unwrap(), Some((h(START), h(START + 1))));
+    assert_eq!(
+        db.block_height_extrema().unwrap(),
+        Some((h(START), h(START + 1)))
+    );
 
     // The tree came back with it, and the surviving note is still witnessable.
     let max = db
@@ -416,7 +415,10 @@ fn rewinding_frees_the_notes_a_purely_scanned_spend_held() {
     // goes, and the note it spent is free again. A wallet that kept the spend
     // would hold the note against a transaction it can never prove dead,
     // because nothing outside that discarded chain ever referred to it.
-    assert_eq!(spends, 0, "a spend known only from the losing chain goes with it");
+    assert_eq!(
+        spends, 0,
+        "a spend known only from the losing chain goes with it"
+    );
     assert_eq!(notes, 1, "the note itself survives the rewind");
 }
 
@@ -537,8 +539,15 @@ fn rewinding_keeps_what_the_chain_cannot_reproduce() {
         .unwrap();
 
     assert_eq!(txs, 2, "the locally built transaction survives the rewind");
-    assert_eq!(mined, 1, "and is un-mined, leaving only the one below the rewind");
-    assert_eq!(fee, Some(5000), "its fee is not something a rescan could recover");
+    assert_eq!(
+        mined, 1,
+        "and is un-mined, leaving only the one below the rewind"
+    );
+    assert_eq!(
+        fee,
+        Some(5000),
+        "its fee is not something a rescan could recover"
+    );
     assert_eq!(notes, 2, "its note keeps its row, and its memo with it");
     assert_eq!(
         positionless, 1,
@@ -670,7 +679,10 @@ fn a_provably_dead_spend_gives_its_note_back() {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(spends, 1, "the spend attempt is history, not a mistake to erase");
+    assert_eq!(
+        spends, 1,
+        "the spend attempt is history, not a mistake to erase"
+    );
 }
 
 #[test]

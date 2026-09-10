@@ -45,6 +45,12 @@ use crate::{Error, RecoveredOutput, RecoveredSpend, WalletDb, apply, schema::CAC
 /// one sync: reaching it ends a sync incomplete with everything so far kept.
 pub const DEFAULT_PENDING_LIMIT: usize = 4_096;
 
+/// The longest script the private tables index.
+///
+/// The shard layout's limit, restated here so the wallet can count what falls
+/// outside it without decoding a manifest. The adapter asserts the two agree.
+pub const MAX_INDEXABLE_SCRIPT_BYTES: usize = 40;
+
 /// The publication lineage the store is bound to, as the library describes it.
 ///
 /// Opaque here. What binds and what continues a lineage is the library's rule;
@@ -291,6 +297,11 @@ pub struct TransparentState {
     /// Why the last sync stopped, as the library states it: `complete`, or
     /// the reason it stopped short. `None` before any sync.
     pub completion: Option<String>,
+    /// Scripts of this account the private tables cannot index, so their
+    /// history is outside what this path recovers. Counted from the address
+    /// rows, so it survives a restart and is known before any sync. Non-zero
+    /// forbids calling the balance synchronized.
+    pub outside_coverage: u32,
 }
 
 /// Why a shard commit was refused.
@@ -1542,6 +1553,15 @@ impl WalletDb {
             [],
             |row| row.get(0),
         )?;
+        let outside_coverage: u32 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {CACHE_SCHEMA}.addresses
+                 WHERE account_id = :account AND transparent_script IS NOT NULL
+                   AND length(transparent_script) > :max"
+            ),
+            named_params![":account": account.0, ":max": MAX_INDEXABLE_SCRIPT_BYTES as i64],
+            |row| row.get(0),
+        )?;
         let lowest = |pick: fn(&ScriptCoverage) -> BlockHeight| {
             anything_read
                 .then(|| coverage.iter().map(pick).min())
@@ -1555,6 +1575,7 @@ impl WalletDb {
             pending_pages: pending,
             anchor: self.transparent_anchor()?,
             completion: self.transparent_completion()?,
+            outside_coverage,
         })
     }
 }

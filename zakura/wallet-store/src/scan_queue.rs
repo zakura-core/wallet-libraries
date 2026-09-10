@@ -233,7 +233,10 @@ fn extend_range(
     fallback_start: Option<BlockHeight>,
     birthday: Option<BlockHeight>,
 ) -> Result<Option<Range<BlockHeight>>, Error> {
-    let Some((&min_index, &max_index)) = required_shards.iter().min().zip(required_shards.iter().max())
+    let Some((&min_index, &max_index)) = required_shards
+        .iter()
+        .min()
+        .zip(required_shards.iter().max())
     else {
         // No notes of this pool were found, so nothing needs widening.
         return Ok(None);
@@ -377,9 +380,7 @@ pub(crate) fn update_chain_tip<P: Parameters>(
         None => match birthday {
             // No accounts yet, so nothing before the tip can matter.
             None => ScanRange::from_parts(floor..chain_end, ScanPriority::Ignored),
-            Some(birthday) => {
-                ScanRange::from_parts(birthday..chain_end, ScanPriority::Historic)
-            }
+            Some(birthday) => ScanRange::from_parts(birthday..chain_end, ScanPriority::Historic),
         },
         Some(max_scanned) => {
             let min_unscanned = max_scanned + 1;

@@ -21,7 +21,9 @@ fn h(n: u32) -> BlockHeight {
 }
 
 /// Creates an account and returns it with the key the chain builder pays to.
-fn account_with_keys(db: &mut WalletDb) -> (zakura_wallet_core::AccountId, orchard::keys::FullViewingKey) {
+fn account_with_keys(
+    db: &mut WalletDb,
+) -> (zakura_wallet_core::AccountId, orchard::keys::FullViewingKey) {
     let id = db
         .create_account(
             &test_params(),
@@ -74,7 +76,8 @@ fn an_account_finds_the_notes_paid_to_it_and_reports_them() {
         chain.blocks(),
     )
     .expect("the chain scans");
-    db.put_batch(&test_params(), &batch).expect("the batch applies");
+    db.put_batch(&test_params(), &batch)
+        .expect("the batch applies");
 
     // The account is worth what was paid to it, and nothing else.
     let balance = db.total_balance(id).unwrap();

@@ -262,14 +262,10 @@ fn the_two_pools_do_not_see_each_others_trees() {
     append_block(&mut db, PoolId::Ironwood, h(1), [(20, true), (21, true)]).unwrap();
 
     let orchard_max = db
-        .with_tree_for(PoolId::Orchard, |tree| {
-            Ok(tree.max_leaf_position(None)?)
-        })
+        .with_tree_for(PoolId::Orchard, |tree| Ok(tree.max_leaf_position(None)?))
         .unwrap();
     let ironwood_max = db
-        .with_tree_for(PoolId::Ironwood, |tree| {
-            Ok(tree.max_leaf_position(None)?)
-        })
+        .with_tree_for(PoolId::Ironwood, |tree| Ok(tree.max_leaf_position(None)?))
         .unwrap();
 
     assert_eq!(orchard_max, Some(Position::from(0)));
@@ -300,9 +296,7 @@ fn marked_positions_are_retained_per_pool() {
     .unwrap();
 
     let marked = db
-        .with_tree_for(PoolId::Ironwood, |tree| {
-            Ok(tree.marked_positions()?)
-        })
+        .with_tree_for(PoolId::Ironwood, |tree| Ok(tree.marked_positions()?))
         .unwrap();
     assert_eq!(
         marked.into_iter().collect::<Vec<_>>(),
@@ -310,9 +304,7 @@ fn marked_positions_are_retained_per_pool() {
     );
 
     let other = db
-        .with_tree_for(PoolId::Orchard, |tree| {
-            Ok(tree.marked_positions()?)
-        })
+        .with_tree_for(PoolId::Orchard, |tree| Ok(tree.marked_positions()?))
         .unwrap();
     assert!(other.is_empty());
 }
@@ -341,9 +333,7 @@ fn truncating_to_a_checkpoint_round_trips() {
         // Extend past the checkpoint, then rewind back to it.
         append_block(&mut db, pool, h(3), [(4, true), (5, true)]).unwrap();
         let truncated = db
-            .with_tree_for(pool, |tree| {
-                Ok(tree.truncate_to_checkpoint(&h(2))?)
-            })
+            .with_tree_for(pool, |tree| Ok(tree.truncate_to_checkpoint(&h(2))?))
             .unwrap();
         assert!(truncated, "{pool:?}");
 
@@ -366,9 +356,7 @@ fn truncating_to_a_checkpoint_round_trips() {
         // The tree is usable again: appending after a rewind works.
         append_block(&mut db, pool, h(3), [(9, true)]).unwrap();
         let max = db
-            .with_tree_for(pool, |tree| {
-                Ok(tree.max_leaf_position(None)?)
-            })
+            .with_tree_for(pool, |tree| Ok(tree.max_leaf_position(None)?))
             .unwrap();
         assert_eq!(max, Some(Position::from(4)), "{pool:?}");
     }
@@ -433,7 +421,13 @@ fn a_retained_checkpoint_survives_pruning() {
 
     // Push far more checkpoints than the pruning depth allows.
     for height in 2..(zakura_wallet_store::PRUNING_DEPTH as u32 + 50) {
-        append_block(&mut db, PoolId::Ironwood, h(height), [(height as u64, false)]).unwrap();
+        append_block(
+            &mut db,
+            PoolId::Ironwood,
+            h(height),
+            [(height as u64, false)],
+        )
+        .unwrap();
     }
 
     let (retained_set, still_there, neighbour, root) = db
@@ -481,7 +475,10 @@ fn a_retained_checkpoint_survives_pruning() {
         };
         index >>= 1;
     }
-    assert_eq!(node, root, "the retained anchor's witness no longer verifies");
+    assert_eq!(
+        node, root,
+        "the retained anchor's witness no longer verifies"
+    );
 }
 
 #[test]
@@ -490,7 +487,13 @@ fn ordinary_checkpoints_are_pruned_to_the_depth() {
     let total = zakura_wallet_store::PRUNING_DEPTH as u32 + 40;
 
     for height in 1..=total {
-        append_block(&mut db, PoolId::Orchard, h(height), [(height as u64, false)]).unwrap();
+        append_block(
+            &mut db,
+            PoolId::Orchard,
+            h(height),
+            [(height as u64, false)],
+        )
+        .unwrap();
     }
 
     let count = db
@@ -617,10 +620,7 @@ fn a_shard_that_would_leave_a_gap_is_rejected() {
 
     let err = db
         .with_tree_for(PoolId::Orchard, |tree| {
-            let far_away = Address::from_parts(
-                Level::from(zakura_wallet_store::SHARD_HEIGHT),
-                5,
-            );
+            let far_away = Address::from_parts(Level::from(zakura_wallet_store::SHARD_HEIGHT), 5);
             let subtree = LocatedPrunableTree::empty(far_away);
             tree.store_mut().put_shard(subtree)?;
             Ok(())
@@ -642,19 +642,19 @@ fn a_failed_transaction_leaves_the_tree_untouched() {
     append_block(&mut db, PoolId::Orchard, h(1), [(0, true)]).unwrap();
 
     let result: Result<(), TreeError> = db.with_tree_for(PoolId::Orchard, |tree| {
-            tree.append(leaf(77), Retention::Ephemeral)?;
-            tree.append(
-                leaf(78),
-                Retention::Checkpoint {
-                    id: h(2),
-                    marking: Marking::None,
-                },
-            )?;
-            // Fail after the appends have been staged.
-            Err(TreeError::Store(Error::CheckpointConflict {
-                checkpoint_id: h(2),
-            }))
-        });
+        tree.append(leaf(77), Retention::Ephemeral)?;
+        tree.append(
+            leaf(78),
+            Retention::Checkpoint {
+                id: h(2),
+                marking: Marking::None,
+            },
+        )?;
+        // Fail after the appends have been staged.
+        Err(TreeError::Store(Error::CheckpointConflict {
+            checkpoint_id: h(2),
+        }))
+    });
     assert!(result.is_err());
 
     let (max, count) = db
@@ -666,7 +666,11 @@ fn a_failed_transaction_leaves_the_tree_untouched() {
         })
         .unwrap();
 
-    assert_eq!(max, Some(Position::from(0)), "the appends must have rolled back");
+    assert_eq!(
+        max,
+        Some(Position::from(0)),
+        "the appends must have rolled back"
+    );
     assert_eq!(count, 1);
 }
 
@@ -675,10 +679,7 @@ fn tempdir() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU32, Ordering};
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "zakura-wallet-store-{}-{n}",
-        std::process::id()
-    ));
+    let path = std::env::temp_dir().join(format!("zakura-wallet-store-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&path).expect("temporary directory");
     path
 }

@@ -112,10 +112,7 @@ where
         }
     }
 
-    async fn retrieve(
-        &self,
-        requests: &[Request],
-    ) -> Vec<Result<Option<Retrieved>, Self::Error>> {
+    async fn retrieve(&self, requests: &[Request]) -> Vec<Result<Option<Retrieved>, Self::Error>> {
         let mut out = Vec::with_capacity(requests.len());
         for request in requests {
             out.push(self.one(request).await);

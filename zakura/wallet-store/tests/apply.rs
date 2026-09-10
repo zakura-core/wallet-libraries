@@ -48,7 +48,8 @@ fn detect(chain: &ChainBuilder, nfs: &NullifierSnapshot) -> DetectedBatch {
 }
 
 fn apply(db: &mut WalletDb, batch: &DetectedBatch) {
-    db.put_batch(&test_params(), batch).expect("the batch applies");
+    db.put_batch(&test_params(), batch)
+        .expect("the batch applies");
 }
 
 /// Counts rows in a cache table.
@@ -114,7 +115,10 @@ fn a_scanned_note_is_stored_with_everything_needed_to_spend_it() {
     // Ironwood notes use version 3 plaintexts; storing the lead byte keeps the
     // value meaningful to anything reading the database.
     assert_eq!(version, 0x03);
-    assert!(has_nf, "the nullifier must be stored, or the note can never be seen spent");
+    assert!(
+        has_nf,
+        "the nullifier must be stored, or the note can never be seen spent"
+    );
 
     // The block and its transaction are recorded, and the transaction is queued
     // for the enhancement that recovers its memo.
@@ -335,7 +339,11 @@ fn an_empty_batch_changes_nothing() {
     apply(&mut db, &detect(&chain, &NullifierSnapshot::default()));
 
     assert_eq!(count(&db, "blocks"), 0);
-    assert!(db.suggest_scan_ranges(ScanPriority::Ignored).unwrap().is_empty());
+    assert!(
+        db.suggest_scan_ranges(ScanPriority::Ignored)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(db.block_height_extrema().unwrap(), None);
 }
 
@@ -421,7 +429,15 @@ fn enhance_candidates_are_stored_with_their_funding_accounts() {
                     length(ephemeral_key), length(compact_ciphertext)
              FROM cache.enhance_candidates ORDER BY commitment_tree_position LIMIT 1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .unwrap();
 
@@ -586,7 +602,11 @@ fn a_found_note_widens_the_queue_to_cover_its_shard() {
         .filter(|r| r.priority() == ScanPriority::FoundNote)
         .collect();
 
-    assert_eq!(found.len(), 1, "expected one widening range, got {ranges:?}");
+    assert_eq!(
+        found.len(),
+        1,
+        "expected one widening range, got {ranges:?}"
+    );
     assert_eq!(
         *found[0].block_range(),
         h(START + 1)..h(shard_end + 1),
@@ -823,7 +843,10 @@ fn a_batch_anchored_on_a_different_block_is_rejected() {
     );
     second.empty_blocks(1);
     let err = db
-        .put_batch(&test_params(), &detect(&second, &NullifierSnapshot::default()))
+        .put_batch(
+            &test_params(),
+            &detect(&second, &NullifierSnapshot::default()),
+        )
         .expect_err("an anchor naming a block the wallet did not scan must be refused");
 
     assert_matches!(
@@ -1103,13 +1126,14 @@ fn retention_does_not_grow_without_bound() {
     assert_eq!(db.grid_anchor_height().unwrap(), None);
 }
 
-
 // ------------------------------------------------- the discovery back edge
 
 /// Reads the txids queued for a given kind of question.
 fn requests(db: &WalletDb, query_type: u8) -> Vec<Vec<u8>> {
     db.connection()
-        .prepare("SELECT subject_txid FROM cache.retrieval_queue WHERE kind = ?1 ORDER BY subject_txid")
+        .prepare(
+            "SELECT subject_txid FROM cache.retrieval_queue WHERE kind = ?1 ORDER BY subject_txid",
+        )
         .unwrap()
         .query_map([query_type], |row| row.get(0))
         .unwrap()
@@ -1574,7 +1598,12 @@ fn a_block_request_waits_until_the_wallet_can_anchor_it() {
         )
         .unwrap()
         .into_iter()
-        .filter(|r| matches!(r.locator, zakura_wallet_core::retrieval::Locator::Block { .. }))
+        .filter(|r| {
+            matches!(
+                r.locator,
+                zakura_wallet_core::retrieval::Locator::Block { .. }
+            )
+        })
         .count()
     };
 
