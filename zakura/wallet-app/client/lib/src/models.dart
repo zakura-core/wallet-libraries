@@ -70,7 +70,9 @@ class Balance {
 /// target the last complete sync accepted; [completion] is why the last sync
 /// stopped, in the ledger's own words; [pendingPages] is work still owed; and
 /// [unresolvedSpends] are spends of outputs the ledger has never seen, each
-/// of which means the balance is too high.
+/// of which means the balance is too high; and [outsideCoverage] counts
+/// addresses whose scripts the private tables cannot index at all, whose
+/// history is therefore unknown rather than empty.
 class TransparentCoverage {
   /// The last height covered, including a shard that can still be replaced.
   /// Null when nothing has been read, which is not a height of zero.
@@ -91,6 +93,12 @@ class TransparentCoverage {
   /// Page retrievals still owed.
   final int pendingPages;
 
+  /// Addresses whose scripts the private tables cannot index.
+  ///
+  /// Nothing recovers their history, so it is unknown, not empty. Known from
+  /// the wallet's own rows before any sync runs.
+  final int outsideCoverage;
+
   const TransparentCoverage({
     this.coveredThrough,
     this.settledThrough,
@@ -98,6 +106,7 @@ class TransparentCoverage {
     this.completion,
     this.unresolvedSpends = 0,
     this.pendingPages = 0,
+    this.outsideCoverage = 0,
   });
 
   /// Whether the transparent balance may be called synchronized: the last
@@ -109,7 +118,8 @@ class TransparentCoverage {
       anchorHeight != null &&
       coveredThrough! >= anchorHeight! &&
       unresolvedSpends == 0 &&
-      pendingPages == 0;
+      pendingPages == 0 &&
+      outsideCoverage == 0;
 
   /// Whether anything has been read at all.
   bool get established => coveredThrough != null;
@@ -196,6 +206,11 @@ class TransparentCoverage {
         ? 'Transparent coverage not yet established'
         : 'Transparent coverage through block $coveredThrough';
     if (synchronized) return coverage;
+    if (outsideCoverage > 0) {
+      return '$coverage. $outsideCoverage address'
+          '${outsideCoverage == 1 ? '' : 'es'} cannot be recovered by this '
+          'path; ${outsideCoverage == 1 ? 'its' : 'their'} history is unknown.';
+    }
     if (unresolvedSpends > 0) {
       return '$coverage. Transaction history is incomplete: '
           '$unresolvedSpends unresolved spend${unresolvedSpends == 1 ? '' : 's'}.';
@@ -223,7 +238,8 @@ class TransparentCoverage {
       anchorHeight == other.anchorHeight &&
       completion == other.completion &&
       unresolvedSpends == other.unresolvedSpends &&
-      pendingPages == other.pendingPages;
+      pendingPages == other.pendingPages &&
+      outsideCoverage == other.outsideCoverage;
   @override
   int get hashCode => Object.hash(
     coveredThrough,
@@ -232,6 +248,7 @@ class TransparentCoverage {
     completion,
     unresolvedSpends,
     pendingPages,
+    outsideCoverage,
   );
 }
 

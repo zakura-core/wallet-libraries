@@ -28,8 +28,8 @@ pub fn validate(phrase: &str) -> bool {
 ///
 /// The passphrase is the BIP 39 one, empty for an ordinary wallet.
 pub fn to_seed(phrase: &str, passphrase: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let mnemonic = Mnemonic::<English>::from_phrase(phrase)
-        .map_err(|e| Error::BadMnemonic(e.to_string()))?;
+    let mnemonic =
+        Mnemonic::<English>::from_phrase(phrase).map_err(|e| Error::BadMnemonic(e.to_string()))?;
     Ok(Zeroizing::new(
         mnemonic.to_seed(passphrase).as_slice().to_vec(),
     ))

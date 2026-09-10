@@ -1112,8 +1112,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ApiTransparentCoverage dco_decode_api_transparent_coverage(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return ApiTransparentCoverage(
       settledThrough: dco_decode_opt_box_autoadd_u_32(arr[0]),
       coveredThrough: dco_decode_opt_box_autoadd_u_32(arr[1]),
@@ -1122,6 +1122,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       pendingPages: dco_decode_u_32(arr[4]),
       anchorHeight: dco_decode_opt_box_autoadd_u_32(arr[5]),
       completion: dco_decode_opt_String(arr[6]),
+      outsideCoverage: dco_decode_u_32(arr[7]),
     );
   }
 
@@ -1425,6 +1426,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_pendingPages = sse_decode_u_32(deserializer);
     var var_anchorHeight = sse_decode_opt_box_autoadd_u_32(deserializer);
     var var_completion = sse_decode_opt_String(deserializer);
+    var var_outsideCoverage = sse_decode_u_32(deserializer);
     return ApiTransparentCoverage(
       settledThrough: var_settledThrough,
       coveredThrough: var_coveredThrough,
@@ -1433,6 +1435,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       pendingPages: var_pendingPages,
       anchorHeight: var_anchorHeight,
       completion: var_completion,
+      outsideCoverage: var_outsideCoverage,
     );
   }
 
@@ -1734,6 +1737,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.pendingPages, serializer);
     sse_encode_opt_box_autoadd_u_32(self.anchorHeight, serializer);
     sse_encode_opt_String(self.completion, serializer);
+    sse_encode_u_32(self.outsideCoverage, serializer);
   }
 
   @protected

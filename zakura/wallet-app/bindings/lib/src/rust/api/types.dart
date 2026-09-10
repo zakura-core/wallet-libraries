@@ -504,6 +504,14 @@ class ApiTransparentCoverage {
   /// when this is `complete` and `unresolved_spends` is zero.
   final String? completion;
 
+  /// Scripts of the account the private tables cannot index.
+  ///
+  /// Their history is outside what this path recovers, and nothing else
+  /// recovers it. Non-zero means the wallet holds addresses it cannot ask
+  /// about, and the interface must say so rather than show their absence
+  /// as an empty history.
+  final int outsideCoverage;
+
   const ApiTransparentCoverage({
     this.settledThrough,
     this.coveredThrough,
@@ -512,6 +520,7 @@ class ApiTransparentCoverage {
     required this.pendingPages,
     this.anchorHeight,
     this.completion,
+    required this.outsideCoverage,
   });
 
   @override
@@ -522,7 +531,8 @@ class ApiTransparentCoverage {
       provisionalShards.hashCode ^
       pendingPages.hashCode ^
       anchorHeight.hashCode ^
-      completion.hashCode;
+      completion.hashCode ^
+      outsideCoverage.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -535,7 +545,8 @@ class ApiTransparentCoverage {
           provisionalShards == other.provisionalShards &&
           pendingPages == other.pendingPages &&
           anchorHeight == other.anchorHeight &&
-          completion == other.completion;
+          completion == other.completion &&
+          outsideCoverage == other.outsideCoverage;
 }
 
 /// One transparent output the ledger holds.

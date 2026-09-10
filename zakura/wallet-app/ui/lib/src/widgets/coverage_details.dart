@@ -43,6 +43,7 @@ class CoverageDetails extends StatelessWidget {
       ('Last sync', coverage.completion ?? 'never run'),
       ('Pages still owed', '${coverage.pendingPages}'),
       ('Unresolved spends', '${coverage.unresolvedSpends}'),
+      ('Addresses outside coverage', '${coverage.outsideCoverage}'),
     ];
     final reason = coverage.reasonDescription;
 
@@ -73,6 +74,17 @@ class CoverageDetails extends StatelessWidget {
               'An unresolved spend is an output still counted that something '
               'has already consumed: the transparent balance is too high '
               'until it resolves.',
+              style: theme.typography.caption.copyWith(
+                color: theme.colors.textMuted,
+              ),
+            ),
+          ],
+          if (coverage.outsideCoverage > 0) ...[
+            SizedBox(height: theme.spacing.xs),
+            Text(
+              'An address outside coverage uses a script the private tables '
+              'cannot index. Nothing recovers its history, so it is unknown '
+              'rather than empty, and the transparent balance may be too low.',
               style: theme.typography.caption.copyWith(
                 color: theme.colors.textMuted,
               ),

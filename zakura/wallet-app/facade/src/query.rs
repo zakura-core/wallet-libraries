@@ -237,6 +237,7 @@ impl Wallet {
                     pending_pages: state.pending_pages,
                     anchor_height: state.anchor.map(|a| u32::from(a.height)),
                     completion,
+                    outside_coverage: state.outside_coverage,
                 },
             ))
         })

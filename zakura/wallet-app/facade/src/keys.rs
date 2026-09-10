@@ -182,7 +182,12 @@ mod tests {
     fn a_watch_only_account_cannot_spend() {
         let mut db = test_db().unwrap();
         let id = account(&mut db);
-        let ufvk = db.account(&test_params(), id).unwrap().unwrap().ufvk.clone();
+        let ufvk = db
+            .account(&test_params(), id)
+            .unwrap()
+            .unwrap()
+            .ufvk
+            .clone();
 
         let mut other = test_db().unwrap();
         let imported = other

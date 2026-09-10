@@ -153,6 +153,7 @@ class NativeBindings implements ZakuraBindings {
         completion: b.coverage.completion,
         unresolvedSpends: b.coverage.unresolvedSpends,
         pendingPages: b.coverage.pendingPages,
+        outsideCoverage: b.coverage.outsideCoverage,
       ),
     );
   });

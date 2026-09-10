@@ -206,10 +206,18 @@ void _navigationTests() {
     await tester.tap(find.text('Diagnostics'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Copy diagnostics'), findsOneWidget);
     expect(find.textContaining('mode: demo'), findsOneWidget);
     expect(find.textContaining('transparent synchronized: false'),
         findsOneWidget);
+    expect(find.textContaining('transparent addresses outside coverage: 0'),
+        findsOneWidget);
+    // The report has grown past one screen; the copy button sits below it.
+    await tester.dragUntilVisible(
+      find.text('Copy diagnostics'),
+      find.byType(ListView),
+      const Offset(0, -200),
+    );
+    expect(find.text('Copy diagnostics'), findsOneWidget);
     // The demo's address prefix, and the word: neither belongs in a report.
     expect(find.textContaining('u1demo'), findsNothing);
     expect(find.textContaining('address:'), findsNothing);

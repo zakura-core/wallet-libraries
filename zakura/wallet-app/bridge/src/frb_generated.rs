@@ -1118,6 +1118,7 @@ impl SseDecode for crate::api::types::ApiTransparentCoverage {
         let mut var_pendingPages = <u32>::sse_decode(deserializer);
         let mut var_anchorHeight = <Option<u32>>::sse_decode(deserializer);
         let mut var_completion = <Option<String>>::sse_decode(deserializer);
+        let mut var_outsideCoverage = <u32>::sse_decode(deserializer);
         return crate::api::types::ApiTransparentCoverage {
             settled_through: var_settledThrough,
             covered_through: var_coveredThrough,
@@ -1126,6 +1127,7 @@ impl SseDecode for crate::api::types::ApiTransparentCoverage {
             pending_pages: var_pendingPages,
             anchor_height: var_anchorHeight,
             completion: var_completion,
+            outside_coverage: var_outsideCoverage,
         };
     }
 }
@@ -1602,6 +1604,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::ApiTransparentCoverage
             self.pending_pages.into_into_dart().into_dart(),
             self.anchor_height.into_into_dart().into_dart(),
             self.completion.into_into_dart().into_dart(),
+            self.outside_coverage.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1781,6 +1784,7 @@ impl SseEncode for crate::api::types::ApiTransparentCoverage {
         <u32>::sse_encode(self.pending_pages, serializer);
         <Option<u32>>::sse_encode(self.anchor_height, serializer);
         <Option<String>>::sse_encode(self.completion, serializer);
+        <u32>::sse_encode(self.outside_coverage, serializer);
     }
 }
 

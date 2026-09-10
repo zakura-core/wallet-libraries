@@ -222,6 +222,7 @@ impl Wallet {
                 pending_pages: state.pending_pages,
                 anchor_height: state.anchor.map(|anchor| u32::from(anchor.height)),
                 completion: state.completion,
+                outside_coverage: state.outside_coverage,
             })
         })
     }
@@ -278,6 +279,11 @@ pub struct TransparentCoverage {
     /// synchronized only when this is `complete` and `unresolved_spends` is
     /// zero.
     pub completion: Option<String>,
+    /// Scripts of the account the private tables cannot index, so their
+    /// history is outside what this path recovers. Counted from the wallet's
+    /// own rows, so it is known before any sync. Non-zero forbids calling the
+    /// balance synchronized: the wallet holds addresses it cannot ask about.
+    pub outside_coverage: u32,
 }
 
 /// What a transaction did, read from its own bytes.

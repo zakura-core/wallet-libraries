@@ -28,7 +28,9 @@ fn seed_of(phrase: &str) -> Zeroizing<Vec<u8>> {
 #[test]
 fn a_restored_wallet_can_be_read_back() {
     let (_dir, wallet) = open();
-    let id = wallet.import_wallet(&seed_of(&phrase()), Some(2_500_000)).unwrap();
+    let id = wallet
+        .import_wallet(&seed_of(&phrase()), Some(2_500_000))
+        .unwrap();
 
     let accounts = wallet.accounts().unwrap();
     assert_eq!(accounts.len(), 1);
@@ -51,7 +53,10 @@ fn the_same_phrase_restores_the_same_wallet() {
     let id_b = b.import_wallet(&seed_of(&words), Some(2_500_000)).unwrap();
     let address_b = b.next_address(id_b, None).unwrap();
 
-    assert_eq!(address_a, address_b, "the same seed issues the same address");
+    assert_eq!(
+        address_a, address_b,
+        "the same seed issues the same address"
+    );
     drop((dir_a, dir_b));
 }
 
@@ -60,8 +65,12 @@ fn the_same_phrase_restores_the_same_wallet() {
 #[test]
 fn a_different_phrase_restores_a_different_wallet() {
     let (_dir, wallet) = open();
-    let first = wallet.import_wallet(&seed_of(&phrase()), Some(2_500_000)).unwrap();
-    let second = wallet.import_wallet(&seed_of(&phrase()), Some(2_500_000)).unwrap();
+    let first = wallet
+        .import_wallet(&seed_of(&phrase()), Some(2_500_000))
+        .unwrap();
+    let second = wallet
+        .import_wallet(&seed_of(&phrase()), Some(2_500_000))
+        .unwrap();
 
     assert_ne!(first, second);
     assert_eq!(wallet.accounts().unwrap().len(), 2);
@@ -78,7 +87,9 @@ fn a_different_phrase_restores_a_different_wallet() {
 fn importing_the_same_wallet_twice_is_refused() {
     let (_dir, wallet) = open();
     let words = phrase();
-    wallet.import_wallet(&seed_of(&words), Some(2_500_000)).unwrap();
+    wallet
+        .import_wallet(&seed_of(&words), Some(2_500_000))
+        .unwrap();
 
     let code = wallet
         .import_wallet(&seed_of(&words), Some(2_500_000))
@@ -132,7 +143,9 @@ fn a_new_wallet_falls_back_to_the_floor_when_the_tip_is_unknown() {
 #[test]
 fn a_restored_wallet_is_watched_for_transparent_payments() {
     let (_dir, wallet) = open();
-    wallet.import_wallet(&seed_of(&phrase()), Some(2_500_000)).unwrap();
+    wallet
+        .import_wallet(&seed_of(&phrase()), Some(2_500_000))
+        .unwrap();
 
     assert!(wallet.watched_transparent_addresses().unwrap() > 0);
 }
@@ -172,7 +185,9 @@ fn a_restored_wallet_is_found_again_when_the_wallet_is_reopened() {
 
     let id = {
         let wallet = Wallet::open(config.clone()).unwrap();
-        wallet.import_wallet(&seed_of(&phrase()), Some(2_500_000)).unwrap()
+        wallet
+            .import_wallet(&seed_of(&phrase()), Some(2_500_000))
+            .unwrap()
     };
 
     let reopened = Wallet::open(config).unwrap();

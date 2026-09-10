@@ -92,6 +92,13 @@ pub struct ApiTransparentCoverage {
     /// sync. The interface may call the transparent balance synchronized only
     /// when this is `complete` and `unresolved_spends` is zero.
     pub completion: Option<String>,
+    /// Scripts of the account the private tables cannot index.
+    ///
+    /// Their history is outside what this path recovers, and nothing else
+    /// recovers it. Non-zero means the wallet holds addresses it cannot ask
+    /// about, and the interface must say so rather than show their absence
+    /// as an empty history.
+    pub outside_coverage: u32,
 }
 
 /// One transparent output the ledger holds.

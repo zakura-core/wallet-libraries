@@ -71,7 +71,9 @@ mod tests {
 
     #[test]
     fn nonsense_is_a_bad_address() {
-        let code = parse(&test_params(), "not an address").err().map(|e| e.code());
+        let code = parse(&test_params(), "not an address")
+            .err()
+            .map(|e| e.code());
         assert_eq!(code, Some(ErrorCode::BadAddress));
     }
 

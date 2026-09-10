@@ -240,6 +240,7 @@ pub fn balance(account: u32) -> Result<ApiBalance, ApiError> {
             pending_pages: c.pending_pages,
             anchor_height: c.anchor_height,
             completion: c.completion,
+            outside_coverage: c.outside_coverage,
         },
     })
 }
@@ -260,6 +261,7 @@ pub fn transparent_coverage(account: u32) -> Result<ApiTransparentCoverage, ApiE
         pending_pages: c.pending_pages,
         anchor_height: c.anchor_height,
         completion: c.completion,
+        outside_coverage: c.outside_coverage,
     })
 }
 

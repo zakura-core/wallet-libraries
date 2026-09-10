@@ -61,6 +61,7 @@ class DiagnosticsScreen extends ConsumerWidget {
       'transparent completion: ${coverage.completion ?? 'never'}',
       'transparent pending pages: ${coverage.pendingPages}',
       'transparent unresolved spends: ${coverage.unresolvedSpends}',
+      'transparent addresses outside coverage: ${coverage.outsideCoverage}',
       'transparent synchronized: ${coverage.synchronized}',
       'history entries shown: $historyEntries',
     ];

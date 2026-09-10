@@ -25,7 +25,8 @@ void main() {
     expect(find.text('Accepted target'), findsOneWidget);
     expect(find.text('none'), findsNWidgets(3));
     expect(find.text('never run'), findsOneWidget);
-    expect(find.text('0'), findsNWidgets(2));
+    expect(find.text('0'), findsNWidgets(3));
+    expect(find.text('Addresses outside coverage'), findsOneWidget);
   });
 
   testWidgets('a sync that stopped short names its reason and its debts', (
@@ -95,4 +96,26 @@ void main() {
     );
     expect(find.textContaining('shield to spend'), findsNothing);
   });
+  testWidgets('an address outside coverage is named, not hidden', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      host(
+        const CoverageDetails(
+          coverage: TransparentCoverage(
+            coveredThrough: 3477090,
+            settledThrough: 3477000,
+            anchorHeight: 3477090,
+            completion: 'complete',
+            outsideCoverage: 1,
+          ),
+        ),
+      ),
+    );
+    expect(find.text('Transparent coverage is incomplete'), findsOneWidget);
+    expect(find.text('Addresses outside coverage'), findsOneWidget);
+    expect(find.text('1'), findsOneWidget);
+    expect(find.textContaining('cannot index'), findsOneWidget);
+  });
+
 }

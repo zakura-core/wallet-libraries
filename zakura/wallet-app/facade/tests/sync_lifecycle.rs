@@ -89,7 +89,9 @@ fn an_unreachable_server_is_reported_as_a_failure() {
     wait_until("the failure to be reported", || wallet.progress().failed);
 
     assert!(
-        wallet.sync_failure().is_some_and(|e| e.contains("127.0.0.1")),
+        wallet
+            .sync_failure()
+            .is_some_and(|e| e.contains("127.0.0.1")),
         "the reason names no server"
     );
 }
@@ -108,7 +110,10 @@ fn starting_again_clears_the_previous_failure() {
 
     wait_until("the sync to end", || !wallet.is_syncing());
     wallet.start_sync().unwrap();
-    assert!(wallet.sync_failure().is_none(), "the failure was not cleared");
+    assert!(
+        wallet.sync_failure().is_none(),
+        "the failure was not cleared"
+    );
 }
 
 /// Stopping is idempotent, so an interface can call it on the way out without
@@ -155,7 +160,9 @@ fn a_sync_that_dies_leaves_a_usable_wallet() {
 
     // The wallet still works: it can be written to, read from, and synced
     // again. Any of these hanging or refusing would mean it had been wedged.
-    wallet.next_address(id, None).expect("it can still issue an address");
+    wallet
+        .next_address(id, None)
+        .expect("it can still issue an address");
     wallet.balance(id).expect("it can still be read");
     wallet.accounts().expect("its accounts are still there");
     wallet.start_sync().expect("and it can sync again");
@@ -172,6 +179,9 @@ fn a_sync_that_dies_is_reported_rather_than_left_starting() {
     wait_until("the failure to be reported", || wallet.progress().failed);
 
     let progress = wallet.progress();
-    assert!(!progress.is_running(), "it must not look like it is still going");
+    assert!(
+        !progress.is_running(),
+        "it must not look like it is still going"
+    );
     assert!(wallet.sync_failure().is_some());
 }

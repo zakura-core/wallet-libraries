@@ -128,6 +128,35 @@ void main() {
       );
     });
 
+    test('an address outside coverage is never synchronized and is named', () {
+      const coverage = TransparentCoverage(
+        coveredThrough: 100,
+        anchorHeight: 100,
+        completion: 'complete',
+        outsideCoverage: 2,
+      );
+      expect(coverage.synchronized, isFalse);
+      expect(
+        coverage.statusAgainst(101),
+        'Transparent coverage through block 100. 2 addresses cannot be '
+        'recovered by this path; their history is unknown.',
+      );
+      const one = TransparentCoverage(
+        coveredThrough: 100,
+        anchorHeight: 100,
+        completion: 'complete',
+        outsideCoverage: 1,
+      );
+      expect(one.statusAgainst(null), contains('1 address cannot'));
+      expect(one.statusAgainst(null), contains('its history'));
+      expect(coverage == one, isFalse);
+      expect(
+        const TransparentCoverage(completion: 'complete', outsideCoverage: 0)
+            .outsideCoverage,
+        0,
+      );
+    });
+
     test('coverage below the accepted target is not synchronized', () {
       const coverage = TransparentCoverage(
         coveredThrough: 150,
