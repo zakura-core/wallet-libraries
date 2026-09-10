@@ -108,7 +108,17 @@ impl Wallet {
                 .map_err(|e| Error::Storage(format!("could not create {}: {e}", dir.display())))?;
         }
         let params = config.network.params();
-        let writer = WalletDb::open(&config.wallet_path, &config.cache_path)?;
+        let mut writer = WalletDb::open(&config.wallet_path, &config.cache_path)?;
+        // A run writes `sync-in-progress` beside the balance when it starts
+        // and its reason when it ends. A wallet that finds the first word on
+        // opening was killed mid-run — a crash, a lost process, a dead
+        // battery — and nothing is running now. Left alone, the balance would
+        // read as a sync still in progress for as long as nobody started one.
+        // Everything the run committed is kept; only the word changes, and to
+        // one that says what happened.
+        if writer.transparent_completion()?.as_deref() == Some("sync-in-progress") {
+            writer.put_transparent_completion("interrupted")?;
+        }
         let reader = WalletDb::open(&config.wallet_path, &config.cache_path)?;
 
         Ok(Self {

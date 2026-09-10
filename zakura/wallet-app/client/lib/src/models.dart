@@ -157,6 +157,10 @@ class TransparentCoverage {
     }
     if (reason == 'sync-in-progress') return 'A transparent sync is running.';
     if (reason == 'stopped') return 'The last transparent sync was stopped.';
+    if (reason == 'interrupted') {
+      return 'The last transparent sync was interrupted before it finished; '
+          'the next sync continues it.';
+    }
     if (reason == 'failed') return 'The last transparent sync failed.';
     if (reason == 'chain-rewound') {
       return 'The chain was rewound and coverage was rolled back.';

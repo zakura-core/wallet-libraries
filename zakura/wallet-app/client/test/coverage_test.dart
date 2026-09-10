@@ -17,6 +17,7 @@ void main() {
         'chain-unknown:110',
         'sync-in-progress',
         'stopped',
+        'interrupted',
         'failed',
         'chain-rewound',
         'overloaded:3',

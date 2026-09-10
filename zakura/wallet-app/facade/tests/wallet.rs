@@ -466,3 +466,48 @@ fn a_server_is_judged_by_the_chain_it_names() {
     assert!(identity.serves(NetworkKind::Main));
     assert!(!identity.serves(NetworkKind::Test));
 }
+
+// ------------------------------------------------- interrupted runs (M3)
+
+/// A wallet whose process died in the middle of a transparent run opens
+/// saying so. The run's own bookkeeping cannot: it writes its reason on the
+/// way out, and a killed process has no way out.
+#[test]
+fn a_wallet_left_mid_sync_opens_as_interrupted_not_in_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = recovery_config(dir.path());
+    let wallet = Wallet::open(config.clone()).unwrap();
+    let account = wallet.create_account(&seed(), 0, 2_000_000).unwrap();
+    drop(wallet);
+
+    // What a run leaves behind when it is killed between two requests.
+    {
+        let mut db =
+            zakura_wallet_store::WalletDb::open(&config.wallet_path, &config.cache_path).unwrap();
+        db.put_transparent_completion("sync-in-progress").unwrap();
+    }
+    let wallet = Wallet::open(config.clone()).unwrap();
+    let coverage = wallet.transparent_coverage(account).unwrap();
+    assert_eq!(coverage.completion.as_deref(), Some("interrupted"));
+    let (_, from_balance) = wallet.balance_with_coverage(account).unwrap();
+    assert_eq!(from_balance.completion.as_deref(), Some("interrupted"));
+    assert_eq!(coverage.anchor_height, None);
+    assert_eq!(coverage.covered_through, None);
+    drop(wallet);
+
+    // Any other word is the run's own, and stays.
+    {
+        let mut db =
+            zakura_wallet_store::WalletDb::open(&config.wallet_path, &config.cache_path).unwrap();
+        db.put_transparent_completion("query-budget").unwrap();
+    }
+    let wallet = Wallet::open(config).unwrap();
+    assert_eq!(
+        wallet
+            .transparent_coverage(account)
+            .unwrap()
+            .completion
+            .as_deref(),
+        Some("query-budget")
+    );
+}
