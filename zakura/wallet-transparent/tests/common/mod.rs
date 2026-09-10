@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 pub mod blocks;
+pub mod catalogue;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -1147,18 +1148,26 @@ impl Needles {
         self
     }
 
-    /// Every script and address of `account`, and every txid in `events`.
+    /// Every script and address of `account`, and every txid of an event at
+    /// one of its scripts in `events`.
     pub fn of(db: &WalletDb, account: AccountId, events: &Events) -> Self {
         let mut needles = Self::new();
-        for script in my_scripts(db, account) {
-            needles = needles.script(script.as_slice());
+        let mine: BTreeSet<Vec<u8>> = my_scripts(db, account)
+            .into_iter()
+            .map(|s| s.as_slice().to_vec())
+            .collect();
+        for script in &mine {
+            needles = needles.script(script);
         }
         for address in db.transparent_addresses(account).unwrap() {
             needles = needles.address(&address);
         }
         let mut seen = BTreeSet::new();
         for shard in events {
-            for (_, event) in shard {
+            for (script, event) in shard {
+                if !mine.contains(script.as_slice()) {
+                    continue;
+                }
                 if seen.insert(event.txid()) {
                     needles = needles.txid(&event.txid());
                 }

@@ -665,6 +665,24 @@ pub struct Expected {
     pub unresolved: usize,
 }
 
+impl Expected {
+    /// Both sets of expectations, for wallets whose scripts are read from
+    /// different heights.
+    pub fn merge(mut self, other: Expected) -> Expected {
+        self.events.extend(other.events);
+        self.utxos.extend(other.utxos);
+        self.spends.extend(other.spends);
+        for (txid, (height, received, spent)) in other.history {
+            let entry = self.history.entry(txid).or_insert((height, 0, 0));
+            entry.1 += received;
+            entry.2 += spent;
+        }
+        self.balance += other.balance;
+        self.unresolved += other.unresolved;
+        self
+    }
+}
+
 pub fn reduce(chain: &Chain, scripts: &[ScriptBytes], from: u64, through: u64) -> Expected {
     let mine: BTreeSet<&[u8]> = scripts.iter().map(|s| s.as_slice()).collect();
     let mut expected = Expected::default();
@@ -855,7 +873,7 @@ pub fn compare_blocks(db: &mut WalletDb, account: AccountId, expected: &Expected
     wanted.sort();
     assert_eq!(shown, wanted, "the outputs shown differ");
     let mut shown_history: BTreeMap<Txid, (u64, u64, u64)> = BTreeMap::new();
-    for entry in db.history(account, usize::MAX).unwrap() {
+    for entry in db.history(account, 100_000).unwrap() {
         let txid = Txid(*entry.txid.as_ref());
         let height = entry.mined_height.map(u64::from).unwrap_or(0);
         shown_history.insert(
