@@ -59,6 +59,7 @@ pub mod chain;
 pub mod endpoints;
 pub mod files;
 pub mod scripts;
+pub mod shadow;
 pub mod source;
 pub mod stop;
 pub mod store;

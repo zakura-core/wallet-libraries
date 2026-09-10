@@ -139,7 +139,9 @@ fn the_jsonl_sample_loads_and_chains() {
         span: 192,
         shards: 6,
     };
-    let chain = Chain::load_jsonl(std::path::Path::new(&path), layout);
+    let paths: Vec<std::path::PathBuf> = path.split(':').map(std::path::PathBuf::from).collect();
+    let refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+    let chain = Chain::load_jsonl(&refs, layout);
     assert_eq!(chain.blocks.len(), 1153);
     let candidates = chain.candidate_scripts();
     assert!(candidates.iter().any(|c| c.is_p2pkh() && c.spends > 0));

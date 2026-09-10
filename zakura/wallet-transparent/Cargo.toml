@@ -28,8 +28,10 @@ transparent-shard = { git = "https://github.com/valargroup/enhance-pir.git", rev
 transparent-events = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
 
 hex.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 zcash_protocol.workspace = true
 zakura-wallet-core = { path = "../wallet-core" }
 zakura-wallet-store = { path = "../wallet-store" }
@@ -43,8 +45,6 @@ transparent-wallet = { git = "https://github.com/valargroup/enhance-pir.git", re
 # them rather than against a stand-in.
 transparent-shard-server = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
 axum = "0.7"
-sha2.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync"] }
 zip32.workspace = true
-rusqlite.workspace = true

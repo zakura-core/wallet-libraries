@@ -296,12 +296,18 @@ impl Chain {
         by_script.into_values().collect()
     }
 
-    /// A chain from a JSON-lines block sample: one `manifest` line and one
+    /// A chain from JSON-lines block samples: `manifest` lines and one
     /// `block` line per height, with raw scripts and previous-output scripts
-    /// on inputs. Heights outside the layout are refused.
-    pub fn load_jsonl(path: &Path, layout: Layout) -> Chain {
-        let text = std::fs::read_to_string(path).expect("the block sample is readable");
-        let mut blocks = BTreeMap::new();
+    /// on inputs. A sample may be split across files, as an interrupted and
+    /// resumed capture is; a height present twice must be identical. Heights
+    /// outside the layout are refused.
+    pub fn load_jsonl(paths: &[&Path], layout: Layout) -> Chain {
+        let mut text = String::new();
+        for path in paths {
+            text.push_str(&std::fs::read_to_string(path).expect("the block sample is readable"));
+            text.push('\n');
+        }
+        let mut blocks: BTreeMap<u64, Block> = BTreeMap::new();
         for line in text.lines() {
             if line.trim().is_empty() {
                 continue;
@@ -361,16 +367,19 @@ impl Chain {
                             .collect();
                         txs.push(Tx { txid, vin, vout });
                     }
-                    blocks.insert(
+                    let block = Block {
                         height,
-                        Block {
-                            height,
-                            hash,
-                            prev_hash,
-                            txs,
-                        },
-                    );
+                        hash,
+                        prev_hash,
+                        txs,
+                    };
+                    if let Some(seen) = blocks.get(&height) {
+                        assert_eq!(seen, &block, "block {height} differs between sample files");
+                    }
+                    blocks.insert(height, block);
                 }
+                // A capture's closing record: counts, not blocks.
+                Some("complete") => {}
                 other => panic!("unknown line type {other:?}"),
             }
         }
