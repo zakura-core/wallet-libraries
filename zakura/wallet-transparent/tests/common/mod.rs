@@ -975,14 +975,21 @@ impl Faults {
 }
 
 /// A running service a test can stop.
+///
+/// The service runs on a runtime of its own, on its own thread, so that
+/// stopping it drops the listener and every open connection at once — a
+/// wallet mid-request sees the connection reset, as it would if the process
+/// died — rather than only the accept loop.
 pub struct ServerHandle {
-    task: tokio::task::JoinHandle<()>,
+    stop: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl ServerHandle {
     /// Stops accepting and drops every connection: the service is gone.
     pub fn stop(&self) {
-        self.task.abort();
+        if let Some(stop) = self.stop.lock().unwrap().take() {
+            let _ = stop.send(());
+        }
     }
 }
 
@@ -1099,13 +1106,35 @@ async fn fault_layer(
 pub async fn serve_with(dir: &Path, faults: Arc<Mutex<Faults>>) -> (String, ServerHandle) {
     let set = ShardSet::open(dir, DEFAULT_RETAIN_REVISIONS).expect("load");
     let state = ServiceState::build(set, ServiceConfig::default()).expect("state");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let addr = std_listener.local_addr().unwrap();
     let app = router(state).layer(axum::middleware::from_fn_with_state(faults, fault_layer));
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
+            axum::serve(listener, app).await.unwrap();
+        });
+        // Run until stopped. A dropped handle is not a stop: the service
+        // lives as long as the test process, as `serve` always has.
+        match stopped.recv() {
+            Ok(()) => runtime.shutdown_background(),
+            Err(_) => loop {
+                std::thread::park();
+            },
+        }
     });
-    (format!("http://{addr}"), ServerHandle { task })
+    (
+        format!("http://{addr}"),
+        ServerHandle {
+            stop: Mutex::new(Some(stop)),
+        },
+    )
 }
 
 /// Starts the service and records every request it sees.
@@ -1389,10 +1418,13 @@ impl ShardTransport for SwitchAfter {
 }
 
 /// One recovery through any transport, off the async runtime.
+///
+/// The transport is built inside the blocking thread: an HTTP client made
+/// on the async runtime's thread cannot be dropped there.
 pub async fn recover_through<T, F>(
     db: WalletDb,
     filters: F,
-    transport: T,
+    make_transport: impl FnOnce() -> T + Send + 'static,
     pir: TransparentPir<Network>,
 ) -> (
     WalletDb,
@@ -1407,7 +1439,7 @@ where
     tokio::task::spawn_blocking(move || {
         let mut db = db;
         let mut filters = filters;
-        let mut transport = transport;
+        let mut transport = make_transport();
         let result = pir.recover_with(&mut db, &mut filters, &mut transport);
         (db, filters, transport, result)
     })
