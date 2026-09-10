@@ -1099,49 +1099,6 @@ async fn a_publication_ahead_of_the_wallet_commits_only_the_accepted_prefix() {
     compare(&store_ledger(&mut db), &traverse(&all, &mine));
 }
 
-/// A transport that raises the wallet's stop signal after a number of
-/// private queries, as a wallet being closed mid-recovery would.
-struct StopAfter {
-    inner: Counting,
-    signal: zakura_wallet_transparent::StopSignal,
-    after: u64,
-}
-
-impl transparent_wallet::transport::ShardTransport for StopAfter {
-    fn init(&mut self) -> Result<(Vec<u8>, u64), transparent_wallet::transport::BoxError> {
-        self.inner.init()
-    }
-    fn manifest(
-        &mut self,
-        shard_id: u64,
-        revision: &str,
-    ) -> Result<(Vec<u8>, u64), transparent_wallet::transport::BoxError> {
-        self.inner.manifest(shard_id, revision)
-    }
-    fn setup(
-        &mut self,
-        shard_id: u64,
-        revision: &str,
-        table: transparent_wallet::client::Table,
-        segment: u32,
-    ) -> Result<(Vec<u8>, u64), transparent_wallet::transport::BoxError> {
-        self.inner.setup(shard_id, revision, table, segment)
-    }
-    fn query(
-        &mut self,
-        shard_id: u64,
-        revision: &str,
-        table: transparent_wallet::client::Table,
-        body: &[u8],
-    ) -> Result<Vec<u8>, transparent_wallet::transport::BoxError> {
-        let answer = self.inner.query(shard_id, revision, table, body)?;
-        if self.inner.queries >= self.after {
-            self.signal.stop();
-        }
-        Ok(answer)
-    }
-}
-
 /// Closing the wallet in the middle of a recovery ends the run at the next
 /// request, keeps every shard committed before it, records `stopped` rather
 /// than a budget reason, and the next run finishes the job exactly.
