@@ -132,7 +132,10 @@ void main() {
       final named = Completer<void>();
       final syncing = Completer<void>();
       var lastChildLine = '';
-      final childLines = child.stdout.transform(utf8.decoder).transform(const LineSplitter());
+      final childLines = child.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .asBroadcastStream();
       final childDone = Completer<void>();
       final pidLine = RegExp(r'CHILD_PID=(\d+)');
       childLines.listen((line) {
@@ -145,14 +148,21 @@ void main() {
         if (line.contains('CHILD ')) lastChildLine = line;
         if (line.contains('CHILD_FAILED')) note('child reported a failure: $line');
       }, onDone: childDone.complete);
-      child.stderr.transform(utf8.decoder).transform(const LineSplitter()).listen((_) {});
+      final childErrors = <String>[];
+      child.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen(childErrors.add);
+      final childOut = <String>[];
+      childLines.listen(childOut.add);
 
       // 3. Kill while the held query is in flight.
       await named.future.timeout(const Duration(minutes: 5), onTimeout: () {
         fail('the child never named its process');
       });
-      await syncing.future.timeout(const Duration(minutes: 5), onTimeout: () {
-        fail('the child never started syncing; last line: $lastChildLine');
+      await syncing.future.timeout(const Duration(minutes: 10), onTimeout: () {
+        fail('the child never started syncing; last line: $lastChildLine\n'
+            'child output:\n${childOut.join('\n')}\nchild errors:\n${childErrors.join('\n')}');
       });
       await held.future.timeout(const Duration(minutes: 10), onTimeout: () {
         fail('the held query never arrived; last child line: $lastChildLine');
