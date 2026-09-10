@@ -438,7 +438,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
 dependencies = [
  "async-trait",
- "axum-core",
+ "axum-core 0.4.5",
  "bytes",
  "futures-util",
  "http",
@@ -447,7 +447,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "itoa",
- "matchit",
+ "matchit 0.7.3",
  "memchr",
  "mime",
  "percent-encoding",
@@ -463,6 +463,31 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "axum"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
+dependencies = [
+ "axum-core 0.5.6",
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "itoa",
+ "matchit 0.8.4",
+ "memchr",
+ "mime",
+ "percent-encoding",
+ "pin-project-lite",
+ "serde_core",
+ "sync_wrapper",
+ "tower",
+ "tower-layer",
+ "tower-service",
 ]
 
 [[package]]
@@ -484,6 +509,24 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "axum-core"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "http",
+ "http-body",
+ "http-body-util",
+ "mime",
+ "pin-project-lite",
+ "sync_wrapper",
+ "tower-layer",
+ "tower-service",
 ]
 
 [[package]]
@@ -1834,7 +1877,7 @@ version = "0.1.0"
 source = "git+https://github.com/valargroup/enhance-pir.git?rev=22e6bec#22e6becacdd0107683cda7280c5585fac9f4f4b2"
 dependencies = [
  "arc-swap",
- "axum",
+ "axum 0.7.9",
  "base64",
  "clap",
  "enhance-pir",
@@ -3449,6 +3492,12 @@ name = "matchit"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
+
+[[package]]
+name = "matchit"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "maybe-rayon"
@@ -6154,6 +6203,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
 dependencies = [
  "async-trait",
+ "axum 0.8.9",
  "base64",
  "bytes",
  "h2",
@@ -7383,7 +7433,7 @@ name = "transparent-shard-server"
 version = "0.1.0"
 source = "git+https://github.com/valargroup/enhance-pir.git?rev=22e6bec#22e6becacdd0107683cda7280c5585fac9f4f4b2"
 dependencies = [
- "axum",
+ "axum 0.7.9",
  "base64",
  "clap",
  "enhance-pir-server",
@@ -8893,6 +8943,7 @@ dependencies = [
  "rusqlite",
  "secrecy",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -8979,7 +9030,8 @@ dependencies = [
 name = "zakura-wallet-transparent"
 version = "0.1.0"
 dependencies = [
- "axum",
+ "axum 0.7.9",
+ "bip0039",
  "hex",
  "rusqlite",
  "serde",
@@ -8993,6 +9045,7 @@ dependencies = [
  "transparent-shard-server",
  "transparent-wallet",
  "zakura-wallet-core",
+ "zakura-wallet-lwd",
  "zakura-wallet-store",
  "zakura-wallet-sync",
  "zcash_protocol",

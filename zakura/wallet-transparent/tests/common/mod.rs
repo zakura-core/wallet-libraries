@@ -1024,10 +1024,10 @@ async fn fault_layer(
                 f.overload_remaining -= 1;
                 f.refused += 1;
                 refuse = Some(f.overload_retry_after.clone());
-            } else if let Some(h) = &f.hold {
-                if h.shard == *shard && h.table.map_or(true, |t| t == table) && h.nth == arrival {
-                    hold = Some(h.clone());
-                }
+            } else if let Some(h) = f.hold.as_ref().filter(|h| {
+                h.shard == *shard && h.table.is_none_or(|t| t == table) && h.nth == arrival
+            }) {
+                hold = Some(h.clone());
             }
         }
         // Count answers per (shard, table) first, so a tamper can name the nth.
@@ -1200,10 +1200,10 @@ impl Needles {
                 if seen.insert(event.txid()) {
                     needles = needles.txid(&event.txid());
                 }
-                if let TransparentEvent::Spend(spend) = event {
-                    if seen.insert(spend.spent_txid) {
-                        needles = needles.txid(&spend.spent_txid);
-                    }
+                if let TransparentEvent::Spend(spend) = event
+                    && seen.insert(spend.spent_txid)
+                {
+                    needles = needles.txid(&spend.spent_txid);
                 }
             }
         }

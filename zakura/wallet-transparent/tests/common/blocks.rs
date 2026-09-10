@@ -658,14 +658,19 @@ impl Fact {
     }
 }
 
+/// An output: script, value, creation height, coinbase.
+pub type OutputFact = (Vec<u8>, u64, u64, bool);
+/// A spent output: script, value, spend height, spending txid.
+pub type SpentFact = (Vec<u8>, u64, u64, Txid);
+
 /// What a wallet holding `scripts` must hold after reading `from..=through`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Expected {
     pub events: BTreeSet<Fact>,
     /// Unspent outputs: script, value, creation height, coinbase.
-    pub utxos: BTreeMap<(Txid, u32), (Vec<u8>, u64, u64, bool)>,
+    pub utxos: BTreeMap<(Txid, u32), OutputFact>,
     /// Spent outputs: script, value, spend height, spending txid.
-    pub spends: BTreeMap<(Txid, u32), (Vec<u8>, u64, u64, Txid)>,
+    pub spends: BTreeMap<(Txid, u32), SpentFact>,
     /// Per transaction: height, received, spent.
     pub history: BTreeMap<Txid, (u64, u64, u64)>,
     pub balance: u64,
@@ -698,8 +703,8 @@ pub fn reduce(chain: &Chain, scripts: &[ScriptBytes], from: u64, through: u64) -
     // Every wallet output ever created, with its creation height, so a spend
     // of one from below `from` is recognised as unresolved rather than
     // mistaken for a fixture bug.
-    let mut created: BTreeMap<(Txid, u32), (Vec<u8>, u64, u64, bool)> = BTreeMap::new();
-    let mut unspent: BTreeMap<(Txid, u32), (Vec<u8>, u64, u64, bool)> = BTreeMap::new();
+    let mut created: BTreeMap<(Txid, u32), OutputFact> = BTreeMap::new();
+    let mut unspent: BTreeMap<(Txid, u32), OutputFact> = BTreeMap::new();
     let mut spent: BTreeSet<(Txid, u32)> = BTreeSet::new();
     for (height, index, tx) in chain.transactions() {
         let coinbase = index == 0 && tx.vin.is_empty();
@@ -803,7 +808,7 @@ pub fn compare_blocks(db: &mut WalletDb, account: AccountId, expected: &Expected
 
     // 2. The ledger the library replays from them.
     let ledger = store_ledger(db);
-    let utxos: BTreeMap<(Txid, u32), (Vec<u8>, u64, u64, bool)> = ledger
+    let utxos: BTreeMap<(Txid, u32), OutputFact> = ledger
         .utxos()
         .filter(|u| mine.contains(&u.script))
         .map(|u| {
@@ -819,7 +824,7 @@ pub fn compare_blocks(db: &mut WalletDb, account: AccountId, expected: &Expected
         })
         .collect();
     assert_eq!(utxos, expected.utxos, "UTXO sets differ");
-    let spends: BTreeMap<(Txid, u32), (Vec<u8>, u64, u64, Txid)> = ledger
+    let spends: BTreeMap<(Txid, u32), SpentFact> = ledger
         .spends()
         .iter()
         .filter(|s| mine.contains(&s.script))

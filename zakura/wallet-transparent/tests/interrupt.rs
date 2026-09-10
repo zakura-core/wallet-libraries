@@ -461,8 +461,7 @@ async fn a_store_failure_before_a_shard_commit_leaves_the_prior_state_exactly() 
     let after = Snapshot::of(&fx.db);
     assert_eq!(after.last_commit, 1, "exactly the first commit landed");
     assert!(
-        after.events.iter().all(|e| e.shard_id != refused.shard_id)
-            || refused.shard_id == after.events[0].shard_id && false,
+        after.events.iter().all(|e| e.shard_id != refused.shard_id),
         "nothing from the refused commit's shard was written"
     );
     assert_eq!(
@@ -1010,7 +1009,7 @@ async fn an_unrelenting_overload_is_named_and_keeps_pending_work_durable() {
         other => panic!("{other:?}"),
     };
     assert!(reason.starts_with("overloaded:"), "{reason}");
-    let shard: u64 = reason.split(':').last().unwrap().parse().unwrap();
+    let shard: u64 = reason.split(':').next_back().unwrap().parse().unwrap();
     assert!(transport.queried.contains(&shard));
     assert_eq!(
         faults.lock().unwrap().refused,
@@ -1191,7 +1190,7 @@ async fn pending_work_for_a_replaced_revision_is_discarded_not_fetched() {
     let progress = result.unwrap();
     complete(&progress);
     assert!(
-        !transport.revisions.iter().any(|r| *r == old_digest),
+        !transport.revisions.contains(&old_digest),
         "no query names the replaced revision"
     );
     assert!(db.transparent_pending().unwrap().is_empty());

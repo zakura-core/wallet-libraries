@@ -190,7 +190,7 @@ async fn a_same_height_fork_inside_a_sealed_shard_is_rolled_back_to_the_last_acc
             );
         }
     }
-    assert!(before.events.len() > 0);
+    assert!(!before.events.is_empty());
     let expected = reduce(&chain_b, &cast.all, FIRST, chain_b.last());
     assert!(expected.utxos.values().any(|(_, v, _, _)| *v == 900));
     compare_blocks(&mut db, account, &expected);
@@ -492,7 +492,7 @@ async fn pending_work_orphaned_by_a_reorg_is_removed_with_the_range() {
         "nothing is owed for a revision the chain left behind"
     );
     assert!(
-        !transport.revisions.iter().any(|r| *r == old_digest),
+        !transport.revisions.contains(&old_digest),
         "no query names the orphaned revision"
     );
     for terminal in db.transparent_coverage_terminals().unwrap() {

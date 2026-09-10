@@ -26,6 +26,8 @@ crate-type = ["cdylib", "staticlib", "lib"]
 # in the generated surface changes with the feature: the functions exist either
 # way and answer `SendDisabled` (code 20) when it is off.
 default = []
+# See the facade: loopback fixture services for rehearsals, never shipped.
+fixture-loopback = ["zakura-wallet-facade/fixture-loopback"]
 send = []
 
 [dependencies]

@@ -214,10 +214,8 @@ pub fn read_shadow_snapshot(profile: &Path) -> Result<ShadowSnapshot, ShadowErro
     let cache = profile.join("cache.db");
     for suffix in ["-wal", "-shm"] {
         let side = profile.join(format!("cache.db{suffix}"));
-        if let Ok(meta) = std::fs::metadata(&side) {
-            if meta.len() > 0 {
-                return Err(ShadowError::Busy(profile.to_path_buf()));
-            }
+        if std::fs::metadata(&side).is_ok_and(|meta| meta.len() > 0) {
+            return Err(ShadowError::Busy(profile.to_path_buf()));
         }
     }
     let uri = format!("file:{}?mode=ro&immutable=1", cache.display());

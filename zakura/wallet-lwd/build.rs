@@ -23,8 +23,11 @@ fn main() -> io::Result<()> {
     println!("cargo:rerun-if-changed=proto/compact_formats.proto");
     println!("cargo:rerun-if-changed=proto/service.proto");
 
+    // The server side is generated only for the fixture light server, which
+    // tests and rehearsals run against; the wallet itself is a client.
+    let server = env::var_os("CARGO_FEATURE_FIXTURE_SERVER").is_some();
     tonic_prost_build::configure()
-        .build_server(false)
+        .build_server(server)
         .compile_protos(
             &["proto/service.proto", "proto/compact_formats.proto"],
             &["proto"],

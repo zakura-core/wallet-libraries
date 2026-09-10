@@ -11,6 +11,13 @@ publish = false
 [lib]
 name = "zakura_wallet_facade"
 
+[features]
+# Lets a recovery-only wallet reach services on the loopback interface over
+# plaintext, for rehearsals against fixture services on this machine. Never
+# in a shipped build: the beta build is made without it, and even with it the
+# process must also carry `ZAKURA_FIXTURE_LOOPBACK=1`.
+fixture-loopback = []
+
 [dependencies]
 # Mnemonics live here rather than in the app, so no other language ever handles
 # entropy or a seed phrase.

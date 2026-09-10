@@ -124,7 +124,7 @@ impl WalletConfig {
             ("shard service", &endpoints.shards_url),
             ("light server", &self.lightwalletd_url),
         ] {
-            if !url.starts_with("https://") {
+            if !url.starts_with("https://") && !fixture_loopback(url) {
                 return Err(format!("the {what} is not reached over TLS"));
             }
         }
@@ -137,4 +137,20 @@ impl WalletConfig {
         }
         Ok(())
     }
+}
+
+/// Whether `url` is a plaintext loopback address a fixture build may use.
+///
+/// Only a build made with the `fixture-loopback` feature, and only when the
+/// process also carries `ZAKURA_FIXTURE_LOOPBACK=1`, and only for the
+/// loopback interface. A shipped build has none of the three.
+#[cfg(feature = "fixture-loopback")]
+fn fixture_loopback(url: &str) -> bool {
+    std::env::var("ZAKURA_FIXTURE_LOOPBACK").as_deref() == Ok("1")
+        && (url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:"))
+}
+
+#[cfg(not(feature = "fixture-loopback"))]
+fn fixture_loopback(_: &str) -> bool {
+    false
 }

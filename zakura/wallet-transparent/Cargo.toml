@@ -45,6 +45,9 @@ transparent-wallet = { git = "https://github.com/valargroup/enhance-pir.git", re
 # them rather than against a stand-in.
 transparent-shard-server = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
 axum = "0.7"
+bip0039.workspace = true
 tempfile.workspace = true
+# The fixture light server the loopback rehearsal runs the real bridge against.
+zakura-wallet-lwd = { path = "../wallet-lwd", features = ["fixture-server"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync"] }
 zip32.workspace = true

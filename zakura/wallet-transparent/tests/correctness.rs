@@ -237,7 +237,7 @@ async fn an_imported_script_is_read_from_the_set_start_without_raising_a_derived
         .collect();
     let expected = reduce(&chain, &derived, FIRST + SPAN, chain.last()).merge(reduce(
         &chain,
-        &[cast.imported.clone()],
+        std::slice::from_ref(&cast.imported),
         FIRST,
         chain.last(),
     ));
