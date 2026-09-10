@@ -2,8 +2,6 @@
 //! the helpers that publish, serve and check it.
 #![allow(dead_code)]
 
-use std::sync::Mutex;
-
 use transparent_filter::ScriptBytes;
 use transparent_shard::layout::{Geometry, RECENT_4K, RECENT_8K};
 use zakura_wallet_core::{AccountId, KeyScope};
