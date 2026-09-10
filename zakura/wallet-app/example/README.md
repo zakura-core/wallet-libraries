@@ -34,3 +34,20 @@ The store holds one account, so there is no switcher. Changing wallets is
 **Forget this wallet** on the home screen, which deletes the app's copy and
 returns to onboarding; restoring the same phrase again from there is how a
 recovery is re-run with a lower birthday.
+
+## Comparing a shadow profile
+
+A shadow-validation profile is compared with an independent reconstruction
+of the same chain without touching it:
+
+```sh
+cargo run -p zakura-wallet-transparent --release --example shadow_compare -- \
+  --profile "$HOME/Library/Containers/org.valargroup.zakura-recovery-beta/Data/Library/Application Support/org.valargroup.zakura-recovery-beta/shadow" \
+  --untouched "$HOME/Library/Containers/org.valargroup.zakura-recovery-beta/Data/Library/Application Support/org.valargroup.zakura-recovery-beta/recovery" \
+  --expected <snapshot.json> --report <sanitized.json>
+```
+
+The command refuses anything but a shadow profile, opens it read-only,
+takes no network address, and reports counts and digests only. Close the
+application first. The recovery profile named with `--untouched` is never
+opened; its files are digested before and after to prove it.
