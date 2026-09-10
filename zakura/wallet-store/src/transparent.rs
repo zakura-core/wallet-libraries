@@ -297,10 +297,11 @@ pub struct TransparentState {
     /// Why the last sync stopped, as the library states it: `complete`, or
     /// the reason it stopped short. `None` before any sync.
     pub completion: Option<String>,
-    /// Scripts of this account the private tables cannot index, so their
-    /// history is outside what this path recovers. Counted from the address
-    /// rows, so it survives a restart and is known before any sync. Non-zero
-    /// forbids calling the balance synchronized.
+    /// Scripts of this account the private path cannot read — longer than
+    /// the tables index, empty, or `OP_RETURN` — so their history is outside
+    /// what it recovers. Counted from the address rows, so it survives a
+    /// restart and is known before any sync. Non-zero forbids calling the
+    /// balance synchronized.
     pub outside_coverage: u32,
 }
 
@@ -1557,7 +1558,9 @@ impl WalletDb {
             &format!(
                 "SELECT COUNT(*) FROM {CACHE_SCHEMA}.addresses
                  WHERE account_id = :account AND transparent_script IS NOT NULL
-                   AND length(transparent_script) > :max"
+                   AND (length(transparent_script) > :max
+                        OR length(transparent_script) = 0
+                        OR substr(transparent_script, 1, 1) = X'6a')"
             ),
             named_params![":account": account.0, ":max": MAX_INDEXABLE_SCRIPT_BYTES as i64],
             |row| row.get(0),

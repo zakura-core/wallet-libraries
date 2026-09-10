@@ -36,7 +36,7 @@ fn snapshot_of(expected: &Expected, chain: &Chain) -> ShadowSnapshot {
     };
     for fact in &expected.events {
         let (script, event) = fact_to_event(fact);
-        snapshot.add_event(&script, &event);
+        snapshot.add_event(&script, &event).unwrap();
     }
     snapshot
 }
@@ -274,6 +274,27 @@ async fn the_recovery_profile_is_untouched_by_a_shadow_comparison() {
         serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
     assert_eq!(report["result"], "equal");
     assert!(detail_path.exists());
+
+    // A profile whose last run stopped short is not equal, however well its
+    // retained events match: the word beside the balance is part of the
+    // comparison.
+    let short = tempfile::tempdir().unwrap();
+    marker(short.path(), "shadow");
+    for file in ["wallet.db", "cache.db"] {
+        std::fs::copy(shadow.path().join(file), short.path().join(file)).unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(short.path().join("cache.db")).unwrap();
+        conn.execute("UPDATE transparent_set SET completion = 'query-budget'", [])
+            .unwrap();
+        conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
+    }
+    let code = run_compare(short.path(), &expected_path, &report_path, None, &[]).unwrap();
+    assert_eq!(code, 1, "a run that stopped short cannot be equal");
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
+    assert_eq!(report["complete"], false);
+    assert_eq!(report["missing_receives"], 0);
 
     // Pointed at the recovery profile, the comparison refuses before opening.
     let code = run_compare(recovery.path(), &expected_path, &report_path, None, &[]);

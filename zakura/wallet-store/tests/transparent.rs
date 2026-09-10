@@ -1175,4 +1175,18 @@ fn a_script_too_long_to_index_is_counted_outside_coverage() {
         db.transparent_state(id, h(100)).unwrap().outside_coverage,
         1
     );
+
+    // A script no filter can hold is outside coverage too, not passed over.
+    db.record_transparent_address(
+        id,
+        zakura_wallet_core::KeyScope::External,
+        902,
+        "t1opreturn",
+        &[0x6a, 0x04, 1, 2, 3, 4],
+    )
+    .unwrap();
+    assert_eq!(
+        db.transparent_state(id, h(100)).unwrap().outside_coverage,
+        2
+    );
 }

@@ -61,8 +61,6 @@ struct Killed {
     account: AccountId,
     chain: Chain,
     cast: Cast,
-    /// What the child printed before it was killed.
-    output_before_kill: bool,
 }
 
 /// Runs the child against a service holding the request `hold` names,
@@ -136,7 +134,6 @@ async fn kill_during(hold: HoldOn) -> Killed {
         account,
         chain,
         cast,
-        output_before_kill: true,
     }
 }
 
@@ -212,7 +209,6 @@ async fn resumes(killed: Killed, db: WalletDb, after: &Snapshot, expected: &Expe
         second.queries,
         whole.queries
     );
-    assert!(killed.output_before_kill);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -71,6 +71,8 @@ pub struct ReceiveFact {
     pub value: u64,
     /// The height it was created at.
     pub height: u32,
+    /// The creating transaction's index in its block.
+    pub transaction_index: u16,
     /// Whether it is a coinbase output.
     pub coinbase: bool,
 }
@@ -78,8 +80,13 @@ pub struct ReceiveFact {
 /// One spend of a recovered output, keyed by the outpoint it consumed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpendFact {
+    /// SHA-256 of the script the spend was indexed under: the consumed
+    /// output's.
+    pub script_sha256: String,
     /// The consuming transaction, in display hex.
     pub spending_txid: String,
+    /// Its index in its block.
+    pub transaction_index: u16,
     /// Which of its inputs.
     pub input_index: u32,
     /// The height it was mined at.
@@ -124,58 +131,85 @@ impl ShadowSnapshot {
             .sum()
     }
 
+    /// Spends whose consumed output the snapshot does not hold.
+    pub fn unresolved(&self) -> usize {
+        self.spends
+            .keys()
+            .filter(|k| !self.receives.contains_key(*k))
+            .count()
+    }
+
+    /// Whether the last run completed to its target.
+    pub fn is_complete(&self) -> bool {
+        self.completion.as_deref() == Some("complete")
+    }
+
     /// A digest over everything the snapshot holds, in a fixed order.
     pub fn digest(&self) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(b"shadow-snapshot-v1\n");
+        hasher.update(b"shadow-snapshot-v2\n");
         hasher.update(format!(
             "anchor {:?} {:?}\n",
             self.anchor_height, self.anchor_hash
         ));
         for (k, r) in &self.receives {
             hasher.update(format!(
-                "R {k} {} {} {} {}\n",
-                r.script_sha256, r.value, r.height, r.coinbase
+                "R {k} {} {} {} {} {}\n",
+                r.script_sha256, r.value, r.height, r.transaction_index, r.coinbase
             ));
         }
         for (k, s) in &self.spends {
             hasher.update(format!(
-                "S {k} {} {} {}\n",
-                s.spending_txid, s.input_index, s.height
+                "S {k} {} {} {} {} {}\n",
+                s.script_sha256, s.spending_txid, s.transaction_index, s.input_index, s.height
             ));
         }
         hex::encode(hasher.finalize())
     }
 
-    /// Adds one event as the ledger indexes it.
-    pub fn add_event(&mut self, script: &[u8], event: &TransparentEvent) {
+    /// Adds one event as the ledger indexes it, refusing a second event for
+    /// an outpoint already held: a snapshot that overwrote would hide a
+    /// contradiction.
+    pub fn add_event(
+        &mut self,
+        script: &[u8],
+        event: &TransparentEvent,
+    ) -> Result<(), ShadowError> {
         match event {
             TransparentEvent::Receive(r) => {
-                self.receives.insert(
-                    outpoint(&r.txid.0, r.output_index),
-                    ReceiveFact {
-                        script_sha256: hex::encode(Sha256::digest(script)),
-                        value: r.value,
-                        height: r.height,
-                        coinbase: r.coinbase,
-                    },
-                );
+                let key = outpoint(&r.txid.0, r.output_index);
+                let fact = ReceiveFact {
+                    script_sha256: hex::encode(Sha256::digest(script)),
+                    value: r.value,
+                    height: r.height,
+                    transaction_index: r.transaction_index,
+                    coinbase: r.coinbase,
+                };
+                if self.receives.insert(key, fact).is_some() {
+                    return Err(ShadowError::Corrupt(
+                        "an outpoint was received twice".into(),
+                    ));
+                }
             }
             TransparentEvent::Spend(s) => {
-                self.spends.insert(
-                    outpoint(&s.spent_txid.0, s.spent_output_index),
-                    SpendFact {
-                        spending_txid: {
-                            let mut d = s.spending_txid.0;
-                            d.reverse();
-                            hex::encode(d)
-                        },
-                        input_index: s.input_index,
-                        height: s.height,
+                let key = outpoint(&s.spent_txid.0, s.spent_output_index);
+                let fact = SpendFact {
+                    script_sha256: hex::encode(Sha256::digest(script)),
+                    spending_txid: {
+                        let mut d = s.spending_txid.0;
+                        d.reverse();
+                        hex::encode(d)
                     },
-                );
+                    transaction_index: s.transaction_index,
+                    input_index: s.input_index,
+                    height: s.height,
+                };
+                if self.spends.insert(key, fact).is_some() {
+                    return Err(ShadowError::Corrupt("an outpoint was spent twice".into()));
+                }
             }
         }
+        Ok(())
     }
 }
 
@@ -259,7 +293,7 @@ pub fn read_shadow_snapshot(profile: &Path) -> Result<ShadowSnapshot, ShadowErro
             let (script, record) = row.map_err(read)?;
             let event = TransparentEvent::from_bytes(&record)
                 .map_err(|e| ShadowError::Corrupt(e.to_string()))?;
-            snapshot.add_event(&script, &event);
+            snapshot.add_event(&script, &event)?;
         }
     }
     Ok(snapshot)
@@ -268,8 +302,11 @@ pub fn read_shadow_snapshot(profile: &Path) -> Result<ShadowSnapshot, ShadowErro
 /// How two snapshots differ.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Comparison {
-    /// Whether the two agree on the anchor and on every event.
+    /// Whether the profile's last run completed, the two agree on the anchor
+    /// and on every event, and neither holds a spend the other resolves.
     pub equal: bool,
+    /// Whether the profile's last run completed to its target.
+    pub complete: bool,
     /// Whether the anchors agree.
     pub anchor_equal: bool,
     /// Expected receives the profile lacks, by outpoint.
@@ -304,6 +341,12 @@ pub struct SanitizedReport {
     pub anchor_height: Option<u32>,
     /// Why the profile's last sync stopped.
     pub completion: Option<String>,
+    /// Whether that sync completed to its target.
+    pub complete: bool,
+    /// Spends the profile holds whose receive it does not.
+    pub actual_unresolved: usize,
+    /// Spends expected without a receive expected.
+    pub expected_unresolved: usize,
     /// Receives the profile holds.
     pub actual_receives: usize,
     /// Receives expected.
@@ -367,7 +410,10 @@ pub fn compare(actual: &ShadowSnapshot, expected: &ShadowSnapshot) -> Comparison
     }
     c.anchor_equal = actual.anchor_height == expected.anchor_height
         && (expected.anchor_hash.is_none() || actual.anchor_hash == expected.anchor_hash);
-    c.equal = c.anchor_equal
+    c.complete = actual.is_complete();
+    c.equal = c.complete
+        && c.anchor_equal
+        && actual.unresolved() == expected.unresolved()
         && c.missing_receives.is_empty()
         && c.extra_receives.is_empty()
         && c.differing_receives.is_empty()
@@ -390,6 +436,9 @@ impl Comparison {
             expected_digest: self.expected.digest(),
             anchor_height: self.actual.anchor_height,
             completion: self.actual.completion.clone(),
+            complete: self.complete,
+            actual_unresolved: self.actual.unresolved(),
+            expected_unresolved: self.expected.unresolved(),
             actual_receives: self.actual.receives.len(),
             expected_receives: self.expected.receives.len(),
             actual_spends: self.actual.spends.len(),

@@ -81,9 +81,12 @@ pub fn watched_scripts<P: Parameters>(
             out.outside_coverage += 1;
             continue;
         }
-        // An empty or `OP_RETURN` script is not in any filter, so asking about
-        // one costs a query that can never match.
+        // An empty or `OP_RETURN` script is not in any filter, so asking
+        // about one costs a query that can never match. It is still a script
+        // the wallet holds and this path cannot read, and it is counted as
+        // such rather than passed over.
         if !script.is_filter_element() {
+            out.outside_coverage += 1;
             continue;
         }
         let Some(birthday) = birthdays.get(&watched.account) else {

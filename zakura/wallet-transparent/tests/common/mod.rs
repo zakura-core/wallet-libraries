@@ -773,6 +773,10 @@ impl FilterSource for SharedFilters {
 pub struct Request {
     pub method: String,
     pub path: String,
+    /// The whole request target, query string included.
+    pub uri: String,
+    /// Every header, `name: value`, one per line.
+    pub headers: String,
     pub body: Vec<u8>,
 }
 
@@ -1001,6 +1005,13 @@ async fn fault_layer(
     use axum::body::{Body, to_bytes};
     let method = req.method().to_string();
     let path = req.uri().path().to_owned();
+    let uri = req.uri().to_string();
+    let headers = req
+        .headers()
+        .iter()
+        .map(|(name, value)| format!("{name}: {}", String::from_utf8_lossy(value.as_bytes())))
+        .collect::<Vec<_>>()
+        .join("\n");
     let (parts, body) = req.into_parts();
     let bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
     let route = Route::of(&method, &path);
@@ -1011,6 +1022,8 @@ async fn fault_layer(
         f.requests.push(Request {
             method: method.clone(),
             path: path.clone(),
+            uri,
+            headers,
             body: bytes.to_vec(),
         });
         let mut refuse = None;
@@ -1161,7 +1174,25 @@ impl Needles {
 
     pub fn script(mut self, script: &[u8]) -> Self {
         self.text.push(hex::encode(script));
+        self.text.push(base64_std(script));
+        self.text.push(base64_url(script));
         self.bytes.push(script.to_vec());
+        // The twenty-byte hash a P2PKH or P2SH script wraps: a request that
+        // carried the bare hash would name the address just as well.
+        let s = script;
+        let hash = if s.len() == 25 && s[0] == 0x76 && s[1] == 0xa9 && s[2] == 0x14 {
+            Some(&s[3..23])
+        } else if s.len() == 23 && s[0] == 0xa9 && s[1] == 0x14 {
+            Some(&s[2..22])
+        } else {
+            None
+        };
+        if let Some(hash) = hash {
+            self.text.push(hex::encode(hash));
+            self.text.push(base64_std(hash));
+            self.text.push(base64_url(hash));
+            self.bytes.push(hash.to_vec());
+        }
         self
     }
 
@@ -1173,7 +1204,12 @@ impl Needles {
     pub fn txid(mut self, txid: &Txid) -> Self {
         self.text.push(txid.to_display_hex());
         self.text.push(hex::encode(txid.0));
+        self.text.push(base64_std(&txid.0));
+        self.text.push(base64_url(&txid.0));
+        let mut display = txid.0;
+        display.reverse();
         self.bytes.push(txid.0.to_vec());
+        self.bytes.push(display.to_vec());
         self
     }
 
@@ -1211,8 +1247,42 @@ impl Needles {
     }
 }
 
-/// Every request went to a route the protocol has, and none of them carried a
-/// script, an address, a txid or an outpoint. Returns the shards named.
+fn base64_with(bytes: &[u8], alphabet: &[u8; 64]) -> String {
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        out.push(alphabet[(n >> 18) as usize & 63] as char);
+        out.push(alphabet[(n >> 12) as usize & 63] as char);
+        if chunk.len() > 1 {
+            out.push(alphabet[(n >> 6) as usize & 63] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(alphabet[n as usize & 63] as char);
+        }
+    }
+    out
+}
+
+pub fn base64_std(bytes: &[u8]) -> String {
+    base64_with(
+        bytes,
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+    )
+}
+
+pub fn base64_url(bytes: &[u8]) -> String {
+    base64_with(
+        bytes,
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+    )
+}
+
+/// Every request went to a route the protocol has, and none of them — path,
+/// query string, headers or body — carried a script (raw, hex, base64 or its
+/// bare hash), an address, a txid (either byte order, hex or base64) or an
+/// outpoint. Returns the shards named.
 pub fn assert_no_plaintext(requests: &[Request], needles: &Needles) -> BTreeSet<u64> {
     let mut shards = BTreeSet::new();
     for request in requests {
@@ -1225,33 +1295,43 @@ pub fn assert_no_plaintext(requests: &[Request], needles: &Needles) -> BTreeSet<
         if let Some(shard) = route.shard() {
             shards.insert(shard);
         }
-        let lower = request.path.to_ascii_lowercase();
-        let body_text = String::from_utf8_lossy(&request.body).to_ascii_lowercase();
+        assert!(
+            !request.uri.contains('?') || request.uri.ends_with('?'),
+            "a request carried a query string: {} {}",
+            request.method,
+            request.uri
+        );
+        let texts = [
+            ("request line", request.uri.clone()),
+            ("headers", request.headers.clone()),
+            ("body", String::from_utf8_lossy(&request.body).into_owned()),
+        ];
         for needle in &needles.text {
-            let needle = needle.to_ascii_lowercase();
-            assert!(
-                !lower.contains(&needle),
-                "a request path names the wallet: {} {}",
-                request.method,
-                request.path
-            );
-            assert!(
-                !body_text.contains(&needle),
-                "a request body names the wallet in text: {} {}",
-                request.method,
-                request.path
-            );
+            for (what, text) in &texts {
+                let hit = text.contains(needle.as_str())
+                    || text
+                        .to_ascii_lowercase()
+                        .contains(&needle.to_ascii_lowercase());
+                assert!(
+                    !hit,
+                    "a request's {what} names the wallet: {} {}",
+                    request.method, request.path
+                );
+            }
         }
         for needle in &needles.bytes {
-            assert!(
-                !request
-                    .body
-                    .windows(needle.len())
-                    .any(|w| w == needle.as_slice()),
-                "a request body carries the wallet's bytes: {} {}",
-                request.method,
-                request.path
-            );
+            for (what, bytes) in [
+                ("request line", request.uri.as_bytes()),
+                ("headers", request.headers.as_bytes()),
+                ("body", request.body.as_slice()),
+            ] {
+                assert!(
+                    !bytes.windows(needle.len()).any(|w| w == needle.as_slice()),
+                    "a request's {what} carries the wallet's bytes: {} {}",
+                    request.method,
+                    request.path
+                );
+            }
         }
     }
     shards

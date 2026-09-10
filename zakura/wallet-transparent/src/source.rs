@@ -232,14 +232,19 @@ impl<P: Parameters + Send + Sync + 'static> TransparentPir<P> {
             // rather than after another run. Any other stop is short
             // coverage, and widening over it would read the new scripts
             // over less than they need.
-            let coverage_complete = matches!(
-                report.completion,
-                Completion::Complete
-                    | Completion::Incomplete {
-                        reason: IncompleteReason::UnresolvedSpends,
-                        ..
-                    }
-            );
+            // The library reports unresolved spends only once every script
+            // in scope is covered to the target; that is what makes widening
+            // safe. Checked here rather than trusted, so a library that ever
+            // reported them early would end the run short rather than read
+            // the new scripts over less than they need.
+            let coverage_complete = match report.completion {
+                Completion::Complete => true,
+                Completion::Incomplete {
+                    reason: IncompleteReason::UnresolvedSpends,
+                    ..
+                } => report.covered_through >= target_height,
+                Completion::Incomplete { .. } => false,
+            };
             last = Some(report);
             if !coverage_complete {
                 break;

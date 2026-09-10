@@ -115,7 +115,10 @@ impl Wallet {
         // battery — and nothing is running now. Left alone, the balance would
         // read as a sync still in progress for as long as nobody started one.
         // Everything the run committed is kept; only the word changes, and to
-        // one that says what happened.
+        // one that says what happened. One process per profile is assumed
+        // here, as everywhere in this facade: a second process opening a
+        // profile another is syncing would read its running sync as
+        // interrupted, and nothing yet holds a lock on the directory.
         if writer.transparent_completion()?.as_deref() == Some("sync-in-progress") {
             writer.put_transparent_completion("interrupted")?;
         }
