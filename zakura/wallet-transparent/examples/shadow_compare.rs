@@ -23,7 +23,7 @@ fn main() {
     let mut detail = None;
     let mut untouched = Vec::new();
     while let Some(flag) = args.next() {
-        let value = || args.next().unwrap_or_else(|| usage(&flag));
+        let mut value = || args.next().unwrap_or_else(|| usage(&flag));
         match flag.as_str() {
             "--profile" => profile = Some(PathBuf::from(value())),
             "--expected" => expected = Some(PathBuf::from(value())),
