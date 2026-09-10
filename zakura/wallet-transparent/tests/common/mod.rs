@@ -8,6 +8,8 @@
 //! paid are the ones this wallet derived from its seed, not synthetic tags.
 #![allow(dead_code)]
 
+pub mod blocks;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
