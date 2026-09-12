@@ -70,4 +70,14 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Run the vendored test suites
-        run: cargo test --workspace --exclude zakura-wallet-lib --locked
+        run: cargo test --workspace --exclude zakura-wallet-lib --exclude zakura-pir-enhance --locked
+
+      - name: Run the Enhance PIR backend tests
+        run: cargo test -p zakura-client-backend --features zakura-pir-enhance,test-dependencies --locked
+
+      - name: Run the Enhance PIR SQLite tests
+        run: cargo test -p zakura-client-sqlite --features zakura-pir-enhance,test-dependencies --locked
+
+      # The standalone client is excluded from the vendored workspace suite.
+      - name: Run the Enhance PIR client tests
+        run: cargo test -p zakura-pir-enhance --all-features --locked

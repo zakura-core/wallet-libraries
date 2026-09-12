@@ -1,0 +1,53 @@
+[package]
+name = "zakura-wallet-transparent"
+version = "0.1.0"
+description = "The Zakura wallet's private transparent ledger"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+categories.workspace = true
+publish = false
+
+[lib]
+name = "zakura_wallet_transparent"
+
+[features]
+default = ["https-client"]
+# The reference blocking HTTP transports. Off in a build that supplies its own.
+https-client = ["transparent-wallet/reqwest"]
+
+[dependencies]
+# The client half of the transparent PIR protocol, from the repository that
+# also serves it. Pinned to a revision rather than tracked: the record layouts
+# and the table geometry are protocol, and a wallet that silently followed a
+# change to either would decode a newer layout as the one it knows.
+transparent-wallet = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
+transparent-filter = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
+transparent-shard = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
+transparent-events = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
+
+hex.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+zcash_protocol.workspace = true
+zakura-wallet-core = { path = "../wallet-core" }
+zakura-wallet-store = { path = "../wallet-store" }
+zakura-wallet-sync = { path = "../wallet-sync" }
+
+[dev-dependencies]
+zakura-wallet-store = { path = "../wallet-store", features = ["test-dependencies"] }
+transparent-wallet = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec", features = ["reqwest", "testing"] }
+# The real shard service, run in-process by the tests so private retrieval,
+# budgets, tail replacement and reorgs are exercised against what will serve
+# them rather than against a stand-in.
+transparent-shard-server = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
+axum = "0.7"
+bip0039.workspace = true
+tempfile.workspace = true
+# The fixture light server the loopback rehearsal runs the real bridge against.
+zakura-wallet-lwd = { path = "../wallet-lwd", features = ["fixture-server"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync"] }
+zip32.workspace = true

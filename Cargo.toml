@@ -14,9 +14,40 @@ members = [
     "librustzcash/zcash_client_backend",
     "librustzcash/zcash_client_sqlite",
     "wallet-lib",
+    "zakura/pir-enhance",
+    "zakura/wallet-core",
+    "zakura/wallet-scan",
+    "zakura/wallet-store",
+    "zakura/wallet-transparent",
+    "zakura/wallet-sync",
+    "zakura/wallet-lwd",
+    "zakura/wallet-tx",
+    "zakura/wallet-app/facade",
+    "zakura/wallet-app/bridge",
 ]
 
 resolver = "2"
+
+# Dependencies are optimised even in debug builds. Flutter's debug builds use
+# Cargo's dev profile, and the proving stack is unusable at opt-level 0 — a
+# single proof takes minutes rather than seconds. This covers dependencies
+# only, so iterating on the crates in this workspace stays fast.
+[profile.dev.package."*"]
+opt-level = 3
+
+# The lattice arithmetic behind private transparent retrieval reduces modulo a
+# 64-bit modulus by letting products wrap, which is correct by construction and
+# an overflow to the checker. Upstream (`valargroup/enhance-pir`) builds it the
+# same way; without this the in-process shard server the transparent tests run
+# panics on its first query. A named package entry does not inherit from
+# `package."*"`, so the optimisation level is repeated.
+[profile.dev.package.valar-spiral-rs]
+overflow-checks = false
+opt-level = 3
+
+[profile.test.package.valar-spiral-rs]
+overflow-checks = false
+opt-level = 3
 
 [workspace.package]
 edition = "2024"
