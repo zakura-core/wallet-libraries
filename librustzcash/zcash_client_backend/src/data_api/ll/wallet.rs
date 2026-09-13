@@ -500,6 +500,8 @@ where
                         tx_ref,
                         Some(block.height()),
                         spent_in,
+                        #[cfg(feature = "zakura-pir-enhance")]
+                        tx.ironwood_pir_eligible(),
                     )
                 },
                 |_account_id| (),
@@ -1063,7 +1065,14 @@ where
         d_tx.ironwood_outputs(),
         |_, _| Ok(None),
         |wallet_db, output, tx_ref, spent_in| {
-            wallet_db.put_received_ironwood_note(output, tx_ref, d_tx.mined_height(), spent_in)
+            wallet_db.put_received_ironwood_note(
+                output,
+                tx_ref,
+                d_tx.mined_height(),
+                spent_in,
+                #[cfg(feature = "zakura-pir-enhance")]
+                true,
+            )
         },
         |_account_id| {
             #[cfg(feature = "transparent-inputs")]
