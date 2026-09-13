@@ -104,6 +104,9 @@ use crate::{
     wallet::{Note, NoteId, ReceivedNote, Recipient, WalletTransparentOutput, WalletTx},
 };
 
+#[cfg(feature = "zakura-pir-enhance")]
+pub mod enhance_pir;
+
 #[cfg(feature = "transparent-inputs")]
 use {
     crate::{fees::StandardFeeRule, wallet::TransparentAddressMetadata},

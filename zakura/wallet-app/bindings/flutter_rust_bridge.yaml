@@ -1,0 +1,7 @@
+# Only this crate's own `api` module. Vizor additionally points codegen at a
+# git-pinned third-party crate's module, which means a Dart-visible type can
+# change when an upstream revision is bumped; keeping the surface to one module
+# we own avoids that.
+rust_input: crate::api
+rust_root: ../bridge/
+dart_output: lib/src/rust

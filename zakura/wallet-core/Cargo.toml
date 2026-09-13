@@ -1,0 +1,23 @@
+[package]
+name = "zakura-wallet-core"
+version = "0.1.0"
+description = "Pool abstraction, compact-block domain types and scan-range planning for the Zakura wallet core"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "zakura_wallet_core"
+
+[features]
+# Exposes `scanning::spanning_tree::testing` to downstream test code.
+test-dependencies = []
+
+[dependencies]
+incrementalmerkletree.workspace = true
+orchard.workspace = true
+transparent.workspace = true
+zcash_note_encryption.workspace = true
+zcash_protocol.workspace = true

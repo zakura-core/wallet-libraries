@@ -1,0 +1,37 @@
+[package]
+name = "zakura-wallet-sync"
+version = "0.1.0"
+description = "The chain synchronisation engine for the Zakura wallet core"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "zakura_wallet_sync"
+
+[features]
+# Exposes the in-memory chain source used to drive the engine in tests.
+test-dependencies = ["zakura-wallet-scan/test-dependencies"]
+
+[dependencies]
+tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+tokio-util = "0.7"
+orchard.workspace = true
+zakura-wallet-core = { path = "../wallet-core" }
+zakura-wallet-scan = { path = "../wallet-scan" }
+zakura-wallet-store = { path = "../wallet-store" }
+transparent = { workspace = true, features = ["transparent-inputs"] }
+zcash_script.workspace = true
+zcash_protocol.workspace = true
+
+[dev-dependencies]
+assert_matches.workspace = true
+incrementalmerkletree.workspace = true
+orchard.workspace = true
+rusqlite.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "macros", "rt-multi-thread"] }
+zakura-wallet-scan = { path = "../wallet-scan", features = ["test-dependencies"] }
+zakura-wallet-store = { path = "../wallet-store", features = ["test-dependencies"] }
+zakura-wallet-sync = { path = ".", features = ["test-dependencies"] }

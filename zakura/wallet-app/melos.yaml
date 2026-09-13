@@ -1,0 +1,20 @@
+name: zakura_wallet_app
+
+packages:
+  - client
+  - state
+  - ui
+  - bindings
+  - example
+
+scripts:
+  analyze:
+    run: dart analyze --fatal-infos
+    exec:
+      concurrency: 1
+  test:
+    run: flutter test
+    exec:
+      concurrency: 1
+    packageFilters:
+      dirExists: test

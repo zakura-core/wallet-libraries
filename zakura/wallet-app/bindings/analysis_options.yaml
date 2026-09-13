@@ -1,0 +1,6 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    # Written by flutter_rust_bridge_codegen; reviewing its style is not useful.
+    - lib/src/rust/**

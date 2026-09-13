@@ -483,6 +483,14 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
         spent_in: Option<Self::TxRef>,
     ) -> Result<(), Self::Error>;
 
+    /// Reconciles transaction-wide Enhance PIR work after all scanned notes are stored.
+    #[cfg(feature = "zakura-pir-enhance")]
+    fn queue_ironwood_enhancement(
+        &mut self,
+        tx_ref: Self::TxRef,
+        tx: &crate::wallet::WalletTx<Self::AccountId>,
+    ) -> Result<(), Self::Error>;
+
     /// Updates the backing store to indicate that the Orchard output having the given nullifier is
     /// spent in the transaction referenced by `spent_in_tx`. This may result in multiple distinct
     /// transactions being recorded as having spent the note; only one of these transactions will

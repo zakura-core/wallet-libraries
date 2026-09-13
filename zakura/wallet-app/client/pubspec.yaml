@@ -1,0 +1,11 @@
+name: zakura_client
+description: Plain Dart models and a wallet handle over the Zakura wallet core.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.9.0
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.0

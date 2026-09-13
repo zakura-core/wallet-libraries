@@ -1,0 +1,25 @@
+name: zakura_bindings
+description: Generated flutter_rust_bridge glue over the Zakura wallet bridge.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.9.0
+  flutter: ">=3.29.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Pinned exactly: the generated Dart and the generated Rust are two halves of
+  # one artefact, and a skew between them fails at runtime rather than at
+  # compile time.
+  flutter_rust_bridge: 2.11.1
+  zakura_client:
+    path: ../client
+  zakura_wallet_bridge:
+    path: rust_builder
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
