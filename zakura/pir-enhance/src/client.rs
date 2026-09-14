@@ -323,11 +323,7 @@ pub fn record_in_row(row: &[u8], slot: usize) -> Result<EnhanceRecord, ClientErr
         .ok_or_else(|| ClientError::Response("record slot is outside decoded row".to_string()))?
         .try_into()
         .expect("fixed record length");
-    let record = EnhanceRecord::from_row_bytes(bytes);
-    record
-        .transparent_flags()
-        .map_err(|error| ClientError::Response(error.to_string()))?;
-    Ok(record)
+    EnhanceRecord::from_bytes(bytes).map_err(|error| ClientError::Response(error.to_string()))
 }
 
 fn validate_generation(
@@ -990,7 +986,7 @@ mod tests {
 
         let mut expected_bytes = [0x5a; RECORD_BYTES];
         expected_bytes[crate::types::RECORD_FLAGS_OFFSET] = 0;
-        let expected_record = EnhanceRecord::from_row_bytes(expected_bytes);
+        let expected_record = EnhanceRecord::from_bytes(expected_bytes).unwrap();
         let target_position = RECORDS_PER_ROW as u64 + 3;
         let target_row = 1;
         let target_slot = 3;

@@ -5,20 +5,11 @@
 //! v6 transparent-presence flags are trusted server metadata, not cryptographic evidence.
 
 use incrementalmerkletree::Position;
-use orchard::{
-    Address,
-    keys::PreparedIncomingViewingKey,
-    note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier},
-    note_encryption::{CompactAction, IronwoodDomain},
-    value::ValueCommitment,
-};
-use zcash_note_encryption::{EphemeralKeyBytes, ShieldedOutput, try_output_recovery_with_ovk};
 use zcash_primitives::block::BlockHash;
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::{consensus::BlockHeight, memo::MemoBytes, value::Zatoshis};
-use zip32::Scope;
+use zcash_protocol::consensus::BlockHeight;
 
-use super::{Account, WalletRead};
+use super::WalletRead;
 use crate::proto::compact_formats::{CompactBlock, CompactTx};
 
 /// A compact block needed to rediscover outgoing actions after retroactive spend linkage.
@@ -60,6 +51,26 @@ pub struct IronwoodEnhanceDiscoveryFailure {
     pub reason: IronwoodEnhanceDiscoveryFailureReason,
 }
 
+/// One private enhancement obligation. Local identities must never be sent to the PIR service.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnhancePirWork {
+    /// Query the position, retaining the captured action identity locally.
+    Query(EnhancePirRequest),
+    /// Obtain a compact block through the normal cache/download path.
+    Rediscover(IronwoodEnhanceDiscoveryRequest),
+    /// Surface incomplete work without automatically retrying it.
+    Suspended(EnhancePirSuspension),
+}
+
+/// Durable work waiting for new local context or user intervention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnhancePirSuspension {
+    /// Missing funding associations or adjacent tree metadata.
+    Discovery(IronwoodEnhanceDiscoveryFailure),
+    /// Outgoing recovery failed; new funding/scanning may reactivate the action.
+    OutgoingNotRecoverable(EnhancePirRequest),
+}
+
 /// Result of atomically applying independently validated discovery plans from a block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IronwoodEnhanceDiscoveryResult {
@@ -74,7 +85,7 @@ pub enum IronwoodEnhanceDiscoveryResult {
         unresolved: Vec<IronwoodEnhanceDiscoveryFailure>,
     },
     /// No matching active work remains, or the request belongs to an old chain branch.
-    /// Suspended jobs may still exist and are exposed separately.
+    /// Suspended jobs may still exist in `enhance_pir_work()`.
     AlreadyResolved,
     /// Block-wide identity, ordering, or tree geometry is invalid. No state was changed.
     Rejected,
@@ -97,10 +108,9 @@ pub fn is_ironwood_pir_candidate(tx: &CompactTx) -> bool {
 ///
 /// Applications that expose a runtime PIR setting should always compile with
 /// `zakura-pir-enhance`, and update this mode when the setting changes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnhancementMode {
     /// Exposes ordinary transaction-ID enhancement requests, including for Ironwood transactions.
-    #[default]
     Standard,
     /// Suppresses transaction-ID enhancement for transactions protected by Enhance PIR.
     ///
@@ -168,64 +178,7 @@ impl IronwoodEnhanceRequestId {
     }
 }
 
-/// The complete encrypted-note fields stored in one Enhance PIR record.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IronwoodEnhanceRecord {
-    ephemeral_key: [u8; 32],
-    ciphertext: [u8; 580],
-    cv_net: [u8; 32],
-    out_ciphertext: [u8; 80],
-    has_transparent_inputs: bool,
-    has_transparent_outputs: bool,
-}
-
-impl IronwoodEnhanceRecord {
-    /// Constructs a record from the fields of an Ironwood encrypted note.
-    pub fn from_parts(
-        ephemeral_key: [u8; 32],
-        ciphertext: [u8; 580],
-        cv_net: [u8; 32],
-        out_ciphertext: [u8; 80],
-        has_transparent_inputs: bool,
-        has_transparent_outputs: bool,
-    ) -> Self {
-        Self {
-            ephemeral_key,
-            ciphertext,
-            cv_net,
-            out_ciphertext,
-            has_transparent_inputs,
-            has_transparent_outputs,
-        }
-    }
-
-    /// Returns the ephemeral key bytes.
-    pub fn ephemeral_key(&self) -> &[u8; 32] {
-        &self.ephemeral_key
-    }
-
-    /// Returns the complete encrypted note ciphertext.
-    pub fn ciphertext(&self) -> &[u8; 580] {
-        &self.ciphertext
-    }
-
-    /// Returns the value commitment used for outgoing recovery.
-    pub fn cv_net(&self) -> &[u8; 32] {
-        &self.cv_net
-    }
-
-    /// Returns the outgoing ciphertext.
-    pub fn out_ciphertext(&self) -> &[u8; 80] {
-        &self.out_ciphertext
-    }
-
-    /// Whether either trusted schema-v6 flag reports transparent activity.
-    ///
-    /// These bits are not authenticated by note decryption.
-    pub fn has_transparent(&self) -> bool {
-        self.has_transparent_inputs || self.has_transparent_outputs
-    }
-}
+pub use zakura_pir_enhance_types::{EnhanceRecord, EnhanceRecordParts};
 
 /// Chain state to which a PIR snapshot is anchored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,69 +218,20 @@ pub enum EnhancePirStoreResult {
     Rejected,
 }
 
-/// Wallet state needed to authenticate a Enhance PIR response.
-#[doc(hidden)]
-pub struct PendingIronwoodMemo<AccountId> {
-    /// Stable identity that must still match when the memo is stored.
-    pub request_id: IronwoodEnhanceRequestId,
-    /// Account that received the note.
-    pub account_id: AccountId,
-    /// Compact-scanned note whose commitment must be reproduced.
-    pub note: Note,
-    /// Key scope detected by compact trial decryption.
-    pub scope: Scope,
-}
-
-/// Compact action and candidate senders retained for outgoing recovery.
-#[doc(hidden)]
-pub struct PendingIronwoodOutgoing<AccountId> {
-    pub request_id: IronwoodEnhanceRequestId,
-    pub account_ids: Vec<AccountId>,
-    pub nullifier: [u8; 32],
-    pub cmx: [u8; 32],
-    pub ephemeral_key: [u8; 32],
-    pub compact_ciphertext: [u8; 52],
-}
-
-/// Read interface for the independent position-keyed memo queue.
+/// Application read interface for private enhancement.
 pub trait EnhancePirRead: WalletRead {
-    /// Returns distinct compact blocks needed to reconstruct outgoing PIR work.
-    /// Suspended jobs are excluded. Jobs survive reopening and block ordinary enhancement
-    /// retirement until rebuilt, even while suspended.
-    fn ironwood_enhance_discovery_requests(
-        &self,
-    ) -> Result<Vec<IronwoodEnhanceDiscoveryRequest>, Self::Error>;
-
-    /// Returns discovery jobs that cannot currently be requested automatically.
-    /// Applications should surface these as incomplete, not repeatedly download their blocks.
-    /// New funding linkage reactivates jobs with `NoFundingAccounts`; scanning the spending
-    /// block and its predecessor makes `AnchorUnavailable` jobs requestable. Standard mode
-    /// exposes their ordinary requests.
-    fn suspended_ironwood_enhance_discoveries(
-        &self,
-    ) -> Result<Vec<IronwoodEnhanceDiscoveryFailure>, Self::Error>;
-
-    /// Returns unresolved Ironwood memo requests in ascending position order.
-    fn enhance_pir_requests(&self) -> Result<Vec<EnhancePirRequest>, Self::Error>;
+    /// Returns active and suspended work from one consistent wallet-state snapshot.
+    /// Rediscovery is grouped by block and ordered by height, followed by queries by position,
+    /// discovery suspensions by transaction location/identity, and outgoing suspensions by
+    /// position/identity. Suspensions are incomplete obligations, not automatic retries.
+    /// Enumeration is mode-independent; applications schedule PIR in private mode.
+    fn enhance_pir_work(&self) -> Result<Vec<EnhancePirWork>, Self::Error>;
 
     /// Compares the snapshot anchor to locally scanned chain state.
     fn enhance_pir_snapshot_status(
         &self,
         anchor: EnhancePirSnapshotAnchor,
     ) -> Result<EnhancePirSnapshotStatus, Self::Error>;
-
-    /// Returns authentication context for an unresolved position.
-    #[doc(hidden)]
-    fn pending_ironwood_memo(
-        &self,
-        position: Position,
-    ) -> Result<Option<PendingIronwoodMemo<Self::AccountId>>, Self::Error>;
-
-    #[doc(hidden)]
-    fn pending_ironwood_outgoing(
-        &self,
-        position: Position,
-    ) -> Result<Option<PendingIronwoodOutgoing<Self::AccountId>>, Self::Error>;
 
     /// Returns whether an Ironwood transaction is covered by transaction-wide txid protection.
     ///
@@ -337,72 +241,7 @@ pub trait EnhancePirRead: WalletRead {
     fn is_ironwood_enhancement_protected(&self, txid: TxId) -> Result<bool, Self::Error>;
 }
 
-/// Outgoing result carried inside a validated, action-bound application.
-#[doc(hidden)]
-pub enum IronwoodOutgoingResult<AccountId> {
-    /// No outgoing work was queued at this action.
-    NotRequested,
-    /// An outgoing plaintext was recovered with exactly one candidate account.
-    Recovered {
-        from_account: AccountId,
-        recipient: Address,
-        value: Zatoshis,
-        memo: MemoBytes,
-    },
-    /// Compact fields match, but outgoing recovery did not succeed.
-    NotRecoverable,
-}
-
-/// One validated response, with a private constructor to protect the write boundary.
-///
-/// All fields, including the routing decision, must be applied in one storage
-/// transaction after rechecking the captured position and action identity.
-/// Transparent metadata is trusted, not authenticated; the *record* must still
-/// be bound to pending wallet state before its metadata can change routing.
-#[doc(hidden)]
-pub struct ValidatedIronwoodEnhancement<AccountId> {
-    request: EnhancePirRequest,
-    has_transparent: bool,
-    incoming: Option<MemoBytes>,
-    outgoing: IronwoodOutgoingResult<AccountId>,
-}
-
-impl<AccountId> ValidatedIronwoodEnhancement<AccountId> {
-    /// Unpacks a validated response for a storage implementation.
-    pub fn into_parts(
-        self,
-    ) -> (
-        EnhancePirRequest,
-        bool,
-        Option<MemoBytes>,
-        IronwoodOutgoingResult<AccountId>,
-    ) {
-        (
-            self.request,
-            self.has_transparent,
-            self.incoming,
-            self.outgoing,
-        )
-    }
-
-    /// Bypasses validation for storage tests only.
-    #[cfg(any(test, feature = "test-dependencies"))]
-    pub fn for_testing(
-        request: EnhancePirRequest,
-        has_transparent: bool,
-        incoming: Option<MemoBytes>,
-        outgoing: IronwoodOutgoingResult<AccountId>,
-    ) -> Self {
-        Self {
-            request,
-            has_transparent,
-            incoming,
-            outgoing,
-        }
-    }
-}
-
-/// Atomic storage boundary for an action-bound response.
+/// Application operations that validate and atomically apply network responses.
 pub trait EnhancePirWrite: EnhancePirRead {
     /// Reconstructs pending outgoing candidates using a previously scanned compact block
     /// and the wallet's current durable funding associations, including already-spent notes.
@@ -419,371 +258,21 @@ pub trait EnhancePirWrite: EnhancePirRead {
         block: &CompactBlock,
     ) -> Result<IronwoodEnhanceDiscoveryResult, Self::Error>;
 
-    /// Rechecks every expected queue identity and applies incoming data, outgoing
-    /// recovery, and routing together, or changes nothing.
+    /// Binds an encoding-validated record to the originally captured request, authenticates
+    /// incoming note data, and attempts outgoing recovery. Context reads, identity rechecks,
+    /// and all writes share one storage transaction. Validation failures never cause LWD fallback.
     ///
+    /// Transparent flags are trusted server metadata, not authenticated by decryption.
+    /// The record must match pending wallet context before those flags can affect routing.
     /// Positive transparent flags set a sticky transaction-wide LWD decision,
     /// clear private work, and preserve ordinary enhancement. False flags can
     /// never undo it. A stale response cannot change routing or note data.
-    fn apply_ironwood_enhancement(
+    fn apply_ironwood_enhance_record(
         &mut self,
-        enhancement: ValidatedIronwoodEnhancement<Self::AccountId>,
+        request: EnhancePirRequest,
+        record: &EnhanceRecord,
     ) -> Result<EnhancePirStoreResult, Self::Error>;
 }
 
-struct FullOutput<'a> {
-    cmx: [u8; 32],
-    record: &'a IronwoodEnhanceRecord,
-}
-
-impl ShieldedOutput<IronwoodDomain, 580> for FullOutput<'_> {
-    fn ephemeral_key(&self) -> EphemeralKeyBytes {
-        EphemeralKeyBytes(*self.record.ephemeral_key())
-    }
-
-    fn cmstar_bytes(&self) -> [u8; 32] {
-        self.cmx
-    }
-
-    fn enc_ciphertext(&self) -> &[u8; 580] {
-        self.record.ciphertext()
-    }
-}
-
-/// Validates one record and atomically applies all work captured by `request`.
-///
-/// Incoming ciphertext must decrypt to the scanned note; outgoing records must
-/// match the scanned compact fields. Authentication/transport failures never
-/// cause public fallback. Identity checks precede even a transparent-flag decision.
-pub fn apply_ironwood_enhance_record<DbT: EnhancePirWrite>(
-    db: &mut DbT,
-    request: EnhancePirRequest,
-    record: &IronwoodEnhanceRecord,
-) -> Result<EnhancePirStoreResult, DbT::Error> {
-    let incoming = db.pending_ironwood_memo(request.position())?;
-    let outgoing = db.pending_ironwood_outgoing(request.position())?;
-    if (incoming.is_none() && outgoing.is_none())
-        || incoming
-            .as_ref()
-            .is_some_and(|p| p.request_id != request.request_id())
-        || outgoing
-            .as_ref()
-            .is_some_and(|p| p.request_id != request.request_id())
-    {
-        return Ok(EnhancePirStoreResult::AlreadyResolved);
-    }
-
-    let memo = if let Some(pending) = incoming {
-        if pending.note.version() != NoteVersion::V3 {
-            return Ok(EnhancePirStoreResult::Rejected);
-        }
-        let Some(account) = db.get_account(pending.account_id)? else {
-            return Ok(EnhancePirStoreResult::Rejected);
-        };
-        let ivk = match pending.scope {
-            Scope::External => account.uivk().orchard().as_ref().map(|ivk| ivk.prepare()),
-            Scope::Internal => account
-                .ufvk()
-                .and_then(|k| k.orchard())
-                .map(|fvk| fvk.to_ivk(Scope::Internal).prepare()),
-        };
-        let Some(memo) = ivk.and_then(|ivk| decrypt_memo(&pending.note, &ivk, record)) else {
-            return Ok(EnhancePirStoreResult::Rejected);
-        };
-        Some(memo)
-    } else {
-        None
-    };
-
-    let outgoing = if let Some(pending) = outgoing {
-        if !record_matches_compact_action(&pending, record) {
-            return Ok(EnhancePirStoreResult::Rejected);
-        }
-        // Mixed transactions need full data, not private outgoing recovery.
-        // This variant records the expected queue; it is never written when
-        // has_transparent is true.
-        let mut recovered = None;
-        if !record.has_transparent() {
-            for account_id in pending.account_ids.iter().copied() {
-                let Some(account) = db.get_account(account_id)? else {
-                    continue;
-                };
-                let Some(fvk) = account.ufvk().and_then(|k| k.orchard()) else {
-                    continue;
-                };
-                if let Some((note, recipient, memo)) = recover_outgoing(fvk, &pending, record) {
-                    if recovered.is_some() {
-                        return Ok(EnhancePirStoreResult::Rejected);
-                    }
-                    let Ok(value) = Zatoshis::from_u64(note.value().inner()) else {
-                        return Ok(EnhancePirStoreResult::Rejected);
-                    };
-                    recovered = Some(IronwoodOutgoingResult::Recovered {
-                        from_account: account_id,
-                        recipient,
-                        value,
-                        memo: MemoBytes::from_bytes(&memo).expect("512-byte memo"),
-                    });
-                }
-            }
-        }
-        recovered.unwrap_or(IronwoodOutgoingResult::NotRecoverable)
-    } else {
-        IronwoodOutgoingResult::NotRequested
-    };
-
-    db.apply_ironwood_enhancement(ValidatedIronwoodEnhancement {
-        request,
-        has_transparent: record.has_transparent(),
-        incoming: memo,
-        outgoing,
-    })
-}
-
-fn decrypt_memo(
-    expected_note: &Note,
-    ivk: &PreparedIncomingViewingKey,
-    record: &IronwoodEnhanceRecord,
-) -> Option<MemoBytes> {
-    let nullifier = Nullifier::from_bytes(&expected_note.rho().to_bytes());
-    let nullifier = Option::from(nullifier)?;
-    let cmx = ExtractedNoteCommitment::from(expected_note.commitment());
-    let compact = CompactAction::from_parts(
-        nullifier,
-        cmx,
-        EphemeralKeyBytes(*record.ephemeral_key()),
-        record.ciphertext()[..52]
-            .try_into()
-            .expect("fixed ciphertext size"),
-    );
-    let output = FullOutput {
-        cmx: cmx.to_bytes(),
-        record,
-    };
-    let (note, _, memo) = zcash_note_encryption::try_note_decryption(
-        &IronwoodDomain::for_compact_action(&compact),
-        ivk,
-        &output,
-    )?;
-    if note != *expected_note {
-        return None;
-    }
-
-    Some(MemoBytes::from_bytes(&memo).expect("note decryption returns exactly 512 bytes"))
-}
-
-fn record_matches_compact_action<AccountId>(
-    pending: &PendingIronwoodOutgoing<AccountId>,
-    record: &IronwoodEnhanceRecord,
-) -> bool {
-    pending.ephemeral_key == *record.ephemeral_key()
-        && pending.compact_ciphertext == record.ciphertext()[..52]
-}
-
-fn recover_outgoing<AccountId>(
-    fvk: &orchard::keys::FullViewingKey,
-    pending: &PendingIronwoodOutgoing<AccountId>,
-    record: &IronwoodEnhanceRecord,
-) -> Option<(Note, Address, [u8; 512])> {
-    let nullifier = Option::from(Nullifier::from_bytes(&pending.nullifier))?;
-    let cmx = Option::from(ExtractedNoteCommitment::from_bytes(&pending.cmx))?;
-    let cv_net = Option::from(ValueCommitment::from_bytes(record.cv_net()))?;
-    let compact = CompactAction::from_parts(
-        nullifier,
-        cmx,
-        EphemeralKeyBytes(*record.ephemeral_key()),
-        record.ciphertext()[..52].try_into().expect("fixed size"),
-    );
-    let output = FullOutput {
-        cmx: pending.cmx,
-        record,
-    };
-    try_output_recovery_with_ovk(
-        &IronwoodDomain::for_compact_action(&compact),
-        &fvk.to_ovk(Scope::External),
-        &output,
-        &cv_net,
-        record.out_ciphertext(),
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use orchard::{
-        note::{Note, NoteVersion, Nullifier, RandomSeed, Rho},
-        note_encryption::{IronwoodDomain, IronwoodNoteEncryption},
-        value::NoteValue,
-    };
-    use pasta_curves::{
-        group::{
-            Group, GroupEncoding,
-            ff::{Field, PrimeField},
-        },
-        pallas,
-    };
-    use rand::{Rng as _, rand_core::UnwrapErr, rngs::SysRng};
-    use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng as _};
-    use zcash_keys::keys::UnifiedSpendingKey;
-    use zcash_note_encryption::Domain;
-    use zcash_protocol::consensus::Network;
-
-    use super::*;
-
-    #[allow(non_upper_case_globals)]
-    const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
-
-    fn encrypted_record() -> (Note, PreparedIncomingViewingKey, IronwoodEnhanceRecord) {
-        let usk =
-            UnifiedSpendingKey::from_seed(&Network::TestNetwork, &[0; 32], zip32::AccountId::ZERO)
-                .expect("valid spending key");
-        let fvk = usk
-            .to_unified_full_viewing_key()
-            .orchard()
-            .expect("Orchard key")
-            .clone();
-        let mut rng = OsRng;
-        let nullifier = Nullifier::from_bytes(&pallas::Base::random(&mut rng).to_repr()).unwrap();
-        let rho = Rho::from_bytes(&nullifier.to_bytes()).unwrap();
-        let rseed = loop {
-            let mut bytes = [0; 32];
-            rng.fill_bytes(&mut bytes);
-            if let Some(rseed) = Option::from(RandomSeed::from_bytes(bytes, &rho)) {
-                break rseed;
-            }
-        };
-        let note = Note::from_parts(
-            fvk.address_at(0u32, Scope::External),
-            NoteValue::from_raw(5),
-            rho,
-            rseed,
-            NoteVersion::V3,
-        )
-        .unwrap();
-        let encryptor = IronwoodNoteEncryption::new(None, note, [7; 512]);
-        let record = IronwoodEnhanceRecord::from_parts(
-            IronwoodDomain::epk_bytes(encryptor.epk()).0,
-            encryptor.encrypt_note_plaintext(),
-            [0; 32],
-            [0; 80],
-            false,
-            false,
-        );
-        (note, fvk.to_ivk(Scope::External).prepare(), record)
-    }
-
-    #[test]
-    fn accepts_authentic_ciphertext_and_rejects_tampering() {
-        let (note, ivk, record) = encrypted_record();
-        assert_eq!(
-            decrypt_memo(&note, &ivk, &record).unwrap().as_slice(),
-            &[7; 512]
-        );
-
-        let mut ciphertext = *record.ciphertext();
-        ciphertext[579] ^= 1;
-        let tampered = IronwoodEnhanceRecord::from_parts(
-            *record.ephemeral_key(),
-            ciphertext,
-            *record.cv_net(),
-            *record.out_ciphertext(),
-            false,
-            false,
-        );
-        assert!(decrypt_memo(&note, &ivk, &tampered).is_none());
-
-        let (_, _, another_note_record) = encrypted_record();
-        assert!(decrypt_memo(&note, &ivk, &another_note_record).is_none());
-    }
-
-    #[test]
-    fn recovers_outgoing_fields_with_the_sender_ovk() {
-        let usk =
-            UnifiedSpendingKey::from_seed(&Network::TestNetwork, &[9; 32], zip32::AccountId::ZERO)
-                .unwrap();
-        let fvk = usk.to_unified_full_viewing_key().orchard().unwrap().clone();
-        let mut rng = OsRng;
-        let nf = Nullifier::from_bytes(&pallas::Base::random(&mut rng).to_repr()).unwrap();
-        let rho = Rho::from_bytes(&nf.to_bytes()).unwrap();
-        let rseed = loop {
-            let mut bytes = [0; 32];
-            rng.fill_bytes(&mut bytes);
-            if let Some(rseed) = Option::from(RandomSeed::from_bytes(bytes, &rho)) {
-                break rseed;
-            }
-        };
-        let note = Note::from_parts(
-            fvk.address_at(3u32, Scope::External),
-            NoteValue::from_raw(123),
-            rho,
-            rseed,
-            NoteVersion::V3,
-        )
-        .unwrap();
-        let encryptor =
-            IronwoodNoteEncryption::new(Some(fvk.to_ovk(Scope::External)), note, [4; 512]);
-        let cmx = ExtractedNoteCommitment::from(note.commitment());
-        let cv_net = ValueCommitment::from_bytes(&pallas::Point::generator().to_bytes()).unwrap();
-        let mut outgoing_rng = ChaCha20Rng::from_seed([7; 32]);
-        let record = IronwoodEnhanceRecord::from_parts(
-            IronwoodDomain::epk_bytes(encryptor.epk()).0,
-            encryptor.encrypt_note_plaintext(),
-            cv_net.to_bytes(),
-            encryptor.encrypt_outgoing_plaintext(&cv_net, &cmx, &mut outgoing_rng),
-            false,
-            false,
-        );
-        let pending = PendingIronwoodOutgoing {
-            request_id: IronwoodEnhanceRequestId::new(TxId::from_bytes([0; 32]), 0),
-            account_ids: vec![()],
-            nullifier: nf.to_bytes(),
-            cmx: cmx.to_bytes(),
-            ephemeral_key: *record.ephemeral_key(),
-            compact_ciphertext: record.ciphertext()[..52].try_into().unwrap(),
-        };
-
-        let (recovered_note, recipient, memo) = recover_outgoing(&fvk, &pending, &record).unwrap();
-        assert_eq!(recovered_note, note);
-        assert_eq!(recipient, note.recipient());
-        assert_eq!(memo, [4; 512]);
-
-        let wrong_fvk =
-            UnifiedSpendingKey::from_seed(&Network::TestNetwork, &[8; 32], zip32::AccountId::ZERO)
-                .unwrap()
-                .to_unified_full_viewing_key()
-                .orchard()
-                .unwrap()
-                .clone();
-        assert!(recover_outgoing(&wrong_fvk, &pending, &record).is_none());
-
-        assert!(record_matches_compact_action(&pending, &record));
-        let mut wrong_ephemeral_key = *record.ephemeral_key();
-        wrong_ephemeral_key[0] ^= 1;
-        let wrong_ephemeral_key_record = IronwoodEnhanceRecord::from_parts(
-            wrong_ephemeral_key,
-            *record.ciphertext(),
-            *record.cv_net(),
-            *record.out_ciphertext(),
-            false,
-            false,
-        );
-        assert!(!record_matches_compact_action(
-            &pending,
-            &wrong_ephemeral_key_record
-        ));
-
-        let mut wrong_compact_ciphertext = *record.ciphertext();
-        wrong_compact_ciphertext[0] ^= 1;
-        let wrong_compact_ciphertext_record = IronwoodEnhanceRecord::from_parts(
-            *record.ephemeral_key(),
-            wrong_compact_ciphertext,
-            *record.cv_net(),
-            *record.out_ciphertext(),
-            false,
-            false,
-        );
-        assert!(!record_matches_compact_action(
-            &pending,
-            &wrong_compact_ciphertext_record
-        ));
-    }
-}
+/// Contracts for storage implementers. Applications should use [`EnhancePirWrite`].
+pub mod storage;

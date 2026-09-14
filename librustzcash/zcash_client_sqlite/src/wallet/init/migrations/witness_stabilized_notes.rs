@@ -120,8 +120,15 @@ mod tests {
     fn migrate_backfills_stabilized_notes() {
         let network = Network::TestNetwork;
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data =
-            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
+        let mut db_data = WalletDb::for_path(
+            data_file.path(),
+            network,
+            test_clock(),
+            test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        )
+        .unwrap();
 
         let seed_bytes = vec![0xab; 32];
 
@@ -352,8 +359,15 @@ mod tests {
     fn migrate_without_scan_state_is_noop() {
         let network = Network::TestNetwork;
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data =
-            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
+        let mut db_data = WalletDb::for_path(
+            data_file.path(),
+            network,
+            test_clock(),
+            test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        )
+        .unwrap();
 
         let seed_bytes = vec![0xab; 32];
         WalletMigrator::new()
@@ -439,8 +453,15 @@ mod tests {
     fn gap_in_scanned_coverage_prevents_stabilization() {
         let network = Network::TestNetwork;
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data =
-            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
+        let mut db_data = WalletDb::for_path(
+            data_file.path(),
+            network,
+            test_clock(),
+            test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        )
+        .unwrap();
 
         let seed_bytes = vec![0xab; 32];
 

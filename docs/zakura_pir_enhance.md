@@ -121,6 +121,9 @@ private routing was cleared; repeated funding scans with intact routing remain i
 Block identity, tree geometry, transaction locators, known received positions,
 and funding nullifiers are checked before any queue changes. Invalid block-wide
 identity, ordering, or tree geometry rejects the entire call without mutation.
+Reconstructed outgoing positions must not belong to another transaction, even
+when the reconstructed transaction is mixed-pool. A conflict rejects the entire
+call before any routing or queue changes.
 Tree geometry requires the preceding block's Ironwood tree size in local metadata;
 at a scan-range boundary, retain or scan that predecessor before reconstruction.
 Jobs are not advertised for automatic reconstruction until both the spending
@@ -145,52 +148,104 @@ encounters. Losing keys does not prove outgoing recovery complete: the suspended
 job still prevents retirement, preserves private protection, and keeps ordinary
 Enhancement intent available if the user disables private mode. Applications can
 read its `NoFundingAccounts` reason through
-`suspended_ironwood_enhance_discoveries()`. The same API reports
+the `Suspended(Discovery(...))` entries of `enhance_pir_work()`. The same API reports
 `AnchorUnavailable` for an otherwise active job waiting for the spending block
 and its predecessor's tree-size metadata; regular scanning makes that job
 requestable without changing its queue row. Linking another funding note reactivates
 an existing `NoFundingAccounts` job. Reimporting a deleted funding key rewinds the
 wallet; rescanning the funding and spending blocks reconstructs the required work.
 Deleting only some funding accounts does not suspend a job that still has funding
-associations.
+associations. Outgoing jobs with no candidate accounts are retained as
+`OutgoingNotRecoverable` suspensions. Both updates run in the account-deletion
+transaction even when compiled without `zakura-pir-enhance`. Full wallet
+initialization also repairs orphaned jobs left by older builds, atomically and
+without clearing pending enhancement intent.
+
+Run `scripts/verify-pir-feature-transition.sh` to exercise a PIR-enabled database,
+account deletion in a separately compiled PIR-disabled binary, and a PIR-enabled
+reopen.
 
 ## Application integration
 
 Compile with the `zakura-pir-enhance` Cargo feature in both runtime setting
-states. The standalone `zakura-pir-enhance` crate's `wallet-integration` feature
-provides `apply_record` for the backend. The facade's additive feature enables
-the corresponding backend and SQLite APIs.
+states. The facade's additive feature enables the backend and SQLite APIs.
+The standalone client and backend share `EnhanceRecord` from the small
+`zakura-pir-enhance-types` crate; no record conversion or client integration
+feature is needed.
 
-`EnhancementMode::Standard` remains the default. Reapply
-`EnhancementMode::PrivateIronwood` when opening a wallet whose application
-setting enables PIR; the setting is not persisted by the library. Set the mode
-before obtaining ordinary enhancement requests. Applications must discard old
-in-memory request batches when changing mode; a mode change cannot recall an
-already dispatched LWD request.
+Choose `EnhancementMode::Standard` or `EnhancementMode::PrivateIronwood` as the
+last argument to `WalletDb::for_path` or `WalletDb::from_connection`. With the
+PIR feature enabled, this argument is required. Load the application preference
+before opening every handle; the library does not persist a second preference.
+Transaction wrappers inherit the handle's mode. Use `set_enhancement_mode` when
+the preference changes, and cancel or discard old in-memory network request
+batches. A mode change cannot recall an already dispatched LWD request.
 
-Use `enhance_pir_requests()` to capture requests, query their positions with the
-PIR client, and pass each original request and decoded record to `apply_record`.
-Do not reconstruct identities from the database after receiving a response.
+Read `EnhancePirRead::enhance_pir_work()` after scanning and on reopening. One
+consistent read reports active and suspended obligations from the independent
+queues, ordered as rediscovery by height, queries by position, discovery
+suspensions by transaction location/identity, then outgoing suspensions by
+position/identity. Enumeration remains available in either mode; schedule
+private network work when the application enables private mode.
 
-Also drain `ironwood_enhance_discovery_requests()` after scanning and on reopening.
-Each request identifies one spending block by height and locally scanned hash;
-jobs for the same block are grouped. Read that block from the cache, or obtain it
-through the ordinary compact-block download path, then call
-`rebuild_ironwood_enhancement(request, &block)`. Successful reconstruction queues
-normal position-keyed PIR requests (or routes a newly identified mixed transaction
-to LWD). `Rejected` means invalid block-wide context and no mutation.
-`Incomplete { rebuilt, unresolved }` reports partial progress (possibly zero),
-with transaction-local failure reasons. Retry unresolved active jobs according
-to the application's retry policy; do not repeatedly feed the same invalid
-cached data in a tight loop. `AlreadyResolved` means no active jobs for that
-request, not that no suspended jobs remain.
+Handle each `EnhancePirWork` variant:
 
-Read `suspended_ironwood_enhance_discoveries()` on reopening and after scanning.
-Surface missing funding keys instead of retrying their blocks. `AnchorUnavailable`
-normally means a range-prioritized sync is waiting for adjacent metadata; surface
-it as incomplete while regular sync catches up instead of repeatedly downloading
-the spending block. Do not declare enhancement done merely because the active
-request APIs are empty while discovery is pending or suspended.
+- `Query(request)`: query only its position with the PIR client, then call
+  `db.apply_ironwood_enhance_record(request, &record)` through `EnhancePirWrite`.
+  Keep the original request across network I/O; never reconstruct its identity
+  after receiving a response. Record decoding rejects reserved flag bits but
+  does not authenticate the record. The wallet binds and validates it before
+  changing note data or routing.
+- `Rediscover(request)`: read the compact block from the cache or the ordinary
+  download path, then call `rebuild_ironwood_enhancement(request, &block)`.
+  Requests are grouped by height and locally scanned block hash. Successful
+  reconstruction queues position queries or routes mixed transactions to LWD;
+  reread work after applying it. `Rejected` changes nothing, while
+  `Incomplete { rebuilt, unresolved }` reports transaction-local failures and
+  partial progress. Retry according to application policy, without repeatedly
+  feeding invalid cached data in a tight loop.
+- `Suspended(Discovery(failure))`: surface missing funding associations or
+  adjacent tree metadata as incomplete. Funding linkage reactivates
+  `NoFundingAccounts`; normal scanning can resolve `AnchorUnavailable`.
+  Repeatedly downloading the spending block is not the remedy.
+- `Suspended(OutgoingNotRecoverable(request))`: outgoing recovery failed and
+  the durable action remains incomplete, including after reopening. Do not
+  automatically query it again. New funding or scanning may reactivate it;
+  disabling private mode exposes its ordinary enhancement request.
+
+Suspensions are returned alongside active work. A transaction can have multiple
+independent obligations; having no active queries does not mean enhancement is
+complete. `AlreadyResolved` applies only to the supplied request, not the wallet
+as a whole. Retryable `TransactionMissing` and `ContextMismatch` reconstruction
+failures remain active work and are reported by the reconstruction result.
+
+Custom storage backends implement the explicit `enhance_pir::storage` contract
+on a transaction-scoped adapter. Its pending context, validation helper, and
+validated commit type are implementation APIs; application traits do not expose
+them. The adapter must keep context reads, validation, identity rechecks, and
+all writes in one consistent transaction. SQLite uses a private adapter and
+rolls back every write on a database error.
+
+### Migrating application code
+
+This is a coordinated Rust API break:
+
+- Replace the three work-list calls with one match over `enhance_pir_work()`.
+- Pass mode to each database constructor. Remove `with_enhancement_mode` and
+  reliance on `EnhancementMode::default()`.
+- Remove the client's `wallet-integration` feature, `wallet_record`, and
+  `apply_record` imports. Pass the shared record to the backend write method.
+- Replace `IronwoodEnhanceRecord::from_parts(...)` with
+  `EnhanceRecord::from_parts(EnhanceRecordParts { ... })`. Byte decoding uses
+  fallible `EnhanceRecord::from_bytes`; flag accessors are now infallible.
+- Custom scanners attach `IronwoodEnhancementPlan::Ineligible` or
+  `Eligible { outgoing }` through `with_ironwood_enhancement_plan`. An empty
+  outgoing list is valid eligibility, not proof of durable completion.
+
+The existing database queues and schema-v6 service contract remain unchanged.
+No wallet database migration, Enhance PIR server update, or snapshot rebuild is
+required. The shared record crate must be available before publishing backend
+releases that depend on it.
 
 Prefer cache reuse and normal batched downloads. Downloading a specific missing
 block reveals interest in its height even though no target txid is sent. The

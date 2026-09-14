@@ -9,11 +9,16 @@ use uuid::Uuid;
 use zcash_client_backend::data_api::{
     Account as _,
     enhance_pir::{
-        EnhancePirRequest, EnhancePirStoreResult, IronwoodEnhanceRequestId, IronwoodOutgoingResult,
-        PendingIronwoodMemo, PendingIronwoodOutgoing, ValidatedIronwoodEnhancement,
+        EnhancePirRequest, EnhancePirStoreResult, EnhancePirSuspension, EnhancePirWork,
+        EnhanceRecord, IronwoodEnhanceDiscoveryFailure, IronwoodEnhanceDiscoveryFailureReason,
+        IronwoodEnhanceDiscoveryRequest, IronwoodEnhanceRequestId,
+        storage::{
+            EnhancePirStorage, IronwoodOutgoingResult, PendingIronwoodMemo,
+            PendingIronwoodOutgoing, ValidatedIronwoodEnhancement, validate_and_apply_record,
+        },
     },
 };
-use zcash_client_backend::wallet::{IronwoodEnhanceCandidate, Recipient, WalletTx};
+use zcash_client_backend::wallet::{IronwoodEnhancementPlan, Recipient, WalletTx};
 use zcash_keys::address::Receiver;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{PoolType, ShieldedPool, consensus::Parameters};
@@ -92,28 +97,125 @@ pub(crate) fn is_protected(conn: &Connection, txid: TxId) -> Result<bool, Sqlite
     )?)
 }
 
-pub(crate) fn requests(conn: &Connection) -> Result<Vec<EnhancePirRequest>, SqliteClientError> {
+/// A single statement gives callers a consistent view across the independent queues.
+pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
     let mut stmt = conn.prepare_cached(&format!(
-        "SELECT q.commitment_tree_position, t.txid, rn.action_index
-         FROM ironwood_memo_retrieval_queue q
-         JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
-         JOIN transactions t ON t.id_tx = rn.transaction_id
-         JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-         WHERE r.route = 0 AND t.raw IS NULL AND t.mined_height IS NOT NULL
-           AND rn.memo IS NULL AND rn.commitment_tree_position = q.commitment_tree_position
-         UNION
-         SELECT q.commitment_tree_position, t.txid, q.output_index {OUTSTANDING_OUTGOING}
-           AND q.not_recoverable = 0
-         ORDER BY 1"
+        "WITH discovery AS (
+             SELECT t.txid, t.mined_height AS height, t.tx_index, b.hash,
+                    CASE WHEN q.suspended = 1 THEN 0
+                         WHEN b.ironwood_commitment_tree_size IS NULL
+                           OR (t.mined_height != 0 AND prior.ironwood_commitment_tree_size IS NULL)
+                         THEN 1 ELSE NULL END AS reason
+             FROM ironwood_enhance_discovery_queue q
+             JOIN transactions t ON t.id_tx = q.transaction_id
+             LEFT JOIN blocks b ON b.height = t.mined_height
+             LEFT JOIN blocks prior ON prior.height = t.mined_height - 1
+             JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
+             WHERE t.raw IS NULL AND t.mined_height IS NOT NULL AND r.route = 0
+         ), queries AS (
+             SELECT q.commitment_tree_position AS position, t.txid, rn.action_index AS output_index
+             FROM ironwood_memo_retrieval_queue q
+             JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
+             JOIN transactions t ON t.id_tx = rn.transaction_id
+             JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
+             WHERE r.route = 0 AND t.raw IS NULL AND t.mined_height IS NOT NULL
+               AND rn.memo IS NULL AND rn.commitment_tree_position = q.commitment_tree_position
+             UNION
+             SELECT q.commitment_tree_position, t.txid, q.output_index {OUTSTANDING_OUTGOING}
+               AND q.not_recoverable = 0
+         )
+         SELECT DISTINCT 0 AS kind, height AS ordinal, hash AS identity, NULL AS output_index,
+                         NULL AS reason, NULL AS tx_index FROM discovery WHERE reason IS NULL
+         UNION ALL
+         SELECT 1, position, txid, output_index, NULL, NULL FROM queries
+         UNION ALL
+         SELECT 2, height, txid, NULL, reason, tx_index FROM discovery WHERE reason IS NOT NULL
+         UNION ALL
+         SELECT 3, q.commitment_tree_position, t.txid, q.output_index, NULL, NULL
+           {OUTSTANDING_OUTGOING} AND q.not_recoverable = 1
+         ORDER BY kind, ordinal, tx_index, identity, output_index"
     ))?;
     stmt.query_map([], |row| {
-        Ok(EnhancePirRequest::new(
-            Position::from(row.get::<_, u64>(0)?),
-            IronwoodEnhanceRequestId::new(TxId::from_bytes(row.get(1)?), row.get(2)?),
-        ))
+        let kind: u8 = row.get(0)?;
+        let ordinal: u64 = row.get(1)?;
+        let identity: [u8; 32] = row.get(2)?;
+        Ok(match kind {
+            0 => EnhancePirWork::Rediscover(IronwoodEnhanceDiscoveryRequest {
+                height: zcash_protocol::consensus::BlockHeight::from_u32(row.get(1)?),
+                block_hash: zcash_primitives::block::BlockHash(identity),
+            }),
+            1 | 3 => {
+                let request = EnhancePirRequest::new(
+                    ordinal.into(),
+                    IronwoodEnhanceRequestId::new(TxId::from_bytes(identity), row.get(3)?),
+                );
+                if kind == 1 {
+                    EnhancePirWork::Query(request)
+                } else {
+                    EnhancePirWork::Suspended(EnhancePirSuspension::OutgoingNotRecoverable(request))
+                }
+            }
+            2 => EnhancePirWork::Suspended(EnhancePirSuspension::Discovery(
+                IronwoodEnhanceDiscoveryFailure {
+                    txid: TxId::from_bytes(identity),
+                    reason: match row.get::<_, u8>(4)? {
+                        0 => IronwoodEnhanceDiscoveryFailureReason::NoFundingAccounts,
+                        1 => IronwoodEnhanceDiscoveryFailureReason::AnchorUnavailable,
+                        _ => unreachable!("closed SQL CASE"),
+                    },
+                },
+            )),
+            _ => unreachable!("closed SQL UNION"),
+        })
     })?
     .collect::<Result<_, _>>()
     .map_err(Into::into)
+}
+
+/// Authentication context and writes share the transaction owned by the public operation.
+struct Storage<'a, 'conn, P> {
+    tx: &'a Transaction<'conn>,
+    params: &'a P,
+}
+
+impl<P: Parameters> EnhancePirStorage for Storage<'_, '_, P> {
+    type AccountId = AccountUuid;
+    type Account = super::Account;
+    type Error = SqliteClientError;
+
+    fn get_account(&self, id: AccountUuid) -> Result<Option<Self::Account>, Self::Error> {
+        super::get_account(self.tx, self.params, id)
+    }
+
+    fn pending_ironwood_memo(
+        &self,
+        position: Position,
+    ) -> Result<Option<PendingIronwoodMemo<AccountUuid>>, Self::Error> {
+        pending(self.tx, self.params, position)
+    }
+
+    fn pending_ironwood_outgoing(
+        &self,
+        position: Position,
+    ) -> Result<Option<PendingIronwoodOutgoing<AccountUuid>>, Self::Error> {
+        pending_outgoing(self.tx, position)
+    }
+
+    fn apply_ironwood_enhancement(
+        &mut self,
+        enhancement: ValidatedIronwoodEnhancement<AccountUuid>,
+    ) -> Result<EnhancePirStoreResult, Self::Error> {
+        apply(self.tx, self.params, enhancement)
+    }
+}
+
+pub(crate) fn apply_record<P: Parameters>(
+    tx: &Transaction<'_>,
+    params: &P,
+    request: EnhancePirRequest,
+    record: &EnhanceRecord,
+) -> Result<EnhancePirStoreResult, SqliteClientError> {
+    validate_and_apply_record(&mut Storage { tx, params }, request, record)
 }
 
 pub(crate) fn pending_outgoing(
@@ -177,8 +279,10 @@ pub(crate) fn queue_scanned(
     // A wallet-funded mixed transaction may have no received Ironwood note
     // (for example, unshielding with only dummy Ironwood outputs). Its positive
     // LWD decision must still survive a later scan with omitted transparent data.
-    if !tx.ironwood_pir_eligible()
-        && (!tx.ironwood_spends().is_empty() || !tx.ironwood_outputs().is_empty())
+    if matches!(
+        tx.ironwood_enhancement_plan(),
+        IronwoodEnhancementPlan::Ineligible
+    ) && (!tx.ironwood_spends().is_empty() || !tx.ironwood_outputs().is_empty())
     {
         return require_lwd(conn, tx_ref);
     }
@@ -195,19 +299,13 @@ pub(crate) fn queue_scanned(
     {
         discovery::queue(conn, tx_ref)?;
     }
-    queue_transaction(
-        conn,
-        tx_ref,
-        tx.ironwood_enhance_candidates(),
-        tx.ironwood_pir_eligible(),
-    )
+    queue_transaction(conn, tx_ref, tx.ironwood_enhancement_plan())
 }
 
 fn queue_transaction(
     conn: &Connection,
     tx_ref: crate::TxRef,
-    candidates: &[IronwoodEnhanceCandidate<AccountUuid>],
-    eligible: bool,
+    plan: &IronwoodEnhancementPlan<AccountUuid>,
 ) -> Result<(), SqliteClientError> {
     let (has_raw, mined): (bool, bool) = conn.query_row(
         "SELECT raw IS NOT NULL, mined_height IS NOT NULL FROM transactions WHERE id_tx = :tx",
@@ -227,17 +325,20 @@ fn queue_transaction(
     if route == Some(LWD_REQUIRED) {
         return require_lwd(conn, tx_ref);
     }
-    if !eligible {
-        let has_notes: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes WHERE transaction_id = :tx)",
-            named_params![":tx": tx_ref.0],
-            |row| row.get(0),
-        )?;
-        if route.is_some() || has_notes || !candidates.is_empty() {
-            require_lwd(conn, tx_ref)?;
+    let candidates = match plan {
+        IronwoodEnhancementPlan::Eligible { outgoing } => outgoing,
+        IronwoodEnhancementPlan::Ineligible => {
+            let has_notes: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes WHERE transaction_id = :tx)",
+                named_params![":tx": tx_ref.0],
+                |row| row.get(0),
+            )?;
+            if route.is_some() || has_notes {
+                require_lwd(conn, tx_ref)?;
+            }
+            return Ok(());
         }
-        return Ok(());
-    }
+    };
 
     // A position identifies one action globally. Rewinds remove obsolete claims
     // before positions can be reused, so another transaction owning one of these
@@ -370,17 +471,6 @@ pub(super) fn outgoing_position_owned_by_other(
         |row| row.get(0),
     )
     .map_err(Into::into)
-}
-
-/// Deleted funding accounts cannot turn incomplete work into successful completion.
-pub(crate) fn remove_orphaned_outgoing(tx: &Transaction<'_>) -> Result<(), SqliteClientError> {
-    tx.execute(
-        "UPDATE ironwood_enhance_outgoing_queue SET not_recoverable = 1
-         WHERE NOT EXISTS (SELECT 1 FROM ironwood_enhance_outgoing_accounts a
-             WHERE a.commitment_tree_position = ironwood_enhance_outgoing_queue.commitment_tree_position)",
-        [],
-    )?;
-    discovery::suspend_orphaned(tx)
 }
 
 pub(crate) fn pending<P: zcash_protocol::consensus::Parameters>(

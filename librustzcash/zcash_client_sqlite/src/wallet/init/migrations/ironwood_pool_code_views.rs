@@ -203,9 +203,15 @@ mod tests {
                 &(arb_orchard_note(), arb_ironwood_note()),
                 |(orchard_note, ironwood_note): (ArbOrchardNote, ArbIronwoodNote)| {
                     let data_file = NamedTempFile::new().unwrap();
-                    let mut db_data =
-                        WalletDb::for_path(data_file.path(), network, test_clock(), test_rng())
-                            .unwrap();
+                    let mut db_data = WalletDb::for_path(
+                        data_file.path(),
+                        network,
+                        test_clock(),
+                        test_rng(),
+                        #[cfg(feature = "zakura-pir-enhance")]
+                        zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+                    )
+                    .unwrap();
 
                     // Migrate through this migration, so `v_received_outputs` includes the
                     // Ironwood branch.

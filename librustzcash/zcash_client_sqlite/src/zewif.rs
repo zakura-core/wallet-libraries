@@ -1719,8 +1719,15 @@ mod tests {
         >,
     ) {
         let db_file = NamedTempFile::new().unwrap();
-        let mut wdb =
-            WalletDb::for_path(db_file.path(), TEST_NETWORK, test_clock(), test_rng()).unwrap();
+        let mut wdb = WalletDb::for_path(
+            db_file.path(),
+            TEST_NETWORK,
+            test_clock(),
+            test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        )
+        .unwrap();
         WalletMigrator::new().init_or_migrate(&mut wdb).unwrap();
         (db_file, wdb)
     }
@@ -1756,6 +1763,8 @@ mod tests {
             regtest_local_network(),
             test_clock(),
             test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
         .unwrap();
         WalletMigrator::new().init_or_migrate(&mut wdb).unwrap();

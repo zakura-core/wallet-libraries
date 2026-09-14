@@ -10,6 +10,13 @@ workspace.
 
 ## [Unreleased]
 
+### Fixed
+- Maintain orphaned Ironwood outgoing and discovery jobs when deleting accounts
+  without PIR compiled in, and repair existing orphaned jobs during full wallet
+  initialization.
+- Reject conflicting outgoing positions during Ironwood enhancement rediscovery
+  for mixed-pool transactions before changing routing or queues.
+
 ## [0.1.0-rc5] - 2026-09-09
 
 ### Changed

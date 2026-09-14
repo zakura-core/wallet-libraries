@@ -14,7 +14,6 @@ name = "zakura_pir_enhance"
 [features]
 default = ["https-client"]
 https-client = ["dep:reqwest"]
-wallet-integration = ["dep:zcash_client_backend"]
 
 [dependencies]
 base64 = "0.22"
@@ -26,7 +25,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror = "2"
-zcash_client_backend = { workspace = true, optional = true, features = ["zakura-pir-enhance"] }
+zakura-pir-enhance-types = { version = "0.1.0", path = "../pir-enhance-types" }
 
 [dev-dependencies]
 inspiring = { git = "https://github.com/valargroup/ipir-sp.git", rev = "accc424e879d8da425fa620aad80f0f2c4e0defd" }

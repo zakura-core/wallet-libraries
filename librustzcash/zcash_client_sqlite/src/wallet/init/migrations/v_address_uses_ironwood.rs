@@ -300,8 +300,15 @@ mod tests {
     /// database out from under the test.
     fn wallet_before_migration() -> (NamedTempFile, TestWalletDb) {
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data =
-            WalletDb::for_path(data_file.path(), NETWORK, test_clock(), test_rng()).unwrap();
+        let mut db_data = WalletDb::for_path(
+            data_file.path(),
+            NETWORK,
+            test_clock(),
+            test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        )
+        .unwrap();
 
         WalletMigrator::new()
             .with_seed(Secret::new(vec![SEED_BYTE; SEED_LEN]))

@@ -42,20 +42,20 @@ fn encrypted_action(
     let cmx = ExtractedNoteCommitment::from(note.commitment());
     let cv = ValueCommitment::from_bytes(&pallas::Point::generator().to_bytes()).unwrap();
     let mut rng = ChaCha20Rng::from_seed([7; 32]);
-    let record = EnhanceRecord::from_parts(
-        IronwoodDomain::epk_bytes(encryptor.epk()).0,
-        encryptor.encrypt_note_plaintext(),
-        cv.to_bytes(),
-        encryptor.encrypt_outgoing_plaintext(&cv, &cmx, &mut rng),
-        false,
-        false,
-    );
+    let record = EnhanceRecord::from_parts(EnhanceRecordParts {
+        ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0,
+        enc_ciphertext: encryptor.encrypt_note_plaintext(),
+        cv_net: cv.to_bytes(),
+        out_ciphertext: encryptor.encrypt_outgoing_plaintext(&cv, &cmx, &mut rng),
+        has_transparent_inputs: false,
+        has_transparent_outputs: false,
+    });
     (
         CompactOrchardAction {
             nullifier: nf.to_vec(),
             cmx: cmx.to_bytes().to_vec(),
             ephemeral_key: record.ephemeral_key().to_vec(),
-            ciphertext: record.ciphertext()[..52].to_vec(),
+            ciphertext: record.enc_ciphertext()[..52].to_vec(),
         },
         record,
     )
@@ -198,7 +198,7 @@ impl Send {
         self.st
             .wallet()
             .db()
-            .enhance_pir_requests()
+            .query_requests()
             .unwrap()
             .into_iter()
             .filter(|r| r.request_id().txid().as_ref().as_slice() == self.block.vtx[0].txid)
@@ -213,12 +213,7 @@ impl Send {
     }
 
     fn discovery(&self) -> IronwoodEnhanceDiscoveryRequest {
-        let jobs = self
-            .st
-            .wallet()
-            .db()
-            .ironwood_enhance_discovery_requests()
-            .unwrap();
+        let jobs = self.st.wallet().db().discovery_requests().unwrap();
         assert_eq!(jobs.len(), 1);
         jobs[0]
     }
@@ -237,7 +232,7 @@ impl Send {
             self.st
                 .wallet()
                 .db()
-                .ironwood_enhance_discovery_requests()
+                .discovery_requests()
                 .unwrap()
                 .is_empty()
         );
@@ -261,16 +256,16 @@ fn rescanning_a_send_preserves_pending_and_suspended_outgoing_recovery() {
             .unwrap();
         finish_incoming(&mut send.st, change);
         if suspend {
-            let mut ciphertext = *send.record.ciphertext();
+            let mut ciphertext = *send.record.enc_ciphertext();
             ciphertext[579] ^= 1;
-            let corrupt = EnhanceRecord::from_parts(
-                *send.record.ephemeral_key(),
-                ciphertext,
-                *send.record.cv_net(),
-                *send.record.out_ciphertext(),
-                false,
-                false,
-            );
+            let corrupt = EnhanceRecord::from_parts(EnhanceRecordParts {
+                ephemeral_key: *send.record.ephemeral_key(),
+                enc_ciphertext: ciphertext,
+                cv_net: *send.record.cv_net(),
+                out_ciphertext: *send.record.out_ciphertext(),
+                has_transparent_inputs: false,
+                has_transparent_outputs: false,
+            });
             assert_eq!(
                 apply_record(send.st.wallet_mut().db_mut(), outgoing, &corrupt).unwrap(),
                 EnhancePirStoreResult::NotRecoverable
@@ -335,7 +330,7 @@ fn later_funding_account_reopens_suspended_ovk_recovery() {
         send.st
             .wallet()
             .db()
-            .ironwood_enhance_discovery_requests()
+            .discovery_requests()
             .unwrap()
             .is_empty()
     );
@@ -346,7 +341,7 @@ fn later_funding_account_reopens_suspended_ovk_recovery() {
         .st
         .wallet()
         .db()
-        .pending_ironwood_outgoing(outgoing.position())
+        .pending_outgoing(outgoing.position())
         .unwrap()
         .unwrap();
     assert_eq!(pending.account_ids.len(), 2);
@@ -439,11 +434,7 @@ fn deleting_a_funder_does_not_block_another_transaction_in_the_block() {
         reason: NoFundingAccounts,
     }];
     assert_eq!(
-        send.st
-            .wallet()
-            .db()
-            .suspended_ironwood_enhance_discoveries()
-            .unwrap(),
+        send.st.wallet().db().discovery_suspensions().unwrap(),
         suspended
     );
     let incoming = send.requests()[0];
@@ -468,7 +459,7 @@ fn deleting_a_funder_does_not_block_another_transaction_in_the_block() {
         .st
         .wallet()
         .db()
-        .enhance_pir_requests()
+        .query_requests()
         .unwrap()
         .into_iter()
         .find(|r| r.request_id().txid() == send.block.vtx[1].txid())
@@ -481,7 +472,7 @@ fn deleting_a_funder_does_not_block_another_transaction_in_the_block() {
         send.st
             .wallet()
             .db()
-            .ironwood_enhance_discovery_requests()
+            .discovery_requests()
             .unwrap()
             .is_empty(),
         "a suspended-only block is not downloaded again"
@@ -500,12 +491,11 @@ fn deleting_a_funder_does_not_block_another_transaction_in_the_block() {
         *send.st.network(),
         test_clock(),
         test_rng(),
+        #[cfg(feature = "zakura-pir-enhance")]
+        zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
     )
     .unwrap();
-    assert_eq!(
-        reopened.suspended_ironwood_enhance_discoveries().unwrap(),
-        suspended
-    );
+    assert_eq!(reopened.discovery_suspensions().unwrap(), suspended);
     assert!(reopened.transaction_data_requests().unwrap().contains(
         &TransactionDataRequest::Enhancement(incoming.request_id().txid())
     ));
@@ -553,7 +543,7 @@ fn transaction_local_failure_does_not_block_a_valid_sibling() {
             .st
             .wallet()
             .db()
-            .enhance_pir_requests()
+            .query_requests()
             .unwrap()
             .into_iter()
             .find(|r| r.request_id().txid() == send.block.vtx[1].txid())
@@ -620,18 +610,14 @@ fn an_active_orphan_is_suspended_without_blocking_a_valid_sibling() {
         }
     );
     assert_eq!(
-        send.st
-            .wallet()
-            .db()
-            .suspended_ironwood_enhance_discoveries()
-            .unwrap(),
+        send.st.wallet().db().discovery_suspensions().unwrap(),
         unresolved
     );
     assert!(
         send.st
             .wallet()
             .db()
-            .ironwood_enhance_discovery_requests()
+            .discovery_requests()
             .unwrap()
             .is_empty()
     );
@@ -658,7 +644,7 @@ fn a_sql_error_rolls_back_sibling_progress_and_defensive_suspension() {
                 )
                 .unwrap();
         }
-        let before = send.st.wallet().db().enhance_pir_requests().unwrap();
+        let before = send.st.wallet().db().query_requests().unwrap();
         // The second job fails after the first job has been rebuilt or suspended.
         send.st.wallet().conn().execute_batch(
             "CREATE TRIGGER fail_second_discovery BEFORE DELETE ON ironwood_enhance_discovery_queue
@@ -672,15 +658,12 @@ fn a_sql_error_rolls_back_sibling_progress_and_defensive_suspension() {
                 .rebuild_ironwood_enhancement(request, &send.block)
                 .is_err()
         );
-        assert_eq!(
-            send.st.wallet().db().enhance_pir_requests().unwrap(),
-            before
-        );
+        assert_eq!(send.st.wallet().db().query_requests().unwrap(), before);
         assert!(
             send.st
                 .wallet()
                 .db()
-                .suspended_ironwood_enhance_discoveries()
+                .discovery_suspensions()
                 .unwrap()
                 .is_empty()
         );
@@ -726,7 +709,7 @@ fn a_sql_error_rolls_back_sibling_progress_and_defensive_suspension() {
 fn invalid_block_geometry_or_ordering_rejects_all_jobs_without_mutation() {
     let mut send = shared_and_independent_jobs();
     let request = send.discovery();
-    let before = send.st.wallet().db().enhance_pir_requests().unwrap();
+    let before = send.st.wallet().db().query_requests().unwrap();
     for kind in 0..4 {
         let mut bad = send.block.clone();
         match kind {
@@ -748,10 +731,7 @@ fn invalid_block_geometry_or_ordering_rejects_all_jobs_without_mutation() {
                 .unwrap(),
             Rejected
         );
-        assert_eq!(
-            send.st.wallet().db().enhance_pir_requests().unwrap(),
-            before
-        );
+        assert_eq!(send.st.wallet().db().query_requests().unwrap(), before);
         let jobs: i64 = send
             .st
             .wallet()
@@ -804,16 +784,12 @@ fn reconstruction_requires_the_preceding_tree_size() {
         send.st
             .wallet()
             .db()
-            .ironwood_enhance_discovery_requests()
+            .discovery_requests()
             .unwrap()
             .is_empty()
     );
     assert_eq!(
-        send.st
-            .wallet()
-            .db()
-            .suspended_ironwood_enhance_discoveries()
-            .unwrap(),
+        send.st.wallet().db().discovery_suspensions().unwrap(),
         vec![IronwoodEnhanceDiscoveryFailure {
             txid: send.block.vtx[0].txid(),
             reason: AnchorUnavailable,
@@ -834,7 +810,7 @@ fn reconstruction_requires_the_preceding_tree_size() {
         send.st
             .wallet()
             .db()
-            .suspended_ironwood_enhance_discoveries()
+            .discovery_suspensions()
             .unwrap()
             .is_empty()
     );
@@ -860,16 +836,12 @@ fn discovery_waits_for_the_spending_blocks_tree_size() {
         send.st
             .wallet()
             .db()
-            .ironwood_enhance_discovery_requests()
+            .discovery_requests()
             .unwrap()
             .is_empty()
     );
     assert_eq!(
-        send.st
-            .wallet()
-            .db()
-            .suspended_ironwood_enhance_discoveries()
-            .unwrap(),
+        send.st.wallet().db().discovery_suspensions().unwrap(),
         vec![IronwoodEnhanceDiscoveryFailure {
             txid: send.block.vtx[0].txid(),
             reason: AnchorUnavailable,
@@ -880,94 +852,129 @@ fn discovery_waits_for_the_spending_blocks_tree_size() {
 
 #[test]
 fn reconstruction_cannot_take_an_outgoing_position_from_another_transaction() {
-    let mut send = shared_and_independent_jobs();
-    let request = send.discovery();
-    let end = send
-        .block
-        .chain_metadata
-        .as_ref()
+    let routing_and_discovery = |conn: &Connection| -> Vec<(i64, i64, Option<i64>)> {
+        conn.prepare(
+            "SELECT r.transaction_id, r.route, q.suspended
+             FROM ironwood_enhance_routing r
+             LEFT JOIN ironwood_enhance_discovery_queue q ON q.transaction_id = r.transaction_id
+             ORDER BY r.transaction_id",
+        )
         .unwrap()
-        .ironwood_commitment_tree_size;
-    let position = end - 1;
-    let owner = send
-        .st
-        .wallet()
-        .conn()
-        .query_row(
-            "SELECT id_tx FROM transactions WHERE txid = ?1",
-            [&send.block.vtx[0].txid],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap();
-    send.st
-        .wallet()
-        .conn()
-        .execute(
-            "INSERT INTO ironwood_enhance_outgoing_queue (
-             commitment_tree_position, transaction_id, output_index, nullifier, cmx,
-             ephemeral_key, compact_ciphertext
-         ) VALUES (?1, ?2, 9, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                position, owner, [91u8; 32], [92u8; 32], [93u8; 32], [94u8; 52]
-            ],
-        )
-        .unwrap();
-    let before = send.st.wallet().db().enhance_pir_requests().unwrap();
-
-    assert_eq!(
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    };
+    for (inputs, outputs) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut send = shared_and_independent_jobs();
+        if inputs {
+            send.block.vtx[1]
+                .vin
+                .push(zcash_client_backend::proto::compact_formats::CompactTxIn {
+                    prevout_txid: vec![8; 32],
+                    prevout_index: 0,
+                });
+        }
+        if outputs {
+            send.block.vtx[1].vout.push(Default::default());
+        }
+        let request = send.discovery();
+        let end = send
+            .block
+            .chain_metadata
+            .as_ref()
+            .unwrap()
+            .ironwood_commitment_tree_size;
+        let position = end - 1;
+        let owner = send
+            .st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id_tx FROM transactions WHERE txid = ?1",
+                [&send.block.vtx[0].txid],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
         send.st
-            .wallet_mut()
-            .db_mut()
-            .rebuild_ironwood_enhancement(request, &send.block)
-            .unwrap(),
-        Rejected
-    );
-    let claimant = send
-        .st
-        .wallet()
-        .conn()
-        .query_row(
-            "SELECT id_tx FROM transactions WHERE txid = ?1",
-            [&send.block.vtx[1].txid],
-            |row| row.get::<_, i64>(0).map(crate::TxRef),
-        )
-        .unwrap();
-    assert!(
-        queue_transaction(
-            send.st.wallet().conn(),
-            claimant,
-            &[IronwoodEnhanceCandidate::from_parts(
-                u64::from(position).into(),
-                0,
-                [81; 32],
-                [82; 32],
-                [83; 32],
-                [84; 52],
-                vec![],
-            )],
-            true,
-        )
-        .is_err(),
-        "the queue itself must also refuse cross-transaction replacement"
-    );
-    let retained_owner = send
-        .st
-        .wallet()
-        .conn()
-        .query_row(
-            "SELECT transaction_id FROM ironwood_enhance_outgoing_queue
-         WHERE commitment_tree_position = ?1",
-            [position],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap();
-    assert_eq!(retained_owner, owner);
-    assert_eq!(
-        send.st.wallet().db().enhance_pir_requests().unwrap(),
-        before
-    );
-    assert_eq!(send.discovery(), request);
-    assert!(send.queued());
+            .wallet()
+            .conn()
+            .execute(
+                "INSERT INTO ironwood_enhance_outgoing_queue (
+                 commitment_tree_position, transaction_id, output_index, nullifier, cmx,
+                 ephemeral_key, compact_ciphertext
+             ) VALUES (?1, ?2, 9, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    position, owner, [91u8; 32], [92u8; 32], [93u8; 32], [94u8; 52]
+                ],
+            )
+            .unwrap();
+        let before = send.st.wallet().db().enhance_pir_work().unwrap();
+        let ordinary_before = send.st.wallet().db().transaction_data_requests().unwrap();
+        let routing_before = routing_and_discovery(send.st.wallet().conn());
+
+        assert_eq!(
+            send.st
+                .wallet_mut()
+                .db_mut()
+                .rebuild_ironwood_enhancement(request, &send.block)
+                .unwrap(),
+            Rejected,
+            "position conflicts must reject even with transparent inputs={inputs}, outputs={outputs}"
+        );
+        let claimant = send
+            .st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id_tx FROM transactions WHERE txid = ?1",
+                [&send.block.vtx[1].txid],
+                |row| row.get::<_, i64>(0).map(crate::TxRef),
+            )
+            .unwrap();
+        assert!(
+            queue_transaction(
+                send.st.wallet().conn(),
+                claimant,
+                &IronwoodEnhancementPlan::Eligible {
+                    outgoing: vec![IronwoodEnhanceCandidate::from_parts(
+                        u64::from(position).into(),
+                        0,
+                        [81; 32],
+                        [82; 32],
+                        [83; 32],
+                        [84; 52],
+                        vec![],
+                    )]
+                }
+            )
+            .is_err(),
+            "the queue itself must also refuse cross-transaction replacement"
+        );
+        let retained_owner = send
+            .st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT transaction_id FROM ironwood_enhance_outgoing_queue
+             WHERE commitment_tree_position = ?1",
+                [position],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(retained_owner, owner);
+        assert_eq!(send.st.wallet().db().enhance_pir_work().unwrap(), before);
+        assert_eq!(
+            send.st.wallet().db().transaction_data_requests().unwrap(),
+            ordinary_before
+        );
+        assert_eq!(
+            routing_and_discovery(send.st.wallet().conn()),
+            routing_before
+        );
+        assert_eq!(send.discovery(), request);
+        assert!(send.queued());
+    }
 }
 
 #[test]
@@ -987,7 +994,7 @@ fn deleting_one_of_multiple_funders_keeps_discovery_active() {
         send.st
             .wallet()
             .db()
-            .suspended_ironwood_enhance_discoveries()
+            .discovery_suspensions()
             .unwrap()
             .is_empty()
     );
@@ -997,7 +1004,7 @@ fn deleting_one_of_multiple_funders_keeps_discovery_active() {
             .st
             .wallet()
             .db()
-            .pending_ironwood_outgoing(request.position())
+            .pending_outgoing(request.position())
             .unwrap()
             .unwrap();
         assert_eq!(pending.account_ids, vec![account_b]);
@@ -1020,7 +1027,7 @@ fn deleting_an_exclusively_owned_transaction_cascades_its_discovery_job() {
         send.st
             .wallet()
             .db()
-            .ironwood_enhance_discovery_requests()
+            .discovery_requests()
             .unwrap()
             .is_empty()
     );
@@ -1028,7 +1035,7 @@ fn deleting_an_exclusively_owned_transaction_cascades_its_discovery_job() {
         send.st
             .wallet()
             .db()
-            .suspended_ironwood_enhance_discoveries()
+            .discovery_suspensions()
             .unwrap()
             .is_empty()
     );
@@ -1088,11 +1095,7 @@ fn linking_another_funder_reactivates_the_existing_suspended_job() {
         .delete_account(account_a)
         .unwrap();
     assert_eq!(
-        send.st
-            .wallet()
-            .db()
-            .suspended_ironwood_enhance_discoveries()
-            .unwrap(),
+        send.st.wallet().db().discovery_suspensions().unwrap(),
         vec![IronwoodEnhanceDiscoveryFailure {
             txid: send.block.vtx[0].txid(),
             reason: NoFundingAccounts,
@@ -1102,7 +1105,7 @@ fn linking_another_funder_reactivates_the_existing_suspended_job() {
         send.st
             .wallet()
             .db()
-            .ironwood_enhance_discovery_requests()
+            .discovery_requests()
             .unwrap()
             .is_empty()
     );
@@ -1113,7 +1116,7 @@ fn linking_another_funder_reactivates_the_existing_suspended_job() {
         send.st
             .wallet()
             .db()
-            .suspended_ironwood_enhance_discoveries()
+            .discovery_suspensions()
             .unwrap()
             .is_empty()
     );
@@ -1127,7 +1130,7 @@ fn linking_another_funder_reactivates_the_existing_suspended_job() {
         .st
         .wallet()
         .db()
-        .pending_ironwood_outgoing(outgoing.position())
+        .pending_outgoing(outgoing.position())
         .unwrap()
         .unwrap();
     assert_eq!(pending.account_ids, vec![account_b]);
@@ -1160,12 +1163,7 @@ fn restoring_a_funding_key_and_rescanning_reactivates_suspended_discovery() {
             .delete_account(account_a)
             .unwrap();
         assert_eq!(
-            send.st
-                .wallet()
-                .db()
-                .suspended_ironwood_enhance_discoveries()
-                .unwrap()
-                .len(),
+            send.st.wallet().db().discovery_suspensions().unwrap().len(),
             1
         );
         send.st
@@ -1196,7 +1194,7 @@ fn restoring_a_funding_key_and_rescanning_reactivates_suspended_discovery() {
             send.st
                 .wallet()
                 .db()
-                .suspended_ironwood_enhance_discoveries()
+                .discovery_suspensions()
                 .unwrap()
                 .is_empty()
         );
@@ -1225,7 +1223,7 @@ fn restoring_a_funding_key_and_rescanning_reactivates_suspended_discovery() {
             send.st
                 .wallet()
                 .db()
-                .ironwood_enhance_discovery_requests()
+                .discovery_requests()
                 .unwrap()
                 .is_empty()
         );
@@ -1233,7 +1231,7 @@ fn restoring_a_funding_key_and_rescanning_reactivates_suspended_discovery() {
             .st
             .wallet()
             .db()
-            .enhance_pir_requests()
+            .query_requests()
             .unwrap()
             .into_iter()
             .find(|r| r.request_id().txid() == send.block.vtx[1].txid())
@@ -1276,7 +1274,7 @@ fn suspension_failure_rolls_back_account_deletion() {
         send.st
             .wallet()
             .db()
-            .suspended_ironwood_enhance_discoveries()
+            .discovery_suspensions()
             .unwrap()
             .is_empty()
     );
@@ -1402,10 +1400,12 @@ fn retro_link_reopens_retired_enhancement_and_recovers_recipient_privately() {
             *send.st.network(),
             test_clock(),
             test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
         .unwrap();
         assert_eq!(
-            reopened.ironwood_enhance_discovery_requests().unwrap(),
+            reopened.discovery_requests().unwrap(),
             vec![send.discovery()]
         );
         assert!(reopened.transaction_data_requests().unwrap().contains(
@@ -1425,7 +1425,7 @@ fn retro_link_reopens_retired_enhancement_and_recovers_recipient_privately() {
             send.st
                 .wallet()
                 .db()
-                .pending_ironwood_outgoing(outgoing.position())
+                .pending_outgoing(outgoing.position())
                 .unwrap()
                 .unwrap()
                 .account_ids,
@@ -1500,7 +1500,7 @@ fn funding_first_stays_private_without_discovery_and_repeated_funding_scan_is_in
         send.st
             .wallet()
             .db()
-            .ironwood_enhance_discovery_requests()
+            .discovery_requests()
             .unwrap()
             .is_empty()
     );
@@ -1509,7 +1509,7 @@ fn funding_first_stays_private_without_discovery_and_repeated_funding_scan_is_in
         send.st
             .wallet()
             .db()
-            .ironwood_enhance_discovery_requests()
+            .discovery_requests()
             .unwrap()
             .is_empty()
     );
@@ -1626,14 +1626,14 @@ fn discovery_commit_is_atomic_and_mixed_routing_is_sticky() {
         .into_iter()
         .find(|r| r.request_id().output_index() == 1)
         .unwrap();
-    let mixed = EnhanceRecord::from_parts(
-        *send.record.ephemeral_key(),
-        *send.record.ciphertext(),
-        *send.record.cv_net(),
-        *send.record.out_ciphertext(),
-        true,
-        false,
-    );
+    let mixed = EnhanceRecord::from_parts(EnhanceRecordParts {
+        ephemeral_key: *send.record.ephemeral_key(),
+        enc_ciphertext: *send.record.enc_ciphertext(),
+        cv_net: *send.record.cv_net(),
+        out_ciphertext: *send.record.out_ciphertext(),
+        has_transparent_inputs: true,
+        has_transparent_outputs: false,
+    });
     assert_eq!(
         apply_record(send.st.wallet_mut().db_mut(), outgoing, &mixed).unwrap(),
         EnhancePirStoreResult::LwdRequired
@@ -1644,7 +1644,7 @@ fn discovery_commit_is_atomic_and_mixed_routing_is_sticky() {
         send.st
             .wallet()
             .db()
-            .ironwood_enhance_discovery_requests()
+            .discovery_requests()
             .unwrap()
             .is_empty()
     );
@@ -1688,7 +1688,7 @@ fn rewind_and_full_data_clear_discovery() {
             send.st
                 .wallet()
                 .db()
-                .ironwood_enhance_discovery_requests()
+                .discovery_requests()
                 .unwrap()
                 .is_empty()
         );
@@ -1700,5 +1700,98 @@ fn rewind_and_full_data_clear_discovery() {
                 .unwrap(),
             AlreadyResolved
         );
+    }
+}
+
+#[test]
+#[ignore = "run scripts/verify-pir-feature-transition.sh"]
+fn account_deletion_across_pir_feature_builds() {
+    use crate::testing::db::{test_clock, test_rng};
+    let send = shared_and_independent_jobs();
+    let tx_ref = send.tx_ref();
+    let outgoing = super::outgoing(&send.st, tx_ref, 99, 9);
+    let status = std::process::Command::new(std::env::var("PIR_DISABLED_TEST_BINARY").unwrap())
+        .args([
+            "wallet::delete_account_without_pir",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("PIR_TRANSITION_DB", send.st.wallet().data_file_path())
+        .env(
+            "PIR_TRANSITION_ACCOUNT",
+            send.st
+                .test_account()
+                .unwrap()
+                .id()
+                .expose_uuid()
+                .to_string(),
+        )
+        .status()
+        .unwrap();
+    assert!(status.success());
+    // Inspect before initialization: initialization repair must not mask a deletion bug.
+    let reopened = crate::WalletDb::for_path(
+        send.st.wallet().data_file_path(),
+        *send.st.network(),
+        test_clock(),
+        test_rng(),
+        EnhancementMode::PrivateIronwood,
+    )
+    .unwrap();
+    assert_eq!(reopened.discovery_suspensions().unwrap().len(), 1);
+    assert!(!reopened.query_requests().unwrap().contains(&outgoing));
+    assert!(reopened.conn.query_row(
+        "SELECT not_recoverable FROM ironwood_enhance_outgoing_queue WHERE commitment_tree_position = 99",
+        [], |row| row.get::<_, bool>(0)).unwrap());
+    assert_eq!(
+        reopened.discovery_requests().unwrap().len(),
+        1,
+        "other account remains active"
+    );
+}
+
+#[test]
+fn initialization_repairs_orphaned_work_atomically() {
+    let mut send = shared_and_independent_jobs();
+    let outgoing = super::outgoing(&send.st, send.tx_ref(), 99, 9);
+    let account = send.st.test_account().unwrap().id();
+    send.st
+        .wallet_mut()
+        .db_mut()
+        .delete_account(account)
+        .unwrap();
+    let reopened = send.st.wallet_mut().db_mut();
+    // Emulate the persisted state left by an older feature-disabled binary.
+    reopened
+        .conn
+        .execute_batch(
+            "UPDATE ironwood_enhance_outgoing_queue SET not_recoverable = 0;
+        UPDATE ironwood_enhance_discovery_queue SET suspended = 0;
+        CREATE TRIGGER fail_repair BEFORE UPDATE OF suspended ON ironwood_enhance_discovery_queue
+        BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        crate::wallet::init::WalletMigrator::new()
+            .init_or_migrate(reopened)
+            .is_err()
+    );
+    assert!(reopened.discovery_suspensions().unwrap().is_empty());
+    assert!(
+        reopened.query_requests().unwrap().contains(&outgoing),
+        "first update rolls back if second fails"
+    );
+    reopened
+        .conn
+        .execute_batch("DROP TRIGGER fail_repair")
+        .unwrap();
+    for _ in 0..2 {
+        crate::wallet::init::WalletMigrator::new()
+            .init_or_migrate(reopened)
+            .unwrap();
+        assert_eq!(reopened.discovery_suspensions().unwrap().len(), 1);
+        assert!(!reopened.query_requests().unwrap().contains(&outgoing));
+        assert_eq!(reopened.discovery_requests().unwrap().len(), 1);
     }
 }

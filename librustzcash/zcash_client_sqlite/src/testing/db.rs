@@ -227,14 +227,28 @@ impl DataStoreFactory for TestDbFactory {
     ) -> Result<Self::DataStore, Self::Error> {
         let (mut db_data, data_file) = if self.file_backed {
             let data_file = NamedTempFile::new().unwrap();
-            let db_data =
-                WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
+            let db_data = WalletDb::for_path(
+                data_file.path(),
+                network,
+                test_clock(),
+                test_rng(),
+                #[cfg(feature = "zakura-pir-enhance")]
+                zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+            )
+            .unwrap();
             (db_data, Some(data_file))
         } else {
             let conn = Connection::open_in_memory().unwrap();
             rusqlite::vtab::array::load_module(&conn).unwrap();
             (
-                WalletDb::from_connection(conn, network, test_clock(), test_rng()),
+                WalletDb::from_connection(
+                    conn,
+                    network,
+                    test_clock(),
+                    test_rng(),
+                    #[cfg(feature = "zakura-pir-enhance")]
+                    zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+                ),
                 None,
             )
         };

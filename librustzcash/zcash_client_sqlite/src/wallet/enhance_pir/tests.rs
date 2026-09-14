@@ -3,19 +3,17 @@ use crate::testing::{
     BlockCache,
     db::{TestDb, TestDbFactory},
 };
-use zcash_client_backend::data_api::enhance_pir::{
-    IronwoodEnhanceRecord as EnhanceRecord, apply_ironwood_enhance_record as apply_record,
-};
+use zcash_client_backend::data_api::enhance_pir::EnhanceRecord;
+use zcash_client_backend::data_api::enhance_pir::EnhanceRecordParts;
 use zcash_client_backend::data_api::{
     TransactionDataRequest, WalletRead, WalletWrite,
-    enhance_pir::{
-        EnhancePirRead, EnhancePirWrite, EnhancementMode, apply_ironwood_enhance_record,
-    },
+    enhance_pir::{EnhancePirRead, EnhancePirWrite, EnhancementMode},
     testing::{
         AddressType, IronwoodFvk, TestBuilder, TestState, orchard::OrchardPoolTester,
         pool::ShieldedPoolTester,
     },
 };
+use zcash_client_backend::wallet::IronwoodEnhanceCandidate;
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::{
     consensus::BlockHeight, local_consensus::LocalNetwork, memo::MemoBytes, value::Zatoshis,
@@ -45,7 +43,7 @@ fn fixture_with_factory(factory: TestDbFactory) -> (State, crate::TxRef, Enhance
             |row| row.get(0).map(crate::TxRef),
         )
         .unwrap();
-    let requests = st.wallet().db().enhance_pir_requests().unwrap();
+    let requests = st.wallet().db().query_requests().unwrap();
     assert_eq!(
         requests.len(),
         1,
@@ -55,7 +53,7 @@ fn fixture_with_factory(factory: TestDbFactory) -> (State, crate::TxRef, Enhance
     assert!(
         st.wallet()
             .db()
-            .pending_ironwood_memo(request.position())
+            .pending_memo(request.position())
             .unwrap()
             .is_some()
     );
@@ -89,16 +87,17 @@ fn outgoing(st: &State, tx_ref: crate::TxRef, position: u64, index: usize) -> En
     queue_transaction(
         st.wallet().conn(),
         tx_ref,
-        &[IronwoodEnhanceCandidate::from_parts(
-            position.into(),
-            index,
-            [1; 32],
-            [2; 32],
-            [3; 32],
-            [4; 52],
-            vec![st.test_account().unwrap().id()],
-        )],
-        true,
+        &IronwoodEnhancementPlan::Eligible {
+            outgoing: vec![IronwoodEnhanceCandidate::from_parts(
+                position.into(),
+                index,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                [4; 52],
+                vec![st.test_account().unwrap().id()],
+            )],
+        },
     )
     .unwrap();
     requests(st.wallet().conn())
@@ -111,7 +110,14 @@ fn outgoing(st: &State, tx_ref: crate::TxRef, position: u64, index: usize) -> En
 fn wire_record(inputs: bool, outputs: bool) -> EnhanceRecord {
     let mut ciphertext = [0; 580];
     ciphertext[..52].copy_from_slice(&[4; 52]);
-    EnhanceRecord::from_parts([3; 32], ciphertext, [5; 32], [6; 80], inputs, outputs)
+    EnhanceRecord::from_parts(EnhanceRecordParts {
+        ephemeral_key: [3; 32],
+        enc_ciphertext: ciphertext,
+        cv_net: [5; 32],
+        out_ciphertext: [6; 80],
+        has_transparent_inputs: inputs,
+        has_transparent_outputs: outputs,
+    })
 }
 
 fn visible(st: &State, request: EnhancePirRequest) -> bool {
@@ -142,7 +148,7 @@ fn finish_incoming(st: &mut State, request: EnhancePirRequest) {
     assert_eq!(
         st.wallet_mut()
             .db_mut()
-            .apply_ironwood_enhancement(validated(
+            .apply_validated(validated(
                 request,
                 false,
                 true,
@@ -185,7 +191,12 @@ fn either_transparent_flag_routes_the_entire_transaction_and_is_sticky() {
             .unwrap(),
             EnhancePirStoreResult::AlreadyResolved
         );
-        queue_transaction(st.wallet().conn(), tx_ref, &[], true).unwrap();
+        queue_transaction(
+            st.wallet().conn(),
+            tx_ref,
+            &IronwoodEnhancementPlan::Eligible { outgoing: vec![] },
+        )
+        .unwrap();
         assert!(requests(st.wallet().conn()).unwrap().is_empty());
         assert!(visible(&st, incoming));
     }
@@ -194,38 +205,37 @@ fn either_transparent_flag_routes_the_entire_transaction_and_is_sticky() {
 #[test]
 fn incoming_authentication_precedes_shape_and_flags_are_not_authenticated() {
     use orchard::note_encryption::{IronwoodDomain, IronwoodNoteEncryption};
-    use zcash_client_backend::data_api::enhance_pir::IronwoodEnhanceRecord;
+    use zcash_client_backend::data_api::enhance_pir::EnhanceRecord;
     use zcash_note_encryption::Domain;
 
     let (mut st, _, request) = fixture();
     let pending = st
         .wallet()
         .db()
-        .pending_ironwood_memo(request.position())
+        .pending_memo(request.position())
         .unwrap()
         .unwrap();
     let encryptor = IronwoodNoteEncryption::new(None, pending.note, [7; 512]);
     let ciphertext = encryptor.encrypt_note_plaintext();
     let record = |bytes| {
-        IronwoodEnhanceRecord::from_parts(
-            IronwoodDomain::epk_bytes(encryptor.epk()).0,
-            bytes,
-            [0; 32],
-            [0; 80],
-            true,
-            false,
-        )
+        EnhanceRecord::from_parts(EnhanceRecordParts {
+            ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0,
+            enc_ciphertext: bytes,
+            cv_net: [0; 32],
+            out_ciphertext: [0; 80],
+            has_transparent_inputs: true,
+            has_transparent_outputs: false,
+        })
     };
     let mut corrupt = ciphertext;
     corrupt[579] ^= 1;
     assert_eq!(
-        apply_ironwood_enhance_record(st.wallet_mut().db_mut(), request, &record(corrupt)).unwrap(),
+        apply_record(st.wallet_mut().db_mut(), request, &record(corrupt)).unwrap(),
         EnhancePirStoreResult::Rejected
     );
     assert!(is_protected(st.wallet().conn(), request.request_id().txid()).unwrap());
     assert_eq!(
-        apply_ironwood_enhance_record(st.wallet_mut().db_mut(), request, &record(ciphertext))
-            .unwrap(),
+        apply_record(st.wallet_mut().db_mut(), request, &record(ciphertext)).unwrap(),
         EnhancePirStoreResult::LwdRequired
     );
 }
@@ -247,7 +257,7 @@ fn stale_identity_cannot_change_memos_or_routing() {
         assert_eq!(
             st.wallet_mut()
                 .db_mut()
-                .apply_ironwood_enhancement(validated(
+                .apply_validated(validated(
                     stale,
                     true,
                     true,
@@ -273,7 +283,14 @@ fn non_recovery_suspends_work_without_completion_or_public_fallback() {
     // A mismatched compact prefix must not apply even a positive flag.
     let mut parts = [0; 580];
     parts[..52].copy_from_slice(&[8; 52]);
-    wrong = EnhanceRecord::from_parts(*wrong.ephemeral_key(), parts, [5; 32], [6; 80], true, false);
+    wrong = EnhanceRecord::from_parts(EnhanceRecordParts {
+        ephemeral_key: *wrong.ephemeral_key(),
+        enc_ciphertext: parts,
+        cv_net: [5; 32],
+        out_ciphertext: [6; 80],
+        has_transparent_inputs: true,
+        has_transparent_outputs: false,
+    });
     assert_eq!(
         apply_record(st.wallet_mut().db_mut(), outgoing, &wrong).unwrap(),
         EnhancePirStoreResult::Rejected
@@ -341,14 +358,14 @@ fn completion_retires_only_enhancement_and_survives_replay() {
     assert_eq!(
         st.wallet_mut()
             .db_mut()
-            .apply_ironwood_enhancement(complete())
+            .apply_validated(complete())
             .unwrap(),
         EnhancePirStoreResult::Stored
     );
     assert_eq!(
         st.wallet_mut()
             .db_mut()
-            .apply_ironwood_enhancement(complete())
+            .apply_validated(complete())
             .unwrap(),
         EnhancePirStoreResult::AlreadyResolved
     );
@@ -379,16 +396,17 @@ fn completion_retires_only_enhancement_and_survives_replay() {
     queue_transaction(
         st.wallet().conn(),
         tx_ref,
-        &[IronwoodEnhanceCandidate::from_parts(
-            99.into(),
-            4,
-            [1; 32],
-            [2; 32],
-            [3; 32],
-            [4; 52],
-            vec![from_account],
-        )],
-        true,
+        &IronwoodEnhancementPlan::Eligible {
+            outgoing: vec![IronwoodEnhanceCandidate::from_parts(
+                99.into(),
+                4,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                [4; 52],
+                vec![from_account],
+            )],
+        },
     )
     .unwrap();
     assert!(requests(st.wallet().conn()).unwrap().is_empty());
@@ -416,7 +434,7 @@ fn atomic_write_rolls_back_memo_and_routing_on_queue_failure() {
         assert!(
             st.wallet_mut()
                 .db_mut()
-                .apply_ironwood_enhancement(validated(
+                .apply_validated(validated(
                     incoming,
                     transparent,
                     true,
@@ -427,14 +445,14 @@ fn atomic_write_rolls_back_memo_and_routing_on_queue_failure() {
         assert!(
             st.wallet()
                 .db()
-                .pending_ironwood_memo(incoming.position())
+                .pending_memo(incoming.position())
                 .unwrap()
                 .is_some()
         );
         assert!(
             st.wallet()
                 .db()
-                .pending_ironwood_outgoing(incoming.position())
+                .pending_outgoing(incoming.position())
                 .unwrap()
                 .is_some()
         );
@@ -455,7 +473,7 @@ fn full_data_supersedes_inflight_work() {
     assert_eq!(
         st.wallet_mut()
             .db_mut()
-            .apply_ironwood_enhancement(validated(
+            .apply_validated(validated(
                 request,
                 true,
                 true,
@@ -482,7 +500,12 @@ fn explicit_mixed_scan_discards_all_work_but_keeps_recovered_data() {
     let (mut st, tx_ref, request) = fixture();
     let _outgoing = outgoing(&st, tx_ref, 99, 4);
     finish_incoming(&mut st, request);
-    queue_transaction(st.wallet().conn(), tx_ref, &[], false).unwrap();
+    queue_transaction(
+        st.wallet().conn(),
+        tx_ref,
+        &IronwoodEnhancementPlan::Ineligible,
+    )
+    .unwrap();
     assert!(visible(&st, request));
     assert!(requests(st.wallet().conn()).unwrap().is_empty());
     let memo: Vec<u8> = st
@@ -495,7 +518,12 @@ fn explicit_mixed_scan_discards_all_work_but_keeps_recovered_data() {
         )
         .unwrap();
     assert_eq!(memo, vec![0xf6]);
-    queue_transaction(st.wallet().conn(), tx_ref, &[], true).unwrap();
+    queue_transaction(
+        st.wallet().conn(),
+        tx_ref,
+        &IronwoodEnhancementPlan::Eligible { outgoing: vec![] },
+    )
+    .unwrap();
     assert!(!is_protected(st.wallet().conn(), request.request_id().txid()).unwrap());
 }
 
@@ -534,7 +562,7 @@ fn reorg_prunes_private_work_but_retains_lwd_decisions() {
         assert_eq!(
             st.wallet_mut()
                 .db_mut()
-                .apply_ironwood_enhancement(validated(
+                .apply_validated(validated(
                     request,
                     true,
                     true,
@@ -547,7 +575,7 @@ fn reorg_prunes_private_work_but_retains_lwd_decisions() {
 }
 
 #[test]
-fn reopening_restores_routes_but_requires_reapplying_the_runtime_setting() {
+fn reopening_uses_explicit_mode_and_preserves_routes() {
     use crate::testing::db::{test_clock, test_rng};
     let (mut st, tx_ref, request) = fixture_with_factory(TestDbFactory::file_backed());
     st.wallet_mut()
@@ -558,9 +586,11 @@ fn reopening_restores_routes_but_requires_reapplying_the_runtime_setting() {
         *st.network(),
         test_clock(),
         test_rng(),
+        #[cfg(feature = "zakura-pir-enhance")]
+        zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
     )
     .unwrap();
-    assert_eq!(reopened.enhance_pir_requests().unwrap(), vec![request]);
+    assert_eq!(reopened.query_requests().unwrap(), vec![request]);
     assert!(reopened.transaction_data_requests().unwrap().contains(
         &TransactionDataRequest::Enhancement(request.request_id().txid())
     ));
@@ -569,7 +599,7 @@ fn reopening_restores_routes_but_requires_reapplying_the_runtime_setting() {
         &TransactionDataRequest::Enhancement(request.request_id().txid())
     ));
     require_lwd(st.wallet().conn(), tx_ref).unwrap();
-    assert!(reopened.enhance_pir_requests().unwrap().is_empty());
+    assert!(reopened.query_requests().unwrap().is_empty());
     assert!(reopened.transaction_data_requests().unwrap().contains(
         &TransactionDataRequest::Enhancement(request.request_id().txid())
     ));
@@ -582,7 +612,7 @@ fn losing_a_funding_account_cannot_erase_incomplete_outgoing_work() {
     let tx = st.wallet_mut().conn_mut().transaction().unwrap();
     tx.execute("DELETE FROM ironwood_enhance_outgoing_accounts", [])
         .unwrap();
-    remove_orphaned_outgoing(&tx).unwrap();
+    crate::wallet::suspend_orphaned_ironwood_enhancement(&tx).unwrap();
     tx.commit().unwrap();
     finish_incoming(&mut st, incoming);
     assert!(requests(st.wallet().conn()).unwrap().is_empty());
@@ -601,10 +631,7 @@ fn a_response_validated_before_position_reassignment_is_still_rejected() {
         )
         .unwrap();
     assert_eq!(
-        st.wallet_mut()
-            .db_mut()
-            .apply_ironwood_enhancement(response)
-            .unwrap(),
+        st.wallet_mut().db_mut().apply_validated(response).unwrap(),
         EnhancePirStoreResult::AlreadyResolved
     );
     let replacement = requests(st.wallet().conn()).unwrap()[0];
@@ -627,7 +654,12 @@ fn rescanning_removes_outgoing_jobs_now_covered_by_incoming_decryption() {
             .unwrap()
             .is_some()
     );
-    queue_transaction(st.wallet().conn(), tx_ref, &[], true).unwrap();
+    queue_transaction(
+        st.wallet().conn(),
+        tx_ref,
+        &IronwoodEnhancementPlan::Eligible { outgoing: vec![] },
+    )
+    .unwrap();
     assert!(
         pending_outgoing(st.wallet().conn(), request.position())
             .unwrap()
@@ -655,7 +687,7 @@ fn a_mixed_spend_without_received_ironwood_notes_is_sticky() {
     let pending = st
         .wallet()
         .db()
-        .pending_ironwood_memo(original.position())
+        .pending_memo(original.position())
         .unwrap()
         .unwrap();
     let nf = orchard::note::Nullifier::from_bytes(&pending.note.rho().to_bytes()).unwrap();
@@ -674,9 +706,10 @@ fn a_mixed_spend_without_received_ironwood_notes_is_sticky() {
         )],
         vec![],
     )
-    .with_ironwood_enhance_candidates(vec![], false);
+    .with_ironwood_enhancement_plan(IronwoodEnhancementPlan::Ineligible);
     queue_scanned(st.wallet().conn(), tx_ref, &scanned).unwrap();
-    let provisional = scanned.with_ironwood_enhance_candidates(vec![], true);
+    let provisional = scanned
+        .with_ironwood_enhancement_plan(IronwoodEnhancementPlan::Eligible { outgoing: vec![] });
     queue_scanned(st.wallet().conn(), tx_ref, &provisional).unwrap();
     let route: i64 = st
         .wallet()
@@ -688,4 +721,145 @@ fn a_mixed_spend_without_received_ironwood_notes_is_sticky() {
         )
         .unwrap();
     assert_eq!(route, LWD_REQUIRED);
+}
+
+// Test projections keep individual queue assertions readable while exercising the single
+// application read API. These helpers are not part of the production wallet interface.
+fn requests(conn: &Connection) -> Result<Vec<EnhancePirRequest>, SqliteClientError> {
+    Ok(work(conn)?
+        .into_iter()
+        .filter_map(|work| match work {
+            EnhancePirWork::Query(request) => Some(request),
+            _ => None,
+        })
+        .collect())
+}
+
+fn apply_record<Db: EnhancePirWrite>(
+    db: &mut Db,
+    request: EnhancePirRequest,
+    record: &EnhanceRecord,
+) -> Result<EnhancePirStoreResult, Db::Error> {
+    db.apply_ironwood_enhance_record(request, record)
+}
+
+impl<C: std::borrow::Borrow<Connection>, P: Parameters, CL, R> crate::WalletDb<C, P, CL, R> {
+    fn query_requests(&self) -> Result<Vec<EnhancePirRequest>, SqliteClientError> {
+        Ok(self
+            .enhance_pir_work()?
+            .into_iter()
+            .filter_map(|work| match work {
+                EnhancePirWork::Query(request) => Some(request),
+                _ => None,
+            })
+            .collect())
+    }
+    fn discovery_requests(
+        &self,
+    ) -> Result<Vec<IronwoodEnhanceDiscoveryRequest>, SqliteClientError> {
+        Ok(self
+            .enhance_pir_work()?
+            .into_iter()
+            .filter_map(|work| match work {
+                EnhancePirWork::Rediscover(request) => Some(request),
+                _ => None,
+            })
+            .collect())
+    }
+    fn discovery_suspensions(
+        &self,
+    ) -> Result<Vec<IronwoodEnhanceDiscoveryFailure>, SqliteClientError> {
+        Ok(self
+            .enhance_pir_work()?
+            .into_iter()
+            .filter_map(|work| match work {
+                EnhancePirWork::Suspended(EnhancePirSuspension::Discovery(failure)) => {
+                    Some(failure)
+                }
+                _ => None,
+            })
+            .collect())
+    }
+    fn pending_memo(
+        &self,
+        position: Position,
+    ) -> Result<Option<PendingIronwoodMemo<AccountUuid>>, SqliteClientError> {
+        pending(self.conn.borrow(), &self.params, position)
+    }
+    fn pending_outgoing(
+        &self,
+        position: Position,
+    ) -> Result<Option<PendingIronwoodOutgoing<AccountUuid>>, SqliteClientError> {
+        pending_outgoing(self.conn.borrow(), position)
+    }
+}
+
+impl<C: std::borrow::BorrowMut<Connection>, P: Parameters, CL: crate::util::Clock, R: rand::Rng>
+    crate::WalletDb<C, P, CL, R>
+{
+    fn apply_validated(
+        &mut self,
+        enhancement: ValidatedIronwoodEnhancement<AccountUuid>,
+    ) -> Result<EnhancePirStoreResult, SqliteClientError> {
+        self.transactionally(|wdb| apply(wdb.conn.0, wdb.params, enhancement))
+    }
+}
+
+#[test]
+fn unified_work_preserves_both_suspension_kinds_across_reopen() {
+    use crate::testing::db::{test_clock, test_rng};
+
+    let (mut st, tx_ref, incoming) = fixture_with_factory(TestDbFactory::file_backed());
+    let outgoing = outgoing(&st, tx_ref, 99, 4);
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .apply_ironwood_enhance_record(outgoing, &wire_record(false, false))
+            .unwrap(),
+        EnhancePirStoreResult::NotRecoverable,
+    );
+    // This incoming-only fixture has no durable spending associations.
+    super::discovery::queue(st.wallet().conn(), tx_ref).unwrap();
+    let suspended = vec![
+        EnhancePirWork::Suspended(EnhancePirSuspension::Discovery(
+            IronwoodEnhanceDiscoveryFailure {
+                txid: incoming.request_id().txid(),
+                reason: IronwoodEnhanceDiscoveryFailureReason::NoFundingAccounts,
+            },
+        )),
+        EnhancePirWork::Suspended(EnhancePirSuspension::OutgoingNotRecoverable(outgoing)),
+    ];
+    let expected = std::iter::once(EnhancePirWork::Query(incoming))
+        .chain(suspended.iter().copied())
+        .collect::<Vec<_>>();
+    assert_eq!(st.wallet().db().enhance_pir_work().unwrap(), expected);
+    finish_incoming(&mut st, incoming);
+
+    for mode in [EnhancementMode::PrivateIronwood, EnhancementMode::Standard] {
+        let mut reopened = crate::WalletDb::for_path(
+            st.wallet().data_file_path(),
+            *st.network(),
+            test_clock(),
+            test_rng(),
+            mode,
+        )
+        .unwrap();
+        assert_eq!(reopened.enhance_pir_work().unwrap(), suspended);
+        let exposes =
+            |db: &crate::WalletDb<_, _, _, _>| {
+                db.transaction_data_requests().unwrap().contains(
+                    &TransactionDataRequest::Enhancement(incoming.request_id().txid()),
+                )
+            };
+        assert_eq!(exposes(&reopened), mode == EnhancementMode::Standard);
+        let inherited =
+            reopened
+                .transactionally(|db| -> Result<_, SqliteClientError> {
+                    Ok(db.transaction_data_requests()?.contains(
+                        &TransactionDataRequest::Enhancement(incoming.request_id().txid()),
+                    ))
+                })
+                .unwrap();
+        assert_eq!(inherited, mode == EnhancementMode::Standard);
+    }
 }

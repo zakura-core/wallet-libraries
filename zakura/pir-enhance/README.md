@@ -24,10 +24,12 @@ Custom transports receive the same allocation protection: the encoded public
 parameters are checked against the generation's exact expected size before
 base64 decoding.
 
-Enable `wallet-integration` when using `zakura-client-backend`. Its
-`apply_record` helper converts the wire record and applies it to both incoming
-and outgoing work atomically using the request's captured local action identity.
+The client and `zakura-client-backend` use the same `EnhanceRecord` from
+`zakura-pir-enhance-types`. Pass a decoded record and the originally captured
+request to `EnhancePirWrite::apply_ironwood_enhance_record`; no conversion or
+`wallet-integration` feature is needed. The wallet validates and applies incoming
+and outgoing work atomically using that local action identity.
 Either transparent-presence flag routes the entire transaction to ordinary LWD.
 The flags are trusted server metadata, not authenticated by note decryption.
-See [the integration contract](../../docs/zakura_pir_enhance.md) for routing,
-migration, recovery, and privacy limitations.
+See [the integration contract](../../docs/zakura_pir_enhance.md) for construction,
+unified work scheduling, migration, recovery, and privacy limitations.

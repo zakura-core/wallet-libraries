@@ -78,6 +78,9 @@ jobs:
       - name: Run the Enhance PIR SQLite tests
         run: cargo test -p zakura-client-sqlite --features zakura-pir-enhance,test-dependencies --locked
 
+      - name: Verify account deletion across PIR feature builds
+        run: ./scripts/verify-pir-feature-transition.sh
+
       # The standalone client is excluded from the vendored workspace suite.
       - name: Run the Enhance PIR client tests
         run: cargo test -p zakura-pir-enhance --all-features --locked

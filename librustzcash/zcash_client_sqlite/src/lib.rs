@@ -56,9 +56,8 @@ use uuid::Uuid;
 #[cfg(feature = "zakura-pir-enhance")]
 use zcash_client_backend::data_api::enhance_pir::{
     EnhancePirRead, EnhancePirRequest, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus,
-    EnhancePirStoreResult, EnhancePirWrite, EnhancementMode, IronwoodEnhanceDiscoveryFailure,
-    IronwoodEnhanceDiscoveryRequest, IronwoodEnhanceDiscoveryResult, PendingIronwoodMemo,
-    PendingIronwoodOutgoing, ValidatedIronwoodEnhancement,
+    EnhancePirStoreResult, EnhancePirWork, EnhancePirWrite, EnhanceRecord, EnhancementMode,
+    IronwoodEnhanceDiscoveryRequest, IronwoodEnhanceDiscoveryResult,
 };
 use zcash_client_backend::{
     TransferType,
@@ -465,11 +464,14 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     /// - `clock`: The clock to use in the case that the backend needs access to the system time.
     /// - `rng`: The random number generation capability to be exposed by the created `WalletDb`
     ///   instance.
+    /// - `enhancement_mode` (with `zakura-pir-enhance`): the application preference, required
+    ///   before ordinary transaction requests can be obtained. It is not persisted.
     pub fn for_path<F: AsRef<Path>>(
         path: F,
         params: P,
         clock: CL,
         rng: R,
+        #[cfg(feature = "zakura-pir-enhance")] enhancement_mode: EnhancementMode,
     ) -> Result<Self, rusqlite::Error> {
         rusqlite::Connection::open(path).and_then(move |conn| {
             rusqlite::vtab::array::load_module(&conn)?;
@@ -480,7 +482,7 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
                 rng,
                 anchor_retention_interval: AnchorRetentionInterval::default(),
                 #[cfg(feature = "zakura-pir-enhance")]
-                enhancement_mode: EnhancementMode::default(),
+                enhancement_mode,
                 #[cfg(feature = "transparent-inputs")]
                 gap_limits: GapLimits::default(),
             })
@@ -519,17 +521,9 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
 
 #[cfg(feature = "zakura-pir-enhance")]
 impl<C, P, CL, R> WalletDb<C, P, CL, R> {
-    /// Configures whether protected Ironwood transactions are exposed through ordinary
-    /// transaction-ID enhancement.
-    ///
-    /// This process-local setting defaults to [`EnhancementMode::Standard`] and must be reapplied
-    /// whenever the wallet is opened.
-    pub fn with_enhancement_mode(mut self, mode: EnhancementMode) -> Self {
-        self.set_enhancement_mode(mode);
-        self
-    }
-
-    /// Updates the runtime enhancement mode; see [`Self::with_enhancement_mode`].
+    /// Changes whether ordinary transaction-ID enhancement exposes protected Ironwood work.
+    /// Discard outstanding in-memory request batches when changing mode. Already dispatched
+    /// network requests cannot be recalled. New handles must choose their mode at construction.
     pub fn set_enhancement_mode(&mut self, mode: EnhancementMode) {
         self.enhancement_mode = mode;
     }
@@ -559,7 +553,15 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// - `clock`: The clock to use in the case that the backend needs access to the system time.
     /// - `rng`: The random number generation capability to be exposed by the created `WalletDb`
     ///   instance.
-    pub fn from_connection(conn: C, params: P, clock: CL, rng: R) -> Self {
+    /// - `enhancement_mode` (with `zakura-pir-enhance`): the application preference, required
+    ///   before ordinary transaction requests can be obtained. It is not persisted.
+    pub fn from_connection(
+        conn: C,
+        params: P,
+        clock: CL,
+        rng: R,
+        #[cfg(feature = "zakura-pir-enhance")] enhancement_mode: EnhancementMode,
+    ) -> Self {
         WalletDb {
             conn,
             params,
@@ -567,7 +569,7 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             rng,
             anchor_retention_interval: AnchorRetentionInterval::default(),
             #[cfg(feature = "zakura-pir-enhance")]
-            enhancement_mode: EnhancementMode::default(),
+            enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: GapLimits::default(),
         }
@@ -1613,20 +1615,8 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePirRead
     for WalletDb<C, P, CL, R>
 {
-    fn ironwood_enhance_discovery_requests(
-        &self,
-    ) -> Result<Vec<IronwoodEnhanceDiscoveryRequest>, Self::Error> {
-        wallet::enhance_pir::discovery::requests(self.conn.borrow())
-    }
-
-    fn suspended_ironwood_enhance_discoveries(
-        &self,
-    ) -> Result<Vec<IronwoodEnhanceDiscoveryFailure>, Self::Error> {
-        wallet::enhance_pir::discovery::suspended(self.conn.borrow())
-    }
-
-    fn enhance_pir_requests(&self) -> Result<Vec<EnhancePirRequest>, Self::Error> {
-        wallet::enhance_pir::requests(self.conn.borrow())
+    fn enhance_pir_work(&self) -> Result<Vec<EnhancePirWork>, Self::Error> {
+        wallet::enhance_pir::work(self.conn.borrow())
     }
 
     fn enhance_pir_snapshot_status(
@@ -1658,20 +1648,6 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
         )
     }
 
-    fn pending_ironwood_memo(
-        &self,
-        position: Position,
-    ) -> Result<Option<PendingIronwoodMemo<Self::AccountId>>, Self::Error> {
-        wallet::enhance_pir::pending(self.conn.borrow(), &self.params, position)
-    }
-
-    fn pending_ironwood_outgoing(
-        &self,
-        position: Position,
-    ) -> Result<Option<PendingIronwoodOutgoing<Self::AccountId>>, Self::Error> {
-        wallet::enhance_pir::pending_outgoing(self.conn.borrow(), position)
-    }
-
     fn is_ironwood_enhancement_protected(&self, txid: TxId) -> Result<bool, Self::Error> {
         wallet::enhance_pir::is_protected(self.conn.borrow(), txid)
     }
@@ -1691,11 +1667,14 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         })
     }
 
-    fn apply_ironwood_enhancement(
+    fn apply_ironwood_enhance_record(
         &mut self,
-        enhancement: ValidatedIronwoodEnhancement<Self::AccountId>,
+        request: EnhancePirRequest,
+        record: &EnhanceRecord,
     ) -> Result<EnhancePirStoreResult, Self::Error> {
-        self.transactionally(|wdb| wallet::enhance_pir::apply(wdb.conn.0, wdb.params, enhancement))
+        self.transactionally(|wdb| {
+            wallet::enhance_pir::apply_record(wdb.conn.0, wdb.params, request, record)
+        })
     }
 }
 

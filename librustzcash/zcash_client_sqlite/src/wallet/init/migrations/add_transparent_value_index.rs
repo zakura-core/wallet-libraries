@@ -97,6 +97,8 @@ mod tests {
             zcash_protocol::consensus::Network::TestNetwork,
             test_clock(),
             test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
         .unwrap();
 

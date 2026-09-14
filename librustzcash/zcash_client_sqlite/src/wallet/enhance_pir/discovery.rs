@@ -10,11 +10,10 @@ use zcash_client_backend::{
         IronwoodEnhanceDiscoveryRequest, IronwoodEnhanceDiscoveryResult, is_ironwood_pir_candidate,
     },
     proto::compact_formats::{CompactBlock, CompactTx},
-    wallet::IronwoodEnhanceCandidate,
+    wallet::{IronwoodEnhanceCandidate, IronwoodEnhancementPlan},
 };
 use zcash_primitives::block::BlockHash;
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::consensus::BlockHeight;
 
 use crate::{AccountUuid, TxRef, error::SqliteClientError};
 
@@ -61,78 +60,6 @@ pub(crate) fn queue(conn: &Connection, tx_ref: TxRef) -> Result<(), SqliteClient
         named_params![":tx": tx_ref.0, ":enhancement": TxQueryType::Enhancement.code()],
     )?;
     Ok(())
-}
-
-pub(crate) fn requests(
-    conn: &Connection,
-) -> Result<Vec<IronwoodEnhanceDiscoveryRequest>, SqliteClientError> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT DISTINCT b.height, b.hash FROM ironwood_enhance_discovery_queue q
-         JOIN transactions t ON t.id_tx = q.transaction_id
-         JOIN blocks b ON b.height = t.mined_height
-         LEFT JOIN blocks prior ON prior.height = b.height - 1
-         JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-         WHERE t.raw IS NULL AND r.route = 0 AND q.suspended = 0
-           AND b.ironwood_commitment_tree_size IS NOT NULL
-           AND (b.height = 0 OR prior.ironwood_commitment_tree_size IS NOT NULL)
-         ORDER BY b.height",
-    )?;
-    stmt.query_map([], |row| {
-        Ok(IronwoodEnhanceDiscoveryRequest {
-            height: BlockHeight::from_u32(row.get(0)?),
-            block_hash: BlockHash(row.get(1)?),
-        })
-    })?
-    .collect::<Result<_, _>>()
-    .map_err(Into::into)
-}
-
-/// Runs after account-deletion cascades, in the same SQL transaction. Keep the job as
-/// incomplete, but remove it from automatic discovery so it cannot poison its block.
-pub(super) fn suspend_orphaned(conn: &Transaction<'_>) -> Result<(), SqliteClientError> {
-    conn.execute(
-        "UPDATE ironwood_enhance_discovery_queue SET suspended = 1
-         WHERE NOT EXISTS (
-             SELECT 1 FROM ironwood_received_note_spends s
-             JOIN ironwood_received_notes rn ON rn.id = s.ironwood_received_note_id
-             WHERE s.transaction_id = ironwood_enhance_discovery_queue.transaction_id
-               AND rn.nf IS NOT NULL)",
-        [],
-    )?;
-    Ok(())
-}
-
-pub(crate) fn suspended(
-    conn: &Connection,
-) -> Result<Vec<IronwoodEnhanceDiscoveryFailure>, SqliteClientError> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT t.txid,
-                CASE WHEN q.suspended = 1 THEN 0 ELSE 1 END AS reason
-         FROM ironwood_enhance_discovery_queue q
-         JOIN transactions t ON t.id_tx = q.transaction_id
-         LEFT JOIN blocks b ON b.height = t.mined_height
-         LEFT JOIN blocks prior ON prior.height = t.mined_height - 1
-         JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-         WHERE t.raw IS NULL AND t.mined_height IS NOT NULL AND r.route = 0
-           AND (
-               q.suspended = 1
-               OR b.ironwood_commitment_tree_size IS NULL
-               OR (t.mined_height != 0 AND prior.ironwood_commitment_tree_size IS NULL)
-           )
-         ORDER BY t.mined_height, t.tx_index, t.txid",
-    )?;
-    stmt.query_map([], |row| {
-        Ok(IronwoodEnhanceDiscoveryFailure {
-            txid: TxId::from_bytes(row.get(0)?),
-            reason: match row.get::<_, i64>(1)? {
-                0 => IronwoodEnhanceDiscoveryFailureReason::NoFundingAccounts,
-                1 => IronwoodEnhanceDiscoveryFailureReason::AnchorUnavailable,
-                _ => unreachable!("reason is produced by a closed SQL CASE"),
-            },
-        })
-    })?
-    .collect::<Result<_, _>>()
-    .map_err(Into::into)
 }
 
 /// Unlike the scan-time nullifier set, this includes already-spent funding notes.
@@ -264,7 +191,27 @@ pub(crate) fn rebuild(
             if let Some(candidates) =
                 candidates(conn, tx_ref, index, *position, compact_tx, &funding)?
             {
-                plans.push((tx_ref, candidates, is_ironwood_pir_candidate(compact_tx)));
+                // Check ownership before mixed transactions discard their candidates.
+                // A locally contradictory reconstruction must not change routing to LWD.
+                for candidate in &candidates {
+                    if outgoing_position_owned_by_other(
+                        conn,
+                        tx_ref,
+                        u64::from(candidate.position()),
+                    )? {
+                        return Ok(Rejected);
+                    }
+                }
+                plans.push((
+                    tx_ref,
+                    if is_ironwood_pir_candidate(compact_tx) {
+                        IronwoodEnhancementPlan::Eligible {
+                            outgoing: candidates,
+                        }
+                    } else {
+                        IronwoodEnhancementPlan::Ineligible
+                    },
+                ));
                 None
             } else {
                 Some(ContextMismatch)
@@ -280,17 +227,7 @@ pub(crate) fn rebuild(
         }
     }
 
-    // Do not allow a bad reconstruction to transfer a globally position-keyed
-    // outgoing row from a transaction that was previously queued.
-    for (tx_ref, candidates, _) in &plans {
-        for candidate in candidates {
-            if outgoing_position_owned_by_other(conn, *tx_ref, u64::from(candidate.position()))? {
-                return Ok(Rejected);
-            }
-        }
-    }
-
-    // No early return for a bad job: it retains its intent while valid siblings progress.
+    // Transaction-local failures retain intent while valid siblings progress.
     // Any SQL error still rolls back all writes in this call, including suspension.
     let rebuilt = plans.len();
     for tx_ref in suspend {
@@ -299,8 +236,8 @@ pub(crate) fn rebuild(
             named_params![":tx": tx_ref.0],
         )?;
     }
-    for (tx_ref, candidates, eligible) in plans {
-        queue_transaction(conn, tx_ref, &candidates, eligible)?;
+    for (tx_ref, plan) in plans {
+        queue_transaction(conn, tx_ref, &plan)?;
         conn.execute(
             "DELETE FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx",
             named_params![":tx": tx_ref.0],

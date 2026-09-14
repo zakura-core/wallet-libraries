@@ -2,8 +2,6 @@
 
 pub mod client;
 pub mod types;
-#[cfg(feature = "wallet-integration")]
-pub mod wallet;
 
 pub use client::{
     AcceptedAnchor, ClientError, ClientResourceLimits, GenerationAcceptance, PreparedQuery,
@@ -11,8 +9,6 @@ pub use client::{
 };
 #[cfg(feature = "https-client")]
 pub use client::{EnhancePirClient, PendingEnhancePirClient};
-#[cfg(feature = "wallet-integration")]
-pub use wallet::{ApplyRecordResult, apply_record, wallet_record};
 
 pub use types::{
     ENHANCE_SETUP_SEED, EnhanceGeneration, EnhanceRecord, EnhanceRecordParts, EnhanceSession,

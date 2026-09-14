@@ -802,9 +802,33 @@ pub(crate) fn delete_account(
         ],
     )?;
 
-    #[cfg(feature = "zakura-pir-enhance")]
-    enhance_pir::remove_orphaned_outgoing(conn)?;
+    suspend_orphaned_ironwood_enhancement(conn)?;
 
+    Ok(())
+}
+
+/// Preserve incomplete enhancement jobs after funding accounts are removed. This
+/// maintains durable database invariants even in builds without PIR support.
+/// The caller's transaction makes both queue updates atomic with account deletion
+/// or with initialization repair of databases written by older builds.
+pub(crate) fn suspend_orphaned_ironwood_enhancement(
+    conn: &rusqlite::Transaction<'_>,
+) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_enhance_outgoing_queue SET not_recoverable = 1
+         WHERE NOT EXISTS (SELECT 1 FROM ironwood_enhance_outgoing_accounts a
+             WHERE a.commitment_tree_position = ironwood_enhance_outgoing_queue.commitment_tree_position)",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE ironwood_enhance_discovery_queue SET suspended = 1
+         WHERE NOT EXISTS (
+             SELECT 1 FROM ironwood_received_note_spends s
+             JOIN ironwood_received_notes rn ON rn.id = s.ironwood_received_note_id
+             WHERE s.transaction_id = ironwood_enhance_discovery_queue.transaction_id
+               AND rn.nf IS NOT NULL)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -4284,7 +4308,8 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
             // decision is made through this handle and the interval is immaterial.
             anchor_retention_interval: AnchorRetentionInterval::default(),
             #[cfg(feature = "zakura-pir-enhance")]
-            enhancement_mode: Default::default(),
+            enhancement_mode:
+                zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: *gap_limits,
         };
@@ -7755,4 +7780,38 @@ mod tests {
             "an external-scope note must not be reclassified as change"
         );
     }
+}
+
+#[cfg(all(test, feature = "orchard", not(feature = "zakura-pir-enhance")))]
+#[test]
+#[ignore = "invoked by scripts/verify-pir-feature-transition.sh"]
+fn delete_account_without_pir() {
+    use crate::testing::db::{test_clock, test_rng};
+    use zcash_client_backend::data_api::{WalletWrite, testing::TestBuilder};
+    use zcash_protocol::local_consensus::LocalNetwork;
+    let activation = BlockHeight::from_u32(100_000);
+    let network = LocalNetwork {
+        nu6: Some(activation),
+        nu6_1: Some(activation),
+        nu6_2: Some(activation),
+        nu6_3: Some(activation),
+        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+    };
+    let mut db = crate::WalletDb::for_path(
+        std::env::var("PIR_TRANSITION_DB").unwrap(),
+        network,
+        test_clock(),
+        test_rng(),
+    )
+    .unwrap();
+    init::WalletMigrator::new()
+        .init_or_migrate(&mut db)
+        .unwrap();
+    db.delete_account(AccountUuid::from_uuid(
+        std::env::var("PIR_TRANSITION_ACCOUNT")
+            .unwrap()
+            .parse()
+            .unwrap(),
+    ))
+    .unwrap();
 }

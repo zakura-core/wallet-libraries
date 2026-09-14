@@ -596,10 +596,13 @@ where
                 ironwood_outputs,
             );
             #[cfg(feature = "zakura-pir-enhance")]
-            let wallet_tx = wallet_tx.with_ironwood_enhance_candidates(
-                ironwood_enhance_candidates,
-                ironwood_pir_eligible,
-            );
+            let wallet_tx = wallet_tx.with_ironwood_enhancement_plan(if ironwood_pir_eligible {
+                crate::wallet::IronwoodEnhancementPlan::Eligible {
+                    outgoing: ironwood_enhance_candidates,
+                }
+            } else {
+                crate::wallet::IronwoodEnhancementPlan::Ineligible
+            });
             wtxs.push(wallet_tx);
         }
 
@@ -852,6 +855,16 @@ impl PositionTracker {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "zakura-pir-enhance")]
+    fn outgoing_candidates<A>(
+        tx: &crate::wallet::WalletTx<A>,
+    ) -> &[crate::wallet::IronwoodEnhanceCandidate<A>] {
+        match tx.ironwood_enhancement_plan() {
+            crate::wallet::IronwoodEnhancementPlan::Eligible { outgoing } => outgoing,
+            crate::wallet::IronwoodEnhancementPlan::Ineligible => &[],
+        }
+    }
+
     #[cfg(feature = "zakura-pir-enhance")]
     #[test]
     fn pir_candidate_rejects_every_explicit_non_ironwood_field() {
@@ -1268,8 +1281,8 @@ mod tests {
 
         let tx = &scanned.transactions()[0];
         assert_eq!(tx.ironwood_spends().len(), 1);
-        assert_eq!(tx.ironwood_enhance_candidates().len(), 2);
-        for (index, candidate) in tx.ironwood_enhance_candidates().iter().enumerate() {
+        assert_eq!(outgoing_candidates(tx).len(), 2);
+        for (index, candidate) in outgoing_candidates(tx).iter().enumerate() {
             assert_eq!(candidate.position(), Position::from(5 + index as u64));
             assert_eq!(candidate.output_index(), index);
             assert_eq!(candidate.funding_accounts(), &[account]);
@@ -1277,16 +1290,19 @@ mod tests {
             assert_eq!(candidate.compact_ciphertext(), &[0; 52]);
         }
         assert_eq!(
-            tx.ironwood_enhance_candidates()[0].nullifier(),
+            outgoing_candidates(tx)[0].nullifier(),
             &owned_nullifier.to_bytes()
         );
-        assert_eq!(tx.ironwood_enhance_candidates()[0].cmx(), &cmx_0);
+        assert_eq!(outgoing_candidates(tx)[0].cmx(), &cmx_0);
         assert_eq!(
-            tx.ironwood_enhance_candidates()[1].nullifier(),
+            outgoing_candidates(tx)[1].nullifier(),
             &other_nullifier.to_bytes()
         );
-        assert_eq!(tx.ironwood_enhance_candidates()[1].cmx(), &cmx_1);
-        assert!(tx.ironwood_pir_eligible());
+        assert_eq!(outgoing_candidates(tx)[1].cmx(), &cmx_1);
+        assert!(matches!(
+            tx.ironwood_enhancement_plan(),
+            crate::wallet::IronwoodEnhancementPlan::Eligible { .. }
+        ));
 
         let mut mixed_block = CompactBlock {
             hash: vec![2; 32],
@@ -1316,9 +1332,12 @@ mod tests {
         )
         .unwrap();
         let mixed_tx = &mixed_scanned.transactions()[0];
-        assert!(!mixed_tx.ironwood_pir_eligible());
+        assert!(!matches!(
+            mixed_tx.ironwood_enhancement_plan(),
+            crate::wallet::IronwoodEnhancementPlan::Eligible { .. }
+        ));
         assert!(
-            mixed_tx.ironwood_enhance_candidates().is_empty(),
+            outgoing_candidates(mixed_tx).is_empty(),
             "mixed-pool transactions must remain on standard txid enhancement"
         );
     }
@@ -1420,7 +1439,10 @@ mod tests {
         .unwrap();
 
         let tx = &scanned.transactions()[0];
-        assert!(tx.ironwood_pir_eligible());
+        assert!(matches!(
+            tx.ironwood_enhancement_plan(),
+            crate::wallet::IronwoodEnhancementPlan::Eligible { .. }
+        ));
         assert_eq!(
             tx.ironwood_outputs().len(),
             1,
@@ -1437,7 +1459,7 @@ mod tests {
             "change must be flagged during scanning, with no later repair to rely on"
         );
 
-        let candidates = tx.ironwood_enhance_candidates();
+        let candidates = outgoing_candidates(tx);
         assert_eq!(
             candidates.len(),
             1,

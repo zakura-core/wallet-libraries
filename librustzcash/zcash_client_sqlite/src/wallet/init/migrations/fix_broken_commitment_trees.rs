@@ -215,7 +215,8 @@ fn truncate_to_height<P: consensus::Parameters>(
             // decision is made through this handle and the interval is immaterial.
             anchor_retention_interval: AnchorRetentionInterval::default(),
             #[cfg(feature = "zakura-pir-enhance")]
-            enhancement_mode: Default::default(),
+            enhancement_mode:
+                zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: *gap_limits,
         };
@@ -282,8 +283,15 @@ mod tests {
     fn migrate_without_confirmed_unmined_at_height_column() {
         let network = Network::TestNetwork;
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data =
-            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
+        let mut db_data = WalletDb::for_path(
+            data_file.path(),
+            network,
+            test_clock(),
+            test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        )
+        .unwrap();
 
         // Migrate to support_legacy_sqlite, which is the dependency of fix_broken_commitment_trees
         // but before tx_observation_height which adds the confirmed_unmined_at_height column
@@ -355,8 +363,15 @@ mod tests {
     fn migrate_with_confirmed_unmined_at_height_column() {
         let network = Network::TestNetwork;
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data =
-            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
+        let mut db_data = WalletDb::for_path(
+            data_file.path(),
+            network,
+            test_clock(),
+            test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        )
+        .unwrap();
 
         // Migrate through tx_observation_height, which adds the confirmed_unmined_at_height column
         WalletMigrator::new()

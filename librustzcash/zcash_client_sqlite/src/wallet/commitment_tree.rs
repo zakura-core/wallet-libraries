@@ -1661,6 +1661,8 @@ mod tests {
             Network::TestNetwork,
             test_clock(),
             test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
         .unwrap();
         data_file.keep().unwrap();
@@ -1780,6 +1782,8 @@ mod tests {
             Network::TestNetwork,
             test_clock(),
             test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
         .unwrap();
         WalletMigrator::new().init_or_migrate(&mut db).unwrap();
@@ -1894,6 +1898,8 @@ mod tests {
             Network::TestNetwork,
             test_clock(),
             test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
         .unwrap();
         data_file.keep().unwrap();
@@ -2007,6 +2013,8 @@ mod tests {
             Network::TestNetwork,
             test_clock(),
             test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
         .unwrap();
         data_file.keep().unwrap();
@@ -2126,6 +2134,8 @@ mod tests {
             Network::TestNetwork,
             test_clock(),
             test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
         .unwrap();
         data_file.keep().unwrap();

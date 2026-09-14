@@ -186,9 +186,22 @@ pub struct WalletTx<AccountId> {
     #[cfg(feature = "orchard")]
     ironwood_outputs: Vec<WalletIronwoodOutput<AccountId>>,
     #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
-    ironwood_enhance_candidates: Vec<IronwoodEnhanceCandidate<AccountId>>,
-    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
-    ironwood_pir_eligible: bool,
+    ironwood_enhancement_plan: IronwoodEnhancementPlan<AccountId>,
+}
+
+/// Provisional private-enhancement plan from a complete compact transaction.
+///
+/// An eligible transaction may have no outgoing candidates (for example, incoming-only).
+/// Eligibility does not prove absence of transparent data omitted by the compact source.
+#[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IronwoodEnhancementPlan<AccountId> {
+    /// Ordinary enhancement, including transactions with represented non-Ironwood activity.
+    Ineligible,
+    /// Ironwood-only compact data; durable spend linkage may still require rediscovery.
+    Eligible {
+        outgoing: Vec<IronwoodEnhanceCandidate<AccountId>>,
+    },
 }
 
 /// Compact-block context needed to privately recover one outgoing Ironwood output.
@@ -288,26 +301,18 @@ impl<AccountId> WalletTx<AccountId> {
             #[cfg(feature = "orchard")]
             ironwood_outputs,
             #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
-            ironwood_enhance_candidates: vec![],
-            #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
-            ironwood_pir_eligible: false,
+            ironwood_enhancement_plan: IronwoodEnhancementPlan::Ineligible,
         }
     }
 
-    /// Attaches recovery candidates and provisional eligibility from compact scanning.
-    ///
-    /// Set `pir_eligible` only for a transaction with Ironwood actions and no
-    /// represented transparent, Sapling, or Orchard fields. The compact source
-    /// must include all shielded pools; omitted transparent activity is checked
-    /// separately using the trusted PIR record flags.
+    /// Attaches provisional eligibility and outgoing candidates from the complete compact
+    /// transaction. Omitted transparent activity is checked using trusted PIR record flags.
     #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
-    pub fn with_ironwood_enhance_candidates(
+    pub fn with_ironwood_enhancement_plan(
         mut self,
-        candidates: Vec<IronwoodEnhanceCandidate<AccountId>>,
-        pir_eligible: bool,
+        plan: IronwoodEnhancementPlan<AccountId>,
     ) -> Self {
-        self.ironwood_enhance_candidates = candidates;
-        self.ironwood_pir_eligible = pir_eligible;
+        self.ironwood_enhancement_plan = plan;
         self
     }
 
@@ -368,20 +373,10 @@ impl<AccountId> WalletTx<AccountId> {
         self.ironwood_outputs.as_ref()
     }
 
-    /// Returns outgoing Ironwood recovery candidates observed during compact scanning.
+    /// Returns provisional compact-scan eligibility and outgoing recovery candidates.
     #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
-    pub fn ironwood_enhance_candidates(&self) -> &[IronwoodEnhanceCandidate<AccountId>] {
-        &self.ironwood_enhance_candidates
-    }
-
-    /// Returns whether the compact transaction represented only Ironwood pool data.
-    ///
-    /// This excludes every other shielded action and any transparent data included by the compact
-    /// block source. It does not prove that the full transaction lacks transparent data omitted by
-    /// that source; see <https://github.com/zakura-core/wallet-libraries/issues/19>.
-    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
-    pub fn ironwood_pir_eligible(&self) -> bool {
-        self.ironwood_pir_eligible
+    pub fn ironwood_enhancement_plan(&self) -> &IronwoodEnhancementPlan<AccountId> {
+        &self.ironwood_enhancement_plan
     }
 }
 

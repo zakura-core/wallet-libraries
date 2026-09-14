@@ -325,6 +325,8 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
 ///     Network::TestNetwork,
 ///     SystemClock,
 ///     UnwrapErr(SysRng),
+/// #   #[cfg(feature = "zakura-pir-enhance")]
+/// #   zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
 /// )?;
 /// match init_wallet_db(&mut db, None) {
 ///     Err(e)
@@ -426,6 +428,8 @@ pub fn init_wallet_db<
 ///     Network::TestNetwork,
 ///     SystemClock,
 ///     UnwrapErr(SysRng),
+/// #   #[cfg(feature = "zakura-pir-enhance")]
+/// #   zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
 /// )?;
 /// match WalletMigrator::new().init_or_migrate(&mut db) {
 ///     Err(e)
@@ -547,6 +551,10 @@ impl WalletMigrator {
 
     /// Sets up the internal structure of the given wallet database to be compatible with
     /// this library version.
+    ///
+    /// Also repairs orphaned Ironwood enhancement jobs left by account deletion in
+    /// older builds, even when no migrations are pending or PIR is disabled. The
+    /// queue repair is atomic; a repair failure is returned to the caller.
     pub fn init_or_migrate<
         C: BorrowMut<rusqlite::Connection>,
         P: consensus::Parameters + 'static,
@@ -674,6 +682,21 @@ fn init_wallet_db_internal<
                 return Err(WalletMigrationError::SeedNotRelevant.into());
             }
         }
+    }
+
+    // Full initialization also repairs orphaned work left by older builds that
+    // deleted accounts without PIR enabled. Partial migration targets may not
+    // contain these tables yet.
+    if target_migrations.is_empty() {
+        let tx = wdb
+            .conn
+            .borrow_mut()
+            .transaction()
+            .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
+        super::suspend_orphaned_ironwood_enhancement(&tx)
+            .map_err(sqlite_client_error_to_wallet_migration_error)?;
+        tx.commit()
+            .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
     }
 
     Ok(())
@@ -1171,6 +1194,8 @@ mod tests {
             Network::TestNetwork,
             test_clock(),
             test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
         .unwrap();
 
@@ -1352,6 +1377,8 @@ mod tests {
             Network::TestNetwork,
             test_clock(),
             test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
         .unwrap();
 
@@ -1527,6 +1554,8 @@ mod tests {
             Network::TestNetwork,
             test_clock(),
             test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
         .unwrap();
 
@@ -1551,8 +1580,15 @@ mod tests {
     fn account_produces_expected_ua_sequence() {
         let network = Network::MainNetwork;
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data =
-            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
+        let mut db_data = WalletDb::for_path(
+            data_file.path(),
+            network,
+            test_clock(),
+            test_rng(),
+            #[cfg(feature = "zakura-pir-enhance")]
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        )
+        .unwrap();
         assert_matches!(init_wallet_db(&mut db_data, None), Ok(_));
 
         // Prior to adding any accounts, every seed phrase is relevant to the wallet.
