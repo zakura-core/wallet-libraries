@@ -11,17 +11,19 @@ workspace.
 ## [Unreleased]
 
 ### Added
-- Support schema-7 Ironwood PIR fee/expiry metadata with explicit metadata binding and atomic storage contracts.
+- Add feature-gated APIs for privately enhancing Ironwood-only transactions with
+  schema-7 Enhance PIR records. The APIs provide transaction-wide LWD routing,
+  unified active and suspended work enumeration, incoming memo decryption, outgoing
+  recovery, rediscovery, and fee/expiry metadata validation.
+- Reconcile private enhancement obligations across rescans, rewinds, late or
+  cross-account funding discovery, and full-transaction arrival.
 
 ### Changed
-- `EnhancePirStorage` requires `ironwood_transaction_metadata` and
+- Require `EnhancePirStorage` implementations to provide
+  `ironwood_transaction_metadata` and
   `compare_and_apply_ironwood_enhancement`. Validated responses carry the expected
-  fee/expiry snapshot; backends must atomically compare it, fill only unknown fields,
-  and reject conflicts without changing action or queue state.
-
-### Fixed
-- Retain outgoing Ironwood PIR candidates for cross-account wallet payments,
-  excluding only outputs marked as change.
+  fee/expiry snapshot so backends can compare it, fill unknown fields, and apply
+  action and queue changes atomically.
 
 ## [0.1.0-rc5] - 2026-09-09
 

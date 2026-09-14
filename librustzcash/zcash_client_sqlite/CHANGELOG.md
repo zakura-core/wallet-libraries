@@ -11,24 +11,20 @@ workspace.
 ## [Unreleased]
 
 ### Added
-- Populate fee and expiry during private Ironwood enhancement through a durable metadata queue independent of memo and outgoing recovery.
+- Add durable SQLite routing and work queues for private Ironwood-only enhancement,
+  including incoming memos, outgoing recovery, candidate accounts, rediscovery, and
+  transaction metadata.
+- Populate fee and expiry through a metadata queue independent of memo and outgoing
+  recovery. Metadata comparison, enhancement writes, routing changes, and queue
+  retirement are atomic.
+- Reconcile private enhancement work across rescans, rewinds, account
+  deletion, late or cross-account funding discovery, and full-transaction arrival.
 - Create all six Ironwood Enhance PIR tables in one consolidated migration.
 
-### Fixed
-- Compare the captured PIR fee/expiry snapshot atomically before filling unknown
-  metadata, with memo/outgoing writes and queue retirement in the same transaction.
-
-- Recover sender history for cross-account Ironwood payments in both funding-first
-  and recent-first restores; exclude only change from outgoing PIR recovery.
-- Keep wallet constructor signatures stable under Cargo feature unification.
-  With PIR enabled, new handles require explicit mode configuration before
-  transaction or PIR request enumeration; otherwise they return
-  `EnhancementModeNotConfigured`.
-- Maintain orphaned Ironwood outgoing and discovery jobs when deleting accounts
-  without PIR compiled in, and repair existing orphaned jobs during full wallet
-  initialization.
-- Reject conflicting outgoing positions during Ironwood enhancement rediscovery
-  for mixed-pool transactions before changing routing or queues.
+### Changed
+- Require each PIR-enabled wallet handle to configure `EnhancementMode` before
+  enumerating transaction or PIR requests. An unconfigured handle returns
+  `EnhancementModeNotConfigured`; wallet constructor signatures remain unchanged.
 
 ## [0.1.0-rc5] - 2026-09-09
 
