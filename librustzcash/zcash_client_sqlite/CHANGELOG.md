@@ -11,6 +11,10 @@ workspace.
 ## [Unreleased]
 
 ### Fixed
+- Keep wallet constructor signatures stable under Cargo feature unification.
+  With PIR enabled, new handles require explicit mode configuration before
+  transaction or PIR request enumeration; otherwise they return
+  `EnhancementModeNotConfigured`.
 - Maintain orphaned Ironwood outgoing and discovery jobs when deleting accounts
   without PIR compiled in, and repair existing orphaned jobs during full wallet
   initialization.

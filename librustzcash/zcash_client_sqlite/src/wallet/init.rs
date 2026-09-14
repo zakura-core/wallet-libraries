@@ -171,6 +171,10 @@ impl std::error::Error for WalletMigrationError {
 /// variants.
 fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> WalletMigrationError {
     match e {
+        #[cfg(feature = "zakura-pir-enhance")]
+        SqliteClientError::EnhancementModeNotConfigured => {
+            unreachable!("we don't enumerate enhancement requests in migrations")
+        }
         SqliteClientError::CorruptedData(e) => WalletMigrationError::CorruptedData(e),
         SqliteClientError::Protobuf(e) => WalletMigrationError::CorruptedData(e.to_string()),
         SqliteClientError::InvalidNote => {
@@ -325,8 +329,6 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
 ///     Network::TestNetwork,
 ///     SystemClock,
 ///     UnwrapErr(SysRng),
-/// #   #[cfg(feature = "zakura-pir-enhance")]
-/// #   zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
 /// )?;
 /// match init_wallet_db(&mut db, None) {
 ///     Err(e)
@@ -428,8 +430,6 @@ pub fn init_wallet_db<
 ///     Network::TestNetwork,
 ///     SystemClock,
 ///     UnwrapErr(SysRng),
-/// #   #[cfg(feature = "zakura-pir-enhance")]
-/// #   zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
 /// )?;
 /// match WalletMigrator::new().init_or_migrate(&mut db) {
 ///     Err(e)
@@ -1194,8 +1194,6 @@ mod tests {
             Network::TestNetwork,
             test_clock(),
             test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
         .unwrap();
 
@@ -1377,8 +1375,6 @@ mod tests {
             Network::TestNetwork,
             test_clock(),
             test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
         .unwrap();
 
@@ -1554,8 +1550,6 @@ mod tests {
             Network::TestNetwork,
             test_clock(),
             test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
         .unwrap();
 
@@ -1580,15 +1574,8 @@ mod tests {
     fn account_produces_expected_ua_sequence() {
         let network = Network::MainNetwork;
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data = WalletDb::for_path(
-            data_file.path(),
-            network,
-            test_clock(),
-            test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-        )
-        .unwrap();
+        let mut db_data =
+            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
         assert_matches!(init_wallet_db(&mut db_data, None), Ok(_));
 
         // Prior to adding any accounts, every seed phrase is relevant to the wallet.

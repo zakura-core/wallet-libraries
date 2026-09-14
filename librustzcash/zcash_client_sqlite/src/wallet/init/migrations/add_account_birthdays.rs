@@ -95,15 +95,8 @@ mod tests {
     fn migrate() {
         let data_file = NamedTempFile::new().unwrap();
         let network = Network::TestNetwork;
-        let mut db_data = WalletDb::for_path(
-            data_file.path(),
-            network,
-            test_clock(),
-            test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-        )
-        .unwrap();
+        let mut db_data =
+            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
 
         let seed_bytes = vec![0xab; 32];
         WalletMigrator::new()

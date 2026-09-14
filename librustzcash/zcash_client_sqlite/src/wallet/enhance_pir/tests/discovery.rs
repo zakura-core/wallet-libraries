@@ -491,10 +491,9 @@ fn deleting_a_funder_does_not_block_another_transaction_in_the_block() {
         *send.st.network(),
         test_clock(),
         test_rng(),
-        #[cfg(feature = "zakura-pir-enhance")]
-        zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
     )
-    .unwrap();
+    .unwrap()
+    .with_enhancement_mode(zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard);
     assert_eq!(reopened.discovery_suspensions().unwrap(), suspended);
     assert!(reopened.transaction_data_requests().unwrap().contains(
         &TransactionDataRequest::Enhancement(incoming.request_id().txid())
@@ -1400,10 +1399,11 @@ fn retro_link_reopens_retired_enhancement_and_recovers_recipient_privately() {
             *send.st.network(),
             test_clock(),
             test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         )
-        .unwrap();
+        .unwrap()
+        .with_enhancement_mode(
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        );
         assert_eq!(
             reopened.discovery_requests().unwrap(),
             vec![send.discovery()]
@@ -1736,9 +1736,9 @@ fn account_deletion_across_pir_feature_builds() {
         *send.st.network(),
         test_clock(),
         test_rng(),
-        EnhancementMode::PrivateIronwood,
     )
-    .unwrap();
+    .unwrap()
+    .with_enhancement_mode(EnhancementMode::PrivateIronwood);
     assert_eq!(reopened.discovery_suspensions().unwrap().len(), 1);
     assert!(!reopened.query_requests().unwrap().contains(&outgoing));
     assert!(reopened.conn.query_row(

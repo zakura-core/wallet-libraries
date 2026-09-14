@@ -173,13 +173,20 @@ The standalone client and backend share `EnhanceRecord` from the small
 `zakura-pir-enhance-types` crate; no record conversion or client integration
 feature is needed.
 
-Choose `EnhancementMode::Standard` or `EnhancementMode::PrivateIronwood` as the
-last argument to `WalletDb::for_path` or `WalletDb::from_connection`. With the
-PIR feature enabled, this argument is required. Load the application preference
-before opening every handle; the library does not persist a second preference.
-Transaction wrappers inherit the handle's mode. Use `set_enhancement_mode` when
-the preference changes, and cancel or discard old in-memory network request
-batches. A mode change cannot recall an already dispatched LWD request.
+Both `WalletDb::for_path` and `WalletDb::from_connection` take four arguments,
+independent of Cargo features. With PIR compiled in, configure every new handle
+using `set_enhancement_mode` or the chainable `with_enhancement_mode`, choosing
+`EnhancementMode::Standard` or `EnhancementMode::PrivateIronwood`.
+Until configured, both `transaction_data_requests()` and `enhance_pir_work()`
+return `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
+
+Load the application preference before requesting work on every reopened handle;
+the library does not persist a second preference. Transaction wrappers inherit
+the handle's configuration. Enabling PIR transitively preserves constructor source
+compatibility but introduces this runtime configuration requirement to prevent
+accidental public enhancement. Use `set_enhancement_mode` when the preference
+changes, and cancel or discard old in-memory network request batches. A mode
+change cannot recall an already dispatched LWD request.
 
 Read `EnhancePirRead::enhance_pir_work()` after scanning and on reopening. One
 consistent read reports active and suspended obligations from the independent
@@ -231,8 +238,9 @@ rolls back every write on a database error.
 This is a coordinated Rust API break:
 
 - Replace the three work-list calls with one match over `enhance_pir_work()`.
-- Pass mode to each database constructor. Remove `with_enhancement_mode` and
-  reliance on `EnhancementMode::default()`.
+- Keep four-argument database constructors and configure each handle with
+  `with_enhancement_mode` or `set_enhancement_mode` before requesting work.
+  Remove reliance on `EnhancementMode::default()`.
 - Remove the client's `wallet-integration` feature, `wallet_record`, and
   `apply_record` imports. Pass the shared record to the backend write method.
 - Replace `IronwoodEnhanceRecord::from_parts(...)` with

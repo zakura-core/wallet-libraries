@@ -4308,8 +4308,7 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
             // decision is made through this handle and the interval is immaterial.
             anchor_retention_interval: AnchorRetentionInterval::default(),
             #[cfg(feature = "zakura-pir-enhance")]
-            enhancement_mode:
-                zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+            enhancement_mode: None,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: *gap_limits,
         };

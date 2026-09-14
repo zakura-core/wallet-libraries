@@ -227,31 +227,21 @@ impl DataStoreFactory for TestDbFactory {
     ) -> Result<Self::DataStore, Self::Error> {
         let (mut db_data, data_file) = if self.file_backed {
             let data_file = NamedTempFile::new().unwrap();
-            let db_data = WalletDb::for_path(
-                data_file.path(),
-                network,
-                test_clock(),
-                test_rng(),
-                #[cfg(feature = "zakura-pir-enhance")]
-                zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-            )
-            .unwrap();
+            let db_data =
+                WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
             (db_data, Some(data_file))
         } else {
             let conn = Connection::open_in_memory().unwrap();
             rusqlite::vtab::array::load_module(&conn).unwrap();
             (
-                WalletDb::from_connection(
-                    conn,
-                    network,
-                    test_clock(),
-                    test_rng(),
-                    #[cfg(feature = "zakura-pir-enhance")]
-                    zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-                ),
+                WalletDb::from_connection(conn, network, test_clock(), test_rng()),
                 None,
             )
         };
+        #[cfg(feature = "zakura-pir-enhance")]
+        db_data.set_enhancement_mode(
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        );
         if let Some(interval) = anchor_retention_interval {
             db_data = db_data.with_anchor_retention_interval(interval);
         }

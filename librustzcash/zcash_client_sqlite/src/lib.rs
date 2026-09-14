@@ -296,7 +296,7 @@ pub struct WalletDb<C, P, CL, R> {
     rng: R,
     anchor_retention_interval: AnchorRetentionInterval,
     #[cfg(feature = "zakura-pir-enhance")]
-    enhancement_mode: EnhancementMode,
+    enhancement_mode: Option<EnhancementMode>,
     #[cfg(feature = "transparent-inputs")]
     gap_limits: GapLimits,
 }
@@ -464,14 +464,17 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     /// - `clock`: The clock to use in the case that the backend needs access to the system time.
     /// - `rng`: The random number generation capability to be exposed by the created `WalletDb`
     ///   instance.
-    /// - `enhancement_mode` (with `zakura-pir-enhance`): the application preference, required
-    ///   before ordinary transaction requests can be obtained. It is not persisted.
+    ///
+    /// With `zakura-pir-enhance` enabled, configure the handle with
+    /// `set_enhancement_mode` or `with_enhancement_mode` before enumerating
+    /// transaction or PIR work. Until then, enumeration returns
+    /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
+    /// Mode is not persisted; reopened handles must be configured again.
     pub fn for_path<F: AsRef<Path>>(
         path: F,
         params: P,
         clock: CL,
         rng: R,
-        #[cfg(feature = "zakura-pir-enhance")] enhancement_mode: EnhancementMode,
     ) -> Result<Self, rusqlite::Error> {
         rusqlite::Connection::open(path).and_then(move |conn| {
             rusqlite::vtab::array::load_module(&conn)?;
@@ -482,7 +485,7 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
                 rng,
                 anchor_retention_interval: AnchorRetentionInterval::default(),
                 #[cfg(feature = "zakura-pir-enhance")]
-                enhancement_mode,
+                enhancement_mode: None,
                 #[cfg(feature = "transparent-inputs")]
                 gap_limits: GapLimits::default(),
             })
@@ -523,9 +526,24 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
 impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// Changes whether ordinary transaction-ID enhancement exposes protected Ironwood work.
     /// Discard outstanding in-memory request batches when changing mode. Already dispatched
-    /// network requests cannot be recalled. New handles must choose their mode at construction.
+    /// network requests cannot be recalled. New handles must choose their mode before
+    /// enumerating requests.
     pub fn set_enhancement_mode(&mut self, mode: EnhancementMode) {
-        self.enhancement_mode = mode;
+        self.enhancement_mode = Some(mode);
+    }
+
+    /// Chooses the enhancement mode before enumerating requests on this handle.
+    ///
+    /// This preference is not persisted. See [`Self::set_enhancement_mode`] for
+    /// the requirements when changing mode after requests have been obtained.
+    pub fn with_enhancement_mode(mut self, mode: EnhancementMode) -> Self {
+        self.set_enhancement_mode(mode);
+        self
+    }
+
+    fn configured_enhancement_mode(&self) -> Result<EnhancementMode, SqliteClientError> {
+        self.enhancement_mode
+            .ok_or(SqliteClientError::EnhancementModeNotConfigured)
     }
 }
 
@@ -553,15 +571,13 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// - `clock`: The clock to use in the case that the backend needs access to the system time.
     /// - `rng`: The random number generation capability to be exposed by the created `WalletDb`
     ///   instance.
-    /// - `enhancement_mode` (with `zakura-pir-enhance`): the application preference, required
-    ///   before ordinary transaction requests can be obtained. It is not persisted.
-    pub fn from_connection(
-        conn: C,
-        params: P,
-        clock: CL,
-        rng: R,
-        #[cfg(feature = "zakura-pir-enhance")] enhancement_mode: EnhancementMode,
-    ) -> Self {
+    ///
+    /// With `zakura-pir-enhance` enabled, configure the handle with
+    /// `set_enhancement_mode` or `with_enhancement_mode` before enumerating
+    /// transaction or PIR work. Until then, enumeration returns
+    /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
+    /// Mode is not persisted; reopened handles must be configured again.
+    pub fn from_connection(conn: C, params: P, clock: CL, rng: R) -> Self {
         WalletDb {
             conn,
             params,
@@ -569,7 +585,7 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             rng,
             anchor_retention_interval: AnchorRetentionInterval::default(),
             #[cfg(feature = "zakura-pir-enhance")]
-            enhancement_mode,
+            enhancement_mode: None,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: GapLimits::default(),
         }
@@ -1567,11 +1583,13 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     }
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
+        #[cfg(feature = "zakura-pir-enhance")]
+        let enhancement_mode = self.configured_enhancement_mode()?;
         if let Some(_chain_tip_height) = wallet::chain_tip_height(self.conn.borrow())? {
             let protect_ironwood = {
                 #[cfg(feature = "zakura-pir-enhance")]
                 {
-                    self.enhancement_mode == EnhancementMode::PrivateIronwood
+                    enhancement_mode == EnhancementMode::PrivateIronwood
                 }
                 #[cfg(not(feature = "zakura-pir-enhance"))]
                 {
@@ -1616,6 +1634,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
     for WalletDb<C, P, CL, R>
 {
     fn enhance_pir_work(&self) -> Result<Vec<EnhancePirWork>, Self::Error> {
+        self.configured_enhancement_mode()?;
         wallet::enhance_pir::work(self.conn.borrow())
     }
 

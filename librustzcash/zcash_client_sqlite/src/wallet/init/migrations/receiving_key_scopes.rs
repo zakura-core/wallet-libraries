@@ -525,15 +525,8 @@ mod tests {
 
         // Create wallet upgraded to just before the current migration.
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data = WalletDb::for_path(
-            data_file.path(),
-            params,
-            test_clock(),
-            test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-        )
-        .unwrap();
+        let mut db_data =
+            WalletDb::for_path(data_file.path(), params, test_clock(), test_rng()).unwrap();
         WalletMigrator::new()
             .ignore_seed_relevance()
             .init_or_migrate_to(
@@ -639,15 +632,8 @@ mod tests {
 
         // Create wallet upgraded to just before the current migration.
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data = WalletDb::for_path(
-            data_file.path(),
-            params,
-            test_clock(),
-            test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-        )
-        .unwrap();
+        let mut db_data =
+            WalletDb::for_path(data_file.path(), params, test_clock(), test_rng()).unwrap();
         WalletMigrator::new()
             .ignore_seed_relevance()
             .init_or_migrate_to(

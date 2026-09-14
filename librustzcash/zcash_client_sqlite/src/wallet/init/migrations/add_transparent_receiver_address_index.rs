@@ -403,15 +403,8 @@ mod tests {
     fn resolves_cross_account_duplicate_by_derivation() {
         let network = Network::TestNetwork;
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data = WalletDb::for_path(
-            data_file.path(),
-            network,
-            test_clock(),
-            test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-        )
-        .unwrap();
+        let mut db_data =
+            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
 
         WalletMigrator::new()
             .with_seed(Secret::new(vec![0xab; 32]))
@@ -515,15 +508,8 @@ mod tests {
     fn cross_account_winner_may_be_legacy_account() {
         let network = Network::TestNetwork;
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data = WalletDb::for_path(
-            data_file.path(),
-            network,
-            test_clock(),
-            test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-        )
-        .unwrap();
+        let mut db_data =
+            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
 
         WalletMigrator::new()
             .with_seed(Secret::new(vec![0xab; 32]))
@@ -640,15 +626,8 @@ mod tests {
     fn resolves_cross_account_duplicate_by_ephemeral_derivation() {
         let network = Network::TestNetwork;
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data = WalletDb::for_path(
-            data_file.path(),
-            network,
-            test_clock(),
-            test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-        )
-        .unwrap();
+        let mut db_data =
+            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
 
         WalletMigrator::new()
             .with_seed(Secret::new(vec![0xab; 32]))
@@ -712,15 +691,8 @@ mod tests {
     fn enforces_uniqueness() {
         let network = Network::TestNetwork;
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data = WalletDb::for_path(
-            data_file.path(),
-            network,
-            test_clock(),
-            test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-        )
-        .unwrap();
+        let mut db_data =
+            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
 
         WalletMigrator::new()
             .with_seed(Secret::new(vec![0xab; 32]))
@@ -778,15 +750,8 @@ mod tests {
     fn resolves_preexisting_duplicates() {
         let network = Network::TestNetwork;
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data = WalletDb::for_path(
-            data_file.path(),
-            network,
-            test_clock(),
-            test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-        )
-        .unwrap();
+        let mut db_data =
+            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
 
         // Migrate to the state just prior to this migration (no UNIQUE index yet).
         WalletMigrator::new()
@@ -891,15 +856,8 @@ mod tests {
     fn repair_carries_min_exposed_at_height() {
         let network = Network::TestNetwork;
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data = WalletDb::for_path(
-            data_file.path(),
-            network,
-            test_clock(),
-            test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-        )
-        .unwrap();
+        let mut db_data =
+            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
 
         WalletMigrator::new()
             .with_seed(Secret::new(vec![0xab; 32]))
@@ -959,15 +917,8 @@ mod tests {
     fn rejects_cross_account_duplicates() {
         let network = Network::TestNetwork;
         let data_file = NamedTempFile::new().unwrap();
-        let mut db_data = WalletDb::for_path(
-            data_file.path(),
-            network,
-            test_clock(),
-            test_rng(),
-            #[cfg(feature = "zakura-pir-enhance")]
-            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-        )
-        .unwrap();
+        let mut db_data =
+            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
 
         WalletMigrator::new()
             .with_seed(Secret::new(vec![0xab; 32]))
