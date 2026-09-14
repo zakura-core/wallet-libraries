@@ -402,7 +402,7 @@ where
 
         #[cfg(feature = "zakura-pir-enhance")]
         // Explicit non-Ironwood fields require LWD. Empty transparent lists are
-        // only provisional: schema-v6 PIR flags may reveal an omitted bundle.
+        // only provisional: PIR shape flags may reveal an omitted bundle.
         // The compact source must include every shielded pool, not filter to Ironwood.
         let ironwood_pir_eligible = is_ironwood_pir_candidate(&tx);
         let (sapling_outputs, mut sapling_nc) = find_received(

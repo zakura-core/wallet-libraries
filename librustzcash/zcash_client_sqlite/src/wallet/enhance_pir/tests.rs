@@ -1074,7 +1074,7 @@ fn schema7_recovers_history_and_backfills_without_losing_a_stored_memo() {
             .is_none()
     );
     assert!(st.wallet().db().query_requests().unwrap().is_empty());
-    // Simulate schema-v6 completion: memo retained, metadata missing, queues retired.
+    // Simulate private completion with a retained memo but missing metadata.
     st.wallet()
         .conn()
         .execute(

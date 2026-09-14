@@ -12,7 +12,7 @@ workspace.
 
 ### Added
 - Populate fee and expiry during private Ironwood enhancement through a durable metadata queue independent of memo and outgoing recovery.
-- Create all six Ironwood Enhance PIR tables in one migration for this unreleased feature; intermediate PR development schemas are not upgrade sources.
+- Create all six Ironwood Enhance PIR tables in one consolidated migration.
 
 ### Fixed
 - Compare the captured PIR fee/expiry snapshot atomically before filling unknown

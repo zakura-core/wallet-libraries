@@ -14,7 +14,7 @@ workspace.
 - Support schema-7 Ironwood PIR fee/expiry metadata with explicit metadata binding and atomic storage contracts.
 
 ### Changed
-- `EnhancePirStorage` now requires `ironwood_transaction_metadata` and
+- `EnhancePirStorage` requires `ironwood_transaction_metadata` and
   `compare_and_apply_ironwood_enhancement`. Validated responses carry the expected
   fee/expiry snapshot; backends must atomically compare it, fill only unknown fields,
   and reject conflicts without changing action or queue state.

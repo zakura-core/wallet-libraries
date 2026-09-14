@@ -214,7 +214,7 @@ pub enum EnhancePirStoreResult {
     /// Outgoing recovery failed. The row is suspended, not completed; the
     /// ordinary fallback remains withheld until private mode is disabled.
     NotRecoverable,
-    /// The whole transaction now requires ordinary LWD enhancement.
+    /// The whole transaction requires ordinary LWD enhancement.
     LwdRequired,
     /// Authentication or action binding failed; nothing was changed.
     Rejected,

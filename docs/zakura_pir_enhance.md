@@ -6,9 +6,8 @@ PIR, transparent spentness discovery, UTXO gating, or a new compact-block format
 Any transaction known to contain transparent, Sapling, or Orchard activity uses
 ordinary lightwalletd (LWD) enhancement for the whole transaction.
 
-This is the minimal replacement for [PR #18](https://github.com/zakura-core/wallet-libraries/pull/18).
-Upstream compact transparent scanning can be integrated later at the scan-time
-eligibility boundary; it is not a prerequisite for this version.
+Compact transparent scanning is outside this integration's scope. Its information
+can be supplied at the scan-time eligibility boundary.
 
 ## Transaction routing
 
@@ -60,7 +59,7 @@ The two transparent flags are **trusted service metadata**. Note decryption does
 not authenticate them, prove transparent absence, or bind them to the transaction
 ID. This is an explicitly accepted limitation of schema v7: a malicious service
 can force a txid fallback with a false positive, or suppress needed transparent
-enhancement with a false negative. This version is not a malicious-server-secure
+enhancement with a false negative. The design does not provide a malicious-server-secure
 proof of transaction shape.
 
 The response must nevertheless match pending wallet state before flags can alter
@@ -236,27 +235,26 @@ them. The adapter must keep context reads, validation, identity rechecks, and
 all writes in one consistent transaction. SQLite uses a private adapter and
 rolls back every write on a database error.
 
-### Migrating application code
+### Application API requirements
 
-This is a coordinated Rust API break:
+The Rust API has these integration requirements:
 
-- Replace the three work-list calls with one match over `enhance_pir_work()`.
-- Keep four-argument database constructors and configure each handle with
+- Enumerate work with one match over `enhance_pir_work()`.
+- Use four-argument database constructors and configure each handle with
   `with_enhancement_mode` or `set_enhancement_mode` before requesting work.
-  Remove reliance on `EnhancementMode::default()`.
-- Remove the client's `wallet-integration` feature, `wallet_record`, and
-  `apply_record` imports. Pass the shared record to the backend write method.
-- Replace `IronwoodEnhanceRecord::from_parts(...)` with
-  `EnhanceRecord::from_parts(EnhanceRecordParts { ... })`. Byte decoding uses
-  fallible `EnhanceRecord::from_bytes`; flag accessors are now infallible.
+- Do not rely on `EnhancementMode::default()`.
+- Pass the shared record directly to the backend write method; the client has no
+  `wallet-integration` feature, `wallet_record`, or `apply_record` API.
+- Construct records with `EnhanceRecord::from_parts(EnhanceRecordParts { ... })`.
+  Byte decoding uses
+  fallible `EnhanceRecord::from_bytes`; flag accessors are infallible.
 - Custom scanners attach `IronwoodEnhancementPlan::Ineligible` or
   `Eligible { outgoing }` through `with_ironwood_enhancement_plan`. An empty
   outgoing list is valid eligibility, not proof of durable completion.
 
 Schema 7 requires the consolidated Ironwood enhancement database migration, an Enhance PIR server
-update, and a canonical snapshot rebuild. Schema-6 servers and clients are not
-compatible with this release. The shared record crate must be available before publishing backend
-releases that depend on it.
+update, and a canonical snapshot rebuild. Servers and clients must both use schema 7.
+Backend builds depend on the shared record crate.
 
 Prefer cache reuse and normal batched downloads. Downloading a specific missing
 block reveals interest in its height even though no target txid is sent. The
@@ -304,7 +302,7 @@ Custom transports use the same acceptance with `QuerySession`.
 Choose limits for the least-capable supported device, never from server fields.
 Public-parameter decoding and deterministic setup remain deferred until acceptance.
 
-## Upgrade and future scope
+## Database migration and scope
 
 The single `ironwood_enhance` migration creates all six feature tables: incoming
 memo work, outgoing work, outgoing candidate accounts, transaction routing,
@@ -313,25 +311,23 @@ received notes and transaction-status observation intent. Every feature table st
 empty: existing ordinary history continues through LWD until explicitly rescanned.
 Enabling the setting alone does not privatize old history.
 
-PR #20 is an unreleased feature, so its intermediate migrations have been consolidated
-under one new migration ID. Development databases created by earlier revisions of
-#20 or the experimental #18 migrations are not upgrade sources; use an independently
-backed-up/fresh development database. The library never deletes or resets one
-automatically. Tests use temporary databases and do not modify an application wallet.
+The consolidated migration is the sole schema definition for these feature tables.
+The library does not delete or reset application databases. Tests use temporary
+databases and do not modify an application wallet.
 
-Future upstream compact scanning can supply more explicit transparent information
-to the existing eligibility decision. Transparent discovery/PIR, variable-length
+Compact scanning can supply more explicit transparent information to the existing
+eligibility decision. Transparent discovery/PIR, variable-length
 address history, and private transparent spentness remain separate designs. No
-future compact-block or service changes are required to land this integration.
+compact-block or service changes are required by this integration.
 
-## Schema-7 fee and expiry completion
+## Schema-7 fee and expiry metadata
 
-`EnhanceRecordParts` now requires `metadata: EnhanceTransactionMetadata`. Construct
+`EnhanceRecordParts` requires `metadata: EnhanceTransactionMetadata`. Construct
 it with `EnhanceTransactionMetadata::new(expiry_height, fee_zatoshis)`; the constructor
 rejects heights at or above 500,000,000 and fees above the monetary range.
 Byte decoding also rejects reserved flags and noncanonical absent-fee payloads.
 The two clients require schema 7, protocol `ironwood-enhance-pir-v2`, and its pinned
-setup seed. They do not downgrade to schema 6 or fall back publicly on errors.
+setup seed. They do not fall back publicly on errors.
 
 The indexer derives a pure Ironwood transaction's actual fee from its public value
 balance. These fields are trusted service metadata, like shape flags; note decryption
@@ -362,11 +358,11 @@ bindings; account deletion converts lost incoming bindings into rediscovery work
 Ordinary unprotected history and sticky LWD routing are not reclassified.
 
 `transactions.fee` and `transactions.expiry_height` feed the existing history API.
-This release does not retrieve raw transactions: `get_transaction()` still returns
+The integration does not retrieve raw transactions: `get_transaction()` returns
 `None` when `transactions.raw` is absent. Raw export and parsed inspection remain
 unavailable for those transactions. History displays can use the populated metadata.
 
-Custom storage implementations now implement `pending_ironwood_metadata` and
+Custom storage implementations implement `pending_ironwood_metadata` and
 consume the named `IronwoodEnhancementData` returned by `into_parts()`. Apply its
 metadata alongside note, route and queue changes; encoding errors use
-`InvalidEnhanceRecord` instead of the former flag-only error.
+`InvalidEnhanceRecord`.
