@@ -11,6 +11,8 @@ workspace.
 ## [Unreleased]
 
 ### Fixed
+- Recover sender history for cross-account Ironwood payments in both funding-first
+  and recent-first restores; exclude only change from outgoing PIR recovery.
 - Keep wallet constructor signatures stable under Cargo feature unification.
   With PIR enabled, new handles require explicit mode configuration before
   transaction or PIR request enumeration; otherwise they return

@@ -10,6 +10,10 @@ workspace.
 
 ## [Unreleased]
 
+### Fixed
+- Retain outgoing Ironwood PIR candidates for cross-account wallet payments,
+  excluding only outputs marked as change.
+
 ## [0.1.0-rc5] - 2026-09-09
 
 ### Changed

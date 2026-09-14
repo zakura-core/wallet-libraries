@@ -15,7 +15,7 @@ use zcash_client_backend::{
 use zcash_primitives::block::BlockHash;
 use zcash_primitives::transaction::TxId;
 
-use crate::{AccountUuid, TxRef, error::SqliteClientError};
+use crate::{AccountUuid, TxRef, error::SqliteClientError, wallet::KeyScope};
 
 use super::{
     LWD_REQUIRED, TxQueryType, outgoing_position_owned_by_other, queue_transaction,
@@ -33,6 +33,19 @@ pub(crate) fn queue(conn: &Connection, tx_ref: TxRef) -> Result<(), SqliteClient
     if !needs_work {
         return Ok(());
     }
+    // Recent-first scanning could not identify change before this spend link existed.
+    // Repair internal outputs belonging to funding accounts before rediscovery uses
+    // the stored flag; another wallet account's received payment is not change.
+    conn.execute(
+        "UPDATE ironwood_received_notes SET is_change = 1
+         WHERE transaction_id = :tx AND recipient_key_scope = :internal_scope
+         AND account_id IN (
+             SELECT rn.account_id FROM ironwood_received_note_spends s
+             JOIN ironwood_received_notes rn ON rn.id = s.ironwood_received_note_id
+             WHERE s.transaction_id = :tx
+         )",
+        named_params![":tx": tx_ref.0, ":internal_scope": KeyScope::INTERNAL.encode()],
+    )?;
     let route: Option<i64> = conn
         .query_row(
             "SELECT route FROM ironwood_enhance_routing WHERE transaction_id = :tx",
@@ -272,15 +285,18 @@ fn candidates(
         .map(|(account, _)| *account)
         .collect::<HashSet<_>>();
     let mut stmt = conn.prepare_cached(
-        "SELECT action_index, commitment_tree_position FROM ironwood_received_notes
+        "SELECT action_index, commitment_tree_position, is_change FROM ironwood_received_notes
          WHERE transaction_id = :tx",
     )?;
     let received = stmt
         .query_map(named_params![":tx": tx_ref.0], |row| {
-            Ok((row.get::<_, u32>(0)?, row.get::<_, Option<u64>>(1)?))
+            Ok((
+                row.get::<_, u32>(0)?,
+                (row.get::<_, Option<u64>>(1)?, row.get::<_, bool>(2)?),
+            ))
         })?
         .collect::<Result<HashMap<_, _>, _>>()?;
-    if received.iter().any(|(index, pos)| {
+    if received.iter().any(|(index, (pos, _))| {
         *index as usize >= compact_tx.ironwood_actions.len()
             || *pos != Some(u64::from(position) + u64::from(*index))
     }) {
@@ -293,7 +309,10 @@ fn candidates(
             return Ok(None);
         };
         nullifiers.insert(action.nullifier().to_bytes());
-        if !received.contains_key(&(index as u32)) {
+        if !received
+            .get(&(index as u32))
+            .is_some_and(|(_, is_change)| *is_change)
+        {
             candidates.push(IronwoodEnhanceCandidate::from_parts(
                 (u64::from(position) + index as u64).into(),
                 index,

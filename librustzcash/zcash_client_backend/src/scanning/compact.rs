@@ -520,26 +520,24 @@ where
         #[cfg(feature = "orchard")]
         ironwood_note_commitments.append(&mut ironwood_nc);
 
-        // Actions the wallet decrypted for itself — including change, which compact scanning
-        // finds because `ScanningKeys` covers the internal scope as well as the external one.
-        // These are served by the incoming memo queue, so they must not also become outgoing
-        // candidates: change is encrypted under the internal OVK and outgoing recovery only
-        // holds the external one, so an outgoing entry for such a position could never be
-        // resolved. It would keep its transaction protected, and therefore un-enhanced, forever.
+        // Same-account change uses the internal OVK, which outgoing recovery does not
+        // hold; its memo is handled by incoming decryption. Other received outputs still
+        // need outgoing recovery to reconstruct the sender's cross-account history.
         #[cfg(feature = "zakura-pir-enhance")]
         let ironwood_enhance_candidates = if spent_from_accounts.is_empty()
             || !ironwood_pir_eligible
         {
             vec![]
         } else {
-            let received_indices = ironwood_outputs
+            let change_indices = ironwood_outputs
                 .iter()
+                .filter(|output| output.is_change())
                 .map(|output| output.index())
                 .collect::<HashSet<_>>();
             tx.ironwood_actions
                 .iter()
                 .enumerate()
-                .filter(|(index, _)| !received_indices.contains(index))
+                .filter(|(index, _)| !change_indices.contains(index))
                 .map(|(index, raw)| {
                     let action =
                         CompactAction::try_from(raw).map_err(|_| ScanError::EncodingInvalid {

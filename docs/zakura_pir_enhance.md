@@ -85,9 +85,11 @@ Mixed-transaction fallback intentionally exposes the transaction ID to LWD.
 
 ## Outgoing recovery and incomplete work
 
-Wallet-funded transactions queue actions that were not already decrypted as
-received notes. Received/change actions use incoming decryption, avoiding an
-unrecoverable outgoing job for change encrypted under an internal OVK.
+Wallet-funded transactions queue every action except same-account change for
+outgoing recovery. Cross-account wallet payments also need outgoing recovery to
+restore the sender’s recipient, value, and memo, alongside the receiver’s incoming
+note. Change uses incoming decryption, avoiding an unrecoverable outgoing job for
+change encrypted under an internal OVK.
 
 An outgoing record may match compact fields but fail OVK recovery because it is
 a dummy, uses `OvkPolicy::Discard`, or contains corrupt server-supplied fields.
@@ -105,13 +107,14 @@ automatically causes public fallback.
 Recent-first restores can scan a send before its funding note. The initial scan
 may find only change and cannot yet enumerate outgoing recovery accounts. When
 nullifier-map lookup later links the funding note to the send, the same SQL
-transaction queues durable outgoing discovery and restores its ordinary
+transaction repairs internal change flags for the linked funding accounts,
+queues durable outgoing discovery, and restores its ordinary
 Enhancement request, even if a completed change memo previously retired it.
 The request remains withheld in private mode. Scan order does not require LWD.
 
 Discovery reconstructs action positions and compact validation fields from the
 spending block, using the current database spend associations, including already
-spent notes. It excludes received/change actions and previously recovered sent
+spent notes. It excludes actions marked `is_change` and previously recovered sent
 outputs. Additional funding accounts reopen discovery and retry suspended OVK
 recovery. An ordinary rescan cannot silently replace this obligation with an
 empty candidate list just because the scanner loads only unspent nullifiers.

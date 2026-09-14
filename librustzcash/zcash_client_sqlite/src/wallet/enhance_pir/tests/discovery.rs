@@ -239,6 +239,133 @@ impl Send {
     }
 }
 
+/// Recent-first incoming completion must not hide the later sender obligation.
+fn cross_account_restore(funding_first: bool) {
+    let mut send = Send::new(true);
+    let (receiver, usk) = send.st.create_account_from_test_seed("receiver");
+    let recipient = usk
+        .to_unified_full_viewing_key()
+        .orchard()
+        .unwrap()
+        .address_at(0u32, Scope::External);
+    let sender = send.st.test_account().unwrap().id();
+    let fvk = OrchardPoolTester::test_account_fvk(&send.st);
+    let (action, record) =
+        encrypted_action([9; 32], recipient, fvk.to_ovk(Scope::External), 20_000);
+    send.block.vtx[0].ironwood_actions[1] = action;
+    send.st
+        .cache()
+        .0
+        .execute(
+            "UPDATE compactblocks SET data = ?1 WHERE height = ?2",
+            rusqlite::params![send.block.encode_to_vec(), u32::from(send.block.height())],
+        )
+        .unwrap();
+    if funding_first {
+        send.scan_funding();
+    }
+    send.scan_send();
+    let requests = send.requests();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        if !funding_first || request.request_id().output_index() == 0 {
+            finish_incoming(&mut send.st, *request);
+        }
+    }
+    if !funding_first {
+        send.scan_funding();
+        send.rebuild();
+    }
+    assert!(
+        send.queued(),
+        "receiver memo completion must retain sender history work"
+    );
+    let outgoing = send.requests();
+    assert_eq!(
+        outgoing.len(),
+        1,
+        "internal change must not need outgoing recovery"
+    );
+    assert_eq!(outgoing[0].request_id().output_index(), 1);
+    assert_eq!(
+        send.st
+            .wallet()
+            .db()
+            .pending_outgoing(outgoing[0].position())
+            .unwrap()
+            .unwrap()
+            .account_ids,
+        vec![sender]
+    );
+    assert_eq!(
+        apply_record(send.st.wallet_mut().db_mut(), outgoing[0], &record).unwrap(),
+        EnhancePirStoreResult::Stored
+    );
+    let (from, address, value, memo): (AccountUuid, String, u64, Vec<u8>) = send
+        .st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT a.uuid, sn.to_address, sn.value, sn.memo FROM sent_notes sn
+             JOIN accounts a ON a.id = sn.from_account_id
+             WHERE sn.transaction_id = ?1 AND sn.output_index = 1",
+            [send.tx_ref().0],
+            |row| {
+                Ok((
+                    AccountUuid(row.get(0)?),
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(from, sender);
+    assert_eq!(
+        address,
+        Receiver::Orchard(recipient)
+            .to_zcash_address(send.st.network().network_type())
+            .to_string()
+    );
+    assert_eq!(value, 20_000);
+    assert_eq!(memo, vec![4; 512]);
+    let (to, value, change, has_memo): (AccountUuid, u64, bool, bool) = send
+        .st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT a.uuid, rn.value, rn.is_change, rn.memo IS NOT NULL
+             FROM ironwood_received_notes rn JOIN accounts a ON a.id = rn.account_id
+             WHERE rn.transaction_id = ?1 AND rn.action_index = 1",
+            [send.tx_ref().0],
+            |row| {
+                Ok((
+                    AccountUuid(row.get(0)?),
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        (to, value, change, has_memo),
+        (receiver, 20_000, false, true)
+    );
+    assert!(!send.queued());
+    assert!(send.requests().is_empty());
+}
+
+#[test]
+fn cross_account_funding_first_restore_preserves_sender_history() {
+    cross_account_restore(true);
+}
+
+#[test]
+fn cross_account_recent_first_restore_preserves_sender_history() {
+    cross_account_restore(false);
+}
+
 #[test]
 fn rescanning_a_send_preserves_pending_and_suspended_outgoing_recovery() {
     for suspend in [false, true] {
