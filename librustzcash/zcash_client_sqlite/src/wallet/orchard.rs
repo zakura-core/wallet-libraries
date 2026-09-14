@@ -636,8 +636,9 @@ pub(crate) fn put_received_note<
                     |row| row.get::<_, bool>(0),
                 )?)
         {
-            // Rewinds retain spend links but clear private routing. Reconstruct those
-            // obligations too, without reopening completed work on an ordinary replay.
+            // New links and unclassified history need reconstruction. Rewinds preserve
+            // protected transactions' discovery obligations separately, so replaying
+            // an existing link must not reopen ordinarily completed work.
             super::enhance_pir::discovery::queue(conn, spent_in)?;
         }
         #[cfg(not(feature = "zakura-pir-enhance"))]

@@ -15,4 +15,4 @@ PYTHON
 )
 test -n "$PIR_DISABLED_TEST_BINARY"
 export PIR_DISABLED_TEST_BINARY
-cargo test -p zakura-client-sqlite --locked --features zakura-pir-enhance,test-dependencies --lib account_deletion_across_pir_feature_builds -- --ignored --nocapture
+cargo test -p zakura-client-sqlite --locked --features zakura-pir-enhance,test-dependencies --lib across_pir_feature_builds -- --ignored --nocapture

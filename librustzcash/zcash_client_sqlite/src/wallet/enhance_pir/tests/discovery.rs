@@ -1016,7 +1016,13 @@ fn deleting_an_exclusively_owned_transaction_cascades_its_discovery_job() {
     send.scan_send();
     send.scan_funding();
     send.discovery();
+    let txid = send.block.vtx[0].txid();
     let account = send.st.test_account().unwrap().id();
+    send.st
+        .wallet_mut()
+        .db_mut()
+        .transactionally(|db| crate::wallet::queue_tx_status(db.conn.0, txid))
+        .unwrap();
     send.st
         .wallet_mut()
         .db_mut()
@@ -1049,6 +1055,32 @@ fn deleting_an_exclusively_owned_transaction_cascades_its_discovery_job() {
         )
         .unwrap();
     assert_eq!(jobs, 0);
+    assert!(
+        !send
+            .st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue WHERE txid = ?1)",
+                [txid.as_ref()],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+    for mode in [EnhancementMode::PrivateIronwood, EnhancementMode::Standard] {
+        use crate::testing::db::{test_clock, test_rng};
+        let reopened = crate::WalletDb::for_path(
+            send.st.wallet().data_file_path(),
+            *send.st.network(),
+            test_clock(),
+            test_rng(),
+        )
+        .unwrap()
+        .with_enhancement_mode(mode);
+        let requests = reopened.transaction_data_requests().unwrap();
+        assert!(!requests.contains(&TransactionDataRequest::Enhancement(txid)));
+        assert!(!requests.contains(&TransactionDataRequest::GetStatus(txid)));
+    }
 }
 
 #[test]
@@ -1176,7 +1208,7 @@ fn restoring_a_funding_key_and_rescanning_reactivates_suspended_discovery() {
                 None,
             )
             .unwrap();
-        // Import rewinds and clears routing, but B's spend link survives. Exercise both
+        // Import rewinds while retaining routing and reconstruction for both sends. Exercise both
         // direct scan-time recovery and rediscovery of this retained link, alongside A's
         // newly restored funding note. A's funding always arrives after the send block.
         if funding_b_first {
@@ -1216,7 +1248,7 @@ fn restoring_a_funding_key_and_rescanning_reactivates_suspended_discovery() {
                 .db_mut()
                 .rebuild_ironwood_enhancement(request, &send.block)
                 .unwrap(),
-            Rebuilt(if funding_b_first { 1 } else { 2 })
+            Rebuilt(2)
         );
         assert!(
             send.st
@@ -1708,11 +1740,21 @@ fn rewind_and_full_data_clear_discovery() {
 fn account_deletion_across_pir_feature_builds() {
     use crate::testing::db::{test_clock, test_rng};
     let send = shared_and_independent_jobs();
+    let funding_txid: Vec<u8> = send
+        .st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT txid FROM transactions WHERE mined_height = ?1",
+            [u32::from(send.funding_height)],
+            |row| row.get(0),
+        )
+        .unwrap();
     let tx_ref = send.tx_ref();
     let outgoing = super::outgoing(&send.st, tx_ref, 99, 9);
     let status = std::process::Command::new(std::env::var("PIR_DISABLED_TEST_BINARY").unwrap())
         .args([
-            "wallet::delete_account_without_pir",
+            "wallet::maintain_wallet_without_pir",
             "--exact",
             "--ignored",
             "--nocapture",
@@ -1739,6 +1781,19 @@ fn account_deletion_across_pir_feature_builds() {
     )
     .unwrap()
     .with_enhancement_mode(EnhancementMode::PrivateIronwood);
+    assert!(
+        !reopened
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue WHERE txid = ?1)",
+                [&funding_txid],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+    assert!(!reopened.transaction_data_requests().unwrap().contains(
+        &TransactionDataRequest::Enhancement(send.block.vtx[0].txid())
+    ));
     assert_eq!(reopened.discovery_suspensions().unwrap().len(), 1);
     assert!(!reopened.query_requests().unwrap().contains(&outgoing));
     assert!(reopened.conn.query_row(
@@ -1794,4 +1849,317 @@ fn initialization_repairs_orphaned_work_atomically() {
         assert!(!reopened.query_requests().unwrap().contains(&outgoing));
         assert_eq!(reopened.discovery_requests().unwrap().len(), 1);
     }
+}
+
+#[test]
+fn rewind_preserves_discovery_for_existing_spend_links() {
+    for change in [false, true] {
+        for funding_first in [false, true] {
+            let mut send = Send::new(change);
+            send.scan_funding();
+            send.scan_send();
+            let txid = send.block.vtx[0].txid();
+            let tx_ref = send.tx_ref();
+            // Rewind both funding and spending blocks, retaining their spend link.
+            send.st
+                .wallet_mut()
+                .db_mut()
+                .truncate_to_height(send.funding_height - 1)
+                .unwrap();
+            assert!(send.requests().is_empty());
+            assert!(
+                send.st
+                    .wallet()
+                    .db()
+                    .discovery_requests()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(is_protected(send.st.wallet().conn(), txid).unwrap());
+            assert!(
+                !send
+                    .st
+                    .wallet()
+                    .db()
+                    .transaction_data_requests()
+                    .unwrap()
+                    .contains(&TransactionDataRequest::Enhancement(txid))
+            );
+            assert!(send.st.wallet().conn().query_row(
+                "SELECT EXISTS(SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = ?1)",
+                [tx_ref.0], |row| row.get::<_, bool>(0)).unwrap());
+            if funding_first {
+                send.scan_funding();
+                send.scan_send();
+            } else {
+                send.scan_send();
+                send.scan_funding();
+            }
+            send.rebuild();
+            let outgoing = send
+                .requests()
+                .into_iter()
+                .find(|r| r.request_id().output_index() == u32::from(change))
+                .unwrap();
+            assert_eq!(
+                apply_record(send.st.wallet_mut().db_mut(), outgoing, &send.record).unwrap(),
+                EnhancePirStoreResult::Stored
+            );
+            assert!(is_protected(send.st.wallet().conn(), txid).unwrap());
+            send.scan_funding();
+            assert!(
+                send.st
+                    .wallet()
+                    .db()
+                    .discovery_requests()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn account_deletion_preserves_shared_intent_and_rolls_back_cleanup() {
+    let mut send = shared_and_independent_jobs();
+    let account = send.st.test_account().unwrap().id();
+    let funding: (i64, Vec<u8>) = send
+        .st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT id_tx, txid FROM transactions WHERE mined_height = ?1",
+            [u32::from(send.funding_height)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let shared_txid = send.block.vtx[0].txid();
+    send.st
+        .wallet()
+        .conn()
+        .execute(
+            "UPDATE tx_retrieval_queue SET dependent_transaction_id = ?1 WHERE txid = ?2",
+            rusqlite::params![funding.0, shared_txid.as_ref()],
+        )
+        .unwrap();
+    send.st
+        .wallet()
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER fail_transaction_delete BEFORE DELETE ON transactions
+         BEGIN SELECT RAISE(ABORT, 'injected deletion failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        send.st
+            .wallet_mut()
+            .db_mut()
+            .delete_account(account)
+            .is_err()
+    );
+    assert!(
+        send.st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue WHERE txid = ?1)",
+                [&funding.1],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        send.st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT dependent_transaction_id FROM tx_retrieval_queue WHERE txid = ?1",
+                [shared_txid.as_ref()],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        funding.0
+    );
+    send.st
+        .wallet()
+        .conn()
+        .execute_batch("DROP TRIGGER fail_transaction_delete")
+        .unwrap();
+    send.st
+        .wallet_mut()
+        .db_mut()
+        .delete_account(account)
+        .unwrap();
+    let dependency: Option<i64> = send
+        .st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT dependent_transaction_id FROM tx_retrieval_queue WHERE txid = ?1",
+            [shared_txid.as_ref()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dependency, None);
+    assert!(is_protected(send.st.wallet().conn(), shared_txid).unwrap());
+    assert!(
+        !send
+            .st
+            .wallet()
+            .db()
+            .transaction_data_requests()
+            .unwrap()
+            .contains(&TransactionDataRequest::Enhancement(shared_txid))
+    );
+    send.st
+        .wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::Standard);
+    assert!(
+        send.st
+            .wallet()
+            .db()
+            .transaction_data_requests()
+            .unwrap()
+            .contains(&TransactionDataRequest::Enhancement(shared_txid))
+    );
+}
+
+#[test]
+#[ignore = "run scripts/verify-pir-feature-transition.sh"]
+fn rewind_across_pir_feature_builds() {
+    use crate::testing::db::{test_clock, test_rng};
+    for change in [false, true] {
+        let mut send = Send::new(change);
+        send.scan_funding();
+        send.scan_send();
+        let txid = send.block.vtx[0].txid();
+        let status = std::process::Command::new(std::env::var("PIR_DISABLED_TEST_BINARY").unwrap())
+            .args([
+                "wallet::maintain_wallet_without_pir",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("PIR_TRANSITION_DB", send.st.wallet().data_file_path())
+            .env(
+                "PIR_TRANSITION_REWIND_HEIGHT",
+                u32::from(send.funding_height - 1).to_string(),
+            )
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let mut reopened = crate::WalletDb::for_path(
+            send.st.wallet().data_file_path(),
+            *send.st.network(),
+            test_clock(),
+            test_rng(),
+        )
+        .unwrap()
+        .with_enhancement_mode(EnhancementMode::PrivateIronwood);
+        assert!(reopened.is_ironwood_enhancement_protected(txid).unwrap());
+        assert!(reopened.enhance_pir_work().unwrap().is_empty());
+        assert!(
+            !reopened
+                .transaction_data_requests()
+                .unwrap()
+                .contains(&TransactionDataRequest::Enhancement(txid))
+        );
+        reopened.set_enhancement_mode(EnhancementMode::Standard);
+        assert!(
+            reopened
+                .transaction_data_requests()
+                .unwrap()
+                .contains(&TransactionDataRequest::Enhancement(txid))
+        );
+        send.scan_send();
+        send.scan_funding();
+        send.rebuild();
+        assert!(!send.requests().is_empty());
+    }
+}
+
+#[test]
+fn rewind_of_completed_private_send_preserves_completion_after_reconstruction() {
+    for change in [false, true] {
+        let mut send = Send::new(change);
+        send.scan_funding();
+        send.scan_send();
+        if change {
+            let incoming = send
+                .requests()
+                .into_iter()
+                .find(|r| r.request_id().output_index() == 0)
+                .unwrap();
+            finish_incoming(&mut send.st, incoming);
+        }
+        let outgoing = send
+            .requests()
+            .into_iter()
+            .find(|r| r.request_id().output_index() == u32::from(change))
+            .unwrap();
+        assert_eq!(
+            apply_record(send.st.wallet_mut().db_mut(), outgoing, &send.record).unwrap(),
+            EnhancePirStoreResult::Stored
+        );
+        assert!(!send.queued());
+        send.st
+            .wallet_mut()
+            .db_mut()
+            .truncate_to_height(send.funding_height - 1)
+            .unwrap();
+        assert!(!send.queued(), "rewinding must not create ordinary intent");
+        send.scan_send();
+        send.scan_funding();
+        send.rebuild();
+        assert!(send.requests().is_empty());
+        assert!(!send.queued());
+        assert!(is_protected(send.st.wallet().conn(), send.block.vtx[0].txid()).unwrap());
+        send.scan_funding();
+        assert!(
+            send.st
+                .wallet()
+                .db()
+                .discovery_requests()
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn rewind_failure_rolls_back_discovery_and_position_cleanup() {
+    let mut send = Send::new(false);
+    send.scan_funding();
+    send.scan_send();
+    let before = send.st.wallet().db().enhance_pir_work().unwrap();
+    let txid = send.block.vtx[0].txid();
+    send.st
+        .wallet()
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER fail_unmine BEFORE UPDATE OF mined_height ON transactions
+         WHEN NEW.mined_height IS NULL
+         BEGIN SELECT RAISE(ABORT, 'injected rewind failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        send.st
+            .wallet_mut()
+            .db_mut()
+            .truncate_to_height(send.funding_height - 1)
+            .is_err()
+    );
+    assert_eq!(send.st.wallet().db().enhance_pir_work().unwrap(), before);
+    assert!(is_protected(send.st.wallet().conn(), txid).unwrap());
+    assert!(send.queued());
+    assert!(
+        !send
+            .st
+            .wallet()
+            .db()
+            .transaction_data_requests()
+            .unwrap()
+            .contains(&TransactionDataRequest::Enhancement(txid))
+    );
 }

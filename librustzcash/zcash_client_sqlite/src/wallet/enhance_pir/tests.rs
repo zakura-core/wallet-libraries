@@ -528,9 +528,10 @@ fn explicit_mixed_scan_discards_all_work_but_keeps_recovered_data() {
 }
 
 #[test]
-fn reorg_prunes_private_work_but_retains_lwd_decisions() {
+fn reorg_prunes_positions_but_retains_protection_and_lwd_decisions() {
+    use crate::testing::db::{test_clock, test_rng};
     for mixed in [false, true] {
-        let (mut st, tx_ref, request) = fixture();
+        let (mut st, tx_ref, request) = fixture_with_factory(TestDbFactory::file_backed());
         if mixed {
             require_lwd(st.wallet().conn(), tx_ref).unwrap();
         }
@@ -558,7 +559,45 @@ fn reorg_prunes_private_work_but_retains_lwd_decisions() {
             )
             .optional()
             .unwrap();
-        assert_eq!(route, mixed.then_some(LWD_REQUIRED));
+        assert_eq!(
+            route,
+            Some(if mixed {
+                LWD_REQUIRED
+            } else {
+                PRIVATE_PROTECTED
+            })
+        );
+        for mode in [EnhancementMode::PrivateIronwood, EnhancementMode::Standard] {
+            st.wallet_mut().db_mut().set_enhancement_mode(mode);
+            let expected = mixed || mode == EnhancementMode::Standard;
+            assert_eq!(visible(&st, request), expected);
+            st.wallet_mut()
+                .db_mut()
+                .transactionally(|db| {
+                    assert_eq!(
+                        db.transaction_data_requests()?.contains(
+                            &TransactionDataRequest::Enhancement(request.request_id().txid())
+                        ),
+                        expected
+                    );
+                    Ok::<_, SqliteClientError>(())
+                })
+                .unwrap();
+            let reopened = crate::WalletDb::for_path(
+                st.wallet().data_file_path(),
+                *st.network(),
+                test_clock(),
+                test_rng(),
+            )
+            .unwrap()
+            .with_enhancement_mode(mode);
+            assert_eq!(
+                reopened.transaction_data_requests().unwrap().contains(
+                    &TransactionDataRequest::Enhancement(request.request_id().txid())
+                ),
+                expected
+            );
+        }
         assert_eq!(
             st.wallet_mut()
                 .db_mut()

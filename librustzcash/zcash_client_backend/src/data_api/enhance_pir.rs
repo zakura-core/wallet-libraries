@@ -117,6 +117,8 @@ pub enum EnhancementMode {
     /// Protection is transaction-wide, but only pure-Ironwood compact transactions are eligible.
     /// Mixed-pool transactions remain on standard transaction-ID enhancement. Status requests and
     /// enhancement of other, unprotected transactions remain available.
+    /// Protection survives rewinds and private completion independently of pending work;
+    /// removing transaction history must also remove its retrieval intents.
     ///
     /// A positive transparent-presence flag routes the whole transaction to LWD.
     /// Errors never trigger fallback. Disabling this mode exposes outstanding ordinary

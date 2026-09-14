@@ -31,8 +31,10 @@ use super::{TxQueryType, get_account, memo_repr, orchard::parse_note_version};
 pub(crate) mod discovery;
 
 // A route is transaction-wide. LwdRequired is sticky, including across rescans.
-// No row means ordinary enhancement; completion is derived from the queues.
-const PRIVATE_CANDIDATE: i64 = 0;
+// PrivateProtected survives completion and rewinds; only an explicit LWD decision or
+// transaction deletion with retrieval-intent cleanup ends protection. No row retains
+// ordinary enhancement semantics for unclassified and legacy transactions.
+const PRIVATE_PROTECTED: i64 = 0;
 const LWD_REQUIRED: i64 = 1;
 
 type PendingOutgoingRow = ([u8; 32], u32, [u8; 32], [u8; 32], [u8; 32], [u8; 52]);
@@ -449,7 +451,7 @@ fn queue_transaction(
         conn.execute(
             "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (:tx, :route)
              ON CONFLICT(transaction_id) DO NOTHING",
-            named_params![":tx": tx_ref.0, ":route": PRIVATE_CANDIDATE],
+            named_params![":tx": tx_ref.0, ":route": PRIVATE_PROTECTED],
         )?;
     }
     // No route + no work is not proof of completion. A previously completed

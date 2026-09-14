@@ -753,11 +753,11 @@ pub(crate) fn delete_account(
         }
     }
 
-    // Delete all transaction information that is solely linked to this account. This
-    // effectively reverts the wallet state for this account to the time before its
-    // viewing keys and transparent addresses had been used to scan for information.
-    conn.execute(
-        r#"
+    // Materialize ownership before cascades change the received-output views. Requests
+    // are keyed by txid, so deleting a transaction does not remove its own intent.
+    let exclusive_transactions = {
+        let mut stmt = conn.prepare(
+            r#"
         WITH account_transactions AS (
             SELECT ro.transaction_id
             FROM v_received_outputs ro
@@ -780,16 +780,43 @@ pub(crate) fn delete_account(
             JOIN accounts sa ON sa.id = ros.account_id
             WHERE sa.uuid != :account_uuid
         )
-        DELETE FROM transactions WHERE id_tx IN (
+        SELECT id_tx, txid FROM transactions WHERE id_tx IN (
             SELECT transaction_id FROM account_transactions
             EXCEPT
             SELECT transaction_id FROM non_account_transactions
         )
         "#,
-        named_params![
-            ":account_uuid": account_uuid.0,
-        ],
+        )?;
+        stmt.query_map(named_params![":account_uuid": account_uuid.0], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+
+    // A request needed by a remaining account must not cascade with a deleted
+    // dependency. Unknown predecessors needed only by the deleted account still cascade.
+    let mut detach = conn.prepare_cached(
+        "UPDATE tx_retrieval_queue SET dependent_transaction_id = NULL
+         WHERE dependent_transaction_id = :tx AND txid IN (
+             SELECT t.txid FROM transactions t
+             JOIN v_received_outputs ro ON ro.transaction_id = t.id_tx
+             JOIN accounts a ON a.id = ro.account_id WHERE a.uuid != :account_uuid
+             UNION
+             SELECT t.txid FROM transactions t
+             JOIN v_received_output_spends ros ON ros.transaction_id = t.id_tx
+             JOIN accounts a ON a.id = ros.account_id WHERE a.uuid != :account_uuid
+         )",
     )?;
+    let mut delete_intent =
+        conn.prepare_cached("DELETE FROM tx_retrieval_queue WHERE txid = :txid")?;
+    for (id, txid) in &exclusive_transactions {
+        detach.execute(named_params![":tx": id, ":account_uuid": account_uuid.0])?;
+        delete_intent.execute(named_params![":txid": txid])?;
+    }
+    let mut delete_tx = conn.prepare_cached("DELETE FROM transactions WHERE id_tx = :tx")?;
+    for (id, _) in exclusive_transactions {
+        delete_tx.execute(named_params![":tx": id])?;
+    }
 
     // At this point, the only information remaining about the account is its entry in the
     // accounts table and its addresses; delete them. Any in-progress pool migration for this
@@ -4248,18 +4275,27 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         named_params![":height": u32::from(truncation_height)],
     )?;
 
-    // Drop private position claims before un-mining. A transaction's positive
-    // mixed-pool decision remains sticky even when its tree positions move.
+    // Routing is durable policy, including while unmined. Preserve reconstruction
+    // intent before dropping position claims: retained spend links may be replayed
+    // without being newly inserted. Discovery derives its anchor from current mined
+    // metadata, so these obligations remain inactive until the transaction is re-mined.
+    // This SQL also runs in builds without PIR support.
     conn.execute(
-        "DELETE FROM ironwood_enhance_discovery_queue
-         WHERE transaction_id IN (SELECT id_tx FROM transactions WHERE mined_height > :height)",
-        named_params![":height": u32::from(truncation_height)],
-    )?;
-    conn.execute(
-        "DELETE FROM ironwood_enhance_routing
-         WHERE route = 0 AND transaction_id IN (
-             SELECT id_tx FROM transactions WHERE mined_height > :height
-         )",
+        "INSERT INTO ironwood_enhance_discovery_queue (transaction_id, suspended)
+         SELECT t.id_tx, NOT EXISTS (
+             SELECT 1 FROM ironwood_received_note_spends s
+             JOIN ironwood_received_notes rn ON rn.id = s.ironwood_received_note_id
+             WHERE s.transaction_id = t.id_tx AND rn.nf IS NOT NULL
+         )
+         FROM transactions t
+         JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
+         WHERE t.mined_height > :height AND t.raw IS NULL AND r.route = 0
+           AND (
+             EXISTS (SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = t.id_tx)
+             OR EXISTS (SELECT 1 FROM ironwood_enhance_outgoing_queue WHERE transaction_id = t.id_tx)
+             OR EXISTS (SELECT 1 FROM ironwood_received_note_spends WHERE transaction_id = t.id_tx)
+           )
+         ON CONFLICT(transaction_id) DO UPDATE SET suspended = excluded.suspended",
         named_params![":height": u32::from(truncation_height)],
     )?;
     conn.execute(
@@ -7784,7 +7820,7 @@ mod tests {
 #[cfg(all(test, feature = "orchard", not(feature = "zakura-pir-enhance")))]
 #[test]
 #[ignore = "invoked by scripts/verify-pir-feature-transition.sh"]
-fn delete_account_without_pir() {
+fn maintain_wallet_without_pir() {
     use crate::testing::db::{test_clock, test_rng};
     use zcash_client_backend::data_api::{WalletWrite, testing::TestBuilder};
     use zcash_protocol::local_consensus::LocalNetwork;
@@ -7806,11 +7842,16 @@ fn delete_account_without_pir() {
     init::WalletMigrator::new()
         .init_or_migrate(&mut db)
         .unwrap();
-    db.delete_account(AccountUuid::from_uuid(
-        std::env::var("PIR_TRANSITION_ACCOUNT")
-            .unwrap()
-            .parse()
-            .unwrap(),
-    ))
-    .unwrap();
+    if let Ok(height) = std::env::var("PIR_TRANSITION_REWIND_HEIGHT") {
+        db.truncate_to_height(BlockHeight::from_u32(height.parse().unwrap()))
+            .unwrap();
+    } else {
+        db.delete_account(AccountUuid::from_uuid(
+            std::env::var("PIR_TRANSITION_ACCOUNT")
+                .unwrap()
+                .parse()
+                .unwrap(),
+        ))
+        .unwrap();
+    }
 }
