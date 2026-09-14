@@ -1,368 +1,287 @@
-# Ironwood-only Enhance PIR
+# Enhance PIR wallet integration
 
-This integration privately retrieves missing Ironwood memos and recovers outgoing
-recipient, value, and memo data. It deliberately does not implement transparent
-PIR, transparent spentness discovery, UTXO gating, or a new compact-block format.
-Any transaction known to contain transparent, Sapling, or Orchard activity uses
-ordinary lightwalletd (LWD) enhancement for the whole transaction.
+Enhance PIR lets a wallet retrieve missing Ironwood memos, recover outgoing
+recipients, amounts, and memos, and populate transaction fee and expiry metadata
+without sending the selected transaction ID to the PIR service. It operates on
+transactions provisionally identified as Ironwood-only. Transactions known to
+contain transparent, Sapling, or Orchard activity use ordinary lightwalletd (LWD)
+enhancement.
 
-Compact transparent scanning is outside this integration's scope. Its information
-can be supplied at the scan-time eligibility boundary.
+PIR hides which record the wallet requests within a query domain. It does not
+hide service contact, timing, query volume, or coarse shard routing.
+Transaction-shape flags, fees, and expiry heights are trusted service metadata;
+note decryption does not authenticate those fields.
 
-## Transaction routing
+## Architecture
 
-The database stores at most one routing row per transaction:
+Compact scanning records received notes and identifies transactions eligible for
+private enhancement. Wallet storage maintains their routing and durable work for
+incoming memos, outgoing recovery, transaction metadata, and outgoing discovery.
+The application reads this work, fetches records through the PIR client or compact
+blocks through its normal download path, and passes responses back to the wallet.
 
-| State | Ordinary enhancement in private mode | Private work |
+The PIR client queries records by Ironwood commitment-tree position within an
+immutable snapshot generation. Before connecting, the application checks that
+generation against locally scanned chain state and its own resource limits.
+Each wallet request captures a position, transaction ID, and action index before
+network I/O. Only the position selects the PIR item; the transaction and action
+identities remain local.
+
+The backend validates responses against scanned wallet data. Incoming decryption
+must reproduce the scanned V3 note. Outgoing records must match the scanned
+ephemeral key and compact ciphertext prefix; outgoing plaintext is accepted only
+if exactly one funding account's outgoing viewing key (OVK) recovers it. SQLite
+keeps validation, identity rechecks, and all resulting writes in one transaction.
+A response from before a reorg cannot modify a new occupant of the same tree
+position.
+
+### Routing and completion
+
+Routing applies to the entire transaction:
+
+| Stored state | Ordinary enhancement in private mode | Private work |
 | --- | --- | --- |
 | No row | Available | None |
-| `PrivateCandidate` | Withheld | Incoming memos, outgoing candidates, and pending rediscovery |
+| `PrivateCandidate` | Withheld | Incoming, outgoing, metadata, and discovery obligations |
 | `LwdRequired` | Available | Cleared for the entire transaction |
 
-`PrivateCandidate` is provisional, not a claim that transparent activity has
-been cryptographically ruled out. Completion requires empty incoming, outgoing, metadata,
-and discovery queues; there is no separate completed state. Later-discovered
-funding can reopen enhancement even after earlier private completion.
+Eligibility is provisional. The compact source must include all shielded pools;
+a stream filtered to Ironwood cannot establish it safely. Explicit transparent
+inputs or outputs, Sapling spends or outputs, or Orchard actions exclude a
+transaction. Empty compact `vin` and `vout` fields do not prove transparent
+absence.
 
-Scanning stores all received notes, then reconciles private work once per wallet
-transaction. An explicit transparent input/output, Sapling spend/output, or
-Orchard action excludes the transaction. The compact source must include all
-shielded pools: a stream filtered to Ironwood cannot safely establish eligibility.
+For an otherwise eligible transaction, the wallet consults the PIR record's
+transparent-presence flags after binding the record to pending wallet state.
+Either flag being set marks the transaction `LwdRequired`, clears its private
+work, and preserves its ordinary enhancement request. For example, a shielding
+transaction whose compact representation omitted transparent inputs initially
+looks eligible; the record's input flag then routes it to LWD.
 
-An empty compact `vin`/`vout` does **not** establish transparent absence. For an
-otherwise eligible transaction, the wallet privately fetches an Ironwood record
-and consults its schema-v7 transparent-presence flags:
+This LWD decision is sticky across rescans and reorgs. It does not erase previously
+recovered memos or sent outputs. Invalid or stale responses and transport errors
+leave routing unchanged and never cause public fallback.
 
-- Either input or output flag set: atomically mark the transaction `LwdRequired`,
-  clear all its pending private work, and preserve its ordinary enhancement
-  request. The existing LWD path obtains the full transaction and handles its
-  transparent and other-pool data.
-- Both flags clear: apply the validated Ironwood data. Retire the dormant ordinary
-  enhancement request only after every incoming, outgoing, metadata, and discovery queue
-  entry completes.
-- Invalid, misaddressed, or stale record: no mutation and no public fallback.
-  Transport failures also leave routing unchanged.
+Private completion requires every incoming, outgoing, metadata, and discovery
+obligation to finish, including suspended work. Storage then retires ordinary
+enhancement intent while preserving transaction-status intent. There is no
+separate completed routing state, and later funding discovery can reopen work.
 
-For example, a shielding transaction with transparent inputs and an Ironwood
-output initially looks eligible if LWD omitted its transparent fields. The
-record for the received Ironwood note reports the input flag; the wallet then
-requests that transaction through ordinary LWD. An Ironwood spend paying a
-transparent output follows the same transaction-wide rule using the output flag.
+### Trust and privacy limits
 
-`LwdRequired` is sticky for that transaction ID, including across rescans and
-reorgs. A late response with false flags cannot re-protect it. Already recovered
-memos and sent outputs are not erased by fallback.
+Action validation authenticates note data, not the service's transaction-shape
+flags. A malicious service can force a transaction-ID fallback with a false
+positive or suppress needed transparent enhancement with a false negative.
+Schema 7 does not prove transaction shape against a malicious server.
 
-## Trust and privacy boundary
+Fees and expiry heights are also trusted metadata. After action binding, storage
+fills unknown values atomically with action work; conflicting known values reject
+the response. A zero fee is a known value, and expiry zero means expiry is
+disabled. Responses that require transparent fallback do not populate fee or
+expiry metadata. Full-transaction storage remains authoritative.
 
-The two transparent flags are **trusted service metadata**. Note decryption does
-not authenticate them, prove transparent absence, or bind them to the transaction
-ID. This is an explicitly accepted limitation of schema v7: a malicious service
-can force a txid fallback with a false positive, or suppress needed transparent
-enhancement with a false negative. The design does not provide a malicious-server-secure
-proof of transaction shape.
+The integration adds no cover traffic. Existing transaction-status requests and
+transparent queries remain unchanged, and mixed-transaction fallback exposes
+the transaction ID to LWD. Fetching a particular compact block for rediscovery
+also reveals interest in its height. These are limits on enhancement privacy;
+this integration does not provide end-to-end wallet network privacy.
 
-The response must nevertheless match pending wallet state before flags can alter
-routing. Incoming decryption must reproduce the scanned V3 note. Outgoing records
-must match the scanned ephemeral key and compact ciphertext prefix; outgoing
-plaintext is accepted only if exactly one funding account's OVK recovers it.
-Those checks authenticate note data, not the extra shape flags.
+## Wallet integration
 
-Every request captures `(tree position, txid, action index)` locally before
-network I/O. Only the position selects the PIR item; the txid/action identity is
-never sent to the service. A single backend application validates both incoming
-and outgoing work, then a single SQL transaction rechecks the queue identities
-before applying any data or routing change. Reorgs, full-transaction arrival,
-duplicate replies, and another reply's fallback cannot make an old response
-mutate a new position occupant.
+### 1. Enable the feature and configure each database handle
 
-PIR hides the selected item within its query domain, not service contact,
-coarse shard routing, timing, or query volume. There is no cover traffic.
-Ordinary transaction-status requests and existing transparent queries are
-unchanged; this is enhancement privacy, not end-to-end wallet network privacy.
-Mixed-transaction fallback intentionally exposes the transaction ID to LWD.
+Compile with the `zakura-pir-enhance` Cargo feature whether the runtime preference
+is on or off. The facade feature enables the backend and SQLite APIs. Add the
+`zakura-pir-enhance` client crate for network queries; its default
+`https-client` feature provides the Reqwest client. Custom transports can use
+`QuerySession`.
 
-## Outgoing recovery and incomplete work
-
-Wallet-funded transactions queue every action except same-account change for
-outgoing recovery. Cross-account wallet payments also need outgoing recovery to
-restore the sender’s recipient, value, and memo, alongside the receiver’s incoming
-note. Change uses incoming decryption, avoiding an unrecoverable outgoing job for
-change encrypted under an internal OVK.
-
-An outgoing record may match compact fields but fail OVK recovery because it is
-a dummy, uses `OvkPolicy::Discard`, or contains corrupt server-supplied fields.
-The wallet cannot distinguish these cases. It marks the row `not_recoverable`
-and stops automatic retries, but retains the row as incomplete. Other successful
-actions must not erase its ordinary fallback.
-
-An explicit rescan requeues suspended candidates, using rediscovery when its
-funding nullifiers are already marked spent. Disabling private mode exposes
-outstanding ordinary enhancement requests. Neither non-recovery nor an error
-automatically causes public fallback.
-
-### Out-of-order scanning and retroactive funding
-
-Recent-first restores can scan a send before its funding note. The initial scan
-may find only change and cannot yet enumerate outgoing recovery accounts. When
-nullifier-map lookup later links the funding note to the send, the same SQL
-transaction repairs internal change flags for the linked funding accounts,
-queues durable outgoing discovery, and restores its ordinary
-Enhancement request, even if a completed change memo previously retired it.
-The request remains withheld in private mode. Scan order does not require LWD.
-
-Discovery reconstructs action positions and compact validation fields from the
-spending block, using the current database spend associations, including already
-spent notes. It excludes actions marked `is_change` and previously recovered sent
-outputs. Additional funding accounts reopen discovery and retry suspended OVK
-recovery. An ordinary rescan cannot silently replace this obligation with an
-empty candidate list just because the scanner loads only unspent nullifiers.
-After a rewind, rescanning a retained spend link also restores discovery if its
-private routing was cleared; repeated funding scans with intact routing remain inert.
-
-Block identity, tree geometry, transaction locators, known received positions,
-and funding nullifiers are checked before any queue changes. Invalid block-wide
-identity, ordering, or tree geometry rejects the entire call without mutation.
-Reconstructed outgoing positions must not belong to another transaction, even
-when the reconstructed transaction is mixed-pool. A conflict rejects the entire
-call before any routing or queue changes.
-Tree geometry requires the preceding block's Ironwood tree size in local metadata;
-at a scan-range boundary, retain or scan that predecessor before reconstruction.
-Jobs are not advertised for automatic reconstruction until both the spending
-block's ending size and that predecessor anchor are available.
-Transaction-local failures do not block independently valid jobs at the same
-height: valid plans commit together, while failed jobs retain their intent and
-return individual reasons (`TransactionMissing` or `ContextMismatch`). A missing
-txid in a supplied block is not evidence that the job can be deleted. SQL errors
-still roll back every write in the call.
-
-The block must come from the same trusted compact source as normal scanning:
-comparing its claimed hash does not cryptographically authenticate compact
-contents. Discovery errors never trigger public fallback. Full transaction
-storage, positive mixed routing, and rewinds clear obsolete jobs.
-
-Deleting an account cascades transactions that exclusively involved it. For
-shared transactions that survive, discovery jobs with no remaining funding
-associations are atomically marked suspended. They are excluded from automatic
-block requests and active reconstruction, so they cannot block another job in
-the same block. Defensive reconstruction also suspends any active orphan it
-encounters. Losing keys does not prove outgoing recovery complete: the suspended
-job still prevents retirement, preserves private protection, and keeps ordinary
-Enhancement intent available if the user disables private mode. Applications can
-read its `NoFundingAccounts` reason through
-the `Suspended(Discovery(...))` entries of `enhance_pir_work()`. The same API reports
-`AnchorUnavailable` for an otherwise active job waiting for the spending block
-and its predecessor's tree-size metadata; regular scanning makes that job
-requestable without changing its queue row. Linking another funding note reactivates
-an existing `NoFundingAccounts` job. Reimporting a deleted funding key rewinds the
-wallet; rescanning the funding and spending blocks reconstructs the required work.
-Deleting only some funding accounts does not suspend a job that still has funding
-associations. Outgoing jobs with no candidate accounts are retained as
-`OutgoingNotRecoverable` suspensions. Both updates run in the account-deletion
-transaction even when compiled without `zakura-pir-enhance`. Full wallet
-initialization also repairs orphaned jobs left by older builds, atomically and
-without clearing pending enhancement intent.
-
-Run `scripts/verify-pir-feature-transition.sh` to exercise a PIR-enabled database,
-account deletion in a separately compiled PIR-disabled binary, and a PIR-enabled
-reopen.
-
-## Application integration
-
-Compile with the `zakura-pir-enhance` Cargo feature in both runtime setting
-states. The facade's additive feature enables the backend and SQLite APIs.
-The standalone client and backend share `EnhanceRecord` from the small
-`zakura-pir-enhance-types` crate; no record conversion or client integration
-feature is needed.
-
-Both `WalletDb::for_path` and `WalletDb::from_connection` take four arguments,
-independent of Cargo features. With PIR compiled in, configure every new handle
-using `set_enhancement_mode` or the chainable `with_enhancement_mode`, choosing
+Both `WalletDb::for_path` and `WalletDb::from_connection` retain their
+four-argument constructors. Before requesting work, configure each handle with
+`with_enhancement_mode` or `set_enhancement_mode`, choosing
 `EnhancementMode::Standard` or `EnhancementMode::PrivateIronwood`.
-Until configured, both `transaction_data_requests()` and `enhance_pir_work()`
-return `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
+Without configuration, `transaction_data_requests()` and `enhance_pir_work()`
+return `SqliteClientError::EnhancementModeNotConfigured`, even for an empty
+wallet.
 
-Load the application preference before requesting work on every reopened handle;
-the library does not persist a second preference. Transaction wrappers inherit
-the handle's configuration. Enabling PIR transitively preserves constructor source
-compatibility but introduces this runtime configuration requirement to prevent
-accidental public enhancement. Use `set_enhancement_mode` when the preference
-changes, and cancel or discard old in-memory network request batches. A mode
-change cannot recall an already dispatched LWD request.
+Load the application's saved preference on every reopen; the library does not
+persist another copy. Transaction wrappers inherit the handle's configuration.
+When the preference changes, update the mode and cancel or discard old in-memory
+network batches before scheduling more work. An already dispatched LWD request
+cannot be recalled.
 
-Read `EnhancePirRead::enhance_pir_work()` after scanning and on reopening. One
-consistent read reports active and suspended obligations from the independent
-queues, ordered as rediscovery by height, queries by position, discovery
-suspensions by transaction location/identity, then outgoing suspensions by
-position/identity. Enumeration remains available in either mode; schedule
-private network work when the application enables private mode.
+Continue obtaining ordinary work through `transaction_data_requests()`. Storage
+withholds protected enhancement requests in private mode while leaving other
+ordinary work available. Disabling private mode exposes unfinished ordinary
+enhancement requests, including transactions with suspended private work.
 
-Handle each `EnhancePirWork` variant:
+### 2. Accept a snapshot generation before allocating PIR setup
 
-- `Query(request)`: query only its position with the PIR client, then call
-  `db.apply_ironwood_enhance_record(request, &record)` through `EnhancePirWrite`.
-  Keep the original request across network I/O; never reconstruct its identity
-  after receiving a response. Record decoding rejects reserved flag bits but
-  does not authenticate the record. The wallet binds and validates it before
-  changing note data or routing.
-- `Rediscover(request)`: read the compact block from the cache or the ordinary
-  download path, then call `rebuild_ironwood_enhancement(request, &block)`.
-  Requests are grouped by height and locally scanned block hash. Successful
-  reconstruction queues position queries or routes mixed transactions to LWD;
-  reread work after applying it. `Rejected` changes nothing, while
-  `Incomplete { rebuilt, unresolved }` reports transaction-local failures and
-  partial progress. Retry according to application policy, without repeatedly
-  feeding invalid cached data in a tight loop.
-- `Suspended(Discovery(failure))`: surface missing funding associations or
-  adjacent tree metadata as incomplete. Funding linkage reactivates
-  `NoFundingAccounts`; normal scanning can resolve `AnchorUnavailable`.
-  Repeatedly downloading the spending block is not the remedy.
-- `Suspended(OutgoingNotRecoverable(request))`: outgoing recovery failed and
-  the durable action remains incomplete, including after reopening. Do not
-  automatically query it again. New funding or scanning may reactivate it;
-  disabling private mode exposes its ordinary enhancement request.
+With the HTTPS client:
 
-Suspensions are returned alongside active work. A transaction can have multiple
-independent obligations; having no active queries does not mean enhancement is
-complete. `AlreadyResolved` applies only to the supplied request, not the wallet
-as a whole. Retryable `TransactionMissing` and `ContextMismatch` reconstruction
-failures remain active work and are reported by the reconstruction result.
+1. Call `EnhancePirClient::fetch_session(base_url)` to obtain a
+   `PendingEnhancePirClient`, then inspect `generation()`.
+2. Build an `EnhancePirSnapshotAnchor` from its anchor height, block hash, and
+   Ironwood tree size. Call `db.enhance_pir_snapshot_status(anchor)` through
+   `EnhancePirRead`. Proceed only on `Accepted`: the anchor must be within the
+   fully scanned frontier and match local hash and tree-size metadata at that
+   exact height, which need not be the current tip. `NotYetScanned` requires
+   further scanning; `Mismatch` requires resolving the disagreement.
+3. Construct `GenerationAcceptance` with the wallet's network, Enhance PIR
+   activation height, an `AcceptedAnchor` for the checked generation, and
+   `ClientResourceLimits`. Choose the maximum logical row count for the
+   least-capable supported device; never take this limit from server metadata.
+4. Call `pending.connect(&acceptance).await`. The client checks schema,
+   protocol, network, activation height, pinned setup seed, canonical row
+   geometry, resource limits, and public parameters before using the session.
+   Public-parameter decoding and deterministic setup are deferred until
+   acceptance.
 
-Custom storage backends implement the explicit `enhance_pir::storage` contract
-on a transaction-scoped adapter. Its pending context, validation helper, and
-validated commit type are implementation APIs; application traits do not expose
-them. The adapter must keep context reads, validation, identity rechecks, and
-all writes in one consistent transaction. SQLite uses a private adapter and
-rolls back every write on a database error.
+Custom transports use the same `GenerationAcceptance` with `QuerySession`.
+The client uses the atomic `/v1/enhance/init` payload and randomized queries to
+`/v1/enhance/query`, binding requests and responses to one generation. A position
+outside that generation's coverage must wait for a suitable wallet-accepted
+generation; it is not a reason to fall back publicly. See the
+[client implementation](../zakura/pir-enhance/src/client.rs) for acceptance and
+transport APIs.
 
-### Application API requirements
+### 3. Process durable work
 
-The Rust API has these integration requirements:
+Read `EnhancePirRead::enhance_pir_work()` after scanning and on reopening.
+Enumeration is available in either configured mode; schedule private network
+work when the application enables private mode.
 
-- Enumerate work with one match over `enhance_pir_work()`.
-- Use four-argument database constructors and configure each handle with
-  `with_enhancement_mode` or `set_enhancement_mode` before requesting work.
-- Do not rely on `EnhancementMode::default()`.
-- Pass the shared record directly to the backend write method; the client has no
-  `wallet-integration` feature, `wallet_record`, or `apply_record` API.
-- Construct records with `EnhanceRecord::from_parts(EnhanceRecordParts { ... })`.
-  Byte decoding uses
-  fallible `EnhanceRecord::from_bytes`; flag accessors are infallible.
-- Custom scanners attach `IronwoodEnhancementPlan::Ineligible` or
-  `Eligible { outgoing }` through `with_ironwood_enhancement_plan`. An empty
-  outgoing list is valid eligibility, not proof of durable completion.
+The following Rust-style pseudocode shows one scheduling pass.
+`compact_blocks` and `scheduler` represent application-owned cache, transport,
+result handling, and retry policy, not library APIs. Imports, error handling,
+and cancellation checks are omitted.
 
-Schema 7 requires the consolidated Ironwood enhancement database migration, an Enhance PIR server
-update, and a canonical snapshot rebuild. Servers and clients must both use schema 7.
-Backend builds depend on the shared record crate.
+```rust
+for work in db.enhance_pir_work()? {
+    match work {
+        EnhancePirWork::Query(request) => {
+            let record = pir.query_position(u64::from(request.position())).await?;
+            let result = db.apply_ironwood_enhance_record(request, &record)?;
+            scheduler.handle_query_result(request, result);
+        }
+        EnhancePirWork::Rediscover(request) => {
+            let block = compact_blocks.get(request.height, request.block_hash).await?;
+            let result = db.rebuild_ironwood_enhancement(request, &block)?;
+            scheduler.handle_discovery_result(request, result);
+        }
+        EnhancePirWork::Suspended(reason) => {
+            scheduler.report_incomplete(reason);
+        }
+    }
+}
+```
 
-Prefer cache reuse and normal batched downloads. Downloading a specific missing
-block reveals interest in its height even though no target txid is sent. The
-library performs no network I/O or automatic retries for this step.
+Keep the original `Query` request across network I/O. Never reconstruct its
+identity from current wallet state when a response arrives, and never send the
+local request identity to the service. The client and backend share
+`EnhanceRecord` from `zakura-pir-enhance-types`; pass it directly to
+`EnhancePirWrite::apply_ironwood_enhance_record` without conversion.
 
-The application owns scheduling, retries, cancellation, transport, and user-facing
-incomplete-work status.
+`Rediscover` requests are grouped by height and locally scanned block hash.
+Obtain the block from the same trusted compact source used for scanning,
+preferably from the cache or normal batched downloads. Matching the claimed
+block hash checks branch identity; it does not cryptographically authenticate
+the compact contents. The library performs no network I/O or automatic retries
+for rediscovery.
 
-The database maintains routing and work regardless of runtime mode. Successful
-private completion removes only enhancement intent, not transaction-status intent.
-Turning PIR off exposes unfinished transactions; completed transactions remain
-retired unless new funding reopens discovery. Full transaction storage clears
-redundant private work. Rewinds prune
-private position claims before positions can be reused, while preserving positive
-LWD decisions.
+Reread work after applying results: reconstruction can create queries or route
+mixed transactions to LWD. Schedule another pass according to progress and retry
+policy, rather than immediately repeating unchanged or invalid work.
 
-## Protocol and generation acceptance
+### 4. Handle results and suspensions
 
-The schema-v7 record is 737 bytes: 32-byte ephemeral key, 580-byte note
-ciphertext, 32-byte net value commitment, 80-byte outgoing ciphertext, a flag
-byte at offset 724, a four-byte little-endian expiry height at offset 725, and an
-eight-byte little-endian fee at offset 729. Bit 0 means transparent inputs, bit 1
-transparent outputs, and bit 2 a present fee. Other bits are rejected. An absent
-fee must have a zero payload; a present zero fee is distinct. Expiry zero means
-expiry is disabled, not unknown. Nine records form a 6,633-byte row.
+| Result or work item | Application behavior |
+| --- | --- |
+| Query `Stored` | Reread work; this action's result does not establish transaction-wide completion. |
+| `AlreadyResolved` | Discard this stale or redundant request; other active or suspended work may remain. |
+| Query `LwdRequired` | Let the ordinary request path enhance the transaction through LWD. |
+| Query `NotRecoverable` / `Suspended(OutgoingNotRecoverable(...))` | Report incomplete outgoing recovery without automatic retries. New funding or a rescan may reactivate it. |
+| `Rejected` or transport error | Keep pending work and routing intact. Retry only under application policy; never fall back publicly because of the error. |
+| Rediscovery `Rebuilt(...)` | Reread work to obtain reconstructed queries or ordinary enhancement requests. |
+| Rediscovery `Incomplete { rebuilt, unresolved }` | Preserve successful progress and handle unresolved `TransactionMissing` or `ContextMismatch` jobs individually; they remain retryable. |
+| Discovery suspension: `NoFundingAccounts` | Wait for funding associations to be restored; downloading the block again does not resolve the missing accounts. |
+| Discovery suspension: `AnchorUnavailable` | Scan or retain the spending block and its predecessor's tree-size metadata before reconstruction. |
 
-The client pins the setup seed, validates generation metadata and the
-public-parameter digest, and binds queries and responses to one immutable
-generation. Use the atomic `/v1/enhance/init` payload and randomized,
-generation-pinned `/v1/enhance/query` requests. A shard's `worker` is an opaque
-logical group identifier; replicas and failover are service concerns.
+A transaction can have several independent obligations. Suspensions appear
+alongside active work, so an empty set of active queries does not establish
+completion. Invalid block-wide identity or geometry rejects the whole
+rediscovery call without mutation; transaction-local failures can coexist with
+successful jobs. Database errors roll back all writes in that call.
 
-Before allocating setup, accept a generation only when:
+Outgoing recovery covers wallet-funded actions except same-account change,
+which uses incoming decryption. Cross-account wallet payments need both sender
+recovery and receiver decryption. Failure to recover outgoing plaintext can
+mean a dummy action, `OvkPolicy::Discard`, or corrupt service data; the wallet
+cannot distinguish them and retains the obligation as incomplete. Recovering
+metadata does not complete suspended outgoing work.
 
-- its anchor is at or below the wallet's fully scanned frontier;
-- its exact block hash and Ironwood tree size match local metadata **at that
-  anchor**, not necessarily at the wallet's current tip;
-- its used/logical row counts have the canonical geometry for that tree size;
-- its logical row count fits a locally configured resource limit.
+### 5. Support restores and wallet lifecycle changes
 
-With the HTTPS client, fetch a `PendingEnhancePirClient`, inspect its generation,
-check `enhance_pir_snapshot_status`, and pass wallet-accepted
-`GenerationAcceptance` plus `ClientResourceLimits` to `connect`.
-Custom transports use the same acceptance with `QuerySession`.
-Choose limits for the least-capable supported device, never from server fields.
-Public-parameter decoding and deterministic setup remain deferred until acceptance.
+A recent-first restore can scan a send before its funding note. When scanning
+later links funding to that send, storage repairs change classification, queues
+outgoing rediscovery, and restores ordinary enhancement intent if needed. The
+request remains withheld in private mode. Reconstruction uses current durable
+funding associations, including spent notes, and requires tree-size metadata
+for the spending block and its predecessor.
 
-## Database migration and scope
+Pending and suspended work survives reopening. Explicit rescans can requeue
+suspended outgoing candidates; additional funding can reactivate recovery and
+discovery. Rewinds invalidate position bindings before positions are reused.
+Full-transaction storage clears redundant private work.
 
-The single `ironwood_enhance` migration creates all six feature tables: incoming
-memo work, outgoing work, outgoing candidate accounts, transaction routing,
-outgoing discovery, and transaction metadata work. It depends on both Ironwood
-received notes and transaction-status observation intent. Every feature table starts
-empty: existing ordinary history continues through LWD until explicitly rescanned.
-Enabling the setting alone does not privatize old history.
+Account deletion removes transactions exclusive to that account. For surviving
+transactions, jobs that lose all funding associations remain suspended and
+protected; losing a key does not prove recovery complete. Linking funding again
+reactivates discovery. Reimporting a deleted funding key rewinds the wallet, and
+rescanning rebuilds the necessary work. Account-deletion cleanup also runs in
+PIR-disabled builds; the
+[feature-transition check](../scripts/verify-pir-feature-transition.sh) exercises
+that path and a subsequent PIR-enabled reopen.
 
-The consolidated migration is the sole schema definition for these feature tables.
-The library does not delete or reset application databases. Tests use temporary
-databases and do not modify an application wallet.
+### 6. Use recovered history data and migrate existing wallets
 
-Compact scanning can supply more explicit transparent information to the existing
-eligibility decision. Transparent discovery/PIR, variable-length
-address history, and private transparent spentness remain separate designs. No
-compact-block or service changes are required by this integration.
+Recovered fees and expiry heights populate `transactions.fee` and
+`transactions.expiry_height` for the existing history API. PIR does not retrieve
+raw transactions: `get_transaction()` returns `None` when
+`transactions.raw` is absent. Raw export and parsed inspection remain
+unavailable for those transactions.
 
-## Schema-7 fee and expiry metadata
+Run the normal wallet migrations. The
+[`ironwood_enhance` migration](../librustzcash/zcash_client_sqlite/src/wallet/init/migrations/ironwood_enhance.rs)
+creates the feature tables empty, including in PIR-disabled builds. Existing
+ordinary history continues through LWD until explicitly rescanned; enabling the
+setting alone does not privatize it. Rescanning an eligible mined transaction can
+queue missing fee and expiry metadata while retaining an already recovered memo.
+No application database reset is required.
 
-`EnhanceRecordParts` requires `metadata: EnhanceTransactionMetadata`. Construct
-it with `EnhanceTransactionMetadata::new(expiry_height, fee_zatoshis)`; the constructor
-rejects heights at or above 500,000,000 and fees above the monetary range.
-Byte decoding also rejects reserved flags and noncanonical absent-fee payloads.
-The two clients require schema 7, protocol `ironwood-enhance-pir-v2`, and its pinned
-setup seed. They do not fall back publicly on errors.
+### Compatibility and extension points
 
-The indexer derives a pure Ironwood transaction's actual fee from its public value
-balance. These fields are trusted service metadata, like shape flags; note decryption
-does not authenticate them. After action binding and current-identity checks, storage
-fills fee and expiry atomically with action work. Conflicting known values reject the
-whole response. Full-transaction storage remains authoritative.
+Clients and servers must use schema 7 and protocol `ironwood-enhance-pir-v2`.
+Moving to schema 7 requires the wallet migration, a compatible Enhance PIR server
+update, and a canonical snapshot rebuild. This integration introduces no new
+compact-block format. Transparent PIR, spentness discovery, and UTXO gating
+remain outside its scope.
 
-Custom storage adapters implement `EnhancePirStorage::ironwood_transaction_metadata`
-and `compare_and_apply_ironwood_enhancement`. Shared validation rejects disagreement
-with known fee or expiry, including known zeros, before calling the commit operation.
-The validated response carries `expected_metadata`; commit must compare that exact
-snapshot, fill only unknown fields, and apply all action/queue effects atomically.
-A changed snapshot returns `Rejected` without consuming work; callers can validate
-again against fresh context. Transparent responses retain LWD routing and neither
-compare nor store fee/expiry. A separate metadata commit would violate this contract.
+Custom scanners attach `IronwoodEnhancementPlan::Ineligible` or
+`Eligible { outgoing }` through `with_ironwood_enhancement_plan`. An empty
+outgoing list expresses eligibility, not completion of durable work. Consult the
+[backend application API](../librustzcash/zcash_client_backend/src/data_api/enhance_pir.rs)
+for work and result types.
 
-A durable metadata queue retains fee and expiry work independently of memo and
-outgoing recovery. Rescanning an eligible mined transaction queues missing metadata
-even when its memo is already stored; that memo is retained.
-Work enumeration reuses action queries; a metadata-only incoming query validates
-against the stored note even when its memo is complete. Missing outgoing-only
-positions are rebuilt from the trusted compact source through `Rediscover`.
-Metadata reconstruction does not require an outgoing recovery key. Suspended
-outgoing work remains independently incomplete after metadata is stored.
+Custom storage implementations must keep context reads, validation, identity and
+metadata comparisons, and all note, routing, and queue changes in one consistent
+transaction. Follow the
+[transaction-scoped storage contract](../librustzcash/zcash_client_backend/src/data_api/enhance_pir/storage.rs);
+applications using SQLite call `EnhancePirWrite` instead.
 
-The migration and cleanup run in PIR-disabled builds too. Rewinds invalidate position
-bindings; account deletion converts lost incoming bindings into rediscovery work.
-Ordinary unprotected history and sticky LWD routing are not reclassified.
-
-`transactions.fee` and `transactions.expiry_height` feed the existing history API.
-The integration does not retrieve raw transactions: `get_transaction()` returns
-`None` when `transactions.raw` is absent. Raw export and parsed inspection remain
-unavailable for those transactions. History displays can use the populated metadata.
-
-Custom storage implementations implement `pending_ironwood_metadata` and
-consume the named `IronwoodEnhancementData` returned by `into_parts()`. Apply its
-metadata alongside note, route and queue changes; encoding errors use
-`InvalidEnhanceRecord`.
+The shared
+[record definitions](../zakura/pir-enhance-types/src/lib.rs) specify wire layout,
+flags, and metadata validation. Custom record producers use
+`EnhanceRecord::from_parts(EnhanceRecordParts { ... })`; byte decoding uses
+fallible `EnhanceRecord::from_bytes`. Decoding checks encoding, while the wallet
+validates the record against pending state before applying it.
