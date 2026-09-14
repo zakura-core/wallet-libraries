@@ -253,7 +253,7 @@ This is a coordinated Rust API break:
   `Eligible { outgoing }` through `with_ironwood_enhancement_plan`. An empty
   outgoing list is valid eligibility, not proof of durable completion.
 
-Schema 7 requires the metadata-queue database migration, an Enhance PIR server
+Schema 7 requires the consolidated Ironwood enhancement database migration, an Enhance PIR server
 update, and a canonical snapshot rebuild. Schema-6 servers and clients are not
 compatible with this release. The shared record crate must be available before publishing backend
 releases that depend on it.
@@ -306,26 +306,18 @@ Public-parameter decoding and deterministic setup remain deferred until acceptan
 
 ## Upgrade and future scope
 
-The original migration creates four empty tables: incoming queue, outgoing queue,
-outgoing candidate accounts, and transaction routing. Existing ordinary history
-continues through LWD until explicitly rescanned. Enabling the setting alone does
-not privatize old history.
+The single `ironwood_enhance` migration creates all six feature tables: incoming
+memo work, outgoing work, outgoing candidate accounts, transaction routing,
+outgoing discovery, and transaction metadata work. It depends on both Ironwood
+received notes and transaction-status observation intent. Every feature table starts
+empty: existing ordinary history continues through LWD until explicitly rescanned.
+Enabling the setting alone does not privatize old history.
 
-A separate follow-up migration adds the outgoing discovery queue. It also restores
-discovery and ordinary enhancement intent for already protected, mined transactions
-with known Ironwood funding and no full transaction data. This repairs work lost by
-earlier rescans or recent-first restores. Reconstruction skips already recovered
-outputs; private mode continues to withhold these ordinary requests. The migration
-preserves memos, sent outputs, status requests, and sticky LWD routing.
-
-Databases created by PR #20's original four-table migration upgrade in place.
-Unreleased rediscovery prototypes that changed that migration's schema are not an
-upgrade source. Tests use temporary databases and do not modify an application wallet.
-
-The experimental migrations from #18 were not released and are not supported as
-an upgrade source. Development databases created by #18 need an independently
-backed-up/fresh development database for this branch; the library never deletes or
-resets one automatically.
+PR #20 is an unreleased feature, so its intermediate migrations have been consolidated
+under one new migration ID. Development databases created by earlier revisions of
+#20 or the experimental #18 migrations are not upgrade sources; use an independently
+backed-up/fresh development database. The library never deletes or resets one
+automatically. Tests use temporary databases and do not modify an application wallet.
 
 Future upstream compact scanning can supply more explicit transparent information
 to the existing eligibility decision. Transparent discovery/PIR, variable-length
@@ -347,8 +339,9 @@ does not authenticate them. After action binding and current-identity checks, st
 fills fee and expiry atomically with action work. Conflicting known values reject the
 whole response. Full-transaction storage remains authoritative.
 
-A new durable metadata queue backfills protected mined transactions whose earlier
-PIR enhancement retired without fee or expiry. Already stored memos are retained.
+A durable metadata queue retains fee and expiry work independently of memo and
+outgoing recovery. Rescanning an eligible mined transaction queues missing metadata
+even when its memo is already stored; that memo is retained.
 Work enumeration reuses action queries; a metadata-only incoming query validates
 against the stored note even when its memo is complete. Missing outgoing-only
 positions are rebuilt from the trusted compact source through `Rediscover`.

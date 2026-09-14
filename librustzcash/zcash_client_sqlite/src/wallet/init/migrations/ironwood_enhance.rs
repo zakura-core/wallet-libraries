@@ -7,12 +7,15 @@ use uuid::Uuid;
 
 use crate::wallet::init::WalletMigrationError;
 
-use super::ironwood_received_notes;
+use super::{ironwood_received_notes, tx_status_observation_intent};
 
 /// Identifier for the Ironwood-only Enhance PIR migration.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x329e7b26_86d1_4376_ae93_87275235eca4);
+pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xcf147152_694f_47e8_8c05_c6dd853ac329);
 
-const DEPENDENCIES: &[Uuid] = &[ironwood_received_notes::MIGRATION_ID];
+const DEPENDENCIES: &[Uuid] = &[
+    ironwood_received_notes::MIGRATION_ID,
+    tx_status_observation_intent::MIGRATION_ID,
+];
 
 pub(super) struct Migration;
 
@@ -33,7 +36,7 @@ impl schemerz::Migration<Uuid> for Migration {
 impl RusqliteMigration for Migration {
     type Error = WalletMigrationError;
 
-    // Deliberately empty: existing history remains on ordinary enhancement until
+    // All feature tables start empty: existing history remains on ordinary enhancement until
     // explicitly rescanned. Database notes alone cannot establish pool eligibility.
     fn up(&self, transaction: &rusqlite::Transaction) -> Result<(), Self::Error> {
         transaction.execute_batch(
@@ -68,6 +71,21 @@ impl RusqliteMigration for Migration {
                 transaction_id INTEGER PRIMARY KEY
                     REFERENCES transactions(id_tx) ON DELETE CASCADE,
                 route INTEGER NOT NULL CHECK (route IN (0, 1))
+            );
+            CREATE TABLE ironwood_enhance_discovery_queue (
+                transaction_id INTEGER PRIMARY KEY
+                    REFERENCES transactions(id_tx) ON DELETE CASCADE,
+                suspended INTEGER NOT NULL DEFAULT 0 CHECK (suspended IN (0, 1))
+            );
+            CREATE TABLE ironwood_enhance_metadata_queue (
+                transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
+                commitment_tree_position INTEGER UNIQUE,
+                output_index INTEGER,
+                ephemeral_key BLOB,
+                compact_ciphertext BLOB,
+                CHECK ((commitment_tree_position IS NULL) = (output_index IS NULL)),
+                CHECK (ephemeral_key IS NULL OR length(ephemeral_key) = 32),
+                CHECK (compact_ciphertext IS NULL OR length(compact_ciphertext) = 52)
             );",
         )?;
         Ok(())
@@ -108,6 +126,8 @@ mod tests {
             "ironwood_enhance_outgoing_queue",
             "ironwood_enhance_outgoing_accounts",
             "ironwood_enhance_routing",
+            "ironwood_enhance_discovery_queue",
+            "ironwood_enhance_metadata_queue",
         ] {
             assert_eq!(
                 tx.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
