@@ -6376,6 +6376,49 @@ mod tests {
         assert!(requests.contains(&TransactionDataRequest::Enhancement(unexpired_txid)));
     }
 
+    #[cfg(not(feature = "zakura-pir-enhance"))]
+    #[test]
+    fn non_pir_enhancement_hook_preserves_ordinary_intent() {
+        use zcash_client_backend::data_api::ll::LowLevelWalletWrite;
+        use zcash_client_backend::wallet::WalletTx;
+        use zcash_protocol::consensus::TxIndex;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let txid = TxId::from_bytes([42; 32]);
+        let scanned = WalletTx::new(
+            txid,
+            TxIndex::from(0u16),
+            vec![],
+            vec![],
+            vec![],
+            #[cfg(feature = "orchard")]
+            vec![],
+            #[cfg(feature = "orchard")]
+            vec![],
+            #[cfg(feature = "orchard")]
+            vec![],
+            #[cfg(feature = "orchard")]
+            vec![],
+        );
+        st.wallet_mut().db_mut().transactionally(|db| {
+            let tx_ref = db.conn.0.query_row(
+                "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1) RETURNING id_tx",
+                [txid.as_ref()], |row| row.get(0).map(TxRef))?;
+            queue_tx_retrieval(db.conn.0, std::iter::once(txid), None)?;
+            db.queue_ironwood_enhancement(tx_ref, &scanned)?;
+            assert_eq!(super::transaction_data_requests(db.conn.0, false)?,
+                vec![TransactionDataRequest::Enhancement(txid)]);
+            assert!(!db.conn.0.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ironwood_enhance_routing)",
+                [], |row| row.get::<_, bool>(0))?);
+            Ok::<_, SqliteClientError>(())
+        }).unwrap();
+    }
+
     #[test]
     fn enhancement_mode_filters_only_protected_enhancement_intent() {
         const PROTECTED_TXID_BYTES: [u8; 32] = [3; 32];

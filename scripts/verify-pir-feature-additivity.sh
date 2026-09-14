@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# A sibling can enable backend PIR while SQLite still uses ordinary enhancement.
+# Keep the library-only check separate so dev dependencies cannot mask this graph.
+cargo check -p zakura-client-sqlite --locked --no-default-features \
+  --features orchard,zcash_client_backend/zakura-pir-enhance
+cargo test -p zakura-client-sqlite --locked --no-default-features \
+  --features orchard,zcash_client_backend/zakura-pir-enhance,test-dependencies \
+  --lib non_pir_enhancement_hook_preserves_ordinary_intent
+
 probe=$(mktemp -d)
 trap 'rm -rf "$probe"' EXIT
 python3 - "$PWD" "$probe" <<'PY'

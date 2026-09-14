@@ -484,12 +484,21 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
     ) -> Result<(), Self::Error>;
 
     /// Reconciles transaction-wide Enhance PIR work after all scanned notes are stored.
-    #[cfg(feature = "zakura-pir-enhance")]
+    ///
+    /// This hook is available regardless of backend features: a dependency may enable
+    /// Enhance PIR without enabling it in the backing store. The default does nothing
+    /// and leaves ordinary transaction enhancement intent unchanged.
+    ///
+    /// Stores supporting private enhancement must override this hook to persist routing
+    /// and work atomically with the scanned notes, returning an error if storage fails.
+    /// The default does not establish privacy protection or suppress txid requests.
     fn queue_ironwood_enhancement(
         &mut self,
-        tx_ref: Self::TxRef,
-        tx: &crate::wallet::WalletTx<Self::AccountId>,
-    ) -> Result<(), Self::Error>;
+        _tx_ref: Self::TxRef,
+        _tx: &crate::wallet::WalletTx<Self::AccountId>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 
     /// Updates the backing store to indicate that the Orchard output having the given nullifier is
     /// spent in the transaction referenced by `spent_in_tx`. This may result in multiple distinct
