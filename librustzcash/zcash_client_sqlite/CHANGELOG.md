@@ -15,6 +15,9 @@ workspace.
 - Create all six Ironwood Enhance PIR tables in one migration for this unreleased feature; intermediate PR development schemas are not upgrade sources.
 
 ### Fixed
+- Compare the captured PIR fee/expiry snapshot atomically before filling unknown
+  metadata, with memo/outgoing writes and queue retirement in the same transaction.
+
 - Recover sender history for cross-account Ironwood payments in both funding-first
   and recent-first restores; exclude only change from outgoing PIR recovery.
 - Keep wallet constructor signatures stable under Cargo feature unification.

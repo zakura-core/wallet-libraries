@@ -14,8 +14,8 @@ use zcash_client_backend::data_api::{
         IronwoodEnhanceDiscoveryRequest, IronwoodEnhanceRequestId,
         storage::{
             EnhancePirStorage, IronwoodOutgoingResult, PendingIronwoodMemo,
-            PendingIronwoodMetadata, PendingIronwoodOutgoing, ValidatedIronwoodEnhancement,
-            validate_and_apply_record,
+            PendingIronwoodMetadata, PendingIronwoodOutgoing, StoredIronwoodMetadata,
+            ValidatedIronwoodEnhancement, validate_and_apply_record,
         },
     },
 };
@@ -199,6 +199,25 @@ impl<P: Parameters> EnhancePirStorage for Storage<'_, '_, P> {
     type Account = super::Account;
     type Error = SqliteClientError;
 
+    fn ironwood_transaction_metadata(
+        &self,
+        txid: TxId,
+    ) -> Result<Option<StoredIronwoodMetadata>, Self::Error> {
+        self.tx
+            .query_row(
+                "SELECT fee, expiry_height FROM transactions WHERE txid = ?",
+                [txid.as_ref()],
+                |r| {
+                    Ok(StoredIronwoodMetadata {
+                        fee_zatoshis: r.get(0)?,
+                        expiry_height: r.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     fn pending_ironwood_metadata(
         &self,
         position: Position,
@@ -224,7 +243,7 @@ impl<P: Parameters> EnhancePirStorage for Storage<'_, '_, P> {
         pending_outgoing(self.tx, position)
     }
 
-    fn apply_ironwood_enhancement(
+    fn compare_and_apply_ironwood_enhancement(
         &mut self,
         enhancement: ValidatedIronwoodEnhancement<AccountUuid>,
     ) -> Result<EnhancePirStoreResult, Self::Error> {
@@ -636,6 +655,7 @@ pub(crate) fn apply<P: Parameters>(
         request,
         has_transparent,
         metadata,
+        expected_metadata,
         incoming,
         outgoing,
     } = enhancement.into_parts();
@@ -696,23 +716,25 @@ pub(crate) fn apply<P: Parameters>(
         require_lwd(tx, tx_ref)?;
         return Ok(EnhancePirStoreResult::LwdRequired);
     }
-    let (known_fee, known_expiry): (Option<u64>, Option<u32>) = tx.query_row(
-        "SELECT fee, expiry_height FROM transactions WHERE id_tx = ?",
-        [tx_ref.0],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    let Some(fee) = metadata.fee_zatoshis() else {
+    let Some(expected) = expected_metadata else {
         return Ok(EnhancePirStoreResult::Rejected);
     };
-    if known_fee.is_some_and(|known| known != fee)
-        || known_expiry.is_some_and(|known| known != metadata.expiry_height())
-    {
+    if !expected.agrees_with(metadata) {
         return Ok(EnhancePirStoreResult::Rejected);
     }
-    tx.execute(
-        "UPDATE transactions SET fee = :fee, expiry_height = :expiry WHERE id_tx = :tx",
-        named_params![":fee": fee, ":expiry": metadata.expiry_height(), ":tx": tx_ref.0],
+    // Compare the exact captured snapshot and fill only unknown fields in one statement.
+    // The surrounding transaction also contains every memo, outgoing and queue write.
+    let updated = tx.execute(
+        "UPDATE transactions SET fee = COALESCE(fee, :fee),
+            expiry_height = COALESCE(expiry_height, :expiry)
+         WHERE id_tx = :tx AND fee IS :expected_fee AND expiry_height IS :expected_expiry",
+        named_params![":fee": metadata.fee_zatoshis(), ":expiry": metadata.expiry_height(),
+            ":tx": tx_ref.0, ":expected_fee": expected.fee_zatoshis,
+            ":expected_expiry": expected.expiry_height],
     )?;
+    if updated != 1 {
+        return Ok(EnhancePirStoreResult::Rejected);
+    }
     tx.execute(
         "DELETE FROM ironwood_enhance_metadata_queue WHERE transaction_id = ?",
         [tx_ref.0],

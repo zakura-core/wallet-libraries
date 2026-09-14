@@ -72,6 +72,30 @@ pub enum IronwoodOutgoingResult<AccountId> {
     NotRecoverable,
 }
 
+/// Transaction-wide metadata already known to storage.
+///
+/// Each field is independently optional; `Some(0)` is known, not missing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StoredIronwoodMetadata {
+    /// Known transaction fee in zatoshis.
+    pub fee_zatoshis: Option<u64>,
+    /// Known expiry height, including zero for no expiry.
+    pub expiry_height: Option<u32>,
+}
+
+impl StoredIronwoodMetadata {
+    /// Whether a private response supplies a fee and agrees with every known field.
+    pub fn agrees_with(self, proposed: EnhanceTransactionMetadata) -> bool {
+        proposed.fee_zatoshis().is_some()
+            && self
+                .fee_zatoshis
+                .is_none_or(|fee| Some(fee) == proposed.fee_zatoshis())
+            && self
+                .expiry_height
+                .is_none_or(|expiry| expiry == proposed.expiry_height())
+    }
+}
+
 /// One validated response, with a private constructor to protect the write boundary.
 ///
 /// All fields, including the routing decision, must be applied in one storage
@@ -82,6 +106,7 @@ pub struct ValidatedIronwoodEnhancement<AccountId> {
     request: EnhancePirRequest,
     has_transparent: bool,
     metadata: EnhanceTransactionMetadata,
+    expected_metadata: Option<StoredIronwoodMetadata>,
     incoming: Option<MemoBytes>,
     outgoing: IronwoodOutgoingResult<AccountId>,
 }
@@ -91,6 +116,9 @@ pub struct IronwoodEnhancementData<AccountId> {
     pub request: EnhancePirRequest,
     pub has_transparent: bool,
     pub metadata: EnhanceTransactionMetadata,
+    /// Snapshot to compare atomically before filling unknown metadata fields.
+    /// `None` occurs only for transparent responses, whose metadata must not be stored.
+    pub expected_metadata: Option<StoredIronwoodMetadata>,
     pub incoming: Option<MemoBytes>,
     pub outgoing: IronwoodOutgoingResult<AccountId>,
 }
@@ -102,6 +130,7 @@ impl<AccountId> ValidatedIronwoodEnhancement<AccountId> {
             request: self.request,
             has_transparent: self.has_transparent,
             metadata: self.metadata,
+            expected_metadata: self.expected_metadata,
             incoming: self.incoming,
             outgoing: self.outgoing,
         }
@@ -114,11 +143,13 @@ impl<AccountId> ValidatedIronwoodEnhancement<AccountId> {
         has_transparent: bool,
         incoming: Option<MemoBytes>,
         outgoing: IronwoodOutgoingResult<AccountId>,
+        expected_metadata: Option<StoredIronwoodMetadata>,
     ) -> Self {
         Self {
             request,
             has_transparent,
             metadata: EnhanceTransactionMetadata::new(0, Some(0)).expect("test metadata"),
+            expected_metadata,
             incoming,
             outgoing,
         }
@@ -128,11 +159,20 @@ impl<AccountId> ValidatedIronwoodEnhancement<AccountId> {
 /// Transaction-scoped context and commit operations used by shared validation.
 ///
 /// Commit must recheck captured identities and apply all note, queue, and routing changes
-/// atomically. A stale response must not change routing, even when it reports transparent data.
+/// atomically, including the metadata comparison and fill. Known metadata is immutable under
+/// PIR enhancement. A stale response must not change routing, even when it reports transparent data.
 pub trait EnhancePirStorage {
     type AccountId: Copy;
     type Account: Account<AccountId = Self::AccountId>;
     type Error;
+
+    /// Reads existing fee and expiry in the same transaction as pending action context.
+    /// Returns `None` if the transaction no longer exists; unknown fields are represented
+    /// by `Some(StoredIronwoodMetadata { fee_zatoshis: None, expiry_height: None })`.
+    fn ironwood_transaction_metadata(
+        &self,
+        txid: zcash_primitives::transaction::TxId,
+    ) -> Result<Option<StoredIronwoodMetadata>, Self::Error>;
 
     /// Loads durable metadata-only work from the same transaction snapshot.
     fn pending_ironwood_metadata(
@@ -154,8 +194,19 @@ pub trait EnhancePirStorage {
         position: Position,
     ) -> Result<Option<PendingIronwoodOutgoing<Self::AccountId>>, Self::Error>;
 
-    /// Rechecks captured queue identities and commits note data and routing atomically.
-    fn apply_ironwood_enhancement(
+    /// Compares captured state and commits all response effects in one atomic operation.
+    ///
+    /// Recheck transaction/action identities first; stale or resolved work returns
+    /// `AlreadyResolved` without mutation. For a private response, the current fee/expiry
+    /// must exactly match `expected_metadata`, and agree with the supplied metadata.
+    /// A missing snapshot or any disagreement returns `Rejected` without changing metadata,
+    /// notes, routing, or queues. Fill only unknown fields; known zero values are immutable.
+    /// The comparison, fills, and all action/queue writes must share a transaction; a write
+    /// error must roll back every effect. Do not perform a separate metadata commit.
+    ///
+    /// For an action-bound transparent response, retain the LWD routing behavior and do
+    /// not compare or store its fee/expiry. Its `expected_metadata` is `None`.
+    fn compare_and_apply_ironwood_enhancement(
         &mut self,
         enhancement: ValidatedIronwoodEnhancement<Self::AccountId>,
     ) -> Result<EnhancePirStoreResult, Self::Error>;
@@ -185,6 +236,9 @@ impl ShieldedOutput<IronwoodDomain, 580> for FullOutput<'_> {
 /// Incoming ciphertext must decrypt to the scanned note; outgoing records must
 /// match the scanned compact fields. Authentication/transport failures never
 /// cause public fallback. Identity checks precede even a transparent-flag decision.
+/// Private responses must agree with known transaction metadata; the captured snapshot
+/// accompanies the response so the backend can reject a change before committing.
+/// A rejected response leaves its work pending for validation against fresh context.
 pub fn validate_and_apply_record<DbT: EnhancePirStorage>(
     db: &mut DbT,
     request: EnhancePirRequest,
@@ -294,10 +348,23 @@ pub fn validate_and_apply_record<DbT: EnhancePirStorage>(
         IronwoodOutgoingResult::NotRequested
     };
 
-    db.apply_ironwood_enhancement(ValidatedIronwoodEnhancement {
+    let expected_metadata = if record.has_transparent() {
+        None
+    } else {
+        let Some(known) = db.ironwood_transaction_metadata(request.request_id().txid())? else {
+            return Ok(EnhancePirStoreResult::AlreadyResolved);
+        };
+        if !known.agrees_with(record.metadata()) {
+            return Ok(EnhancePirStoreResult::Rejected);
+        }
+        Some(known)
+    };
+
+    db.compare_and_apply_ironwood_enhancement(ValidatedIronwoodEnhancement {
         request,
         has_transparent: record.has_transparent(),
         metadata: record.metadata(),
+        expected_metadata,
         incoming: memo,
         outgoing,
     })

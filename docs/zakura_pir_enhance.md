@@ -339,6 +339,15 @@ does not authenticate them. After action binding and current-identity checks, st
 fills fee and expiry atomically with action work. Conflicting known values reject the
 whole response. Full-transaction storage remains authoritative.
 
+Custom storage adapters implement `EnhancePirStorage::ironwood_transaction_metadata`
+and `compare_and_apply_ironwood_enhancement`. Shared validation rejects disagreement
+with known fee or expiry, including known zeros, before calling the commit operation.
+The validated response carries `expected_metadata`; commit must compare that exact
+snapshot, fill only unknown fields, and apply all action/queue effects atomically.
+A changed snapshot returns `Rejected` without consuming work; callers can validate
+again against fresh context. Transparent responses retain LWD routing and neither
+compare nor store fee/expiry. A separate metadata commit would violate this contract.
+
 A durable metadata queue retains fee and expiry work independently of memo and
 outgoing recovery. Rescanning an eligible mined transaction queues missing metadata
 even when its memo is already stored; that memo is retained.

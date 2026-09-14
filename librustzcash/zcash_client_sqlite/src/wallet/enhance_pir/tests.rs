@@ -146,21 +146,41 @@ fn validated(
         transparent,
         incoming.then(MemoBytes::empty),
         outgoing,
+        (!transparent).then(Default::default),
     )
 }
 
+fn stored_metadata(st: &State, request: EnhancePirRequest) -> StoredIronwoodMetadata {
+    st.wallet()
+        .conn()
+        .query_row(
+            "SELECT fee, expiry_height FROM transactions WHERE txid = ?",
+            [request.request_id().txid().as_ref()],
+            |r| {
+                Ok(StoredIronwoodMetadata {
+                    fee_zatoshis: r.get(0)?,
+                    expiry_height: r.get(1)?,
+                })
+            },
+        )
+        .unwrap()
+}
+
 fn finish_incoming(st: &mut State, request: EnhancePirRequest) {
+    let expected = stored_metadata(st, request);
+    let enhancement = ValidatedIronwoodEnhancement::for_testing(
+        request,
+        false,
+        Some(MemoBytes::empty()),
+        IronwoodOutgoingResult::NotRequested,
+        Some(expected),
+    );
     assert_eq!(
         st.wallet_mut()
             .db_mut()
-            .apply_validated(validated(
-                request,
-                false,
-                true,
-                IronwoodOutgoingResult::NotRequested
-            ))
+            .apply_validated(enhancement)
             .unwrap(),
-        EnhancePirStoreResult::Stored
+        EnhancePirStoreResult::Stored,
     );
 }
 
@@ -357,17 +377,19 @@ fn completion_retires_only_enhancement_and_survives_replay() {
     );
     let fvk = OrchardPoolTester::test_account_fvk(&st);
     let from_account = st.test_account().unwrap().id();
+    let expected = stored_metadata(&st, outgoing);
     let complete = || {
-        validated(
+        ValidatedIronwoodEnhancement::for_testing(
             outgoing,
             false,
-            false,
+            None,
             IronwoodOutgoingResult::Recovered {
                 from_account,
                 recipient: fvk.address_at(3u32, Scope::External),
                 value: Zatoshis::const_from_u64(123),
                 memo: MemoBytes::empty(),
             },
+            Some(expected),
         )
     };
     assert_eq!(
@@ -1142,4 +1164,115 @@ fn schema7_conflicting_metadata_rolls_back_the_entire_response() {
         )
         .unwrap();
     assert_eq!(values, (10, None));
+}
+
+#[test]
+fn metadata_compare_and_apply_rejects_changed_snapshot_without_retiring_work() {
+    for (fee, expiry) in [(Some(0u64), None), (None, Some(0u32)), (Some(0), Some(0))] {
+        let (mut st, tx_ref, request) = fixture();
+        let captured = stored_metadata(&st, request);
+        assert_eq!(captured, StoredIronwoodMetadata::default());
+        // Another writer fills the same proposed values after the snapshot was captured.
+        st.wallet()
+            .conn()
+            .execute(
+                "UPDATE transactions SET fee = ?1, expiry_height = ?2 WHERE id_tx = ?3",
+                rusqlite::params![fee, expiry, tx_ref.0],
+            )
+            .unwrap();
+        let concurrent = stored_metadata(&st, request);
+        let response = ValidatedIronwoodEnhancement::for_testing(
+            request,
+            false,
+            Some(MemoBytes::empty()),
+            IronwoodOutgoingResult::NotRequested,
+            Some(captured),
+        );
+        assert_eq!(
+            st.wallet_mut().db_mut().apply_validated(response).unwrap(),
+            EnhancePirStoreResult::Rejected
+        );
+        assert_eq!(stored_metadata(&st, request), concurrent);
+        assert!(requests(st.wallet().conn()).unwrap().contains(&request));
+        assert!(
+            pending(
+                st.wallet().conn(),
+                &TestBuilder::<(), ()>::DEFAULT_NETWORK,
+                request.position()
+            )
+            .unwrap()
+            .is_some()
+        );
+        // A fresh validation snapshot can complete the still-pending action.
+        finish_incoming(&mut st, request);
+    }
+}
+
+#[test]
+fn metadata_compare_and_apply_requires_a_compatible_snapshot() {
+    for expected in [
+        None,
+        Some(StoredIronwoodMetadata {
+            fee_zatoshis: Some(1),
+            expiry_height: None,
+        }),
+    ] {
+        let (mut st, _, request) = fixture();
+        let before = stored_metadata(&st, request);
+        let response = ValidatedIronwoodEnhancement::for_testing(
+            request,
+            false,
+            Some(MemoBytes::empty()),
+            IronwoodOutgoingResult::NotRequested,
+            expected,
+        );
+        assert_eq!(
+            st.wallet_mut().db_mut().apply_validated(response).unwrap(),
+            EnhancePirStoreResult::Rejected
+        );
+        assert_eq!(stored_metadata(&st, request), before);
+        assert!(requests(st.wallet().conn()).unwrap().contains(&request));
+    }
+}
+
+#[test]
+fn metadata_fill_rolls_back_when_later_memo_write_fails() {
+    let (mut st, _, request) = fixture();
+    let before = stored_metadata(&st, request);
+    st.wallet().conn().execute_batch(
+        "CREATE TRIGGER fail_memo_after_metadata BEFORE UPDATE OF memo ON ironwood_received_notes
+         BEGIN SELECT RAISE(FAIL, 'memo write failed'); END;",
+    ).unwrap();
+    let response = ValidatedIronwoodEnhancement::for_testing(
+        request,
+        false,
+        Some(MemoBytes::empty()),
+        IronwoodOutgoingResult::NotRequested,
+        Some(before),
+    );
+    assert!(st.wallet_mut().db_mut().apply_validated(response).is_err());
+    assert_eq!(stored_metadata(&st, request), before);
+    assert!(requests(st.wallet().conn()).unwrap().contains(&request));
+    assert!(
+        pending(
+            st.wallet().conn(),
+            &TestBuilder::<(), ()>::DEFAULT_NETWORK,
+            request.position()
+        )
+        .unwrap()
+        .is_some()
+    );
+    let metadata_jobs: u64 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM ironwood_enhance_metadata_queue",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        metadata_jobs, 1,
+        "metadata queue deletion must roll back too"
+    );
 }
