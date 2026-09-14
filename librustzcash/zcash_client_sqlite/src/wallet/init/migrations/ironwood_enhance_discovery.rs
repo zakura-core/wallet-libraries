@@ -9,6 +9,7 @@ use crate::wallet::init::WalletMigrationError;
 
 use super::{ironwood_enhance, tx_status_observation_intent};
 
+/// Identifier for the migration adding durable outgoing Ironwood enhancement discovery.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xa7de8f13_282e_46cb_b90d_5d55ec82439e);
 
 pub(super) struct Migration;

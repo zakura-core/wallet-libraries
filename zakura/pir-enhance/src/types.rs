@@ -13,7 +13,7 @@ pub const SHARD_POSITIONS: usize = SHARD_ROWS * RECORDS_PER_ROW;
 /// Shards assigned to one logical worker group. Every replica in the group
 /// holds the complete assignment; replicas are alternatives, not additive
 /// contributors to a query.
-pub const SHARDS_PER_GROUP: u64 = 6;
+pub const SHARDS_PER_GROUP: u64 = 16;
 pub const ITEM_SIZE_BITS: u64 = (ROW_BYTES * 8) as u64;
 
 pub const RECORD_EPHEMERAL_KEY_OFFSET: usize = 0;
@@ -218,9 +218,6 @@ pub fn group_index_for_shard(shard_id: u64, group_count: usize) -> Option<usize>
     if group_count == 0 {
         return None;
     }
-    if group_count == 1 {
-        return Some(0);
-    }
     let index = usize::try_from(shard_id / SHARDS_PER_GROUP).ok()?;
     (index < group_count).then_some(index)
 }
@@ -246,6 +243,24 @@ mod tests {
         assert_eq!(record.cv_net(), &[3; 32]);
         assert_eq!(record.out_ciphertext(), &[4; 80]);
         assert_eq!(record.has_transparent_inputs(), Ok(true));
+    }
+
+    #[test]
+    fn group_placement_respects_capacity() {
+        for (shard, groups, expected) in [
+            (0, 0, None),
+            (0, 1, Some(0)),
+            (15, 1, Some(0)),
+            (16, 1, None),
+            (15, 2, Some(0)),
+            (16, 2, Some(1)),
+            (31, 2, Some(1)),
+            (32, 2, None),
+            (32, 3, Some(2)),
+            (u64::MAX, 1, None),
+        ] {
+            assert_eq!(group_index_for_shard(shard, groups), expected);
+        }
     }
 
     #[test]

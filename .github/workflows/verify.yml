@@ -81,3 +81,9 @@ jobs:
       # The standalone client is excluded from the vendored workspace suite.
       - name: Run the Enhance PIR client tests
         run: cargo test -p zakura-pir-enhance --all-features --locked
+
+      - name: Run the transport-neutral Enhance PIR client tests
+        run: cargo test -p zakura-pir-enhance --no-default-features --locked
+
+      - name: Run the production-parameter Enhance PIR round trip
+        run: cargo test -p zakura-pir-enhance --release --locked --test compatibility -- --ignored

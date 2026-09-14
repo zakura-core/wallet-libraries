@@ -19,7 +19,7 @@ wallet-integration = ["dep:zcash_client_backend"]
 [dependencies]
 base64 = "0.22"
 hex.workspace = true
-ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", rev = "e875404cef33661906ab60af236dfb327e6b28b1" }
+ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", rev = "accc424e879d8da425fa620aad80f0f2c4e0defd" }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 serde.workspace = true
@@ -29,4 +29,4 @@ thiserror = "2"
 zcash_client_backend = { workspace = true, optional = true, features = ["zakura-pir-enhance"] }
 
 [dev-dependencies]
-inspiring = { git = "https://github.com/valargroup/ipir-sp.git", rev = "e875404cef33661906ab60af236dfb327e6b28b1" }
+inspiring = { git = "https://github.com/valargroup/ipir-sp.git", rev = "accc424e879d8da425fa620aad80f0f2c4e0defd" }
