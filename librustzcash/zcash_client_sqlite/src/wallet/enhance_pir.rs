@@ -14,7 +14,8 @@ use zcash_client_backend::data_api::{
         IronwoodEnhanceDiscoveryRequest, IronwoodEnhanceRequestId,
         storage::{
             EnhancePirStorage, IronwoodOutgoingResult, PendingIronwoodMemo,
-            PendingIronwoodOutgoing, ValidatedIronwoodEnhancement, validate_and_apply_record,
+            PendingIronwoodMetadata, PendingIronwoodOutgoing, ValidatedIronwoodEnhancement,
+            validate_and_apply_record,
         },
     },
 };
@@ -29,6 +30,7 @@ use crate::{AccountUuid, error::SqliteClientError};
 use super::{TxQueryType, get_account, memo_repr, orchard::parse_note_version};
 
 pub(crate) mod discovery;
+mod metadata;
 
 // A route is transaction-wide. LwdRequired is sticky, including across rescans.
 // PrivateProtected survives completion and rewinds; only an explicit LWD decision or
@@ -62,7 +64,9 @@ fn retire_enhancement_if_complete(
            AND NOT EXISTS (
                SELECT 1 FROM ironwood_enhance_outgoing_queue WHERE transaction_id = :tx)
            AND NOT EXISTS (
-               SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx)",
+               SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx)
+           AND NOT EXISTS (
+               SELECT 1 FROM ironwood_enhance_metadata_queue WHERE transaction_id = :tx)",
         named_params![":tx": tx_ref.0, ":enhancement": TxQueryType::Enhancement.code()],
     )?;
     Ok(())
@@ -102,13 +106,16 @@ pub(crate) fn is_protected(conn: &Connection, txid: TxId) -> Result<bool, Sqlite
 /// A single statement gives callers a consistent view across the independent queues.
 pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
     let mut stmt = conn.prepare_cached(&format!(
-        "WITH discovery AS (
+        "WITH discovery_jobs AS (
+             SELECT transaction_id, suspended FROM ironwood_enhance_discovery_queue
+             UNION ALL SELECT transaction_id, 0 FROM ironwood_enhance_metadata_queue WHERE commitment_tree_position IS NULL
+         ), discovery AS (
              SELECT t.txid, t.mined_height AS height, t.tx_index, b.hash,
                     CASE WHEN q.suspended = 1 THEN 0
                          WHEN b.ironwood_commitment_tree_size IS NULL
                            OR (t.mined_height != 0 AND prior.ironwood_commitment_tree_size IS NULL)
                          THEN 1 ELSE NULL END AS reason
-             FROM ironwood_enhance_discovery_queue q
+             FROM discovery_jobs q
              JOIN transactions t ON t.id_tx = q.transaction_id
              LEFT JOIN blocks b ON b.height = t.mined_height
              LEFT JOIN blocks prior ON prior.height = t.mined_height - 1
@@ -125,6 +132,13 @@ pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClien
              UNION
              SELECT q.commitment_tree_position, t.txid, q.output_index {OUTSTANDING_OUTGOING}
                AND q.not_recoverable = 0
+             UNION
+             SELECT q.commitment_tree_position, t.txid, q.output_index
+             FROM ironwood_enhance_metadata_queue q
+             JOIN transactions t ON t.id_tx = q.transaction_id
+             JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
+             WHERE q.commitment_tree_position IS NOT NULL AND r.route = 0
+               AND t.raw IS NULL AND t.mined_height IS NOT NULL
          )
          SELECT DISTINCT 0 AS kind, height AS ordinal, hash AS identity, NULL AS output_index,
                          NULL AS reason, NULL AS tx_index FROM discovery WHERE reason IS NULL
@@ -184,6 +198,13 @@ impl<P: Parameters> EnhancePirStorage for Storage<'_, '_, P> {
     type AccountId = AccountUuid;
     type Account = super::Account;
     type Error = SqliteClientError;
+
+    fn pending_ironwood_metadata(
+        &self,
+        position: Position,
+    ) -> Result<Option<PendingIronwoodMetadata<AccountUuid>>, Self::Error> {
+        metadata::pending(self.tx, self.params, position)
+    }
 
     fn get_account(&self, id: AccountUuid) -> Result<Option<Self::Account>, Self::Error> {
         super::get_account(self.tx, self.params, id)
@@ -439,11 +460,14 @@ fn queue_transaction(
         }
     }
 
+    metadata::queue(conn, tx_ref, candidates)?;
+
     let has_work: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_memo_retrieval_queue q
                        JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
                        WHERE rn.transaction_id = :tx)
-             OR EXISTS(SELECT 1 FROM ironwood_enhance_outgoing_queue WHERE transaction_id = :tx)",
+             OR EXISTS(SELECT 1 FROM ironwood_enhance_outgoing_queue WHERE transaction_id = :tx)
+             OR EXISTS(SELECT 1 FROM ironwood_enhance_metadata_queue WHERE transaction_id = :tx)",
         named_params![":tx": tx_ref.0],
         |row| row.get(0),
     )?;
@@ -468,7 +492,10 @@ pub(super) fn outgoing_position_owned_by_other(
         "SELECT EXISTS(
              SELECT 1 FROM ironwood_enhance_outgoing_queue
              WHERE commitment_tree_position = :position AND transaction_id != :tx
-         )",
+         ) OR EXISTS (SELECT 1 FROM ironwood_enhance_metadata_queue
+             WHERE commitment_tree_position = :position AND transaction_id != :tx)
+           OR EXISTS (SELECT 1 FROM ironwood_received_notes rn JOIN transactions t ON t.id_tx = rn.transaction_id
+             WHERE rn.commitment_tree_position = :position AND rn.transaction_id != :tx AND t.mined_height IS NOT NULL)",
         named_params![":position": position, ":tx": tx_ref.0],
         |row| row.get(0),
     )
@@ -479,6 +506,15 @@ pub(crate) fn pending<P: zcash_protocol::consensus::Parameters>(
     conn: &Connection,
     params: &P,
     position: Position,
+) -> Result<Option<PendingIronwoodMemo<AccountUuid>>, SqliteClientError> {
+    pending_note(conn, params, position, false)
+}
+
+fn pending_note<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    position: Position,
+    metadata_only: bool,
 ) -> Result<Option<PendingIronwoodMemo<AccountUuid>>, SqliteClientError> {
     #[allow(clippy::type_complexity)]
     let raw: Option<(
@@ -493,18 +529,25 @@ pub(crate) fn pending<P: zcash_protocol::consensus::Parameters>(
         i64,
     )> = conn
         .query_row(
-            "SELECT t.txid, rn.action_index, a.uuid, rn.diversifier, rn.value,
+            "WITH q AS (
+                SELECT received_note_id, commitment_tree_position FROM ironwood_memo_retrieval_queue WHERE NOT :metadata
+                UNION ALL
+                SELECT rn.id, m.commitment_tree_position FROM ironwood_enhance_metadata_queue m
+                JOIN ironwood_received_notes rn ON rn.transaction_id = m.transaction_id AND rn.action_index = m.output_index
+                WHERE :metadata AND rn.commitment_tree_position = m.commitment_tree_position
+             )
+             SELECT t.txid, rn.action_index, a.uuid, rn.diversifier, rn.value,
                     rn.rho, rn.rseed, rn.note_version, rn.recipient_key_scope
-             FROM ironwood_memo_retrieval_queue q
+             FROM q
              JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
              JOIN transactions t ON t.id_tx = rn.transaction_id
              JOIN accounts a ON a.id = rn.account_id
              JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
              WHERE q.commitment_tree_position = :position
-               AND rn.memo IS NULL AND r.route = 0
+               AND (:metadata OR rn.memo IS NULL) AND r.route = 0
                AND t.raw IS NULL AND t.mined_height IS NOT NULL
                AND rn.commitment_tree_position = q.commitment_tree_position",
-            named_params![":position": u64::from(position)],
+            named_params![":position": u64::from(position), ":metadata": metadata_only],
             |row| {
                 let value = u64::try_from(row.get::<_, i64>(4)?)
                     .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, i64::MIN))?;
@@ -589,7 +632,13 @@ pub(crate) fn apply<P: Parameters>(
     params: &P,
     enhancement: ValidatedIronwoodEnhancement<AccountUuid>,
 ) -> Result<EnhancePirStoreResult, SqliteClientError> {
-    let (request, has_transparent, incoming, outgoing) = enhancement.into_parts();
+    let zcash_client_backend::data_api::enhance_pir::storage::IronwoodEnhancementData {
+        request,
+        has_transparent,
+        metadata,
+        incoming,
+        outgoing,
+    } = enhancement.into_parts();
     let id = request.request_id();
     let target: Option<crate::TxRef> = tx
         .query_row(
@@ -619,10 +668,14 @@ pub(crate) fn apply<P: Parameters>(
         named_params![":position": u64::from(request.position()), ":tx": tx_ref.0, ":index": id.output_index()],
         |row| row.get(0),
     )?;
+    let has_metadata: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_enhance_metadata_queue WHERE transaction_id = :tx
+         AND commitment_tree_position = :position AND output_index = :index)",
+        named_params![":tx": tx_ref.0, ":position": u64::from(request.position()), ":index": id.output_index()], |r| r.get(0))?;
     let expects_outgoing = !matches!(outgoing, IronwoodOutgoingResult::NotRequested);
     if memo_id.is_some() != incoming.is_some()
         || has_outgoing != expects_outgoing
-        || (memo_id.is_none() && !has_outgoing)
+        || (memo_id.is_none() && !has_outgoing && !has_metadata)
     {
         return Ok(EnhancePirStoreResult::AlreadyResolved);
     }
@@ -643,6 +696,27 @@ pub(crate) fn apply<P: Parameters>(
         require_lwd(tx, tx_ref)?;
         return Ok(EnhancePirStoreResult::LwdRequired);
     }
+    let (known_fee, known_expiry): (Option<u64>, Option<u32>) = tx.query_row(
+        "SELECT fee, expiry_height FROM transactions WHERE id_tx = ?",
+        [tx_ref.0],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let Some(fee) = metadata.fee_zatoshis() else {
+        return Ok(EnhancePirStoreResult::Rejected);
+    };
+    if known_fee.is_some_and(|known| known != fee)
+        || known_expiry.is_some_and(|known| known != metadata.expiry_height())
+    {
+        return Ok(EnhancePirStoreResult::Rejected);
+    }
+    tx.execute(
+        "UPDATE transactions SET fee = :fee, expiry_height = :expiry WHERE id_tx = :tx",
+        named_params![":fee": fee, ":expiry": metadata.expiry_height(), ":tx": tx_ref.0],
+    )?;
+    tx.execute(
+        "DELETE FROM ironwood_enhance_metadata_queue WHERE transaction_id = ?",
+        [tx_ref.0],
+    )?;
     if let (Some(note_id), Some(memo)) = (memo_id, incoming) {
         tx.execute(
             "UPDATE ironwood_received_notes SET memo = :memo WHERE id = :id",

@@ -5,7 +5,7 @@ enhance Ironwood compact actions by note-commitment-tree position.
 
 The transport-neutral `QuerySession` supports application-owned direct or Tor
 HTTP routing. The default `https-client` feature also provides a Reqwest client
-for the schema-v6 `/v1/enhance/*` API.
+for the schema-v7 `/v1/enhance/*` API.
 
 Before constructing a query session, the application must provide a
 `GenerationAcceptance` containing an anchor height, block hash, and Ironwood

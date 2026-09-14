@@ -49,6 +49,11 @@ fn encrypted_action(
         out_ciphertext: encryptor.encrypt_outgoing_plaintext(&cv, &cmx, &mut rng),
         has_transparent_inputs: false,
         has_transparent_outputs: false,
+        metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata::new(
+            0,
+            Some(0),
+        )
+        .unwrap(),
     });
     (
         CompactOrchardAction {
@@ -392,6 +397,12 @@ fn rescanning_a_send_preserves_pending_and_suspended_outgoing_recovery() {
                 out_ciphertext: *send.record.out_ciphertext(),
                 has_transparent_inputs: false,
                 has_transparent_outputs: false,
+                metadata:
+                    zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata::new(
+                        0,
+                        Some(0),
+                    )
+                    .unwrap(),
             });
             assert_eq!(
                 apply_record(send.st.wallet_mut().db_mut(), outgoing, &corrupt).unwrap(),
@@ -1792,6 +1803,11 @@ fn discovery_commit_is_atomic_and_mixed_routing_is_sticky() {
         out_ciphertext: *send.record.out_ciphertext(),
         has_transparent_inputs: true,
         has_transparent_outputs: false,
+        metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata::new(
+            0,
+            Some(0),
+        )
+        .unwrap(),
     });
     assert_eq!(
         apply_record(send.st.wallet_mut().db_mut(), outgoing, &mixed).unwrap(),
@@ -2289,4 +2305,59 @@ fn rewind_failure_rolls_back_discovery_and_position_cleanup() {
             .unwrap()
             .contains(&TransactionDataRequest::Enhancement(txid))
     );
+}
+
+#[test]
+fn metadata_backfill_rediscovers_completed_outgoing_only_history() {
+    let mut send = Send::new(false);
+    send.scan_funding();
+    send.scan_send();
+    let request = send.requests()[0];
+    assert_eq!(
+        apply_record(send.st.wallet_mut().db_mut(), request, &send.record).unwrap(),
+        EnhancePirStoreResult::Stored
+    );
+    let tx_ref = send.tx_ref();
+    send.st
+        .wallet()
+        .conn()
+        .execute(
+            "UPDATE transactions SET fee = NULL, expiry_height = NULL WHERE id_tx = ?",
+            [tx_ref.0],
+        )
+        .unwrap();
+    send.st
+        .wallet()
+        .conn()
+        .execute(
+            "INSERT INTO ironwood_enhance_metadata_queue (transaction_id) VALUES (?)",
+            [tx_ref.0],
+        )
+        .unwrap();
+    let discovery = send.discovery();
+    assert_eq!(
+        send.st
+            .wallet_mut()
+            .db_mut()
+            .rebuild_ironwood_enhancement(discovery, &send.block)
+            .unwrap(),
+        Rebuilt(1)
+    );
+    assert_eq!(send.requests(), vec![request]);
+    assert_eq!(
+        apply_record(send.st.wallet_mut().db_mut(), request, &send.record).unwrap(),
+        EnhancePirStoreResult::Stored
+    );
+    assert!(send.requests().is_empty());
+    let values: (u64, u32, Option<Vec<u8>>) = send
+        .st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT fee, expiry_height, raw FROM transactions WHERE id_tx = ?",
+            [tx_ref.0],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(values, (0, 0, None));
 }

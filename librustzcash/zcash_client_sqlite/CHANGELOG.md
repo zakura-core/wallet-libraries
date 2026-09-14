@@ -10,6 +10,9 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- Populate fee and expiry during private Ironwood enhancement and backfill completed history through a durable metadata queue.
+
 ### Fixed
 - Recover sender history for cross-account Ironwood payments in both funding-first
   and recent-first restores; exclude only change from outgoing PIR recovery.

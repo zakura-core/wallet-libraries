@@ -10,6 +10,9 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- Support schema-7 Ironwood PIR fee/expiry metadata with explicit metadata binding and atomic storage contracts.
+
 ### Fixed
 - Retain outgoing Ironwood PIR candidates for cross-account wallet payments,
   excluding only outputs marked as change.

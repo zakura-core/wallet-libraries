@@ -28,6 +28,7 @@ mod full_account_ids;
 mod initial_setup;
 mod ironwood_enhance;
 mod ironwood_enhance_discovery;
+mod ironwood_enhance_metadata;
 mod ironwood_pool_code_views;
 mod ironwood_received_notes;
 mod ironwood_shardtree;
@@ -366,6 +367,7 @@ pub(super) fn all_migrations<
         Box::new(ironwood_received_notes::Migration),
         Box::new(ironwood_enhance::Migration),
         Box::new(ironwood_enhance_discovery::Migration),
+        Box::new(ironwood_enhance_metadata::Migration),
         Box::new(ironwood_pool_code_views::Migration),
         Box::new(fix_bad_ironwood_change_flagging::Migration),
         Box::new(v_address_uses_ironwood::Migration),
@@ -574,7 +576,7 @@ pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     ivk_item_cache::MIGRATION_ID,
     add_transparent_receiver_address_index::MIGRATION_ID,
     add_transparent_value_index::MIGRATION_ID,
-    ironwood_enhance_discovery::MIGRATION_ID,
+    ironwood_enhance_metadata::MIGRATION_ID,
     fix_bad_ironwood_change_flagging::MIGRATION_ID,
     v_address_uses_ironwood::MIGRATION_ID,
     orchard_ironwood_migration_unsatisfiability::MIGRATION_ID,

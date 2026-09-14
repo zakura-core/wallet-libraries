@@ -24,6 +24,20 @@ impl EnhancePirStorage for TransactionContext {
     type Account = (u32, UnifiedFullViewingKey, BlockHeight);
     type Error = std::convert::Infallible;
 
+    fn pending_ironwood_metadata(
+        &self,
+        _: incrementalmerkletree::Position,
+    ) -> Result<
+        Option<
+            zcash_client_backend::data_api::enhance_pir::storage::PendingIronwoodMetadata<
+                Self::AccountId,
+            >,
+        >,
+        Self::Error,
+    > {
+        Ok(None)
+    }
+
     fn get_account(&self, _: u32) -> Result<Option<Self::Account>, Self::Error> {
         Ok(None)
     }
@@ -55,7 +69,11 @@ impl EnhancePirStorage for TransactionContext {
         &mut self,
         enhancement: ValidatedIronwoodEnhancement<u32>,
     ) -> Result<EnhancePirStoreResult, Self::Error> {
-        let (request, has_transparent, _, _) = enhancement.into_parts();
+        let zcash_client_backend::data_api::enhance_pir::storage::IronwoodEnhancementData {
+            request,
+            has_transparent,
+            ..
+        } = enhancement.into_parts();
         if request != self.request {
             return Ok(EnhancePirStoreResult::AlreadyResolved);
         }
@@ -83,6 +101,11 @@ fn custom_storage_uses_shared_validation_before_routing() {
             out_ciphertext: [0; 80],
             has_transparent_inputs: true,
             has_transparent_outputs: false,
+            metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata::new(
+                0,
+                Some(0),
+            )
+            .unwrap(),
         })
     };
     assert_eq!(
@@ -104,4 +127,30 @@ fn custom_storage_uses_shared_validation_before_routing() {
         Ok(EnhancePirStoreResult::LwdRequired)
     );
     assert!(storage.committed);
+}
+
+#[test]
+fn canonical_fixture_agrees_with_standard_transaction_fee_and_expiry() {
+    use zcash_primitives::transaction::Transaction;
+    use zcash_protocol::{
+        consensus::{BlockHeight, BranchId, MAIN_NETWORK},
+        value::BalanceError,
+    };
+    let bytes = hex::decode(include_str!("fixtures/ironwood-fee-expiry.hex").trim()).unwrap();
+    let tx = Transaction::read(
+        bytes.as_slice(),
+        BranchId::for_height(&MAIN_NETWORK, BlockHeight::from_u32(3483367)),
+    )
+    .unwrap();
+    assert_eq!(
+        tx.txid().to_string(),
+        "f337d9675817668120ae626021f61e5350ff5412beeb5e42b67bd412452b8d13"
+    );
+    let data = tx.into_data();
+    assert_eq!(u32::from(data.expiry_height()), 3483371);
+    let fee = data
+        .fee_paid::<BalanceError, _>(|_| Ok(None))
+        .unwrap()
+        .unwrap();
+    assert_eq!(u64::from(fee), 10000);
 }

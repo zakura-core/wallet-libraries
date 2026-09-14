@@ -21,7 +21,7 @@ The database stores at most one routing row per transaction:
 | `LwdRequired` | Available | Cleared for the entire transaction |
 
 `PrivateCandidate` is provisional, not a claim that transparent activity has
-been cryptographically ruled out. Completion requires empty incoming, outgoing,
+been cryptographically ruled out. Completion requires empty incoming, outgoing, metadata,
 and discovery queues; there is no separate completed state. Later-discovered
 funding can reopen enhancement even after earlier private completion.
 
@@ -32,14 +32,14 @@ shielded pools: a stream filtered to Ironwood cannot safely establish eligibilit
 
 An empty compact `vin`/`vout` does **not** establish transparent absence. For an
 otherwise eligible transaction, the wallet privately fetches an Ironwood record
-and consults its schema-v6 transparent-presence flags:
+and consults its schema-v7 transparent-presence flags:
 
 - Either input or output flag set: atomically mark the transaction `LwdRequired`,
   clear all its pending private work, and preserve its ordinary enhancement
   request. The existing LWD path obtains the full transaction and handles its
   transparent and other-pool data.
 - Both flags clear: apply the validated Ironwood data. Retire the dormant ordinary
-  enhancement request only after every incoming, outgoing, and discovery queue
+  enhancement request only after every incoming, outgoing, metadata, and discovery queue
   entry completes.
 - Invalid, misaddressed, or stale record: no mutation and no public fallback.
   Transport failures also leave routing unchanged.
@@ -58,7 +58,7 @@ memos and sent outputs are not erased by fallback.
 
 The two transparent flags are **trusted service metadata**. Note decryption does
 not authenticate them, prove transparent absence, or bind them to the transaction
-ID. This is an explicitly accepted limitation of schema v6: a malicious service
+ID. This is an explicitly accepted limitation of schema v7: a malicious service
 can force a txid fallback with a false positive, or suppress needed transparent
 enhancement with a false negative. This version is not a malicious-server-secure
 proof of transaction shape.
@@ -253,9 +253,9 @@ This is a coordinated Rust API break:
   `Eligible { outgoing }` through `with_ironwood_enhancement_plan`. An empty
   outgoing list is valid eligibility, not proof of durable completion.
 
-The existing database queues and schema-v6 service contract remain unchanged.
-No wallet database migration, Enhance PIR server update, or snapshot rebuild is
-required. The shared record crate must be available before publishing backend
+Schema 7 requires the metadata-queue database migration, an Enhance PIR server
+update, and a canonical snapshot rebuild. Schema-6 servers and clients are not
+compatible with this release. The shared record crate must be available before publishing backend
 releases that depend on it.
 
 Prefer cache reuse and normal batched downloads. Downloading a specific missing
@@ -275,10 +275,13 @@ LWD decisions.
 
 ## Protocol and generation acceptance
 
-The existing schema-v6 record is 725 bytes: 32-byte ephemeral key, 580-byte note
-ciphertext, 32-byte net value commitment, 80-byte outgoing ciphertext, and one flag
-byte at offset 724. Bit 0 means transparent inputs, bit 1 transparent outputs;
-reserved bits are rejected. Nine records form a 6,525-byte row.
+The schema-v7 record is 737 bytes: 32-byte ephemeral key, 580-byte note
+ciphertext, 32-byte net value commitment, 80-byte outgoing ciphertext, a flag
+byte at offset 724, a four-byte little-endian expiry height at offset 725, and an
+eight-byte little-endian fee at offset 729. Bit 0 means transparent inputs, bit 1
+transparent outputs, and bit 2 a present fee. Other bits are rejected. An absent
+fee must have a zero payload; a present zero fee is distinct. Expiry zero means
+expiry is disabled, not unknown. Nine records form a 6,633-byte row.
 
 The client pins the setup seed, validates generation metadata and the
 public-parameter digest, and binds queries and responses to one immutable
@@ -328,3 +331,40 @@ Future upstream compact scanning can supply more explicit transparent informatio
 to the existing eligibility decision. Transparent discovery/PIR, variable-length
 address history, and private transparent spentness remain separate designs. No
 future compact-block or service changes are required to land this integration.
+
+## Schema-7 fee and expiry completion
+
+`EnhanceRecordParts` now requires `metadata: EnhanceTransactionMetadata`. Construct
+it with `EnhanceTransactionMetadata::new(expiry_height, fee_zatoshis)`; the constructor
+rejects heights at or above 500,000,000 and fees above the monetary range.
+Byte decoding also rejects reserved flags and noncanonical absent-fee payloads.
+The two clients require schema 7, protocol `ironwood-enhance-pir-v2`, and its pinned
+setup seed. They do not downgrade to schema 6 or fall back publicly on errors.
+
+The indexer derives a pure Ironwood transaction's actual fee from its public value
+balance. These fields are trusted service metadata, like shape flags; note decryption
+does not authenticate them. After action binding and current-identity checks, storage
+fills fee and expiry atomically with action work. Conflicting known values reject the
+whole response. Full-transaction storage remains authoritative.
+
+A new durable metadata queue backfills protected mined transactions whose earlier
+PIR enhancement retired without fee or expiry. Already stored memos are retained.
+Work enumeration reuses action queries; a metadata-only incoming query validates
+against the stored note even when its memo is complete. Missing outgoing-only
+positions are rebuilt from the trusted compact source through `Rediscover`.
+Metadata reconstruction does not require an outgoing recovery key. Suspended
+outgoing work remains independently incomplete after metadata is stored.
+
+The migration and cleanup run in PIR-disabled builds too. Rewinds invalidate position
+bindings; account deletion converts lost incoming bindings into rediscovery work.
+Ordinary unprotected history and sticky LWD routing are not reclassified.
+
+`transactions.fee` and `transactions.expiry_height` feed the existing history API.
+This release does not retrieve raw transactions: `get_transaction()` still returns
+`None` when `transactions.raw` is absent. Raw export and parsed inspection remain
+unavailable for those transactions. History displays can use the populated metadata.
+
+Custom storage implementations now implement `pending_ironwood_metadata` and
+consume the named `IronwoodEnhancementData` returned by `into_parts()`. Apply its
+metadata alongside note, route and queue changes; encoding errors use
+`InvalidEnhanceRecord` instead of the former flag-only error.

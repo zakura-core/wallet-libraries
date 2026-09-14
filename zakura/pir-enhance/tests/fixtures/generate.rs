@@ -1,15 +1,7 @@
 //! Run in a temporary Cargo project as described in README.md.
-#[allow(dead_code)]
-mod upstream {
-    include!(concat!(
-        env!("ENHANCE_PIR_CHECKOUT"),
-        "/pir/enhance/src/types.rs"
-    ));
-}
-
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256};
-use upstream::*;
+use enhance_pir::types::*;
 
 fn main() {
     let (rlwe, params) = ipir_sp::params_for_simplepir(SHARD_ROWS as u64, ITEM_SIZE_BITS).unwrap();

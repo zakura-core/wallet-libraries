@@ -1,8 +1,8 @@
 use ipir_sp::YpirSchemeParams;
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u16 = 6;
-pub const PROTOCOL_REVISION: &str = "ironwood-enhance-pir-v1";
+pub const SCHEMA_VERSION: u16 = 7;
+pub const PROTOCOL_REVISION: &str = "ironwood-enhance-pir-v2";
 pub const POOL: &str = "ironwood";
 
 pub const RECORDS_PER_ROW: usize = 9;
@@ -16,7 +16,7 @@ pub const SHARDS_PER_GROUP: u64 = 16;
 pub const ITEM_SIZE_BITS: u64 = (ROW_BYTES * 8) as u64;
 
 /// Pinned deterministic setup seed for the Enhance PIR protocol.
-pub const ENHANCE_SETUP_SEED: u64 = 0x7dc0_c1be_a8ed_2c29;
+pub const ENHANCE_SETUP_SEED: u64 = 0xa4d6_9bc2_317e_085f;
 
 pub fn setup_seed_bytes() -> [u8; 32] {
     let mut bytes = [0; 32];
@@ -25,10 +25,10 @@ pub fn setup_seed_bytes() -> [u8; 32] {
 }
 
 pub use zakura_pir_enhance_types::{
-    EnhanceRecord, EnhanceRecordParts, FLAG_HAS_TRANSPARENT_INPUTS, FLAG_HAS_TRANSPARENT_OUTPUTS,
-    InvalidEnhanceRecordFlags, KNOWN_FLAGS, RECORD_BYTES, RECORD_CV_NET_OFFSET,
-    RECORD_ENC_CIPHERTEXT_OFFSET, RECORD_EPHEMERAL_KEY_OFFSET, RECORD_FLAGS_OFFSET,
-    RECORD_OUT_CIPHERTEXT_OFFSET,
+    EnhanceRecord, EnhanceRecordParts, EnhanceTransactionMetadata, FLAG_HAS_TRANSPARENT_INPUTS,
+    FLAG_HAS_TRANSPARENT_OUTPUTS, InvalidEnhanceRecord, KNOWN_FLAGS, RECORD_BYTES,
+    RECORD_CV_NET_OFFSET, RECORD_ENC_CIPHERTEXT_OFFSET, RECORD_EPHEMERAL_KEY_OFFSET,
+    RECORD_FLAGS_OFFSET, RECORD_OUT_CIPHERTEXT_OFFSET,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -125,9 +125,11 @@ mod tests {
             out_ciphertext: [4; 80],
             has_transparent_inputs: true,
             has_transparent_outputs: false,
+            metadata: zakura_pir_enhance_types::EnhanceTransactionMetadata::new(0, Some(0))
+                .unwrap(),
         });
-        assert_eq!(RECORD_BYTES, 725);
-        assert_eq!(ROW_BYTES, 6_525);
+        assert_eq!(RECORD_BYTES, 737);
+        assert_eq!(ROW_BYTES, 6_633);
         assert_eq!(record.ephemeral_key(), &[1; 32]);
         assert_eq!(record.enc_ciphertext(), &[2; 580]);
         assert_eq!(record.cv_net(), &[3; 32]);

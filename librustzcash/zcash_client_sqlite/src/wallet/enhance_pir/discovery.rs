@@ -132,10 +132,15 @@ pub(crate) fn rebuild(
         return Ok(Rejected);
     }
     let mut stmt = conn.prepare_cached(
-        "SELECT t.id_tx, t.txid, t.tx_index FROM ironwood_enhance_discovery_queue q
+        "WITH jobs AS (
+            SELECT transaction_id FROM ironwood_enhance_discovery_queue WHERE suspended = 0
+            UNION SELECT transaction_id FROM ironwood_enhance_metadata_queue WHERE commitment_tree_position IS NULL
+         ) SELECT t.id_tx, t.txid, t.tx_index,
+            EXISTS(SELECT 1 FROM ironwood_enhance_discovery_queue d WHERE d.transaction_id = t.id_tx AND d.suspended = 0)
+         FROM jobs q
          JOIN transactions t ON t.id_tx = q.transaction_id
          JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-         WHERE t.mined_height = :height AND t.raw IS NULL AND r.route = 0 AND q.suspended = 0
+         WHERE t.mined_height = :height AND t.raw IS NULL AND r.route = 0
          ORDER BY t.tx_index, t.txid",
     )?;
     let jobs = stmt
@@ -144,6 +149,7 @@ pub(crate) fn rebuild(
                 TxRef(row.get(0)?),
                 row.get::<_, [u8; 32]>(1)?,
                 row.get::<_, u64>(2)?,
+                row.get::<_, bool>(3)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -191,10 +197,68 @@ pub(crate) fn rebuild(
         position += u32::try_from(compact_tx.ironwood_actions.len()).expect("checked total");
     }
 
+    let mut metadata_plans = vec![];
+    let mut metadata_rebuilt = 0;
     let mut plans = vec![];
     let mut unresolved = vec![];
     let mut suspend = vec![];
-    for (tx_ref, txid, index) in jobs {
+    for (tx_ref, txid, index, needs_outgoing) in jobs {
+        if let Some((position, compact_tx)) = transactions.get(txid.as_slice()) {
+            // Validate geometry, locators and received positions even for metadata-only jobs.
+            if candidates(conn, tx_ref, index, *position, compact_tx, &[])?.is_some() {
+                for index in 0..compact_tx.ironwood_actions.len() {
+                    if outgoing_position_owned_by_other(
+                        conn,
+                        tx_ref,
+                        u64::from(*position) + index as u64,
+                    )? {
+                        return Ok(Rejected);
+                    }
+                }
+                if let Some(action) = compact_tx.ironwood_actions.first() {
+                    if outgoing_position_owned_by_other(conn, tx_ref, u64::from(*position))? {
+                        return Ok(Rejected);
+                    }
+                    let epk: [u8; 32] =
+                        action.ephemeral_key.as_slice().try_into().map_err(|_| {
+                            SqliteClientError::CorruptedData("invalid compact epk".into())
+                        })?;
+                    let ciphertext: [u8; 52] =
+                        action.ciphertext.as_slice().try_into().map_err(|_| {
+                            SqliteClientError::CorruptedData("invalid compact ciphertext".into())
+                        })?;
+                    metadata_plans.push((
+                        tx_ref,
+                        *position,
+                        epk,
+                        ciphertext,
+                        is_ironwood_pir_candidate(compact_tx),
+                    ));
+                    if !needs_outgoing {
+                        metadata_rebuilt += 1;
+                        continue;
+                    }
+                } else if !needs_outgoing {
+                    unresolved.push(IronwoodEnhanceDiscoveryFailure {
+                        txid: TxId::from_bytes(txid),
+                        reason: ContextMismatch,
+                    });
+                    continue;
+                }
+            } else if !needs_outgoing {
+                unresolved.push(IronwoodEnhanceDiscoveryFailure {
+                    txid: TxId::from_bytes(txid),
+                    reason: ContextMismatch,
+                });
+                continue;
+            }
+        } else if !needs_outgoing {
+            unresolved.push(IronwoodEnhanceDiscoveryFailure {
+                txid: TxId::from_bytes(txid),
+                reason: TransactionMissing,
+            });
+            continue;
+        }
         let funding = funding(conn, tx_ref)?;
         let reason = if funding.is_empty() {
             // Defensive handling for an active orphan, even if deletion cleanup was missed.
@@ -242,7 +306,14 @@ pub(crate) fn rebuild(
 
     // Transaction-local failures retain intent while valid siblings progress.
     // Any SQL error still rolls back all writes in this call, including suspension.
-    let rebuilt = plans.len();
+    let rebuilt = plans.len() + metadata_rebuilt;
+    for (tx_ref, position, epk, ciphertext, eligible) in metadata_plans {
+        if eligible {
+            super::metadata::bind(conn, tx_ref, u64::from(position), 0, &epk, &ciphertext)?;
+        } else {
+            super::require_lwd(conn, tx_ref)?;
+        }
+    }
     for tx_ref in suspend {
         conn.execute(
             "UPDATE ironwood_enhance_discovery_queue SET suspended = 1 WHERE transaction_id = :tx",

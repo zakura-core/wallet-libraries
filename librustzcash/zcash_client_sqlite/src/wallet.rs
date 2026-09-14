@@ -841,6 +841,10 @@ pub(crate) fn delete_account(
 pub(crate) fn suspend_orphaned_ironwood_enhancement(
     conn: &rusqlite::Transaction<'_>,
 ) -> Result<(), SqliteClientError> {
+    conn.execute("UPDATE ironwood_enhance_metadata_queue AS q SET commitment_tree_position = NULL,
+        output_index = NULL WHERE q.ephemeral_key IS NULL AND q.commitment_tree_position IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM ironwood_received_notes rn WHERE rn.transaction_id = q.transaction_id
+            AND rn.action_index = q.output_index AND rn.commitment_tree_position = q.commitment_tree_position)", [])?;
     conn.execute(
         "UPDATE ironwood_enhance_outgoing_queue SET not_recoverable = 1
          WHERE NOT EXISTS (SELECT 1 FROM ironwood_enhance_outgoing_accounts a
@@ -4306,6 +4310,13 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         named_params![":height": u32::from(truncation_height)],
     )?;
 
+    conn.execute(
+        "UPDATE ironwood_enhance_metadata_queue SET commitment_tree_position = NULL,
+        output_index = NULL, ephemeral_key = NULL, compact_ciphertext = NULL
+        WHERE transaction_id IN (SELECT id_tx FROM transactions WHERE mined_height > :height)",
+        named_params![":height": u32::from(truncation_height)],
+    )?;
+
     // Un-mine transactions. This must be done outside of the last_scanned_height check because
     // transaction entries may be created as a consequence of receiving transparent TXOs.
     conn.execute(
@@ -5259,6 +5270,10 @@ fn clear_ironwood_enhancement_work(
     conn: &rusqlite::Connection,
     tx_ref: TxRef,
 ) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "DELETE FROM ironwood_enhance_metadata_queue WHERE transaction_id = :tx",
+        named_params![":tx": tx_ref.0],
+    )?;
     conn.execute(
         "DELETE FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx",
         named_params![":tx": tx_ref.0],

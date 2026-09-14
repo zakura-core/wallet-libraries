@@ -891,11 +891,11 @@ mod tests {
     #[test]
     fn row_decoder_rejects_reserved_shape_bits() {
         let mut row = vec![0; ROW_BYTES];
-        for flags in 0..=3 {
+        for flags in 0..=7 {
             row[crate::types::RECORD_FLAGS_OFFSET] = flags;
             assert!(record_in_row(&row, 0).is_ok());
         }
-        for bit in 2..8 {
+        for bit in 3..8 {
             row[crate::types::RECORD_FLAGS_OFFSET] = 1 << bit;
             assert!(record_in_row(&row, 0).is_err());
         }
@@ -985,7 +985,7 @@ mod tests {
         let setup = client.generate_public_query_setup_simplepir_from_seed(setup_seed_bytes());
 
         let mut expected_bytes = [0x5a; RECORD_BYTES];
-        expected_bytes[crate::types::RECORD_FLAGS_OFFSET] = 0;
+        expected_bytes[crate::types::RECORD_FLAGS_OFFSET..].fill(0);
         let expected_record = EnhanceRecord::from_bytes(expected_bytes).unwrap();
         let target_position = RECORDS_PER_ROW as u64 + 3;
         let target_row = 1;

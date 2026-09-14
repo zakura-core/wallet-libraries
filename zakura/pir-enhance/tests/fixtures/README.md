@@ -1,11 +1,10 @@
 # Enhance PIR conformance fixture
 
-`upstream-session.json` was generated from the public types in
-`valargroup/enhance-pir` revision `8c86d1b4c446658a74c6f8ab1ddf1d1ba1be1c87`,
-using its `ipir-sp` pin `accc424e879d8da425fa620aad80f0f2c4e0defd`.
-`generate.rs` includes the upstream source directly, rather than the wallet's
-copy. The fixture freezes the schema-v6 JSON fields, setup seed, one-shard
-geometry, generated parameters, and encoded public-parameter length.
+`upstream-session.json` freezes the schema-7 JSON contract, new setup seed,
+one-shard geometry, generated parameters and public-parameter length.
+`generate.rs` imports the server protocol crate from an explicit checkout;
+it does not import the wallet's copy. The pinned `ipir-sp` revision remains
+`accc424e879d8da425fa620aad80f0f2c4e0defd`.
 
 The anchor, group name, and hashes are synthetic test metadata. The published
 coefficients are zero and are **not** a server snapshot or a decryption vector.
@@ -13,7 +12,7 @@ The ordinary conformance test independently supplies the synthetic wallet anchor
 accepts this session, and checks exact JSON round-trip equality.
 
 `full_shard_production_round_trip` separately builds a deterministic 8,192-row
-database with nine 725-byte records per row, packs each row into 14-bit
+database with nine 737-byte records per row, packs each row into 14-bit
 coefficients like the Enhance server, and computes real published parameters
 with the pinned server primitives. It checks fresh randomized queries at row
 boundaries and the last position, plus a dummy query, through the public wallet
@@ -29,7 +28,7 @@ It is ignored in ordinary test runs because full-shard preprocessing is expensiv
 CI runs it explicitly in release mode.
 
 To regenerate the JSON, set `ENHANCE_PIR_CHECKOUT` to a clean checkout of the
-upstream revision above. From the wallet-libraries root, create a temporary
+schema-7 server revision. From the wallet-libraries root, create a temporary
 Cargo project, so no upstream checkout or wallet manifest is modified:
 
 ```sh
@@ -44,6 +43,7 @@ edition = "2021"
 name = "generate"
 path = "$PWD/zakura/pir-enhance/tests/fixtures/generate.rs"
 [dependencies]
+enhance-pir = { path = "$ENHANCE_PIR_CHECKOUT/pir/enhance" }
 ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", rev = "accc424e879d8da425fa620aad80f0f2c4e0defd" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

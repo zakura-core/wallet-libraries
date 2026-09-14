@@ -2,7 +2,7 @@
 //!
 //! Network lookups use tree positions; transaction/action identities stay local to
 //! reject stale responses after reorgs. Note plaintext is authenticated, but schema
-//! v6 transparent-presence flags are trusted server metadata, not cryptographic evidence.
+//! v7 transaction metadata (shape, fee, expiry) is trusted indexer data, not cryptographic evidence.
 
 use incrementalmerkletree::Position;
 use zcash_primitives::block::BlockHash;
@@ -180,7 +180,7 @@ impl IronwoodEnhanceRequestId {
     }
 }
 
-pub use zakura_pir_enhance_types::{EnhanceRecord, EnhanceRecordParts};
+pub use zakura_pir_enhance_types::{EnhanceRecord, EnhanceRecordParts, EnhanceTransactionMetadata};
 
 /// Chain state to which a PIR snapshot is anchored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -117,6 +117,11 @@ fn wire_record(inputs: bool, outputs: bool) -> EnhanceRecord {
         out_ciphertext: [6; 80],
         has_transparent_inputs: inputs,
         has_transparent_outputs: outputs,
+        metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata::new(
+            0,
+            Some(0),
+        )
+        .unwrap(),
     })
 }
 
@@ -225,6 +230,11 @@ fn incoming_authentication_precedes_shape_and_flags_are_not_authenticated() {
             out_ciphertext: [0; 80],
             has_transparent_inputs: true,
             has_transparent_outputs: false,
+            metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata::new(
+                0,
+                Some(0),
+            )
+            .unwrap(),
         })
     };
     let mut corrupt = ciphertext;
@@ -290,6 +300,11 @@ fn non_recovery_suspends_work_without_completion_or_public_fallback() {
         out_ciphertext: [6; 80],
         has_transparent_inputs: true,
         has_transparent_outputs: false,
+        metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata::new(
+            0,
+            Some(0),
+        )
+        .unwrap(),
     });
     assert_eq!(
         apply_record(st.wallet_mut().db_mut(), outgoing, &wrong).unwrap(),
@@ -983,4 +998,148 @@ fn reopening_requires_mode_before_enumerating_persisted_work() {
     let db = db.with_enhancement_mode(EnhancementMode::PrivateIronwood);
     assert_eq!(db.enhance_pir_work().unwrap(), expected);
     assert!(db.transaction_data_requests().unwrap().is_empty());
+}
+
+#[test]
+fn schema7_recovers_history_and_backfills_without_losing_a_stored_memo() {
+    use orchard::note_encryption::{IronwoodDomain, IronwoodNoteEncryption};
+    use zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata;
+    use zcash_note_encryption::Domain;
+    let (mut st, tx_ref, request) = fixture();
+    let note = st
+        .wallet()
+        .db()
+        .pending_memo(request.position())
+        .unwrap()
+        .unwrap()
+        .note;
+    let encryptor = IronwoodNoteEncryption::new(None, note, [7; 512]);
+    let record = EnhanceRecord::from_parts(EnhanceRecordParts {
+        ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0,
+        enc_ciphertext: encryptor.encrypt_note_plaintext(),
+        cv_net: [0; 32],
+        out_ciphertext: [0; 80],
+        has_transparent_inputs: false,
+        has_transparent_outputs: false,
+        metadata: EnhanceTransactionMetadata::new(123_456, Some(12_345)).unwrap(),
+    });
+    assert_eq!(
+        apply_record(st.wallet_mut().db_mut(), request, &record).unwrap(),
+        EnhancePirStoreResult::Stored
+    );
+    let history = || {
+        st.wallet()
+            .conn()
+            .query_row(
+                "SELECT fee, expiry_height, raw FROM transactions WHERE id_tx = ?",
+                [tx_ref.0],
+                |r| {
+                    Ok((
+                        r.get::<_, u64>(0)?,
+                        r.get::<_, u32>(1)?,
+                        r.get::<_, Option<Vec<u8>>>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    assert_eq!(history(), (12_345, 123_456, None));
+    assert!(
+        st.wallet()
+            .db()
+            .get_transaction(request.request_id().txid())
+            .unwrap()
+            .is_none()
+    );
+    assert!(st.wallet().db().query_requests().unwrap().is_empty());
+    // Simulate schema-v6 completion: memo retained, metadata missing, queues retired.
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE transactions SET fee = NULL, expiry_height = NULL WHERE id_tx = ?",
+            [tx_ref.0],
+        )
+        .unwrap();
+    queue_transaction(
+        st.wallet().conn(),
+        tx_ref,
+        &IronwoodEnhancementPlan::Eligible { outgoing: vec![] },
+    )
+    .unwrap();
+    assert!(
+        st.wallet()
+            .db()
+            .pending_memo(request.position())
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(st.wallet().db().query_requests().unwrap(), vec![request]);
+    assert_eq!(
+        apply_record(st.wallet_mut().db_mut(), request, &record).unwrap(),
+        EnhancePirStoreResult::Stored
+    );
+    assert!(st.wallet().db().query_requests().unwrap().is_empty());
+    let memo: Vec<u8> = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT memo FROM ironwood_received_notes WHERE transaction_id = ?",
+            [tx_ref.0],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(memo, vec![7; 512]);
+}
+
+#[test]
+fn schema7_conflicting_metadata_rolls_back_the_entire_response() {
+    use orchard::note_encryption::{IronwoodDomain, IronwoodNoteEncryption};
+    use zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata;
+    use zcash_note_encryption::Domain;
+    let (mut st, tx_ref, request) = fixture();
+    let note = st
+        .wallet()
+        .db()
+        .pending_memo(request.position())
+        .unwrap()
+        .unwrap()
+        .note;
+    let encryptor = IronwoodNoteEncryption::new(None, note, [8; 512]);
+    let record = EnhanceRecord::from_parts(EnhanceRecordParts {
+        ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0,
+        enc_ciphertext: encryptor.encrypt_note_plaintext(),
+        cv_net: [0; 32],
+        out_ciphertext: [0; 80],
+        has_transparent_inputs: false,
+        has_transparent_outputs: false,
+        metadata: EnhanceTransactionMetadata::new(0, Some(20)).unwrap(),
+    });
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE transactions SET fee = 10 WHERE id_tx = ?",
+            [tx_ref.0],
+        )
+        .unwrap();
+    assert_eq!(
+        apply_record(st.wallet_mut().db_mut(), request, &record).unwrap(),
+        EnhancePirStoreResult::Rejected
+    );
+    assert!(
+        st.wallet()
+            .db()
+            .pending_memo(request.position())
+            .unwrap()
+            .is_some()
+    );
+    let values: (u64, Option<u32>) = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT fee, expiry_height FROM transactions WHERE id_tx = ?",
+            [tx_ref.0],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(values, (10, None));
 }

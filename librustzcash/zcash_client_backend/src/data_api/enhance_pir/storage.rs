@@ -4,7 +4,10 @@
 //! Hold a consistent storage transaction across context reads, validation, and commit.
 //! Applications call `EnhancePirWrite::apply_ironwood_enhance_record` instead.
 
-use super::{EnhancePirRequest, EnhancePirStoreResult, EnhanceRecord, IronwoodEnhanceRequestId};
+use super::{
+    EnhancePirRequest, EnhancePirStoreResult, EnhanceRecord, EnhanceTransactionMetadata,
+    IronwoodEnhanceRequestId,
+};
 use crate::data_api::Account;
 use incrementalmerkletree::Position;
 use orchard::{
@@ -39,6 +42,21 @@ pub struct PendingIronwoodOutgoing<AccountId> {
     pub compact_ciphertext: [u8; 52],
 }
 
+/// Binding context for transaction metadata, independent of memo/OVK completion.
+pub enum PendingIronwoodMetadata<AccountId> {
+    Incoming(PendingIronwoodMemo<AccountId>),
+    Compact(PendingIronwoodOutgoing<AccountId>),
+}
+
+impl<AccountId> PendingIronwoodMetadata<AccountId> {
+    fn request_id(&self) -> IronwoodEnhanceRequestId {
+        match self {
+            Self::Incoming(p) => p.request_id,
+            Self::Compact(p) => p.request_id,
+        }
+    }
+}
+
 /// Outgoing result carried inside a validated, action-bound application.
 pub enum IronwoodOutgoingResult<AccountId> {
     /// No outgoing work was queued at this action.
@@ -63,26 +81,30 @@ pub enum IronwoodOutgoingResult<AccountId> {
 pub struct ValidatedIronwoodEnhancement<AccountId> {
     request: EnhancePirRequest,
     has_transparent: bool,
+    metadata: EnhanceTransactionMetadata,
     incoming: Option<MemoBytes>,
     outgoing: IronwoodOutgoingResult<AccountId>,
 }
 
+/// Fields of a validated response; commit them together after identity rechecks.
+pub struct IronwoodEnhancementData<AccountId> {
+    pub request: EnhancePirRequest,
+    pub has_transparent: bool,
+    pub metadata: EnhanceTransactionMetadata,
+    pub incoming: Option<MemoBytes>,
+    pub outgoing: IronwoodOutgoingResult<AccountId>,
+}
+
 impl<AccountId> ValidatedIronwoodEnhancement<AccountId> {
-    /// Unpacks a validated response for a storage implementation.
-    pub fn into_parts(
-        self,
-    ) -> (
-        EnhancePirRequest,
-        bool,
-        Option<MemoBytes>,
-        IronwoodOutgoingResult<AccountId>,
-    ) {
-        (
-            self.request,
-            self.has_transparent,
-            self.incoming,
-            self.outgoing,
-        )
+    /// Unpacks all validated fields, including transaction metadata, for atomic storage.
+    pub fn into_parts(self) -> IronwoodEnhancementData<AccountId> {
+        IronwoodEnhancementData {
+            request: self.request,
+            has_transparent: self.has_transparent,
+            metadata: self.metadata,
+            incoming: self.incoming,
+            outgoing: self.outgoing,
+        }
     }
 
     /// Bypasses validation for storage tests only.
@@ -96,6 +118,7 @@ impl<AccountId> ValidatedIronwoodEnhancement<AccountId> {
         Self {
             request,
             has_transparent,
+            metadata: EnhanceTransactionMetadata::new(0, Some(0)).expect("test metadata"),
             incoming,
             outgoing,
         }
@@ -110,6 +133,12 @@ pub trait EnhancePirStorage {
     type AccountId: Copy;
     type Account: Account<AccountId = Self::AccountId>;
     type Error;
+
+    /// Loads durable metadata-only work from the same transaction snapshot.
+    fn pending_ironwood_metadata(
+        &self,
+        position: Position,
+    ) -> Result<Option<PendingIronwoodMetadata<Self::AccountId>>, Self::Error>;
 
     /// Loads viewing keys from the same storage snapshot as the pending context.
     fn get_account(&self, id: Self::AccountId) -> Result<Option<Self::Account>, Self::Error>;
@@ -161,9 +190,13 @@ pub fn validate_and_apply_record<DbT: EnhancePirStorage>(
     request: EnhancePirRequest,
     record: &EnhanceRecord,
 ) -> Result<EnhancePirStoreResult, DbT::Error> {
+    let metadata = db.pending_ironwood_metadata(request.position())?;
     let incoming = db.pending_ironwood_memo(request.position())?;
     let outgoing = db.pending_ironwood_outgoing(request.position())?;
-    if (incoming.is_none() && outgoing.is_none())
+    if (incoming.is_none() && outgoing.is_none() && metadata.is_none())
+        || metadata
+            .as_ref()
+            .is_some_and(|p| p.request_id() != request.request_id())
         || incoming
             .as_ref()
             .is_some_and(|p| p.request_id != request.request_id())
@@ -172,6 +205,34 @@ pub fn validate_and_apply_record<DbT: EnhancePirStorage>(
             .is_some_and(|p| p.request_id != request.request_id())
     {
         return Ok(EnhancePirStoreResult::AlreadyResolved);
+    }
+
+    if let Some(binding) = metadata {
+        let valid = match binding {
+            PendingIronwoodMetadata::Incoming(pending) => {
+                let account = db.get_account(pending.account_id)?;
+                let ivk = account.as_ref().and_then(|account| match pending.scope {
+                    Scope::External => account.uivk().orchard().as_ref().map(|ivk| ivk.prepare()),
+                    Scope::Internal => account
+                        .ufvk()
+                        .and_then(|key| key.orchard())
+                        .map(|fvk| fvk.to_ivk(Scope::Internal).prepare()),
+                });
+                pending.note.version() == NoteVersion::V3
+                    && ivk
+                        .and_then(|ivk| decrypt_memo(&pending.note, &ivk, record))
+                        .is_some()
+            }
+            PendingIronwoodMetadata::Compact(pending) => {
+                record_matches_compact_action(&pending, record)
+            }
+        };
+        if !valid {
+            return Ok(EnhancePirStoreResult::Rejected);
+        }
+    }
+    if !record.has_transparent() && record.metadata().fee_zatoshis().is_none() {
+        return Ok(EnhancePirStoreResult::Rejected);
     }
 
     let memo = if let Some(pending) = incoming {
@@ -236,6 +297,7 @@ pub fn validate_and_apply_record<DbT: EnhancePirStorage>(
     db.apply_ironwood_enhancement(ValidatedIronwoodEnhancement {
         request,
         has_transparent: record.has_transparent(),
+        metadata: record.metadata(),
         incoming: memo,
         outgoing,
     })
@@ -372,6 +434,8 @@ mod tests {
             out_ciphertext: [0; 80],
             has_transparent_inputs: false,
             has_transparent_outputs: false,
+            metadata: crate::data_api::enhance_pir::EnhanceTransactionMetadata::new(0, Some(0))
+                .unwrap(),
         });
         (note, fvk.to_ivk(Scope::External).prepare(), record)
     }
@@ -393,6 +457,8 @@ mod tests {
             out_ciphertext: *record.out_ciphertext(),
             has_transparent_inputs: false,
             has_transparent_outputs: false,
+            metadata: crate::data_api::enhance_pir::EnhanceTransactionMetadata::new(0, Some(0))
+                .unwrap(),
         });
         assert!(decrypt_memo(&note, &ivk, &tampered).is_none());
 
@@ -436,6 +502,8 @@ mod tests {
             out_ciphertext: encryptor.encrypt_outgoing_plaintext(&cv_net, &cmx, &mut outgoing_rng),
             has_transparent_inputs: false,
             has_transparent_outputs: false,
+            metadata: crate::data_api::enhance_pir::EnhanceTransactionMetadata::new(0, Some(0))
+                .unwrap(),
         });
         let pending = PendingIronwoodOutgoing {
             request_id: IronwoodEnhanceRequestId::new(TxId::from_bytes([0; 32]), 0),
@@ -470,6 +538,8 @@ mod tests {
             out_ciphertext: *record.out_ciphertext(),
             has_transparent_inputs: false,
             has_transparent_outputs: false,
+            metadata: crate::data_api::enhance_pir::EnhanceTransactionMetadata::new(0, Some(0))
+                .unwrap(),
         });
         assert!(!record_matches_compact_action(
             &pending,
@@ -485,6 +555,8 @@ mod tests {
             out_ciphertext: *record.out_ciphertext(),
             has_transparent_inputs: false,
             has_transparent_outputs: false,
+            metadata: crate::data_api::enhance_pir::EnhanceTransactionMetadata::new(0, Some(0))
+                .unwrap(),
         });
         assert!(!record_matches_compact_action(
             &pending,

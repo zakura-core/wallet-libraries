@@ -1,4 +1,4 @@
-//! Conformance to Enhance PIR 8c86d1b and its pinned ipir-sp server primitives.
+//! Conformance to Enhance PIR schema 7 and its pinned ipir-sp server primitives.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use inspiring::TopKeyImages;
 use ipir_sp::{
@@ -64,7 +64,10 @@ fn full_shard_production_round_trip() {
         for (offset, byte) in record.iter_mut().enumerate() {
             *byte = (position.wrapping_mul(37) ^ (position >> 8) ^ offset) as u8;
         }
-        record[RECORD_FLAGS_OFFSET] = (position % 4) as u8;
+        record[RECORD_FLAGS_OFFSET..].fill(0);
+        record[RECORD_FLAGS_OFFSET] = (position % 4) as u8 | 4;
+        record[725..729].copy_from_slice(&(position as u32).to_le_bytes());
+        record[729..737].copy_from_slice(&(position as u64 * 37).to_le_bytes());
     }
     session.generation.shards[0].rows_sha256 = hex::encode(Sha256::digest(&rows));
     // Matches Enhance server's RowCoefficientIter: each row is independently packed into p.
