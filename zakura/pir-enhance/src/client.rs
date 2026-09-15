@@ -83,6 +83,12 @@ impl GenerationAcceptance {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
+    #[error("row query failed: {0}")]
+    Row(#[source] std::sync::Arc<ClientError>),
+    #[error("request cancelled")]
+    Cancelled,
+    #[error("transport error: {0}")]
+    Transport(String),
     #[cfg(feature = "https-client")]
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
@@ -404,63 +410,43 @@ fn checked_response_product(left: usize, right: usize, name: &str) -> Result<usi
         .ok_or_else(|| ClientError::Response(format!("{name} overflows usize")))
 }
 
+/// Default HTTPS adapter around the transport-independent workflow.
 #[cfg(feature = "https-client")]
 pub struct EnhancePirClient {
     http: reqwest::Client,
-    base_url: String,
-    session: QuerySession,
+    inner: crate::transport::Client,
 }
-
 #[cfg(feature = "https-client")]
 pub struct PendingEnhancePirClient {
     http: reqwest::Client,
-    base_url: String,
-    session: EnhanceSession,
+    inner: crate::transport::PendingClient,
 }
-
 #[cfg(feature = "https-client")]
 impl PendingEnhancePirClient {
     pub fn generation(&self) -> &EnhanceGeneration {
-        &self.session.generation
+        self.inner.generation()
     }
-
     pub async fn connect(
         self,
         acceptance: &GenerationAcceptance,
     ) -> Result<EnhancePirClient, ClientError> {
-        acceptance.validate(&self.session.generation)?;
-        let session = QuerySession::from_session(self.session, acceptance)?;
         Ok(EnhancePirClient {
             http: self.http,
-            base_url: self.base_url,
-            session,
+            inner: self.inner.accept(acceptance)?,
         })
     }
 }
-
 #[cfg(feature = "https-client")]
 impl EnhancePirClient {
     pub async fn fetch_session(base_url: &str) -> Result<PendingEnhancePirClient, ClientError> {
-        let base_url = base_url.trim_end_matches('/').to_string();
         let http = reqwest::Client::builder()
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
-        let session: EnhanceSession = serde_json::from_slice(
-            &read_limited(
-                http.get(format!("{base_url}/v1/enhance/init"))
-                    .send()
-                    .await?,
-                1024 * 1024,
-            )
-            .await?,
-        )?;
-        Ok(PendingEnhancePirClient {
-            http,
-            base_url,
-            session,
-        })
+        let inner = crate::transport::PendingClient::fetch(&http, base_url).await?;
+        Ok(PendingEnhancePirClient { http, inner })
     }
-
     pub async fn connect(
         base_url: &str,
         acceptance: &GenerationAcceptance,
@@ -470,60 +456,24 @@ impl EnhancePirClient {
             .connect(acceptance)
             .await
     }
-
     pub fn generation(&self) -> &EnhanceGeneration {
-        self.session.generation()
+        self.inner.generation()
     }
-
+    pub fn query_batch(
+        &self,
+        positions: impl IntoIterator<Item = u64>,
+    ) -> impl futures_util::Stream<Item = crate::transport::PositionResult> + '_ {
+        self.inner.query_batch(&self.http, positions)
+    }
     pub async fn query_position(&self, position: u64) -> Result<EnhanceRecord, ClientError> {
-        let (query, slot) = self.session.prepare_position(position)?;
-        let row = self.send(query).await?;
-        record_in_row(&row, slot)
+        use futures_util::StreamExt;
+        let results = self.query_batch([position]);
+        futures_util::pin_mut!(results);
+        results.next().await.expect("one position").record
     }
-
     pub async fn query_dummy(&self) -> Result<(), ClientError> {
-        self.send(self.session.prepare_dummy()?).await.map(|_| ())
+        self.inner.query_dummy(&self.http).await
     }
-
-    async fn send(&self, query: PreparedQuery) -> Result<Vec<u8>, ClientError> {
-        let response = self
-            .http
-            .post(format!("{}/v1/enhance/query", self.base_url))
-            .body(query.body().to_vec())
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            return Err(ClientError::Response(format!(
-                "server returned {}",
-                response.status()
-            )));
-        }
-        let response = read_limited(response, 16 * 1024 * 1024).await?;
-        self.session.decode(query, &response)
-    }
-}
-
-#[cfg(feature = "https-client")]
-async fn read_limited(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, ClientError> {
-    let mut response = response.error_for_status()?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > limit as u64)
-    {
-        return Err(ClientError::Response("HTTP body exceeds limit".to_string()));
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        if body
-            .len()
-            .checked_add(chunk.len())
-            .is_none_or(|length| length > limit)
-        {
-            return Err(ClientError::Response("HTTP body exceeds limit".to_string()));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 #[cfg(test)]
@@ -1059,5 +1009,159 @@ mod tests {
 
         let row = query_session.decode(query, &response).unwrap();
         assert_eq!(record_in_row(&row, slot).unwrap(), expected_record);
+
+        // The same tiny server exercises the public batch workflow, including
+        // association, coalescing, duplicates, and progress before a later error.
+        use crate::transport::{Client, Request, Transport};
+        use futures::{StreamExt, executor::block_on};
+        struct Fake<F>(F);
+        impl<F: Fn(Request) -> Result<Vec<u8>, ClientError>> Transport for Fake<F> {
+            async fn execute(
+                &self,
+                request: Request,
+            ) -> Result<crate::transport::ResponseBody, ClientError> {
+                let mut body = request.response_body();
+                body.extend(&(self.0)(request)?)?;
+                Ok(body.finish())
+            }
+        }
+        let calls = std::cell::Cell::new(0);
+        let fail_at = std::cell::Cell::new(None);
+        let transport = Fake(|request: Request| {
+            let call = calls.get() + 1;
+            calls.set(call);
+            if fail_at.get() == Some(call) {
+                return Err(ClientError::Cancelled);
+            }
+            let keys = deserialize_packing_keys(&rlwe, &request.body[8..8 + keys_len]).unwrap();
+            let body = server
+                .perform_full_online_computation_simplepir_measured(
+                    &rlwe,
+                    &request.body[8 + keys_len..],
+                    &keys,
+                    &top_keys,
+                    &preprocessed,
+                )
+                .unwrap()
+                .0;
+            let mut response = 7u64.to_le_bytes().to_vec();
+            response.extend_from_slice(&[9; 8]);
+            response.extend_from_slice(&body);
+            Ok(response)
+        });
+        let client = Client {
+            base_url: "https://example.test".into(),
+            session: query_session,
+        };
+        let results = block_on(
+            client
+                .query_batch(
+                    &transport,
+                    [
+                        target_position,
+                        target_position,
+                        target_position + 1,
+                        0,
+                        100,
+                    ],
+                )
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(results.len(), 4);
+        assert!(matches!(
+            results[3].record,
+            Err(ClientError::OutsideCoverage(100))
+        ));
+        assert_eq!(
+            results
+                .iter()
+                .find(|r| r.position == target_position)
+                .unwrap()
+                .record
+                .as_ref()
+                .unwrap(),
+            &expected_record
+        );
+        assert_ne!(
+            results
+                .iter()
+                .find(|r| r.position == target_position + 1)
+                .unwrap()
+                .record
+                .as_ref()
+                .unwrap(),
+            &expected_record
+        );
+        // A caller using per-item `?` still commits covered rows before the
+        // coverage error. Explicit matching can keep draining all outcomes.
+        calls.set(0);
+        let mut committed = 0;
+        let outcome: Result<(), ClientError> = block_on(async {
+            let results = client.query_batch(&transport, [100, 0, target_position]);
+            futures::pin_mut!(results);
+            while let Some(result) = results.next().await {
+                result.record?;
+                committed += 1;
+            }
+            Ok(())
+        });
+        assert_eq!(committed, 2);
+        assert_eq!(calls.get(), 2);
+        assert!(matches!(outcome, Err(ClientError::OutsideCoverage(100))));
+        calls.set(0);
+        fail_at.set(Some(2));
+        let results = block_on(
+            client
+                .query_batch(&transport, [0, target_position])
+                .collect::<Vec<_>>(),
+        );
+        assert!(results[0].record.is_ok());
+        assert!(matches!(results[1].record, Err(ClientError::Cancelled)));
+        calls.set(0);
+        fail_at.set(Some(1));
+        let results = block_on(
+            client
+                .query_batch(&transport, [0, target_position])
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(calls.get(), 1);
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r.record, Err(ClientError::Cancelled)))
+        );
+        assert_eq!(results.len(), 2);
+        // Cancelling a covered row never changes uncovered work into a public
+        // fallback or hides its coverage outcome, even when the stream is drained.
+        calls.set(0);
+        let results = block_on(
+            client
+                .query_batch(&transport, [100, 0, target_position])
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(results.len(), 3);
+        assert!(matches!(results[0].record, Err(ClientError::Cancelled)));
+        assert!(matches!(results[1].record, Err(ClientError::Cancelled)));
+        assert!(matches!(
+            results[2].record,
+            Err(ClientError::OutsideCoverage(100))
+        ));
+        // All-uncovered and empty batches never dispatch network requests.
+        calls.set(0);
+        let results = block_on(
+            client
+                .query_batch(&transport, [100, 100, 101])
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(results.len(), 2);
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r.record, Err(ClientError::OutsideCoverage(_))))
+        );
+        assert!(block_on(client.query_batch(&transport, []).collect::<Vec<_>>()).is_empty());
+        assert_eq!(calls.get(), 0);
     }
 }

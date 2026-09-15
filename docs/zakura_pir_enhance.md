@@ -285,3 +285,142 @@ flags, and metadata validation. Custom record producers use
 `EnhanceRecord::from_parts(EnhanceRecordParts { ... })`; byte decoding uses
 fallible `EnhanceRecord::from_bytes`. Decoding checks encoding, while the wallet
 validates the record against pending state before applying it.
+
+## Application-routed client and wallet adapter
+
+`zakura_pir_enhance::transport::PendingClient::fetch(&route, endpoint)` performs
+bounded initialization collection without allocating PIR setup. Supply application
+typed consensus parameters (the same ones used to open and scan the wallet)
+and limits to `zakura_pir_enhance::wallet::acceptance`; only its
+`Acceptance::Accepted` outcome may be passed to `PendingClient::accept`.
+`WaitingForScanning` and `Mismatch` never authorize setup. The wallet adapter
+converts the display-order advertised hash to the wallet's internal block hash.
+It derives the network identifier and NU6.3 activation height from those parameters;
+it rejects an unscheduled activation and anchors below activation. Do not derive
+wallet policy from the service response. Low-level `GenerationAcceptance` remains
+available for consumers that implement their own policy validation.
+
+```rust,ignore
+let pending = PendingClient::fetch(&route, endpoint).await?;
+let approved = acceptance(&db, pending.generation(), &wallet_params, limits)??;
+let Acceptance::Accepted(approved) = approved else { return Ok(()); };
+let client = pending.accept(&approved)?;
+let work = PreparedWork::new(db.enhance_pir_work()?);
+let results = client.query_batch(&route, work.positions());
+futures_util::pin_mut!(results);
+let mut waiting_for_snapshot = false;
+let mut retry_later = false;
+let mut ordinary_work_changed = false;
+let mut suspension_observed = false;
+let mut stored = 0;
+while let Some(result) = results.next().await {
+    let record = match result.record {
+        Ok(record) => record,
+        Err(ClientError::OutsideCoverage(_)) => {
+            waiting_for_snapshot = true;
+            continue; // Keep durable work; never infer public fallback from coverage.
+        }
+        Err(error @ ClientError::Cancelled) => return Err(error.into()),
+        Err(error) => {
+            eprintln!("Private recovery will retry a failed row: {error}");
+            retry_later = true;
+            continue; // Other rows can still make progress.
+        }
+    };
+    for (request, record) in work.map_record(result.position, record) {
+        match db.apply_ironwood_enhance_record(request, &record)? {
+            EnhancePirStoreResult::Stored => stored += 1,
+            EnhancePirStoreResult::AlreadyResolved => continue, // Stale identity: no write.
+            EnhancePirStoreResult::NotRecoverable => suspension_observed = true,
+            EnhancePirStoreResult::LwdRequired => ordinary_work_changed = true,
+            EnhancePirStoreResult::Rejected => {
+                return Err("PIR record failed wallet authentication".into());
+            }
+        }
+    }
+}
+let remaining = PreparedWork::new(db.enhance_pir_work()?);
+// Publish remaining counts plus waiting/retry state. `stored` is progress, not
+// completion; suspensions remain incomplete. Service the ordinary queue when
+// ordinary_work_changed, using its configured database routing and cancellation.
+
+```
+
+`query_batch` deduplicates positions and coalesces packed rows internally. Rows
+execute sequentially before uncovered positions; each yielded success can be
+applied before a later failure. Handle each item as above rather than collecting
+with an early-return operator that discards successful records.
+A position outside coverage is an explicit `OutsideCoverage` result. Row errors
+retain their typed source through `ClientError::Row`. A cancelled row ends further
+row dispatch; remaining covered positions yield cancellation lazily, while
+uncovered positions retain their explicit coverage outcome. Dropping the stream also prevents subsequent dispatch. Each stream
+borrows an immutable client generation; refreshing creates a separate client.
+
+Custom `Transport` implementations own routing, request cancellation and deadlines.
+They return an opaque `ResponseBody`, constructed only by extending the collector
+from `request.response_body()` and calling `finish()`. The protocol chooses the
+collector limit; transports cannot construct a body from an unchecked `Vec` or
+choose an unlimited collector. Feed each network chunk into `extend()` and
+propagate its error immediately. Reject unsuccessful HTTP status codes before
+returning the body. Transport-internal buffers and network chunk sizes still
+require bounded handling; the API cannot constrain arbitrary allocations inside
+an implementation. The Reqwest implementation
+and default `EnhancePirClient` use the same workflow. `QuerySession` remains
+available to low-level consumers. Transport-free builds retain all protocol and
+wallet adapter functionality when `wallet` is enabled.
+
+`PreparedWork` captures original wallet request identities before network I/O.
+Its counts include rediscovery and suspended obligations, so no active queries
+is not equivalent to complete recovery. Callers continue to handle `Rediscover`
+through trusted compact blocks and `EnhancePirWrite`, then reread durable work.
+Neither module holds a wallet transaction or application lock across I/O.
+
+Enable the optional `wallet` feature to use `zakura_pir_enhance::wallet::*`.
+The backend continues to depend only on `zakura-pir-enhance-types`; it must not
+depend on the client crate. SQLite is a test dependency of the client, never a
+runtime dependency of the wallet adapter.
+
+### Accepted batch traffic-analysis leakage
+
+The current integration accepts row-coalescing leakage in exchange for fewer
+expensive PIR operations and lower bandwidth. For a batch known to contain two
+covered, distinct positions, positions in the same packed row generate one HTTP
+query; positions in different rows generate two. A service or observer that can
+infer query counts can therefore distinguish those row-sharing cases, although
+the PIR query still hides the selected row's index. Larger batches reveal the
+number of distinct covered rows, not necessarily the full partition of positions.
+Deduplication, uncovered positions, cancellation, and failures also affect counts.
+
+This is an explicit limitation of batch privacy: the API does not provide a
+fixed request count, padding, cover traffic, or protection against timing/volume
+correlation. Applications requiring those properties need a separately designed
+and reviewed padding/scheduling policy. Acceptance here does not extend to such
+stronger threat models; no claim of row-relationship privacy is made.
+
+### Transport API revision
+
+Custom transports now return `Result<ResponseBody, ClientError>` instead of
+`Result<Vec<u8>, ClientError>`. Obtain the collector **before moving request fields**:
+
+```rust,ignore
+let mut response = request.response_body();
+// Dispatch through the application's route, check HTTP status, then stream:
+while let Some(chunk) = network_body.next_chunk().await? {
+    response.extend(&chunk)?;
+}
+Ok(response.finish())
+```
+
+### Wallet policy and partial-progress revision
+
+`wallet::acceptance` now takes `&impl Parameters` instead of a network string and
+activation integer. Applications must pass their wallet's trusted consensus
+configuration. The shared adapter derives both checks, rejects missing activation,
+and still requires SQLite anchor acceptance before setup. Vizor passes its typed
+`WalletNetwork` directly.
+
+Batches yield covered rows first, then uncovered positions. Cancellation no longer
+materializes an error for the entire remaining batch at once. HTTP adapters use a
+single non-success status check, and endpoint requests use the validated URL's
+canonical serialization rather than the original input string. These changes do
+not add padding or change the accepted row-coalescing leakage.

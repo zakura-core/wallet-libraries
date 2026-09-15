@@ -7660,7 +7660,10 @@ name = "zakura-pir-enhance"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "futures",
+ "futures-util",
  "hex",
+ "incrementalmerkletree",
  "inspiring",
  "ipir-sp",
  "rand 0.8.7",
@@ -7669,7 +7672,12 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "url",
+ "zakura-client-backend",
+ "zakura-client-sqlite",
  "zakura-pir-enhance-types",
+ "zakura-primitives",
+ "zcash_protocol",
 ]
 
 [[package]]

@@ -1,6 +1,7 @@
 //! Client and protocol types for privately enhancing Ironwood compact actions.
 
 pub mod client;
+pub mod transport;
 pub mod types;
 
 pub use client::{
@@ -17,3 +18,7 @@ pub use types::{
     ROW_BYTES, SCHEMA_VERSION, SHARD_POSITIONS, SHARD_ROWS, SHARDS_PER_GROUP, ShardDescriptor,
     checked_logical_rows_for, group_index_for_shard,
 };
+
+/// Wallet acceptance and captured-identity mapping, without network I/O.
+#[cfg(feature = "wallet")]
+pub mod wallet;
