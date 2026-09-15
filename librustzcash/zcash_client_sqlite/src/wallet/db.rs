@@ -2048,11 +2048,13 @@ pub(super) fn init_orchard_ironwood_migration_tables(
 pub(super) const TABLE_IRONWOOD_ENHANCE_METADATA_QUEUE: &str = "
 CREATE TABLE ironwood_enhance_metadata_queue (
     transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
-    commitment_tree_position INTEGER UNIQUE,
-    output_index INTEGER,
+    commitment_tree_position INTEGER UNIQUE CHECK (commitment_tree_position >= 0),
+    output_index INTEGER CHECK (output_index >= 0),
     ephemeral_key BLOB,
     compact_ciphertext BLOB,
     CHECK ((commitment_tree_position IS NULL) = (output_index IS NULL)),
+    CHECK ((ephemeral_key IS NULL) = (compact_ciphertext IS NULL)),
+    CHECK (ephemeral_key IS NULL OR commitment_tree_position IS NOT NULL),
     CHECK (ephemeral_key IS NULL OR length(ephemeral_key) = 32),
     CHECK (compact_ciphertext IS NULL OR length(compact_ciphertext) = 52)
 )";
