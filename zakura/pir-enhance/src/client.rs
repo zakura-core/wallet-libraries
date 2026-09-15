@@ -1026,12 +1026,16 @@ mod tests {
             }
         }
         let calls = std::cell::Cell::new(0);
-        let fail_at = std::cell::Cell::new(None);
+        let cancel_at = std::cell::Cell::new(None);
+        let row_error_at = std::cell::Cell::new(None);
         let transport = Fake(|request: Request| {
             let call = calls.get() + 1;
             calls.set(call);
-            if fail_at.get() == Some(call) {
+            if cancel_at.get() == Some(call) {
                 return Err(ClientError::Cancelled);
+            }
+            if row_error_at.get() == Some(call) {
+                return Err(ClientError::Response("injected row failure".into()));
             }
             let keys = deserialize_packing_keys(&rlwe, &request.body[8..8 + keys_len]).unwrap();
             let body = server
@@ -1109,8 +1113,38 @@ mod tests {
         assert_eq!(committed, 2);
         assert_eq!(calls.get(), 2);
         assert!(matches!(outcome, Err(ClientError::OutsideCoverage(100))));
+
+        // An ordinary row failure remains associated with that row and does not
+        // prevent a later independent row from making progress.
         calls.set(0);
-        fail_at.set(Some(2));
+        row_error_at.set(Some(1));
+        let results = block_on(
+            client
+                .query_batch(&transport, [0, target_position])
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(calls.get(), 2);
+        assert!(matches!(
+            &results[0].record,
+            Err(ClientError::Row(error))
+                if matches!(error.as_ref(), ClientError::Response(message)
+                    if message == "injected row failure")
+        ));
+        assert!(results[1].record.is_ok());
+        row_error_at.set(None);
+
+        // Query streams do not prefetch: dropping after one result prevents
+        // dispatch of subsequent rows.
+        calls.set(0);
+        block_on(async {
+            let results = client.query_batch(&transport, [0, target_position]);
+            futures::pin_mut!(results);
+            assert!(results.next().await.unwrap().record.is_ok());
+        });
+        assert_eq!(calls.get(), 1);
+
+        calls.set(0);
+        cancel_at.set(Some(2));
         let results = block_on(
             client
                 .query_batch(&transport, [0, target_position])
@@ -1119,7 +1153,7 @@ mod tests {
         assert!(results[0].record.is_ok());
         assert!(matches!(results[1].record, Err(ClientError::Cancelled)));
         calls.set(0);
-        fail_at.set(Some(1));
+        cancel_at.set(Some(1));
         let results = block_on(
             client
                 .query_batch(&transport, [0, target_position])

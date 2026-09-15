@@ -311,6 +311,29 @@ fn validate_http_status(status: reqwest::StatusCode) -> Result<(), ClientError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "https-client")]
+    fn serve_once(response: &'static [u8]) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let mut received = Vec::new();
+            while !received.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut request).unwrap();
+                if read == 0 {
+                    break;
+                }
+                received.extend_from_slice(&request[..read]);
+            }
+            stream.write_all(response).unwrap();
+        });
+        (format!("http://{address}/"), server)
+    }
+
     #[test]
     fn bounds_before_extending() {
         let mut body = BoundedBody::new(3);
@@ -329,6 +352,52 @@ mod tests {
                 assert!(matches!(error, ClientError::Response(_)));
             }
         }
+    }
+
+    #[cfg(feature = "https-client")]
+    #[test]
+    fn reqwest_rejects_redirects_and_bounds_chunked_responses() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let (url, server) = serve_once(
+            b"HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let redirect = runtime.block_on(Transport::execute(
+            &client,
+            Request {
+                method: Method::Get,
+                url,
+                body: vec![],
+                response_limit: 3,
+            },
+        ));
+        server.join().unwrap();
+        assert!(matches!(
+            redirect,
+            Err(ClientError::Response(message)) if message.contains("302")
+        ));
+
+        let (url, server) = serve_once(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nab\r\n2\r\ncd\r\n0\r\n\r\n",
+        );
+        let oversized = runtime.block_on(Transport::execute(
+            &client,
+            Request {
+                method: Method::Get,
+                url,
+                body: vec![],
+                response_limit: 3,
+            },
+        ));
+        server.join().unwrap();
+        assert!(matches!(
+            oversized,
+            Err(ClientError::Response(message)) if message == "HTTP body exceeds limit"
+        ));
     }
 
     #[test]

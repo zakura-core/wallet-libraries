@@ -39,3 +39,4 @@ zcash_client_backend = { workspace = true, features = ["zakura-pir-enhance", "te
 incrementalmerkletree.workspace = true
 futures = "0.3"
 inspiring = { git = "https://github.com/valargroup/ipir-sp.git", rev = "accc424e879d8da425fa620aad80f0f2c4e0defd" }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
