@@ -306,7 +306,7 @@ let approved = acceptance(&db, pending.generation(), &wallet_params, limits)??;
 let Acceptance::Accepted(approved) = approved else { return Ok(()); };
 let client = pending.accept(&approved)?;
 let work = PreparedWork::new(db.enhance_pir_work()?);
-let results = client.query_batch(&route, work.positions());
+let results = client.query_batch(&route, work.positions())?;
 futures_util::pin_mut!(results);
 let mut waiting_for_snapshot = false;
 let mut retry_later = false;

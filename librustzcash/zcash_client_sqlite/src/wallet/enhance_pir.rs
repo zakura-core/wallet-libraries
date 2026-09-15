@@ -145,7 +145,7 @@ pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClien
          UNION ALL
          SELECT 1, position, txid, output_index, NULL, NULL FROM queries
          UNION ALL
-         SELECT 2, height, txid, NULL, reason, tx_index FROM discovery WHERE reason IS NOT NULL
+         SELECT DISTINCT 2, height, txid, NULL, reason, tx_index FROM discovery WHERE reason IS NOT NULL
          UNION ALL
          SELECT 3, q.commitment_tree_position, t.txid, q.output_index, NULL, NULL
            {OUTSTANDING_OUTGOING} AND q.not_recoverable = 1

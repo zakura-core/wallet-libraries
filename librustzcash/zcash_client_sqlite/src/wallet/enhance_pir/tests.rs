@@ -1276,3 +1276,116 @@ fn metadata_fill_rolls_back_when_later_memo_write_fails() {
         "metadata queue deletion must roll back too"
     );
 }
+
+#[test]
+fn identical_anchor_suspensions_are_deduplicated() {
+    let (st, tx_ref, request) = fixture();
+    let conn = st.wallet().conn();
+    conn.execute(
+        "INSERT INTO ironwood_enhance_discovery_queue (transaction_id) VALUES (?)",
+        [tx_ref.0],
+    )
+    .unwrap();
+    conn.execute("UPDATE ironwood_enhance_metadata_queue SET commitment_tree_position = NULL, output_index = NULL, ephemeral_key = NULL, compact_ciphertext = NULL WHERE transaction_id = ?", [tx_ref.0]).unwrap();
+    conn.execute("UPDATE blocks SET ironwood_commitment_tree_size = NULL", [])
+        .unwrap();
+    let anchor = EnhancePirWork::Suspended(EnhancePirSuspension::Discovery(
+        IronwoodEnhanceDiscoveryFailure {
+            txid: request.request_id().txid(),
+            reason: IronwoodEnhanceDiscoveryFailureReason::AnchorUnavailable,
+        },
+    ));
+    assert_eq!(
+        work(conn)
+            .unwrap()
+            .iter()
+            .filter(|item| **item == anchor)
+            .count(),
+        1
+    );
+    conn.execute(
+        "UPDATE ironwood_enhance_discovery_queue SET suspended = 1",
+        [],
+    )
+    .unwrap();
+    let items = work(conn).unwrap();
+    assert!(items.contains(&anchor));
+    assert!(
+        items.contains(&EnhancePirWork::Suspended(EnhancePirSuspension::Discovery(
+            IronwoodEnhanceDiscoveryFailure {
+                txid: request.request_id().txid(),
+                reason: IronwoodEnhanceDiscoveryFailureReason::NoFundingAccounts
+            }
+        )))
+    );
+}
+
+#[test]
+fn response_application_retries_after_another_connection_rolls_back() {
+    use orchard::note_encryption::{IronwoodDomain, IronwoodNoteEncryption};
+    use zcash_note_encryption::Domain;
+    let (mut st, tx_ref, request) = fixture_with_factory(TestDbFactory::file_backed());
+    let note = st
+        .wallet()
+        .db()
+        .pending_memo(request.position())
+        .unwrap()
+        .unwrap()
+        .note;
+    let encryptor = IronwoodNoteEncryption::new(None, note, [8; 512]);
+    let record = EnhanceRecord::from_parts(EnhanceRecordParts {
+        ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0,
+        enc_ciphertext: encryptor.encrypt_note_plaintext(),
+        cv_net: [0; 32],
+        out_ciphertext: [0; 80],
+        has_transparent_inputs: false,
+        has_transparent_outputs: false,
+        metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata::new(
+            0,
+            Some(20),
+        )
+        .unwrap(),
+    });
+    let mut competing = Connection::open(st.wallet().data_file_path()).unwrap();
+    st.wallet()
+        .conn()
+        .busy_timeout(std::time::Duration::ZERO)
+        .unwrap();
+    let tx = competing
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    tx.execute(
+        "UPDATE transactions SET fee = 99 WHERE id_tx = ?",
+        [tx_ref.0],
+    )
+    .unwrap();
+    let before = work(st.wallet().conn()).unwrap();
+    let err = apply_record(st.wallet_mut().db_mut(), request, &record).unwrap_err();
+    assert!(
+        matches!(err, SqliteClientError::DbError(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::DatabaseBusy)
+    );
+    assert_eq!(work(st.wallet().conn()).unwrap(), before);
+    assert!(
+        st.wallet()
+            .db()
+            .pending_memo(request.position())
+            .unwrap()
+            .is_some()
+    );
+    tx.rollback().unwrap();
+    assert_eq!(
+        apply_record(st.wallet_mut().db_mut(), request, &record).unwrap(),
+        EnhancePirStoreResult::Stored
+    );
+    assert!(work(st.wallet().conn()).unwrap().is_empty());
+    assert_eq!(
+        competing
+            .query_row(
+                "SELECT fee FROM transactions WHERE id_tx = ?",
+                [tx_ref.0],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+        20
+    );
+}

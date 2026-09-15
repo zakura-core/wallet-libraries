@@ -83,6 +83,8 @@ impl GenerationAcceptance {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
+    #[error("batch exceeds the local limit of {max_items} input items")]
+    BatchTooLarge { max_items: usize },
     #[error("row query failed: {0}")]
     Row(#[source] std::sync::Arc<ClientError>),
     #[error("request cancelled")]
@@ -413,12 +415,12 @@ fn checked_response_product(left: usize, right: usize, name: &str) -> Result<usi
 /// Default HTTPS adapter around the transport-independent workflow.
 #[cfg(feature = "https-client")]
 pub struct EnhancePirClient {
-    http: reqwest::Client,
+    http: crate::transport::ReqwestTransport,
     inner: crate::transport::Client,
 }
 #[cfg(feature = "https-client")]
 pub struct PendingEnhancePirClient {
-    http: reqwest::Client,
+    http: crate::transport::ReqwestTransport,
     inner: crate::transport::PendingClient,
 }
 #[cfg(feature = "https-client")]
@@ -439,11 +441,7 @@ impl PendingEnhancePirClient {
 #[cfg(feature = "https-client")]
 impl EnhancePirClient {
     pub async fn fetch_session(base_url: &str) -> Result<PendingEnhancePirClient, ClientError> {
-        let http = reqwest::Client::builder()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(120))
-            .build()?;
+        let http = crate::transport::ReqwestTransport::new()?;
         let inner = crate::transport::PendingClient::fetch(&http, base_url).await?;
         Ok(PendingEnhancePirClient { http, inner })
     }
@@ -459,15 +457,28 @@ impl EnhancePirClient {
     pub fn generation(&self) -> &EnhanceGeneration {
         self.inner.generation()
     }
+    /// Returns a stream after checking the default input limit, or `BatchTooLarge`.
+    /// See `transport::Client::query_batch` for batching and privacy semantics.
     pub fn query_batch(
         &self,
         positions: impl IntoIterator<Item = u64>,
-    ) -> impl futures_util::Stream<Item = crate::transport::PositionResult> + '_ {
+    ) -> Result<impl futures_util::Stream<Item = crate::transport::PositionResult> + '_, ClientError>
+    {
         self.inner.query_batch(&self.http, positions)
+    }
+    /// Like `query_batch`, with an application-selected maximum input count.
+    pub fn query_batch_with_limit(
+        &self,
+        positions: impl IntoIterator<Item = u64>,
+        max_items: usize,
+    ) -> Result<impl futures_util::Stream<Item = crate::transport::PositionResult> + '_, ClientError>
+    {
+        self.inner
+            .query_batch_with_limit(&self.http, positions, max_items)
     }
     pub async fn query_position(&self, position: u64) -> Result<EnhanceRecord, ClientError> {
         use futures_util::StreamExt;
-        let results = self.query_batch([position]);
+        let results = self.query_batch([position])?;
         futures_util::pin_mut!(results);
         results.next().await.expect("one position").record
     }
@@ -1057,6 +1068,30 @@ mod tests {
             base_url: "https://example.test".into(),
             session: query_session,
         };
+        // Bound raw input consumption, including duplicates, before any dispatch.
+        assert!(client.query_batch_with_limit(&transport, [], 0).is_ok());
+        assert!(client.query_batch_with_limit(&transport, [0, 0], 2).is_ok());
+        for oversized in [vec![0, 0, 0], vec![0, 1, 2]] {
+            assert!(matches!(
+                client.query_batch_with_limit(&transport, oversized, 2),
+                Err(ClientError::BatchTooLarge { max_items: 2 })
+            ));
+        }
+        let consumed = std::cell::Cell::new(0);
+        assert!(matches!(
+            client.query_batch_with_limit(
+                &transport,
+                std::iter::repeat(0).inspect(|_| consumed.set(consumed.get() + 1)),
+                2
+            ),
+            Err(ClientError::BatchTooLarge { max_items: 2 })
+        ));
+        assert_eq!(consumed.get(), 3);
+        assert!(matches!(
+            client.query_batch(&transport, std::iter::repeat(0)),
+            Err(ClientError::BatchTooLarge { .. })
+        ));
+        assert_eq!(calls.get(), 0);
         let results = block_on(
             client
                 .query_batch(
@@ -1069,6 +1104,7 @@ mod tests {
                         100,
                     ],
                 )
+                .unwrap()
                 .collect::<Vec<_>>(),
         );
         assert_eq!(calls.get(), 2);
@@ -1102,7 +1138,9 @@ mod tests {
         calls.set(0);
         let mut committed = 0;
         let outcome: Result<(), ClientError> = block_on(async {
-            let results = client.query_batch(&transport, [100, 0, target_position]);
+            let results = client
+                .query_batch(&transport, [100, 0, target_position])
+                .unwrap();
             futures::pin_mut!(results);
             while let Some(result) = results.next().await {
                 result.record?;
@@ -1121,6 +1159,7 @@ mod tests {
         let results = block_on(
             client
                 .query_batch(&transport, [0, target_position])
+                .unwrap()
                 .collect::<Vec<_>>(),
         );
         assert_eq!(calls.get(), 2);
@@ -1137,7 +1176,9 @@ mod tests {
         // dispatch of subsequent rows.
         calls.set(0);
         block_on(async {
-            let results = client.query_batch(&transport, [0, target_position]);
+            let results = client
+                .query_batch(&transport, [0, target_position])
+                .unwrap();
             futures::pin_mut!(results);
             assert!(results.next().await.unwrap().record.is_ok());
         });
@@ -1148,6 +1189,7 @@ mod tests {
         let results = block_on(
             client
                 .query_batch(&transport, [0, target_position])
+                .unwrap()
                 .collect::<Vec<_>>(),
         );
         assert!(results[0].record.is_ok());
@@ -1157,6 +1199,7 @@ mod tests {
         let results = block_on(
             client
                 .query_batch(&transport, [0, target_position])
+                .unwrap()
                 .collect::<Vec<_>>(),
         );
         assert_eq!(calls.get(), 1);
@@ -1172,6 +1215,7 @@ mod tests {
         let results = block_on(
             client
                 .query_batch(&transport, [100, 0, target_position])
+                .unwrap()
                 .collect::<Vec<_>>(),
         );
         assert_eq!(calls.get(), 1);
@@ -1187,6 +1231,7 @@ mod tests {
         let results = block_on(
             client
                 .query_batch(&transport, [100, 100, 101])
+                .unwrap()
                 .collect::<Vec<_>>(),
         );
         assert_eq!(results.len(), 2);
@@ -1195,7 +1240,15 @@ mod tests {
                 .iter()
                 .all(|r| matches!(r.record, Err(ClientError::OutsideCoverage(_))))
         );
-        assert!(block_on(client.query_batch(&transport, []).collect::<Vec<_>>()).is_empty());
+        assert!(
+            block_on(
+                client
+                    .query_batch(&transport, [])
+                    .unwrap()
+                    .collect::<Vec<_>>()
+            )
+            .is_empty()
+        );
         assert_eq!(calls.get(), 0);
     }
 }

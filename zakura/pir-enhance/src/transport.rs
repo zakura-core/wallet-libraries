@@ -10,6 +10,9 @@ use std::{
     future::Future,
 };
 
+/// Default maximum number of input items, including duplicates, in one batch.
+pub const DEFAULT_MAX_BATCH_SIZE: usize = 4096;
+
 pub const MAX_SESSION_BYTES: usize = 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -160,6 +163,8 @@ impl Client {
         self.session.decode(query, response.as_ref()).map(|_| ())
     }
 
+    /// Rejects more than `DEFAULT_MAX_BATCH_SIZE` input items before returning.
+    /// Use `query_batch_with_limit` to select a local limit.
     /// Deduplicates positions and sends one query per row, sequentially. A row
     /// failure is associated with every position in that row; earlier records
     /// have already been yielded and can be committed independently. Covered rows
@@ -174,11 +179,31 @@ impl Client {
         &'a self,
         transport: &'a impl Transport,
         positions: impl IntoIterator<Item = u64>,
-    ) -> impl Stream<Item = PositionResult> + 'a {
+    ) -> Result<impl Stream<Item = PositionResult> + 'a, ClientError> {
+        self.query_batch_with_limit(transport, positions, DEFAULT_MAX_BATCH_SIZE)
+    }
+
+    /// Ingests at most `max_items + 1` input items before returning a stream or
+    /// `BatchTooLarge`. Counts duplicates and uncovered positions. No network I/O
+    /// occurs on rejection. The caller must ensure each iterator step terminates.
+    /// Choose a local limit suitable for the device; zero accepts only empty input.
+    pub fn query_batch_with_limit<'a>(
+        &'a self,
+        transport: &'a impl Transport,
+        positions: impl IntoIterator<Item = u64>,
+        max_items: usize,
+    ) -> Result<impl Stream<Item = PositionResult> + 'a, ClientError> {
         let mut rows = BTreeMap::<u64, Vec<u64>>::new();
         let ready = VecDeque::new();
         let mut uncovered = VecDeque::new();
-        for position in positions.into_iter().collect::<BTreeSet<_>>() {
+        let mut unique = BTreeSet::new();
+        for (index, position) in positions.into_iter().enumerate() {
+            if index == max_items {
+                return Err(ClientError::BatchTooLarge { max_items });
+            }
+            unique.insert(position);
+        }
+        for position in unique {
             if position >= self.generation().ironwood_tree_size {
                 uncovered.push_back(position);
             } else {
@@ -187,7 +212,7 @@ impl Client {
                     .push(position);
             }
         }
-        stream::unfold(
+        Ok(stream::unfold(
             (rows.into_values(), ready, uncovered, false),
             move |(mut rows, mut ready, mut uncovered, mut cancelled)| async move {
                 if let Some(result) = ready.pop_front() {
@@ -254,7 +279,7 @@ impl Client {
                     .pop_front()
                     .map(|result| (result, (rows, ready, uncovered, cancelled)))
             },
-        )
+        ))
     }
 }
 
@@ -276,10 +301,35 @@ fn endpoint(base: &str, path: &str) -> Result<String, ClientError> {
 }
 
 #[cfg(feature = "https-client")]
-impl Transport for reqwest::Client {
+/// HTTPS transport with redirects disabled and a deadline covering the response body.
+/// Construct with `new`; arbitrary Reqwest clients cannot bypass these policies.
+#[derive(Clone)]
+pub struct ReqwestTransport(reqwest::Client);
+
+#[cfg(feature = "https-client")]
+impl ReqwestTransport {
+    /// Builds a transport with a 120-second request deadline. Returns an HTTP
+    /// client construction error if TLS or resolver initialization fails.
+    pub fn new() -> Result<Self, ClientError> {
+        Ok(Self(
+            Self::builder(std::time::Duration::from_secs(120)).build()?,
+        ))
+    }
+
+    fn builder(timeout: std::time::Duration) -> reqwest::ClientBuilder {
+        reqwest::Client::builder()
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(timeout)
+    }
+}
+
+#[cfg(feature = "https-client")]
+impl Transport for ReqwestTransport {
     async fn execute(&self, request: Request) -> Result<ResponseBody, ClientError> {
         let mut body = request.response_body();
         let mut response = self
+            .0
             .request(
                 match request.method {
                     Method::Get => reqwest::Method::GET,
@@ -358,10 +408,13 @@ mod tests {
     #[test]
     fn reqwest_rejects_redirects_and_bounds_chunked_responses() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap();
+        // Local HTTP fixture; keep the production redirect policy and a short deadline.
+        let client = ReqwestTransport(
+            ReqwestTransport::builder(std::time::Duration::from_millis(200))
+                .https_only(false)
+                .build()
+                .unwrap(),
+        );
 
         let (url, server) = serve_once(
             b"HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -398,6 +451,51 @@ mod tests {
             oversized,
             Err(ClientError::Response(message)) if message == "HTTP body exceeds limit"
         ));
+    }
+
+    #[cfg(feature = "https-client")]
+    #[test]
+    fn reqwest_rejects_http_and_times_out_an_unfinished_body() {
+        use std::io::{Read, Write};
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let safe = ReqwestTransport::new().unwrap();
+        let denied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        denied.set_nonblocking(true).unwrap();
+        let result = runtime.block_on(safe.execute(Request {
+            method: Method::Get,
+            url: format!("http://{}/", denied.local_addr().unwrap()),
+            body: vec![],
+            response_limit: 3,
+        }));
+        assert!(result.is_err());
+        assert!(matches!(denied.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let (release, hold) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buf = [0; 1024];
+            socket.read(&mut buf).unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na")
+                .unwrap();
+            let _ = hold.recv_timeout(std::time::Duration::from_secs(2));
+        });
+        let client = ReqwestTransport(
+            ReqwestTransport::builder(std::time::Duration::from_millis(200))
+                .https_only(false)
+                .build()
+                .unwrap(),
+        );
+        let result = runtime.block_on(client.execute(Request {
+            method: Method::Get,
+            url,
+            body: vec![],
+            response_limit: 3,
+        }));
+        let _ = release.send(());
+        server.join().unwrap();
+        assert!(matches!(result, Err(ClientError::Http(e)) if e.is_timeout()));
     }
 
     #[test]

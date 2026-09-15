@@ -33,3 +33,9 @@ Either transparent-presence flag routes the entire transaction to ordinary LWD.
 The flags are trusted server metadata, not authenticated by note decryption.
 See [the integration contract](../../docs/zakura_pir_enhance.md) for construction,
 unified work scheduling, migration, recovery, and privacy limitations.
+
+Batch APIs return `Result<Stream, ClientError>` and reject more than 4096 input
+items by default. Use `query_batch_with_limit` to select a local bound; duplicates
+count toward the limit. The built-in routed HTTP adapter is
+`transport::ReqwestTransport::new()`, which enforces HTTPS, no redirects, and a
+120-second deadline; plain Reqwest clients no longer implement `Transport`.
