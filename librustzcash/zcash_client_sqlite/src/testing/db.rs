@@ -238,6 +238,10 @@ impl DataStoreFactory for TestDbFactory {
                 None,
             )
         };
+        #[cfg(feature = "zakura-pir-enhance")]
+        db_data.set_enhancement_mode(
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        );
         if let Some(interval) = anchor_retention_interval {
             db_data = db_data.with_anchor_retention_interval(interval);
         }

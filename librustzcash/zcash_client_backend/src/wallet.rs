@@ -185,6 +185,87 @@ pub struct WalletTx<AccountId> {
     ironwood_spends: Vec<WalletIronwoodSpend<AccountId>>,
     #[cfg(feature = "orchard")]
     ironwood_outputs: Vec<WalletIronwoodOutput<AccountId>>,
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+    ironwood_enhancement_plan: IronwoodEnhancementPlan<AccountId>,
+}
+
+/// Provisional private-enhancement plan from a complete compact transaction.
+///
+/// An eligible transaction may have no outgoing candidates (for example, incoming-only).
+/// Eligibility does not prove absence of transparent data omitted by the compact source.
+#[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IronwoodEnhancementPlan<AccountId> {
+    /// Ordinary enhancement, including transactions with represented non-Ironwood activity.
+    Ineligible,
+    /// Ironwood-only compact data; durable spend linkage may still require rediscovery.
+    Eligible {
+        outgoing: Vec<IronwoodEnhanceCandidate<AccountId>>,
+    },
+}
+
+/// Compact-block context needed to privately recover one outgoing Ironwood output.
+#[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IronwoodEnhanceCandidate<AccountId> {
+    position: Position,
+    output_index: usize,
+    nullifier: [u8; 32],
+    cmx: [u8; 32],
+    ephemeral_key: [u8; 32],
+    compact_ciphertext: [u8; 52],
+    funding_accounts: Vec<AccountId>,
+}
+
+#[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+impl<AccountId> IronwoodEnhanceCandidate<AccountId> {
+    pub fn from_parts(
+        position: Position,
+        output_index: usize,
+        nullifier: [u8; 32],
+        cmx: [u8; 32],
+        ephemeral_key: [u8; 32],
+        compact_ciphertext: [u8; 52],
+        funding_accounts: Vec<AccountId>,
+    ) -> Self {
+        Self {
+            position,
+            output_index,
+            nullifier,
+            cmx,
+            ephemeral_key,
+            compact_ciphertext,
+            funding_accounts,
+        }
+    }
+
+    pub fn position(&self) -> Position {
+        self.position
+    }
+
+    pub fn output_index(&self) -> usize {
+        self.output_index
+    }
+
+    pub fn nullifier(&self) -> &[u8; 32] {
+        &self.nullifier
+    }
+
+    pub fn cmx(&self) -> &[u8; 32] {
+        &self.cmx
+    }
+
+    pub fn ephemeral_key(&self) -> &[u8; 32] {
+        &self.ephemeral_key
+    }
+
+    pub fn compact_ciphertext(&self) -> &[u8; 52] {
+        &self.compact_ciphertext
+    }
+
+    pub fn funding_accounts(&self) -> &[AccountId] {
+        &self.funding_accounts
+    }
 }
 
 impl<AccountId> WalletTx<AccountId> {
@@ -219,7 +300,20 @@ impl<AccountId> WalletTx<AccountId> {
             ironwood_spends,
             #[cfg(feature = "orchard")]
             ironwood_outputs,
+            #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+            ironwood_enhancement_plan: IronwoodEnhancementPlan::Ineligible,
         }
+    }
+
+    /// Attaches provisional eligibility and outgoing candidates from the complete compact
+    /// transaction. Omitted transparent activity is checked using trusted PIR record flags.
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+    pub fn with_ironwood_enhancement_plan(
+        mut self,
+        plan: IronwoodEnhancementPlan<AccountId>,
+    ) -> Self {
+        self.ironwood_enhancement_plan = plan;
+        self
     }
 
     /// Returns the [`TxId`] for the corresponding [`Transaction`].
@@ -277,6 +371,12 @@ impl<AccountId> WalletTx<AccountId> {
     #[cfg(feature = "orchard")]
     pub fn ironwood_outputs(&self) -> &[WalletIronwoodOutput<AccountId>] {
         self.ironwood_outputs.as_ref()
+    }
+
+    /// Returns provisional compact-scan eligibility and outgoing recovery candidates.
+    #[cfg(all(feature = "orchard", feature = "zakura-pir-enhance"))]
+    pub fn ironwood_enhancement_plan(&self) -> &IronwoodEnhancementPlan<AccountId> {
+        &self.ironwood_enhancement_plan
     }
 }
 
