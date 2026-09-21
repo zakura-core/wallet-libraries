@@ -28,12 +28,6 @@ use getset::Getters;
 use zcash_protocol::PoolType;
 #[cfg(any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"))]
 use zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID};
-#[cfg(all(
-    any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"),
-    zcash_unstable = "nu7",
-    feature = "zip-233",
-))]
-use zcash_protocol::value::Zatoshis;
 #[cfg(any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"))]
 use {
     common::{Global, determine_lock_time},
@@ -588,8 +582,6 @@ impl Pczt {
                 consensus_branch_id,
                 lock_time,
                 global.expiry_height.into(),
-                #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-                Zatoshis::ZERO,
                 transparent_bundle,
                 sapling_bundle,
                 orchard_bundle,
@@ -600,8 +592,6 @@ impl Pczt {
                 consensus_branch_id,
                 lock_time,
                 global.expiry_height.into(),
-                #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-                Zatoshis::ZERO,
                 transparent_bundle,
                 None,
                 sapling_bundle,
