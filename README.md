@@ -59,7 +59,7 @@ Nothing is patched at the source level. `manifests/sources.toml` holds a
 Cargo dependency rename:
 
 ```toml
-orchard = { version = "1.3.0-alpha.1", package = "zakura-orchard", git = "https://github.com/zakura-core/common.git", rev = "1929e9f745f58e20404e91dea2b73d743f6aaf73" }
+orchard = { version = "1.3.0-alpha.1", package = "zakura-orchard", git = "https://github.com/zakura-core/common.git", rev = "659cfb53dc083851d0216f493a9a9ef9b08a5a3a" }
 ```
 
 The dependency key stays `orchard`, so every `orchard::` path in the vendored
