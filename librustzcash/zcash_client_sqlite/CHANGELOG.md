@@ -7,6 +7,10 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- Storing a received Sapling or Orchard note looks up the note's address row by diversifier index before deriving its unified address, so the derivation runs only when the row is absent. The exposure-height update is unchanged.
+
 ## [0.1.0-rc9.4] - 2026-10-23
 
 ### Changed

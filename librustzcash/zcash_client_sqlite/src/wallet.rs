@@ -1527,6 +1527,45 @@ pub(crate) fn get_last_generated_address_matching<P: consensus::Parameters>(
 ///   inserted for the given account and diversifier index, and the `exposed_at_height` column
 ///   is currently `NULL` (i.e. the address at this diversifier index has not yet been exposed)
 ///   then the value of the `address` column will be replaced with the provided address.
+/// Returns the external-scope address row already stored for `diversifier_index`, if any,
+/// lowering its exposure height the way [`upsert_address`]'s conflict branch would.
+///
+/// A received note's address row is created when the compact-block scan first sees the note,
+/// so by the time the full transaction is stored - the memo backfill, or a spend the wallet
+/// took part in - it is nearly always present. Deriving the unified address again (a Sapling
+/// diversifier, an Orchard address and a transparent child, each a scalar multiplication or
+/// key derivation) for an upsert to find the row and change nothing was the larger part of
+/// what storing a note cost.
+pub(crate) fn existing_address_at(
+    conn: &rusqlite::Connection,
+    account_id: AccountRef,
+    diversifier_index: DiversifierIndex,
+    exposed_at_height: Option<BlockHeight>,
+) -> Result<Option<AddressRef>, SqliteClientError> {
+    let di_be = encode_diversifier_index_be(diversifier_index);
+    conn.query_row(
+        "UPDATE addresses
+         SET exposed_at_height = COALESCE(
+                MIN(exposed_at_height, :exposed_at_height),
+                exposed_at_height,
+                :exposed_at_height
+            )
+         WHERE account_id = :account_id
+         AND diversifier_index_be = :diversifier_index_be
+         AND key_scope = :key_scope
+         RETURNING id",
+        named_params![
+            ":account_id": account_id.0,
+            ":diversifier_index_be": &di_be,
+            ":key_scope": KeyScope::EXTERNAL.encode(),
+            ":exposed_at_height": exposed_at_height.map(u32::from),
+        ],
+        |row| row.get::<_, i64>(0).map(AddressRef),
+    )
+    .optional()
+    .map_err(SqliteClientError::from)
+}
+
 pub(crate) fn upsert_address<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
