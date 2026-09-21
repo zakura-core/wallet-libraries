@@ -12,8 +12,8 @@ applied to arrives untouched on the vendor branch.
 Four rules are applied to `[workspace.dependencies]`:
 
 1. a dependency named in the manifest's `[rewire]` table is redirected at the
-   published Zakura fork, keeping the upstream key so crate sources are
-   unchanged (`orchard = { package = "zakura-orchard", ... }`);
+   configured Zakura fork and immutable revision, keeping the upstream key so
+   crate sources are unchanged (`orchard = { package = "zakura-orchard", ... }`);
 2. a path dependency on a crate this repository vendors keeps its path,
    rewritten into the vendored directory, gains the crate's published name,
    and takes the Zakura `version` from `[[crate]]` rather than upstream's;
@@ -141,8 +141,11 @@ def main(argv: list[str]) -> int:
         if key in rewire:
             target = rewire[key]
             fields.pop("path", None)
-            fields["version"] = f'"{target["version"]}"'
-            fields["package"] = f'"{target["package"]}"'
+            for source_field in ("git", "rev", "branch"):
+                fields.pop(source_field, None)
+            for target_field in ("version", "package", "git", "rev"):
+                if target_field in target:
+                    fields[target_field] = f'"{target[target_field]}"'
         elif "path" in fields:
             if package in vendored:
                 crate = vendored[package]

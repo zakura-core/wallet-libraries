@@ -10,6 +10,10 @@ workspace.
 
 ## [Unreleased]
 
+### Changed
+- `Creator::new` and the updater anchor setters now accept the NU7 consensus
+  branch without the `zcash_unstable="nu7"` configuration flag.
+
 ## [0.1.0-rc3] - 2026-09-09
 
 ### Changed

@@ -33,7 +33,7 @@ categories = ["cryptography::cryptocurrencies"]
 [workspace.dependencies]
 # Intra-workspace dependencies
 equihash = { version = "0.3", default-features = false }
-zcash_address = { version = "0.13.0", default-features = false }
+zcash_address = { version = "1.3.0-alpha.1", default-features = false, package = "zakura-address", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
 zcash_client_backend = { version = "0.1.0-rc5", path = "librustzcash/zcash_client_backend", package = "zakura-client-backend" }
 # zcash_encoding 0.5.0 is a breaking release (MSRV bump + `CompactSize::write` now
 # rejects values above `MAX_COMPACT_SIZE`). To avoid forcing every dependent to
@@ -42,19 +42,19 @@ zcash_client_backend = { version = "0.1.0-rc5", path = "librustzcash/zcash_clien
 # explicit path dependency on the local 0.5. Migrate the remaining crates one at a
 # time, then flip this back to `path = "components/zcash_encoding"` at "0.5".
 zcash_encoding = { version = "0.4", default-features = false }
-zcash_keys = { version = "1.2.0", default-features = false, package = "zakura-keys" }
+zcash_keys = { version = "1.3.0-alpha.1", default-features = false, package = "zakura-keys", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
 zcash_pool_migration = { version = "0.1.0-rc.6" }
-zcash_protocol = { version = "0.10.4", default-features = false }
-zip321 = { version = "0.9.0-rc.1" }
+zcash_protocol = { version = "1.3.0-alpha.1", default-features = false, package = "zakura-protocol", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
+zip321 = { version = "1.3.0-alpha.1", package = "zakura-zip321", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
 
 zcash_note_encryption = "0.4.1"
-zcash_primitives = { version = "1.2.0", default-features = false, package = "zakura-primitives" }
-zcash_proofs = { version = "1.2.0", default-features = false, package = "zakura-proofs" }
+zcash_primitives = { version = "1.3.0-alpha.1", default-features = false, package = "zakura-primitives", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
+zcash_proofs = { version = "1.3.0-alpha.1", default-features = false, package = "zakura-proofs", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
 
 pczt = { version = "0.1.0-rc3", path = "librustzcash/pczt", package = "zakura-pczt" }
 
 # Shielded protocols
-bellman = { version = "1.2.0", default-features = false, features = ["groth16"], package = "zakura-bellman" }
+bellman = { version = "1.3.0-alpha.1", default-features = false, features = ["groth16"], package = "zakura-bellman", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
 ff = { version = "0.14", default-features = false }
 group = { version = "0.14" }
 incrementalmerkletree = { version = "0.8.2", default-features = false }
@@ -66,14 +66,14 @@ zcash_spec = "0.2"
 # - Sapling
 bitvec = { version = "1", default-features = false, features = ["alloc"] }
 blake2s_simd = { version = "1", default-features = false }
-bls12_381 = { version = "1.2.0", package = "zakura-bls12-381" }
-jubjub = { version = "1.2.0", package = "zakura-jubjub" }
-redjubjub = { version = "1.2.0", default-features = false, package = "zakura-redjubjub" }
-sapling = { package = "zakura-sapling-crypto", version = "1.2.0", default-features = false }
+bls12_381 = { version = "1.3.0-alpha.1", package = "zakura-bls12-381", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
+jubjub = { version = "1.3.0-alpha.1", package = "zakura-jubjub", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
+redjubjub = { version = "1.3.0-alpha.1", default-features = false, package = "zakura-redjubjub", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
+sapling = { package = "zakura-sapling-crypto", version = "1.3.0-alpha.1", default-features = false, git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
 
 # - Orchard
-orchard = { version = "1.2.0", default-features = false, package = "zakura-orchard" }
-pasta_curves = { version = "1.2.0", package = "zakura-pasta-curves" }
+orchard = { version = "1.3.0-alpha.1", default-features = false, package = "zakura-orchard", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
+pasta_curves = { version = "1.3.0-alpha.1", package = "zakura-pasta-curves", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
 
 # - Transparent
 bip32 = { version = "=0.6.0-pre.1", default-features = false, features = ["alloc"] }
@@ -81,7 +81,7 @@ block-buffer = { version = "=0.11.0-rc.3" } # later RCs require edition2024
 crypto-common = { version = "=0.2.0-rc.1" } # later RCs require edition2024
 ripemd = { version = "0.1", default-features = false }
 secp256k1 = { version = "0.29", default-features = false, features = ["alloc"] }
-transparent = { package = "zcash_transparent", version = "0.10.0", default-features = false }
+transparent = { package = "zakura-transparent", version = "1.3.0-alpha.1", default-features = false, git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
 zcash_script = { version = "0.4.3", default-features = false }
 zeroize = { version = "1.7", default-features = false }
 
