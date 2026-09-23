@@ -981,16 +981,23 @@ fn find_received<
             let note_commitment_tree_position = note_position(output_idx);
             let nf = key.nf(&note, note_commitment_tree_position);
 
-            shielded_outputs.push(WalletOutput::from_parts(
-                output_idx,
-                output.ephemeral_key(),
-                enrich_note(note),
-                is_change,
-                note_commitment_tree_position,
-                nf,
-                *key.account_id(),
-                key.key_scope(),
-            ));
+            shielded_outputs.push(
+                WalletOutput::from_parts(
+                    output_idx,
+                    output.ephemeral_key(),
+                    enrich_note(note),
+                    is_change,
+                    note_commitment_tree_position,
+                    nf,
+                    *key.account_id(),
+                    key.key_scope(),
+                )
+                .with_compact_ciphertext(
+                    output.enc_ciphertext()[..52]
+                        .try_into()
+                        .expect("compact ciphertext prefix"),
+                ),
+            );
         }
 
         note_commitments.push((node, retention))

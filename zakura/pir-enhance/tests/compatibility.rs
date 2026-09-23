@@ -1,4 +1,4 @@
-//! Pinned v4 public wire contract emitted by the reference wallet-pir crate.
+//! Wallet-only v5 wire fixtures; legacy v4 server fixtures must be rejected.
 use serde::Deserialize;
 use zakura_pir_enhance::{
     AcceptedAnchor, ClientResourceLimits, GenerationAcceptance, HEADER_BYTES, Manifest,
@@ -9,14 +9,14 @@ use zakura_pir_enhance::{
 
 #[derive(Deserialize)]
 struct Fixture {
-    server_revision: String,
+    provenance: String,
     ipir_sp_revision: String,
     manifest: Manifest,
     session: ShardSession,
 }
 
 fn fixture() -> Fixture {
-    serde_json::from_str(include_str!("fixtures/upstream-session.json")).unwrap()
+    serde_json::from_str(include_str!("fixtures/wallet-schema11.json")).unwrap()
 }
 
 fn acceptance() -> GenerationAcceptance {
@@ -29,33 +29,30 @@ fn acceptance() -> GenerationAcceptance {
 }
 
 #[test]
-fn pinned_server_manifest_and_session_are_accepted() {
+fn synthetic_wallet_manifest_and_session_are_accepted() {
     let fixture = fixture();
-    assert_eq!(
-        fixture.server_revision,
-        "436dcc7efda3e09a6734342fd4f55e07bf1d9d95"
-    );
+    assert!(fixture.provenance.starts_with("Synthetic wallet"));
     assert_eq!(
         fixture.ipir_sp_revision,
         "225972648cc2982abfac66ba5b7a3930b223051a"
     );
-    assert_eq!(fixture.manifest.schema_version, 10);
+    assert_eq!(fixture.manifest.schema_version, 11);
     assert_eq!(
         fixture.manifest.protocol_revision,
-        "ironwood-enhance-pir-v4"
+        "ironwood-enhance-pir-v5"
     );
-    assert_eq!(RECORD_BYTES, 737);
+    assert_eq!(RECORD_BYTES, 653);
     assert_eq!(RECORDS_PER_ROW, 33);
-    assert_eq!(ROW_BYTES, 24_321);
+    assert_eq!(ROW_BYTES, 21_549);
     assert_eq!(
         fixture.manifest.sessions[0].parameter_id,
-        "ironwood-enhance-pir-v4/ce8bbd84ff64a3d46e1f00d3142ecac4b42acda912ab9f6f241f59908db76a53"
+        "ironwood-enhance-pir-v5/6f7e6857d7efd01f954ff8a11aface91020ca496b80ea869c868393e95a73358"
     );
     assert_eq!(
         fixture.manifest.sessions[0].public_params_sha256,
         "793dd18194116ab34ab06e753faefa8d882fb962beba46dbf4256264c74c5006"
     );
-    assert_eq!(fixture.session.public_params_base64.len(), 114_688);
+    assert_eq!(fixture.session.public_params_base64.len(), 114688);
     fixture.manifest.validate().unwrap();
     let query_session =
         QuerySession::from_session(&fixture.manifest, fixture.session, &acceptance()).unwrap();
@@ -74,10 +71,10 @@ fn pinned_contract_rejects_old_or_unaccepted_chain_state() {
     let mut fixture = fixture();
     fixture.manifest.schema_version = 7;
     assert!(fixture.manifest.validate().is_err());
-    fixture.manifest.schema_version = 10;
+    fixture.manifest.schema_version = 11;
     fixture.manifest.protocol_revision = "ironwood-enhance-pir-v2".into();
     assert!(fixture.manifest.validate().is_err());
-    fixture.manifest.protocol_revision = "ironwood-enhance-pir-v4".into();
+    fixture.manifest.protocol_revision = "ironwood-enhance-pir-v5".into();
     let wrong_anchor = GenerationAcceptance::new(
         "main",
         3_428_143,
@@ -170,4 +167,12 @@ fn malformed_shard_setup_is_rejected_before_expansion() {
     let mut wrong_length = fixture.session;
     wrong_length.public_params_base64.pop();
     assert!(QuerySession::from_session(&fixture.manifest, wrong_length, &acceptance()).is_err());
+}
+
+#[test]
+fn legacy_server_schema_is_rejected() {
+    let legacy: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/upstream-session.json")).unwrap();
+    let manifest: Manifest = serde_json::from_value(legacy["manifest"].clone()).unwrap();
+    assert!(acceptance().validate(&manifest).is_err());
 }

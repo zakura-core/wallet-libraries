@@ -322,6 +322,54 @@ impl Client {
         self.query_batch_with_limit(transport, positions, DEFAULT_MAX_BATCH_SIZE)
     }
 
+    /// Queries only one transaction in one row. Shape and coverage failures perform
+    /// no network I/O. Session setup may precede the single row query POST.
+    #[cfg(feature = "wallet")]
+    pub async fn query_row_requests(
+        &mut self,
+        transport: &impl Transport,
+        requests: &[zcash_client_backend::data_api::enhance_pir::EnhancePirRequest],
+    ) -> Result<crate::wallet::RowQueryResult, ClientError> {
+        use futures_util::StreamExt;
+        let first = requests.first().ok_or(ClientError::EmptyBatch)?;
+        if requests.len() > DEFAULT_MAX_BATCH_SIZE {
+            return Err(ClientError::BatchTooLarge {
+                max_items: DEFAULT_MAX_BATCH_SIZE,
+            });
+        }
+        let row = u64::from(first.position()) / RECORDS_PER_ROW as u64;
+        for request in requests {
+            if request.request_id().txid() != first.request_id().txid() {
+                return Err(ClientError::MixedTxid);
+            }
+            let position = u64::from(request.position());
+            if position / RECORDS_PER_ROW as u64 != row {
+                return Err(ClientError::CrossRowBatch);
+            }
+            if self.manifest.coverage.locate(position).is_none() {
+                return Err(ClientError::OutsideCoverage(position));
+            }
+        }
+        let stream =
+            self.query_batch(transport, requests.iter().map(|r| u64::from(r.position())))?;
+        futures_util::pin_mut!(stream);
+        let mut records = BTreeMap::new();
+        while let Some(result) = stream.next().await {
+            records.insert(result.position, result.record?);
+        }
+        let slots = requests
+            .iter()
+            .map(|request| {
+                records
+                    .get(&u64::from(request.position()))
+                    .cloned()
+                    .map(|record| (*request, record))
+                    .ok_or_else(|| ClientError::Response("missing requested row slot".into()))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(crate::wallet::RowQueryResult { row, slots })
+    }
+
     /// Ingests at most `max_items + 1` input items before returning a stream or
     /// `BatchTooLarge`. Counts duplicates and uncovered positions. No network I/O
     /// occurs on rejection. The caller must ensure each iterator step terminates.
@@ -798,7 +846,7 @@ mod lifecycle_tests {
     impl FixtureTransport {
         fn new(session_status: Option<u16>, query_status: Option<u16>) -> Self {
             let fixture: serde_json::Value =
-                serde_json::from_str(include_str!("../tests/fixtures/upstream-session.json"))
+                serde_json::from_str(include_str!("../tests/fixtures/wallet-schema11.json"))
                     .unwrap();
             Self {
                 manifest: serde_json::to_vec(&fixture["manifest"]).unwrap(),
@@ -840,7 +888,28 @@ mod lifecycle_tests {
                 if let Some(status) = self.query_status {
                     return Err(ClientError::HttpStatus(status));
                 }
-                panic!("fixture transport does not synthesize PIR answers");
+                // Zero public material and zero packed response model an all-zero
+                // database. This exercises client decoding without a server process.
+                let (_, params) = ipir_sp::params_for_simplepir_profile(
+                    4096,
+                    crate::ITEM_SIZE_BITS,
+                    ipir_sp::SimplePirProfile::P16Q46,
+                )
+                .unwrap();
+                let binding = crate::types::QueryBinding::decode(&request.body).unwrap();
+                let mut response = binding.encode();
+                response.resize(
+                    crate::HEADER_BYTES
+                        + params.db_cols / params.poly_len
+                            * ipir_sp::modulus_switch::response_body_len(
+                                params.poly_len,
+                                params.q_prime_1,
+                            ),
+                    0,
+                );
+                let mut body = request.response_body();
+                body.extend(&response)?;
+                return Ok(body.finish());
             } else {
                 panic!("unexpected endpoint: {}", request.url);
             };
@@ -965,6 +1034,115 @@ mod lifecycle_tests {
             assert_eq!(again.len(), 1);
             assert_eq!(transport.session_requests.get(), 1);
             assert_eq!(transport.query_requests.get(), 2);
+        });
+    }
+
+    #[cfg(feature = "wallet")]
+    #[test]
+    fn row_requests_decode_one_row_and_preserve_order_and_duplicate_identities() {
+        use zcash_client_backend::data_api::enhance_pir::{
+            EnhancePirRequest, IronwoodEnhanceRequestId,
+        };
+        use zcash_primitives::transaction::TxId;
+        let transport = FixtureTransport::new(None, None);
+        let request = |position: u64, index| {
+            EnhancePirRequest::new(
+                position.into(),
+                IronwoodEnhanceRequestId::new(TxId::from_bytes([1; 32]), index),
+            )
+        };
+        let requests = [
+            request(32, 2),
+            request(0, 0),
+            request(32, 2),
+            request(32, 3),
+        ];
+        futures::executor::block_on(async {
+            let mut client = PendingClient::fetch(&transport, "https://example.test")
+                .await
+                .unwrap()
+                .accept(&transport.acceptance(0x42, 1))
+                .unwrap();
+            let result = client
+                .query_row_requests(&transport, &requests)
+                .await
+                .unwrap();
+            assert_eq!(result.row, 0);
+            assert_eq!(
+                result.slots.iter().map(|(r, _)| *r).collect::<Vec<_>>(),
+                requests
+            );
+            assert!(
+                result
+                    .slots
+                    .iter()
+                    .all(|(_, record)| record.as_bytes() == &[0; crate::RECORD_BYTES])
+            );
+            assert_eq!(transport.session_requests.get(), 1);
+            assert_eq!(transport.query_requests.get(), 1);
+        });
+    }
+
+    #[cfg(feature = "wallet")]
+    #[test]
+    fn row_requests_reject_shape_without_io_and_query_only_one_row() {
+        use zcash_client_backend::data_api::enhance_pir::{
+            EnhancePirRequest, IronwoodEnhanceRequestId,
+        };
+        use zcash_primitives::transaction::TxId;
+        let transport = FixtureTransport::new(None, Some(503));
+        let request = |position: u64, txid| {
+            EnhancePirRequest::new(
+                position.into(),
+                IronwoodEnhanceRequestId::new(TxId::from_bytes([txid; 32]), position as u32),
+            )
+        };
+        futures::executor::block_on(async {
+            let mut client = PendingClient::fetch(&transport, "https://example.test")
+                .await
+                .unwrap()
+                .accept(&transport.acceptance(0x42, 1))
+                .unwrap();
+            assert!(matches!(
+                client.query_row_requests(&transport, &[]).await,
+                Err(ClientError::EmptyBatch)
+            ));
+            assert!(matches!(
+                client
+                    .query_row_requests(&transport, &[request(0, 1), request(1, 2)])
+                    .await,
+                Err(ClientError::MixedTxid)
+            ));
+            assert!(matches!(
+                client
+                    .query_row_requests(&transport, &[request(32, 1), request(33, 1)])
+                    .await,
+                Err(ClientError::CrossRowBatch)
+            ));
+            assert!(matches!(
+                client
+                    .query_row_requests(&transport, &[request(67, 1)])
+                    .await,
+                Err(ClientError::OutsideCoverage(67))
+            ));
+            assert!(matches!(
+                client
+                    .query_row_requests(
+                        &transport,
+                        &vec![request(0, 1); DEFAULT_MAX_BATCH_SIZE + 1]
+                    )
+                    .await,
+                Err(ClientError::BatchTooLarge { .. })
+            ));
+            assert_eq!(transport.session_requests.get(), 0);
+            assert_eq!(transport.query_requests.get(), 0);
+            let error = client
+                .query_row_requests(&transport, &[request(32, 1), request(0, 1), request(32, 1)])
+                .await
+                .unwrap_err();
+            assert_eq!(error.http_status(), Some(503));
+            assert_eq!(transport.session_requests.get(), 1);
+            assert_eq!(transport.query_requests.get(), 1);
         });
     }
 

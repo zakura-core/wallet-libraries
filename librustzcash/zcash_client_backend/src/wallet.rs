@@ -635,12 +635,20 @@ pub type WalletIronwoodSpend<AccountId> = WalletSpend<orchard::note::Nullifier, 
 pub struct WalletOutput<Note, Nullifier, AccountId> {
     index: usize,
     ephemeral_key: EphemeralKeyBytes,
+    compact_ciphertext: Option<[u8; 52]>,
     note: Note,
     is_change: bool,
     note_commitment_tree_position: Position,
     nf: Option<Nullifier>,
     account_id: AccountId,
     recipient_key_scope: Option<zip32::Scope>,
+}
+
+/// Compact action encryption fields retained from scanning for later enhancement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompactEncryptionFields {
+    pub ephemeral_key: [u8; 32],
+    pub compact_ciphertext: [u8; 52],
 }
 
 impl<Note, Nullifier, AccountId> WalletOutput<Note, Nullifier, AccountId> {
@@ -659,6 +667,7 @@ impl<Note, Nullifier, AccountId> WalletOutput<Note, Nullifier, AccountId> {
         Self {
             index,
             ephemeral_key,
+            compact_ciphertext: None,
             note,
             is_change,
             note_commitment_tree_position,
@@ -666,6 +675,17 @@ impl<Note, Nullifier, AccountId> WalletOutput<Note, Nullifier, AccountId> {
             account_id,
             recipient_key_scope,
         }
+    }
+
+    /// Attaches the compact encryption prefix retained by scanning.
+    pub fn with_compact_ciphertext(mut self, ciphertext: [u8; 52]) -> Self {
+        self.compact_ciphertext = Some(ciphertext);
+        self
+    }
+
+    /// Compact ciphertext when this output came from a compact scan.
+    pub fn compact_ciphertext(&self) -> Option<&[u8; 52]> {
+        self.compact_ciphertext.as_ref()
     }
 
     /// The index of the output or action in the transaction that created this output.

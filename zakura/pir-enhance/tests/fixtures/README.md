@@ -1,4 +1,22 @@
-# Enhance PIR v4 conformance fixtures
+# Wallet v5 fixtures and historical server v4 fixtures
+
+`wallet-schema11.json` is a synthetic wallet-only fixture generated with:
+
+```sh
+cargo run -p zakura-pir-enhance --example generate_wallet_fixture --locked > zakura/pir-enhance/tests/fixtures/wallet-schema11.json
+```
+
+It checks schema 11, 653-byte records, 33 records per row, derived parameters,
+setup lengths, and wallet acceptance. It is **not** evidence of interoperability
+with an updated server. The wallet tests retain `upstream-session.json` unchanged
+to check that the historical schema-10 server manifest is rejected.
+
+The following generator, HTTP harness, commands, and recorded results describe the
+historical v4 contract only. They do not qualify the v5 client and must not be
+presented as current verification. Updating and running the server harness requires
+separate server-side work.
+
+## Historical Enhance PIR v4 conformance fixtures
 
 `upstream-session.json` is emitted by `generate.rs` using the reference server crate at
 `wallet-pir` revision `436dcc7efda3e09a6734342fd4f55e07bf1d9d95` and

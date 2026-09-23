@@ -726,6 +726,11 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
 
 /// This trait provides a generalization over output representations.
 pub trait ReceivedShieldedOutput {
+    /// Compact encryption context, when retained by scanning.
+    fn compact_encryption_fields(&self) -> Option<crate::wallet::CompactEncryptionFields> {
+        None
+    }
+
     type AccountId;
     type Note;
     type Nullifier;
@@ -864,6 +869,14 @@ impl<T: ReceivedShieldedOutput<Note = ::orchard::Note, Nullifier = ::orchard::no
 
 #[cfg(feature = "orchard")]
 impl<AccountId: Copy> ReceivedShieldedOutput for WalletOrchardOutput<AccountId> {
+    fn compact_encryption_fields(&self) -> Option<crate::wallet::CompactEncryptionFields> {
+        self.compact_ciphertext()
+            .map(|ciphertext| crate::wallet::CompactEncryptionFields {
+                ephemeral_key: self.ephemeral_key().0,
+                compact_ciphertext: *ciphertext,
+            })
+    }
+
     type AccountId = AccountId;
     type Note = ::orchard::Note;
     type Nullifier = ::orchard::note::Nullifier;

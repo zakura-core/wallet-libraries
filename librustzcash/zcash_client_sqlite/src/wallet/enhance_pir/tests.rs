@@ -111,8 +111,7 @@ fn wire_record(inputs: bool, outputs: bool) -> EnhanceRecord {
     let mut ciphertext = [0; 580];
     ciphertext[..52].copy_from_slice(&[4; 52]);
     EnhanceRecord::from_parts(EnhanceRecordParts {
-        ephemeral_key: [3; 32],
-        enc_ciphertext: ciphertext,
+        enc_ciphertext_suffix: (ciphertext)[52..].try_into().unwrap(),
         cv_net: [5; 32],
         out_ciphertext: [6; 80],
         has_transparent_inputs: inputs,
@@ -229,9 +228,8 @@ fn either_transparent_flag_routes_the_entire_transaction_and_is_sticky() {
 
 #[test]
 fn incoming_authentication_precedes_shape_and_flags_are_not_authenticated() {
-    use orchard::note_encryption::{IronwoodDomain, IronwoodNoteEncryption};
+    use orchard::note_encryption::IronwoodNoteEncryption;
     use zcash_client_backend::data_api::enhance_pir::EnhanceRecord;
-    use zcash_note_encryption::Domain;
 
     let (mut st, _, request) = fixture();
     let pending = st
@@ -242,10 +240,9 @@ fn incoming_authentication_precedes_shape_and_flags_are_not_authenticated() {
         .unwrap();
     let encryptor = IronwoodNoteEncryption::new(None, pending.note, [7; 512]);
     let ciphertext = encryptor.encrypt_note_plaintext();
-    let record = |bytes| {
+    let record = |bytes: [u8; 580]| {
         EnhanceRecord::from_parts(EnhanceRecordParts {
-            ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0,
-            enc_ciphertext: bytes,
+            enc_ciphertext_suffix: (bytes)[52..].try_into().unwrap(),
             cv_net: [0; 32],
             out_ciphertext: [0; 80],
             has_transparent_inputs: true,
@@ -308,29 +305,6 @@ fn non_recovery_suspends_work_without_completion_or_public_fallback() {
     st.wallet_mut()
         .db_mut()
         .set_enhancement_mode(EnhancementMode::PrivateIronwood);
-
-    let mut wrong = wire_record(true, false);
-    // A mismatched compact prefix must not apply even a positive flag.
-    let mut parts = [0; 580];
-    parts[..52].copy_from_slice(&[8; 52]);
-    wrong = EnhanceRecord::from_parts(EnhanceRecordParts {
-        ephemeral_key: *wrong.ephemeral_key(),
-        enc_ciphertext: parts,
-        cv_net: [5; 32],
-        out_ciphertext: [6; 80],
-        has_transparent_inputs: true,
-        has_transparent_outputs: false,
-        metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata::new(
-            0,
-            Some(0),
-        )
-        .unwrap(),
-    });
-    assert_eq!(
-        apply_record(st.wallet_mut().db_mut(), outgoing, &wrong).unwrap(),
-        EnhancePirStoreResult::Rejected
-    );
-    assert_eq!(requests(st.wallet().conn()).unwrap().len(), 2);
 
     assert_eq!(
         apply_record(
@@ -1107,9 +1081,8 @@ fn reopening_requires_mode_before_enumerating_persisted_work() {
 
 #[test]
 fn pir_recovers_history_and_backfills_without_losing_a_stored_memo() {
-    use orchard::note_encryption::{IronwoodDomain, IronwoodNoteEncryption};
+    use orchard::note_encryption::IronwoodNoteEncryption;
     use zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata;
-    use zcash_note_encryption::Domain;
     let (mut st, tx_ref, request) = fixture();
     let note = st
         .wallet()
@@ -1120,8 +1093,9 @@ fn pir_recovers_history_and_backfills_without_losing_a_stored_memo() {
         .note;
     let encryptor = IronwoodNoteEncryption::new(None, note, [7; 512]);
     let record = EnhanceRecord::from_parts(EnhanceRecordParts {
-        ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0,
-        enc_ciphertext: encryptor.encrypt_note_plaintext(),
+        enc_ciphertext_suffix: (encryptor.encrypt_note_plaintext())[52..]
+            .try_into()
+            .unwrap(),
         cv_net: [0; 32],
         out_ciphertext: [0; 80],
         has_transparent_inputs: false,
@@ -1224,9 +1198,8 @@ fn pir_recovers_history_and_backfills_without_losing_a_stored_memo() {
 
 #[test]
 fn pir_conflicting_metadata_rolls_back_the_entire_response() {
-    use orchard::note_encryption::{IronwoodDomain, IronwoodNoteEncryption};
+    use orchard::note_encryption::IronwoodNoteEncryption;
     use zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata;
-    use zcash_note_encryption::Domain;
     let (mut st, tx_ref, request) = fixture();
     let note = st
         .wallet()
@@ -1237,8 +1210,9 @@ fn pir_conflicting_metadata_rolls_back_the_entire_response() {
         .note;
     let encryptor = IronwoodNoteEncryption::new(None, note, [8; 512]);
     let record = EnhanceRecord::from_parts(EnhanceRecordParts {
-        ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0,
-        enc_ciphertext: encryptor.encrypt_note_plaintext(),
+        enc_ciphertext_suffix: (encryptor.encrypt_note_plaintext())[52..]
+            .try_into()
+            .unwrap(),
         cv_net: [0; 32],
         out_ciphertext: [0; 80],
         has_transparent_inputs: false,
@@ -1447,8 +1421,7 @@ fn identical_anchor_suspensions_are_deduplicated() {
 
 #[test]
 fn response_application_retries_after_another_connection_rolls_back() {
-    use orchard::note_encryption::{IronwoodDomain, IronwoodNoteEncryption};
-    use zcash_note_encryption::Domain;
+    use orchard::note_encryption::IronwoodNoteEncryption;
     let (mut st, tx_ref, request) = fixture_with_factory(TestDbFactory::file_backed());
     let note = st
         .wallet()
@@ -1459,8 +1432,9 @@ fn response_application_retries_after_another_connection_rolls_back() {
         .note;
     let encryptor = IronwoodNoteEncryption::new(None, note, [8; 512]);
     let record = EnhanceRecord::from_parts(EnhanceRecordParts {
-        ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0,
-        enc_ciphertext: encryptor.encrypt_note_plaintext(),
+        enc_ciphertext_suffix: (encryptor.encrypt_note_plaintext())[52..]
+            .try_into()
+            .unwrap(),
         cv_net: [0; 32],
         out_ciphertext: [0; 80],
         has_transparent_inputs: false,
@@ -1513,4 +1487,371 @@ fn response_application_retries_after_another_connection_rolls_back() {
             .unwrap(),
         20
     );
+}
+
+fn authentic_incoming_record(st: &State, request: EnhancePirRequest) -> EnhanceRecord {
+    let pending = st
+        .wallet()
+        .db()
+        .pending_memo(request.position())
+        .unwrap()
+        .unwrap();
+    let encryptor =
+        orchard::note_encryption::IronwoodNoteEncryption::new(None, pending.note, [7; 512]);
+    EnhanceRecord::from_parts(EnhanceRecordParts {
+        enc_ciphertext_suffix: encryptor.encrypt_note_plaintext()[52..].try_into().unwrap(),
+        cv_net: [0; 32],
+        out_ciphertext: [0; 80],
+        has_transparent_inputs: false,
+        has_transparent_outputs: false,
+        metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata::new(
+            0,
+            Some(0),
+        )
+        .unwrap(),
+    })
+}
+
+#[test]
+fn batch_commits_across_rows_preserves_duplicates_and_ignores_stale_metadata() {
+    use zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult as Batch;
+    let (mut st, tx_ref, incoming) = fixture();
+    let outgoing = outgoing(&st, tx_ref, 99, 4);
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    let record = authentic_incoming_record(&st, incoming);
+    let stale = EnhancePirRequest::new(100.into(), incoming.request_id());
+    let result = st
+        .wallet_mut()
+        .db_mut()
+        .apply_ironwood_enhance_records(&[
+            (incoming, record.clone()),
+            (outgoing, wire_record(false, false)),
+            (incoming, record),
+            (stale, wire_record(true, true)),
+        ])
+        .unwrap();
+    assert_eq!(
+        result,
+        Batch::Committed(vec![
+            EnhancePirStoreResult::Stored,
+            EnhancePirStoreResult::NotRecoverable,
+            EnhancePirStoreResult::Stored,
+            EnhancePirStoreResult::AlreadyResolved
+        ])
+    );
+    assert!(requests(st.wallet().conn()).unwrap().is_empty());
+    assert!(!visible(&st, incoming));
+}
+
+#[test]
+fn batch_rejection_and_sql_failure_roll_back_all_effects() {
+    use zcash_client_backend::data_api::enhance_pir::{
+        EnhancePirBatchRejection as Reason, EnhancePirBatchResult as Batch,
+    };
+    let (mut st, tx_ref, incoming) = fixture();
+    let outgoing = outgoing(&st, tx_ref, 99, 4);
+    let valid = authentic_incoming_record(&st, incoming);
+    let before = requests(st.wallet().conn()).unwrap();
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .apply_ironwood_enhance_records(&[
+                (outgoing, wire_record(false, false)),
+                (incoming, wire_record(false, false)),
+            ])
+            .unwrap(),
+        Batch::Rejected {
+            index: Some(1),
+            reason: Reason::RecordRejected
+        }
+    );
+    assert_eq!(requests(st.wallet().conn()).unwrap(), before);
+    // The first action stores its memo before the second action hits this trigger.
+    st.wallet()
+        .conn()
+        .execute_batch(
+            "CREATE TEMP TRIGGER fail_batch_second_action
+        BEFORE UPDATE OF not_recoverable ON ironwood_enhance_outgoing_queue
+        BEGIN SELECT RAISE(ABORT, 'batch failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .apply_ironwood_enhance_records(&[
+                (incoming, valid.clone()),
+                (outgoing, wire_record(false, false)),
+            ])
+            .is_err()
+    );
+    assert_eq!(requests(st.wallet().conn()).unwrap(), before);
+    assert!(
+        st.wallet()
+            .db()
+            .pending_memo(incoming.position())
+            .unwrap()
+            .is_some()
+    );
+    let fee: Option<u64> = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT fee FROM transactions WHERE id_tx = ?",
+            [tx_ref.0],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(fee, None);
+    st.wallet()
+        .conn()
+        .execute_batch("DROP TRIGGER fail_batch_second_action")
+        .unwrap();
+    // A commit-time rejection also rolls back an earlier action, not just SQL errors.
+    st.wallet()
+        .conn()
+        .execute_batch(
+            "CREATE TEMP TRIGGER conflict_batch_second_action
+        AFTER UPDATE OF memo ON ironwood_received_notes BEGIN
+        UPDATE ironwood_enhance_routing SET history_expiry_height = 1; END;",
+        )
+        .unwrap();
+    assert!(matches!(
+        st.wallet_mut()
+            .db_mut()
+            .apply_ironwood_enhance_records(&[
+                (incoming, valid),
+                (outgoing, wire_record(false, false)),
+            ])
+            .unwrap(),
+        Batch::Rejected { .. }
+    ));
+    assert_eq!(requests(st.wallet().conn()).unwrap(), before);
+    assert!(
+        st.wallet()
+            .db()
+            .pending_memo(incoming.position())
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn batch_rejects_shape_duplicates_and_metadata_conflicts_without_mutation() {
+    use zcash_client_backend::data_api::enhance_pir::{
+        EnhancePirBatchRejection as Reason, EnhancePirBatchResult as Batch,
+    };
+    let (mut st, tx_ref, incoming) = fixture();
+    let outgoing = outgoing(&st, tx_ref, 99, 4);
+    let valid = authentic_incoming_record(&st, incoming);
+    let before = requests(st.wallet().conn()).unwrap();
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .apply_ironwood_enhance_records(&[])
+            .unwrap(),
+        Batch::Rejected {
+            index: None,
+            reason: Reason::Empty
+        }
+    );
+    let other = EnhancePirRequest::new(
+        100.into(),
+        IronwoodEnhanceRequestId::new(TxId::from_bytes([55; 32]), 0),
+    );
+    for (items, reason) in [
+        (
+            vec![(incoming, valid.clone()), (other, valid.clone())],
+            Reason::MixedTxid,
+        ),
+        (
+            vec![
+                (incoming, valid.clone()),
+                (incoming, wire_record(false, false)),
+            ],
+            Reason::ConflictingDuplicate,
+        ),
+        (
+            vec![
+                (incoming, valid.clone()),
+                (outgoing, wire_record(true, false)),
+            ],
+            Reason::MetadataConflict,
+        ),
+    ] {
+        assert_eq!(
+            st.wallet_mut()
+                .db_mut()
+                .apply_ironwood_enhance_records(&items)
+                .unwrap(),
+            Batch::Rejected {
+                index: Some(1),
+                reason
+            }
+        );
+        assert_eq!(requests(st.wallet().conn()).unwrap(), before);
+    }
+    for offset in [641, 645] {
+        let mut bytes = *wire_record(false, false).as_bytes();
+        bytes[offset] = 1;
+        assert_eq!(
+            st.wallet_mut()
+                .db_mut()
+                .apply_ironwood_enhance_records(&[
+                    (incoming, valid.clone()),
+                    (outgoing, EnhanceRecord::from_bytes(bytes).unwrap()),
+                ])
+                .unwrap(),
+            Batch::Rejected {
+                index: Some(1),
+                reason: Reason::MetadataConflict
+            }
+        );
+        assert_eq!(requests(st.wallet().conn()).unwrap(), before);
+    }
+}
+
+#[test]
+fn batch_transparent_routing_is_order_independent_and_sticky() {
+    use zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult as Batch;
+    for reverse in [false, true] {
+        let (mut st, tx_ref, incoming) = fixture();
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+        queue_transaction(
+            st.wallet().conn(),
+            tx_ref,
+            &IronwoodEnhancementPlan::Eligible {
+                outgoing: [(98, 3), (99, 4)]
+                    .map(|(position, index)| {
+                        IronwoodEnhanceCandidate::from_parts(
+                            position.into(),
+                            index,
+                            [1; 32],
+                            [2; 32],
+                            [3; 32],
+                            [4; 52],
+                            vec![st.test_account().unwrap().id()],
+                        )
+                    })
+                    .to_vec(),
+            },
+        )
+        .unwrap();
+        let a = EnhancePirRequest::new(
+            98.into(),
+            IronwoodEnhanceRequestId::new(incoming.request_id().txid(), 3),
+        );
+        let b = EnhancePirRequest::new(
+            99.into(),
+            IronwoodEnhanceRequestId::new(incoming.request_id().txid(), 4),
+        );
+        let mut items = vec![(a, wire_record(true, false)), (b, wire_record(true, false))];
+        if reverse {
+            items.reverse();
+        }
+        assert_eq!(
+            st.wallet_mut()
+                .db_mut()
+                .apply_ironwood_enhance_records(&items)
+                .unwrap(),
+            Batch::Committed(vec![EnhancePirStoreResult::LwdRequired; 2])
+        );
+        assert!(visible(&st, incoming));
+        assert!(requests(st.wallet().conn()).unwrap().is_empty());
+        assert_eq!(
+            apply_record(st.wallet_mut().db_mut(), a, &wire_record(false, false)).unwrap(),
+            EnhancePirStoreResult::AlreadyResolved
+        );
+        assert!(visible(&st, incoming));
+    }
+}
+
+#[test]
+fn scan_persists_compact_fields_and_rescan_preserves_them() {
+    let (mut st, tx_ref, incoming) = fixture();
+    let before = st
+        .wallet()
+        .db()
+        .pending_memo(incoming.position())
+        .unwrap()
+        .unwrap();
+    let height: u32 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT mined_height FROM transactions WHERE id_tx = ?",
+            [tx_ref.0],
+            |r| r.get(0),
+        )
+        .unwrap();
+    st.scan_cached_blocks(BlockHeight::from_u32(height), 1);
+    let after = st
+        .wallet()
+        .db()
+        .pending_memo(incoming.position())
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.ephemeral_key, after.ephemeral_key);
+    assert_eq!(before.compact_ciphertext, after.compact_ciphertext);
+    // A received-output update without compact context must not erase scan data.
+    let output = zcash_client_backend::wallet::WalletOrchardOutput::from_parts(
+        incoming.request_id().output_index() as usize,
+        zcash_note_encryption::EphemeralKeyBytes(after.ephemeral_key),
+        (after.note, orchard::ValuePool::Ironwood),
+        false,
+        incoming.position(),
+        None,
+        after.account_id,
+        Some(after.scope),
+    );
+    let tx = st.wallet().conn().unchecked_transaction().unwrap();
+    super::super::orchard::put_received_note(
+        &tx,
+        st.network(),
+        ShieldedPool::Ironwood,
+        &output,
+        tx_ref,
+        Some(BlockHeight::from_u32(height)),
+        None,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let updated = st
+        .wallet()
+        .db()
+        .pending_memo(incoming.position())
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.ephemeral_key, before.ephemeral_key);
+    assert_eq!(updated.compact_ciphertext, before.compact_ciphertext);
+
+    assert!(
+        st.wallet()
+            .conn()
+            .execute(
+                "UPDATE ironwood_received_notes SET ephemeral_key = zeroblob(31)",
+                []
+            )
+            .is_err()
+    );
+    assert!(
+        st.wallet()
+            .conn()
+            .execute(
+                "UPDATE ironwood_received_notes SET ephemeral_key = NULL",
+                []
+            )
+            .is_err()
+    );
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE ironwood_received_notes SET ephemeral_key = NULL, compact_ciphertext = NULL",
+            [],
+        )
+        .unwrap();
+    assert!(st.wallet().db().pending_memo(incoming.position()).is_err());
 }

@@ -1686,14 +1686,34 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         })
     }
 
+    fn apply_ironwood_enhance_records(
+        &mut self,
+        records: &[(EnhancePirRequest, EnhanceRecord)],
+    ) -> Result<zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult, Self::Error>
+    {
+        use zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult;
+        let tx = self.conn.borrow_mut().transaction()?;
+        let result = wallet::enhance_pir::apply_records(&tx, &self.params, records)?;
+        if matches!(result, EnhancePirBatchResult::Committed(_)) {
+            tx.commit()?;
+        } else {
+            tx.rollback()?;
+        }
+        Ok(result)
+    }
+
     fn apply_ironwood_enhance_record(
         &mut self,
         request: EnhancePirRequest,
         record: &EnhanceRecord,
     ) -> Result<EnhancePirStoreResult, Self::Error> {
-        self.transactionally(|wdb| {
-            wallet::enhance_pir::apply_record(wdb.conn.0, wdb.params, request, record)
-        })
+        use zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult;
+        Ok(
+            match self.apply_ironwood_enhance_records(&[(request, record.clone())])? {
+                EnhancePirBatchResult::Committed(results) => results[0],
+                EnhancePirBatchResult::Rejected { .. } => EnhancePirStoreResult::Rejected,
+            },
+        )
     }
 }
 
