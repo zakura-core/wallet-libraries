@@ -8,10 +8,7 @@ use futures_util::{Stream, stream};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
 };
 
 /// Default maximum number of input items, including duplicates, in one batch.
@@ -142,8 +139,8 @@ impl PendingClient {
             base_url: self.base_url,
             manifest: self.manifest,
             acceptance: acceptance.clone(),
-            cache: Mutex::new(SessionCache::default()),
-            expired: AtomicBool::new(false),
+            cache: SessionCache::default(),
+            expired: false,
         })
     }
 }
@@ -154,14 +151,35 @@ struct SessionCache {
     order: VecDeque<u64>,
 }
 
+/// Drop an idle expanded setup before allocating its replacement. Query methods
+/// borrow the client exclusively, so no other query can retain an evicted setup.
+fn make_room<T>(
+    sessions: &mut BTreeMap<u64, Arc<T>>,
+    order: &mut VecDeque<u64>,
+    limit: usize,
+) -> Result<(), ClientError> {
+    if limit == 0 {
+        return Err(ClientError::Generation("zero shard cache limit".into()));
+    }
+    while sessions.len() >= limit {
+        let id = order
+            .pop_front()
+            .ok_or_else(|| ClientError::Generation("invalid shard cache state".into()))?;
+        sessions
+            .remove(&id)
+            .ok_or_else(|| ClientError::Generation("invalid shard cache state".into()))?;
+    }
+    Ok(())
+}
+
 /// One wallet-accepted manifest. Refresh by fetching and accepting a new
 /// `PendingClient`; a batch never silently changes generation or coverage.
 pub struct Client {
     pub(crate) base_url: String,
     manifest: Manifest,
     acceptance: GenerationAcceptance,
-    cache: Mutex<SessionCache>,
-    expired: AtomicBool,
+    cache: SessionCache,
+    expired: bool,
 }
 #[derive(Debug)]
 pub struct PositionResult {
@@ -177,24 +195,23 @@ impl Client {
     }
 
     fn check_live(&self) -> Result<(), ClientError> {
-        if self.expired.load(Ordering::Acquire) {
+        if self.expired {
             Err(ClientError::HttpStatus(410))
         } else {
             Ok(())
         }
     }
 
-    fn note_status(&self, error: &ClientError) {
+    fn note_status(&mut self, error: &ClientError) {
         if matches!(error, ClientError::HttpStatus(410)) {
-            self.expired.store(true, Ordering::Release);
-            let mut cache = self.cache.lock().unwrap();
-            cache.sessions.clear();
-            cache.order.clear();
+            self.expired = true;
+            self.cache.sessions.clear();
+            self.cache.order.clear();
         }
     }
 
     async fn session(
-        &self,
+        &mut self,
         transport: &impl Transport,
         shard_id: u64,
     ) -> Result<Arc<QuerySession>, ClientError> {
@@ -207,13 +224,10 @@ impl Client {
         {
             return Err(ClientError::Generation("unknown shard".into()));
         }
-        {
-            let mut cache = self.cache.lock().unwrap();
-            if let Some(session) = cache.sessions.get(&shard_id).cloned() {
-                cache.order.retain(|id| *id != shard_id);
-                cache.order.push_back(shard_id);
-                return Ok(session);
-            }
+        if let Some(session) = self.cache.sessions.get(&shard_id).cloned() {
+            self.cache.order.retain(|id| *id != shard_id);
+            self.cache.order.push_back(shard_id);
+            return Ok(session);
         }
         let response = transport
             .execute(Request {
@@ -242,33 +256,22 @@ impl Client {
         }
         self.check_live()?;
         let session: ShardSession = serde_json::from_slice(response.as_ref())?;
+        make_room(
+            &mut self.cache.sessions,
+            &mut self.cache.order,
+            self.acceptance.limits.max_cached_shards,
+        )?;
         let session = Arc::new(QuerySession::from_session(
             &self.manifest,
             session,
             &self.acceptance,
         )?);
-        self.check_live()?;
-        let mut cache = self.cache.lock().unwrap();
-        if let Some(existing) = cache.sessions.get(&shard_id).cloned() {
-            return Ok(existing);
-        }
-        let limit = self.acceptance.limits.max_cached_shards;
-        if limit == 0 {
-            return Err(ClientError::Generation("zero shard cache limit".into()));
-        }
-        while cache.sessions.len() >= limit {
-            if let Some(evicted) = cache.order.pop_front() {
-                cache.sessions.remove(&evicted);
-            } else {
-                return Err(ClientError::Generation("invalid shard cache state".into()));
-            }
-        }
-        cache.order.push_back(shard_id);
-        cache.sessions.insert(shard_id, session.clone());
+        self.cache.order.push_back(shard_id);
+        self.cache.sessions.insert(shard_id, session.clone());
         Ok(session)
     }
     pub async fn query_dummy(
-        &self,
+        &mut self,
         transport: &impl Transport,
         shard_id: u64,
     ) -> Result<(), ClientError> {
@@ -312,7 +315,7 @@ impl Client {
     /// padding hides duplicates, uncovered positions, or early termination.
     /// This traffic-analysis leakage is accepted for the current integration.
     pub fn query_batch<'a>(
-        &'a self,
+        &'a mut self,
         transport: &'a impl Transport,
         positions: impl IntoIterator<Item = u64>,
     ) -> Result<impl Stream<Item = PositionResult> + 'a, ClientError> {
@@ -324,7 +327,7 @@ impl Client {
     /// occurs on rejection. The caller must ensure each iterator step terminates.
     /// Choose a local limit suitable for the device; zero accepts only empty input.
     pub fn query_batch_with_limit<'a>(
-        &'a self,
+        &'a mut self,
         transport: &'a impl Transport,
         positions: impl IntoIterator<Item = u64>,
         max_items: usize,
@@ -351,10 +354,17 @@ impl Client {
             }
         }
         Ok(stream::unfold(
-            (rows.into_values(), ready, uncovered, None::<u16>, false),
-            move |(mut rows, mut ready, mut uncovered, mut stopped, mut cancelled)| async move {
+            (
+                self,
+                rows.into_values(),
+                ready,
+                uncovered,
+                None::<u16>,
+                false,
+            ),
+            move |(client, mut rows, mut ready, mut uncovered, mut stopped, mut cancelled)| async move {
                 if let Some(result) = ready.pop_front() {
-                    return Some((result, (rows, ready, uncovered, stopped, cancelled)));
+                    return Some((result, (client, rows, ready, uncovered, stopped, cancelled)));
                 }
                 let Some((shard_id, row, positions)) = rows.next() else {
                     let position = uncovered.pop_front()?;
@@ -363,7 +373,7 @@ impl Client {
                             position,
                             record: Err(ClientError::OutsideCoverage(position)),
                         },
-                        (rows, ready, uncovered, stopped, cancelled),
+                        (client, rows, ready, uncovered, stopped, cancelled),
                     ));
                 };
                 let row = async {
@@ -373,13 +383,13 @@ impl Client {
                     if let Some(status) = stopped {
                         return Err(ClientError::HttpStatus(status));
                     }
-                    let session = self.session(transport, shard_id).await?;
+                    let session = client.session(transport, shard_id).await?;
                     let query = session.prepare_row(row)?;
-                    self.check_live()?;
+                    client.check_live()?;
                     let response = transport
                         .execute(Request {
                             method: Method::Post,
-                            url: endpoint(&self.base_url, "/v1/enhance/query")?,
+                            url: endpoint(&client.base_url, "/v1/enhance/query")?,
                             body: query.body().to_vec(),
                             response_limit: MAX_RESPONSE_BYTES,
                         })
@@ -387,11 +397,11 @@ impl Client {
                     let response = match response {
                         Ok(response) => response,
                         Err(error) => {
-                            self.note_status(&error);
+                            client.note_status(&error);
                             return Err(error);
                         }
                     };
-                    self.check_live()?;
+                    client.check_live()?;
                     if response.as_ref().len() > MAX_RESPONSE_BYTES {
                         return Err(ClientError::Response("HTTP body exceeds limit".into()));
                     }
@@ -433,7 +443,7 @@ impl Client {
                 }
                 ready
                     .pop_front()
-                    .map(|result| (result, (rows, ready, uncovered, stopped, cancelled)))
+                    .map(|result| (result, (client, rows, ready, uncovered, stopped, cancelled)))
             },
         ))
     }
@@ -749,6 +759,32 @@ mod lifecycle_tests {
     use futures::StreamExt;
     use std::cell::Cell;
 
+    #[test]
+    fn cache_releases_old_setup_before_admitting_new_one() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct SetupProbe(Arc<AtomicUsize>);
+        impl Drop for SetupProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let mut sessions = BTreeMap::from([(0, Arc::new(SetupProbe(dropped.clone())))]);
+        let mut order = VecDeque::from([0]);
+        make_room(&mut sessions, &mut order, 1).unwrap();
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(sessions.is_empty());
+        assert!(order.is_empty());
+
+        sessions.insert(1, Arc::new(SetupProbe(dropped.clone())));
+        order.push_back(1);
+        make_room(&mut sessions, &mut order, 2).unwrap();
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(sessions.len(), 1);
+    }
+
     struct FixtureTransport {
         manifest: Vec<u8>,
         session: Vec<u8>,
@@ -821,7 +857,7 @@ mod lifecycle_tests {
             let pending = PendingClient::fetch(&transport, "https://example.test")
                 .await
                 .unwrap();
-            let client = pending.accept(&transport.acceptance(0x42, 1)).unwrap();
+            let mut client = pending.accept(&transport.acceptance(0x42, 1)).unwrap();
             let results = client
                 .query_batch(&transport, [33, 0, 0, 1])
                 .unwrap()
@@ -866,7 +902,7 @@ mod lifecycle_tests {
         for status in [429, 503] {
             let transport = FixtureTransport::new(Some(status), None);
             futures::executor::block_on(async {
-                let client = PendingClient::fetch(&transport, "https://example.test")
+                let mut client = PendingClient::fetch(&transport, "https://example.test")
                     .await
                     .unwrap()
                     .accept(&transport.acceptance(0x42, 1))
@@ -899,7 +935,7 @@ mod lifecycle_tests {
     fn query_status_reuses_one_cached_shard_session() {
         let transport = FixtureTransport::new(None, Some(503));
         futures::executor::block_on(async {
-            let client = PendingClient::fetch(&transport, "https://example.test")
+            let mut client = PendingClient::fetch(&transport, "https://example.test")
                 .await
                 .unwrap()
                 .accept(&transport.acceptance(0x42, 1))

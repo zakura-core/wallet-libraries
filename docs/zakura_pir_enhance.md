@@ -20,10 +20,10 @@ let accepted = match acceptance(db, pending.manifest(), consensus_params, limits
     Ok(Acceptance::Mismatch) => return Err("anchor mismatch".into()),
     Err(error) => return Err(error.into()),
 };
-let client = pending.accept(&accepted)?;
+let mut client = pending.accept(&accepted)?;
 ```
 
-The application chooses limits for its least capable device. `max_shard_rows` bounds each shard setup independently of total chain records; `max_cached_shards` bounds retained setups. Sessions load lazily from `GET /v1/enhance/sessions/{generation}/{shard_id}`. Before setup, the client checks generation, shard, P16Q46 parameters, exact public material length, SHA-256 digest, and the manifest reference. The public setup seed uses the server's v4 mainnet domain and shard ID. Query and response headers contain `EPQ4`, generation and shard ID as little-endian u64 values, and the first eight bytes of SHA-256 of decoded public material. Responses require the exact binding and length before decoding.
+The application chooses limits for its least capable device. `max_shard_rows` bounds each shard setup independently of total chain records; `max_cached_shards` bounds retained setups. Query methods take `&mut self`, allowing one active batch per client. An idle setup is evicted before its replacement is built. Sessions load lazily from `GET /v1/enhance/sessions/{generation}/{shard_id}`. Before setup, the client checks generation, shard, P16Q46 parameters, exact public material length, SHA-256 digest, and the manifest reference. The public setup seed uses the server's v4 mainnet domain and shard ID. Query and response headers contain `EPQ4`, generation and shard ID as little-endian u64 values, and the first eight bytes of SHA-256 of decoded public material. Responses require the exact binding and length before decoding.
 
 ## Batches and expiry
 

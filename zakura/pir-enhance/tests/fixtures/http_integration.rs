@@ -59,7 +59,7 @@ impl Transport for LoopbackTransport {
 }
 
 async fn query_position(
-    client: &Client,
+    client: &mut Client,
     transport: &LoopbackTransport,
     position: u64,
 ) -> Result<EnhanceRecord, ClientError> {
@@ -140,20 +140,20 @@ async fn wallet_client_round_trips_real_v4_http_and_requires_fresh_acceptance() 
     let pending = PendingClient::fetch(&transport, &origin).await.unwrap();
     assert_eq!(pending.manifest().coverage.records, 67);
     assert!(pending.accept(&acceptance(3_428_143, 2, 67)).is_err());
-    let client = PendingClient::fetch(&transport, &origin)
+    let mut client = PendingClient::fetch(&transport, &origin)
         .await
         .unwrap()
         .accept(&acceptance(3_428_143, 1, 67))
         .unwrap();
     for position in [0, 32, 33, 65, 66, 33] {
-        let answer = query_position(&client, &transport, position).await.unwrap();
+        let answer = query_position(&mut client, &transport, position).await.unwrap();
         assert_eq!(
             answer.as_bytes(),
             record(position).as_slice(),
             "position {position}"
         );
     }
-    assert!(query_position(&client, &transport, 67).await.is_err());
+    assert!(query_position(&mut client, &transport, 67).await.is_err());
 
     // The sixth publication expires the first generation. A newly fetched
     // manifest still needs a new locally scanned anchor before its setup is used.
@@ -166,17 +166,17 @@ async fn wallet_client_round_trips_real_v4_http_and_requires_fresh_acceptance() 
             .unwrap();
         coordinator.publish(&journal, height, hash).await.unwrap();
     }
-    let stale = query_position(&client, &transport, 0).await.unwrap_err();
+    let stale = query_position(&mut client, &transport, 0).await.unwrap_err();
     assert_eq!(stale.http_status(), Some(410));
     let pending = PendingClient::fetch(&transport, &origin).await.unwrap();
     assert!(pending.accept(&acceptance(3_428_143, 1, 67)).is_err());
-    let refreshed = PendingClient::fetch(&transport, &origin)
+    let mut refreshed = PendingClient::fetch(&transport, &origin)
         .await
         .unwrap()
         .accept(&acceptance(3_428_148, 5, 72))
         .unwrap();
     assert_eq!(
-        query_position(&refreshed, &transport, 71)
+        query_position(&mut refreshed, &transport, 71)
             .await
             .unwrap()
             .as_bytes(),
@@ -263,7 +263,7 @@ async fn wallet_client_queries_every_v4_domain_over_real_http() {
             AcceptedAnchor::new(height, [hash_byte; 32], target_records),
             ClientResourceLimits::with_cache(32_768, 1),
         );
-        let client = PendingClient::fetch(&transport, &origin)
+        let mut client = PendingClient::fetch(&transport, &origin)
             .await
             .unwrap()
             .accept(&accepted)
@@ -276,14 +276,14 @@ async fn wallet_client_queries_every_v4_domain_over_real_http() {
             if position >= target_records {
                 continue;
             }
-            let answer = query_position(&client, &transport, position).await.unwrap();
+            let answer = query_position(&mut client, &transport, position).await.unwrap();
             assert_eq!(
                 answer.as_bytes(),
                 record(position).as_slice(),
                 "position {position}, rows {expected_rows}"
             );
         }
-        assert!(query_position(&client, &transport, target_records)
+        assert!(query_position(&mut client, &transport, target_records)
             .await
             .is_err());
         if target_records == span - 1 {
@@ -299,7 +299,7 @@ async fn wallet_client_queries_every_v4_domain_over_real_http() {
                     .id,
                 1
             );
-            let old = before_loan.as_ref().unwrap();
+            let old = before_loan.as_mut().unwrap();
             assert_eq!(
                 query_position(old, &transport, borrowed_position)
                     .await
@@ -320,7 +320,7 @@ async fn wallet_client_queries_every_v4_domain_over_real_http() {
                     .id,
                 0
             );
-            let old_borrower = during_loan.as_ref().unwrap();
+            let old_borrower = during_loan.as_mut().unwrap();
             assert_eq!(
                 query_position(old_borrower, &transport, borrowed_position)
                     .await
