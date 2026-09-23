@@ -34,7 +34,7 @@ fn synthetic_wallet_manifest_and_session_are_accepted() {
     assert!(fixture.provenance.starts_with("Synthetic wallet"));
     assert_eq!(
         fixture.ipir_sp_revision,
-        "b1c540f90f62e112c834a0f57f025e3c605e55d1"
+        "6f74a2d754b58934f925fc8a347f46620148ad47"
     );
     assert_eq!(fixture.manifest.schema_version, 11);
     assert_eq!(
@@ -46,7 +46,7 @@ fn synthetic_wallet_manifest_and_session_are_accepted() {
     assert_eq!(ROW_BYTES, 21_549);
     assert_eq!(
         fixture.manifest.sessions[0].parameter_id,
-        "ironwood-enhance-pir-v6/374a9b116e59a537ee883c763ff5e60b2b044e710419360fe8d4516f3181c8b9"
+        "ironwood-enhance-pir-v6/6ef480a31bd6a76c6403288ba1a0f0aeefbbe1805ba35168a85ccb2b07bd1c7b"
     );
     assert_eq!(
         fixture.manifest.sessions[0].public_params_sha256,
@@ -184,4 +184,15 @@ fn q46_schema11_manifest_and_session_are_rejected() {
     assert!(legacy.manifest.validate().is_err());
     let current = fixture();
     assert!(QuerySession::from_session(&current.manifest, legacy.session, &acceptance()).is_err());
+}
+
+#[test]
+fn q48_rejects_other_query_precisions_even_with_v6_manifest() {
+    for bits in [46, 47, 49] {
+        let mut current = fixture();
+        current.session.params.query_bits = bits;
+        assert!(
+            QuerySession::from_session(&current.manifest, current.session, &acceptance()).is_err()
+        );
+    }
 }

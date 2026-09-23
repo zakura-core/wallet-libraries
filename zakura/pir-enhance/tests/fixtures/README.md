@@ -7,7 +7,7 @@ cargo run -p zakura-pir-enhance --example generate_wallet_fixture --locked > zak
 ```
 
 `wallet-schema11-v5.json` preserves the previous wallet fixture for q46 rejection.
-The current fixture checks protocol v6, q49, schema 11, 653-byte records, 33 records per row, derived parameters,
+The current fixture checks protocol v6, q48, schema 11, 653-byte records, 33 records per row, derived parameters,
 setup lengths, and wallet acceptance. It is **not** evidence of interoperability
 with an updated server. The wallet tests retain `upstream-session.json` unchanged
 to check that the historical schema-10 server manifest is rejected.
