@@ -1,133 +1,173 @@
-//! Conformance to Enhance PIR schema 7 and its pinned ipir-sp server primitives.
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use inspiring::TopKeyImages;
-use ipir_sp::{
-    IPIRClient,
-    serialize::{deserialize_packing_keys, serialized_packing_keys_len},
-    server::{IPIRServer, build_pack_preprocessed_blocks, published_c1_rows},
-};
-use sha2::{Digest, Sha256};
+//! Pinned v4 public wire contract emitted by the reference wallet-pir crate.
+use serde::Deserialize;
 use zakura_pir_enhance::{
-    AcceptedAnchor, ClientResourceLimits, EnhanceSession, GenerationAcceptance, QuerySession,
-    RECORD_BYTES, RECORDS_PER_ROW, ROW_BYTES, SHARD_POSITIONS, SHARD_ROWS,
-    client::record_in_row,
-    types::{RECORD_FLAGS_OFFSET, setup_seed_bytes},
+    AcceptedAnchor, ClientResourceLimits, GenerationAcceptance, HEADER_BYTES, Manifest,
+    QuerySession, RECORD_BYTES, RECORDS_PER_ROW, ROW_BYTES, ShardSession,
+    client::ClientError,
+    types::{QueryBinding, setup_seed},
 };
 
-fn fixture() -> EnhanceSession {
+#[derive(Deserialize)]
+struct Fixture {
+    server_revision: String,
+    ipir_sp_revision: String,
+    manifest: Manifest,
+    session: ShardSession,
+}
+
+fn fixture() -> Fixture {
     serde_json::from_str(include_str!("fixtures/upstream-session.json")).unwrap()
 }
 
 fn acceptance() -> GenerationAcceptance {
-    // Independent, synthetic wallet metadata; never accept an anchor by copying server fields.
     GenerationAcceptance::new(
         "main",
         3_428_143,
-        AcceptedAnchor::new(3_428_143, [0x42; 32], 73_728),
-        ClientResourceLimits::new(8_192),
+        AcceptedAnchor::new(3_428_143, [0x42; 32], 67),
+        ClientResourceLimits::new(4_096),
     )
 }
 
 #[test]
-fn upstream_session_contract_is_accepted_and_round_trips() {
-    let wire: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/upstream-session.json")).unwrap();
-    let session = fixture();
-    assert_eq!(serde_json::to_value(&session).unwrap(), wire);
-    let query_session = QuerySession::from_session(session, &acceptance()).unwrap();
-    assert_eq!(query_session.params().instances, 2);
-    assert_eq!(query_session.params().db_cols, 4_096);
+fn pinned_server_manifest_and_session_are_accepted() {
+    let fixture = fixture();
     assert_eq!(
-        query_session.generation().shards[0].worker,
-        "opaque-group-a"
+        fixture.server_revision,
+        "436dcc7efda3e09a6734342fd4f55e07bf1d9d95"
+    );
+    assert_eq!(
+        fixture.ipir_sp_revision,
+        "225972648cc2982abfac66ba5b7a3930b223051a"
+    );
+    assert_eq!(fixture.manifest.schema_version, 10);
+    assert_eq!(
+        fixture.manifest.protocol_revision,
+        "ironwood-enhance-pir-v4"
+    );
+    assert_eq!(RECORD_BYTES, 737);
+    assert_eq!(RECORDS_PER_ROW, 33);
+    assert_eq!(ROW_BYTES, 24_321);
+    assert_eq!(
+        fixture.manifest.sessions[0].parameter_id,
+        "ironwood-enhance-pir-v4/ce8bbd84ff64a3d46e1f00d3142ecac4b42acda912ab9f6f241f59908db76a53"
+    );
+    assert_eq!(
+        fixture.manifest.sessions[0].public_params_sha256,
+        "793dd18194116ab34ab06e753faefa8d882fb962beba46dbf4256264c74c5006"
+    );
+    assert_eq!(fixture.session.public_params_base64.len(), 114_688);
+    fixture.manifest.validate().unwrap();
+    let query_session =
+        QuerySession::from_session(&fixture.manifest, fixture.session, &acceptance()).unwrap();
+    let (query, slot) = query_session.prepare_position(66).unwrap();
+    assert_eq!(slot, 0);
+    assert_eq!(query.row(), 2);
+    let binding = QueryBinding::decode(query.body()).unwrap();
+    assert_eq!(binding.generation, 7);
+    assert_eq!(binding.shard_id, 0);
+    assert_eq!(&query.body()[..4], b"EPQ4");
+    assert!(query.body().len() > HEADER_BYTES);
+}
+
+#[test]
+fn pinned_contract_rejects_old_or_unaccepted_chain_state() {
+    let mut fixture = fixture();
+    fixture.manifest.schema_version = 7;
+    assert!(fixture.manifest.validate().is_err());
+    fixture.manifest.schema_version = 10;
+    fixture.manifest.protocol_revision = "ironwood-enhance-pir-v2".into();
+    assert!(fixture.manifest.validate().is_err());
+    fixture.manifest.protocol_revision = "ironwood-enhance-pir-v4".into();
+    let wrong_anchor = GenerationAcceptance::new(
+        "main",
+        3_428_143,
+        AcceptedAnchor::new(3_428_143, [0x41; 32], 67),
+        ClientResourceLimits::new(4_096),
+    );
+    assert!(matches!(
+        wrong_anchor.validate(&fixture.manifest),
+        Err(ClientError::Generation(_))
+    ));
+    let unscanned = GenerationAcceptance::new(
+        "main",
+        3_428_143,
+        AcceptedAnchor::new(3_428_142, [0x42; 32], 67),
+        ClientResourceLimits::new(4_096),
+    );
+    assert!(unscanned.validate(&fixture.manifest).is_err());
+    let too_small = GenerationAcceptance::new(
+        "main",
+        3_428_143,
+        AcceptedAnchor::new(3_428_143, [0x42; 32], 67),
+        ClientResourceLimits::new(2_048),
+    );
+    assert!(too_small.validate(&fixture.manifest).is_err());
+}
+
+#[test]
+fn shard_setup_seed_is_pinned() {
+    assert_eq!(
+        hex::encode(setup_seed(0)),
+        "38d2a05f33de9281da5efac0ab38e35386df6458b816cccfa8a13ac7d50fe7fb"
+    );
+    assert_eq!(
+        hex::encode(setup_seed(1)),
+        "f448c40881f2d017a6a063ed77439de7a39bbe5f2f0d5ad6e4a452c24e9d1eae"
     );
 }
 
-/// Full production geometry is intentionally opt-in locally and mandatory in release-mode CI.
 #[test]
-#[ignore = "full-shard cryptography; run with --release -- --ignored"]
-fn full_shard_production_round_trip() {
-    let mut session = fixture();
-    let (rlwe, params) = ipir_sp::params_for_simplepir(
-        session.generation.logical_rows,
-        u64::from(session.generation.row_bytes) * 8,
-    )
-    .unwrap();
-    assert_eq!(params, session.params);
-    let setup = IPIRClient::new(&rlwe, &params)
-        .generate_public_query_setup_simplepir_from_seed(setup_seed_bytes());
+fn malformed_response_bindings_and_length_are_rejected() {
+    let fixture = fixture();
+    let session =
+        QuerySession::from_session(&fixture.manifest, fixture.session, &acceptance()).unwrap();
+    let (query, _) = session.prepare_position(33).unwrap();
+    let mut binding = QueryBinding::decode(query.body()).unwrap();
+    let response = binding.encode();
+    assert!(session.decode(query, &response).is_err()); // Exact packed-body length.
 
-    // Position-dependent bytes catch row/slot swaps, 14-bit packing errors, and truncation.
-    let mut rows = vec![0u8; SHARD_ROWS * ROW_BYTES];
-    for position in 0..SHARD_POSITIONS {
-        let record = &mut rows[position * RECORD_BYTES..(position + 1) * RECORD_BYTES];
-        for (offset, byte) in record.iter_mut().enumerate() {
-            *byte = (position.wrapping_mul(37) ^ (position >> 8) ^ offset) as u8;
-        }
-        record[RECORD_FLAGS_OFFSET..].fill(0);
-        record[RECORD_FLAGS_OFFSET] = (position % 4) as u8 | 4;
-        record[725..729].copy_from_slice(&(position as u32).to_le_bytes());
-        record[729..737].copy_from_slice(&(position as u64 * 37).to_le_bytes());
-    }
-    session.generation.shards[0].rows_sha256 = hex::encode(Sha256::digest(&rows));
-    // Matches Enhance server's RowCoefficientIter: each row is independently packed into p.
-    let plaintext_bits = params.p.ilog2() as usize;
-    let coefficients = rows.chunks_exact(ROW_BYTES).flat_map(|row| {
-        (0..params.db_cols).map(move |column| {
-            ipir_sp::bits::read_bits(row, column * plaintext_bits, plaintext_bits) as u16
-        })
-    });
-    let server = IPIRServer::new(params.clone(), coefficients, false, true);
-    let offline = server.perform_offline_precomputation_simplepir(&rlwe, &setup);
-    let preprocessed = build_pack_preprocessed_blocks(&rlwe, &offline.crs_blocks).unwrap();
-    let top_keys = TopKeyImages::build(&rlwe);
-    let public_params = published_c1_rows(&preprocessed, rlwe.q);
-    let digest = Sha256::digest(&public_params);
-    session.generation.public_params_epoch = hex::encode(&digest[..8]);
-    session.generation.public_params_sha256 = hex::encode(digest);
-    session.public_params_base64 = STANDARD.encode(public_params);
-    let generation = session.generation.generation;
-    let query_session = QuerySession::from_session(session, &acceptance()).unwrap();
-
-    let answer = |body: &[u8]| {
-        assert_eq!(&body[..8], &generation.to_le_bytes());
-        let keys_len = serialized_packing_keys_len(&rlwe);
-        let keys = deserialize_packing_keys(&rlwe, &body[8..8 + keys_len]).unwrap();
-        let payload = server
-            .perform_full_online_computation_simplepir_measured(
-                &rlwe,
-                &body[8 + keys_len..],
-                &keys,
-                &top_keys,
-                &preprocessed,
-            )
-            .unwrap()
-            .0;
-        let mut response = generation.to_le_bytes().to_vec();
-        response.extend_from_slice(&digest[..8]);
-        response.extend_from_slice(&payload);
-        response
-    };
-    for position in [0, RECORDS_PER_ROW - 1, RECORDS_PER_ROW, SHARD_POSITIONS - 1] {
-        let (query, slot) = query_session.prepare_position(position as u64).unwrap();
-        let response = answer(query.body());
-        let decoded = query_session.decode(query, &response).unwrap();
-        assert_eq!(
-            record_in_row(&decoded, slot).unwrap().as_bytes().as_slice(),
-            &rows[position * RECORD_BYTES..(position + 1) * RECORD_BYTES],
-            "position {position}"
+    for altered in 0..4 {
+        let (query, _) = session.prepare_position(33).unwrap();
+        binding = QueryBinding::decode(query.body()).unwrap();
+        let mut response = match altered {
+            0 => {
+                let mut bytes = binding.encode();
+                bytes[0] = b'X';
+                bytes
+            }
+            1 => {
+                binding.generation += 1;
+                binding.encode()
+            }
+            2 => {
+                binding.shard_id += 1;
+                binding.encode()
+            }
+            _ => {
+                binding.epoch[0] ^= 1;
+                binding.encode()
+            }
+        };
+        response.extend([0; 4]);
+        assert!(
+            session.decode(query, &response).is_err(),
+            "altered {altered}"
         );
     }
+}
+
+#[test]
+fn malformed_shard_setup_is_rejected_before_expansion() {
+    let fixture = fixture();
+    let mut wrong_params = fixture.session.clone();
+    wrong_params.params.db_rows += 1;
+    assert!(QuerySession::from_session(&fixture.manifest, wrong_params, &acceptance()).is_err());
+    let mut wrong_hash = fixture.manifest.clone();
+    wrong_hash.sessions[0].public_params_sha256 = "00".repeat(32);
     assert!(
-        query_session
-            .prepare_position(SHARD_POSITIONS as u64)
-            .is_err()
+        QuerySession::from_session(&wrong_hash, fixture.session.clone(), &acceptance()).is_err()
     );
-    let dummy = query_session.prepare_dummy().unwrap();
-    let row = dummy.row();
-    let response = answer(dummy.body());
-    assert_eq!(
-        query_session.decode(dummy, &response).unwrap(),
-        rows[row * ROW_BYTES..(row + 1) * ROW_BYTES]
-    );
+    let mut wrong_length = fixture.session;
+    wrong_length.public_params_base64.pop();
+    assert!(QuerySession::from_session(&fixture.manifest, wrong_length, &acceptance()).is_err());
 }

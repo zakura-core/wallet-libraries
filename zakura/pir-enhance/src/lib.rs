@@ -1,4 +1,4 @@
-//! Client and protocol types for privately enhancing Ironwood compact actions.
+//! Wallet-bound v4 client for private Ironwood compact-action enhancement.
 
 pub mod client;
 pub mod transport;
@@ -12,13 +12,13 @@ pub use client::{
 pub use client::{EnhancePirClient, PendingEnhancePirClient};
 
 pub use types::{
-    ENHANCE_SETUP_SEED, EnhanceGeneration, EnhanceRecord, EnhanceRecordParts, EnhanceSession,
-    EnhanceTransactionMetadata, FLAG_HAS_TRANSPARENT_INPUTS, FLAG_HAS_TRANSPARENT_OUTPUTS,
-    ITEM_SIZE_BITS, InvalidEnhanceRecord, POOL, PROTOCOL_REVISION, RECORD_BYTES, RECORDS_PER_ROW,
-    ROW_BYTES, SCHEMA_VERSION, SHARD_POSITIONS, SHARD_ROWS, SHARDS_PER_GROUP, ShardDescriptor,
-    checked_logical_rows_for, group_index_for_shard,
+    Coverage, ENHANCE_SETUP_SEED, EnhanceRecord, EnhanceRecordParts, EnhanceTransactionMetadata,
+    FLAG_HAS_TRANSPARENT_INPUTS, FLAG_HAS_TRANSPARENT_OUTPUTS, Geometry, HEADER_BYTES,
+    ITEM_SIZE_BITS, InvalidEnhanceRecord, Loan, Manifest, MutableUnit, POOL, PROTOCOL_REVISION,
+    QueryBinding, QueryShard, RECORD_BYTES, RECORDS_PER_ROW, ROW_BYTES, SCHEMA_VERSION, SessionRef,
+    ShardSession, ShardState, UnitIdentity, parameter_id, parameters, setup_seed,
+    unit_parameter_id,
 };
 
-/// Wallet acceptance and captured-identity mapping, without network I/O.
 #[cfg(feature = "wallet")]
 pub mod wallet;

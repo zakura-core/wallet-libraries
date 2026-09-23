@@ -1,45 +1,80 @@
-//! Run in a temporary Cargo project as described in README.md.
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+//! Build with the pinned wallet-pir checkout as described in README.md.
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use enhance_pir::v4::{
+    parameter_id, parameters, setup_seed, unit_parameter_id, Geometry, Lifecycle, Manifest,
+    SessionRef, ShardSession, UnitIdentity, PROTOCOL_REVISION, SCHEMA_VERSION,
+};
+use ipir_sp::modulus_switch::published_c1_len;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
-use enhance_pir::types::*;
+use std::collections::BTreeMap;
+
+#[derive(Serialize)]
+struct Fixture {
+    server_revision: &'static str,
+    ipir_sp_revision: &'static str,
+    manifest: Manifest,
+    session: ShardSession,
+}
 
 fn main() {
-    let (rlwe, params) = ipir_sp::params_for_simplepir(SHARD_ROWS as u64, ITEM_SIZE_BITS).unwrap();
-    // Synthetic public coefficients: this fixture checks the JSON contract, not decryption.
-    let public_params =
-        vec![0; params.instances * ipir_sp::modulus_switch::published_c1_len(rlwe.d, rlwe.q)];
-    let digest = Sha256::digest(&public_params);
-    let session = EnhanceSession {
-        generation: EnhanceGeneration {
-            schema_version: SCHEMA_VERSION,
-            protocol_revision: PROTOCOL_REVISION.into(),
-            network: NETWORK.into(),
-            pool: POOL.into(),
-            anchor_height: ACTIVATION_HEIGHT,
-            anchor_block_hash: hex::encode([0x42; 32]),
-            ironwood_tree_size: SHARD_POSITIONS as u64,
-            generation: 7,
-            record_bytes: RECORD_BYTES as u32,
-            records_per_row: RECORDS_PER_ROW as u32,
-            row_bytes: ROW_BYTES as u32,
-            shard_rows: SHARD_ROWS as u32,
-            used_rows: used_rows_for(SHARD_POSITIONS as u64),
-            logical_rows: logical_rows_for(SHARD_ROWS as u64),
-            parameter_id: "upstream-conformance-fixture".into(),
-            setup_seed: ENHANCE_SETUP_SEED,
-            public_params_epoch: hex::encode(&digest[..8]),
-            public_params_sha256: hex::encode(digest),
-            shards: vec![ShardDescriptor {
-                shard_id: 0,
-                global_row_start: 0,
-                populated_positions: SHARD_POSITIONS as u64,
-                rows_sha256: hex::encode([0x24; 32]),
-                sealed: true,
-                worker: "opaque-group-a".into(),
-            }],
-        },
-        params,
-        public_params_base64: STANDARD.encode(public_params),
+    let geometry = Geometry::default();
+    let coverage = Lifecycle::default().coverage(67, geometry).unwrap();
+    let shard = coverage.shards[0].clone();
+    let (rlwe, params) = ipir_sp::params_for_simplepir_profile(
+        shard.logical_rows,
+        enhance_pir::ITEM_SIZE_BITS,
+        ipir_sp::SimplePirProfile::P16Q46,
+    )
+    .unwrap();
+    assert_eq!(params, parameters(shard.logical_rows).unwrap());
+    let public = vec![0u8; params.db_cols / rlwe.d * published_c1_len(rlwe.d, rlwe.q)];
+    let public_hash = hex::encode(Sha256::digest(&public));
+    let units = shard
+        .units
+        .iter()
+        .map(|unit| UnitIdentity {
+            table: "enhance".into(),
+            shard_id: shard.id,
+            local_row_start: unit.local_row_start,
+            allocated_rows: unit.allocated_rows,
+            setup_sha256: hex::encode(Sha256::digest(setup_seed(shard.id))),
+            parameter_id: unit_parameter_id(unit.allocated_rows).unwrap(),
+            content_sha256: "00".repeat(32),
+        })
+        .collect();
+    let manifest = Manifest {
+        schema_version: SCHEMA_VERSION,
+        protocol_revision: PROTOCOL_REVISION.into(),
+        network: "main".into(),
+        pool: "ironwood".into(),
+        generation: 7,
+        anchor_height: 3_428_143,
+        anchor_block_hash: "42".repeat(32),
+        geometry,
+        coverage,
+        sessions: vec![SessionRef {
+            shard_id: shard.id,
+            parameter_id: parameter_id(shard.logical_rows).unwrap(),
+            public_params_sha256: public_hash,
+        }],
+        unit_identities: BTreeMap::from([(shard.id, units)]),
     };
-    println!("{}", serde_json::to_string_pretty(&session).unwrap());
+    manifest.validate().unwrap();
+    let session = ShardSession {
+        generation: manifest.generation,
+        shard_id: shard.id,
+        params,
+        public_params_base64: STANDARD.encode(public),
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&Fixture {
+            server_revision: "436dcc7efda3e09a6734342fd4f55e07bf1d9d95",
+            ipir_sp_revision: "225972648cc2982abfac66ba5b7a3930b223051a",
+            manifest,
+            session,
+        })
+        .unwrap()
+    );
 }

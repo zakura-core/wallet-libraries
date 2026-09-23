@@ -1,60 +1,90 @@
-# Enhance PIR conformance fixture
+# Enhance PIR v4 conformance fixtures
 
-`upstream-session.json` freezes the schema-7 JSON contract, new setup seed,
-one-shard geometry, generated parameters and public-parameter length.
-`generate.rs` imports the server protocol crate from an explicit checkout;
-it does not import the wallet's copy. The pinned `ipir-sp` revision remains
-`accc424e879d8da425fa620aad80f0f2c4e0defd`.
+`upstream-session.json` is emitted by `generate.rs` using the reference server crate at
+`wallet-pir` revision `436dcc7efda3e09a6734342fd4f55e07bf1d9d95` and
+`ipir-sp` revision `225972648cc2982abfac66ba5b7a3930b223051a`. The Rust
+sources are identical at candidate revision
+`9718a6dcf9801385f69f31bb71f02efd261914f0`. The generator calls the
+server's `Lifecycle`, parameter, parameter ID, and setup seed functions. Its
+67-record coverage, anchor, content digest, and all-zero public material are
+synthetic. This fixture checks the serialized contract and setup length; it
+is not a decrypted-answer vector.
 
-The anchor, group name, and hashes are synthetic test metadata. The published
-coefficients are zero and are **not** a server snapshot or a decryption vector.
-The ordinary conformance test independently supplies the synthetic wallet anchor,
-accepts this session, and checks exact JSON round-trip equality.
+The ordinary `compatibility.rs` test validates the fixture with the wallet
+client and independently supplied wallet anchor and resource limits. The
+separate `http_integration.rs` test uses an application provided loopback HTTP
+transport and starts the reference coordinator and two actual workers. It
+sends encrypted wallet-libraries queries, checks recovered 737-byte records,
+expires the first generation, and requires fresh wallet acceptance. Its
+ignored release test covers every v4 query domain, including the last record
+of a full 32K shard, loan growth and return, and retained old-session answers. These processes never contact production services.
 
-`full_shard_production_round_trip` separately builds a deterministic 8,192-row
-database with nine 737-byte records per row, packs each row into 14-bit
-coefficients like the Enhance server, and computes real published parameters
-with the pinned server primitives. It checks fresh randomized queries at row
-boundaries and the last position, plus a dummy query, through the public wallet
-client API. It uses the production degree, moduli, and Gaussian sampler. This is
-a local cryptographic interoperability test, not a deployed HTTP/fleet test.
-Run it with:
+From a clean checkout of the pinned server revision, set both checkout paths:
 
 ```sh
-cargo test -p zakura-pir-enhance --release --locked --test compatibility -- --ignored
+export ENHANCE_PIR_CHECKOUT=/absolute/path/to/wallet-pir
+export WALLET_LIBRARIES_CHECKOUT=/absolute/path/to/wallet-libraries
 ```
 
-It is ignored in ordinary test runs because full-shard preprocessing is expensive;
-CI runs it explicitly in release mode.
-
-To regenerate the JSON, set `ENHANCE_PIR_CHECKOUT` to a clean checkout of the
-schema-7 server revision. From the wallet-libraries root, create a temporary
-Cargo project, so no upstream checkout or wallet manifest is modified:
+Regenerate the JSON using a temporary project:
 
 ```sh
-export ENHANCE_PIR_CHECKOUT=/path/to/enhance-pir
 fixture_project=$(mktemp -d)
 cat > "$fixture_project/Cargo.toml" <<EOF_MANIFEST
 [package]
-name = "enhance-conformance-generator"
+name = "wallet-v4-fixture-gen"
 version = "0.0.0"
 edition = "2021"
 [[bin]]
 name = "generate"
-path = "$PWD/zakura/pir-enhance/tests/fixtures/generate.rs"
+path = "$WALLET_LIBRARIES_CHECKOUT/zakura/pir-enhance/tests/fixtures/generate.rs"
 [dependencies]
-enhance-pir = { path = "$ENHANCE_PIR_CHECKOUT/pir/enhance" }
-ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", rev = "accc424e879d8da425fa620aad80f0f2c4e0defd" }
+enhance-pir = { path = "$ENHANCE_PIR_CHECKOUT/enhance/crates/enhance-pir" }
+ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", rev = "225972648cc2982abfac66ba5b7a3930b223051a" }
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
 EOF_MANIFEST
-cargo run --quiet --manifest-path "$fixture_project/Cargo.toml" > "$fixture_project/session.json"
-cp "$fixture_project/session.json" zakura/pir-enhance/tests/fixtures/upstream-session.json
-rm -r "$fixture_project"
+cargo run --quiet --manifest-path "$fixture_project/Cargo.toml" > "$fixture_project/upstream-session.json"
+diff -u "$WALLET_LIBRARIES_CHECKOUT/zakura/pir-enhance/tests/fixtures/upstream-session.json" "$fixture_project/upstream-session.json"
 ```
 
-Review fixture differences against upstream changes before accepting them. Never
-regenerate a fixture just to make a failing conformance assertion pass.
+To run the real server HTTP tests, create another temporary project:
+
+```sh
+http_project=$(mktemp -d)
+cat > "$http_project/Cargo.toml" <<EOF_MANIFEST
+[package]
+name = "wallet-v4-http-test"
+version = "0.0.0"
+edition = "2021"
+[[test]]
+name = "http_integration"
+path = "$WALLET_LIBRARIES_CHECKOUT/zakura/pir-enhance/tests/fixtures/http_integration.rs"
+[dependencies]
+enhance-pir-server = { path = "$ENHANCE_PIR_CHECKOUT/enhance/services/enhance-pir-server" }
+zakura-pir-enhance = { path = "$WALLET_LIBRARIES_CHECKOUT/zakura/pir-enhance" }
+axum = "0.7"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+futures-util = "0.3"
+EOF_MANIFEST
+cargo test --release --manifest-path "$http_project/Cargo.toml" --test http_integration
+cargo test --release --manifest-path "$http_project/Cargo.toml" --test http_integration -- --ignored
+```
+
+The ignored test creates about 1.2 million synthetic records and requires
+substantial local RAM, disk, and runtime. Review fixture differences against
+server changes before accepting them. Full application integration through
+Vizor remains a separate verification step.
+
+Verified locally on 2026-09-23 with the pinned server checkout and a temporary
+HTTP test project: fixture regeneration matched `upstream-session.json` byte for
+byte; `cargo test -p zakura-pir-enhance --locked --test compatibility` passed
+5/5 tests (also 5/5 with `--no-default-features`); the release HTTP command
+above passed 1/1 small test in 59.70 seconds; and its `--ignored` release
+command passed 1/1 all-domain, loan and return test in 186.52 seconds. The
+large test's observed process RSS peaked near 14 GiB.

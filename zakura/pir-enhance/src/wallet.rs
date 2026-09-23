@@ -1,7 +1,7 @@
 //! Synchronous wallet acceptance and identity capture. No network I/O or writes.
 use crate::{
-    AcceptedAnchor, ClientError, ClientResourceLimits, EnhanceGeneration, EnhanceRecord,
-    GenerationAcceptance,
+    AcceptedAnchor, ClientError, ClientResourceLimits, EnhanceRecord, GenerationAcceptance,
+    Manifest,
 };
 use std::collections::BTreeMap;
 use zcash_client_backend::data_api::enhance_pir::{
@@ -17,12 +17,14 @@ pub enum Acceptance {
     Mismatch,
 }
 
-pub fn snapshot_anchor(
-    generation: &EnhanceGeneration,
-) -> Result<EnhancePirSnapshotAnchor, ClientError> {
-    let height = u32::try_from(generation.anchor_height)
+pub fn snapshot_anchor(manifest: &Manifest) -> Result<EnhancePirSnapshotAnchor, ClientError> {
+    manifest
+        .coverage
+        .validate(manifest.geometry)
+        .map_err(ClientError::Generation)?;
+    let height = u32::try_from(manifest.anchor_height)
         .map_err(|_| ClientError::Generation("anchor height exceeds wallet range".into()))?;
-    let mut hash: [u8; 32] = hex::decode(&generation.anchor_block_hash)
+    let mut hash: [u8; 32] = hex::decode(&manifest.anchor_block_hash)
         .ok()
         .and_then(|v| v.try_into().ok())
         .ok_or_else(|| ClientError::Generation("invalid anchor block hash".into()))?;
@@ -30,7 +32,7 @@ pub fn snapshot_anchor(
     Ok(EnhancePirSnapshotAnchor {
         height: BlockHeight::from(height),
         block_hash: BlockHash::from_slice(&hash),
-        ironwood_tree_size: generation.ironwood_tree_size,
+        ironwood_tree_size: manifest.coverage.records,
     })
 }
 
@@ -41,7 +43,7 @@ pub fn snapshot_anchor(
 /// rejects the generation. Pass the same parameters used to open/scan the wallet.
 pub fn acceptance<D: EnhancePirRead>(
     db: &D,
-    generation: &EnhanceGeneration,
+    manifest: &Manifest,
     params: &impl Parameters,
     limits: ClientResourceLimits,
 ) -> Result<Result<Acceptance, ClientError>, D::Error> {
@@ -56,7 +58,7 @@ pub fn acceptance<D: EnhancePirRead>(
         )));
     };
     let activation_height = u64::from(u32::from(activation));
-    let anchor = match snapshot_anchor(generation) {
+    let anchor = match snapshot_anchor(manifest) {
         Ok(a) => a,
         Err(e) => return Ok(Err(e)),
     };
@@ -66,13 +68,13 @@ pub fn acceptance<D: EnhancePirRead>(
         network,
         activation_height,
         AcceptedAnchor::new(
-            generation.anchor_height,
+            manifest.anchor_height,
             display_hash,
-            generation.ironwood_tree_size,
+            manifest.coverage.records,
         ),
         limits,
     );
-    if let Err(e) = accepted.validate(generation) {
+    if let Err(e) = accepted.validate(manifest) {
         return Ok(Err(e));
     }
     Ok(Ok(match db.enhance_pir_snapshot_status(anchor)? {
@@ -181,12 +183,14 @@ mod tests {
 #[cfg(test)]
 mod acceptance_tests {
     use super::*;
+    use crate::types::Lifecycle;
     use crate::*;
+    use sha2::{Digest, Sha256};
     use zcash_client_backend::data_api::{WalletRead, testing::TestBuilder};
     use zcash_client_sqlite::testing::{BlockCache, db::TestDbFactory};
     use zcash_protocol::local_consensus::LocalNetwork;
     #[test]
-    fn wallet_scanning_and_hash_agreement_gate_acceptance() {
+    fn snapshot_anchor_uses_v4_coverage_and_scanned_wallet_state() {
         let activation = BlockHeight::from_u32(100_000);
         let network = LocalNetwork {
             nu6: Some(activation),
@@ -202,72 +206,83 @@ mod acceptance_tests {
             .with_account_from_sapling_activation(BlockHash([0; 32]))
             .build();
         let (height, _) = state.generate_empty_block();
-        let mut generation = EnhanceGeneration {
+        let geometry = Geometry::default();
+        let coverage = Lifecycle::default().coverage(1, geometry).unwrap();
+        let shard = &coverage.shards[0];
+        let shard_id = shard.id;
+        let shard_logical_rows = shard.logical_rows;
+        let unit_identities = BTreeMap::from([(
+            shard.id,
+            shard
+                .units
+                .iter()
+                .map(|unit| UnitIdentity {
+                    table: "enhance".into(),
+                    shard_id: shard.id,
+                    local_row_start: unit.local_row_start,
+                    allocated_rows: unit.allocated_rows,
+                    setup_sha256: hex::encode(Sha256::digest(setup_seed(shard.id))),
+                    parameter_id: unit_parameter_id(unit.allocated_rows).unwrap(),
+                    content_sha256: "00".repeat(32),
+                })
+                .collect(),
+        )]);
+        let mut manifest = Manifest {
             schema_version: SCHEMA_VERSION,
             protocol_revision: PROTOCOL_REVISION.into(),
-            network: "regtest".into(),
+            network: "main".into(),
             pool: POOL.into(),
+            generation: 1,
             anchor_height: u64::from(u32::from(height)),
             anchor_block_hash: "00".repeat(32),
-            ironwood_tree_size: 0,
-            generation: 1,
-            record_bytes: RECORD_BYTES as u32,
-            records_per_row: RECORDS_PER_ROW as u32,
-            row_bytes: ROW_BYTES as u32,
-            shard_rows: SHARD_ROWS as u32,
-            used_rows: 0,
-            logical_rows: checked_logical_rows_for(0).unwrap(),
-            parameter_id: "fixture".into(),
-            setup_seed: ENHANCE_SETUP_SEED,
-            public_params_epoch: "00".repeat(8),
-            public_params_sha256: "00".repeat(32),
-            shards: vec![],
+            geometry,
+            coverage,
+            sessions: vec![SessionRef {
+                shard_id,
+                public_params_sha256: "00".repeat(32),
+                parameter_id: parameter_id(shard_logical_rows).unwrap(),
+            }],
+            unit_identities,
         };
-        let check = |generation: &EnhanceGeneration, db: &_| {
-            acceptance(db, generation, &network, ClientResourceLimits::new(65_536))
-                .unwrap()
-                .unwrap()
-        };
+        manifest.validate().unwrap();
         assert!(matches!(
-            check(&generation, state.wallet().db()),
-            Acceptance::WaitingForScanning
+            state
+                .wallet()
+                .db()
+                .enhance_pir_snapshot_status(snapshot_anchor(&manifest).unwrap()),
+            Ok(EnhancePirSnapshotStatus::NotYetScanned)
         ));
         state.scan_cached_blocks(height, 1);
         let metadata = state.wallet().db().block_metadata(height).unwrap().unwrap();
-        generation.anchor_block_hash = metadata.block_hash().to_string();
-        generation.ironwood_tree_size = u64::from(metadata.ironwood_tree_size().unwrap());
+        manifest.anchor_block_hash = metadata.block_hash().to_string();
         assert!(matches!(
-            check(&generation, state.wallet().db()),
-            Acceptance::Accepted(_)
+            state
+                .wallet()
+                .db()
+                .enhance_pir_snapshot_status(snapshot_anchor(&manifest).unwrap()),
+            Ok(EnhancePirSnapshotStatus::Mismatch)
         ));
         assert_eq!(
-            snapshot_anchor(&generation).unwrap().block_hash,
+            snapshot_anchor(&manifest).unwrap().block_hash,
             metadata.block_hash()
         );
-        // These advertised policies cannot be made self-approving, even though
-        // the database accepts this exact block anchor and tree size.
-        let accepted_generation = generation.clone();
-        generation.network = "main".into();
-        assert!(
-            acceptance(
-                state.wallet().db(),
-                &generation,
-                &network,
-                ClientResourceLimits::new(65_536)
-            )
-            .unwrap()
-            .is_err()
+        assert_eq!(
+            snapshot_anchor(&manifest).unwrap().ironwood_tree_size,
+            manifest.coverage.records
         );
-        generation = accepted_generation.clone();
-        let future_activation = LocalNetwork {
-            nu6_3: Some(height + 1),
-            ..network
-        };
+        let mut actual = snapshot_anchor(&manifest).unwrap();
+        actual.ironwood_tree_size = u64::from(metadata.ironwood_tree_size().unwrap());
+        assert!(matches!(
+            state.wallet().db().enhance_pir_snapshot_status(actual),
+            Ok(EnhancePirSnapshotStatus::Accepted)
+        ));
+        // The v4 wire contract is mainnet-only, so a local test network cannot
+        // accept even an anchor that its database recognizes.
         assert!(
             acceptance(
                 state.wallet().db(),
-                &generation,
-                &future_activation,
+                &manifest,
+                &network,
                 ClientResourceLimits::new(65_536)
             )
             .unwrap()
@@ -280,32 +295,25 @@ mod acceptance_tests {
         assert!(
             acceptance(
                 state.wallet().db(),
-                &generation,
+                &manifest,
                 &disabled,
                 ClientResourceLimits::new(65_536)
             )
             .unwrap()
             .is_err()
         );
-        let at_anchor = LocalNetwork {
-            nu6_3: Some(height),
-            ..network
-        };
+        manifest.anchor_block_hash = "01".repeat(32);
         assert!(matches!(
-            acceptance(
-                state.wallet().db(),
-                &generation,
-                &at_anchor,
-                ClientResourceLimits::new(65_536)
-            )
-            .unwrap()
-            .unwrap(),
-            Acceptance::Accepted(_)
+            state
+                .wallet()
+                .db()
+                .enhance_pir_snapshot_status(snapshot_anchor(&manifest).unwrap()),
+            Ok(EnhancePirSnapshotStatus::Mismatch)
         ));
-        generation.anchor_block_hash = "01".repeat(32);
+        manifest.coverage.records = 0;
         assert!(matches!(
-            check(&generation, state.wallet().db()),
-            Acceptance::Mismatch
+            snapshot_anchor(&manifest),
+            Err(ClientError::Generation(_))
         ));
     }
 }

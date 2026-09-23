@@ -2573,7 +2573,7 @@ dependencies = [
 [[package]]
 name = "inspiring"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=accc424e879d8da425fa620aad80f0f2c4e0defd#accc424e879d8da425fa620aad80f0f2c4e0defd"
+source = "git+https://github.com/valargroup/ipir-sp.git?rev=225972648cc2982abfac66ba5b7a3930b223051a#225972648cc2982abfac66ba5b7a3930b223051a"
 dependencies = [
  "rand 0.8.7",
  "rand_chacha 0.3.1",
@@ -2594,7 +2594,7 @@ dependencies = [
 [[package]]
 name = "ipir-sp"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=accc424e879d8da425fa620aad80f0f2c4e0defd#accc424e879d8da425fa620aad80f0f2c4e0defd"
+source = "git+https://github.com/valargroup/ipir-sp.git?rev=225972648cc2982abfac66ba5b7a3930b223051a#225972648cc2982abfac66ba5b7a3930b223051a"
 dependencies = [
  "clap",
  "env_logger",
@@ -4774,7 +4774,7 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 [[package]]
 name = "simplepir-kernel"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=accc424e879d8da425fa620aad80f0f2c4e0defd#accc424e879d8da425fa620aad80f0f2c4e0defd"
+source = "git+https://github.com/valargroup/ipir-sp.git?rev=225972648cc2982abfac66ba5b7a3930b223051a#225972648cc2982abfac66ba5b7a3930b223051a"
 dependencies = [
  "inspiring",
  "rayon",
