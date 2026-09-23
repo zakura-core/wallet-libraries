@@ -1141,14 +1141,14 @@ fn schema7_recovers_history_and_backfills_without_losing_a_stored_memo() {
                 |r| {
                     Ok((
                         r.get::<_, u64>(0)?,
-                        r.get::<_, u32>(1)?,
+                        r.get::<_, Option<u32>>(1)?,
                         r.get::<_, Option<Vec<u8>>>(2)?,
                     ))
                 },
             )
             .unwrap()
     };
-    assert_eq!(history(), (12_345, 123_456, None));
+    assert_eq!(history(), (12_345, None, None));
     assert!(
         st.wallet()
             .db()

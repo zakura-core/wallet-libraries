@@ -22,8 +22,11 @@ workspace.
 - Require `EnhancePirStorage` implementations to provide
   `ironwood_transaction_metadata` and
   `compare_and_apply_ironwood_enhancement`. Validated responses carry the expected
-  fee/expiry snapshot so backends can compare it, fill unknown fields, and apply
+  fee/expiry snapshot so backends can compare it, fill an unknown fee, and apply
   action and queue changes atomically.
+- `StoredIronwoodMetadata::filled_from` fills only an unknown fee and preserves
+  existing expiry. No PIR-supplied expiry is persisted, so unauthenticated zero
+  or far-future heights cannot pin spent notes across a reorg.
 
 ## [0.1.0-rc5] - 2026-09-09
 

@@ -7,9 +7,11 @@ pub(super) fn queue(
     tx_ref: crate::TxRef,
     candidates: &[IronwoodEnhanceCandidate<AccountUuid>],
 ) -> Result<(), SqliteClientError> {
+    // Private responses must supply a fee. Expiry is deliberately not persisted,
+    // so an unknown expiry must not reopen successfully completed enhancement.
     conn.execute("INSERT INTO ironwood_enhance_metadata_queue (transaction_id)
         SELECT id_tx FROM transactions WHERE id_tx = :tx AND raw IS NULL AND mined_height IS NOT NULL
-        AND (fee IS NULL OR expiry_height IS NULL) ON CONFLICT(transaction_id) DO NOTHING",
+        AND fee IS NULL ON CONFLICT(transaction_id) DO NOTHING",
         named_params![":tx": tx_ref.0])?;
     let note: Option<(u64, u32)> = conn
         .query_row(

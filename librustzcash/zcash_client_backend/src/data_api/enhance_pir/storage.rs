@@ -75,11 +75,15 @@ pub enum IronwoodOutgoingResult<AccountId> {
 /// Transaction-wide metadata already known to storage.
 ///
 /// Each field is independently optional; `Some(0)` is known, not missing.
+/// PIR enhancement treats every proposed expiry as untrusted for
+/// persistence: see [`StoredIronwoodMetadata::filled_from`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StoredIronwoodMetadata {
     /// Known transaction fee in zatoshis.
     pub fee_zatoshis: Option<u64>,
-    /// Known expiry height, including zero for no expiry.
+    /// Known expiry height, including zero for no expiry when authenticated
+    /// (for example from raw transaction bytes). PIR responses do not persist
+    /// a proposed expiry; unknown expiry remains unknown.
     pub expiry_height: Option<u32>,
 }
 
@@ -93,6 +97,19 @@ impl StoredIronwoodMetadata {
             && self
                 .expiry_height
                 .is_none_or(|expiry| expiry == proposed.expiry_height())
+    }
+
+    /// Fills an unknown fee from a private PIR response, preserving known expiry.
+    ///
+    /// Callers must first check [`Self::agrees_with`]; this helper does not validate
+    /// the response. PIR expiry is not authenticated by note decryption, so it must
+    /// never become authoritative for spendability. Both zero ("never expires") and
+    /// a far-future height could otherwise pin spent notes after a reorg.
+    pub fn filled_from(self, proposed: EnhanceTransactionMetadata) -> Self {
+        Self {
+            fee_zatoshis: self.fee_zatoshis.or(proposed.fee_zatoshis()),
+            expiry_height: self.expiry_height,
+        }
     }
 }
 
@@ -200,7 +217,9 @@ pub trait EnhancePirStorage {
     /// `AlreadyResolved` without mutation. For a private response, the current fee/expiry
     /// must exactly match `expected_metadata`, and agree with the supplied metadata.
     /// A missing snapshot or any disagreement returns `Rejected` without changing metadata,
-    /// notes, routing, or queues. Fill only unknown fields; known zero values are immutable.
+    /// notes, routing, or queues. Fill only an unknown fee; known zero values are immutable.
+    /// Do not persist any proposed expiry from PIR: preserve the existing expiry so
+    /// unauthenticated metadata cannot pin spendability across a reorg.
     /// The comparison, fills, and all action/queue writes must share a transaction; a write
     /// error must roll back every effect. Do not perform a separate metadata commit.
     ///

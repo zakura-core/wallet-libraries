@@ -16,10 +16,12 @@ use zcash_client_backend::{
             IronwoodEnhanceDiscoveryFailure, IronwoodEnhanceDiscoveryFailureReason::*,
             IronwoodEnhanceDiscoveryRequest, IronwoodEnhanceDiscoveryResult::*,
         },
+        wallet::ConfirmationsPolicy,
     },
     proto::compact_formats::{CompactBlock, CompactOrchardAction, CompactTx},
 };
 use zcash_note_encryption::Domain;
+use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 
 /// A real V3 encrypted action and its matching PIR record, including authentic OVK ciphertext.
 fn encrypted_action(
@@ -2349,7 +2351,7 @@ fn metadata_backfill_rediscovers_completed_outgoing_only_history() {
         EnhancePirStoreResult::Stored
     );
     assert!(send.requests().is_empty());
-    let values: (u64, u32, Option<Vec<u8>>) = send
+    let values: (u64, Option<u32>, Option<Vec<u8>>) = send
         .st
         .wallet()
         .conn()
@@ -2359,5 +2361,63 @@ fn metadata_backfill_rediscovers_completed_outgoing_only_history() {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
-    assert_eq!(values, (0, 0, None));
+    assert_eq!(values, (0, None, None));
+}
+
+/// Change only unauthenticated expiry, keeping the encrypted action valid.
+fn with_expiry(record: &EnhanceRecord, expiry: u32) -> EnhanceRecord {
+    let mut bytes = *record.as_bytes();
+    bytes[725..729].copy_from_slice(&expiry.to_le_bytes());
+    EnhanceRecord::from_bytes(bytes).unwrap()
+}
+
+#[test]
+fn pir_expiry_does_not_pin_notes_across_reorg_or_reopen_completed_work() {
+    for expiry in [0, 1, 499_999_999] {
+        let mut send = Send::new(false);
+        send.scan_funding();
+        send.scan_send();
+        let account = send.st.test_account().unwrap().id();
+        let request = send.requests()[0];
+        let record = with_expiry(&send.record, expiry);
+        assert_eq!(
+            apply_record(send.st.wallet_mut().db_mut(), request, &record).unwrap(),
+            EnhancePirStoreResult::Stored
+        );
+        assert_eq!(
+            stored_metadata(&send.st, request),
+            StoredIronwoodMetadata {
+                fee_zatoshis: Some(0),
+                expiry_height: None,
+            }
+        );
+        assert_eq!(
+            send.st
+                .get_spendable_balance(account, ConfirmationsPolicy::MIN),
+            Zatoshis::ZERO
+        );
+        assert!(send.requests().is_empty());
+        send.scan_send();
+        assert!(
+            send.requests().is_empty(),
+            "unknown expiry must not reopen enhancement"
+        );
+        assert!(!send.queued());
+
+        send.st
+            .wallet_mut()
+            .db_mut()
+            .truncate_to_height(send.funding_height)
+            .unwrap();
+        for _ in 0..=DEFAULT_TX_EXPIRY_DELTA {
+            let (height, _) = send.st.generate_empty_block();
+            send.st.scan_cached_blocks(height, 1);
+        }
+        assert_eq!(
+            send.st
+                .get_spendable_balance(account, ConfirmationsPolicy::MIN),
+            Zatoshis::const_from_u64(50_000),
+            "unmined spend must age out regardless of PIR expiry"
+        );
+    }
 }

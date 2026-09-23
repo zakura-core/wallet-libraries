@@ -753,13 +753,16 @@ pub(crate) fn apply<P: Parameters>(
     if !expected.agrees_with(metadata) {
         return Ok(EnhancePirStoreResult::Rejected);
     }
-    // Compare the exact captured snapshot and fill only unknown fields in one statement.
+    // Compare the exact captured snapshot and fill only an unknown fee in one statement.
     // The surrounding transaction also contains every memo, outgoing and queue write.
+    // Do not persist PIR expiry: unauthenticated zero or far-future heights could pin
+    // spent notes if a reorg later drops the spending transaction.
+    let filled = expected.filled_from(metadata);
     let updated = tx.execute(
         "UPDATE transactions SET fee = COALESCE(fee, :fee),
             expiry_height = COALESCE(expiry_height, :expiry)
          WHERE id_tx = :tx AND fee IS :expected_fee AND expiry_height IS :expected_expiry",
-        named_params![":fee": metadata.fee_zatoshis(), ":expiry": metadata.expiry_height(),
+        named_params![":fee": filled.fee_zatoshis, ":expiry": filled.expiry_height,
             ":tx": tx_ref.0, ":expected_fee": expected.fee_zatoshis,
             ":expected_expiry": expected.expiry_height],
     )?;

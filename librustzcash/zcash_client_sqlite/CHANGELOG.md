@@ -14,7 +14,7 @@ workspace.
 - Add durable SQLite routing and work queues for private Ironwood-only enhancement,
   including incoming memos, outgoing recovery, candidate accounts, rediscovery, and
   transaction metadata.
-- Populate fee and expiry through a metadata queue independent of memo and outgoing
+- Populate fee through a metadata queue independent of memo and outgoing
   recovery. Metadata comparison, enhancement writes, routing changes, and queue
   retirement are atomic.
 - Reconcile private enhancement work across rescans, rewinds, account
@@ -25,6 +25,10 @@ workspace.
 - Require each PIR-enabled wallet handle to configure `EnhancementMode` before
   enumerating transaction or PIR requests. An unconfigured handle returns
   `EnhancementModeNotConfigured`; wallet constructor signatures remain unchanged.
+- Do not persist any PIR-supplied transaction expiry. Zero and far-future heights
+  are unauthenticated and can pin spent notes after a reorg. Metadata retrieval
+  depends only on a missing fee, so intentionally unknown expiry does not reopen
+  completed enhancement.
 
 ## [0.1.0-rc5] - 2026-09-09
 

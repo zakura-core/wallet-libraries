@@ -271,12 +271,7 @@ impl EnhancePirStorage for MetadataStore {
             if self.known != Some(expected) || !expected.agrees_with(data.metadata) {
                 return Ok(EnhancePirStoreResult::Rejected);
             }
-            next_metadata = Some(StoredIronwoodMetadata {
-                fee_zatoshis: expected.fee_zatoshis.or(data.metadata.fee_zatoshis()),
-                expiry_height: expected
-                    .expiry_height
-                    .or(Some(data.metadata.expiry_height())),
-            });
+            next_metadata = Some(expected.filled_from(data.metadata));
         } else {
             assert_eq!(data.expected_metadata, None);
         }
@@ -315,15 +310,19 @@ fn metadata_record(
 }
 
 #[test]
-fn custom_store_rejects_transaction_metadata_disagreement_before_commit() {
+fn custom_store_rejects_known_transaction_metadata_disagreement_before_commit() {
     for differing in [(20_000, 100), (10_000, 101), (20_000, 101)] {
         for reverse in [false, true] {
-            let mut store = MetadataStore::new(StoredIronwoodMetadata::default());
-            let requests = store.pending.clone();
             let mut values = [(10_000, 100), differing];
             if reverse {
                 values.reverse();
             }
+            // Expiry must come from an independent trusted source, not the first PIR response.
+            let mut store = MetadataStore::new(StoredIronwoodMetadata {
+                fee_zatoshis: None,
+                expiry_height: Some(values[0].1),
+            });
+            let requests = store.pending.clone();
             let first = metadata_record(requests[0], Some(values[0].0), values[0].1, false);
             let second = metadata_record(requests[1], Some(values[1].0), values[1].1, false);
             assert_eq!(
@@ -348,9 +347,9 @@ fn custom_store_rejects_transaction_metadata_disagreement_before_commit() {
 }
 
 #[test]
-fn custom_store_fills_unknown_fields_and_accepts_matching_actions_including_zero() {
-    for (fee, expiry) in [(10_000, 100), (0, 0)] {
-        for known in [
+fn custom_store_fills_unknown_fields_and_accepts_matching_actions_including_zero_fee() {
+    for (fee, expiry) in [(10_000u64, 100u32), (0, 0), (0, 499_999_999)] {
+        let known_cases = [
             StoredIronwoodMetadata::default(),
             StoredIronwoodMetadata {
                 fee_zatoshis: Some(fee),
@@ -364,7 +363,8 @@ fn custom_store_fills_unknown_fields_and_accepts_matching_actions_including_zero
                 fee_zatoshis: Some(fee),
                 expiry_height: Some(expiry),
             },
-        ] {
+        ];
+        for known in known_cases {
             let mut store = MetadataStore::new(known);
             for request in store.pending.clone() {
                 let record = metadata_record(request, Some(fee), expiry, false);
@@ -377,7 +377,7 @@ fn custom_store_fills_unknown_fields_and_accepts_matching_actions_including_zero
                 store.known,
                 Some(StoredIronwoodMetadata {
                     fee_zatoshis: Some(fee),
-                    expiry_height: Some(expiry)
+                    expiry_height: known.expiry_height,
                 })
             );
             assert!(store.pending.is_empty());
