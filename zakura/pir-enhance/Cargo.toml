@@ -1,0 +1,42 @@
+[package]
+name = "zakura-pir-enhance"
+version = "0.1.0"
+description = "Private Ironwood compact-action enhancement client for Zakura wallets"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "zakura_pir_enhance"
+
+[features]
+default = ["https-client"]
+https-client = ["dep:reqwest"]
+wallet = ["dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol"]
+
+[dependencies]
+zcash_client_backend = { workspace = true, optional = true, features = ["zakura-pir-enhance"] }
+zcash_primitives = { workspace = true, optional = true }
+zcash_protocol = { workspace = true, optional = true }
+futures-util = "0.3"
+url = "2"
+base64 = "0.22"
+hex.workspace = true
+ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", rev = "225972648cc2982abfac66ba5b7a3930b223051a" }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror = "2"
+zakura-pir-enhance-types = { version = "0.1.0", path = "../pir-enhance-types" }
+
+[dev-dependencies]
+zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", features = ["zakura-pir-enhance", "test-dependencies"] }
+zcash_client_backend = { workspace = true, features = ["zakura-pir-enhance", "test-dependencies"] }
+incrementalmerkletree.workspace = true
+futures = "0.3"
+inspiring = { git = "https://github.com/valargroup/ipir-sp.git", rev = "225972648cc2982abfac66ba5b7a3930b223051a" }
+tokio = { workspace = true, features = ["rt-multi-thread"] }

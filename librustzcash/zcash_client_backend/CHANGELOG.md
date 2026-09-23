@@ -10,6 +10,24 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- Add feature-gated APIs for privately enhancing Ironwood-only transactions with
+  Enhance PIR records. The APIs provide transaction-wide LWD routing,
+  unified active and suspended work enumeration, incoming memo decryption, outgoing
+  recovery, rediscovery, and fee/expiry metadata validation.
+- Reconcile private enhancement obligations across rescans, rewinds, late or
+  cross-account funding discovery, and full-transaction arrival.
+
+### Changed
+- Require `EnhancePirStorage` implementations to provide
+  `ironwood_transaction_metadata` and
+  `compare_and_apply_ironwood_enhancement`. Validated responses carry the expected
+  fee/expiry snapshot so backends can compare it, fill an unknown fee, and apply
+  action and queue changes atomically.
+- `StoredIronwoodMetadata::filled_from` fills only an unknown fee and preserves
+  authoritative expiry. Backends can retain a separate display-only PIR expiry
+  without letting unauthenticated zero or far-future heights pin spent notes.
+
 ## [0.1.0-rc5] - 2026-09-09
 
 ### Changed
