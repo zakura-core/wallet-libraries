@@ -75,7 +75,7 @@ impl GenerationAcceptance {
         manifest.validate().map_err(ClientError::Generation)?;
         if self.network != "main" || manifest.network != self.network {
             return Err(ClientError::Generation(
-                "v5 is only defined for mainnet".into(),
+                "v6 is only defined for mainnet".into(),
             ));
         }
         if manifest.anchor_height < self.activation_height {
@@ -159,7 +159,7 @@ pub struct QuerySession {
     shard: QueryShard,
     params: YpirSchemeParams,
     client: IPIRClient,
-    setup: Vec<Vec<u64>>,
+    setup: ipir_sp::PublicQuerySetup,
     public: Vec<Vec<u64>>,
 }
 pub struct PreparedQuery {
@@ -206,7 +206,7 @@ impl QuerySession {
         let (rlwe, expected) = ipir_sp::params_for_simplepir_profile(
             shard.logical_rows,
             ITEM_SIZE_BITS,
-            SimplePirProfile::P16Q46,
+            SimplePirProfile::P16Q49,
         )
         .map_err(|e| ClientError::Pir(e.to_string()))?;
         if session.params != expected || expected.db_cols % rlwe.d != 0 {
@@ -240,7 +240,9 @@ impl QuerySession {
             shard_id: shard.id,
             epoch: hash[..8].try_into().unwrap(),
         };
-        let client = IPIRClient::new(&rlwe, &expected);
+        let client =
+            IPIRClient::from_profile(shard.logical_rows, ITEM_SIZE_BITS, SimplePirProfile::P16Q49)
+                .map_err(|e| ClientError::Pir(e.to_string()))?;
         let setup = client.generate_public_query_setup_simplepir_from_seed(setup_seed(shard.id));
         let public = recover_published_c1(&bytes, rlwe.d, blocks, rlwe.q);
         Ok(Self {
@@ -289,7 +291,7 @@ impl QuerySession {
     pub fn decode(&self, query: PreparedQuery, response: &[u8]) -> Result<Vec<u8>, ClientError> {
         let binding = QueryBinding::decode(response).map_err(ClientError::Response)?;
         let d = self.client.rlwe_params().d;
-        if self.params.db_cols % d != 0 {
+        if !self.params.db_cols.is_multiple_of(d) {
             return Err(ClientError::Response("invalid PIR dimensions".into()));
         }
         let size = (self.params.db_cols / d)

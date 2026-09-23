@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add protocol v6 with the distinct P16Q49 transport profile and exact IPIR dependency pin; reject v5/q46 manifests and sessions. Retain schema-11 record encoding and wallet acceptance.
+- Use the validated production client constructor and opaque public setup API.
+
 - Add wallet-side schema 11/v5: 653-byte ciphertext-suffix records, retaining 33-record rows and the existing shard/session transport.
 - Add same-transaction row queries, prepared-work grouping, and atomic wallet batch application. Persist compact encryption fields in the initial Ironwood note schema; no existing-client migration is provided.
 - Trust send-only server association when decryption cannot authenticate the action; retain incoming authentication and stale-identity checks.

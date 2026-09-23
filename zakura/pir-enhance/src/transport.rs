@@ -893,7 +893,7 @@ mod lifecycle_tests {
                 let (_, params) = ipir_sp::params_for_simplepir_profile(
                     4096,
                     crate::ITEM_SIZE_BITS,
-                    ipir_sp::SimplePirProfile::P16Q46,
+                    ipir_sp::SimplePirProfile::P16Q49,
                 )
                 .unwrap();
                 let binding = crate::types::QueryBinding::decode(&request.body).unwrap();
