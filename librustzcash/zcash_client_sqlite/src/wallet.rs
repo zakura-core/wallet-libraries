@@ -3851,10 +3851,11 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
                 ],
             )?;
 
-            // Enhancement is complete once the server has reported that it cannot provide the
-            // transaction. A status-observation intent remains active until the transaction is
-            // confirmed to be terminal.
-            delete_retrieval_queue_entry(conn, txid, TxQueryType::Enhancement)?;
+            // Ordinary enhancement is complete once the server has reported that it cannot
+            // provide the transaction. A status-observation intent remains active until the
+            // transaction is confirmed to be terminal. Do not erase a PIR LWD fallback that
+            // still needs raw data; GetStatus and Enhancement are independent queue rows.
+            retire_enhancement_after_status(conn, txid)?;
             conn.execute(
                 "DELETE FROM tx_retrieval_queue
                  WHERE txid = :txid
@@ -3919,11 +3920,27 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
             #[cfg(feature = "transparent-inputs")]
             transparent::update_gap_limits(conn, _params, gap_limits, txid, height)?;
 
-            delete_retrieval_queue_entry(conn, txid, TxQueryType::Enhancement)?;
+            // Mining observation alone does not satisfy Enhancement; PIR can restore an
+            // ordinary LWD fallback while a concurrent GetStatus response is applied.
+            retire_enhancement_after_status(conn, txid)?;
         }
     }
 
     Ok(())
+}
+
+fn retire_enhancement_after_status(
+    conn: &rusqlite::Transaction,
+    txid: TxId,
+) -> Result<(), SqliteClientError> {
+    #[cfg(feature = "zakura-pir-enhance")]
+    {
+        enhance_pir::retire_enhancement_after_status(conn, txid)
+    }
+    #[cfg(not(feature = "zakura-pir-enhance"))]
+    {
+        delete_retrieval_queue_entry(conn, txid, TxQueryType::Enhancement)
+    }
 }
 
 /// Returns the minimum checkpoint height that exists in all note commitment trees that contain

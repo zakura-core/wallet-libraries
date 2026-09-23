@@ -6,7 +6,7 @@ use crate::testing::{
 use zcash_client_backend::data_api::enhance_pir::EnhanceRecord;
 use zcash_client_backend::data_api::enhance_pir::EnhanceRecordParts;
 use zcash_client_backend::data_api::{
-    TransactionDataRequest, WalletRead, WalletWrite,
+    TransactionDataRequest, TransactionStatus, WalletRead, WalletWrite,
     enhance_pir::{EnhancePirRead, EnhancePirWrite, EnhancementMode},
     testing::{
         AddressType, IronwoodFvk, TestBuilder, TestState, orchard::OrchardPoolTester,
@@ -678,6 +678,89 @@ fn reopening_uses_explicit_mode_and_preserves_routes() {
     assert!(reopened.transaction_data_requests().unwrap().contains(
         &TransactionDataRequest::Enhancement(request.request_id().txid())
     ));
+}
+
+#[test]
+fn status_response_preserves_lwd_fallback_enhancement() {
+    let mined_height = BlockHeight::from_u32(100_001);
+    for status in [
+        TransactionStatus::Mined(mined_height),
+        TransactionStatus::NotInMainChain,
+        TransactionStatus::TxidNotRecognized,
+    ] {
+        let (mut st, tx_ref, request) = fixture();
+        let txid = request.request_id().txid();
+        st.wallet()
+            .conn()
+            .execute(
+                "INSERT INTO tx_retrieval_queue (txid, query_type)
+                 VALUES (:txid, :status)
+                 ON CONFLICT (txid, query_type) DO NOTHING",
+                named_params![
+                    ":txid": txid.as_ref(),
+                    ":status": TxQueryType::Status.code(),
+                ],
+            )
+            .unwrap();
+        require_lwd(st.wallet().conn(), tx_ref).unwrap();
+        assert!(
+            visible(&st, request),
+            "LWD fallback restores Enhancement before the status response"
+        );
+
+        st.wallet_mut()
+            .set_transaction_status(txid, status)
+            .unwrap();
+
+        assert!(
+            visible(&st, request),
+            "status {status:?} must not erase LWD fallback Enhancement while raw is missing"
+        );
+        assert!(!is_protected(st.wallet().conn(), txid).unwrap());
+        let route: i64 = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT route FROM ironwood_enhance_routing WHERE transaction_id = :tx",
+                named_params![":tx": tx_ref.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(route, LWD_REQUIRED);
+    }
+}
+
+#[test]
+fn status_response_still_retires_ordinary_enhancement() {
+    let (mut st, _, request) = fixture();
+    let txid = request.request_id().txid();
+    // Drop private routing so Enhancement is ordinary LWD intent, not PIR fallback.
+    st.wallet()
+        .conn()
+        .execute("DELETE FROM ironwood_enhance_routing", [])
+        .unwrap();
+    st.wallet()
+        .conn()
+        .execute(
+            "INSERT INTO tx_retrieval_queue (txid, query_type)
+             VALUES (:txid, :enhancement)
+             ON CONFLICT (txid, query_type) DO NOTHING",
+            named_params![
+                ":txid": txid.as_ref(),
+                ":enhancement": TxQueryType::Enhancement.code(),
+            ],
+        )
+        .unwrap();
+    assert!(visible(&st, request));
+
+    st.wallet_mut()
+        .set_transaction_status(txid, TransactionStatus::NotInMainChain)
+        .unwrap();
+
+    assert!(
+        !visible(&st, request),
+        "ordinary enhancement still retires when status reports the tx unavailable"
+    );
 }
 
 #[test]

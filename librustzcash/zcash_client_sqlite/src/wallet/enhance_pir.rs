@@ -94,6 +94,37 @@ fn require_lwd(conn: &Connection, tx_ref: crate::TxRef) -> Result<(), SqliteClie
     Ok(())
 }
 
+/// Status observation must not erase an ordinary LWD fallback that still lacks raw data.
+///
+/// `GetStatus` and `Enhancement` are independent queue rows for the same txid. PIR fallback
+/// can restore Enhancement while a concurrent status response is still in flight; clearing
+/// Enhancement unconditionally would leave `LWD_REQUIRED` with no request to fetch the raw
+/// transaction.
+pub(crate) fn retire_enhancement_after_status(
+    conn: &Connection,
+    txid: TxId,
+) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "DELETE FROM tx_retrieval_queue
+         WHERE txid = :txid
+           AND query_type = :enhancement
+           AND NOT EXISTS (
+               SELECT 1
+               FROM transactions t
+               JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
+               WHERE t.txid = :txid
+                 AND t.raw IS NULL
+                 AND r.route = :lwd_required
+           )",
+        named_params![
+            ":txid": txid.as_ref(),
+            ":enhancement": TxQueryType::Enhancement.code(),
+            ":lwd_required": LWD_REQUIRED,
+        ],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn is_protected(conn: &Connection, txid: TxId) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_enhance_routing r
