@@ -206,7 +206,7 @@ impl QuerySession {
         let (rlwe, expected) = ipir_sp::params_for_simplepir_profile(
             shard.logical_rows,
             ITEM_SIZE_BITS,
-            SimplePirProfile::P16Q49,
+            SimplePirProfile::P16Q48,
         )
         .map_err(|e| ClientError::Pir(e.to_string()))?;
         if session.params != expected || expected.db_cols % rlwe.d != 0 {
@@ -241,7 +241,7 @@ impl QuerySession {
             epoch: hash[..8].try_into().unwrap(),
         };
         let client =
-            IPIRClient::from_profile(shard.logical_rows, ITEM_SIZE_BITS, SimplePirProfile::P16Q49)
+            IPIRClient::from_profile(shard.logical_rows, ITEM_SIZE_BITS, SimplePirProfile::P16Q48)
                 .map_err(|e| ClientError::Pir(e.to_string()))?;
         let setup = client.generate_public_query_setup_simplepir_from_seed(setup_seed(shard.id));
         let public = recover_published_c1(&bytes, rlwe.d, blocks, rlwe.q);

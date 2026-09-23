@@ -11,12 +11,12 @@ fn main() {
     let mut fixture: serde_json::Value =
         serde_json::from_str(include_str!("../tests/fixtures/upstream-session.json")).unwrap();
     fixture.as_object_mut().unwrap().remove("server_revision");
-    fixture["ipir_sp_revision"] = "b1c540f90f62e112c834a0f57f025e3c605e55d1".into();
+    fixture["ipir_sp_revision"] = "6f74a2d754b58934f925fc8a347f46620148ad47".into();
     fixture["provenance"] = "Synthetic wallet schema-11 fixture; not emitted by a v6 server".into();
     fixture["manifest"]["schema_version"] = SCHEMA_VERSION.into();
     fixture["manifest"]["protocol_revision"] = PROTOCOL_REVISION.into();
     let (rlwe, params) =
-        ipir_sp::params_for_simplepir_profile(4096, ITEM_SIZE_BITS, SimplePirProfile::P16Q49)
+        ipir_sp::params_for_simplepir_profile(4096, ITEM_SIZE_BITS, SimplePirProfile::P16Q48)
             .unwrap();
     let public = vec![0; params.db_cols / rlwe.d * published_c1_len(rlwe.d, rlwe.q)];
     fixture["session"]["params"] = serde_json::to_value(params).unwrap();

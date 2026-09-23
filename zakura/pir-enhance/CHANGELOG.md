@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add protocol v6 with the distinct P16Q49 transport profile and exact IPIR dependency pin; reject v5/q46 manifests and sessions. Retain schema-11 record encoding and wallet acceptance.
+- Add protocol v6 with the distinct P16Q48 transport profile and exact IPIR dependency pin; reject v5/q46 manifests and sessions. Retain schema-11 record encoding and wallet acceptance.
 - Use the validated production client constructor and opaque public setup API.
 
 - Add wallet-side schema 11/v5: 653-byte ciphertext-suffix records, retaining 33-record rows and the existing shard/session transport.

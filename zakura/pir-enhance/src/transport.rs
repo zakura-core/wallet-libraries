@@ -694,7 +694,11 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             let mut buf = [0; 1024];
-            socket.read(&mut buf).unwrap();
+            let received = socket.read(&mut buf).unwrap();
+            assert!(
+                received > 0,
+                "client must send a request before the mock responds"
+            );
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na")
                 .unwrap();
@@ -893,7 +897,7 @@ mod lifecycle_tests {
                 let (_, params) = ipir_sp::params_for_simplepir_profile(
                     4096,
                     crate::ITEM_SIZE_BITS,
-                    ipir_sp::SimplePirProfile::P16Q49,
+                    ipir_sp::SimplePirProfile::P16Q48,
                 )
                 .unwrap();
                 let binding = crate::types::QueryBinding::decode(&request.body).unwrap();
