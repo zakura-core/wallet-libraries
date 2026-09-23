@@ -1,6 +1,6 @@
 # zakura-pir-enhance
 
-This crate implements the mainnet Ironwood enhancement v5 client. Wire schema 11 uses 653-byte suffix-only records, 33 records per row, independently parameterized shards, and the P16Q46 SimplePIR profile. The wallet retains compact encryption fields and supports same-transaction row queries and atomic batch application. The initial SQLite schema is rewritten; no existing-client migration is provided. A matching v5 server is required.
+This crate implements the mainnet Ironwood enhancement v6 client. Wire schema 11 uses 653-byte suffix-only records, 33 records per row, independently parameterized shards, and the P16Q49 SimplePIR profile. The wallet retains compact encryption fields and supports same-transaction row queries and atomic batch application. The initial SQLite schema is rewritten; no existing-client migration is provided. A matching v6 server is required.
 
 Fetch a `PendingClient` manifest from `/v1/enhance/init`, call `wallet::acceptance` using locally scanned state, then call `accept` with the returned `GenerationAcceptance`. The client fetches shard sessions lazily from `/v1/enhance/sessions/{generation}/{shard_id}` and retains at most `ClientResourceLimits::max_cached_shards` expanded setups. `max_shard_rows` limits each setup, separately from total chain coverage. Query methods borrow the client mutably so one client has at most one active batch; an idle setup is evicted before its replacement is built.
 
@@ -9,3 +9,9 @@ A batch stays bound to one accepted manifest. Queries are deduplicated by shard 
 On `ClientError::HttpStatus(410)`, stop the batch, fetch a new pending manifest, repeat wallet acceptance, and reschedule unfinished durable work. Use bounded application scheduling for 429/503. Transport and validation errors must not trigger public LWD fallback.
 
 The built-in Reqwest transport requires HTTPS, rejects redirects, and has a 120-second deadline. Custom transports must stream into `Request::response_body()`, reject non-success status with `ClientError::HttpStatus(code)`, and honor cancellation and deadlines. Plaintext positions, rows, slots, txids, and action indexes stay out of requests and URLs; shard and generation are public.
+
+The q49 profile requires IPIR revision `b1c540f90f62e112c834a0f57f025e3c605e55d1`.
+V5/q46 manifests and sessions are rejected. The schema-11 records, `EPQ4`
+header, and public setup domain remain unchanged; query bodies grow by three
+bits per row. Noise qualification is tracked separately from wallet acceptance
+and note authentication.
