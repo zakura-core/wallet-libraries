@@ -12,7 +12,7 @@ workspace.
 
 ### Added
 - Add feature-gated APIs for privately enhancing Ironwood-only transactions with
-  schema-7 Enhance PIR records. The APIs provide transaction-wide LWD routing,
+  Enhance PIR records. The APIs provide transaction-wide LWD routing,
   unified active and suspended work enumeration, incoming memo decryption, outgoing
   recovery, rediscovery, and fee/expiry metadata validation.
 - Reconcile private enhancement obligations across rescans, rewinds, late or
@@ -25,8 +25,8 @@ workspace.
   fee/expiry snapshot so backends can compare it, fill an unknown fee, and apply
   action and queue changes atomically.
 - `StoredIronwoodMetadata::filled_from` fills only an unknown fee and preserves
-  existing expiry. No PIR-supplied expiry is persisted, so unauthenticated zero
-  or far-future heights cannot pin spent notes across a reorg.
+  authoritative expiry. Backends can retain a separate display-only PIR expiry
+  without letting unauthenticated zero or far-future heights pin spent notes.
 
 ## [0.1.0-rc5] - 2026-09-09
 

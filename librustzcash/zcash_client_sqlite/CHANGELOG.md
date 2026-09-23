@@ -19,16 +19,17 @@ workspace.
   retirement are atomic.
 - Reconcile private enhancement work across rescans, rewinds, account
   deletion, late or cross-account funding discovery, and full-transaction arrival.
-- Create all six Ironwood Enhance PIR tables in one consolidated migration.
+- Create all six Ironwood Enhance PIR tables and expose a history-only PIR expiry
+  through `v_transactions` in one consolidated migration.
 
 ### Changed
 - Require each PIR-enabled wallet handle to configure `EnhancementMode` before
   enumerating transaction or PIR requests. An unconfigured handle returns
   `EnhancementModeNotConfigured`; wallet constructor signatures remain unchanged.
-- Do not persist any PIR-supplied transaction expiry. Zero and far-future heights
-  are unauthenticated and can pin spent notes after a reorg. Metadata retrieval
-  depends only on a missing fee, so intentionally unknown expiry does not reopen
-  completed enhancement.
+- Keep PIR-supplied expiry separate from authoritative transaction expiry. History
+  displays it only for privately routed transactions; spendability and expiry
+  status continue to use authenticated transaction data. Conflicting PIR expiry
+  assertions are rejected. Metadata retrieval depends only on a missing fee.
 
 ## [0.1.0-rc5] - 2026-09-09
 

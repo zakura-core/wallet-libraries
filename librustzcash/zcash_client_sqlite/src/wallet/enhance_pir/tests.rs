@@ -1106,7 +1106,7 @@ fn reopening_requires_mode_before_enumerating_persisted_work() {
 }
 
 #[test]
-fn schema7_recovers_history_and_backfills_without_losing_a_stored_memo() {
+fn pir_recovers_history_and_backfills_without_losing_a_stored_memo() {
     use orchard::note_encryption::{IronwoodDomain, IronwoodNoteEncryption};
     use zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata;
     use zcash_note_encryption::Domain;
@@ -1128,6 +1128,21 @@ fn schema7_recovers_history_and_backfills_without_losing_a_stored_memo() {
         has_transparent_outputs: false,
         metadata: EnhanceTransactionMetadata::new(123_456, Some(12_345)).unwrap(),
     });
+    // A response conflicting with a previously stored history assertion must
+    // leave this action's work pending.
+    st.wallet().conn().execute(
+        "UPDATE ironwood_enhance_routing SET history_expiry_height = 123457 WHERE transaction_id = ?",
+        [tx_ref.0],
+    ).unwrap();
+    assert_eq!(
+        apply_record(st.wallet_mut().db_mut(), request, &record).unwrap(),
+        EnhancePirStoreResult::Rejected
+    );
+    assert_eq!(st.wallet().db().query_requests().unwrap(), vec![request]);
+    st.wallet().conn().execute(
+        "UPDATE ironwood_enhance_routing SET history_expiry_height = NULL WHERE transaction_id = ?",
+        [tx_ref.0],
+    ).unwrap();
     assert_eq!(
         apply_record(st.wallet_mut().db_mut(), request, &record).unwrap(),
         EnhancePirStoreResult::Stored
@@ -1149,6 +1164,17 @@ fn schema7_recovers_history_and_backfills_without_losing_a_stored_memo() {
             .unwrap()
     };
     assert_eq!(history(), (12_345, None, None));
+    assert_eq!(
+        st.wallet()
+            .conn()
+            .query_row(
+                "SELECT expiry_height FROM v_transactions WHERE txid = ?",
+                [request.request_id().txid().as_ref()],
+                |r| r.get::<_, Option<u32>>(0),
+            )
+            .unwrap(),
+        Some(123_456),
+    );
     assert!(
         st.wallet()
             .db()
@@ -1197,7 +1223,7 @@ fn schema7_recovers_history_and_backfills_without_losing_a_stored_memo() {
 }
 
 #[test]
-fn schema7_conflicting_metadata_rolls_back_the_entire_response() {
+fn pir_conflicting_metadata_rolls_back_the_entire_response() {
     use orchard::note_encryption::{IronwoodDomain, IronwoodNoteEncryption};
     use zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata;
     use zcash_note_encryption::Domain;
@@ -1276,6 +1302,14 @@ fn metadata_compare_and_apply_rejects_changed_snapshot_without_retiring_work() {
             EnhancePirStoreResult::Rejected
         );
         assert_eq!(stored_metadata(&st, request), concurrent);
+        assert_eq!(
+            st.wallet().conn().query_row(
+                "SELECT history_expiry_height FROM ironwood_enhance_routing WHERE transaction_id = ?",
+                [tx_ref.0],
+                |row| row.get::<_, Option<u32>>(0),
+            ).unwrap(),
+            None,
+        );
         assert!(requests(st.wallet().conn()).unwrap().contains(&request));
         assert!(
             pending(
@@ -1320,7 +1354,7 @@ fn metadata_compare_and_apply_requires_a_compatible_snapshot() {
 
 #[test]
 fn metadata_fill_rolls_back_when_later_memo_write_fails() {
-    let (mut st, _, request) = fixture();
+    let (mut st, tx_ref, request) = fixture();
     let before = stored_metadata(&st, request);
     st.wallet().conn().execute_batch(
         "CREATE TRIGGER fail_memo_after_metadata BEFORE UPDATE OF memo ON ironwood_received_notes
@@ -1335,6 +1369,14 @@ fn metadata_fill_rolls_back_when_later_memo_write_fails() {
     );
     assert!(st.wallet_mut().db_mut().apply_validated(response).is_err());
     assert_eq!(stored_metadata(&st, request), before);
+    assert_eq!(
+        st.wallet().conn().query_row(
+            "SELECT history_expiry_height FROM ironwood_enhance_routing WHERE transaction_id = ?",
+            [tx_ref.0],
+            |row| row.get::<_, Option<u32>>(0),
+        ).unwrap(),
+        None,
+    );
     assert!(requests(st.wallet().conn()).unwrap().contains(&request));
     assert!(
         pending(

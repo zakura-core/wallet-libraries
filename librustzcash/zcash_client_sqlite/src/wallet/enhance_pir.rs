@@ -35,7 +35,8 @@ mod metadata;
 // A route is transaction-wide. LwdRequired is sticky, including across rescans.
 // PrivateProtected survives completion and rewinds; only an explicit LWD decision or
 // transaction deletion with retrieval-intent cleanup ends protection. No row retains
-// ordinary enhancement semantics for unclassified and legacy transactions.
+// ordinary enhancement semantics for unclassified and legacy transactions. Its
+// history expiry is display-only and never controls spendability.
 const PRIVATE_PROTECTED: i64 = 0;
 const LWD_REQUIRED: i64 = 1;
 
@@ -753,10 +754,20 @@ pub(crate) fn apply<P: Parameters>(
     if !expected.agrees_with(metadata) {
         return Ok(EnhancePirStoreResult::Rejected);
     }
+    // Reject conflicting service assertions before any fee or history write.
+    // All reads and writes share the caller's SQL transaction.
+    let displayed_expiry: Option<u32> = tx.query_row(
+        "SELECT history_expiry_height FROM ironwood_enhance_routing WHERE transaction_id = :tx",
+        named_params![":tx": tx_ref.0],
+        |row| row.get(0),
+    )?;
+    if displayed_expiry.is_some_and(|expiry| expiry != metadata.expiry_height()) {
+        return Ok(EnhancePirStoreResult::Rejected);
+    }
     // Compare the exact captured snapshot and fill only an unknown fee in one statement.
     // The surrounding transaction also contains every memo, outgoing and queue write.
-    // Do not persist PIR expiry: unauthenticated zero or far-future heights could pin
-    // spent notes if a reorg later drops the spending transaction.
+    // Do not put PIR expiry in the authoritative transaction column:
+    // unauthenticated zero or far-future heights could pin spent notes after a reorg.
     let filled = expected.filled_from(metadata);
     let updated = tx.execute(
         "UPDATE transactions SET fee = COALESCE(fee, :fee),
@@ -768,6 +779,24 @@ pub(crate) fn apply<P: Parameters>(
     )?;
     if updated != 1 {
         return Ok(EnhancePirStoreResult::Rejected);
+    }
+    // The authoritative transaction expiry remains untouched by PIR. A failed
+    // routing update is an integrity error so the caller rolls back the fee fill.
+    if tx.execute(
+        "UPDATE ironwood_enhance_routing
+         SET history_expiry_height = COALESCE(history_expiry_height, :expiry)
+         WHERE transaction_id = :tx AND route = :private
+           AND (history_expiry_height IS NULL OR history_expiry_height = :expiry)",
+        named_params![
+            ":expiry": metadata.expiry_height(),
+            ":tx": tx_ref.0,
+            ":private": PRIVATE_PROTECTED,
+        ],
+    )? != 1
+    {
+        return Err(SqliteClientError::CorruptedData(
+            "Ironwood enhancement routing changed during response application".into(),
+        ));
     }
     tx.execute(
         "DELETE FROM ironwood_enhance_metadata_queue WHERE transaction_id = ?",

@@ -650,7 +650,9 @@ CREATE TABLE ironwood_enhance_outgoing_accounts (
 pub(super) const TABLE_IRONWOOD_ENHANCE_ROUTING: &str = "
 CREATE TABLE ironwood_enhance_routing (
     transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
-    route INTEGER NOT NULL CHECK (route IN (0, 1))
+    route INTEGER NOT NULL CHECK (route IN (0, 1)),
+    history_expiry_height INTEGER
+        CHECK (history_expiry_height >= 0 AND history_expiry_height < 500000000)
 )";
 
 // The in-progress Orchard -> Ironwood pool migration (ZIP 318). The table DDL and store live in the
@@ -1550,7 +1552,9 @@ SELECT accounts.uuid                AS account_uuid,
        transactions.mined_height    AS mined_height,
        transactions.txid            AS txid,
        transactions.tx_index        AS tx_index,
-       transactions.expiry_height   AS expiry_height,
+       COALESCE(transactions.expiry_height, (SELECT history_expiry_height
+        FROM ironwood_enhance_routing WHERE transaction_id = transactions.id_tx AND route = 0))
+           AS expiry_height,
        transactions.raw             AS raw,
        SUM(notes.value)             AS account_balance_delta,
        SUM(notes.spent_value)       AS total_spent,

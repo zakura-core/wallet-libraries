@@ -83,7 +83,8 @@ pub struct StoredIronwoodMetadata {
     pub fee_zatoshis: Option<u64>,
     /// Known expiry height, including zero for no expiry when authenticated
     /// (for example from raw transaction bytes). PIR responses do not persist
-    /// a proposed expiry; unknown expiry remains unknown.
+    /// a proposed expiry in this authoritative field; storage may retain a separate
+    /// display-only assertion for history.
     pub expiry_height: Option<u32>,
 }
 
@@ -218,8 +219,9 @@ pub trait EnhancePirStorage {
     /// must exactly match `expected_metadata`, and agree with the supplied metadata.
     /// A missing snapshot or any disagreement returns `Rejected` without changing metadata,
     /// notes, routing, or queues. Fill only an unknown fee; known zero values are immutable.
-    /// Do not persist any proposed expiry from PIR: preserve the existing expiry so
-    /// unauthenticated metadata cannot pin spendability across a reorg.
+    /// Do not persist any proposed expiry as authoritative transaction expiry:
+    /// preserve the existing expiry so unauthenticated metadata cannot pin
+    /// spendability across a reorg. A separate history-only assertion is allowed.
     /// The comparison, fills, and all action/queue writes must share a transaction; a write
     /// error must roll back every effect. Do not perform a separate metadata commit.
     ///

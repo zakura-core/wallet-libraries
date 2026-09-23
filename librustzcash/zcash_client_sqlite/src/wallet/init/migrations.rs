@@ -576,7 +576,6 @@ pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     v_address_uses_ironwood::MIGRATION_ID,
     orchard_ironwood_migration_unsatisfiability::MIGRATION_ID,
     tree_retained_checkpoints::MIGRATION_ID,
-    v_transactions_zip318_kind::MIGRATION_ID,
 ];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(

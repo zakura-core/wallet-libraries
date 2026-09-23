@@ -2393,6 +2393,18 @@ fn pir_expiry_does_not_pin_notes_across_reorg_or_reopen_completed_work() {
         );
         assert_eq!(
             send.st
+                .wallet()
+                .conn()
+                .query_row(
+                    "SELECT expiry_height FROM v_transactions WHERE txid = ?",
+                    [request.request_id().txid().as_ref()],
+                    |row| row.get::<_, Option<u32>>(0),
+                )
+                .unwrap(),
+            Some(expiry),
+        );
+        assert_eq!(
+            send.st
                 .get_spendable_balance(account, ConfirmationsPolicy::MIN),
             Zatoshis::ZERO
         );
