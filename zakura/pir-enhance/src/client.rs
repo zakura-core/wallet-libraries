@@ -157,6 +157,8 @@ impl ClientError {
 pub struct QuerySession {
     binding: QueryBinding,
     shard: QueryShard,
+    routes: Vec<crate::types::Route>,
+    records: u64,
     params: YpirSchemeParams,
     client: IPIRClient,
     setup: ipir_sp::PublicQuerySetup,
@@ -177,6 +179,37 @@ impl PreparedQuery {
     }
 }
 impl QuerySession {
+    pub fn session_id(&self) -> [u8; 32] {
+        self.binding.session_id
+    }
+
+    /// Only the routing binding changes; the content-bound PIR material is reused.
+    pub fn rebind(&mut self, manifest: &Manifest) -> Result<(), ClientError> {
+        manifest.validate().map_err(ClientError::Generation)?;
+        if manifest
+            .session_id(self.shard.id)
+            .map_err(ClientError::Generation)?
+            != self.binding.session_id
+        {
+            return Err(ClientError::Generation("session content changed".into()));
+        }
+        self.binding.generation = manifest.generation;
+        self.binding.recovery_epoch = manifest.recovery_epoch;
+        self.binding.anchor_hash = hex::decode(&manifest.anchor_block_hash)
+            .map_err(|e| ClientError::Generation(e.to_string()))?
+            .try_into()
+            .map_err(|_| ClientError::Generation("anchor length".into()))?;
+        self.routes = manifest
+            .coverage
+            .routes
+            .iter()
+            .filter(|r| r.domain_id == self.shard.id)
+            .cloned()
+            .collect();
+        self.records = manifest.coverage.records;
+        Ok(())
+    }
+
     /// Caller must validate wallet acceptance before the expanded PIR setup is allocated.
     pub fn from_session(
         manifest: &Manifest,
@@ -196,7 +229,12 @@ impl QuerySession {
             .iter()
             .find(|s| s.shard_id == shard.id)
             .ok_or_else(|| ClientError::Generation("missing session reference".into()))?;
-        if session.generation != manifest.generation
+        if session.session_id
+            != hex::encode(
+                manifest
+                    .session_id(shard.id)
+                    .map_err(ClientError::Generation)?,
+            )
             || session.params != parameters(shard.logical_rows).map_err(ClientError::Generation)?
         {
             return Err(ClientError::Generation(
@@ -239,6 +277,15 @@ impl QuerySession {
             generation: manifest.generation,
             shard_id: shard.id,
             epoch: hash[..8].try_into().unwrap(),
+            recovery_epoch: manifest.recovery_epoch,
+            session_id: manifest
+                .session_id(shard.id)
+                .map_err(ClientError::Generation)?,
+            request_id: [0; 16],
+            anchor_hash: hex::decode(&manifest.anchor_block_hash)
+                .map_err(|e| ClientError::Generation(e.to_string()))?
+                .try_into()
+                .map_err(|_| ClientError::Generation("anchor length".into()))?,
         };
         let client =
             IPIRClient::from_profile(shard.logical_rows, ITEM_SIZE_BITS, SimplePirProfile::P16Q48)
@@ -247,6 +294,14 @@ impl QuerySession {
         let public = recover_published_c1(&bytes, rlwe.d, blocks, rlwe.q);
         Ok(Self {
             binding,
+            routes: manifest
+                .coverage
+                .routes
+                .iter()
+                .filter(|r| r.domain_id == shard.id)
+                .cloned()
+                .collect(),
+            records: manifest.coverage.records,
             shard,
             params: expected,
             client,
@@ -261,10 +316,17 @@ impl QuerySession {
         self.binding.generation
     }
     pub fn prepare_position(&self, position: u64) -> Result<(PreparedQuery, usize), ClientError> {
-        let (row, slot) = self
-            .shard
-            .locate(position)
+        if position >= self.records {
+            return Err(ClientError::OutsideCoverage(position));
+        }
+        let global = position / 33;
+        let route = self
+            .routes
+            .iter()
+            .find(|r| r.global_start <= global && global < r.global_end)
             .ok_or(ClientError::OutsideCoverage(position))?;
+        let row = (route.local_start + global - route.global_start) as usize;
+        let slot = (position % 33) as usize;
         Ok((self.prepare_row(row)?, slot))
     }
     pub fn prepare_dummy(&self) -> Result<PreparedQuery, ClientError> {
@@ -275,14 +337,16 @@ impl QuerySession {
             return Err(ClientError::OutsideCoverage(row as u64));
         }
         let (query, keys, seed) = self.client.generate_fresh_query_simplepir(&self.setup, row);
-        let mut body = self.binding.encode();
+        let mut binding = self.binding;
+        binding.request_id = OsRng.r#gen();
+        let mut body = binding.encode();
         body.extend(
             serialize_packing_keys(self.client.rlwe_params(), &keys)
                 .map_err(|e| ClientError::Pir(e.to_string()))?,
         );
         body.extend(query.to_switched_bytes(self.client.rlwe_params().q, self.params.query_bits));
         Ok(PreparedQuery {
-            binding: self.binding,
+            binding,
             row,
             body,
             seed,
@@ -298,7 +362,11 @@ impl QuerySession {
             .checked_mul(response_body_len(d, self.params.q_prime_1))
             .and_then(|n| n.checked_add(HEADER_BYTES))
             .ok_or_else(|| ClientError::Response("response length overflow".into()))?;
-        if binding != self.binding || query.binding != self.binding || response.len() != size {
+        if binding != query.binding
+            || binding.session_id != self.binding.session_id
+            || binding.anchor_hash != self.binding.anchor_hash
+            || response.len() != size
+        {
             return Err(ClientError::Response(
                 "PIR response binding or length mismatch".into(),
             ));
@@ -360,6 +428,32 @@ impl PendingEnhancePirClient {
 }
 #[cfg(feature = "https-client")]
 impl EnhancePirClient {
+    pub fn refresh_due(&self) -> bool {
+        self.inner.refresh_due()
+    }
+
+    pub async fn fetch_routing(&self) -> Result<crate::transport::PendingClient, ClientError> {
+        crate::transport::PendingClient::fetch(&self.http, &self.inner.base_url).await
+    }
+
+    pub fn accept_routing(
+        &mut self,
+        pending: crate::transport::PendingClient,
+        acceptance: &GenerationAcceptance,
+    ) -> Result<(), ClientError> {
+        self.inner.accept_routing(pending, acceptance)
+    }
+
+    pub async fn query_positions_with_cover(
+        &mut self,
+        positions: &[u64],
+        birthday_first_position: u64,
+    ) -> Result<Vec<EnhanceRecord>, ClientError> {
+        self.inner
+            .query_positions_with_cover(&self.http, positions, birthday_first_position)
+            .await
+    }
+
     pub async fn fetch_session(base_url: &str) -> Result<PendingEnhancePirClient, ClientError> {
         let http = crate::transport::ReqwestTransport::new()?;
         let inner = crate::transport::PendingClient::fetch(&http, base_url).await?;

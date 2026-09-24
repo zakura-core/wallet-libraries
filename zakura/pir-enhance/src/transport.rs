@@ -141,6 +141,7 @@ impl PendingClient {
             acceptance: acceptance.clone(),
             cache: SessionCache::default(),
             expired: false,
+            accepted_at: std::time::Instant::now(),
         })
     }
 }
@@ -180,6 +181,7 @@ pub struct Client {
     acceptance: GenerationAcceptance,
     cache: SessionCache,
     expired: bool,
+    accepted_at: std::time::Instant,
 }
 #[derive(Debug)]
 pub struct PositionResult {
@@ -187,6 +189,160 @@ pub struct PositionResult {
     pub record: Result<EnhanceRecord, ClientError>,
 }
 impl Client {
+    /// Fetch at sync start and when refresh_due() is true, validate against the
+    /// locally scanned anchor, then reuse unchanged sessions through this method.
+    pub fn accept_routing(
+        &mut self,
+        pending: PendingClient,
+        acceptance: &GenerationAcceptance,
+    ) -> Result<(), ClientError> {
+        acceptance.validate(&pending.manifest)?;
+        if pending.base_url != self.base_url
+            || pending.manifest.generation < self.manifest.generation
+            || pending.manifest.recovery_epoch < self.manifest.recovery_epoch
+        {
+            return Err(ClientError::Generation(
+                "routing origin or revision changed".into(),
+            ));
+        }
+        self.cache.sessions.retain(|_, session| {
+            Arc::get_mut(session).is_some_and(|s| s.rebind(&pending.manifest).is_ok())
+        });
+        self.cache
+            .order
+            .retain(|id| self.cache.sessions.contains_key(id));
+        self.manifest = pending.manifest;
+        self.acceptance = acceptance.clone();
+        self.expired = false;
+        self.accepted_at = std::time::Instant::now();
+        Ok(())
+    }
+
+    pub fn refresh_due(&self) -> bool {
+        self.expired || self.accepted_at.elapsed() >= std::time::Duration::from_secs(30)
+    }
+
+    /// Opt-in birthday cover policy. One interval is one accepted routing view.
+    /// Every round visits every domain since the birthday with fresh randomness
+    /// and target-independent ordering. A retry repeats the entire round.
+    /// No records are returned until the complete operation succeeds.
+    /// Cross-interval intersection and the public birthday range remain visible.
+    pub async fn query_positions_with_cover(
+        &mut self,
+        transport: &impl Transport,
+        positions: &[u64],
+        birthday_first_position: u64,
+    ) -> Result<Vec<EnhanceRecord>, ClientError> {
+        use rand::seq::SliceRandom;
+        if positions.len() > DEFAULT_MAX_BATCH_SIZE {
+            return Err(ClientError::BatchTooLarge {
+                max_items: DEFAULT_MAX_BATCH_SIZE,
+            });
+        }
+        if self.refresh_due() {
+            return Err(ClientError::HttpStatus(409));
+        }
+        let birthday_row = birthday_first_position / RECORDS_PER_ROW as u64;
+        let domains: BTreeSet<_> = self
+            .manifest
+            .coverage
+            .routes
+            .iter()
+            .filter(|r| r.global_end > birthday_row)
+            .map(|r| r.domain_id)
+            .collect();
+        let mut rows = BTreeMap::<u64, BTreeMap<usize, Vec<(usize, usize)>>>::new();
+        for (index, position) in positions.iter().copied().enumerate() {
+            if position < birthday_first_position {
+                return Err(ClientError::OutsideCoverage(position));
+            }
+            let (domain, row, slot) = self
+                .manifest
+                .coverage
+                .locate(position)
+                .ok_or(ClientError::OutsideCoverage(position))?;
+            if !domains.contains(&domain.id) {
+                return Err(ClientError::OutsideCoverage(position));
+            }
+            rows.entry(domain.id)
+                .or_default()
+                .entry(row)
+                .or_default()
+                .push((index, slot));
+        }
+        let rows: BTreeMap<_, Vec<_>> = rows
+            .into_iter()
+            .map(|(id, rows)| (id, rows.into_iter().collect()))
+            .collect();
+        let rounds = rows.values().map(Vec::len).max().unwrap_or(0);
+        let mut result = vec![None; positions.len()];
+        for round in 0..rounds {
+            if self.refresh_due() {
+                return Err(ClientError::HttpStatus(409));
+            }
+            for attempt in 0..2 {
+                let mut order: Vec<_> = domains.iter().copied().collect();
+                order.shuffle(&mut rand::rngs::OsRng);
+                let mut error = None;
+                let mut completed = Vec::new();
+                for domain in order {
+                    let session = self.session(transport, domain).await?;
+                    let wanted = rows.get(&domain).and_then(|r| r.get(round));
+                    let query = match wanted {
+                        Some((row, _)) => session.prepare_row(*row)?,
+                        None => session.prepare_dummy()?,
+                    };
+                    let response = transport
+                        .execute(Request {
+                            method: Method::Post,
+                            url: endpoint(&self.base_url, "/v1/enhance/query")?,
+                            body: query.body().to_vec(),
+                            response_limit: MAX_RESPONSE_BYTES,
+                        })
+                        .await;
+                    let decoded =
+                        response.and_then(|response| session.decode(query, response.as_ref()));
+                    match decoded {
+                        Ok(row) => {
+                            if let Some((_, slots)) = wanted {
+                                for (index, slot) in slots {
+                                    match record_in_row(&row, *slot) {
+                                        Ok(record) => completed.push((*index, record)),
+                                        Err(failure) => error = Some(failure),
+                                    }
+                                }
+                            }
+                        }
+                        Err(failure) => {
+                            // Any nonretryable failure dominates a retryable one,
+                            // independent of the domain's randomized position.
+                            if error.as_ref().is_none_or(|e: &ClientError| {
+                                matches!(e.http_status(), Some(429 | 503))
+                            }) {
+                                error = Some(failure);
+                            }
+                        }
+                    }
+                }
+                if let Some(error) = error {
+                    if attempt == 0 && matches!(error.http_status(), Some(429 | 503)) {
+                        continue;
+                    }
+                    self.note_status(&error);
+                    return Err(error);
+                }
+                for (index, record) in completed {
+                    result[index] = Some(record);
+                }
+                break;
+            }
+        }
+        result
+            .into_iter()
+            .map(|r| r.ok_or_else(|| ClientError::Response("missing covered record".into())))
+            .collect()
+    }
+
     pub fn generation(&self) -> &Manifest {
         &self.manifest
     }
@@ -197,16 +353,16 @@ impl Client {
     fn check_live(&self) -> Result<(), ClientError> {
         if self.expired {
             Err(ClientError::HttpStatus(410))
+        } else if self.refresh_due() {
+            Err(ClientError::HttpStatus(409))
         } else {
             Ok(())
         }
     }
 
     fn note_status(&mut self, error: &ClientError) {
-        if matches!(error, ClientError::HttpStatus(410)) {
+        if matches!(error, ClientError::HttpStatus(409 | 410)) {
             self.expired = true;
-            self.cache.sessions.clear();
-            self.cache.order.clear();
         }
     }
 
@@ -235,8 +391,12 @@ impl Client {
                 url: endpoint(
                     &self.base_url,
                     &format!(
-                        "/v1/enhance/sessions/{}/{}",
-                        self.manifest.generation, shard_id
+                        "/v1/enhance/session/{}",
+                        hex::encode(
+                            self.manifest
+                                .session_id(shard_id)
+                                .map_err(ClientError::Generation)?
+                        )
                     ),
                 )?,
                 body: vec![],
@@ -380,6 +540,9 @@ impl Client {
         positions: impl IntoIterator<Item = u64>,
         max_items: usize,
     ) -> Result<impl Stream<Item = PositionResult> + 'a, ClientError> {
+        if !self.expired && self.refresh_due() {
+            return Err(ClientError::HttpStatus(409));
+        }
         let mut rows = BTreeMap::<u64, (u64, usize, Vec<u64>)>::new();
         let ready = VecDeque::new();
         let mut uncovered = VecDeque::new();
@@ -471,7 +634,7 @@ impl Client {
                     Err(error) => {
                         // Stop dispatch when retry scheduling or wallet acceptance is needed.
                         cancelled = matches!(error, ClientError::Cancelled);
-                        if let ClientError::HttpStatus(code @ (410 | 429 | 503)) = &error {
+                        if let ClientError::HttpStatus(code @ (409 | 410 | 429 | 503)) = &error {
                             stopped = Some(*code);
                         }
                         let error = std::sync::Arc::new(error);
@@ -879,7 +1042,7 @@ mod lifecycle_tests {
                 assert!(matches!(request.method, Method::Get));
                 self.init_requests.set(self.init_requests.get() + 1);
                 &self.manifest
-            } else if request.url.ends_with("/v1/enhance/sessions/7/0") {
+            } else if request.url.contains("/v1/enhance/session/") {
                 assert!(matches!(request.method, Method::Get));
                 self.session_requests.set(self.session_requests.get() + 1);
                 if let Some(status) = self.session_status {

@@ -14,7 +14,7 @@ pub use client::{EnhancePirClient, PendingEnhancePirClient};
 pub use types::{
     Coverage, ENHANCE_SETUP_SEED, EnhanceRecord, EnhanceRecordParts, EnhanceTransactionMetadata,
     FLAG_HAS_TRANSPARENT_INPUTS, FLAG_HAS_TRANSPARENT_OUTPUTS, Geometry, HEADER_BYTES,
-    ITEM_SIZE_BITS, InvalidEnhanceRecord, Loan, Manifest, MutableUnit, POOL, PROTOCOL_REVISION,
+    ITEM_SIZE_BITS, InvalidEnhanceRecord, Manifest, MutableUnit, POOL, PROTOCOL_REVISION,
     QueryBinding, QueryShard, RECORD_BYTES, RECORDS_PER_ROW, ROW_BYTES, SCHEMA_VERSION, SessionRef,
     ShardSession, ShardState, UnitIdentity, parameter_id, parameters, setup_seed,
     unit_parameter_id,

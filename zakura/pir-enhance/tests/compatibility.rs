@@ -34,19 +34,19 @@ fn synthetic_wallet_manifest_and_session_are_accepted() {
     assert!(fixture.provenance.starts_with("Synthetic wallet"));
     assert_eq!(
         fixture.ipir_sp_revision,
-        "6f74a2d754b58934f925fc8a347f46620148ad47"
+        "611a29284264d844bf4dba00de2874c5b762f8c2"
     );
     assert_eq!(fixture.manifest.schema_version, 11);
     assert_eq!(
         fixture.manifest.protocol_revision,
-        "ironwood-enhance-pir-v6"
+        "ironwood-enhance-pir-v7"
     );
     assert_eq!(RECORD_BYTES, 653);
     assert_eq!(RECORDS_PER_ROW, 33);
     assert_eq!(ROW_BYTES, 21_549);
     assert_eq!(
         fixture.manifest.sessions[0].parameter_id,
-        "ironwood-enhance-pir-v6/6ef480a31bd6a76c6403288ba1a0f0aeefbbe1805ba35168a85ccb2b07bd1c7b"
+        "ironwood-enhance-pir-v7/6ef480a31bd6a76c6403288ba1a0f0aeefbbe1805ba35168a85ccb2b07bd1c7b"
     );
     assert_eq!(
         fixture.manifest.sessions[0].public_params_sha256,
@@ -62,7 +62,7 @@ fn synthetic_wallet_manifest_and_session_are_accepted() {
     let binding = QueryBinding::decode(query.body()).unwrap();
     assert_eq!(binding.generation, 7);
     assert_eq!(binding.shard_id, 0);
-    assert_eq!(&query.body()[..4], b"EPQ4");
+    assert_eq!(&query.body()[..4], b"EPQ7");
     assert!(query.body().len() > HEADER_BYTES);
 }
 
@@ -74,7 +74,7 @@ fn pinned_contract_rejects_old_or_unaccepted_chain_state() {
     fixture.manifest.schema_version = 11;
     fixture.manifest.protocol_revision = "ironwood-enhance-pir-v2".into();
     assert!(fixture.manifest.validate().is_err());
-    fixture.manifest.protocol_revision = "ironwood-enhance-pir-v6".into();
+    fixture.manifest.protocol_revision = "ironwood-enhance-pir-v7".into();
     let wrong_anchor = GenerationAcceptance::new(
         "main",
         3_428_143,
@@ -173,17 +173,18 @@ fn malformed_shard_setup_is_rejected_before_expansion() {
 fn legacy_server_schema_is_rejected() {
     let legacy: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/upstream-session.json")).unwrap();
-    let manifest: Manifest = serde_json::from_value(legacy["manifest"].clone()).unwrap();
-    assert!(acceptance().validate(&manifest).is_err());
+    assert!(serde_json::from_value::<Manifest>(legacy["manifest"].clone()).is_err());
 }
 
 #[test]
 fn q46_schema11_manifest_and_session_are_rejected() {
-    let legacy: Fixture =
-        serde_json::from_str(include_str!("fixtures/wallet-schema11-v5.json")).unwrap();
-    assert!(legacy.manifest.validate().is_err());
+    assert!(
+        serde_json::from_str::<Fixture>(include_str!("fixtures/wallet-schema11-v5.json")).is_err()
+    );
     let current = fixture();
-    assert!(QuerySession::from_session(&current.manifest, legacy.session, &acceptance()).is_err());
+    let mut session = current.session;
+    session.params.query_bits = 46;
+    assert!(QuerySession::from_session(&current.manifest, session, &acceptance()).is_err());
 }
 
 #[test]

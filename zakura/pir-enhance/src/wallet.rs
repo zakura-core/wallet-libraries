@@ -265,6 +265,7 @@ mod acceptance_tests {
                 .units
                 .iter()
                 .map(|unit| UnitIdentity {
+                    recovery_epoch: 0,
                     table: "enhance".into(),
                     shard_id: shard.id,
                     local_row_start: unit.local_row_start,
@@ -276,6 +277,9 @@ mod acceptance_tests {
                 .collect(),
         )]);
         let mut manifest = Manifest {
+            recovery_epoch: 0,
+            placement_revision: 1,
+            domain_recovery_epochs: [(0, "0".into())].into(),
             schema_version: SCHEMA_VERSION,
             protocol_revision: PROTOCOL_REVISION.into(),
             network: "main".into(),
