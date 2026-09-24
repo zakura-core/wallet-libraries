@@ -86,6 +86,7 @@ struct Send {
     second_funding: Option<(BlockHeight, AccountUuid)>,
     block: CompactBlock,
     record: EnhanceRecord,
+    change_record: Option<EnhanceRecord>,
     recipient: orchard::Address,
 }
 
@@ -126,16 +127,16 @@ impl Send {
             OrchardPoolTester::sk_to_fvk(&OrchardPoolTester::sk(&[0xf5; 32]));
         let recipient = other_fvk.address_at(0u32, Scope::External);
         let mut actions = vec![];
+        let mut change_record = None;
         if change {
-            actions.push(
-                encrypted_action(
-                    nf.to_bytes(),
-                    fvk.0.address_at(0u32, Scope::Internal),
-                    fvk.0.to_ovk(Scope::Internal),
-                    30_000,
-                )
-                .0,
+            let (action, record) = encrypted_action(
+                nf.to_bytes(),
+                fvk.0.address_at(0u32, Scope::Internal),
+                fvk.0.to_ovk(Scope::Internal),
+                30_000,
             );
+            actions.push(action);
+            change_record = Some(record);
         }
         let (action, record) = encrypted_action(
             second_funding
@@ -181,6 +182,7 @@ impl Send {
             second_funding: second_funding.map(|(height, account, _)| (height, account)),
             block,
             record,
+            change_record,
             recipient,
         }
     }
@@ -245,6 +247,53 @@ impl Send {
                 .is_empty()
         );
     }
+}
+
+#[test]
+fn rediscovery_restores_legacy_received_note_compact_context() {
+    let mut send = Send::new(true);
+
+    // Model old history scanned before the rc5 upgrade: the received change note exists, but
+    // the compact encryption columns added by the migration have no historical values.
+    send.scan_send();
+    let tx_ref = send.tx_ref();
+    send.st
+        .wallet()
+        .conn()
+        .execute(
+            "UPDATE ironwood_received_notes
+             SET ephemeral_key = NULL, compact_ciphertext = NULL
+             WHERE transaction_id = ?",
+            [tx_ref.0],
+        )
+        .unwrap();
+
+    // Scanning only the funding block links its spend and reopens discovery of the send.
+    send.scan_funding();
+    let discovery = send.discovery();
+    assert_eq!(
+        send.st
+            .wallet_mut()
+            .db_mut()
+            .rebuild_ironwood_enhancement(discovery, &send.block)
+            .unwrap(),
+        Rebuilt(1)
+    );
+
+    let incoming = send
+        .requests()
+        .into_iter()
+        .find(|request| request.request_id().output_index() == 0)
+        .unwrap();
+    assert_eq!(
+        apply_record(
+            send.st.wallet_mut().db_mut(),
+            incoming,
+            send.change_record.as_ref().unwrap(),
+        )
+        .unwrap(),
+        EnhancePirStoreResult::Stored
+    );
 }
 
 /// Recent-first incoming completion must not hide the later sender obligation.
