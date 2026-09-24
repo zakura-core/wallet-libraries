@@ -1328,3 +1328,219 @@ mod lifecycle_tests {
         });
     }
 }
+
+#[cfg(test)]
+mod v7_cover_tests {
+    use super::*;
+    use crate::types::*;
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    use std::cell::{Cell, RefCell};
+
+    struct Mock {
+        manifest: Manifest,
+        posts: RefCell<Vec<u64>>,
+        setups: Cell<usize>,
+        retry: Cell<bool>,
+    }
+    impl Mock {
+        fn new() -> Self {
+            let coverage = Lifecycle::default()
+                .coverage(32768 * 33 + 1, Geometry::default())
+                .unwrap();
+            let mut sessions = Vec::new();
+            let mut units = BTreeMap::new();
+            for shard in &coverage.shards {
+                let params = parameters(shard.logical_rows).unwrap();
+                let (rlwe, _) = ipir_sp::params_for_simplepir_profile(
+                    shard.logical_rows,
+                    ITEM_SIZE_BITS,
+                    ipir_sp::SimplePirProfile::P16Q48,
+                )
+                .unwrap();
+                let public = vec![
+                    0u8;
+                    params.db_cols / rlwe.d
+                        * ipir_sp::modulus_switch::published_c1_len(rlwe.d, rlwe.q)
+                ];
+                sessions.push(SessionRef {
+                    shard_id: shard.id,
+                    public_params_sha256: hex::encode(Sha256::digest(&public)),
+                    parameter_id: parameter_id(shard.logical_rows).unwrap(),
+                });
+                units.insert(
+                    shard.id,
+                    shard
+                        .units
+                        .iter()
+                        .map(|unit| UnitIdentity {
+                            recovery_epoch: 0,
+                            table: "enhance".into(),
+                            shard_id: shard.id,
+                            local_row_start: unit.local_row_start,
+                            allocated_rows: unit.allocated_rows,
+                            setup_sha256: hex::encode(Sha256::digest(setup_seed(shard.id))),
+                            parameter_id: unit_parameter_id(unit.allocated_rows).unwrap(),
+                            content_sha256: "00".repeat(32),
+                        })
+                        .collect(),
+                );
+            }
+            Self {
+                manifest: Manifest {
+                    recovery_epoch: 0,
+                    placement_revision: 1,
+                    domain_recovery_epochs: [(0, "0".into()), (1, "0".into())].into(),
+                    schema_version: SCHEMA_VERSION,
+                    protocol_revision: PROTOCOL_REVISION.into(),
+                    network: "main".into(),
+                    pool: "ironwood".into(),
+                    generation: 1,
+                    anchor_height: 3428143,
+                    anchor_block_hash: "42".repeat(32),
+                    geometry: Geometry::default(),
+                    coverage,
+                    sessions,
+                    unit_identities: units,
+                },
+                posts: RefCell::new(Vec::new()),
+                setups: Cell::new(0),
+                retry: Cell::new(false),
+            }
+        }
+        fn acceptance(&self) -> GenerationAcceptance {
+            GenerationAcceptance::new(
+                "main",
+                3428143,
+                crate::AcceptedAnchor::new(
+                    self.manifest.anchor_height,
+                    hex::decode(&self.manifest.anchor_block_hash)
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                    self.manifest.coverage.records,
+                ),
+                crate::ClientResourceLimits::with_cache(32768, 2),
+            )
+        }
+    }
+    impl Transport for Mock {
+        async fn execute(&self, request: Request) -> Result<ResponseBody, ClientError> {
+            let bytes = if request.url.ends_with("/init") {
+                serde_json::to_vec(&self.manifest).unwrap()
+            } else if request.url.contains("/session/") {
+                self.setups.set(self.setups.get() + 1);
+                let shard = self
+                    .manifest
+                    .coverage
+                    .shards
+                    .iter()
+                    .find(|s| {
+                        request
+                            .url
+                            .ends_with(&hex::encode(self.manifest.session_id(s.id).unwrap()))
+                    })
+                    .unwrap();
+                let params = parameters(shard.logical_rows).unwrap();
+                let (rlwe, _) = ipir_sp::params_for_simplepir_profile(
+                    shard.logical_rows,
+                    ITEM_SIZE_BITS,
+                    ipir_sp::SimplePirProfile::P16Q48,
+                )
+                .unwrap();
+                let public = vec![
+                    0;
+                    params.db_cols / rlwe.d
+                        * ipir_sp::modulus_switch::published_c1_len(rlwe.d, rlwe.q)
+                ];
+                serde_json::to_vec(&ShardSession {
+                    session_id: hex::encode(self.manifest.session_id(shard.id).unwrap()),
+                    generation: self.manifest.generation,
+                    shard_id: shard.id,
+                    params,
+                    public_params_base64: base64::engine::general_purpose::STANDARD.encode(public),
+                })
+                .unwrap()
+            } else {
+                let binding = QueryBinding::decode(&request.body).unwrap();
+                self.posts.borrow_mut().push(binding.shard_id);
+                if binding.shard_id == 1 && self.retry.replace(false) {
+                    return Err(ClientError::HttpStatus(429));
+                }
+                let shard = &self.manifest.coverage.shards[binding.shard_id as usize];
+                let params = parameters(shard.logical_rows).unwrap();
+                let mut response = binding.encode();
+                response.resize(
+                    HEADER_BYTES
+                        + params.db_cols / params.poly_len
+                            * ipir_sp::modulus_switch::response_body_len(
+                                params.poly_len,
+                                params.q_prime_1,
+                            ),
+                    0,
+                );
+                response
+            };
+            let mut body = request.response_body();
+            body.extend(&bytes)?;
+            Ok(body.finish())
+        }
+    }
+    #[test]
+    fn cover_rounds_hide_target_and_retry_every_domain() {
+        futures::executor::block_on(async {
+            for position in [0, 32768 * 33] {
+                let transport = Mock::new();
+                transport.retry.set(true);
+                let mut client = PendingClient::fetch(&transport, "https://example.test")
+                    .await
+                    .unwrap()
+                    .accept(&transport.acceptance())
+                    .unwrap();
+                let records = client
+                    .query_positions_with_cover(&transport, &[position, position], 0)
+                    .await
+                    .unwrap();
+                assert_eq!(records.len(), 2);
+                let posts = transport.posts.borrow();
+                assert_eq!(posts.len(), 4);
+                for round in posts.chunks_exact(2) {
+                    let mut set = round.to_vec();
+                    set.sort();
+                    assert_eq!(set, [0, 1]);
+                }
+            }
+        });
+    }
+    #[test]
+    fn routing_refresh_reuses_unchanged_material() {
+        futures::executor::block_on(async {
+            let mut transport = Mock::new();
+            let mut client = PendingClient::fetch(&transport, "https://example.test")
+                .await
+                .unwrap()
+                .accept(&transport.acceptance())
+                .unwrap();
+            client
+                .query_positions_with_cover(&transport, &[0], 0)
+                .await
+                .unwrap();
+            assert_eq!(transport.setups.get(), 2);
+            transport.manifest.generation += 1;
+            transport.manifest.placement_revision += 1;
+            transport.manifest.anchor_height += 1;
+            transport.manifest.anchor_block_hash = "43".repeat(32);
+            let pending = PendingClient::fetch(&transport, "https://example.test")
+                .await
+                .unwrap();
+            client
+                .accept_routing(pending, &transport.acceptance())
+                .unwrap();
+            client
+                .query_positions_with_cover(&transport, &[0], 0)
+                .await
+                .unwrap();
+            assert_eq!(transport.setups.get(), 2);
+        });
+    }
+}
