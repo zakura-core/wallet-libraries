@@ -10,7 +10,7 @@ use zakura_pir_enhance::{
 #[derive(Deserialize)]
 struct Fixture {
     provenance: String,
-    ipir_sp_revision: String,
+    ipir_sp_version: String,
     manifest: Manifest,
     session: ShardSession,
 }
@@ -33,8 +33,8 @@ fn synthetic_wallet_manifest_and_session_are_accepted() {
     let fixture = fixture();
     assert!(fixture.provenance.starts_with("Synthetic wallet"));
     assert_eq!(
-        fixture.ipir_sp_revision,
-        "a16f456dfaf5fadca77d472c0c502a93cf0977d0"
+        fixture.ipir_sp_version,
+        "0.1.0-rc.3"
     );
     assert_eq!(fixture.manifest.schema_version, 11);
     assert_eq!(

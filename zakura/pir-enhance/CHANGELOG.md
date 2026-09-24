@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Update the pinned IPIR dependency to v0.1.0-rc.3; retain the v7 wire protocol and CPU backend.
+- Use the published IPIR v0.1.0-rc.3 crate and InspiRING v0.1.0-rc.1 test dependency with exact version pins; retain the v7 wire protocol and CPU backend.
 
 - Preserve observed v7 routing expiration when an in-flight cover future is dropped; cancellation without an expiration signal keeps the accepted view usable.
 

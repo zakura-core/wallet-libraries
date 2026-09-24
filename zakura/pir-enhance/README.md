@@ -31,8 +31,7 @@ Cover is off by default;
 timing, round count, the birthday window and cross-interval intersection remain
 observable. Ordinary streaming batches retain their existing partial-result semantics.
 
-The q48 profile uses IPIR v0.1.0-rc.3, pinned to revision
-`a16f456dfaf5fadca77d472c0c502a93cf0977d0`. v5/q46 and v6/q48 manifests and
+The q48 profile uses the published `ipir-sp` crate, pinned to `=0.1.0-rc.3`. v5/q46 and v6/q48 manifests and
 sessions are rejected. Schema-11 records and the deterministic public setup domain
 are unchanged. The v7 `EPQ7` header is 116 bytes and binds routing, domain, packing
 material, recovery epoch, session ID, request ID and accepted anchor. Noise
