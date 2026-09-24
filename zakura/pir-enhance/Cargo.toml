@@ -24,7 +24,7 @@ futures-util = "0.3"
 url = "2"
 base64 = "0.22"
 hex.workspace = true
-ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", rev = "225972648cc2982abfac66ba5b7a3930b223051a" }
+ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", rev = "6f74a2d754b58934f925fc8a347f46620148ad47" }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 serde.workspace = true
@@ -38,5 +38,5 @@ zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustz
 zcash_client_backend = { workspace = true, features = ["zakura-pir-enhance", "test-dependencies"] }
 incrementalmerkletree.workspace = true
 futures = "0.3"
-inspiring = { git = "https://github.com/valargroup/ipir-sp.git", rev = "225972648cc2982abfac66ba5b7a3930b223051a" }
+inspiring = { git = "https://github.com/valargroup/ipir-sp.git", rev = "6f74a2d754b58934f925fc8a347f46620148ad47" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

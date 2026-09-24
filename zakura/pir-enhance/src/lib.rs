@@ -1,4 +1,4 @@
-//! Wallet-bound v5 client for private Ironwood compact-action enhancement.
+//! Wallet-bound v6 client for private Ironwood compact-action enhancement.
 
 pub mod client;
 pub mod transport;
