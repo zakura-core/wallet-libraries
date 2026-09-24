@@ -2573,7 +2573,8 @@ dependencies = [
 [[package]]
 name = "inspiring"
 version = "0.1.0-rc.1"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=611a29284264d844bf4dba00de2874c5b762f8c2#611a29284264d844bf4dba00de2874c5b762f8c2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "591187fbe9b9560c7b0b7ddc423fe9d65e9c368d707f9b019d61d6c7f728bb03"
 dependencies = [
  "rand_chacha 0.3.1",
  "rayon",
@@ -2592,8 +2593,9 @@ dependencies = [
 
 [[package]]
 name = "ipir-sp"
-version = "0.1.0-rc.2"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=611a29284264d844bf4dba00de2874c5b762f8c2#611a29284264d844bf4dba00de2874c5b762f8c2"
+version = "0.1.0-rc.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1339bcc6ac45f36bd5c7d27c9ee2d3d2a5ebf6acbecdf1d9fc448d263fb2906"
 dependencies = [
  "clap",
  "env_logger",
@@ -4772,8 +4774,9 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "simplepir-kernel"
-version = "0.1.0-rc.1"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=611a29284264d844bf4dba00de2874c5b762f8c2#611a29284264d844bf4dba00de2874c5b762f8c2"
+version = "0.1.0-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d34558ed959f5d53c7278eab6b333cea0617423ea19dba9604468f7072c6bae"
 dependencies = [
  "inspiring",
  "rayon",

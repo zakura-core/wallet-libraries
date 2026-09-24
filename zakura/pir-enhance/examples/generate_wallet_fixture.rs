@@ -11,7 +11,8 @@ fn main() {
     let mut fixture: serde_json::Value =
         serde_json::from_str(include_str!("../tests/fixtures/upstream-session.json")).unwrap();
     fixture.as_object_mut().unwrap().remove("server_revision");
-    fixture["ipir_sp_revision"] = "611a29284264d844bf4dba00de2874c5b762f8c2".into();
+    fixture.as_object_mut().unwrap().remove("ipir_sp_revision");
+    fixture["ipir_sp_version"] = "0.1.0-rc.3".into();
     fixture["provenance"] = "Synthetic wallet schema-11 fixture; not emitted by a v7 server".into();
     fixture["manifest"]["schema_version"] = SCHEMA_VERSION.into();
     fixture["manifest"]["protocol_revision"] = PROTOCOL_REVISION.into();

@@ -1,5 +1,5 @@
 {
-  "ipir_sp_revision": "611a29284264d844bf4dba00de2874c5b762f8c2",
+  "ipir_sp_version": "0.1.0-rc.3",
   "manifest": {
     "anchor_block_hash": "4242424242424242424242424242424242424242424242424242424242424242",
     "anchor_height": 3428143,
