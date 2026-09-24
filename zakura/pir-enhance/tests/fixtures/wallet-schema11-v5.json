@@ -1,5 +1,5 @@
 {
-  "ipir_sp_revision": "6f74a2d754b58934f925fc8a347f46620148ad47",
+  "ipir_sp_revision": "225972648cc2982abfac66ba5b7a3930b223051a",
   "manifest": {
     "anchor_block_hash": "4242424242424242424242424242424242424242424242424242424242424242",
     "anchor_height": 3428143,
@@ -32,11 +32,11 @@
     },
     "network": "main",
     "pool": "ironwood",
-    "protocol_revision": "ironwood-enhance-pir-v6",
+    "protocol_revision": "ironwood-enhance-pir-v5",
     "schema_version": 11,
     "sessions": [
       {
-        "parameter_id": "ironwood-enhance-pir-v6/6ef480a31bd6a76c6403288ba1a0f0aeefbbe1805ba35168a85ccb2b07bd1c7b",
+        "parameter_id": "ironwood-enhance-pir-v5/6f7e6857d7efd01f954ff8a11aface91020ca496b80ea869c868393e95a73358",
         "public_params_sha256": "793dd18194116ab34ab06e753faefa8d882fb962beba46dbf4256264c74c5006",
         "shard_id": 0
       }
@@ -47,7 +47,7 @@
           "allocated_rows": 2048,
           "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
           "local_row_start": 0,
-          "parameter_id": "ironwood-enhance-pir-v6/unit/4060688777d40ec7703e657242a5684692ecfd2f1e325a5306c19a5ab2caba1a",
+          "parameter_id": "ironwood-enhance-pir-v5/unit/1afadd86c618e0155de09411e2618d5d0a752d19e5543023bb07499782473407",
           "setup_sha256": "0f5e0e337094ec6c892a90000cd430b4718d53323eb6431455408d28aef040f7",
           "shard_id": 0,
           "table": "enhance"
@@ -55,7 +55,7 @@
       ]
     }
   },
-  "provenance": "Synthetic wallet schema-11 fixture; not emitted by a v6 server",
+  "provenance": "Synthetic wallet schema-11 fixture; not emitted by a v5 server",
   "session": {
     "generation": 7,
     "params": {
@@ -71,7 +71,7 @@
       "q2_bits": 28,
       "q_prime_1": 1048576,
       "q_prime_2": 268369921,
-      "query_bits": 48,
+      "query_bits": 46,
       "t_exp_left": 3,
       "t_exp_right": 2
     },

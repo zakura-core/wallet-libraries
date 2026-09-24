@@ -1,4 +1,4 @@
-//! Public v5 shard geometry and wire representations.
+//! Public v6 shard geometry and wire representations.
 pub use zakura_pir_enhance_types::{
     EnhanceRecord, EnhanceRecordParts, EnhanceTransactionMetadata, FLAG_HAS_TRANSPARENT_INPUTS,
     FLAG_HAS_TRANSPARENT_OUTPUTS, InvalidEnhanceRecord, KNOWN_FLAGS, RECORD_BYTES,
@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const SCHEMA_VERSION: u16 = 11;
-pub const PROTOCOL_REVISION: &str = "ironwood-enhance-pir-v5";
+pub const PROTOCOL_REVISION: &str = "ironwood-enhance-pir-v6";
 pub const RETAINED_GENERATIONS: usize = 5;
 pub const HEADER_BYTES: usize = 28;
 
@@ -361,7 +361,7 @@ impl Manifest {
             || self.anchor_block_hash.len() != 64
             || hex::decode(&self.anchor_block_hash).is_err()
         {
-            return Err("incompatible v5 manifest".into());
+            return Err("incompatible v6 manifest".into());
         }
         self.coverage.validate(self.geometry)?;
         if self.sessions.len() != self.coverage.shards.len()
@@ -409,7 +409,7 @@ pub fn parameters(logical_rows: u64) -> Result<ipir_sp::YpirSchemeParams, String
     ipir_sp::params_for_simplepir_profile(
         logical_rows,
         (RECORD_BYTES * RECORDS_PER_ROW * 8) as u64,
-        ipir_sp::SimplePirProfile::P16Q46,
+        ipir_sp::SimplePirProfile::P16Q48,
     )
     .map(|(_, p)| p)
     .map_err(|e| e.to_string())
@@ -429,7 +429,7 @@ pub fn unit_parameter_id(rows: u64) -> Result<String, String> {
     let (_, params) = ipir_sp::params_for_simplepir_profile(
         rows,
         ITEM_SIZE_BITS,
-        ipir_sp::SimplePirProfile::P16Q46,
+        ipir_sp::SimplePirProfile::P16Q48,
     )
     .map_err(|e| e.to_string())?;
     Ok(format!("{PROTOCOL_REVISION}/unit/{}", digest(&params)))

@@ -24,7 +24,7 @@ fn main() {
     let (rlwe, params) = ipir_sp::params_for_simplepir_profile(
         shard.logical_rows,
         enhance_pir::ITEM_SIZE_BITS,
-        ipir_sp::SimplePirProfile::P16Q46,
+        ipir_sp::SimplePirProfile::P16Q48,
     )
     .unwrap();
     assert_eq!(params, parameters(shard.logical_rows).unwrap());

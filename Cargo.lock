@@ -1575,7 +1575,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2573,9 +2573,8 @@ dependencies = [
 [[package]]
 name = "inspiring"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=225972648cc2982abfac66ba5b7a3930b223051a#225972648cc2982abfac66ba5b7a3930b223051a"
+source = "git+https://github.com/valargroup/ipir-sp.git?rev=6f74a2d754b58934f925fc8a347f46620148ad47#6f74a2d754b58934f925fc8a347f46620148ad47"
 dependencies = [
- "rand 0.8.7",
  "rand_chacha 0.3.1",
  "rayon",
  "thiserror 1.0.69",
@@ -2594,14 +2593,14 @@ dependencies = [
 [[package]]
 name = "ipir-sp"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=225972648cc2982abfac66ba5b7a3930b223051a#225972648cc2982abfac66ba5b7a3930b223051a"
+source = "git+https://github.com/valargroup/ipir-sp.git?rev=6f74a2d754b58934f925fc8a347f46620148ad47#6f74a2d754b58934f925fc8a347f46620148ad47"
 dependencies = [
  "clap",
  "env_logger",
  "fastrand",
  "inspiring",
  "log",
- "rand 0.8.7",
+ "rand 0.9.5",
  "rand_chacha 0.3.1",
  "rayon",
  "serde",
@@ -3833,7 +3832,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4296,7 +4295,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4774,7 +4773,7 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 [[package]]
 name = "simplepir-kernel"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=225972648cc2982abfac66ba5b7a3930b223051a#225972648cc2982abfac66ba5b7a3930b223051a"
+source = "git+https://github.com/valargroup/ipir-sp.git?rev=6f74a2d754b58934f925fc8a347f46620148ad47#6f74a2d754b58934f925fc8a347f46620148ad47"
 dependencies = [
  "inspiring",
  "rayon",
@@ -5038,7 +5037,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6905,7 +6904,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
