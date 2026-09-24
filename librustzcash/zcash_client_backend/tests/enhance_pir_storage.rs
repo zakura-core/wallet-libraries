@@ -94,7 +94,7 @@ impl EnhancePirStorage for TransactionContext {
 }
 
 #[test]
-fn custom_storage_uses_shared_validation_before_routing() {
+fn custom_storage_rechecks_identity_and_trusts_send_only_association() {
     let request = EnhancePirRequest::new(
         5.into(),
         IronwoodEnhanceRequestId::new(TxId::from_bytes([3; 32]), 0),
@@ -103,10 +103,9 @@ fn custom_storage_uses_shared_validation_before_routing() {
         request,
         committed: false,
     };
-    let record = |ephemeral_key| {
+    let record = || {
         EnhanceRecord::from_parts(EnhanceRecordParts {
-            ephemeral_key,
-            enc_ciphertext: [2; 580],
+            enc_ciphertext_suffix: [2; 528],
             cv_net: [0; 32],
             out_ciphertext: [0; 80],
             has_transparent_inputs: true,
@@ -118,22 +117,17 @@ fn custom_storage_uses_shared_validation_before_routing() {
             .unwrap(),
         })
     };
-    assert_eq!(
-        validate_and_apply_record(&mut storage, request, &record([9; 32])),
-        Ok(EnhancePirStoreResult::Rejected)
-    );
-    assert!(!storage.committed);
     let stale = EnhancePirRequest::new(
         request.position(),
         IronwoodEnhanceRequestId::new(TxId::from_bytes([4; 32]), 0),
     );
     assert_eq!(
-        validate_and_apply_record(&mut storage, stale, &record([1; 32])),
+        validate_and_apply_record(&mut storage, stale, &record()),
         Ok(EnhancePirStoreResult::AlreadyResolved)
     );
     assert!(!storage.committed);
     assert_eq!(
-        validate_and_apply_record(&mut storage, request, &record([1; 32])),
+        validate_and_apply_record(&mut storage, request, &record()),
         Ok(EnhancePirStoreResult::LwdRequired)
     );
     assert!(storage.committed);
@@ -293,14 +287,13 @@ impl EnhancePirStorage for MetadataStore {
 }
 
 fn metadata_record(
-    request: EnhancePirRequest,
+    _request: EnhancePirRequest,
     fee: Option<u64>,
     expiry: u32,
     transparent: bool,
 ) -> EnhanceRecord {
     EnhanceRecord::from_parts(EnhanceRecordParts {
-        ephemeral_key: [1 + request.request_id().output_index() as u8; 32],
-        enc_ciphertext: [2; 580],
+        enc_ciphertext_suffix: [2; 528],
         cv_net: [0; 32],
         out_ciphertext: [0; 80],
         has_transparent_inputs: transparent,

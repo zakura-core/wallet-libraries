@@ -562,8 +562,13 @@ CREATE TABLE ironwood_received_notes (
         REFERENCES addresses(id) ON DELETE CASCADE,
     witness_stabilized INTEGER NOT NULL DEFAULT 0,
     note_version INTEGER NOT NULL,
+    ephemeral_key BLOB,
+    compact_ciphertext BLOB,
     lock_expiry_height INTEGER,
     lock_owner BLOB,
+    CHECK ((ephemeral_key IS NULL AND compact_ciphertext IS NULL) OR
+           (ephemeral_key IS NOT NULL AND compact_ciphertext IS NOT NULL AND
+            length(ephemeral_key) = 32 AND length(compact_ciphertext) = 52)),
     UNIQUE (transaction_id, action_index)
 )";
 pub(super) const INDEX_IRONWOOD_RECEIVED_NOTES_ACCOUNT: &str = "

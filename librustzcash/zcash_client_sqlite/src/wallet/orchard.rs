@@ -613,6 +613,17 @@ pub(crate) fn put_received_note<
         .query_row(sql_args, |row| row.get::<_, i64>(0))
         .map_err(SqliteClientError::from)?;
 
+    if shielded_pool == ShieldedPool::Ironwood {
+        if let Some(fields) = output.compact_encryption_fields() {
+            conn.execute(
+                "UPDATE ironwood_received_notes SET ephemeral_key = :epk,
+                 compact_ciphertext = :ciphertext WHERE id = :id",
+                named_params![":epk": fields.ephemeral_key.as_slice(),
+                    ":ciphertext": fields.compact_ciphertext.as_slice(), ":id": received_note_id],
+            )?;
+        }
+    }
+
     if let Some(spent_in) = spent_in {
         let inserted = conn.execute(
             &format!(

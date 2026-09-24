@@ -75,7 +75,7 @@ impl GenerationAcceptance {
         manifest.validate().map_err(ClientError::Generation)?;
         if self.network != "main" || manifest.network != self.network {
             return Err(ClientError::Generation(
-                "v4 is only defined for mainnet".into(),
+                "v5 is only defined for mainnet".into(),
             ));
         }
         if manifest.anchor_height < self.activation_height {
@@ -112,6 +112,12 @@ impl GenerationAcceptance {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
+    #[error("row batch must not be empty")]
+    EmptyBatch,
+    #[error("row batch contains multiple transaction IDs")]
+    MixedTxid,
+    #[error("row batch spans multiple PIR rows")]
+    CrossRowBatch,
     #[error("batch exceeds the local limit of {max_items} input items")]
     BatchTooLarge { max_items: usize },
     #[error("row query failed: {0}")]
@@ -292,7 +298,7 @@ impl QuerySession {
             .ok_or_else(|| ClientError::Response("response length overflow".into()))?;
         if binding != self.binding || query.binding != self.binding || response.len() != size {
             return Err(ClientError::Response(
-                "v4 response binding or length mismatch".into(),
+                "PIR response binding or length mismatch".into(),
             ));
         }
         let decoded = self.client.decode_response_simplepir(
@@ -388,6 +394,15 @@ impl EnhancePirClient {
         self.inner
             .query_batch_with_limit(&self.http, positions, max_items)
     }
+    /// Queries one row for one transaction, preserving captured wallet identities.
+    #[cfg(feature = "wallet")]
+    pub async fn query_row_requests(
+        &mut self,
+        requests: &[zcash_client_backend::data_api::enhance_pir::EnhancePirRequest],
+    ) -> Result<crate::wallet::RowQueryResult, ClientError> {
+        self.inner.query_row_requests(&self.http, requests).await
+    }
+
     pub async fn query_position(&mut self, position: u64) -> Result<EnhanceRecord, ClientError> {
         use futures_util::StreamExt;
         let stream = self.query_batch([position])?;

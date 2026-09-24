@@ -2,7 +2,7 @@
 //!
 //! Network lookups use tree positions; transaction/action identities stay local to
 //! reject stale responses after reorgs. Note plaintext is authenticated, but schema
-//! v7 transaction metadata (shape, fee, expiry) is trusted indexer data, not cryptographic evidence.
+//! v11 transaction metadata (shape, fee, expiry) is trusted indexer data, not cryptographic evidence.
 
 use incrementalmerkletree::Position;
 use zcash_primitives::block::BlockHash;
@@ -220,6 +220,26 @@ pub enum EnhancePirStoreResult {
     Rejected,
 }
 
+/// Reason an atomic batch made no changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnhancePirBatchRejection {
+    Empty,
+    MixedTxid,
+    ConflictingDuplicate,
+    MetadataConflict,
+    RecordRejected,
+}
+
+/// Atomic application outcome; committed results retain input order and duplicates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EnhancePirBatchResult {
+    Committed(Vec<EnhancePirStoreResult>),
+    Rejected {
+        index: Option<usize>,
+        reason: EnhancePirBatchRejection,
+    },
+}
+
 /// Application read interface for private enhancement.
 pub trait EnhancePirRead: WalletRead {
     /// Returns active and suspended work from one consistent wallet-state snapshot.
@@ -245,6 +265,15 @@ pub trait EnhancePirRead: WalletRead {
 
 /// Application operations that validate and atomically apply network responses.
 pub trait EnhancePirWrite: EnhancePirRead {
+    /// Applies a nonempty, same-transaction batch, including batches spanning rows.
+    /// Any live rejection or database error rolls back the entire batch. Stale
+    /// requests are harmless no-ops. Server association and metadata are trusted
+    /// where no incoming or outgoing decryption authenticates the action.
+    fn apply_ironwood_enhance_records(
+        &mut self,
+        records: &[(EnhancePirRequest, EnhanceRecord)],
+    ) -> Result<EnhancePirBatchResult, Self::Error>;
+
     /// Reconstructs pending outgoing candidates using a previously scanned compact block
     /// and the wallet's current durable funding associations, including already-spent notes.
     ///
@@ -265,7 +294,8 @@ pub trait EnhancePirWrite: EnhancePirRead {
     /// and all writes share one storage transaction. Validation failures never cause LWD fallback.
     ///
     /// Transparent flags are trusted server metadata, not authenticated by decryption.
-    /// The record must match pending wallet context before those flags can affect routing.
+    /// The request must match pending wallet identity before those flags can affect routing.
+    /// Send-only association is trusted even when outgoing decryption cannot succeed.
     /// Positive transparent flags set a sticky transaction-wide LWD decision,
     /// clear private work, and preserve ordinary enhancement. False flags can
     /// never undo it. A stale response cannot change routing or note data.

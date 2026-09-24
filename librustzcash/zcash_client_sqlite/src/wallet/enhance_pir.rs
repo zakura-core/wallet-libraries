@@ -15,7 +15,7 @@ use zcash_client_backend::data_api::{
         storage::{
             EnhancePirStorage, IronwoodOutgoingResult, PendingIronwoodMemo,
             PendingIronwoodMetadata, PendingIronwoodOutgoing, StoredIronwoodMetadata,
-            ValidatedIronwoodEnhancement, validate_and_apply_record,
+            ValidatedIronwoodEnhancement,
         },
     },
 };
@@ -283,13 +283,15 @@ impl<P: Parameters> EnhancePirStorage for Storage<'_, '_, P> {
     }
 }
 
-pub(crate) fn apply_record<P: Parameters>(
+pub(crate) fn apply_records<P: Parameters>(
     tx: &Transaction<'_>,
     params: &P,
-    request: EnhancePirRequest,
-    record: &EnhanceRecord,
-) -> Result<EnhancePirStoreResult, SqliteClientError> {
-    validate_and_apply_record(&mut Storage { tx, params }, request, record)
+    records: &[(EnhancePirRequest, EnhanceRecord)],
+) -> Result<zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult, SqliteClientError> {
+    zcash_client_backend::data_api::enhance_pir::storage::validate_and_apply_records(
+        &mut Storage { tx, params },
+        records,
+    )
 }
 
 pub(crate) fn pending_outgoing(
@@ -578,6 +580,8 @@ fn pending_note<P: Parameters>(
         [u8; 32],
         i64,
         i64,
+        [u8; 32],
+        [u8; 52],
     )> = conn
         .query_row(
             "WITH q AS (
@@ -588,7 +592,7 @@ fn pending_note<P: Parameters>(
                 WHERE :metadata AND rn.commitment_tree_position = m.commitment_tree_position
              )
              SELECT t.txid, rn.action_index, a.uuid, rn.diversifier, rn.value,
-                    rn.rho, rn.rseed, rn.note_version, rn.recipient_key_scope
+                    rn.rho, rn.rseed, rn.note_version, rn.recipient_key_scope, rn.ephemeral_key, rn.compact_ciphertext
              FROM q
              JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
              JOIN transactions t ON t.id_tx = rn.transaction_id
@@ -612,12 +616,25 @@ fn pending_note<P: Parameters>(
                     row.get(6)?,
                     row.get(7)?,
                     row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
                 ))
             },
         )
         .optional()?;
-    let Some((txid, output_index, account_uuid, diversifier, value, rho, rseed, version, scope)) =
-        raw
+    let Some((
+        txid,
+        output_index,
+        account_uuid,
+        diversifier,
+        value,
+        rho,
+        rseed,
+        version,
+        scope,
+        ephemeral_key,
+        compact_ciphertext,
+    )) = raw
     else {
         return Ok(None);
     };
@@ -672,6 +689,8 @@ fn pending_note<P: Parameters>(
         account_id,
         note,
         scope,
+        ephemeral_key,
+        compact_ciphertext,
     }))
 }
 

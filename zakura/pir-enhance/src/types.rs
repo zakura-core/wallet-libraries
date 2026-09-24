@@ -1,9 +1,9 @@
-//! Public v4 shard geometry and wire representations.
+//! Public v5 shard geometry and wire representations.
 pub use zakura_pir_enhance_types::{
     EnhanceRecord, EnhanceRecordParts, EnhanceTransactionMetadata, FLAG_HAS_TRANSPARENT_INPUTS,
     FLAG_HAS_TRANSPARENT_OUTPUTS, InvalidEnhanceRecord, KNOWN_FLAGS, RECORD_BYTES,
-    RECORD_CV_NET_OFFSET, RECORD_ENC_CIPHERTEXT_OFFSET, RECORD_EPHEMERAL_KEY_OFFSET,
-    RECORD_FLAGS_OFFSET, RECORD_OUT_CIPHERTEXT_OFFSET,
+    RECORD_CV_NET_OFFSET, RECORD_ENC_CIPHERTEXT_SUFFIX_OFFSET, RECORD_FLAGS_OFFSET,
+    RECORD_OUT_CIPHERTEXT_OFFSET,
 };
 
 pub const POOL: &str = "ironwood";
@@ -22,8 +22,8 @@ pub fn setup_seed_bytes() -> [u8; 32] {
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const SCHEMA_VERSION: u16 = 10;
-pub const PROTOCOL_REVISION: &str = "ironwood-enhance-pir-v4";
+pub const SCHEMA_VERSION: u16 = 11;
+pub const PROTOCOL_REVISION: &str = "ironwood-enhance-pir-v5";
 pub const RETAINED_GENERATIONS: usize = 5;
 pub const HEADER_BYTES: usize = 28;
 
@@ -361,7 +361,7 @@ impl Manifest {
             || self.anchor_block_hash.len() != 64
             || hex::decode(&self.anchor_block_hash).is_err()
         {
-            return Err("incompatible v4 manifest".into());
+            return Err("incompatible v5 manifest".into());
         }
         self.coverage.validate(self.geometry)?;
         if self.sessions.len() != self.coverage.shards.len()
@@ -451,19 +451,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn record_layout_remains_737_bytes() {
+    fn record_layout_is_653_bytes() {
         let record = EnhanceRecord::from_parts(EnhanceRecordParts {
-            ephemeral_key: [1; 32],
-            enc_ciphertext: [2; 580],
+            enc_ciphertext_suffix: [2; 528],
             cv_net: [3; 32],
             out_ciphertext: [4; 80],
             has_transparent_inputs: true,
             has_transparent_outputs: false,
             metadata: EnhanceTransactionMetadata::new(0, Some(0)).unwrap(),
         });
-        assert_eq!(RECORD_BYTES, 737);
-        assert_eq!(ROW_BYTES, 24_321);
-        assert_eq!(record.ephemeral_key(), &[1; 32]);
+        assert_eq!(RECORD_BYTES, 653);
+        assert_eq!(ROW_BYTES, 21_549);
+        assert_eq!(record.enc_ciphertext_suffix(), &[2; 528]);
         assert!(record.has_transparent_inputs());
     }
 

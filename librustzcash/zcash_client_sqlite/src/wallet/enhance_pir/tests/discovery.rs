@@ -45,8 +45,9 @@ fn encrypted_action(
     let cv = ValueCommitment::from_bytes(&pallas::Point::generator().to_bytes()).unwrap();
     let mut rng = ChaCha20Rng::from_seed([7; 32]);
     let record = EnhanceRecord::from_parts(EnhanceRecordParts {
-        ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0,
-        enc_ciphertext: encryptor.encrypt_note_plaintext(),
+        enc_ciphertext_suffix: (encryptor.encrypt_note_plaintext())[52..]
+            .try_into()
+            .unwrap(),
         cv_net: cv.to_bytes(),
         out_ciphertext: encryptor.encrypt_outgoing_plaintext(&cv, &cmx, &mut rng),
         has_transparent_inputs: false,
@@ -61,8 +62,8 @@ fn encrypted_action(
         CompactOrchardAction {
             nullifier: nf.to_vec(),
             cmx: cmx.to_bytes().to_vec(),
-            ephemeral_key: record.ephemeral_key().to_vec(),
-            ciphertext: record.enc_ciphertext()[..52].to_vec(),
+            ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0.to_vec(),
+            ciphertext: encryptor.encrypt_note_plaintext()[..52].to_vec(),
         },
         record,
     )
@@ -390,11 +391,10 @@ fn rescanning_a_send_preserves_pending_and_suspended_outgoing_recovery() {
             .unwrap();
         finish_incoming(&mut send.st, change);
         if suspend {
-            let mut ciphertext = *send.record.enc_ciphertext();
-            ciphertext[579] ^= 1;
+            let mut ciphertext = *send.record.enc_ciphertext_suffix();
+            ciphertext[527] ^= 1;
             let corrupt = EnhanceRecord::from_parts(EnhanceRecordParts {
-                ephemeral_key: *send.record.ephemeral_key(),
-                enc_ciphertext: ciphertext,
+                enc_ciphertext_suffix: ciphertext,
                 cv_net: *send.record.cv_net(),
                 out_ciphertext: *send.record.out_ciphertext(),
                 has_transparent_inputs: false,
@@ -1799,8 +1799,7 @@ fn discovery_commit_is_atomic_and_mixed_routing_is_sticky() {
         .find(|r| r.request_id().output_index() == 1)
         .unwrap();
     let mixed = EnhanceRecord::from_parts(EnhanceRecordParts {
-        ephemeral_key: *send.record.ephemeral_key(),
-        enc_ciphertext: *send.record.enc_ciphertext(),
+        enc_ciphertext_suffix: *send.record.enc_ciphertext_suffix(),
         cv_net: *send.record.cv_net(),
         out_ciphertext: *send.record.out_ciphertext(),
         has_transparent_inputs: true,
@@ -2367,7 +2366,7 @@ fn metadata_backfill_rediscovers_completed_outgoing_only_history() {
 /// Change only unauthenticated expiry, keeping the encrypted action valid.
 fn with_expiry(record: &EnhanceRecord, expiry: u32) -> EnhanceRecord {
     let mut bytes = *record.as_bytes();
-    bytes[725..729].copy_from_slice(&expiry.to_le_bytes());
+    bytes[641..645].copy_from_slice(&expiry.to_le_bytes());
     EnhanceRecord::from_bytes(bytes).unwrap()
 }
 

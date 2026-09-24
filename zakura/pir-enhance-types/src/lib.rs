@@ -1,17 +1,16 @@
 //! Encoding-validated Enhance PIR records shared by clients and wallet backends.
 
-pub const RECORD_BYTES: usize = 737;
+pub const RECORD_BYTES: usize = 653;
 
-pub const RECORD_EPHEMERAL_KEY_OFFSET: usize = 0;
-pub const RECORD_ENC_CIPHERTEXT_OFFSET: usize = 32;
-pub const RECORD_CV_NET_OFFSET: usize = 612;
-pub const RECORD_OUT_CIPHERTEXT_OFFSET: usize = 644;
-pub const RECORD_FLAGS_OFFSET: usize = 724;
+pub const RECORD_ENC_CIPHERTEXT_SUFFIX_OFFSET: usize = 0;
+pub const RECORD_CV_NET_OFFSET: usize = 528;
+pub const RECORD_OUT_CIPHERTEXT_OFFSET: usize = 560;
+pub const RECORD_FLAGS_OFFSET: usize = 640;
 pub const FLAG_HAS_TRANSPARENT_INPUTS: u8 = 1 << 0;
 pub const FLAG_HAS_TRANSPARENT_OUTPUTS: u8 = 1 << 1;
 pub const FLAG_HAS_FEE: u8 = 1 << 2;
-pub const RECORD_EXPIRY_HEIGHT_OFFSET: usize = 725;
-pub const RECORD_FEE_OFFSET: usize = 729;
+pub const RECORD_EXPIRY_HEIGHT_OFFSET: usize = 641;
+pub const RECORD_FEE_OFFSET: usize = 645;
 pub const KNOWN_FLAGS: u8 =
     FLAG_HAS_TRANSPARENT_INPUTS | FLAG_HAS_TRANSPARENT_OUTPUTS | FLAG_HAS_FEE;
 pub const MAX_FEE_ZATOSHIS: u64 = 21_000_000 * 100_000_000;
@@ -61,14 +60,14 @@ impl std::error::Error for InvalidEnhanceRecord {}
 /// The private fields needed to enhance one compact Ironwood action.
 ///
 /// Construction validates the wire encoding, including reserved flag bits. It does not
-/// authenticate the ciphertext or server metadata; the wallet must bind and decrypt it.
+/// authenticate ciphertext or server metadata. The wallet checks request identity and
+/// authenticates decrypted notes; send-only association can require trust in the server.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnhanceRecord([u8; RECORD_BYTES]);
 
 /// Named encrypted-note fields and trusted transaction-shape metadata.
 pub struct EnhanceRecordParts {
-    pub ephemeral_key: [u8; 32],
-    pub enc_ciphertext: [u8; 580],
+    pub enc_ciphertext_suffix: [u8; 528],
     pub cv_net: [u8; 32],
     pub out_ciphertext: [u8; 80],
     pub has_transparent_inputs: bool,
@@ -83,8 +82,16 @@ impl EnhanceRecord {
         if flags & !KNOWN_FLAGS != 0 {
             return Err(InvalidEnhanceRecord("reserved flag bits are set"));
         }
-        let expiry = u32::from_le_bytes(bytes[725..729].try_into().expect("fixed slice"));
-        let fee = u64::from_le_bytes(bytes[729..737].try_into().expect("fixed slice"));
+        let expiry = u32::from_le_bytes(
+            bytes[RECORD_EXPIRY_HEIGHT_OFFSET..RECORD_FEE_OFFSET]
+                .try_into()
+                .expect("fixed slice"),
+        );
+        let fee = u64::from_le_bytes(
+            bytes[RECORD_FEE_OFFSET..RECORD_BYTES]
+                .try_into()
+                .expect("fixed slice"),
+        );
         if flags & FLAG_HAS_FEE == 0 && fee != 0 {
             return Err(InvalidEnhanceRecord("absent fee must have a zero payload"));
         }
@@ -94,27 +101,37 @@ impl EnhanceRecord {
 
     pub fn from_parts(parts: EnhanceRecordParts) -> Self {
         let mut bytes = [0; RECORD_BYTES];
-        bytes[RECORD_EPHEMERAL_KEY_OFFSET..RECORD_ENC_CIPHERTEXT_OFFSET]
-            .copy_from_slice(&parts.ephemeral_key);
-        bytes[RECORD_ENC_CIPHERTEXT_OFFSET..RECORD_CV_NET_OFFSET]
-            .copy_from_slice(&parts.enc_ciphertext);
+        bytes[RECORD_ENC_CIPHERTEXT_SUFFIX_OFFSET..RECORD_CV_NET_OFFSET]
+            .copy_from_slice(&parts.enc_ciphertext_suffix);
         bytes[RECORD_CV_NET_OFFSET..RECORD_OUT_CIPHERTEXT_OFFSET].copy_from_slice(&parts.cv_net);
         bytes[RECORD_OUT_CIPHERTEXT_OFFSET..RECORD_FLAGS_OFFSET]
             .copy_from_slice(&parts.out_ciphertext);
         bytes[RECORD_FLAGS_OFFSET] = (u8::from(parts.has_transparent_inputs)
             * FLAG_HAS_TRANSPARENT_INPUTS)
             | (u8::from(parts.has_transparent_outputs) * FLAG_HAS_TRANSPARENT_OUTPUTS);
-        bytes[724] |= u8::from(parts.metadata.fee_zatoshis.is_some()) * FLAG_HAS_FEE;
-        bytes[725..729].copy_from_slice(&parts.metadata.expiry_height.to_le_bytes());
-        bytes[729..737].copy_from_slice(&parts.metadata.fee_zatoshis.unwrap_or(0).to_le_bytes());
+        bytes[RECORD_FLAGS_OFFSET] |=
+            u8::from(parts.metadata.fee_zatoshis.is_some()) * FLAG_HAS_FEE;
+        bytes[RECORD_EXPIRY_HEIGHT_OFFSET..RECORD_FEE_OFFSET]
+            .copy_from_slice(&parts.metadata.expiry_height.to_le_bytes());
+        bytes[RECORD_FEE_OFFSET..RECORD_BYTES]
+            .copy_from_slice(&parts.metadata.fee_zatoshis.unwrap_or(0).to_le_bytes());
         Self(bytes)
     }
 
     pub fn metadata(&self) -> EnhanceTransactionMetadata {
         EnhanceTransactionMetadata {
-            expiry_height: u32::from_le_bytes(self.0[725..729].try_into().expect("fixed slice")),
-            fee_zatoshis: (self.0[724] & FLAG_HAS_FEE != 0)
-                .then(|| u64::from_le_bytes(self.0[729..737].try_into().expect("fixed slice"))),
+            expiry_height: u32::from_le_bytes(
+                self.0[RECORD_EXPIRY_HEIGHT_OFFSET..RECORD_FEE_OFFSET]
+                    .try_into()
+                    .expect("fixed slice"),
+            ),
+            fee_zatoshis: (self.0[RECORD_FLAGS_OFFSET] & FLAG_HAS_FEE != 0).then(|| {
+                u64::from_le_bytes(
+                    self.0[RECORD_FEE_OFFSET..RECORD_BYTES]
+                        .try_into()
+                        .expect("fixed slice"),
+                )
+            }),
         }
     }
 
@@ -122,14 +139,8 @@ impl EnhanceRecord {
         &self.0
     }
 
-    pub fn ephemeral_key(&self) -> &[u8; 32] {
-        self.0[RECORD_EPHEMERAL_KEY_OFFSET..RECORD_ENC_CIPHERTEXT_OFFSET]
-            .try_into()
-            .expect("fixed slice")
-    }
-
-    pub fn enc_ciphertext(&self) -> &[u8; 580] {
-        self.0[RECORD_ENC_CIPHERTEXT_OFFSET..RECORD_CV_NET_OFFSET]
+    pub fn enc_ciphertext_suffix(&self) -> &[u8; 528] {
+        self.0[RECORD_ENC_CIPHERTEXT_SUFFIX_OFFSET..RECORD_CV_NET_OFFSET]
             .try_into()
             .expect("fixed slice")
     }
@@ -175,11 +186,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_v7_preserves_ciphertext_offsets() {
+    fn schema_v11_suffix_offsets() {
         for flags in 0u8..4 {
             let record = EnhanceRecord::from_parts(EnhanceRecordParts {
-                ephemeral_key: [1; 32],
-                enc_ciphertext: [2; 580],
+                enc_ciphertext_suffix: [2; 528],
                 cv_net: [3; 32],
                 out_ciphertext: [4; 80],
                 has_transparent_inputs: flags & 1 != 0,
@@ -187,12 +197,11 @@ mod tests {
                 metadata: EnhanceTransactionMetadata::new(0, None).unwrap(),
             });
             let bytes = record.as_bytes();
-            assert_eq!(bytes.len(), 737);
-            assert_eq!(&bytes[..32], &[1; 32]);
-            assert_eq!(&bytes[32..612], &[2; 580]);
-            assert_eq!(&bytes[612..644], &[3; 32]);
-            assert_eq!(&bytes[644..724], &[4; 80]);
-            assert_eq!(bytes[724], flags);
+            assert_eq!(bytes.len(), 653);
+            assert_eq!(&bytes[..528], &[2; 528]);
+            assert_eq!(&bytes[528..560], &[3; 32]);
+            assert_eq!(&bytes[560..640], &[4; 80]);
+            assert_eq!(bytes[640], flags);
             assert_eq!(EnhanceRecord::from_bytes(*bytes), Ok(record.clone()));
             assert_eq!(record.transparent_flags(), flags);
             assert_eq!(record.has_transparent(), flags != 0);
@@ -203,7 +212,7 @@ mod tests {
     fn every_reserved_flag_encoding_is_rejected() {
         for flags in 8..=u8::MAX {
             let mut bytes = [0; RECORD_BYTES];
-            bytes[724] = flags;
+            bytes[640] = flags;
             assert_eq!(
                 EnhanceRecord::from_bytes(bytes),
                 Err(InvalidEnhanceRecord("reserved flag bits are set"))
@@ -211,8 +220,8 @@ mod tests {
         }
     }
     #[test]
-    fn schema7_frozen_vector_and_metadata_validation() {
-        let text = include_str!("../tests/fixtures/schema7-record.hex").trim();
+    fn schema11_frozen_vector_and_metadata_validation() {
+        let text = include_str!("../tests/fixtures/schema11-record.hex").trim();
         let bytes: Vec<u8> = (0..text.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
@@ -222,23 +231,21 @@ mod tests {
             record.metadata(),
             EnhanceTransactionMetadata::new(123456, Some(12345)).unwrap()
         );
-        assert_eq!(record.ephemeral_key(), &[1; 32]);
-        assert_eq!(record.enc_ciphertext(), &[2; 580]);
+        assert_eq!(record.enc_ciphertext_suffix(), &[2; 528]);
         assert_eq!(record.cv_net(), &[3; 32]);
         assert_eq!(record.out_ciphertext(), &[4; 80]);
         let mut malformed = *record.as_bytes();
-        malformed[724] = 0;
+        malformed[640] = 0;
         assert!(EnhanceRecord::from_bytes(malformed).is_err());
         malformed = *record.as_bytes();
-        malformed[725..729].copy_from_slice(&500_000_000u32.to_le_bytes());
+        malformed[641..645].copy_from_slice(&500_000_000u32.to_le_bytes());
         assert!(EnhanceRecord::from_bytes(malformed).is_err());
         malformed = *record.as_bytes();
-        malformed[729..737].copy_from_slice(&(MAX_FEE_ZATOSHIS + 1).to_le_bytes());
+        malformed[645..653].copy_from_slice(&(MAX_FEE_ZATOSHIS + 1).to_le_bytes());
         assert!(EnhanceRecord::from_bytes(malformed).is_err());
         for fee in [None, Some(0), Some(MAX_FEE_ZATOSHIS)] {
             let record = EnhanceRecord::from_parts(EnhanceRecordParts {
-                ephemeral_key: [0; 32],
-                enc_ciphertext: [0; 580],
+                enc_ciphertext_suffix: [0; 528],
                 cv_net: [0; 32],
                 out_ciphertext: [0; 80],
                 has_transparent_inputs: false,

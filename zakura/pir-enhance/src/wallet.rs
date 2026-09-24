@@ -11,6 +11,13 @@ use zcash_client_backend::data_api::enhance_pir::{
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkType, NetworkUpgrade, Parameters};
 
+/// One decoded row, retaining every requested wallet identity in input order.
+#[derive(Clone, Debug)]
+pub struct RowQueryResult {
+    pub row: u64,
+    pub slots: Vec<(EnhancePirRequest, EnhanceRecord)>,
+}
+
 pub enum Acceptance {
     Accepted(GenerationAcceptance),
     WaitingForScanning,
@@ -113,6 +120,25 @@ impl PreparedWork {
         }
         prepared
     }
+    /// Groups active requests without changing discovery ordering or identities.
+    pub fn batches_by_tx_and_row(
+        &self,
+    ) -> BTreeMap<(zcash_primitives::transaction::TxId, u64), Vec<EnhancePirRequest>> {
+        let mut batches: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for (&position, requests) in &self.requests {
+            for request in requests {
+                batches
+                    .entry((
+                        request.request_id().txid(),
+                        position / crate::RECORDS_PER_ROW as u64,
+                    ))
+                    .or_default()
+                    .push(*request);
+            }
+        }
+        batches
+    }
+
     pub fn positions(&self) -> impl Iterator<Item = u64> + '_ {
         self.requests.keys().copied()
     }
@@ -166,6 +192,28 @@ mod tests {
         assert_eq!(mapped[0].0, old);
         assert_ne!(mapped[0].0, new);
     }
+    #[test]
+    fn batches_preserve_identities_at_row_boundaries() {
+        let txid = TxId::from_bytes([1; 32]);
+        let other = TxId::from_bytes([2; 32]);
+        let request = |position, txid| {
+            EnhancePirRequest::new(
+                Position::from(position),
+                IronwoodEnhanceRequestId::new(txid, position as u32),
+            )
+        };
+        let a = request(32, txid);
+        let b = request(33, txid);
+        let c = request(34, other);
+        let prepared = PreparedWork::new([b, a, c, a].map(EnhancePirWork::Query));
+        let batches = prepared.batches_by_tx_and_row();
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[&(txid, 0)], [a]);
+        assert_eq!(batches[&(txid, 1)], [b]);
+        assert_eq!(batches[&(other, 1)], [c]);
+        assert_eq!(prepared.positions().collect::<Vec<_>>(), [32, 33, 34]);
+    }
+
     #[test]
     fn suspensions_are_incomplete_without_active_queries() {
         let request = EnhancePirRequest::new(
