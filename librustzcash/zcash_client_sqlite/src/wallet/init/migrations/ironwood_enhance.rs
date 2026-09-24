@@ -7,13 +7,15 @@ use uuid::Uuid;
 
 use crate::wallet::init::WalletMigrationError;
 
-use super::{ironwood_received_notes, tx_status_observation_intent, v_transactions_zip318_kind};
+use super::{
+    ironwood_compact_encryption, tx_status_observation_intent, v_transactions_zip318_kind,
+};
 
 /// Identifier for the Ironwood-only Enhance PIR migration.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xcf147152_694f_47e8_8c05_c6dd853ac329);
 
 const DEPENDENCIES: &[Uuid] = &[
-    ironwood_received_notes::MIGRATION_ID,
+    ironwood_compact_encryption::MIGRATION_ID,
     tx_status_observation_intent::MIGRATION_ID,
     // Rebuild the latest released history view, including its ZIP 318 column.
     v_transactions_zip318_kind::MIGRATION_ID,

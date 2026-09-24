@@ -26,6 +26,7 @@ mod fix_transparent_received_outputs;
 mod fix_v_transactions_expired_unmined;
 mod full_account_ids;
 mod initial_setup;
+mod ironwood_compact_encryption;
 mod ironwood_enhance;
 mod ironwood_pool_code_views;
 mod ironwood_received_notes;
@@ -130,6 +131,7 @@ pub mod ids {
         fix_v_transactions_expired_unmined::MIGRATION_ID as FIX_V_TRANSACTIONS_EXPIRED_UNMINED,
         full_account_ids::MIGRATION_ID as FULL_ACCOUNT_IDS,
         initial_setup::MIGRATION_ID as INITIAL_SETUP,
+        ironwood_compact_encryption::MIGRATION_ID as IRONWOOD_COMPACT_ENCRYPTION,
         ironwood_enhance::MIGRATION_ID as IRONWOOD_ENHANCE,
         ironwood_pool_code_views::MIGRATION_ID as IRONWOOD_POOL_CODE_VIEWS,
         ironwood_received_notes::MIGRATION_ID as IRONWOOD_RECEIVED_NOTES,
@@ -362,6 +364,7 @@ pub(super) fn all_migrations<
         Box::new(add_transparent_value_index::Migration),
         Box::new(orchard_note_version::Migration),
         Box::new(ironwood_received_notes::Migration),
+        Box::new(ironwood_compact_encryption::Migration),
         Box::new(ironwood_enhance::Migration),
         Box::new(ironwood_pool_code_views::Migration),
         Box::new(fix_bad_ironwood_change_flagging::Migration),
@@ -410,6 +413,7 @@ const PUBLIC_MIGRATION_STATES: &[&[Uuid]] = &[
     V_0_20_0,
     V_0_22_0_RC1,
     V_0_22_0_RC2,
+    V_ZAKURA_0_1_0_RC5,
 ];
 
 /// Leaf migrations in the 0.4.0 release.
@@ -565,6 +569,20 @@ pub const V_0_22_0_RC2: &[Uuid] = &[
     note_locking::MIGRATION_ID,
 ];
 
+/// Leaf migrations in the published zakura-client-sqlite 0.1.0-rc5 release.
+pub const V_ZAKURA_0_1_0_RC5: &[Uuid] = &[
+    v_tx_outputs_transparent_addresses::MIGRATION_ID,
+    ivk_item_cache::MIGRATION_ID,
+    add_transparent_receiver_address_index::MIGRATION_ID,
+    add_transparent_value_index::MIGRATION_ID,
+    fix_bad_ironwood_change_flagging::MIGRATION_ID,
+    v_address_uses_ironwood::MIGRATION_ID,
+    orchard_ironwood_migration_unsatisfiability::MIGRATION_ID,
+    tree_retained_checkpoints::MIGRATION_ID,
+    tx_status_observation_intent::MIGRATION_ID,
+    v_transactions_zip318_kind::MIGRATION_ID,
+];
+
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     v_tx_outputs_transparent_addresses::MIGRATION_ID,
@@ -691,6 +709,7 @@ pub(crate) mod tests {
             ids::FULL_ACCOUNT_IDS,
             ids::INITIAL_SETUP,
             ids::IRONWOOD_POOL_CODE_VIEWS,
+            ids::IRONWOOD_COMPACT_ENCRYPTION,
             ids::IRONWOOD_ENHANCE,
             ids::IRONWOOD_RECEIVED_NOTES,
             ids::IRONWOOD_SHARDTREE,

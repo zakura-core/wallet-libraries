@@ -1,4 +1,4 @@
-//! Public v6 shard geometry and wire representations.
+//! Public v7 shard geometry and wire representations.
 pub use zakura_pir_enhance_types::{
     EnhanceRecord, EnhanceRecordParts, EnhanceTransactionMetadata, FLAG_HAS_TRANSPARENT_INPUTS,
     FLAG_HAS_TRANSPARENT_OUTPUTS, InvalidEnhanceRecord, KNOWN_FLAGS, RECORD_BYTES,

@@ -26,7 +26,10 @@ fn fixture() -> (State, crate::TxRef, EnhancePirRequest) {
 }
 
 fn fixture_with_factory(factory: TestDbFactory) -> (State, crate::TxRef, EnhancePirRequest) {
-    let mut st = state_with_factory(factory);
+    fixture_from_state(state_with_factory(factory))
+}
+
+fn fixture_from_state(mut st: State) -> (State, crate::TxRef, EnhancePirRequest) {
     let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
     let (height, _, _) = st.generate_next_block(
         &fvk,
@@ -60,7 +63,7 @@ fn fixture_with_factory(factory: TestDbFactory) -> (State, crate::TxRef, Enhance
     (st, tx_ref, request)
 }
 
-fn state_with_factory(factory: TestDbFactory) -> State {
+fn unscanned_state_with_factory(factory: TestDbFactory) -> State {
     let activation = BlockHeight::from_u32(100_000);
     let network = LocalNetwork {
         nu6: Some(activation),
@@ -69,12 +72,16 @@ fn state_with_factory(factory: TestDbFactory) -> State {
         nu6_3: Some(activation),
         ..TestBuilder::<(), ()>::DEFAULT_NETWORK
     };
-    let mut st = TestBuilder::new()
+    TestBuilder::new()
         .with_network(network)
         .with_data_store_factory(factory)
         .with_block_cache(BlockCache::new())
         .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+        .build()
+}
+
+fn state_with_factory(factory: TestDbFactory) -> State {
+    let mut st = unscanned_state_with_factory(factory);
     // Establish a real retained checkpoint before the block the reorg test removes.
     let (empty_height, _) = st.generate_empty_block();
     st.scan_cached_blocks(empty_height, 1);
@@ -1854,4 +1861,41 @@ fn scan_persists_compact_fields_and_rescan_preserves_them() {
         )
         .unwrap();
     assert!(st.wallet().db().pending_memo(incoming.position()).is_err());
+}
+
+#[test]
+fn rc5_wallet_upgrades_and_scans_private_ironwood_work() {
+    use crate::wallet::init::{WalletMigrator, migrations::V_ZAKURA_0_1_0_RC5};
+
+    let mut st = unscanned_state_with_factory(TestDbFactory::at_migrations(V_ZAKURA_0_1_0_RC5));
+    assert!(
+        st.wallet()
+            .conn()
+            .prepare("SELECT ephemeral_key FROM ironwood_received_notes")
+            .is_err()
+    );
+    WalletMigrator::new()
+        .init_or_migrate(st.wallet_mut().db_mut())
+        .unwrap();
+    // A second initialization must not repeat ALTER TABLE or reset wallet state.
+    WalletMigrator::new()
+        .init_or_migrate(st.wallet_mut().db_mut())
+        .unwrap();
+    let (mut st, _, incoming) = fixture_from_state(st);
+    assert!(
+        st.wallet()
+            .db()
+            .pending_memo(incoming.position())
+            .unwrap()
+            .is_some()
+    );
+    let (empty_height, _) = st.generate_empty_block();
+    st.scan_cached_blocks(empty_height, 1);
+    assert!(
+        st.wallet()
+            .db()
+            .query_requests()
+            .unwrap()
+            .contains(&incoming)
+    );
 }

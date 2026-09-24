@@ -203,6 +203,15 @@ pub struct TestDbFactory {
 }
 
 impl TestDbFactory {
+    /// Constructs a factory pinned to a historical wallet schema.
+    #[cfg(all(test, feature = "zakura-pir-enhance"))]
+    pub(crate) fn at_migrations(migrations: &[Uuid]) -> Self {
+        Self {
+            target_migrations: Some(migrations.to_vec()),
+            file_backed: false,
+        }
+    }
+
     /// Constructs a factory for tests that require a database file.
     pub fn file_backed() -> Self {
         Self {

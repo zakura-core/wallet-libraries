@@ -1,4 +1,4 @@
-//! Wallet-only v6 wire fixtures; legacy v4 server fixtures must be rejected.
+//! Wallet-only v7 wire fixtures; legacy v4 server fixtures must be rejected.
 use serde::Deserialize;
 use zakura_pir_enhance::{
     AcceptedAnchor, ClientResourceLimits, GenerationAcceptance, HEADER_BYTES, Manifest,
@@ -32,10 +32,7 @@ fn acceptance() -> GenerationAcceptance {
 fn synthetic_wallet_manifest_and_session_are_accepted() {
     let fixture = fixture();
     assert!(fixture.provenance.starts_with("Synthetic wallet"));
-    assert_eq!(
-        fixture.ipir_sp_version,
-        "0.1.0-rc.3"
-    );
+    assert_eq!(fixture.ipir_sp_version, "0.1.0-rc.3");
     assert_eq!(fixture.manifest.schema_version, 11);
     assert_eq!(
         fixture.manifest.protocol_revision,
