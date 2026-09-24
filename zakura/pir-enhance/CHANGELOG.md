@@ -1,26 +1,37 @@
 # Changelog
 
-## Unreleased
+## [Unreleased]
 
-- Use the published IPIR v0.1.0-rc.3 crate and InspiRING v0.1.0-rc.1 test dependency with exact version pins; retain the v7 wire protocol and CPU backend.
+## [0.0.1-rc0] - 2026-09-24
 
-- Preserve observed v7 routing expiration when an in-flight cover future is dropped; cancellation without an expiration signal keeps the accepted view usable.
+Initial release candidate for the mainnet Ironwood enhancement client.
 
-- Require fresh wallet acceptance for v7 session rebinding; keep in-flight batches valid past the routing refresh cadence.
-- Keep cover traffic scheduling independent of record validation errors, and preserve every observed 409/410 expiration signal across mixed failures.
-- Apply reduced session cache limits immediately when accepting routing, evicting least-recently-used setups.
+### Added
 
-- Add protocol v6 with the distinct P16Q48 transport profile and exact IPIR dependency pin; reject v5/q46 manifests and sessions. Retain schema-11 record encoding and wallet acceptance.
-- Use the validated production client constructor and opaque public setup API.
+- Enhance v7 routing with canonical fixed storage domains, composed successor
+  tails, schema-11 records, and the P16Q48 SimplePIR profile. Each row contains
+  33 records of 653 bytes.
+- Wallet acceptance of locally scanned anchors before session setup or routing
+  rebinding, with configurable setup and session-cache limits.
+- Reuse of unchanged public session material across routing and placement
+  changes, with affected sessions invalidated by recovery epochs. Each query
+  uses fresh randomness and a request ID in its 116-byte `EPQ7` binding.
+- Bounded HTTPS transport, lazy session loading, row-deduplicated streaming
+  queries, and optional wallet helpers for preserving request identities and
+  grouping same-transaction row queries.
+- Explicit routing refresh and expiry handling. HTTP 409/410 requires renewed
+  wallet acceptance; HTTP 429/503 supports bounded application retries.
+- Optional birthday-based cover traffic with randomized domain order, uniform
+  rounds, and whole-round overload retries. Record validation errors do not
+  change the scheduled traffic, and cancellation preserves observed expiry.
 
-- Add wallet-side schema 11/v5: 653-byte ciphertext-suffix records, retaining 33-record rows and the existing shard/session transport.
-- Add same-transaction row queries, prepared-work grouping, and atomic wallet batch application. Persist compact encryption fields in the initial Ironwood note schema; no existing-client migration is provided.
-- Trust send-only server association when decryption cannot authenticate the action; retain incoming authentication and stale-identity checks.
-- Add synthetic wallet v5 fixtures and reject the historical v4 server manifest. Server implementation and interoperability qualification remain separate work.
+### Compatibility and privacy
 
-### Earlier v4 work
-
-- Replace Enhance PIR v2 schema 7 with architecture_2 v4 schema 10: manifest coverage, shard sessions, P16Q46 parameters, 33-record rows, and EPQ4 query binding.
-- Require wallet acceptance of the manifest anchor before lazy shard setup; add per-shard row and cache limits.
-- Surface typed HTTP statuses and require fresh wallet acceptance after a 410 expiry. Keep 429/503 work available for bounded application retries.
-- Pin ipir-sp and compatibility fixtures to the v4 reference revisions. The 737-byte record format and wallet database schema are unchanged.
+- Requires an Enhance v7 server; older protocol revisions are rejected.
+- Uses the published `ipir-sp = "=0.1.0-rc.3"` dependency with CUDA disabled.
+- Cover traffic is opt-in. Timing, round counts, birthday coverage, and
+  cross-interval intersection remain observable; ordinary queries also reveal
+  the queried domains and row counts.
+- Record decoding validates encoding. Wallet note authentication and stale
+  request checks remain required; transaction metadata and some send-only
+  associations require trust in the server.

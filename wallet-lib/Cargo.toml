@@ -36,8 +36,8 @@ lrz-pczt = { package = "pczt", version = "0.9.2", optional = true }
 lrz-primitives = { package = "zcash_primitives", version = "0.30.0", default-features = false, optional = true }
 
 # -- Zakura: the default stack, under the upstream names consumers expect ----
-zcash-client-backend = { package = "zakura-client-backend", path = "../librustzcash/zcash_client_backend", version = "0.1.0-rc5", default-features = false, optional = true }
-zcash-client-sqlite = { package = "zakura-client-sqlite", path = "../librustzcash/zcash_client_sqlite", version = "0.1.0-rc5", default-features = false, optional = true }
+zcash-client-backend = { package = "zakura-client-backend", path = "../librustzcash/zcash_client_backend", version = "0.1.0-rc6", default-features = false, optional = true }
+zcash-client-sqlite = { package = "zakura-client-sqlite", path = "../librustzcash/zcash_client_sqlite", version = "0.1.0-rc6", default-features = false, optional = true }
 zcash-keys = { package = "zakura-keys", version = "1.2.0", default-features = false, optional = true }
 orchard = { package = "zakura-orchard", version = "1.2.0", optional = true }
 pczt = { package = "zakura-pczt", path = "../librustzcash/pczt", version = "0.1.0-rc3", optional = true }
@@ -121,7 +121,7 @@ zakura = [
 ## Enables Zakura's private, position-keyed Ironwood action enhancement APIs.
 ##
 ## The hand-written `zakura-pir-enhance` client remains a direct application
-## dependency because this published facade cannot depend on an unpublished crate.
+## dependency; this facade enables the wallet storage APIs without re-exporting the client.
 zakura-pir-enhance = [
     "zakura",
     "zcash-client-backend/zakura-pir-enhance",

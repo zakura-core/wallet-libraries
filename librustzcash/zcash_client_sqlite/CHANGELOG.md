@@ -10,6 +10,10 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc6] - 2026-09-24
+
+PIR storage integration release using `zakura-client-backend 0.1.0-rc6`.
+
 ### Added
 - Add durable SQLite routing and work queues for private Ironwood-only enhancement,
   including incoming memos, outgoing recovery, candidate accounts, rediscovery, and

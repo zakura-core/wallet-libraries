@@ -1,7 +1,7 @@
 # New Zakura work
 
 Hand-written crates that are ours rather than forks. `pir-enhance/` contains the
-unpublished, position-keyed Ironwood compact-action enhancement client.
+position-keyed Ironwood compact-action enhancement client, and `pir-enhance-types/` contains its shared wire records.
 
 Nothing here is generated. `scripts/sync-upstream.sh` never touches this
 directory, unlike `librustzcash/`, which it deletes and re-extracts on every
