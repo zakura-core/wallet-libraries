@@ -2572,8 +2572,8 @@ dependencies = [
 
 [[package]]
 name = "inspiring"
-version = "0.1.0"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=6f74a2d754b58934f925fc8a347f46620148ad47#6f74a2d754b58934f925fc8a347f46620148ad47"
+version = "0.1.0-rc.1"
+source = "git+https://github.com/valargroup/ipir-sp.git?rev=611a29284264d844bf4dba00de2874c5b762f8c2#611a29284264d844bf4dba00de2874c5b762f8c2"
 dependencies = [
  "rand_chacha 0.3.1",
  "rayon",
@@ -2592,8 +2592,8 @@ dependencies = [
 
 [[package]]
 name = "ipir-sp"
-version = "0.1.0"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=6f74a2d754b58934f925fc8a347f46620148ad47#6f74a2d754b58934f925fc8a347f46620148ad47"
+version = "0.1.0-rc.2"
+source = "git+https://github.com/valargroup/ipir-sp.git?rev=611a29284264d844bf4dba00de2874c5b762f8c2#611a29284264d844bf4dba00de2874c5b762f8c2"
 dependencies = [
  "clap",
  "env_logger",
@@ -4772,8 +4772,8 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "simplepir-kernel"
-version = "0.1.0"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=6f74a2d754b58934f925fc8a347f46620148ad47#6f74a2d754b58934f925fc8a347f46620148ad47"
+version = "0.1.0-rc.1"
+source = "git+https://github.com/valargroup/ipir-sp.git?rev=611a29284264d844bf4dba00de2874c5b762f8c2#611a29284264d844bf4dba00de2874c5b762f8c2"
 dependencies = [
  "inspiring",
  "rayon",
@@ -6633,8 +6633,9 @@ dependencies = [
 
 [[package]]
 name = "valar-spiral-rs"
-version = "0.5.2"
-source = "git+https://github.com/valargroup/spiral-rs.git?rev=584fee3893b1d2d17b5d774c83bd801fb70d5ace#584fee3893b1d2d17b5d774c83bd801fb70d5ace"
+version = "0.5.3-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25241fdd53c5952c5c80557c6d248a2835cf9e722de52e16bbbba794009b80b9"
 dependencies = [
  "fastrand",
  "getrandom 0.2.17",

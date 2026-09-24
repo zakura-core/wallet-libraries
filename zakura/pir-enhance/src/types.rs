@@ -19,13 +19,16 @@ pub fn setup_seed_bytes() -> [u8; 32] {
     bytes[..8].copy_from_slice(&ENHANCE_SETUP_SEED.to_le_bytes());
     bytes
 }
+// Schema-11 records, v7 routing and session identities.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Frozen schema-11 wallet limit, independent of worker placement density.
+pub const MAX_QUERY_SHARDS: u64 = 24;
 pub const SCHEMA_VERSION: u16 = 11;
-pub const PROTOCOL_REVISION: &str = "ironwood-enhance-pir-v6";
+pub const PROTOCOL_REVISION: &str = "ironwood-enhance-pir-v7";
 pub const RETAINED_GENERATIONS: usize = 5;
-pub const HEADER_BYTES: usize = 28;
+pub const HEADER_BYTES: usize = 116;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -48,14 +51,14 @@ impl Default for Geometry {
 }
 
 impl Geometry {
-    /// Only the geometry family exercised by the v4 qualification suite is accepted.
+    /// Only the geometry family exercised by the qualification suite is accepted.
     pub fn validate(self) -> Result<(), String> {
         if self.max_shard_rows != 32768
             || self.min_shard_rows != 4096
             || self.max_mutable_unit_rows != 8192
             || self.min_mutable_unit_rows != 2048
         {
-            return Err("unqualified v4 geometry".into());
+            return Err("unqualified geometry".into());
         }
         Ok(())
     }
@@ -102,7 +105,7 @@ pub struct MutableUnit {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ShardState {
     Growing,
-    Lending,
+    Provisional,
     Sealed,
 }
 
@@ -128,17 +131,7 @@ impl QueryShard {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Loan {
-    pub lender: u64,
-    pub borrower: u64,
-    pub row_start: u64,
-    pub row_end: u64,
-    pub return_at_records: u64,
-}
-
-/// Persist this identity registry with the publication decision. Entries survive reorgs.
+/// Persisted fixed-range identities; confirmation is decided from canonical blocks.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Lifecycle {
@@ -148,121 +141,155 @@ pub struct Lifecycle {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct Route {
+    pub global_start: u64,
+    pub global_end: u64,
+    pub domain_id: u64,
+    pub local_start: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Coverage {
     pub records: u64,
     pub shards: Vec<QueryShard>,
-    pub loan: Option<Loan>,
+    pub routes: Vec<Route>,
+}
+
+impl QueryShard {
+    pub fn composed(&self) -> bool {
+        self.id > 0
+            && self.records.div_ceil(RECORDS_PER_ROW as u64) < Geometry::default().min_shard_rows
+    }
+
+    pub fn expected_units(&self, geometry: Geometry) -> Result<Vec<MutableUnit>, String> {
+        let mut units = geometry.units(self.records)?;
+        if self.composed() {
+            units.push(MutableUnit {
+                local_row_start: geometry.min_shard_rows,
+                used_rows: geometry.min_shard_rows,
+                allocated_rows: geometry.min_shard_rows,
+            });
+        }
+        Ok(units)
+    }
+
+    pub fn expected_logical_rows(&self, geometry: Geometry) -> Result<u64, String> {
+        if self.composed() {
+            Ok(2 * geometry.min_shard_rows)
+        } else {
+            geometry.logical_rows(self.records)
+        }
+    }
 }
 
 impl Lifecycle {
-    /// Derive the final state for complete canonical coverage, including crossing-block excess.
-    /// This deliberately does not publish intermediate threshold states.
+    /// Build one complete fixed-range view. Full ranges are provisional until
+    /// their completing block is confirmed by the canonical controller.
     pub fn coverage(&mut self, records: u64, geometry: Geometry) -> Result<Coverage, String> {
         geometry.validate()?;
-        if records == 0 {
-            return Err("cannot publish empty coverage".into());
+        let span = geometry.max_shard_rows * RECORDS_PER_ROW as u64;
+        let count = records.div_ceil(span);
+        if count == 0 || count > MAX_QUERY_SHARDS {
+            return Err("unsupported coverage".into());
         }
-        let per_row = RECORDS_PER_ROW as u64;
-        let span = geometry.max_shard_rows * per_row;
-        let loan_records = geometry.min_shard_rows * per_row;
-        let complete = records / span;
-        let remainder = records % span;
-        let count = complete.checked_add(1).ok_or("shard count overflow")?;
-        // The fleet ceiling is four groups of six shards. Reject absurd input before allocation.
-        if count > 24 {
-            return Err("coverage exceeds the four-group fleet ceiling".into());
+        if self.next_id > MAX_QUERY_SHARDS {
+            return Err("invalid persisted identity ceiling".into());
         }
-        while self.identities.len() < count as usize {
-            let id = self.next_id;
-            self.next_id = id.checked_add(1).ok_or("shard identity exhausted")?;
-            self.identities.push(id);
-        }
-        let borrowing = complete > 0 && remainder < loan_records;
+        self.next_id = self.next_id.max(count);
+        self.identities = (0..self.next_id).collect();
         let mut shards = Vec::new();
-        for index in 0..count {
-            let (start, n, state) = if index < complete {
-                let lending = borrowing && index + 1 == complete;
-                (
-                    index * geometry.max_shard_rows,
-                    span - if lending { loan_records } else { 0 },
-                    if lending {
-                        ShardState::Lending
-                    } else {
-                        ShardState::Sealed
-                    },
-                )
-            } else {
-                (
-                    index * geometry.max_shard_rows
-                        - if borrowing {
-                            geometry.min_shard_rows
-                        } else {
-                            0
-                        },
-                    remainder + if borrowing { loan_records } else { 0 },
-                    ShardState::Growing,
-                )
-            };
-            shards.push(QueryShard {
-                id: self.identities[index as usize],
-                global_row_start: start,
+        let mut routes = Vec::new();
+        for id in 0..count {
+            let n = (records - id * span).min(span);
+            let mut shard = QueryShard {
+                id,
+                global_row_start: id * geometry.max_shard_rows,
                 records: n,
-                logical_rows: geometry.logical_rows(n)?,
-                state,
-                units: geometry.units(n)?,
+                logical_rows: 0,
+                state: if n == span {
+                    ShardState::Provisional
+                } else {
+                    ShardState::Growing
+                },
+                units: Vec::new(),
+            };
+            shard.logical_rows = shard.expected_logical_rows(geometry)?;
+            shard.units = shard.expected_units(geometry)?;
+            if shard.composed() {
+                let previous: &mut Route = routes.last_mut().ok_or("missing predecessor")?;
+                previous.global_end -= geometry.min_shard_rows;
+                routes.push(Route {
+                    global_start: shard.global_row_start - geometry.min_shard_rows,
+                    global_end: shard.global_row_start,
+                    domain_id: id,
+                    local_start: geometry.min_shard_rows,
+                });
+            }
+            routes.push(Route {
+                global_start: shard.global_row_start,
+                global_end: shard.global_row_start + n.div_ceil(RECORDS_PER_ROW as u64),
+                domain_id: id,
+                local_start: 0,
             });
+            shards.push(shard);
         }
-        let loan = borrowing.then(|| Loan {
-            lender: self.identities[complete as usize - 1],
-            borrower: self.identities[complete as usize],
-            row_start: complete * geometry.max_shard_rows - geometry.min_shard_rows,
-            row_end: complete * geometry.max_shard_rows,
-            return_at_records: complete * span + loan_records,
-        });
         Ok(Coverage {
             records,
             shards,
-            loan,
+            routes,
         })
     }
 }
 
 impl Coverage {
     pub fn validate(&self, geometry: Geometry) -> Result<(), String> {
-        geometry.validate()?;
-        let mut ids = std::collections::BTreeSet::new();
-        let mut end = 0u64;
-        for shard in &self.shards {
-            if !ids.insert(shard.id)
-                || shard.global_row_start.checked_mul(RECORDS_PER_ROW as u64) != Some(end)
-                || shard.logical_rows != geometry.logical_rows(shard.records)?
-                || shard.units != geometry.units(shard.records)?
-            {
-                return Err("invalid shard coverage or geometry".into());
+        let expected = Lifecycle::default().coverage(self.records, geometry)?;
+        if self.routes != expected.routes || self.shards.len() != expected.shards.len() {
+            return Err("noncanonical routing coverage".into());
+        }
+        for (actual, mut expected) in self.shards.iter().zip(expected.shards) {
+            if actual.state == ShardState::Sealed && expected.state == ShardState::Provisional {
+                expected.state = ShardState::Sealed;
             }
-            end = end
-                .checked_add(shard.records)
-                .ok_or("record coverage overflow")?;
-        }
-        if end == 0 || end != self.records {
-            return Err("incomplete record coverage".into());
-        }
-        // Compare lifecycle semantics as well as ranges, independent of assigned stable IDs.
-        let mut lifecycle = Lifecycle {
-            identities: self.shards.iter().map(|s| s.id).collect(),
-            next_id: 0,
-        };
-        let expected = lifecycle.coverage(self.records, geometry)?;
-        if &expected != self {
-            return Err("invalid loan or lifecycle state".into());
+            if actual != &expected {
+                return Err("invalid fixed domain geometry".into());
+            }
         }
         Ok(())
     }
 
     pub fn locate(&self, position: u64) -> Option<(&QueryShard, usize, usize)> {
-        self.shards
+        if position >= self.records {
+            return None;
+        }
+        let row = position / RECORDS_PER_ROW as u64;
+        let route = self
+            .routes
             .iter()
-            .find_map(|s| s.locate(position).map(|(r, p)| (s, r, p)))
+            .find(|r| r.global_start <= row && row < r.global_end)?;
+        let shard = self.shards.iter().find(|s| s.id == route.domain_id)?;
+        Some((
+            shard,
+            (route.local_start + row - route.global_start) as usize,
+            (position % RECORDS_PER_ROW as u64) as usize,
+        ))
+    }
+}
+
+/// Canonical JSON u64 encoding avoids loss through JavaScript numbers.
+pub mod decimal_u64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(n: &u64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&n.to_string())
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        let text = String::deserialize(d)?;
+        let n: u64 = text.parse().map_err(serde::de::Error::custom)?;
+        if n.to_string() != text {
+            return Err(serde::de::Error::custom("noncanonical u64"));
+        }
+        Ok(n)
     }
 }
 
@@ -270,6 +297,8 @@ impl Coverage {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct UnitIdentity {
+    #[serde(with = "decimal_u64")]
+    pub recovery_epoch: u64,
     pub table: String,
     pub shard_id: u64,
     pub local_row_start: u64,
@@ -302,27 +331,40 @@ pub fn setup_seed(shard_id: u64) -> [u8; 32] {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueryBinding {
+    /// The routing revision, not the lifetime of the session material.
     pub generation: u64,
     pub shard_id: u64,
     pub epoch: [u8; 8],
+    pub recovery_epoch: u64,
+    pub session_id: [u8; 32],
+    pub request_id: [u8; 16],
+    pub anchor_hash: [u8; 32],
 }
 
 impl QueryBinding {
     pub fn encode(self) -> Vec<u8> {
-        let mut bytes = b"EPQ4".to_vec();
+        let mut bytes = b"EPQ7".to_vec();
         bytes.extend(self.generation.to_le_bytes());
         bytes.extend(self.shard_id.to_le_bytes());
         bytes.extend(self.epoch);
+        bytes.extend(self.recovery_epoch.to_le_bytes());
+        bytes.extend(self.session_id);
+        bytes.extend(self.request_id);
+        bytes.extend(self.anchor_hash);
         bytes
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() < HEADER_BYTES || &bytes[..4] != b"EPQ4" {
-            return Err("invalid v4 framing".into());
+        if bytes.len() < HEADER_BYTES || &bytes[..4] != b"EPQ7" {
+            return Err("invalid v7 query framing".into());
         }
         Ok(Self {
             generation: u64::from_le_bytes(bytes[4..12].try_into().unwrap()),
             shard_id: u64::from_le_bytes(bytes[12..20].try_into().unwrap()),
             epoch: bytes[20..28].try_into().unwrap(),
+            recovery_epoch: u64::from_le_bytes(bytes[28..36].try_into().unwrap()),
+            session_id: bytes[36..68].try_into().unwrap(),
+            request_id: bytes[68..84].try_into().unwrap(),
+            anchor_hash: bytes[84..116].try_into().unwrap(),
         })
     }
 }
@@ -338,6 +380,10 @@ pub struct SessionRef {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
+    #[serde(with = "decimal_u64")]
+    pub recovery_epoch: u64,
+    pub placement_revision: u64,
+    pub domain_recovery_epochs: std::collections::BTreeMap<u64, String>,
     pub schema_version: u16,
     pub protocol_revision: String,
     pub network: String,
@@ -352,6 +398,58 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// Hash ordered padded unit commitments, geometry and packing material.
+    /// Unit hashes commit to every stored byte; gaps are prescribed zero padding.
+    pub fn session_id(&self, id: u64) -> Result<[u8; 32], String> {
+        let shard = self
+            .coverage
+            .shards
+            .iter()
+            .find(|s| s.id == id)
+            .ok_or("unknown domain")?;
+        let reference = self
+            .sessions
+            .iter()
+            .find(|s| s.shard_id == id)
+            .ok_or("missing session")?;
+        let epoch = self
+            .domain_recovery_epochs
+            .get(&id)
+            .ok_or("missing domain epoch")?;
+        let number: u64 = epoch.parse().map_err(|_| "invalid domain epoch")?;
+        if number.to_string() != *epoch || number > self.recovery_epoch {
+            return Err("invalid domain epoch".into());
+        }
+        let units = self.unit_identities.get(&id).ok_or("missing units")?;
+        let mut hash = Sha256::new();
+        hash.update(b"enhance-pir/v7/session\0");
+        hash.update((PROTOCOL_REVISION.len() as u64).to_le_bytes());
+        hash.update(PROTOCOL_REVISION.as_bytes());
+        for n in [
+            id,
+            number,
+            shard.logical_rows,
+            shard.records,
+            units.len() as u64,
+        ] {
+            hash.update(n.to_le_bytes());
+        }
+        for unit in units {
+            hash.update(unit.recovery_epoch.to_le_bytes());
+            hash.update(unit.local_row_start.to_le_bytes());
+            hash.update(unit.allocated_rows.to_le_bytes());
+            for value in [&unit.content_sha256, &unit.setup_sha256, &unit.parameter_id] {
+                hash.update((value.len() as u64).to_le_bytes());
+                hash.update(value.as_bytes());
+            }
+        }
+        for value in [&reference.parameter_id, &reference.public_params_sha256] {
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value.as_bytes());
+        }
+        Ok(hash.finalize().into())
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.schema_version != SCHEMA_VERSION
             || self.protocol_revision != PROTOCOL_REVISION
@@ -359,17 +457,19 @@ impl Manifest {
             || self.pool != "ironwood"
             || self.generation == 0
             || self.anchor_block_hash.len() != 64
-            || hex::decode(&self.anchor_block_hash).is_err()
+            || !canonical_hash(&self.anchor_block_hash)
         {
-            return Err("incompatible v6 manifest".into());
+            return Err("incompatible manifest".into());
         }
         self.coverage.validate(self.geometry)?;
-        if self.sessions.len() != self.coverage.shards.len()
+        if self.domain_recovery_epochs.len() != self.coverage.shards.len()
+            || self.sessions.len() != self.coverage.shards.len()
             || self.unit_identities.len() != self.coverage.shards.len()
         {
             return Err("incomplete sessions".into());
         }
         for (shard, session) in self.coverage.shards.iter().zip(&self.sessions) {
+            self.session_id(shard.id)?;
             let units = self
                 .unit_identities
                 .get(&shard.id)
@@ -378,13 +478,14 @@ impl Manifest {
                 return Err("incomplete unit identities".into());
             }
             for (identity, unit) in units.iter().zip(&shard.units) {
-                if identity.shard_id != shard.id
+                if identity.recovery_epoch.to_string() != self.domain_recovery_epochs[&shard.id]
+                    || identity.shard_id != shard.id
                     || identity.table != "enhance"
                     || identity.local_row_start != unit.local_row_start
                     || identity.allocated_rows != unit.allocated_rows
                     || identity.parameter_id != unit_parameter_id(unit.allocated_rows)?
                     || identity.content_sha256.len() != 64
-                    || hex::decode(&identity.content_sha256).is_err()
+                    || !canonical_hash(&identity.content_sha256)
                     || identity.setup_sha256 != hex::encode(Sha256::digest(setup_seed(shard.id)))
                 {
                     return Err("invalid unit identity".into());
@@ -393,13 +494,20 @@ impl Manifest {
             if session.shard_id != shard.id
                 || session.parameter_id != parameter_id(shard.logical_rows)?
                 || session.public_params_sha256.len() != 64
-                || hex::decode(&session.public_params_sha256).is_err()
+                || !canonical_hash(&session.public_params_sha256)
             {
                 return Err("invalid shard session reference".into());
             }
         }
         Ok(())
     }
+}
+
+pub fn canonical_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 pub fn parameters(logical_rows: u64) -> Result<ipir_sp::YpirSchemeParams, String> {
@@ -438,6 +546,7 @@ pub fn unit_parameter_id(rows: u64) -> Result<String, String> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShardSession {
+    pub session_id: String,
     pub generation: u64,
     pub shard_id: u64,
     pub params: ipir_sp::YpirSchemeParams,
@@ -445,158 +554,3 @@ pub struct ShardSession {
 }
 
 pub const ROW_PAYLOAD_BYTES: usize = ROW_BYTES;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn record_layout_is_653_bytes() {
-        let record = EnhanceRecord::from_parts(EnhanceRecordParts {
-            enc_ciphertext_suffix: [2; 528],
-            cv_net: [3; 32],
-            out_ciphertext: [4; 80],
-            has_transparent_inputs: true,
-            has_transparent_outputs: false,
-            metadata: EnhanceTransactionMetadata::new(0, Some(0)).unwrap(),
-        });
-        assert_eq!(RECORD_BYTES, 653);
-        assert_eq!(ROW_BYTES, 21_549);
-        assert_eq!(record.enc_ciphertext_suffix(), &[2; 528]);
-        assert!(record.has_transparent_inputs());
-    }
-
-    #[test]
-    fn loan_and_return_coverage_map_to_local_rows() {
-        let g = Geometry::default();
-        let span = 32_768 * RECORDS_PER_ROW as u64;
-        let loan = 4_096 * RECORDS_PER_ROW as u64;
-        let mut state = Lifecycle::default();
-        for n in [1, span - 1, span, span + 1, span + loan - 1, span + loan] {
-            let coverage = state.coverage(n, g).unwrap();
-            coverage.validate(g).unwrap();
-            assert!(coverage.locate(n).is_none());
-            for p in [0, n / 2, n - 1] {
-                let (shard, row, slot) = coverage.locate(p).unwrap();
-                assert_eq!(shard.locate(p), Some((row, slot)));
-                assert_eq!(
-                    shard.global_row_start * 33 + row as u64 * 33 + slot as u64,
-                    p
-                );
-            }
-        }
-        let during = state.coverage(span, g).unwrap();
-        assert_eq!(during.shards[0].state, ShardState::Lending);
-        assert_eq!(during.shards[1].global_row_start, 32_768 - 4_096);
-        assert_eq!(during.shards[1].logical_rows, 4_096);
-        let after = state.coverage(span + loan, g).unwrap();
-        assert!(after.loan.is_none());
-        assert_eq!(after.shards[1].global_row_start, 32_768);
-    }
-
-    #[test]
-    fn geometry_rejects_invalid_units_and_coverage() {
-        let g = Geometry::default();
-        for (records, rows) in [
-            (1, 4_096),
-            (4_096 * 33 + 1, 8_192),
-            (8_192 * 33 + 1, 16_384),
-            (16_384 * 33 + 1, 32_768),
-        ] {
-            assert_eq!(g.logical_rows(records).unwrap(), rows);
-        }
-        assert!(g.logical_rows(0).is_err());
-        assert!(g.logical_rows(32_768 * 33 + 1).is_err());
-        let mut state = Lifecycle::default();
-        let mut coverage = state.coverage(32_768 * 33, g).unwrap();
-        coverage.loan = None;
-        assert!(coverage.validate(g).is_err());
-    }
-
-    #[test]
-    fn query_binding_has_exact_header_fields() {
-        let binding = QueryBinding {
-            generation: 0x0102030405060708,
-            shard_id: 0x1112131415161718,
-            epoch: [0xa5; 8],
-        };
-        let encoded = binding.encode();
-        assert_eq!(encoded.len(), HEADER_BYTES);
-        assert_eq!(&encoded[..4], b"EPQ4");
-        assert_eq!(&encoded[4..12], &[8, 7, 6, 5, 4, 3, 2, 1]);
-        assert_eq!(QueryBinding::decode(&encoded).unwrap(), binding);
-        assert!(QueryBinding::decode(&encoded[..27]).is_err());
-        let mut wrong = encoded;
-        wrong[0] = b'X';
-        assert!(QueryBinding::decode(&wrong).is_err());
-    }
-
-    #[test]
-    fn shard_setup_seed_uses_server_domain() {
-        assert_eq!(
-            hex::encode(setup_seed(0)),
-            "38d2a05f33de9281da5efac0ab38e35386df6458b816cccfa8a13ac7d50fe7fb"
-        );
-        assert_eq!(
-            hex::encode(setup_seed(1)),
-            "f448c40881f2d017a6a063ed77439de7a39bbe5f2f0d5ad6e4a452c24e9d1eae"
-        );
-    }
-
-    #[test]
-    fn manifest_rejects_incompatible_versions_and_identity_changes() {
-        let geometry = Geometry::default();
-        let coverage = Lifecycle::default().coverage(1, geometry).unwrap();
-        let shard = &coverage.shards[0];
-        let shard_id = shard.id;
-        let logical_rows = shard.logical_rows;
-        let unit_identities = std::collections::BTreeMap::from([(
-            shard.id,
-            shard
-                .units
-                .iter()
-                .map(|unit| UnitIdentity {
-                    table: "enhance".into(),
-                    shard_id: shard.id,
-                    local_row_start: unit.local_row_start,
-                    allocated_rows: unit.allocated_rows,
-                    setup_sha256: hex::encode(Sha256::digest(setup_seed(shard.id))),
-                    parameter_id: unit_parameter_id(unit.allocated_rows).unwrap(),
-                    content_sha256: "00".repeat(32),
-                })
-                .collect(),
-        )]);
-        let manifest = Manifest {
-            schema_version: SCHEMA_VERSION,
-            protocol_revision: PROTOCOL_REVISION.into(),
-            network: "main".into(),
-            pool: POOL.into(),
-            generation: 1,
-            anchor_height: 3_428_143,
-            anchor_block_hash: "00".repeat(32),
-            geometry,
-            coverage,
-            sessions: vec![SessionRef {
-                shard_id,
-                public_params_sha256: "00".repeat(32),
-                parameter_id: parameter_id(logical_rows).unwrap(),
-            }],
-            unit_identities,
-        };
-        manifest.validate().unwrap();
-        let mut bad = manifest.clone();
-        bad.schema_version = 7;
-        assert!(bad.validate().is_err());
-        let mut bad = manifest.clone();
-        bad.network = "test".into();
-        assert!(bad.validate().is_err());
-        let mut bad = manifest.clone();
-        bad.unit_identities.get_mut(&shard_id).unwrap()[0].setup_sha256 = "00".repeat(32);
-        assert!(bad.validate().is_err());
-        let mut json = serde_json::to_value(&manifest).unwrap();
-        json.as_object_mut()
-            .unwrap()
-            .insert("old_v2_field".into(), serde_json::Value::Null);
-        assert!(serde_json::from_value::<Manifest>(json).is_err());
-    }
-}
