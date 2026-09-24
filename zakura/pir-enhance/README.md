@@ -25,7 +25,9 @@ birthday position with uniform rounds and randomized order. It retries an entire
 round once on session or query 429/503 and returns no partial records. Record validation
 errors are deferred until the scheduled cover traffic finishes and do not change
 round counts or transport retries. Any observed 409/410 expires the client even
-when another error is returned. Cover is off by default;
+when another error is returned or the cover future is subsequently dropped.
+Cancellation before any expiration signal leaves the accepted view usable.
+Cover is off by default;
 timing, round count, the birthday window and cross-interval intersection remain
 observable. Ordinary streaming batches retain their existing partial-result semantics.
 

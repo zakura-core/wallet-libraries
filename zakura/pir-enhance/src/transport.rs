@@ -192,6 +192,19 @@ pub struct Client {
     expired: bool,
     accepted_at: std::time::Instant,
 }
+/// Persist expiration on completion or cancellation without interrupting cover
+/// dispatch within a round after a query rejection.
+struct CoverRound<'a> {
+    client: &'a mut Client,
+    expired: bool,
+}
+
+impl Drop for CoverRound<'_> {
+    fn drop(&mut self) {
+        self.client.expired |= self.expired;
+    }
+}
+
 #[derive(Debug)]
 pub struct PositionResult {
     pub position: u64,
@@ -242,6 +255,7 @@ impl Client {
     /// and target-independent ordering. A retry repeats the entire round.
     /// Record validation errors are returned only after the scheduled traffic finishes;
     /// they never affect round counts or transport retries.
+    /// Dropping the future preserves any expiration already observed in this round.
     /// No records are returned until the complete operation succeeds.
     /// Cross-interval intersection and the public birthday range remain visible.
     pub async fn query_positions_with_cover(
@@ -298,12 +312,15 @@ impl Client {
                 let mut order: Vec<_> = domains.iter().copied().collect();
                 order.shuffle(&mut rand::rngs::OsRng);
                 let mut error = None;
-                let mut expired = false;
+                let mut round_state = CoverRound {
+                    client: self,
+                    expired: false,
+                };
                 let mut completed = Vec::new();
                 for domain in order {
                     let wanted = rows.get(&domain).and_then(|r| r.get(round));
                     let decoded = async {
-                        let session = self.session(transport, domain).await?;
+                        let session = round_state.client.session(transport, domain).await?;
                         let query = match wanted {
                             Some((row, _)) => session.prepare_row(*row)?,
                             None => session.prepare_dummy()?,
@@ -311,7 +328,7 @@ impl Client {
                         let response = transport
                             .execute(Request {
                                 method: Method::Post,
-                                url: endpoint(&self.base_url, "/v1/enhance/query")?,
+                                url: endpoint(&round_state.client.base_url, "/v1/enhance/query")?,
                                 body: query.body().to_vec(),
                                 response_limit: MAX_RESPONSE_BYTES,
                             })
@@ -328,7 +345,7 @@ impl Client {
                             }
                         }
                         Err(failure) => {
-                            expired |= matches!(failure.http_status(), Some(409 | 410));
+                            round_state.expired |= matches!(failure.http_status(), Some(409 | 410));
                             // Any nonretryable failure dominates a retryable one,
                             // independent of the domain's randomized position.
                             if error.as_ref().is_none_or(|e: &ClientError| {
@@ -339,9 +356,8 @@ impl Client {
                         }
                     }
                 }
-                // Preserve every expiration signal even when another error is returned.
-                // Defer query-status expiration until the round finishes to preserve cover.
-                self.expired |= expired;
+                // Apply observed expiration before deciding whether to retry or return.
+                drop(round_state);
                 if let Some(error) = error {
                     if attempt == 0 && matches!(error.http_status(), Some(429 | 503)) {
                         continue;
@@ -1368,6 +1384,8 @@ mod v7_cover_tests {
         delay_once: Cell<bool>,
         post_statuses: RefCell<VecDeque<Option<u16>>>,
         session_statuses: RefCell<VecDeque<Option<u16>>>,
+        pending_post: Option<usize>,
+        pending_session: Option<usize>,
     }
     impl Mock {
         fn new() -> Self {
@@ -1437,6 +1455,8 @@ mod v7_cover_tests {
                 delay_once: Cell::new(false),
                 post_statuses: RefCell::new(VecDeque::new()),
                 session_statuses: RefCell::new(VecDeque::new()),
+                pending_post: None,
+                pending_session: None,
             }
         }
         fn acceptance(&self) -> GenerationAcceptance {
@@ -1461,6 +1481,9 @@ mod v7_cover_tests {
                 serde_json::to_vec(&self.manifest).unwrap()
             } else if request.url.contains("/session/") {
                 self.setups.set(self.setups.get() + 1);
+                if self.pending_session == Some(self.setups.get()) {
+                    std::future::pending::<()>().await;
+                }
                 if let Some(Some(status)) = self.session_statuses.borrow_mut().pop_front() {
                     return Err(ClientError::HttpStatus(status));
                 }
@@ -1498,6 +1521,9 @@ mod v7_cover_tests {
             } else {
                 let binding = QueryBinding::decode(&request.body).unwrap();
                 self.posts.borrow_mut().push(binding.shard_id);
+                if self.pending_post == Some(self.posts.borrow().len()) {
+                    std::future::pending::<()>().await;
+                }
                 if let Some(Some(status)) = self.post_statuses.borrow_mut().pop_front() {
                     return Err(ClientError::HttpStatus(status));
                 }
@@ -1826,6 +1852,55 @@ mod v7_cover_tests {
                 assert_eq!(retry, [0, 1]);
                 assert_eq!(transport.setups.get(), 3);
                 assert!(!client.refresh_due());
+            }
+        });
+    }
+    #[test]
+    fn dropping_cover_preserves_observed_expiration() {
+        futures::executor::block_on(async {
+            for status in [None, Some(409), Some(410)] {
+                for pending_session in [false, true] {
+                    let mut transport = Mock::new();
+                    if pending_session {
+                        transport.pending_session = Some(2);
+                    } else {
+                        transport.pending_post = Some(2);
+                    }
+                    let mut client = PendingClient::fetch(&transport, "https://example.test")
+                        .await
+                        .unwrap()
+                        .accept(&transport.acceptance())
+                        .unwrap();
+                    transport.post_statuses.borrow_mut().push_back(status);
+                    let mut query =
+                        Box::pin(client.query_positions_with_cover(&transport, &[0], 0));
+                    let mut context =
+                        std::task::Context::from_waker(futures_util::task::noop_waker_ref());
+                    assert!(query.as_mut().poll(&mut context).is_pending());
+                    // First query completed, then the next setup/query suspended.
+                    assert_eq!(transport.setups.get(), 2);
+                    let posts = transport.posts.borrow().len();
+                    assert_eq!(posts, if pending_session { 1 } else { 2 });
+                    drop(query);
+                    assert_eq!(client.refresh_due(), status.is_some());
+                    if status.is_some() {
+                        assert!(matches!(
+                            client.query_dummy(&transport, 0).await,
+                            Err(ClientError::HttpStatus(410))
+                        ));
+                        assert_eq!(transport.setups.get(), 2);
+                        assert_eq!(transport.posts.borrow().len(), posts);
+                        let pending = PendingClient::fetch(&transport, "https://example.test")
+                            .await
+                            .unwrap();
+                        client
+                            .accept_routing(pending, &transport.acceptance())
+                            .unwrap();
+                        assert!(!client.refresh_due());
+                    }
+                    client.query_dummy(&transport, 0).await.unwrap();
+                    assert_eq!(transport.posts.borrow().len(), posts + 1);
+                }
             }
         });
     }

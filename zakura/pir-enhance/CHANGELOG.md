@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve observed v7 routing expiration when an in-flight cover future is dropped; cancellation without an expiration signal keeps the accepted view usable.
+
 - Require fresh wallet acceptance for v7 session rebinding; keep in-flight batches valid past the routing refresh cadence.
 - Keep cover traffic scheduling independent of record validation errors, and preserve every observed 409/410 expiration signal across mixed failures.
 - Apply reduced session cache limits immediately when accepting routing, evicting least-recently-used setups.
