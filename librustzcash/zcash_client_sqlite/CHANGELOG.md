@@ -26,6 +26,11 @@ PIR storage integration release using `zakura-client-backend 0.1.0-rc6`.
 - Create all six Ironwood Enhance PIR tables and expose a history-only PIR expiry
   through `v_transactions` in one consolidated migration.
 
+### Fixed
+- Upgrade existing rc5 wallets with a forward migration for Ironwood compact
+  encryption fields, preserving notes, spends, and locks. Older notes retain
+  nullable context until their compact blocks are rescanned.
+
 ### Changed
 - Require each PIR-enabled wallet handle to configure `EnhancementMode` before
   enumerating transaction or PIR requests. An unconfigured handle returns

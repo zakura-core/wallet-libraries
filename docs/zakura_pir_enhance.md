@@ -1,6 +1,6 @@
-# Ironwood enhancement through PIR v5
+# Ironwood enhancement through PIR v7
 
-`zakura-pir-enhance` implements the wallet side of suffix-only Ironwood enhancement for **mainnet only**. The wire schema is **11** and revision is `ironwood-enhance-pir-v5`. A matching server is required; server changes and deployment are outside this repository change.
+`zakura-pir-enhance` implements the wallet side of suffix-only Ironwood enhancement for **mainnet only**. The wire schema is **11** and revision is `ironwood-enhance-pir-v7`. A matching server is required; server changes and deployment are outside this repository change.
 
 Records are **653 bytes**; 33 occupy each **21,549-byte row**:
 
@@ -13,9 +13,9 @@ Records are **653 bytes**; 33 occupy each **21,549-byte row**:
 | Expiry height | 641 | 4 |
 | Fee | 645 | 8 |
 
-The wallet persists the ephemeral key and 52-byte ciphertext prefix from compact scanning on `ironwood_received_notes`, and stitches the prefix and returned suffix before decryption. The original Ironwood table definition is rewritten because there are no existing clients to migrate. Development databases initialized with the old definition must be recreated separately. There is no automatic deletion, upgrade migration, or legacy backfill. Notes inserted without compact context may omit both fields; queued compact-scanned incoming work requires both.
+The wallet persists the ephemeral key and 52-byte ciphertext prefix from compact scanning on `ironwood_received_notes`, and stitches the prefix and returned suffix before decryption. A forward SQLite migration adds nullable compact encryption fields to existing rc5 wallets while preserving notes, spends, and locks. Older notes acquire this context when their compact blocks are rescanned; migration alone does not create private enhancement work. Notes inserted without compact context may omit both fields; queued compact-scanned incoming work requires both.
 
-The service publishes a `Manifest` at `GET /v1/enhance/init`. It contains the chain anchor, canonical coverage and loan geometry, shard session references, and unit identities. Shard query domains remain 4,096, 8,192, 16,384, or 32,768 rows. Mutable units remain 2K, 4K, or 8K rows. The client validates geometry, coverage, and loan return rules before using the manifest. It uses P16Q46 parameters with ipir-sp revision `225972648cc2982abfac66ba5b7a3930b223051a`. Parameters and their identities reflect the new row size. Schema-10/v4 manifests are rejected.
+The service publishes a `Manifest` at `GET /v1/enhance/init`. It contains the chain anchor, fixed query domains, canonical routing, recovery epochs, and immutable session references. Shard query domains are 4,096, 8,192, 16,384, or 32,768 rows. The client validates domain geometry, coverage, routing, and session identities before use. It uses P16Q48 parameters with the published `ipir-sp =0.1.0-rc.3` crate. Earlier v5/q46 and v6/q48 manifests and sessions are rejected; schema-11 records and the deterministic public setup domain are unchanged.
 
 ## Wallet acceptance and resources
 
@@ -36,7 +36,7 @@ let accepted = match acceptance(db, pending.manifest(), consensus_params, limits
 let mut client = pending.accept(&accepted)?;
 ```
 
-The application chooses limits for its least capable device. `max_shard_rows` bounds each shard setup independently of total chain records; `max_cached_shards` bounds retained setups. Query methods take `&mut self`, allowing one active batch per client. An idle setup is evicted before its replacement is built. Sessions load lazily from `GET /v1/enhance/sessions/{generation}/{shard_id}`. Before setup, the client checks generation, shard, P16Q46 parameters, exact public material length, SHA-256 digest, and the manifest reference. The public setup seed uses the server's v4 mainnet domain and shard ID. Query and response headers contain `EPQ4`, generation and shard ID as little-endian u64 values, and the first eight bytes of SHA-256 of decoded public material. Responses require the exact binding and length before decoding.
+The application chooses limits for its least capable device. `max_shard_rows` bounds each shard setup independently of total chain records; `max_cached_shards` bounds retained setups. Query methods take `&mut self`, allowing one active batch per client. An idle setup is evicted before its replacement is built. Sessions load lazily from `GET /v1/enhance/session/{session_id}`. Before setup, the client checks P16Q48 parameters, exact public material length, digest, and immutable session identity against the accepted manifest. The public setup seed retains the server's v4 mainnet domain and shard ID. The 116-byte `EPQ7` query and response header binds routing revision, domain, packing material, recovery epoch, session ID, a fresh request ID, and the accepted anchor. Responses require the exact binding and length before decoding.
 
 ## Batches and expiry
 
@@ -63,7 +63,7 @@ Batch application requires one txid but permits multiple rows. All live actions 
 
 Transactions can span arbitrarily many rows, and separate transaction groups can query the same row repeatedly. The example's atomicity is per row batch, not across all rows of a transaction. Applications wanting cross-transaction row coalescing can retain `query_batch`, then group decoded results for wallet application. Batching does not hide observable query volume, shard selection, or timing.
 
-On HTTP 410, discard the expired client, stop its batch, fetch a fresh manifest, and repeat wallet acceptance before any new query. Reschedule unfinished durable Query work from the wallet database; do not relabel old responses with the new generation. For 429/503, use bounded application retries and preserve the work. Transport or manifest validation errors must not trigger ordinary LWD fallback. Retained server sessions permit an older accepted generation to continue until expiry.
+On HTTP 409 or 410, discard the expired client, stop its batch, fetch a fresh manifest, and repeat wallet acceptance before any new query. Reschedule unfinished durable Query work from the wallet database; do not relabel old responses with the new generation. For 429/503, use bounded application retries and preserve the work. Transport or manifest validation errors must not trigger ordinary LWD fallback. Refresh routing at sync start and before new work whenever `refresh_due()` is true (30 seconds). In-flight operations keep their accepted view until completion or server rejection. Independently accept each refreshed anchor before calling `accept_routing`; unchanged immutable sessions can be reused, but a deep recovery epoch change invalidates them.
 
 ## Wallet state and application integration
 
@@ -71,4 +71,6 @@ Every SQLite handle must be configured in Standard or PrivateIronwood mode. The 
 
 For privately routed transactions, `v_transactions.expiry_height` displays the service's expiry assertion when the wallet has no authoritative expiry. `transactions.expiry_height` remains unchanged until raw transaction data supplies it; spendability and `expired_unmined` continue to use that authoritative field. Conflicting expiry assertions from different PIR records are rejected without completing the pending work.
 
-Vizor PR #601 must fetch a pending v5 manifest, pass it through synchronous wallet acceptance, choose per-shard setup and cache limits, use lazy shard sessions, and handle 410 by stopping the batch and repeating wallet acceptance before rescheduling unfinished durable work. It must schedule bounded 429/503 retries and retain original local request identities. Full Vizor application integration requires separate verification in that PR.
+Application integration must configure each wallet handle, accept manifests against locally scanned state, choose per-shard setup and cache limits, and reschedule durable work after routing refresh or expiry. Preserve captured request identities and use bounded application retries for 429/503.
+
+Optional `query_positions_with_cover` sends uniform rounds across every domain since a supplied birthday position, in randomized order. It returns no partial records and retries a whole round once on 429/503. Cover is off by default; timing, round count, the birthday window, and cross-interval intersection remain observable.

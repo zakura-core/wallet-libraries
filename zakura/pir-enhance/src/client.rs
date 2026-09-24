@@ -75,7 +75,7 @@ impl GenerationAcceptance {
         manifest.validate().map_err(ClientError::Generation)?;
         if self.network != "main" || manifest.network != self.network {
             return Err(ClientError::Generation(
-                "v6 is only defined for mainnet".into(),
+                "v7 is only defined for mainnet".into(),
             ));
         }
         if manifest.anchor_height < self.activation_height {

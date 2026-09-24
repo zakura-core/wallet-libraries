@@ -66,11 +66,6 @@ impl RusqliteMigration for Migration {
                     REFERENCES addresses(id) ON DELETE CASCADE,
                 witness_stabilized INTEGER NOT NULL DEFAULT 0,
                 note_version INTEGER NOT NULL,
-                ephemeral_key BLOB,
-                compact_ciphertext BLOB,
-                CHECK ((ephemeral_key IS NULL AND compact_ciphertext IS NULL) OR
-                       (ephemeral_key IS NOT NULL AND compact_ciphertext IS NOT NULL AND
-                        length(ephemeral_key) = 32 AND length(compact_ciphertext) = 52)),
                 UNIQUE (transaction_id, action_index)
             );
             CREATE INDEX idx_ironwood_received_notes_account ON ironwood_received_notes (
