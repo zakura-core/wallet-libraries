@@ -117,40 +117,32 @@ fn shard_setup_seed_is_pinned() {
 fn malformed_response_bindings_and_length_are_rejected() {
     let fixture = fixture();
     let session =
-        QuerySession::from_session(&fixture.manifest, fixture.session, &acceptance()).unwrap();
+        QuerySession::from_session(&fixture.manifest, fixture.session.clone(), &acceptance())
+            .unwrap();
     let (query, _) = session.prepare_position(33).unwrap();
-    let mut binding = QueryBinding::decode(query.body()).unwrap();
+    let binding = QueryBinding::decode(query.body()).unwrap();
     let response = binding.encode();
     assert!(session.decode(query, &response).is_err()); // Exact packed-body length.
 
-    for altered in 0..4 {
+    let params = &fixture.session.params;
+    let response_len = HEADER_BYTES
+        + params.db_cols / params.poly_len
+            * ipir_sp::modulus_switch::response_body_len(params.poly_len, params.q_prime_1);
+    for altered in 0..8 {
         let (query, _) = session.prepare_position(33).unwrap();
-        binding = QueryBinding::decode(query.body()).unwrap();
-        let mut response = match altered {
-            0 => {
-                let mut bytes = binding.encode();
-                bytes[0] = b'X';
-                bytes
-            }
-            1 => {
-                binding.generation += 1;
-                binding.encode()
-            }
-            2 => {
-                binding.shard_id += 1;
-                binding.encode()
-            }
-            _ => {
-                binding.epoch[0] ^= 1;
-                binding.encode()
-            }
-        };
-        response.extend([0; 4]);
+        let mut response = query.body()[..HEADER_BYTES].to_vec();
+        response.resize(response_len, 0);
+        // Magic and every binding field, with a valid body length in every case.
+        response[[0, 4, 12, 20, 28, 36, 68, 84][altered]] ^= 1;
         assert!(
             session.decode(query, &response).is_err(),
             "altered {altered}"
         );
     }
+    let (query, _) = session.prepare_position(33).unwrap();
+    let mut response = query.body()[..HEADER_BYTES].to_vec();
+    response.resize(response_len, 0);
+    assert!(session.decode(query, &response).is_ok());
 }
 
 #[test]
@@ -196,4 +188,37 @@ fn q48_rejects_other_query_precisions_even_with_v6_manifest() {
             QuerySession::from_session(&current.manifest, current.session, &acceptance()).is_err()
         );
     }
+}
+
+#[test]
+fn rebinding_requires_fresh_wallet_acceptance_and_preserves_state_on_failure() {
+    let mut fixture = fixture();
+    let mut session =
+        QuerySession::from_session(&fixture.manifest, fixture.session, &acceptance()).unwrap();
+    let id = session.session_id();
+    let old_generation = session.manifest_generation();
+    fixture.manifest.generation += 1;
+    fixture.manifest.anchor_height += 1;
+    fixture.manifest.anchor_block_hash = "43".repeat(32);
+    assert!(session.rebind(&fixture.manifest, &acceptance()).is_err());
+    assert_eq!(session.manifest_generation(), old_generation);
+    let (query, _) = session.prepare_position(0).unwrap();
+    assert_eq!(
+        QueryBinding::decode(query.body()).unwrap().anchor_hash,
+        [0x42; 32]
+    );
+    let mut accepted = acceptance();
+    accepted.anchor.height += 1;
+    accepted.anchor.block_hash = [0x43; 32];
+    session.rebind(&fixture.manifest, &accepted).unwrap();
+    assert_eq!(session.session_id(), id);
+    assert_eq!(session.manifest_generation(), fixture.manifest.generation);
+    let (query, _) = session.prepare_position(0).unwrap();
+    assert_eq!(
+        QueryBinding::decode(query.body()).unwrap().anchor_hash,
+        [0x43; 32]
+    );
+    fixture.manifest.unit_identities.get_mut(&0).unwrap()[0].content_sha256 = "ab".repeat(32);
+    assert!(session.rebind(&fixture.manifest, &accepted).is_err());
+    assert_eq!(session.session_id(), id);
 }

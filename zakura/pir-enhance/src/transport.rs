@@ -162,7 +162,16 @@ fn make_room<T>(
     if limit == 0 {
         return Err(ClientError::Generation("zero shard cache limit".into()));
     }
-    while sessions.len() >= limit {
+    trim_cache(sessions, order, limit - 1)
+}
+
+/// Enforce an accepted cache limit without reserving a slot for a new setup.
+fn trim_cache<T>(
+    sessions: &mut BTreeMap<u64, Arc<T>>,
+    order: &mut VecDeque<u64>,
+    limit: usize,
+) -> Result<(), ClientError> {
+    while sessions.len() > limit {
         let id = order
             .pop_front()
             .ok_or_else(|| ClientError::Generation("invalid shard cache state".into()))?;
@@ -206,11 +215,16 @@ impl Client {
             ));
         }
         self.cache.sessions.retain(|_, session| {
-            Arc::get_mut(session).is_some_and(|s| s.rebind(&pending.manifest).is_ok())
+            Arc::get_mut(session).is_some_and(|s| s.rebind(&pending.manifest, acceptance).is_ok())
         });
         self.cache
             .order
             .retain(|id| self.cache.sessions.contains_key(id));
+        trim_cache(
+            &mut self.cache.sessions,
+            &mut self.cache.order,
+            acceptance.limits.max_cached_shards,
+        )?;
         self.manifest = pending.manifest;
         self.acceptance = acceptance.clone();
         self.expired = false;
@@ -218,6 +232,7 @@ impl Client {
         Ok(())
     }
 
+    /// Refresh before starting new work; an in-flight operation retains its accepted view.
     pub fn refresh_due(&self) -> bool {
         self.expired || self.accepted_at.elapsed() >= std::time::Duration::from_secs(30)
     }
@@ -225,6 +240,8 @@ impl Client {
     /// Opt-in birthday cover policy. One interval is one accepted routing view.
     /// Every round visits every domain since the birthday with fresh randomness
     /// and target-independent ordering. A retry repeats the entire round.
+    /// Record validation errors are returned only after the scheduled traffic finishes;
+    /// they never affect round counts or transport retries.
     /// No records are returned until the complete operation succeeds.
     /// Cross-interval intersection and the public birthday range remain visible.
     pub async fn query_positions_with_cover(
@@ -275,45 +292,43 @@ impl Client {
             .map(|(id, rows)| (id, rows.into_iter().collect()))
             .collect();
         let rounds = rows.values().map(Vec::len).max().unwrap_or(0);
-        let mut result = vec![None; positions.len()];
+        let mut result: Vec<_> = (0..positions.len()).map(|_| None).collect();
         for round in 0..rounds {
-            if self.refresh_due() {
-                return Err(ClientError::HttpStatus(409));
-            }
             for attempt in 0..2 {
                 let mut order: Vec<_> = domains.iter().copied().collect();
                 order.shuffle(&mut rand::rngs::OsRng);
                 let mut error = None;
+                let mut expired = false;
                 let mut completed = Vec::new();
                 for domain in order {
-                    let session = self.session(transport, domain).await?;
                     let wanted = rows.get(&domain).and_then(|r| r.get(round));
-                    let query = match wanted {
-                        Some((row, _)) => session.prepare_row(*row)?,
-                        None => session.prepare_dummy()?,
-                    };
-                    let response = transport
-                        .execute(Request {
-                            method: Method::Post,
-                            url: endpoint(&self.base_url, "/v1/enhance/query")?,
-                            body: query.body().to_vec(),
-                            response_limit: MAX_RESPONSE_BYTES,
-                        })
-                        .await;
-                    let decoded =
-                        response.and_then(|response| session.decode(query, response.as_ref()));
+                    let decoded = async {
+                        let session = self.session(transport, domain).await?;
+                        let query = match wanted {
+                            Some((row, _)) => session.prepare_row(*row)?,
+                            None => session.prepare_dummy()?,
+                        };
+                        let response = transport
+                            .execute(Request {
+                                method: Method::Post,
+                                url: endpoint(&self.base_url, "/v1/enhance/query")?,
+                                body: query.body().to_vec(),
+                                response_limit: MAX_RESPONSE_BYTES,
+                            })
+                            .await?;
+                        session.decode(query, response.as_ref())
+                    }
+                    .await;
                     match decoded {
                         Ok(row) => {
                             if let Some((_, slots)) = wanted {
                                 for (index, slot) in slots {
-                                    match record_in_row(&row, *slot) {
-                                        Ok(record) => completed.push((*index, record)),
-                                        Err(failure) => error = Some(failure),
-                                    }
+                                    completed.push((*index, record_in_row(&row, *slot)));
                                 }
                             }
                         }
                         Err(failure) => {
+                            expired |= matches!(failure.http_status(), Some(409 | 410));
                             // Any nonretryable failure dominates a retryable one,
                             // independent of the domain's randomized position.
                             if error.as_ref().is_none_or(|e: &ClientError| {
@@ -324,6 +339,9 @@ impl Client {
                         }
                     }
                 }
+                // Preserve every expiration signal even when another error is returned.
+                // Defer query-status expiration until the round finishes to preserve cover.
+                self.expired |= expired;
                 if let Some(error) = error {
                     if attempt == 0 && matches!(error.http_status(), Some(429 | 503)) {
                         continue;
@@ -339,7 +357,9 @@ impl Client {
         }
         result
             .into_iter()
-            .map(|r| r.ok_or_else(|| ClientError::Response("missing covered record".into())))
+            .map(|r| {
+                r.unwrap_or_else(|| Err(ClientError::Response("missing covered record".into())))
+            })
             .collect()
     }
 
@@ -353,8 +373,6 @@ impl Client {
     fn check_live(&self) -> Result<(), ClientError> {
         if self.expired {
             Err(ClientError::HttpStatus(410))
-        } else if self.refresh_due() {
-            Err(ClientError::HttpStatus(409))
         } else {
             Ok(())
         }
@@ -435,6 +453,9 @@ impl Client {
         transport: &impl Transport,
         shard_id: u64,
     ) -> Result<(), ClientError> {
+        if !self.expired && self.refresh_due() {
+            return Err(ClientError::HttpStatus(409));
+        }
         let session = self.session(transport, shard_id).await?;
         let query = session.prepare_dummy()?;
         self.check_live()?;
@@ -1342,6 +1363,11 @@ mod v7_cover_tests {
         posts: RefCell<Vec<u64>>,
         setups: Cell<usize>,
         retry: Cell<bool>,
+        retry_domain: u64,
+        corrupt: bool,
+        delay_once: Cell<bool>,
+        post_statuses: RefCell<VecDeque<Option<u16>>>,
+        session_statuses: RefCell<VecDeque<Option<u16>>>,
     }
     impl Mock {
         fn new() -> Self {
@@ -1406,6 +1432,11 @@ mod v7_cover_tests {
                 posts: RefCell::new(Vec::new()),
                 setups: Cell::new(0),
                 retry: Cell::new(false),
+                retry_domain: 1,
+                corrupt: false,
+                delay_once: Cell::new(false),
+                post_statuses: RefCell::new(VecDeque::new()),
+                session_statuses: RefCell::new(VecDeque::new()),
             }
         }
         fn acceptance(&self) -> GenerationAcceptance {
@@ -1430,6 +1461,9 @@ mod v7_cover_tests {
                 serde_json::to_vec(&self.manifest).unwrap()
             } else if request.url.contains("/session/") {
                 self.setups.set(self.setups.get() + 1);
+                if let Some(Some(status)) = self.session_statuses.borrow_mut().pop_front() {
+                    return Err(ClientError::HttpStatus(status));
+                }
                 let shard = self
                     .manifest
                     .coverage
@@ -1464,7 +1498,13 @@ mod v7_cover_tests {
             } else {
                 let binding = QueryBinding::decode(&request.body).unwrap();
                 self.posts.borrow_mut().push(binding.shard_id);
-                if binding.shard_id == 1 && self.retry.replace(false) {
+                if let Some(Some(status)) = self.post_statuses.borrow_mut().pop_front() {
+                    return Err(ClientError::HttpStatus(status));
+                }
+                if self.delay_once.replace(false) {
+                    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+                }
+                if binding.shard_id == self.retry_domain && self.retry.replace(false) {
                     return Err(ClientError::HttpStatus(429));
                 }
                 let shard = &self.manifest.coverage.shards[binding.shard_id as usize];
@@ -1479,6 +1519,9 @@ mod v7_cover_tests {
                             ),
                     0,
                 );
+                if self.corrupt && binding.shard_id == 1 {
+                    response[HEADER_BYTES..].fill(0x55);
+                }
                 response
             };
             let mut body = request.response_body();
@@ -1541,6 +1584,249 @@ mod v7_cover_tests {
                 .await
                 .unwrap();
             assert_eq!(transport.setups.get(), 2);
+        });
+    }
+    #[test]
+    fn record_errors_do_not_change_cover_rounds_or_retries() {
+        futures::executor::block_on(async {
+            for real in [false, true] {
+                for retry in [false, true] {
+                    let mut transport = Mock::new();
+                    transport.corrupt = true;
+                    transport.retry_domain = 0;
+                    transport.retry.set(retry);
+                    let mut client = PendingClient::fetch(&transport, "https://example.test")
+                        .await
+                        .unwrap()
+                        .accept(&transport.acceptance())
+                        .unwrap();
+                    // Domain 0 sets two rounds in both cases. Domain 1 is real or dummy.
+                    let positions = if real {
+                        vec![0, 33, 32768 * 33]
+                    } else {
+                        vec![0, 33]
+                    };
+                    let result = client
+                        .query_positions_with_cover(&transport, &positions, 0)
+                        .await;
+                    assert_eq!(result.is_err(), real);
+                    let posts = transport.posts.borrow();
+                    assert_eq!(posts.len(), if retry { 6 } else { 4 });
+                    for round in posts.chunks_exact(2) {
+                        let mut round = round.to_vec();
+                        round.sort();
+                        assert_eq!(round, [0, 1]);
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn cover_finishes_after_refresh_becomes_due() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let transport = Mock::new();
+                transport.delay_once.set(true);
+                let mut client = PendingClient::fetch(&transport, "https://example.test")
+                    .await
+                    .unwrap()
+                    .accept(&transport.acceptance())
+                    .unwrap();
+                assert_eq!(
+                    client
+                        .query_positions_with_cover(&transport, &[0, 33], 0)
+                        .await
+                        .unwrap()
+                        .len(),
+                    2
+                );
+                assert_eq!(transport.posts.borrow().len(), 4);
+                assert!(client.refresh_due());
+                assert!(matches!(
+                    client.query_positions_with_cover(&transport, &[0], 0).await,
+                    Err(ClientError::HttpStatus(409))
+                ));
+                assert!(client.query_batch(&transport, [0]).is_err());
+                assert!(matches!(
+                    client.query_dummy(&transport, 0).await,
+                    Err(ClientError::HttpStatus(409))
+                ));
+                assert_eq!(transport.posts.borrow().len(), 4);
+            });
+    }
+
+    #[test]
+    fn streaming_batch_finishes_after_refresh_becomes_due() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                use futures_util::StreamExt;
+                let transport = Mock::new();
+                transport.delay_once.set(true);
+                let mut client = PendingClient::fetch(&transport, "https://example.test")
+                    .await
+                    .unwrap()
+                    .accept(&transport.acceptance())
+                    .unwrap();
+                let results: Vec<_> = client
+                    .query_batch(&transport, [0, 33])
+                    .unwrap()
+                    .collect()
+                    .await;
+                assert_eq!(results.len(), 2);
+                assert!(results.iter().all(|r| r.record.is_ok()));
+                assert!(client.refresh_due());
+                assert_eq!(transport.posts.borrow().len(), 2);
+            });
+    }
+    #[test]
+    fn mixed_cover_errors_preserve_expiration_in_either_order() {
+        futures::executor::block_on(async {
+            for status in [409, 410] {
+                for statuses in [[400, status], [status, 400]] {
+                    let transport = Mock::new();
+                    let mut client = PendingClient::fetch(&transport, "https://example.test")
+                        .await
+                        .unwrap()
+                        .accept(&transport.acceptance())
+                        .unwrap();
+                    transport
+                        .post_statuses
+                        .borrow_mut()
+                        .extend(statuses.map(Some));
+                    let failure = client
+                        .query_positions_with_cover(&transport, &[0], 0)
+                        .await
+                        .unwrap_err();
+                    assert_eq!(failure.http_status(), Some(statuses[0]));
+                    assert_eq!(transport.posts.borrow().len(), 2);
+                    assert!(client.refresh_due(), "expiration hidden by {statuses:?}");
+                    assert!(matches!(
+                        client.query_dummy(&transport, 0).await,
+                        Err(ClientError::HttpStatus(410))
+                    ));
+                    assert_eq!(transport.posts.borrow().len(), 2);
+                    // Fresh acceptance clears expiration and retains valid setups.
+                    let pending = PendingClient::fetch(&transport, "https://example.test")
+                        .await
+                        .unwrap();
+                    client
+                        .accept_routing(pending, &transport.acceptance())
+                        .unwrap();
+                    assert!(!client.refresh_due());
+                    client.query_dummy(&transport, 0).await.unwrap();
+                    assert_eq!(transport.setups.get(), 2);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn cover_expiration_survives_a_later_session_failure() {
+        futures::executor::block_on(async {
+            for status in [409, 410] {
+                let transport = Mock::new();
+                let mut client = PendingClient::fetch(&transport, "https://example.test")
+                    .await
+                    .unwrap()
+                    .accept(&transport.acceptance())
+                    .unwrap();
+                transport.post_statuses.borrow_mut().push_back(Some(status));
+                transport
+                    .session_statuses
+                    .borrow_mut()
+                    .extend([None, Some(400)]);
+                let failure = client
+                    .query_positions_with_cover(&transport, &[0], 0)
+                    .await
+                    .unwrap_err();
+                assert_eq!(failure.http_status(), Some(status));
+                assert!(client.refresh_due());
+                assert_eq!(transport.posts.borrow().len(), 1);
+                assert_eq!(transport.setups.get(), 2);
+            }
+        });
+    }
+
+    #[test]
+    fn routing_acceptance_enforces_reduced_cache_limit() {
+        futures::executor::block_on(async {
+            let transport = Mock::new();
+            let mut accepted = transport.acceptance();
+            let mut client = PendingClient::fetch(&transport, "https://example.test")
+                .await
+                .unwrap()
+                .accept(&accepted)
+                .unwrap();
+            for id in [0, 1, 0] {
+                client.query_dummy(&transport, id).await.unwrap();
+            }
+            assert_eq!(transport.setups.get(), 2);
+            // Invalid limits must leave the existing cache untouched.
+            accepted.limits.max_cached_shards = 0;
+            let pending = PendingClient::fetch(&transport, "https://example.test")
+                .await
+                .unwrap();
+            assert!(client.accept_routing(pending, &accepted).is_err());
+            assert_eq!(client.cache.sessions.len(), 2);
+            // The exact limit keeps all material and the existing LRU ordering.
+            accepted.limits.max_cached_shards = 2;
+            let pending = PendingClient::fetch(&transport, "https://example.test")
+                .await
+                .unwrap();
+            client.accept_routing(pending, &accepted).unwrap();
+            assert_eq!(client.cache.sessions.len(), 2);
+            accepted.limits.max_cached_shards = 1;
+            let pending = PendingClient::fetch(&transport, "https://example.test")
+                .await
+                .unwrap();
+            client.accept_routing(pending, &accepted).unwrap();
+            assert_eq!(client.cache.sessions.len(), 1);
+            assert_eq!(client.cache.order, VecDeque::from([0]));
+            client.query_dummy(&transport, 0).await.unwrap();
+            assert_eq!(transport.setups.get(), 2);
+            client.query_dummy(&transport, 1).await.unwrap();
+            assert_eq!(transport.setups.get(), 3);
+            assert_eq!(client.cache.sessions.len(), 1);
+            assert_eq!(client.cache.order, VecDeque::from([1]));
+        });
+    }
+    #[test]
+    fn cover_session_overload_retries_the_round() {
+        futures::executor::block_on(async {
+            for status in [429, 503] {
+                let transport = Mock::new();
+                let mut client = PendingClient::fetch(&transport, "https://example.test")
+                    .await
+                    .unwrap()
+                    .accept(&transport.acceptance())
+                    .unwrap();
+                transport
+                    .session_statuses
+                    .borrow_mut()
+                    .extend([None, Some(status)]);
+                assert_eq!(
+                    client
+                        .query_positions_with_cover(&transport, &[0], 0)
+                        .await
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                let posts = transport.posts.borrow();
+                assert_eq!(posts.len(), 3);
+                let mut retry = posts[1..].to_vec();
+                retry.sort();
+                assert_eq!(retry, [0, 1]);
+                assert_eq!(transport.setups.get(), 3);
+                assert!(!client.refresh_due());
+            }
         });
     }
 }

@@ -183,9 +183,15 @@ impl QuerySession {
         self.binding.session_id
     }
 
-    /// Only the routing binding changes; the content-bound PIR material is reused.
-    pub fn rebind(&mut self, manifest: &Manifest) -> Result<(), ClientError> {
-        manifest.validate().map_err(ClientError::Generation)?;
+    /// Reuse content-bound PIR material after independently accepting the new anchor.
+    /// Returns an error without changing the session if wallet acceptance fails or
+    /// the manifest requires different session material.
+    pub fn rebind(
+        &mut self,
+        manifest: &Manifest,
+        acceptance: &GenerationAcceptance,
+    ) -> Result<(), ClientError> {
+        acceptance.validate(manifest)?;
         if manifest
             .session_id(self.shard.id)
             .map_err(ClientError::Generation)?

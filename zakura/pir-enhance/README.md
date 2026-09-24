@@ -10,16 +10,22 @@ On `ClientError::HttpStatus(409)` or `ClientError::HttpStatus(410)`, stop the ba
 
 The built-in Reqwest transport requires HTTPS, rejects redirects, and has a 120-second deadline. Custom transports must stream into `Request::response_body()`, reject non-success status with `ClientError::HttpStatus(code)`, and honor cancellation and deadlines. Plaintext positions, rows, slots, txids, and action indexes stay out of requests and URLs; domain and routing revision are public.
 
-Refresh routing at sync start and whenever `refresh_due()` is true (30 seconds).
+Refresh routing at sync start and before starting new work whenever `refresh_due()`
+is true (30 seconds). In-flight operations keep their accepted routing view until
+completion or a server rejection; the refresh cadence is not a batch deadline.
 Fetch a new pending manifest, independently accept its anchor, then call
 `accept_routing` to reuse unchanged session material. The HTTPS wrapper exposes
 `fetch_routing`, `accept_routing`, and `refresh_due`. A routing or placement change
 does not by itself invalidate immutable session material. A deep recovery epoch
-change does. Every request has fresh randomness and a fresh request ID.
+change does. Accepting a lower cache limit immediately evicts the least-recently-used
+retained setups. Every request has fresh randomness and a fresh request ID.
 
 Optional `query_positions_with_cover` queries every domain since a supplied
 birthday position with uniform rounds and randomized order. It retries an entire
-round once on 429/503 and returns no partial records. Cover is off by default;
+round once on session or query 429/503 and returns no partial records. Record validation
+errors are deferred until the scheduled cover traffic finishes and do not change
+round counts or transport retries. Any observed 409/410 expires the client even
+when another error is returned. Cover is off by default;
 timing, round count, the birthday window and cross-interval intersection remain
 observable. Ordinary streaming batches retain their existing partial-result semantics.
 
@@ -29,3 +35,10 @@ sessions are rejected. Schema-11 records and the deterministic public setup doma
 are unchanged. The v7 `EPQ7` header is 116 bytes and binds routing, domain, packing
 material, recovery epoch, session ID, request ID and accepted anchor. Noise
 qualification remains separate from wallet acceptance and note authentication.
+
+## Integration changes
+
+`QuerySession::rebind` now requires a `GenerationAcceptance` argument, just like
+initial session construction. Recreate it from locally scanned state for the new
+manifest; a session ID match alone does not accept a new chain anchor. The
+higher-level `Client::accept_routing` API already takes this argument.
