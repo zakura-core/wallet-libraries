@@ -22,6 +22,11 @@ use super::{
     retire_enhancement_if_complete,
 };
 
+struct ReconstructedCandidates {
+    outgoing: Vec<IronwoodEnhanceCandidate<AccountUuid>>,
+    received_context: Vec<(u32, [u8; 32], [u8; 52])>,
+}
+
 /// Reopens outgoing discovery in the same transaction that persists the spend link.
 /// This is mode-independent; Standard exposes the restored request, PrivateIronwood withholds it.
 pub(crate) fn queue(conn: &Connection, tx_ref: TxRef) -> Result<(), SqliteClientError> {
@@ -199,13 +204,16 @@ pub(crate) fn rebuild(
 
     let mut metadata_plans = vec![];
     let mut metadata_rebuilt = 0;
+    let mut received_context_plans = vec![];
     let mut plans = vec![];
     let mut unresolved = vec![];
     let mut suspend = vec![];
     for (tx_ref, txid, index, needs_outgoing) in jobs {
         if let Some((position, compact_tx)) = transactions.get(txid.as_slice()) {
             // Validate geometry, locators and received positions even for metadata-only jobs.
-            if candidates(conn, tx_ref, index, *position, compact_tx, &[])?.is_some() {
+            if let Some(reconstructed) =
+                candidates(conn, tx_ref, index, *position, compact_tx, &[])?
+            {
                 for index in 0..compact_tx.ironwood_actions.len() {
                     if outgoing_position_owned_by_other(
                         conn,
@@ -235,6 +243,7 @@ pub(crate) fn rebuild(
                         is_ironwood_pir_candidate(compact_tx),
                     ));
                     if !needs_outgoing {
+                        received_context_plans.push((tx_ref, reconstructed.received_context));
                         metadata_rebuilt += 1;
                         continue;
                     }
@@ -265,12 +274,12 @@ pub(crate) fn rebuild(
             suspend.push(tx_ref);
             Some(NoFundingAccounts)
         } else if let Some((position, compact_tx)) = transactions.get(txid.as_slice()) {
-            if let Some(candidates) =
+            if let Some(reconstructed) =
                 candidates(conn, tx_ref, index, *position, compact_tx, &funding)?
             {
                 // Check ownership before mixed transactions discard their candidates.
                 // A locally contradictory reconstruction must not change routing to LWD.
-                for candidate in &candidates {
+                for candidate in &reconstructed.outgoing {
                     if outgoing_position_owned_by_other(
                         conn,
                         tx_ref,
@@ -283,11 +292,12 @@ pub(crate) fn rebuild(
                     tx_ref,
                     if is_ironwood_pir_candidate(compact_tx) {
                         IronwoodEnhancementPlan::Eligible {
-                            outgoing: candidates,
+                            outgoing: reconstructed.outgoing,
                         }
                     } else {
                         IronwoodEnhancementPlan::Ineligible
                     },
+                    reconstructed.received_context,
                 ));
                 None
             } else {
@@ -314,13 +324,17 @@ pub(crate) fn rebuild(
             super::require_lwd(conn, tx_ref)?;
         }
     }
+    for (tx_ref, received_context) in received_context_plans {
+        restore_received_context(conn, tx_ref, received_context)?;
+    }
     for tx_ref in suspend {
         conn.execute(
             "UPDATE ironwood_enhance_discovery_queue SET suspended = 1 WHERE transaction_id = :tx",
             named_params![":tx": tx_ref.0],
         )?;
     }
-    for (tx_ref, plan) in plans {
+    for (tx_ref, plan, received_context) in plans {
+        restore_received_context(conn, tx_ref, received_context)?;
         queue_transaction(conn, tx_ref, &plan)?;
         conn.execute(
             "DELETE FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx",
@@ -338,6 +352,28 @@ pub(crate) fn rebuild(
     })
 }
 
+fn restore_received_context(
+    conn: &Connection,
+    tx_ref: TxRef,
+    received_context: Vec<(u32, [u8; 32], [u8; 52])>,
+) -> Result<(), SqliteClientError> {
+    for (index, epk, ciphertext) in received_context {
+        conn.execute(
+            "UPDATE ironwood_received_notes
+             SET ephemeral_key = :epk, compact_ciphertext = :ciphertext
+             WHERE transaction_id = :tx AND action_index = :index
+               AND ephemeral_key IS NULL AND compact_ciphertext IS NULL",
+            named_params![
+                ":epk": epk,
+                ":ciphertext": ciphertext,
+                ":tx": tx_ref.0,
+                ":index": index,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 /// Returns None for transaction-local context mismatches. Database errors remain errors;
 /// neither case is permission to declare the transaction complete or fetch it publicly.
 fn candidates(
@@ -347,7 +383,7 @@ fn candidates(
     position: u32,
     compact_tx: &CompactTx,
     funding: &[(AccountUuid, [u8; 32])],
-) -> Result<Option<Vec<IronwoodEnhanceCandidate<AccountUuid>>>, SqliteClientError> {
+) -> Result<Option<ReconstructedCandidates>, SqliteClientError> {
     if expected_index != compact_tx.index {
         return Ok(None);
     }
@@ -374,12 +410,26 @@ fn candidates(
         return Ok(None);
     }
     let mut candidates = vec![];
+    let mut received_context = vec![];
     let mut nullifiers = HashSet::new();
     for (index, raw) in compact_tx.ironwood_actions.iter().enumerate() {
         let Ok(action) = CompactAction::try_from(raw) else {
             return Ok(None);
         };
         nullifiers.insert(action.nullifier().to_bytes());
+        if received.contains_key(&(index as u32)) {
+            received_context.push((
+                index as u32,
+                raw.ephemeral_key
+                    .as_slice()
+                    .try_into()
+                    .expect("validated CompactAction"),
+                raw.ciphertext
+                    .as_slice()
+                    .try_into()
+                    .expect("validated CompactAction"),
+            ));
+        }
         if !received
             .get(&(index as u32))
             .is_some_and(|(_, is_change)| *is_change)
@@ -404,5 +454,8 @@ fn candidates(
     if funding.iter().any(|(_, nf)| !nullifiers.contains(nf)) {
         return Ok(None);
     }
-    Ok(Some(candidates))
+    Ok(Some(ReconstructedCandidates {
+        outgoing: candidates,
+        received_context,
+    }))
 }
