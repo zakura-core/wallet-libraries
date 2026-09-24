@@ -1,12 +1,14 @@
 [package]
 name = "zakura-pir-enhance"
-version = "0.1.0"
+version = "0.0.1-rc0"
 description = "Private Ironwood compact-action enhancement client for Zakura wallets"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+readme = "README.md"
+categories.workspace = true
+keywords = ["zcash", "privacy", "pir"]
 
 [lib]
 name = "zakura_pir_enhance"
@@ -31,10 +33,10 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror = "2"
-zakura-pir-enhance-types = { version = "0.1.0", path = "../pir-enhance-types" }
+zakura-pir-enhance-types = { version = "=0.0.1-rc0", path = "../pir-enhance-types" }
 
 [dev-dependencies]
-zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", features = ["zakura-pir-enhance", "test-dependencies"] }
+zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", version = "0.1.0-rc6", features = ["zakura-pir-enhance", "test-dependencies"] }
 zcash_client_backend = { workspace = true, features = ["zakura-pir-enhance", "test-dependencies"] }
 incrementalmerkletree.workspace = true
 futures = "0.3"

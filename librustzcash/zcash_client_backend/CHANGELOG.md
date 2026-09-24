@@ -10,7 +10,12 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc6] - 2026-09-24
+
+PIR wallet integration release supporting `zakura-pir-enhance 0.0.1-rc0`.
+
 ### Added
+- Share schema-11 wire records through `zakura-pir-enhance-types =0.0.1-rc0`.
 - Add feature-gated APIs for privately enhancing Ironwood-only transactions with
   Enhance PIR records. The APIs provide transaction-wide LWD routing,
   unified active and suspended work enumeration, incoming memo decryption, outgoing

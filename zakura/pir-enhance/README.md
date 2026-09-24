@@ -1,5 +1,11 @@
 # zakura-pir-enhance
 
+Release candidate `0.0.1-rc0` requires Rust 1.91. The default `https-client`
+feature provides the HTTPS transport; the optional `wallet` feature integrates
+with `zakura-client-backend 0.1.0-rc6`. Shared records come from
+`zakura-pir-enhance-types =0.0.1-rc0`. See [CHANGELOG.md](CHANGELOG.md) for release
+notes.
+
 This crate implements the mainnet Ironwood enhancement v7 client. Wire schema 11 uses 653-byte suffix-only records, 33 records per row, independently parameterized shards, and the P16Q48 SimplePIR profile. The wallet retains compact encryption fields and supports same-transaction row queries and atomic batch application. The initial SQLite schema is rewritten; no existing-client migration is provided. A matching v7 server is required.
 
 Fetch a `PendingClient` manifest from `/v1/enhance/init`, call `wallet::acceptance` using locally scanned state, then call `accept` with the returned `GenerationAcceptance`. The client fetches shard sessions lazily from `/v1/enhance/session/{session_id}` and retains at most `ClientResourceLimits::max_cached_shards` expanded setups. `max_shard_rows` limits each setup, separately from total chain coverage. Query methods borrow the client mutably so one client has at most one active batch; an idle setup is evicted before its replacement is built.

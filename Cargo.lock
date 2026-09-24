@@ -7327,7 +7327,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-backend"
-version = "0.1.0-rc5"
+version = "0.1.0-rc6"
 dependencies = [
  "ambassador",
  "arti-client",
@@ -7404,7 +7404,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-sqlite"
-version = "0.1.0-rc5"
+version = "0.1.0-rc6"
 dependencies = [
  "ambassador",
  "assert_matches",
@@ -7660,7 +7660,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-enhance"
-version = "0.1.0"
+version = "0.0.1-rc0"
 dependencies = [
  "base64",
  "futures",
@@ -7686,7 +7686,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-enhance-types"
-version = "0.1.0"
+version = "0.0.1-rc0"
 
 [[package]]
 name = "zakura-primitives"
