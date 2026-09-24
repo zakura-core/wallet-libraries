@@ -34,7 +34,7 @@ fn synthetic_wallet_manifest_and_session_are_accepted() {
     assert!(fixture.provenance.starts_with("Synthetic wallet"));
     assert_eq!(
         fixture.ipir_sp_revision,
-        "611a29284264d844bf4dba00de2874c5b762f8c2"
+        "a16f456dfaf5fadca77d472c0c502a93cf0977d0"
     );
     assert_eq!(fixture.manifest.schema_version, 11);
     assert_eq!(

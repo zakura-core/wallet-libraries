@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Update the pinned IPIR dependency to v0.1.0-rc.3; retain the v7 wire protocol and CPU backend.
+
 - Preserve observed v7 routing expiration when an in-flight cover future is dropped; cancellation without an expiration signal keeps the accepted view usable.
 
 - Require fresh wallet acceptance for v7 session rebinding; keep in-flight batches valid past the routing refresh cadence.
