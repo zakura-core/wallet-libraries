@@ -49,6 +49,8 @@ pub struct DecryptedOutput<Note, AccountId> {
     account: AccountId,
     memo: MemoBytes,
     transfer_type: TransferType,
+    #[cfg(feature = "experimental-swap-receiving")]
+    swap_key_id: Option<zakura_swap_receiving::KeyId>,
 }
 
 impl<Note, AccountId> DecryptedOutput<Note, AccountId> {
@@ -67,7 +69,22 @@ impl<Note, AccountId> DecryptedOutput<Note, AccountId> {
             account,
             memo,
             transfer_type,
+            #[cfg(feature = "experimental-swap-receiving")]
+            swap_key_id: None,
         }
+    }
+
+    /// Retains the derived receiving key used for authenticated note decryption.
+    #[cfg(feature = "experimental-swap-receiving")]
+    pub(crate) fn with_swap_key_id(mut self, key_id: zakura_swap_receiving::KeyId) -> Self {
+        self.swap_key_id = Some(key_id);
+        self
+    }
+
+    /// Derived receiving key, relative to the owning account.
+    #[cfg(feature = "experimental-swap-receiving")]
+    pub fn swap_key_id(&self) -> Option<zakura_swap_receiving::KeyId> {
+        self.swap_key_id
     }
 
     /// The index of the output within the shielded outputs of the Sapling bundle or the actions of

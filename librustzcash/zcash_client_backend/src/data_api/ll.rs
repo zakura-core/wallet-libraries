@@ -936,6 +936,11 @@ impl<AccountId: Copy> ReceivedShieldedOutput for WalletOrchardOutput<AccountId> 
 impl<AccountId: Copy> ReceivedShieldedOutput
     for DecryptedOutput<(::orchard::Note, ::orchard::ValuePool), AccountId>
 {
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn swap_key_id(&self) -> Option<zakura_swap_receiving::KeyId> {
+        self.swap_key_id()
+    }
+
     type AccountId = AccountId;
     type Note = ::orchard::Note;
     type Nullifier = ::orchard::note::Nullifier;

@@ -3087,6 +3087,27 @@ pub struct DecryptedTransaction<'a, Tx: DecryptableTransaction<AccountId>, Accou
     ironwood_outputs: Vec<Tx::DecryptedOrchardOutput>,
 }
 
+#[cfg(feature = "experimental-swap-receiving")]
+impl<AccountId: Copy + Eq> DecryptedTransaction<'_, Transaction, AccountId> {
+    /// Adds authenticated incoming outputs from registered swap keys.
+    /// A self-payment may already have been recovered with the account OVK.
+    /// In that case, retain one incoming record carrying its receiving-key identity.
+    pub fn with_swap_receiving_keys(
+        mut self,
+        keys: impl IntoIterator<Item = SwapScanningKey<AccountId>>,
+    ) -> Self {
+        for key in keys {
+            for output in key.decrypt_outputs(self.tx) {
+                self.ironwood_outputs.retain(|existing| {
+                    existing.index() != output.index() || existing.account() != output.account()
+                });
+                self.ironwood_outputs.push(output);
+            }
+        }
+        self
+    }
+}
+
 impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<'a, Tx, AccountId> {
     /// Constructs a new [`DecryptedTransaction`] from its constituent parts.
     ///

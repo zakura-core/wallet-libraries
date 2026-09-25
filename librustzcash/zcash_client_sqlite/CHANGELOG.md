@@ -16,7 +16,8 @@ workspace.
   Compact scanning retains the derived key on each note, promotes paid lookahead
   indices, and reconstructs inputs with that key after reopening. Builds without
   the feature exclude these notes from reconstruction. Automatic historical
-  replay, memo enhancement, and key retirement remain pending.
+  replay, PIR memo enhancement, and key retirement remain pending. Ordinary
+  full-transaction enhancement now preserves swap key references and memos.
 
 ## [0.1.0-rc6] - 2026-09-24
 

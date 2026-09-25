@@ -46,6 +46,44 @@ impl<AccountId> SwapScanningKey<AccountId> {
     }
 }
 
+impl<AccountId: Copy> SwapScanningKey<AccountId> {
+    /// Decrypts full Ironwood ciphertexts with this registered receiving key.
+    pub(crate) fn decrypt_outputs(
+        &self,
+        tx: &zcash_primitives::transaction::Transaction,
+    ) -> Vec<crate::decrypt::DecryptedOutput<(orchard::Note, orchard::ValuePool), AccountId>> {
+        let ivk = self.prepare();
+        tx.ironwood_bundle()
+            .into_iter()
+            .flat_map(|bundle| {
+                bundle
+                    .actions()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, action)| {
+                        zcash_note_encryption::try_note_decryption(
+                            &IronwoodDomain::for_action(action),
+                            &ivk,
+                            action,
+                        )
+                        .map(|(note, _, memo)| {
+                            crate::decrypt::DecryptedOutput::new(
+                                index,
+                                (note, orchard::ValuePool::Ironwood),
+                                zcash_protocol::ShieldedPool::Ironwood,
+                                self.account,
+                                zcash_protocol::memo::MemoBytes::from_bytes(&memo)
+                                    .expect("memo length"),
+                                crate::decrypt::TransferType::Incoming,
+                            )
+                            .with_swap_key_id(self.key_id)
+                        })
+                    })
+            })
+            .collect()
+    }
+}
+
 impl<AccountId> ScanningKeyOps<IronwoodDomain, AccountId, Nullifier>
     for SwapScanningKey<AccountId>
 {

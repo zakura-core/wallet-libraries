@@ -259,13 +259,16 @@ where
     // Fetch the UnifiedFullViewingKeys we are tracking
     let ufvks = data.get_unified_full_viewing_keys()?;
 
-    data.store_decrypted_tx(decrypt_transaction(
+    let decrypted = decrypt_transaction(
         params,
         mined_height.map_or_else(|| data.get_tx_height(tx.txid()), |h| Ok(Some(h)))?,
         data.chain_height()?,
         tx,
         &ufvks,
-    ))?;
+    );
+    #[cfg(feature = "experimental-swap-receiving")]
+    let decrypted = decrypted.with_swap_receiving_keys(data.get_swap_scanning_keys()?);
+    data.store_decrypted_tx(decrypted)?;
 
     Ok(())
 }

@@ -103,8 +103,10 @@ The SQLite integration tests also scan both purposes alongside ordinary keys,
 reopen the database, and construct a mixed-input transaction whose change returns
 to the ordinary internal key. They check replay, late payments, and invalid note
 metadata. Registered keys currently remain in every subsequent compact scan.
+Full-transaction retrieval authenticates swap memos before or after compact
+scanning, including self-payments also recoverable through the ordinary OVK.
 
-Per-key historical coverage, retirement, ordinary and PIR memo enhancement,
+Per-key historical coverage, retirement, PIR memo enhancement,
 automatic seed restore and gap extension, PCZT/firmware qualification, Vizor,
 and receiver PIR remain required before live use. Registration after an earlier
 scan does not yet schedule the missing history automatically.
