@@ -16,6 +16,7 @@ members = [
     "wallet-lib",
     "zakura/pir-enhance",
     "zakura/pir-enhance-types",
+    "zakura/swap-receiving",
 ]
 
 resolver = "2"

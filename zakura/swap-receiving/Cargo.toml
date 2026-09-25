@@ -1,0 +1,31 @@
+[package]
+name = "zakura-swap-receiving"
+version = "0.0.0"
+publish = false
+description = "Experimental swap receiving keys and recovery memos"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[dependencies]
+ff.workspace = true
+hmac = { version = "0.12", default-features = false }
+orchard.workspace = true
+pasta_curves.workspace = true
+sha2.workspace = true
+zcash_address.workspace = true
+zcash_keys = { workspace = true, features = ["orchard", "sapling"] }
+zcash_protocol.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+incrementalmerkletree.workspace = true
+orchard = { workspace = true, features = ["circuit"] }
+rand = { workspace = true, features = ["thread_rng"] }
+shardtree.workspace = true
+
+[lints]
+workspace = true

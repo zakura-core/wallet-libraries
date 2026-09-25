@@ -52,6 +52,10 @@ hand-written goes in `wallet-lib/` or `zakura/` and is listed in
 generator appends to the members it produces — a crate placed under
 `librustzcash/` would be deleted by the next sync.
 
+The unpublished [swap receiving POC](zakura/swap-receiving/README.md) provides
+shared key derivation and refund memo helpers, with an Ironwood proof test for
+mixed ordinary, refund, and incoming inputs.
+
 ## How the rewiring works
 
 Nothing is patched at the source level. `manifests/sources.toml` holds a
