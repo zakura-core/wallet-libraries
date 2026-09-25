@@ -14,8 +14,6 @@ pub use client::{
     AcceptedAnchor, ClientError, ClientResourceLimits, GenerationAcceptance, PreparedQuery,
     QuerySession,
 };
-#[cfg(feature = "https-client")]
-pub use client::{EnhancePirClient, PendingEnhancePirClient};
 
 pub use types::{
     Coverage, ENHANCE_SETUP_SEED, EnhanceRecord, EnhanceRecordParts, EnhanceTransactionMetadata,

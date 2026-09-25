@@ -1,11 +1,12 @@
 # zakura-pir-enhance
 
-Release candidate `0.0.1-rc0` requires Rust 1.91. The default `https-client`
-feature provides the HTTPS transport; the optional `wallet` feature integrates
-with `zakura-client-backend 0.1.0-rc6`. The optional `native-reinspiring`
-feature selects the experimental native two-mask protocol (v9) instead of v7;
-see below. Shared records come from `zakura-pir-enhance-types =0.0.1-rc0`. See
-[CHANGELOG.md](CHANGELOG.md) for release notes.
+Release candidate `0.0.1-rc0` requires Rust 1.91. The crate has no default
+features and bundles no HTTP client: applications implement `transport::Transport`.
+The optional `wallet` feature integrates with `zakura-client-backend 0.1.0-rc6`.
+The optional `native-reinspiring` feature selects the experimental native
+two-mask protocol (v9) instead of v7; see below. Shared records come from
+`zakura-pir-enhance-types =0.0.1-rc0`. See [CHANGELOG.md](CHANGELOG.md) for
+release notes.
 
 This crate implements the mainnet Ironwood enhancement v7 client. Wire schema 11 uses 653-byte suffix-only records, 33 records per row, independently parameterized shards, and the P16Q48 SimplePIR profile. The wallet retains compact encryption fields and supports same-transaction row queries and atomic batch application. SQLite upgrades existing rc5 wallets with a forward migration that preserves notes and adds nullable compact encryption fields. Rescanning compact blocks fills those fields for older notes. A matching v7 server is required.
 
@@ -15,14 +16,15 @@ A batch stays bound to one accepted manifest. Queries are deduplicated by shard 
 
 On `ClientError::HttpStatus(409)` or `ClientError::HttpStatus(410)`, stop the batch, fetch a new pending manifest, repeat wallet acceptance, and reschedule unfinished durable work. Use bounded application scheduling for 429/503. Transport and validation errors must not trigger public LWD fallback.
 
-The built-in Reqwest transport requires HTTPS, rejects redirects, and has a 120-second deadline. Custom transports must stream into `Request::response_body()`, reject non-success status with `ClientError::HttpStatus(code)`, and honor cancellation and deadlines. Plaintext positions, rows, slots, txids, and action indexes stay out of requests and URLs; domain and routing revision are public.
+Transports should reject redirects and enforce a deadline covering the response body. They must stream into `Request::response_body()`, reject non-success status with `ClientError::HttpStatus(code)`, and honor cancellation and deadlines. Plaintext positions, rows, slots, txids, and action indexes stay out of requests and URLs; domain and routing revision are public.
 
 Refresh routing at sync start and before starting new work whenever `refresh_due()`
 is true (30 seconds). In-flight operations keep their accepted routing view until
 completion or a server rejection; the refresh cadence is not a batch deadline.
 Fetch a new pending manifest, independently accept its anchor, then call
-`accept_routing` to reuse unchanged session material. The HTTPS wrapper exposes
-`fetch_routing`, `accept_routing`, and `refresh_due`. A routing or placement change
+`accept_routing` to reuse unchanged session material. `transport::Client`
+exposes `accept_routing` and `refresh_due`; fetch the new manifest with
+`PendingClient::fetch`. A routing or placement change
 does not by itself invalidate immutable session material. A deep recovery epoch
 change does. Accepting a lower cache limit immediately evicts the least-recently-used
 retained setups. Every request has fresh randomness and a fresh request ID.
