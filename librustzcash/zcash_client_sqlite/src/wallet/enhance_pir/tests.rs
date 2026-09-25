@@ -728,7 +728,9 @@ fn status_and_payload_absence_preserve_private_recovery_work() {
         TransactionStatus::NotInMainChain,
         TransactionStatus::TxidNotRecognized,
     ] {
-        st.wallet_mut().set_transaction_status(txid, status).unwrap();
+        st.wallet_mut()
+            .set_transaction_status(txid, status)
+            .unwrap();
         st.wallet_mut()
             .notify_transaction_enhancement_not_found(txid)
             .unwrap();
@@ -1111,11 +1113,9 @@ fn reopening_requires_mode_before_enumerating_persisted_work() {
     assert_eq!(db.enhance_pir_work().unwrap(), expected);
     // Other request kinds (such as transparent address history) are independent
     // of private enhancement and may remain visible in this feature build.
-    assert!(
-        !db.transaction_data_requests()
-            .unwrap()
-            .contains(&TransactionDataRequest::Enhancement(request.request_id().txid()))
-    );
+    assert!(!db.transaction_data_requests().unwrap().contains(
+        &TransactionDataRequest::Enhancement(request.request_id().txid())
+    ));
 }
 
 #[test]

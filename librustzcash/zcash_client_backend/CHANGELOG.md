@@ -29,6 +29,11 @@ workspace.
   only the `IronwoodEnhanceRequestId`; send-only metadata validation never read
   the placeholder compact action fields.
 
+### Removed
+- `data_api::enhance_pir::storage::validate_and_apply_record`. Apply a single
+  record as a batch of one with `validate_and_apply_records`, as
+  `zakura-client-sqlite` already does.
+
 ## [0.1.0-rc6] - 2026-09-24
 
 PIR wallet integration release supporting `zakura-pir-enhance 0.0.1-rc0`.

@@ -265,7 +265,9 @@ impl ShieldedOutput<IronwoodDomain, 580> for FullOutput {
     }
 }
 
-/// Validates one record and atomically applies all work captured by `request`.
+/// Validates all live actions before committing any of them. The caller MUST roll
+/// back its enclosing storage transaction on `Rejected` as well as on errors.
+/// Identical requests are processed once; stale identities never supply metadata.
 ///
 /// Incoming ciphertext must decrypt to the scanned note. Send-only association
 /// is trusted when outgoing decryption cannot authenticate the action. Incoming
@@ -274,20 +276,7 @@ impl ShieldedOutput<IronwoodDomain, 580> for FullOutput {
 /// Private responses must agree with known transaction metadata; the captured snapshot
 /// accompanies the response so the backend can reject a change before committing.
 /// A rejected response leaves its work pending for validation against fresh context.
-pub fn validate_and_apply_record<DbT: EnhancePirStorage>(
-    db: &mut DbT,
-    request: EnhancePirRequest,
-    record: &EnhanceRecord,
-) -> Result<EnhancePirStoreResult, DbT::Error> {
-    match validate_record(db, request, record)? {
-        Ok(validated) => db.compare_and_apply_ironwood_enhancement(validated),
-        Err(result) => Ok(result),
-    }
-}
-
-/// Validates all live actions before committing any of them. The caller MUST roll
-/// back its enclosing storage transaction on `Rejected` as well as on errors.
-/// Identical requests are processed once; stale identities never supply metadata.
+/// A single record is applied as a batch of one.
 pub fn validate_and_apply_records<DbT: EnhancePirStorage>(
     db: &mut DbT,
     records: &[(EnhancePirRequest, EnhanceRecord)],
