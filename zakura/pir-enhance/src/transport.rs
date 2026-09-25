@@ -1393,64 +1393,30 @@ mod v7_cover_tests {
     }
     impl Mock {
         fn new() -> Self {
-            let coverage = Lifecycle::default()
-                .coverage(32768 * 33 + 1, Geometry::default())
-                .unwrap();
-            let mut sessions = Vec::new();
-            let mut units = BTreeMap::new();
-            for shard in &coverage.shards {
-                let params = parameters(shard.logical_rows).unwrap();
-                let (rlwe, _) = ipir_sp::params_for_simplepir_profile(
-                    shard.logical_rows,
-                    ITEM_SIZE_BITS,
-                    ipir_sp::SimplePirProfile::P16Q48,
-                )
-                .unwrap();
-                let public = vec![
-                    0u8;
-                    params.db_cols / rlwe.d
-                        * ipir_sp::modulus_switch::published_c1_len(rlwe.d, rlwe.q)
-                ];
-                sessions.push(SessionRef {
-                    shard_id: shard.id,
-                    public_params_sha256: hex::encode(Sha256::digest(&public)),
-                    parameter_id: parameter_id(shard.logical_rows).unwrap(),
-                });
-                units.insert(
-                    shard.id,
-                    shard
-                        .units
-                        .iter()
-                        .map(|unit| UnitIdentity {
-                            recovery_epoch: 0,
-                            table: "enhance".into(),
-                            shard_id: shard.id,
-                            local_row_start: unit.local_row_start,
-                            allocated_rows: unit.allocated_rows,
-                            setup_sha256: hex::encode(Sha256::digest(setup_seed(shard.id))),
-                            parameter_id: unit_parameter_id(unit.allocated_rows).unwrap(),
-                            content_sha256: "00".repeat(32),
-                        })
-                        .collect(),
-                );
-            }
-            Self {
-                manifest: Manifest {
-                    recovery_epoch: 0,
-                    placement_revision: 1,
-                    domain_recovery_epochs: [(0, "0".into()), (1, "0".into())].into(),
-                    schema_version: SCHEMA_VERSION,
-                    protocol_revision: PROTOCOL_REVISION.into(),
-                    network: "main".into(),
-                    pool: "ironwood".into(),
-                    generation: 1,
-                    anchor_height: 3428143,
-                    anchor_block_hash: "42".repeat(32),
-                    geometry: Geometry::default(),
-                    coverage,
-                    sessions,
-                    unit_identities: units,
+            let mut manifest = crate::test_support::synthetic_manifest(
+                32768 * 33 + 1,
+                |shard| {
+                    let params = parameters(shard.logical_rows).unwrap();
+                    let (rlwe, _) = ipir_sp::params_for_simplepir_profile(
+                        shard.logical_rows,
+                        ITEM_SIZE_BITS,
+                        ipir_sp::SimplePirProfile::P16Q48,
+                    )
+                    .unwrap();
+                    let public =
+                        vec![
+                            0u8;
+                            params.db_cols / rlwe.d
+                                * ipir_sp::modulus_switch::published_c1_len(rlwe.d, rlwe.q)
+                        ];
+                    hex::encode(Sha256::digest(&public))
                 },
+                &"00".repeat(32),
+            );
+            manifest.anchor_height = 3428143;
+            manifest.anchor_block_hash = "42".repeat(32);
+            Self {
+                manifest,
                 posts: RefCell::new(Vec::new()),
                 setups: Cell::new(0),
                 retry: Cell::new(false),
