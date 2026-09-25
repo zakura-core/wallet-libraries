@@ -528,6 +528,21 @@ CREATE INDEX idx_orchard_received_note_spends_transaction_id ON orchard_received
     transaction_id ASC
 )"#;
 
+/// Registered swap keys. Empty lookahead entries do not advance allocation.
+pub(super) const TABLE_IRONWOOD_RECEIVING_KEYS: &str = "
+CREATE TABLE ironwood_receiving_keys (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    purpose INTEGER NOT NULL CHECK (purpose IN (0, 1)),
+    derivation_version INTEGER NOT NULL CHECK (derivation_version = 1),
+    key_index BLOB NOT NULL CHECK (typeof(key_index) = 'blob' AND length(key_index) = 8),
+    receiver BLOB NOT NULL CHECK (typeof(receiver) = 'blob' AND length(receiver) = 43),
+    scan_from INTEGER NOT NULL CHECK (scan_from >= 0 AND scan_from <= 4294967295),
+    advances_allocation INTEGER NOT NULL CHECK (advances_allocation IN (0, 1)),
+    UNIQUE (account_id, purpose, derivation_version, key_index)
+)
+";
+
 /// Stores the Ironwood notes received by the wallet.
 ///
 /// Ironwood notes ([ZIP 2005], NU6.3) are Orchard-protocol notes obtained from version 3 note

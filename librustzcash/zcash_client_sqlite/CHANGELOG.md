@@ -10,6 +10,11 @@ workspace.
 
 ## [Unreleased]
 
+- Add an opt-in experimental swap receiving-key registry with atomic per-purpose
+  reservations, recovered-index tracking, and persistent incoming lookahead keys.
+  The schema preserves these records across builds with the feature disabled.
+  Scanning and spending integration are still pending.
+
 ## [0.1.0-rc6] - 2026-09-24
 
 PIR storage integration release using `zakura-client-backend 0.1.0-rc6`.

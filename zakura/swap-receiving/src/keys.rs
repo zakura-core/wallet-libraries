@@ -6,12 +6,44 @@ use sha2::Sha512;
 use zeroize::Zeroizing;
 
 /// Independent v1 receiving sequences under one account's spending authority.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Purpose {
     /// Return of funds from a Zcash-funded swap, recorded in its funding memo.
     Refund,
     /// Payment into Zcash, recovered through receiver lookahead.
     Receive,
+}
+
+/// A v1 key within one account's Ironwood receiving namespace.
+///
+/// Account and network are supplied by the owning wallet. This is not an
+/// operation ID: multiple swaps may be associated with the same receiving key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct KeyId {
+    purpose: Purpose,
+    index: u64,
+}
+
+impl KeyId {
+    /// Identifies the v1 key at `index` in the selected purpose's sequence.
+    pub fn new(purpose: Purpose, index: u64) -> Self {
+        Self { purpose, index }
+    }
+
+    /// The independent sequence containing this key.
+    pub fn purpose(self) -> Purpose {
+        self.purpose
+    }
+
+    /// The index in that sequence.
+    pub fn index(self) -> u64 {
+        self.index
+    }
+
+    /// Reconstructs this key from the account's external FVK.
+    pub fn derive(self, account: &FullViewingKey) -> Result<FullViewingKey, DerivationError> {
+        derive_full_viewing_key(account, self.purpose, self.index)
+    }
 }
 
 impl Purpose {

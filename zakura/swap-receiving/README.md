@@ -22,6 +22,26 @@ replace recipient, nullifier, signature, value, or change validation. The wallet
 owns reservation, persistence, coverage, lifecycle, and note selection. There is
 no alternate balance store in this crate.
 
+The SQLite backend's `experimental-swap-receiving` feature adds durable key
+registration. `reserve_swap_receiving_key` advances a purpose's sequence,
+`recover_swap_receiving_key` records validated recovery evidence, and
+`watch_swap_receive_key` retains an unpaid incoming lookahead key without
+advancing allocation. `get_swap_receiving_keys` reconstructs and verifies stored
+receivers after reopen. These are `WalletDb` methods, also usable inside its
+transaction helpers so a reservation and an application's operation record can
+commit together. Do not expose an address until that transaction commits.
+
+The registry stores full `u64` indices as fixed-width big-endian blobs for SQLite
+ordering. This is an internal storage encoding; the KDF and memo remain
+little-endian. Registration retains the earliest requested scan height, not
+proof that its history was scanned. Scanning and note association are the next
+integration step. The feature is disabled by default.
+
+The planned selector will prefer swap notes during ordinary sends when doing so
+adds neither inputs nor fees, respecting existing input constraints. Confirmed
+ordinary internal change then uses normal account recovery. This preference will
+not trigger separate transactions or delete receiving keys.
+
 ## Derivation
 
 The HMAC key is the account's canonical 32-byte external `rivk`. The message is
@@ -72,9 +92,16 @@ change. It also checks that ordinary viewing keys cannot read the swap notes and
 that zero OVK reveals the fixture payouts but not the recovery marker.
 
 This is a bundle-level test with synthetic commitments as signing messages and a
-local commitment tree. It does not yet exercise SQLite persistence, a complete
-transaction on a chain, Vizor, PIR, incoming gap discovery, or Keystone. Those
-integrations remain required for the receive/restore/spend milestone.
+local commitment tree. Separate SQLite registry tests cover durable allocation,
+reopening, lookahead, recovery bounds, rollback, and concurrent connections:
+
+```sh
+cargo test -p zakura-client-sqlite --features experimental-swap-receiving --locked swap_receiving
+```
+
+Note persistence and scanning, a complete transaction on a chain, Vizor, PIR,
+incoming gap discovery, and Keystone remain required for the
+receive/restore/spend milestone.
 
 ## Protocol baseline
 

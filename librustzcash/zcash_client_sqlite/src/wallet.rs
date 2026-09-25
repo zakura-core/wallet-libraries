@@ -192,6 +192,8 @@ pub(crate) mod locking;
 pub(crate) mod orchard;
 pub(crate) mod sapling;
 pub(crate) mod scanning;
+#[cfg(feature = "experimental-swap-receiving")]
+pub mod swap_receiving;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) mod transparent;
 

@@ -54,6 +54,9 @@ jobs:
       - name: PIR wallet integration
         run: cargo test -p zakura-client-backend -p zakura-client-sqlite --features zakura-pir-enhance,test-dependencies --locked
 
+      - name: Experimental swap key registry
+        run: cargo test -p zakura-client-sqlite --features experimental-swap-receiving --locked swap_receiving
+
       - name: PIR client
         run: |
           cargo test -p zakura-pir-enhance --all-features --locked
