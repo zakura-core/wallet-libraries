@@ -162,3 +162,173 @@ fn swap_receiving_full_transaction_after_compact_scan() {
 fn swap_receiving_full_transaction_before_compact_scan() {
     full_transaction_roundtrip(true);
 }
+
+#[test]
+fn refund_funding_memo_recovers_from_seed_with_zero_change() {
+    use zakura_swap_receiving::RefundMemo;
+    let activation = BlockHeight::from_u32(100_000);
+    let network = LocalNetwork {
+        nu6: Some(activation),
+        nu6_1: Some(activation),
+        nu6_2: Some(activation),
+        nu6_3: Some(activation),
+        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+    };
+    let mut st = TestBuilder::new()
+        .with_network(network)
+        .with_data_store_factory(TestDbFactory::file_backed())
+        .with_block_cache(crate::testing::BlockCache::new())
+        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .build();
+    let account = st.test_account().cloned().unwrap();
+    let parent = orchard::keys::FullViewingKey::from(account.usk().orchard());
+    let (first, _, _) = st.generate_next_block(
+        &IronwoodFvk(parent),
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(1_000_000),
+    );
+    st.scan_cached_blocks(first, 1);
+    for _ in 0..5 {
+        let (h, _) = st.generate_empty_block();
+        st.scan_cached_blocks(h, 1);
+    }
+    let receiver = orchard::keys::FullViewingKey::from(
+        &orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap(),
+    )
+    .address_at(0u32, Scope::External);
+    let address =
+        Address::Unified(UnifiedAddress::from_receivers(Some(receiver), None, None).unwrap())
+            .to_zcash_address(&network);
+    let memo = RefundMemo::new(network.network_type(), 7, &address.to_string()).unwrap();
+    let memo_bytes = MemoBytes::from_bytes(&memo.encode()).unwrap();
+    let strategy = standard::SingleOutputChangeStrategy::<TestDb>::new(
+        StandardFeeRule::Zip317,
+        Some(memo_bytes.clone()),
+        ShieldedPool::Ironwood,
+        DustOutputPolicy::default(),
+    );
+    let proposal = st
+        .propose_transfer(
+            account.id(),
+            &GreedyInputSelector::new(),
+            &strategy,
+            TransactionRequest::new(vec![Payment::without_memo(
+                address,
+                Zatoshis::const_from_u64(990_000),
+            )])
+            .unwrap(),
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    let change = proposal.steps()[0].balance().proposed_change();
+    assert_eq!(change.len(), 1);
+    assert_eq!(change[0].value(), Zatoshis::ZERO);
+    assert_eq!(change[0].memo(), Some(&memo_bytes));
+    let created = st
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .unwrap();
+    let tx = st.wallet().get_transaction(created[0]).unwrap().unwrap();
+    let (mined, _) = st.generate_next_block_including(created[0]);
+    st.scan_cached_blocks(mined, 1);
+
+    let refund_fvk = KeyId::new(Purpose::Refund, 7)
+        .derive(&orchard::keys::FullViewingKey::from(
+            account.usk().orchard(),
+        ))
+        .unwrap();
+    let (refunded, _, _) = st.generate_next_block(
+        &IronwoodFvk(refund_fvk),
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(980_000),
+    );
+
+    // Replace the wallet with a seed restore. No reservations or sent-transaction
+    // records survive, so recovery must authenticate chain inputs and the memo.
+    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+    let _old_wallet = st.reset();
+    let (restored, _) = st
+        .wallet_mut()
+        .create_account("restored", &seed, account.birthday(), None)
+        .unwrap();
+    st.wallet_mut().update_chain_tip(refunded).unwrap();
+    st.scan_cached_blocks(first, (u32::from(refunded) - u32::from(first) + 1) as usize);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .recover_swap_refund_memos(restored)
+            .unwrap()
+            .is_empty()
+    );
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
+    let records = st
+        .wallet_mut()
+        .db_mut()
+        .recover_swap_refund_memos(restored)
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].index, 7);
+    assert_eq!(records[0].deposit_address, memo.deposit_address());
+    let keys = st.wallet().db().get_swap_receiving_keys(restored).unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].key_id(), KeyId::new(Purpose::Refund, 7));
+    assert_eq!(keys[0].scan_from(), mined);
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .recover_swap_refund_memos(restored)
+            .unwrap(),
+        records
+    );
+
+    // The first pass already crossed the refund without its key. Registration
+    // queues that missing history, and replay makes the note reconstructible.
+    st.scan_cached_blocks(mined, 2);
+    let notes = st
+        .wallet()
+        .db()
+        .get_unspent_ironwood_notes_at_historical_height(restored, refunded)
+        .unwrap();
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.swap_key_id() == Some(KeyId::new(Purpose::Refund, 7)))
+    );
+
+    // Losing own-send evidence, or changing the authenticated scope, must make
+    // the same memo ineligible. Restoring the evidence lets a later pass retry.
+    let conn = st.wallet().conn();
+    conn.execute(
+        "UPDATE ironwood_received_notes SET recipient_key_scope = 0 WHERE memo = ?1",
+        [memo_bytes.as_slice()],
+    )
+    .unwrap();
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .recover_swap_refund_memos(restored)
+            .unwrap()
+            .is_empty()
+    );
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE ironwood_received_notes SET recipient_key_scope = 1 WHERE memo = ?1",
+            [memo_bytes.as_slice()],
+        )
+        .unwrap();
+    st.wallet()
+        .conn()
+        .execute("DELETE FROM ironwood_received_note_spends", [])
+        .unwrap();
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .recover_swap_refund_memos(restored)
+            .unwrap()
+            .is_empty()
+    );
+}

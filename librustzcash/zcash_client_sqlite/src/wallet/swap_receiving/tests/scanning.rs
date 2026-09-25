@@ -304,3 +304,77 @@ fn swap_receiving_reconstructs_only_with_the_registered_account() {
         .unwrap();
     assert!(note_key(st.wallet().conn(), st.network(), id, &parent).is_err());
 }
+
+#[test]
+fn incoming_seed_lookahead_replays_payments_before_the_window_edge() {
+    use zcash_client_backend::data_api::{
+        WalletRead,
+        testing::{AddressType, IronwoodFvk},
+    };
+    use zcash_protocol::value::Zatoshis;
+    let activation = BlockHeight::from_u32(100_000);
+    let network = LocalNetwork {
+        nu6: Some(activation),
+        nu6_1: Some(activation),
+        nu6_2: Some(activation),
+        nu6_3: Some(activation),
+        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+    };
+    let mut st = TestBuilder::new()
+        .with_network(network)
+        .with_data_store_factory(TestDbFactory::file_backed())
+        .with_block_cache(crate::testing::BlockCache::new())
+        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .build();
+    let account = st.test_account().cloned().unwrap();
+    let parent = orchard::keys::FullViewingKey::from(account.usk().orchard());
+    // Index 20 was paid before 19, so extending only future scanning loses it.
+    let (first, _, _) = st.generate_next_block(
+        &IronwoodFvk(KeyId::new(Purpose::Receive, 20).derive(&parent).unwrap()),
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(50_000),
+    );
+    st.generate_next_block(
+        &IronwoodFvk(KeyId::new(Purpose::Receive, 19).derive(&parent).unwrap()),
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(60_000),
+    );
+    st.wallet_mut()
+        .db_mut()
+        .maintain_swap_receive_lookahead(account.id(), 20, first)
+        .unwrap();
+    st.scan_cached_blocks(first, 2);
+    let notes = st
+        .wallet()
+        .db()
+        .get_unspent_ironwood_notes_at_historical_height(account.id(), first + 1)
+        .unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(
+        notes[0].swap_key_id(),
+        Some(KeyId::new(Purpose::Receive, 19))
+    );
+    st.wallet_mut()
+        .db_mut()
+        .maintain_swap_receive_lookahead(account.id(), 20, first)
+        .unwrap();
+    assert!(
+        st.wallet()
+            .suggest_scan_ranges()
+            .unwrap()
+            .iter()
+            .any(|r| r.block_range().contains(&first))
+    );
+    st.scan_cached_blocks(first, 2);
+    let notes = st
+        .wallet()
+        .db()
+        .get_unspent_ironwood_notes_at_historical_height(account.id(), first + 1)
+        .unwrap();
+    assert_eq!(notes.len(), 2);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.swap_key_id() == Some(KeyId::new(Purpose::Receive, 20)))
+    );
+}

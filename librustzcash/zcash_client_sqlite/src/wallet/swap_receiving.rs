@@ -6,6 +6,8 @@
 //! retirement is managed separately by the caller.
 
 pub(crate) mod coverage;
+mod recovery;
+pub use recovery::RecoveredRefund;
 
 use std::borrow::{Borrow, BorrowMut};
 

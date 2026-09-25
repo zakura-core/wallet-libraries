@@ -287,3 +287,28 @@ mod scanning;
 mod enhancement;
 
 mod coverage;
+
+#[test]
+fn maintained_lookahead_advances_only_after_reservation_or_payment() {
+    let mut st = wallet(false);
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet_mut().db_mut();
+    db.maintain_swap_receive_lookahead(account, 20, start())
+        .unwrap();
+    db.maintain_swap_receive_lookahead(account, 20, start())
+        .unwrap();
+    assert_eq!(db.get_swap_receiving_keys(account).unwrap().len(), 20);
+    assert!(
+        db.get_swap_receiving_keys(account)
+            .unwrap()
+            .iter()
+            .all(|k| !k.advances_allocation())
+    );
+    db.recover_swap_receiving_key(account, KeyId::new(Purpose::Receive, 19), start())
+        .unwrap();
+    db.maintain_swap_receive_lookahead(account, 20, start())
+        .unwrap();
+    let keys = db.get_swap_receiving_keys(account).unwrap();
+    assert_eq!(keys.len(), 40);
+    assert_eq!(keys.last().unwrap().key_id().index(), 39);
+}

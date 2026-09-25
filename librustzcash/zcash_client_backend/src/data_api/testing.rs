@@ -803,7 +803,11 @@ where
     <Cache::BlockSource as BlockSource>::Error: fmt::Debug,
 {
     /// Exposes an immutable reference to the test's [`BlockSource`].
-    #[cfg(any(feature = "unstable", feature = "zakura-pir-enhance"))]
+    #[cfg(any(
+        feature = "test-dependencies",
+        feature = "unstable",
+        feature = "zakura-pir-enhance"
+    ))]
     pub fn cache(&self) -> &Cache::BlockSource {
         self.cache.block_source()
     }

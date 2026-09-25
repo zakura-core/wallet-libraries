@@ -20,7 +20,8 @@ workspace.
   Unsupported builds preserve PIR work and report missing swap support.
   Per-key scan coverage persists with blocks and queues missing history when keys
   are recovered. Rewinds trim coverage even without the feature. Key retirement
-  remains pending.
+  remains pending. Shared recovery helpers register authenticated funding memos
+  and extend incoming lookahead with historical replay.
 
 ## [0.1.0-rc6] - 2026-09-24
 
