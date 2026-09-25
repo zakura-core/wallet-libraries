@@ -30,10 +30,26 @@ pub struct PendingIronwoodMemo<AccountId> {
     pub note: Note,
     /// Key scope detected by compact trial decryption.
     pub scope: Scope,
+    /// Storage-resolved incoming key for a registered receiving key. It must belong
+    /// to `account_id` and reconstruct `note`. Use `None` only for ordinary account
+    /// keys. A missing or unsupported registration must return a storage error.
+    pub receiving_ivk: Option<PreparedIncomingViewingKey>,
     /// Ephemeral key retained from the trusted compact scan.
     pub ephemeral_key: [u8; 32],
     /// First 52 ciphertext bytes retained from the same compact action.
     pub compact_ciphertext: [u8; 52],
+}
+
+impl<AccountId> PendingIronwoodMemo<AccountId> {
+    fn incoming_key(&self, account: &impl Account) -> Option<PreparedIncomingViewingKey> {
+        self.receiving_ivk.clone().or_else(|| match self.scope {
+            Scope::External => account.uivk().orchard().as_ref().map(|ivk| ivk.prepare()),
+            Scope::Internal => account
+                .ufvk()
+                .and_then(|key| key.orchard())
+                .map(|fvk| fvk.to_ivk(Scope::Internal).prepare()),
+        })
+    }
 }
 
 /// Compact action and candidate senders retained for outgoing recovery.
@@ -382,13 +398,9 @@ fn validate_record<DbT: EnhancePirStorage>(
         let valid = match binding {
             PendingIronwoodMetadata::Incoming(pending) => {
                 let account = db.get_account(pending.account_id)?;
-                let ivk = account.as_ref().and_then(|account| match pending.scope {
-                    Scope::External => account.uivk().orchard().as_ref().map(|ivk| ivk.prepare()),
-                    Scope::Internal => account
-                        .ufvk()
-                        .and_then(|key| key.orchard())
-                        .map(|fvk| fvk.to_ivk(Scope::Internal).prepare()),
-                });
+                let ivk = account
+                    .as_ref()
+                    .and_then(|account| pending.incoming_key(account));
                 pending.note.version() == NoteVersion::V3
                     && ivk
                         .and_then(|ivk| decrypt_memo(&pending, &ivk, record))
@@ -413,13 +425,7 @@ fn validate_record<DbT: EnhancePirStorage>(
         let Some(account) = db.get_account(pending.account_id)? else {
             return Ok(Err(EnhancePirStoreResult::Rejected));
         };
-        let ivk = match pending.scope {
-            Scope::External => account.uivk().orchard().as_ref().map(|ivk| ivk.prepare()),
-            Scope::Internal => account
-                .ufvk()
-                .and_then(|k| k.orchard())
-                .map(|fvk| fvk.to_ivk(Scope::Internal).prepare()),
-        };
+        let ivk = pending.incoming_key(&account);
         let Some(memo) = ivk.and_then(|ivk| decrypt_memo(&pending, &ivk, record)) else {
             return Ok(Err(EnhancePirStoreResult::Rejected));
         };
@@ -619,6 +625,7 @@ mod tests {
             account_id: (),
             note,
             scope: Scope::External,
+            receiving_ivk: None,
             ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0,
             compact_ciphertext: encryptor.encrypt_note_plaintext()[..52].try_into().unwrap(),
         };

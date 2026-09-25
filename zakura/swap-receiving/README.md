@@ -105,8 +105,11 @@ to the ordinary internal key. They check replay, late payments, and invalid note
 metadata. Registered keys currently remain in every subsequent compact scan.
 Full-transaction retrieval authenticates swap memos before or after compact
 scanning, including self-payments also recoverable through the ordinary OVK.
+Enhance PIR resolves the registered key after restart and rejects altered
+ciphertext without clearing pending work. A build without swap support reports
+an error for that retrieval instead of trying the ordinary account key.
 
-Per-key historical coverage, retirement, PIR memo enhancement,
+Per-key historical coverage, retirement,
 automatic seed restore and gap extension, PCZT/firmware qualification, Vizor,
 and receiver PIR remain required before live use. Registration after an earlier
 scan does not yet schedule the missing history automatically.

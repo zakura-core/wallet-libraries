@@ -582,6 +582,7 @@ fn pending_note<P: Parameters>(
         i64,
         [u8; 32],
         [u8; 52],
+        Option<i64>,
     )> = conn
         .query_row(
             "WITH q AS (
@@ -592,7 +593,7 @@ fn pending_note<P: Parameters>(
                 WHERE :metadata AND rn.commitment_tree_position = m.commitment_tree_position
              )
              SELECT t.txid, rn.action_index, a.uuid, rn.diversifier, rn.value,
-                    rn.rho, rn.rseed, rn.note_version, rn.recipient_key_scope, rn.ephemeral_key, rn.compact_ciphertext
+                    rn.rho, rn.rseed, rn.note_version, rn.recipient_key_scope, rn.ephemeral_key, rn.compact_ciphertext, rn.receiving_key_id
              FROM q
              JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
              JOIN transactions t ON t.id_tx = rn.transaction_id
@@ -618,6 +619,7 @@ fn pending_note<P: Parameters>(
                     row.get(8)?,
                     row.get(9)?,
                     row.get(10)?,
+                    row.get(11)?,
                 ))
             },
         )
@@ -634,6 +636,7 @@ fn pending_note<P: Parameters>(
         scope,
         ephemeral_key,
         compact_ciphertext,
+        receiving_key_id,
     )) = raw
     else {
         return Ok(None);
@@ -651,22 +654,55 @@ fn pending_note<P: Parameters>(
     let account =
         get_account(conn, params, account_id)?.ok_or(SqliteClientError::AccountUnknown)?;
     let diversifier = Diversifier::from_bytes(diversifier);
-    let recipient = match scope {
-        Scope::External => account
-            .uivk()
-            .orchard()
-            .as_ref()
-            .map(|ivk| ivk.address(diversifier)),
-        Scope::Internal => account
-            .ufvk()
-            .and_then(|ufvk| ufvk.orchard())
-            .map(|fvk| fvk.to_ivk(Scope::Internal).address(diversifier)),
+    #[cfg(not(feature = "experimental-swap-receiving"))]
+    if receiving_key_id.is_some() {
+        return Err(SqliteClientError::SwapReceivingNotEnabled);
     }
-    .ok_or_else(|| {
-        SqliteClientError::CorruptedData(
-            "Account cannot reconstruct queued Ironwood note".to_owned(),
-        )
-    })?;
+    #[cfg(feature = "experimental-swap-receiving")]
+    let receiving_key = receiving_key_id
+        .map(|id| {
+            let parent = account
+                .ufvk()
+                .and_then(|key| key.orchard())
+                .ok_or_else(|| {
+                    SqliteClientError::CorruptedData("missing swap account FVK".into())
+                })?;
+            super::swap_receiving::note_key(conn, params, id, parent).map(|(_, fvk)| fvk)
+        })
+        .transpose()?;
+    #[cfg(feature = "experimental-swap-receiving")]
+    let receiving_ivk = receiving_key
+        .as_ref()
+        .map(|key| key.to_ivk(Scope::External));
+    #[cfg(not(feature = "experimental-swap-receiving"))]
+    let receiving_ivk: Option<orchard::keys::IncomingViewingKey> = None;
+    let recipient = receiving_ivk
+        .as_ref()
+        .map(|ivk| ivk.address(diversifier))
+        .or_else(|| match scope {
+            Scope::External => account
+                .uivk()
+                .orchard()
+                .as_ref()
+                .map(|ivk| ivk.address(diversifier)),
+            Scope::Internal => account
+                .ufvk()
+                .and_then(|ufvk| ufvk.orchard())
+                .map(|fvk| fvk.to_ivk(Scope::Internal).address(diversifier)),
+        })
+        .ok_or_else(|| {
+            SqliteClientError::CorruptedData(
+                "Account cannot reconstruct queued Ironwood note".to_owned(),
+            )
+        })?;
+    #[cfg(feature = "experimental-swap-receiving")]
+    if receiving_key.as_ref().is_some_and(|key| {
+        scope != Scope::External || recipient != key.address_at(0u32, Scope::External)
+    }) {
+        return Err(SqliteClientError::CorruptedData(
+            "invalid queued swap note recipient".into(),
+        ));
+    }
     let rho = Option::from(Rho::from_bytes(&rho)).ok_or_else(|| {
         SqliteClientError::CorruptedData("Invalid queued Ironwood rho".to_owned())
     })?;
@@ -689,6 +725,7 @@ fn pending_note<P: Parameters>(
         account_id,
         note,
         scope,
+        receiving_ivk: receiving_ivk.map(|ivk| ivk.prepare()),
         ephemeral_key,
         compact_ciphertext,
     }))

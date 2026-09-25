@@ -15,9 +15,10 @@ workspace.
   The schema preserves these records across builds with the feature disabled.
   Compact scanning retains the derived key on each note, promotes paid lookahead
   indices, and reconstructs inputs with that key after reopening. Builds without
-  the feature exclude these notes from reconstruction. Automatic historical
-  replay, PIR memo enhancement, and key retirement remain pending. Ordinary
-  full-transaction enhancement now preserves swap key references and memos.
+  the feature exclude these notes from reconstruction. Full-transaction and
+  Enhance PIR retrieval authenticate memos using the note's registered key.
+  Unsupported builds preserve PIR work and report missing swap support.
+  Automatic historical replay and key retirement remain pending.
 
 ## [0.1.0-rc6] - 2026-09-24
 

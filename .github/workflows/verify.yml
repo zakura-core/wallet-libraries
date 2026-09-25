@@ -56,8 +56,8 @@ jobs:
 
       - name: Experimental swap receiving
         run: |
-          cargo test -p zakura-client-sqlite --features experimental-swap-receiving --locked swap_receiving
-          cargo test -p zakura-client-sqlite --features orchard --locked swap_receiving_notes_are_unavailable_without_feature
+          cargo test -p zakura-client-sqlite --features experimental-swap-receiving,zakura-pir-enhance --locked swap_receiving
+          cargo test -p zakura-client-sqlite --features zakura-pir-enhance --locked swap_receiving
 
       - name: PIR client
         run: |

@@ -24,7 +24,7 @@ use zcash_note_encryption::Domain;
 use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 
 /// A real V3 encrypted action and its matching PIR record, including authentic OVK ciphertext.
-fn encrypted_action(
+pub(super) fn encrypted_action(
     nf: [u8; 32],
     recipient: orchard::Address,
     ovk: OutgoingViewingKey,
@@ -69,7 +69,7 @@ fn encrypted_action(
     )
 }
 
-fn cached(st: &State, height: BlockHeight) -> CompactBlock {
+pub(super) fn cached(st: &State, height: BlockHeight) -> CompactBlock {
     let mut result = None;
     st.cache()
         .with_blocks::<_, SqliteClientError>(Some(height), Some(1), |block| {

@@ -172,7 +172,8 @@ impl std::error::Error for WalletMigrationError {
 fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> WalletMigrationError {
     match e {
         #[cfg(feature = "zakura-pir-enhance")]
-        SqliteClientError::EnhancementModeNotConfigured => {
+        SqliteClientError::EnhancementModeNotConfigured
+        | SqliteClientError::SwapReceivingNotEnabled => {
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
         SqliteClientError::CorruptedData(e) => WalletMigrationError::CorruptedData(e),

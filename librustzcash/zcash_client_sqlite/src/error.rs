@@ -46,6 +46,10 @@ pub enum SqliteClientError {
     #[cfg(feature = "zakura-pir-enhance")]
     EnhancementModeNotConfigured,
 
+    /// A queued note needs experimental swap support that this build lacks.
+    #[cfg(feature = "zakura-pir-enhance")]
+    SwapReceivingNotEnabled,
+
     /// Decoding of a stored value from its serialized form has failed.
     CorruptedData(String),
 
@@ -327,6 +331,10 @@ impl fmt::Display for SqliteClientError {
                 f,
                 "Enhancement mode is not configured; call set_enhancement_mode before enumerating requests"
             ),
+            #[cfg(feature = "zakura-pir-enhance")]
+            SqliteClientError::SwapReceivingNotEnabled => {
+                write!(f, "This note requires experimental swap receiving support")
+            }
             SqliteClientError::CorruptedData(reason) => {
                 write!(f, "Data DB is corrupted: {reason}")
             }

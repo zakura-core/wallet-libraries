@@ -89,6 +89,7 @@ fn state_with_factory(factory: TestDbFactory) -> State {
 }
 
 mod discovery;
+mod swap_receiving;
 
 fn outgoing(st: &State, tx_ref: crate::TxRef, position: u64, index: usize) -> EnhancePirRequest {
     queue_transaction(
