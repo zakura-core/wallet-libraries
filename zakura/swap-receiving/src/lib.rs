@@ -3,11 +3,13 @@
 //! This implements a draft wallet convention, not a consensus key derivation.
 //! It is unpublished and must not be used to issue live addresses before review.
 //! Wallets own durable index reservation, authenticated funding-note provenance,
-//! scanning coverage, and ordinary note accounting. This crate owns the shared
-//! byte formats and derivation so those rules need not be reimplemented in a UI.
+//! scanning coverage, and ordinary note accounting. This crate owns derivation,
+//! byte formats, and completion policy so wallets can share those rules.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+pub mod lifecycle;
 
 mod keys;
 mod memo;

@@ -53,6 +53,39 @@ adds neither inputs nor fees, respecting existing input constraints. Confirmed
 ordinary internal change then uses normal account recovery. This preference will
 not trigger separate transactions or delete receiving keys.
 
+## Completion policy
+
+`lifecycle::Lifecycle` holds one operation's completion state. Store its terminal
+observation, receipt expectation, and reconciliation state together. Restore them
+with `from_parts` so reopening and later policy changes preserve saved deadlines.
+The route adapter supplies an explicit zero, positive, or unknown Zcash receipt
+expectation. Missing API data stays unknown.
+
+On the first terminal observation, save the accepted tip, a grace target 10 blocks
+later, and a reconciliation time 12 hours later. Repeated observations preserve
+those deadlines. `scan_decision` checks actual per-key coverage through the target
+and current canonical receipt accounting. Positive expectations require confirmed
+notes with enough on-chain value. Unknown expectations also require completed
+directory reconciliation. Ambiguous operation attribution remains unresolved.
+
+`key_needs_scanning` combines every linked operation's decision. Unresolved uses
+and restored keys without operation history remain active. A `Retire` decision
+only stops trial decryption. Preserve the key, reservation, and delayed query.
+
+When due, `begin_reconciliation` saves a fixed chain target across retries and
+pages. Validate publication coverage, chain binding, and all returned payments
+before calling `finish_reconciliation`. Incomplete results leave the query pending.
+Transport failures and unknown statuses preserve state. Backoff belongs to the
+caller's network scheduler.
+
+After a supported status regression call `resume`. After a reorg call `rewind`
+and update coverage and receipt accounting in the same storage transaction.
+Recompute scan decisions even for retired keys. Never credit a note to multiple
+operations sharing a receiver.
+
+This helper is unit tested. SQLite operation persistence and active-key filtering
+are the next integration step. SQLite currently scans every registered key.
+
 ## Derivation
 
 The HMAC key is the account's canonical 32-byte external `rivk`. The message is
