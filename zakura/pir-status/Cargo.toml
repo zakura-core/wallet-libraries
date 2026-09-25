@@ -1,0 +1,21 @@
+[package]
+name = "zakura-pir-status"
+version = "0.0.1-rc0"
+description = "Private transaction-status PIR protocol and client for Zakura wallets"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["zcash", "privacy", "pir"]
+
+[dependencies]
+hex.workspace = true
+ipir-sp = "=0.1.0-rc.3"
+rand = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
