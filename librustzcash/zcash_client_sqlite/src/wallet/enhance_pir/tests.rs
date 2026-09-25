@@ -751,7 +751,7 @@ fn losing_a_funding_account_cannot_erase_incomplete_outgoing_work() {
     let tx = st.wallet_mut().conn_mut().transaction().unwrap();
     tx.execute("DELETE FROM ironwood_enhance_outgoing_accounts", [])
         .unwrap();
-    crate::wallet::suspend_orphaned_ironwood_enhancement(&tx).unwrap();
+    crate::wallet::ironwood_hooks::suspend_orphaned_ironwood_enhancement(&tx).unwrap();
     tx.commit().unwrap();
     finish_incoming(&mut st, incoming);
     assert!(requests(st.wallet().conn()).unwrap().is_empty());
