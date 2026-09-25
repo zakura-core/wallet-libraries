@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- An expired client now reports HTTP 410 from every query entry point.
+  `query_positions_with_cover` previously returned 409 after expiry, while
+  `query_batch` and `query_dummy` returned 410. A live client that is merely
+  due for a routing refresh still reports 409.
+- Cover-traffic and dummy queries now apply the same response-length cap as
+  batch queries when a custom `Transport` returns a body larger than the
+  request's limit.
+
 ## [0.0.1-rc0] - 2026-09-24
 
 Initial release candidate for the mainnet Ironwood enhancement client.

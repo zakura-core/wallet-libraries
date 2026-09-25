@@ -111,18 +111,15 @@ pub struct PendingClient {
 impl PendingClient {
     pub async fn fetch(transport: &impl Transport, base_url: &str) -> Result<Self, ClientError> {
         let base_url = base_url.trim_end_matches('/').to_owned();
-        let url = endpoint(&base_url, "/v1/enhance/init")?;
-        let bytes = transport
-            .execute(Request {
-                method: Method::Get,
-                url,
-                body: vec![],
-                response_limit: MAX_MANIFEST_BYTES,
-            })
-            .await?;
-        if bytes.as_ref().len() > MAX_MANIFEST_BYTES {
-            return Err(ClientError::Response("HTTP body exceeds limit".into()));
-        }
+        let bytes = fetch(
+            transport,
+            &base_url,
+            Method::Get,
+            "/v1/enhance/init",
+            vec![],
+            MAX_MANIFEST_BYTES,
+        )
+        .await?;
         let manifest: Manifest = serde_json::from_slice(bytes.as_ref())?;
         manifest.validate().map_err(ClientError::Generation)?;
         Ok(Self { base_url, manifest })
@@ -270,9 +267,8 @@ impl Client {
                 max_items: DEFAULT_MAX_BATCH_SIZE,
             });
         }
-        if self.refresh_due() {
-            return Err(ClientError::HttpStatus(409));
-        }
+        self.check_live()?;
+        self.check_fresh()?;
         let birthday_row = birthday_first_position / RECORDS_PER_ROW as u64;
         let domains: BTreeSet<_> = self
             .manifest
@@ -325,14 +321,15 @@ impl Client {
                             Some((row, _)) => session.prepare_row(*row)?,
                             None => session.prepare_dummy()?,
                         };
-                        let response = transport
-                            .execute(Request {
-                                method: Method::Post,
-                                url: endpoint(&round_state.client.base_url, "/v1/enhance/query")?,
-                                body: query.body().to_vec(),
-                                response_limit: MAX_RESPONSE_BYTES,
-                            })
-                            .await?;
+                        let response = fetch(
+                            transport,
+                            &round_state.client.base_url,
+                            Method::Post,
+                            "/v1/enhance/query",
+                            query.body().to_vec(),
+                            MAX_RESPONSE_BYTES,
+                        )
+                        .await?;
                         session.decode(query, response.as_ref())
                     }
                     .await;
@@ -394,6 +391,16 @@ impl Client {
         }
     }
 
+    /// A live view that is due for refresh rejects new work with 409. Expiration is
+    /// left to `check_live`, so an expired client always reports 410.
+    fn check_fresh(&self) -> Result<(), ClientError> {
+        if !self.expired && self.refresh_due() {
+            Err(ClientError::HttpStatus(409))
+        } else {
+            Ok(())
+        }
+    }
+
     fn note_status(&mut self, error: &ClientError) {
         if matches!(error, ClientError::HttpStatus(409 | 410)) {
             self.expired = true;
@@ -419,35 +426,24 @@ impl Client {
             self.cache.order.push_back(shard_id);
             return Ok(session);
         }
-        let response = transport
-            .execute(Request {
-                method: Method::Get,
-                url: endpoint(
-                    &self.base_url,
-                    &format!(
-                        "/v1/enhance/session/{}",
-                        hex::encode(
-                            self.manifest
-                                .session_id(shard_id)
-                                .map_err(ClientError::Generation)?
-                        )
-                    ),
-                )?,
-                body: vec![],
-                response_limit: MAX_SESSION_BYTES,
-            })
-            .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                self.note_status(&error);
-                return Err(error);
-            }
-        };
-        // A custom transport may use its own collector. Retain the protocol cap.
-        if response.as_ref().len() > MAX_SESSION_BYTES {
-            return Err(ClientError::Response("HTTP body exceeds limit".into()));
-        }
+        let path = format!(
+            "/v1/enhance/session/{}",
+            hex::encode(
+                self.manifest
+                    .session_id(shard_id)
+                    .map_err(ClientError::Generation)?
+            )
+        );
+        let response = fetch(
+            transport,
+            &self.base_url,
+            Method::Get,
+            &path,
+            vec![],
+            MAX_SESSION_BYTES,
+        )
+        .await
+        .inspect_err(|error| self.note_status(error))?;
         self.check_live()?;
         let session: ShardSession = serde_json::from_slice(response.as_ref())?;
         make_room(
@@ -469,27 +465,20 @@ impl Client {
         transport: &impl Transport,
         shard_id: u64,
     ) -> Result<(), ClientError> {
-        if !self.expired && self.refresh_due() {
-            return Err(ClientError::HttpStatus(409));
-        }
+        self.check_fresh()?;
         let session = self.session(transport, shard_id).await?;
         let query = session.prepare_dummy()?;
         self.check_live()?;
-        let response = transport
-            .execute(Request {
-                method: Method::Post,
-                url: endpoint(&self.base_url, "/v1/enhance/query")?,
-                body: query.body().to_vec(),
-                response_limit: MAX_RESPONSE_BYTES,
-            })
-            .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                self.note_status(&error);
-                return Err(error);
-            }
-        };
+        let response = fetch(
+            transport,
+            &self.base_url,
+            Method::Post,
+            "/v1/enhance/query",
+            query.body().to_vec(),
+            MAX_RESPONSE_BYTES,
+        )
+        .await
+        .inspect_err(|error| self.note_status(error))?;
         self.check_live()?;
         session.decode(query, response.as_ref()).map(|_| ())
     }
@@ -577,9 +566,7 @@ impl Client {
         positions: impl IntoIterator<Item = u64>,
         max_items: usize,
     ) -> Result<impl Stream<Item = PositionResult> + 'a, ClientError> {
-        if !self.expired && self.refresh_due() {
-            return Err(ClientError::HttpStatus(409));
-        }
+        self.check_fresh()?;
         let mut rows = BTreeMap::<u64, (u64, usize, Vec<u64>)>::new();
         let ready = VecDeque::new();
         let mut uncovered = VecDeque::new();
@@ -634,25 +621,17 @@ impl Client {
                     let session = client.session(transport, shard_id).await?;
                     let query = session.prepare_row(row)?;
                     client.check_live()?;
-                    let response = transport
-                        .execute(Request {
-                            method: Method::Post,
-                            url: endpoint(&client.base_url, "/v1/enhance/query")?,
-                            body: query.body().to_vec(),
-                            response_limit: MAX_RESPONSE_BYTES,
-                        })
-                        .await;
-                    let response = match response {
-                        Ok(response) => response,
-                        Err(error) => {
-                            client.note_status(&error);
-                            return Err(error);
-                        }
-                    };
+                    let response = fetch(
+                        transport,
+                        &client.base_url,
+                        Method::Post,
+                        "/v1/enhance/query",
+                        query.body().to_vec(),
+                        MAX_RESPONSE_BYTES,
+                    )
+                    .await
+                    .inspect_err(|error| client.note_status(error))?;
                     client.check_live()?;
-                    if response.as_ref().len() > MAX_RESPONSE_BYTES {
-                        return Err(ClientError::Response("HTTP body exceeds limit".into()));
-                    }
                     session.decode(query, response.as_ref())
                 }
                 .await;
@@ -695,6 +674,30 @@ impl Client {
             },
         ))
     }
+}
+
+/// Dispatches one request to `path` under `base`. A custom transport may use its
+/// own collector, so the protocol cap is enforced again on the returned body.
+async fn fetch(
+    transport: &impl Transport,
+    base: &str,
+    method: Method,
+    path: &str,
+    body: Vec<u8>,
+    response_limit: usize,
+) -> Result<ResponseBody, ClientError> {
+    let response = transport
+        .execute(Request {
+            method,
+            url: endpoint(base, path)?,
+            body,
+            response_limit,
+        })
+        .await?;
+    if response.as_ref().len() > response_limit {
+        return Err(ClientError::Response("HTTP body exceeds limit".into()));
+    }
+    Ok(response)
 }
 
 fn endpoint(base: &str, path: &str) -> Result<String, ClientError> {
@@ -1386,6 +1389,7 @@ mod v7_cover_tests {
         session_statuses: RefCell<VecDeque<Option<u16>>>,
         pending_post: Option<usize>,
         pending_session: Option<usize>,
+        oversized_post: bool,
     }
     impl Mock {
         fn new() -> Self {
@@ -1457,6 +1461,7 @@ mod v7_cover_tests {
                 session_statuses: RefCell::new(VecDeque::new()),
                 pending_post: None,
                 pending_session: None,
+                oversized_post: false,
             }
         }
         fn acceptance(&self) -> GenerationAcceptance {
@@ -1526,6 +1531,10 @@ mod v7_cover_tests {
                 }
                 if let Some(Some(status)) = self.post_statuses.borrow_mut().pop_front() {
                     return Err(ClientError::HttpStatus(status));
+                }
+                if self.oversized_post {
+                    // A custom transport that ignores the request's collector.
+                    return Ok(ResponseBody(vec![0; MAX_RESPONSE_BYTES + 1]));
                 }
                 if self.delay_once.replace(false) {
                     tokio::time::sleep(std::time::Duration::from_secs(31)).await;
@@ -1683,6 +1692,65 @@ mod v7_cover_tests {
                 ));
                 assert_eq!(transport.posts.borrow().len(), 4);
             });
+    }
+
+    #[test]
+    fn expired_client_reports_410_on_every_query_path() {
+        futures::executor::block_on(async {
+            use futures_util::StreamExt;
+            let transport = Mock::new();
+            let mut client = PendingClient::fetch(&transport, "https://example.test")
+                .await
+                .unwrap()
+                .accept(&transport.acceptance())
+                .unwrap();
+            transport.post_statuses.borrow_mut().push_back(Some(410));
+            assert!(matches!(
+                client.query_dummy(&transport, 0).await,
+                Err(ClientError::HttpStatus(410))
+            ));
+            assert!(client.refresh_due());
+            // Expiration wins over the refresh-due 409 on every entry point.
+            assert!(matches!(
+                client.query_positions_with_cover(&transport, &[0], 0).await,
+                Err(ClientError::HttpStatus(410))
+            ));
+            assert!(matches!(
+                client.query_dummy(&transport, 0).await,
+                Err(ClientError::HttpStatus(410))
+            ));
+            let stale: Vec<_> = client.query_batch(&transport, [0]).unwrap().collect().await;
+            assert!(matches!(
+                &stale[0].record,
+                Err(ClientError::HttpStatus(410))
+            ));
+            assert_eq!(transport.posts.borrow().len(), 1);
+        });
+    }
+
+    #[test]
+    fn every_query_path_caps_custom_transport_responses() {
+        futures::executor::block_on(async {
+            let mut transport = Mock::new();
+            transport.oversized_post = true;
+            let mut client = PendingClient::fetch(&transport, "https://example.test")
+                .await
+                .unwrap()
+                .accept(&transport.acceptance())
+                .unwrap();
+            let dummy = client.query_dummy(&transport, 0).await;
+            let cover = client
+                .query_positions_with_cover(&transport, &[0], 0)
+                .await
+                .map(|_| ());
+            for result in [dummy, cover] {
+                assert!(matches!(
+                    result,
+                    Err(ClientError::Response(message)) if message == "HTTP body exceeds limit"
+                ));
+            }
+            assert_eq!(transport.posts.borrow().len(), 3);
+        });
     }
 
     #[test]
