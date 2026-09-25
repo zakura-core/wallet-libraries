@@ -613,16 +613,12 @@ pub(crate) fn put_received_note<
         .query_row(sql_args, |row| row.get::<_, i64>(0))
         .map_err(SqliteClientError::from)?;
 
-    if shielded_pool == ShieldedPool::Ironwood {
-        if let Some(fields) = output.compact_encryption_fields() {
-            conn.execute(
-                "UPDATE ironwood_received_notes SET ephemeral_key = :epk,
-                 compact_ciphertext = :ciphertext WHERE id = :id",
-                named_params![":epk": fields.ephemeral_key.as_slice(),
-                    ":ciphertext": fields.compact_ciphertext.as_slice(), ":id": received_note_id],
-            )?;
-        }
-    }
+    super::ironwood_hooks::put_received_note_encryption_fields(
+        conn,
+        shielded_pool,
+        received_note_id,
+        output.compact_encryption_fields(),
+    )?;
 
     if let Some(spent_in) = spent_in {
         let inserted = conn.execute(
@@ -637,23 +633,7 @@ pub(crate) fn put_received_note<
                 ":transaction_id": spent_in.0
             ],
         )?;
-        #[cfg(feature = "zakura-pir-enhance")]
-        if shielded_pool == ShieldedPool::Ironwood
-            && (inserted != 0
-                || conn.query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM ironwood_enhance_routing
-                     WHERE transaction_id = :tx)",
-                    named_params![":tx": spent_in.0],
-                    |row| row.get::<_, bool>(0),
-                )?)
-        {
-            // New links and unclassified history need reconstruction. Rewinds preserve
-            // protected transactions' discovery obligations separately, so replaying
-            // an existing link must not reopen ordinarily completed work.
-            super::enhance_pir::discovery::queue(conn, spent_in)?;
-        }
-        #[cfg(not(feature = "zakura-pir-enhance"))]
-        let _ = inserted;
+        super::ironwood_hooks::put_received_note_spend(conn, shielded_pool, spent_in, inserted)?;
     }
 
     Ok(account_id)

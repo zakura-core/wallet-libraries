@@ -110,7 +110,7 @@ fn retire_enhancement_if_complete(
 
 /// Clears private work without removing recovered data or an ordinary request.
 pub(crate) fn clear_work(conn: &Connection, tx_ref: crate::TxRef) -> Result<(), SqliteClientError> {
-    super::clear_ironwood_enhancement_work(conn, tx_ref)
+    super::ironwood_hooks::clear_ironwood_enhancement_work(conn, tx_ref)
 }
 
 fn route(conn: &Connection, tx_ref: crate::TxRef) -> Result<Option<i64>, SqliteClientError> {

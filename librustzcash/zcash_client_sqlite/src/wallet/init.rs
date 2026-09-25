@@ -693,7 +693,7 @@ fn init_wallet_db_internal<
             .borrow_mut()
             .transaction()
             .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
-        super::suspend_orphaned_ironwood_enhancement(&tx)
+        super::ironwood_hooks::suspend_orphaned_ironwood_enhancement(&tx)
             .map_err(sqlite_client_error_to_wallet_migration_error)?;
         tx.commit()
             .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
