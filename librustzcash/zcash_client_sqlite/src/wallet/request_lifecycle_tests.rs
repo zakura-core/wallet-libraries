@@ -68,6 +68,55 @@ fn queued(st: &State, txid: TxId, query_type: i64) -> bool {
 }
 
 #[test]
+fn typed_requests_follow_independent_status_and_payload_lifecycles() {
+    let (mut st, height) = fixture();
+    let txid = TxId::from_bytes([71; 32]);
+    queue_both(&st, txid, height, None);
+
+    let requests = st.wallet().transaction_data_requests().unwrap();
+    assert!(requests.contains(&TransactionDataRequest::GetStatus(txid)));
+    assert!(requests.contains(&TransactionDataRequest::Enhancement(txid)));
+    assert!(st
+        .wallet()
+        .transaction_status_requests()
+        .unwrap()
+        .iter()
+        .any(|request| request.txid() == txid));
+    assert!(st
+        .wallet()
+        .public_transaction_enhancement_requests()
+        .unwrap()
+        .iter()
+        .any(|request| request.txid() == txid));
+
+    st.wallet_mut()
+        .set_transaction_status(txid, TransactionStatus::Mined(height))
+        .unwrap();
+    assert!(!st
+        .wallet()
+        .transaction_status_requests()
+        .unwrap()
+        .iter()
+        .any(|request| request.txid() == txid));
+    assert!(st
+        .wallet()
+        .public_transaction_enhancement_requests()
+        .unwrap()
+        .iter()
+        .any(|request| request.txid() == txid));
+
+    st.wallet_mut()
+        .notify_transaction_enhancement_not_found(txid)
+        .unwrap();
+    assert!(!st
+        .wallet()
+        .public_transaction_enhancement_requests()
+        .unwrap()
+        .iter()
+        .any(|request| request.txid() == txid));
+}
+
+#[test]
 fn every_status_preserves_payload_work_even_with_stored_bytes() {
     let (mut st, height) = fixture();
     for (i, status) in [

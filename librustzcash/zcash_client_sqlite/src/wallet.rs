@@ -6563,6 +6563,22 @@ mod tests {
             .unwrap();
 
         let standard_requests = st.wallet().transaction_data_requests().unwrap();
+        assert_eq!(
+            st.wallet().transaction_status_requests().unwrap(),
+            standard_requests
+                .iter()
+                .cloned()
+                .filter_map(TransactionDataRequest::into_status_request)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            st.wallet().public_transaction_enhancement_requests().unwrap(),
+            standard_requests
+                .iter()
+                .cloned()
+                .filter_map(TransactionDataRequest::into_public_enhancement_request)
+                .collect::<Vec<_>>()
+        );
         assert!(standard_requests.contains(&TransactionDataRequest::Enhancement(protected_txid)));
         assert!(standard_requests.contains(&TransactionDataRequest::GetStatus(protected_txid)));
         assert!(standard_requests.contains(&TransactionDataRequest::Enhancement(unprotected_txid)));
@@ -6575,6 +6591,38 @@ mod tests {
                 .db_mut()
                 .set_enhancement_mode(EnhancementMode::PrivateIronwood);
             let private_requests = st.wallet().transaction_data_requests().unwrap();
+            assert_eq!(
+                st.wallet().transaction_status_requests().unwrap(),
+                private_requests
+                    .iter()
+                    .cloned()
+                    .filter_map(TransactionDataRequest::into_status_request)
+                    .collect::<Vec<_>>()
+            );
+            let private_public_enhancements = st
+                .wallet()
+                .public_transaction_enhancement_requests()
+                .unwrap();
+            assert_eq!(
+                private_public_enhancements,
+                private_requests
+                    .iter()
+                    .cloned()
+                    .filter_map(TransactionDataRequest::into_public_enhancement_request)
+                    .collect::<Vec<_>>()
+            );
+            assert!(!private_public_enhancements
+                .iter()
+                .any(|request| request.txid() == protected_txid));
+            assert!(private_public_enhancements
+                .iter()
+                .any(|request| request.txid() == mixed_pool_txid));
+            assert!(st
+                .wallet()
+                .transaction_status_requests()
+                .unwrap()
+                .iter()
+                .any(|request| request.txid() == protected_txid));
             assert!(
                 !private_requests.contains(&TransactionDataRequest::Enhancement(protected_txid))
             );

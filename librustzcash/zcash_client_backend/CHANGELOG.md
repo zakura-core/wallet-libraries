@@ -10,6 +10,11 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- Add typed `WalletRead::transaction_status_requests` and
+  `public_transaction_enhancement_requests` views of the existing request queue.
+  The methods have defaults for custom stores and do not grant disclosure consent.
+
 ### Changed
 - `WalletWrite::set_transaction_status` and the low-level equivalent now update
   status only; they must not retire enhancement or private recovery work.

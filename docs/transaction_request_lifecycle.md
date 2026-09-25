@@ -5,6 +5,27 @@ obligations. A wallet may need both for the same transaction. Keep request
 tracking keyed by operation and txid, and reread the queue after processing:
 payload ingestion can discover additional parent transactions to retrieve.
 
+## Read entrypoints and disclosure
+
+`WalletRead::transaction_status_requests()` returns typed status observations.
+`WalletRead::public_transaction_enhancement_requests()` returns typed ordinary
+payload requests eligible under the currently configured enhancement mode.
+Both are views of `transaction_data_requests()` and preserve its scheduling and
+routing rules. The combined method remains available to callers that need one
+snapshot for status, enhancement, and transparent discovery work; its
+`into_status_request()` and `into_public_enhancement_request()` conversions can
+classify entries without rereading the database. Custom wallet stores gain the
+new methods through default trait implementations.
+
+A status request says that the wallet needs an observation. It does **not**
+authorize revealing the txid to a public server. The caller must choose a
+status transport independently of the enhancement mode. Likewise, ordinary
+payload eligibility reflects the configured wallet routing, not blanket
+disclosure consent. A caller must authorize its chosen payload transport.
+Private Ironwood enhancement work remains under `EnhancePirRead::enhance_pir_work()`;
+transparent address and outpoint discovery remain distinct requests in the
+combined enumeration.
+
 ## Completion contract
 
 | Event | Status obligation | Enhancement obligation |

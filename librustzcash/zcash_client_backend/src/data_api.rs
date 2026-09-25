@@ -1464,7 +1464,55 @@ pub enum TransactionDataRequest {
     GetSpendingTx(OutPoint),
 }
 
+/// Pending observation of a transaction's status on the main chain.
+///
+/// This describes wallet work, not permission to disclose the transaction ID. The caller must
+/// select a status transport whose disclosure policy is appropriate for this transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TransactionStatusRequest(TxId);
+
+impl TransactionStatusRequest {
+    /// Returns the transaction whose status the wallet needs to observe.
+    pub fn txid(self) -> TxId {
+        self.0
+    }
+}
+
+/// Pending ordinary payload enhancement eligible under the configured enhancement routing.
+///
+/// This includes transaction-ID enhancement exposed by the configured mode. Callers must still
+/// choose an authorized payload transport before disclosing the transaction ID. Private PIR work
+/// is returned separately by `EnhancePirRead::enhance_pir_work` when that feature is enabled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PublicTransactionEnhancementRequest(TxId);
+
+impl PublicTransactionEnhancementRequest {
+    /// Returns the transaction whose full payload the wallet needs to retrieve.
+    pub fn txid(self) -> TxId {
+        self.0
+    }
+}
+
 impl TransactionDataRequest {
+    /// Converts a status request from a combined transaction-data request snapshot.
+    pub fn into_status_request(self) -> Option<TransactionStatusRequest> {
+        match self {
+            Self::GetStatus(txid) => Some(TransactionStatusRequest(txid)),
+            _ => None,
+        }
+    }
+
+    /// Converts an ordinary payload request from a combined transaction-data request snapshot.
+    ///
+    /// The request was eligible when the snapshot was read; a caller must still select an
+    /// authorized transport before disclosing its transaction ID.
+    pub fn into_public_enhancement_request(self) -> Option<PublicTransactionEnhancementRequest> {
+        match self {
+            Self::Enhancement(txid) => Some(PublicTransactionEnhancementRequest(txid)),
+            _ => None,
+        }
+    }
+
     /// Constructs a request for Information about transactions that receive or spend funds
     /// belonging to the specified transparent address.
     ///
@@ -2584,6 +2632,37 @@ pub trait WalletRead {
     /// transaction data requests, such as when it is necessary to fill in purely-transparent
     /// transaction history by walking the chain backwards via transparent inputs.
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error>;
+
+    /// Returns pending transaction-status observations from the current transaction-data request
+    /// snapshot. This is a convenience view of [`WalletRead::transaction_data_requests`], so it
+    /// retains that method's scheduling and retry rules.
+    ///
+    /// A status request is not permission to reveal its transaction ID. The caller must choose a
+    /// status transport appropriate for its privacy policy independently of enhancement routing.
+    /// In particular, private enhancement routing does not make status observation private.
+    fn transaction_status_requests(&self) -> Result<Vec<TransactionStatusRequest>, Self::Error> {
+        Ok(self
+            .transaction_data_requests()?
+            .into_iter()
+            .filter_map(TransactionDataRequest::into_status_request)
+            .collect())
+    }
+
+    /// Returns pending ordinary payload enhancements eligible under the configured enhancement
+    /// routing. This is a convenience view of [`WalletRead::transaction_data_requests`]; private
+    /// PIR work remains available through `EnhancePirRead::enhance_pir_work` when enabled.
+    ///
+    /// Eligibility describes wallet routing, not blanket consent to disclose a transaction ID.
+    /// The caller must select an authorized payload transport before issuing the request.
+    fn public_transaction_enhancement_requests(
+        &self,
+    ) -> Result<Vec<PublicTransactionEnhancementRequest>, Self::Error> {
+        Ok(self
+            .transaction_data_requests()?
+            .into_iter()
+            .filter_map(TransactionDataRequest::into_public_enhancement_request)
+            .collect())
+    }
 
     /// Returns a vector of [`ReceivedTransactionOutput`] values describing the outputs of the
     /// specified transaction that were received by the wallet. The number of confirmations until
