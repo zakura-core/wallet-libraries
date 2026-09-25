@@ -3851,11 +3851,6 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
                 ],
             )?;
 
-            // Ordinary enhancement is complete once the server has reported that it cannot
-            // provide the transaction. A status-observation intent remains active until the
-            // transaction is confirmed to be terminal. Do not erase a PIR LWD fallback that
-            // still needs raw data; GetStatus and Enhancement are independent queue rows.
-            retire_enhancement_after_status(conn, txid)?;
             conn.execute(
                 "DELETE FROM tx_retrieval_queue
                  WHERE txid = :txid
@@ -3919,28 +3914,33 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
 
             #[cfg(feature = "transparent-inputs")]
             transparent::update_gap_limits(conn, _params, gap_limits, txid, height)?;
-
-            // Mining observation alone does not satisfy Enhancement; PIR can restore an
-            // ordinary LWD fallback while a concurrent GetStatus response is applied.
-            retire_enhancement_after_status(conn, txid)?;
         }
     }
 
     Ok(())
 }
 
-fn retire_enhancement_after_status(
-    conn: &rusqlite::Transaction,
+/// Only an explicit failed payload lookup retires ordinary enhancement. The
+/// routing table exists in every build, so reopening a PIR wallet without the
+/// feature cannot erase its incomplete recovery obligations through this API.
+pub(crate) fn notify_transaction_enhancement_not_found(
+    conn: &rusqlite::Transaction<'_>,
     txid: TxId,
 ) -> Result<(), SqliteClientError> {
-    #[cfg(feature = "zakura-pir-enhance")]
-    {
-        enhance_pir::retire_enhancement_after_status(conn, txid)
-    }
-    #[cfg(not(feature = "zakura-pir-enhance"))]
-    {
-        delete_retrieval_queue_entry(conn, txid, TxQueryType::Enhancement)
-    }
+    conn.execute(
+        "DELETE FROM tx_retrieval_queue
+         WHERE txid = :txid AND query_type = :enhancement
+           AND NOT EXISTS (
+               SELECT 1 FROM transactions t
+               JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
+               WHERE t.txid = :txid AND t.raw IS NULL
+           )",
+        named_params![
+            ":txid": txid.as_ref(),
+            ":enhancement": TxQueryType::Enhancement.code(),
+        ],
+    )?;
+    Ok(())
 }
 
 /// Returns the minimum checkpoint height that exists in all note commitment trees that contain
@@ -7930,3 +7930,6 @@ fn maintain_wallet_without_pir() {
         .unwrap();
     }
 }
+
+#[cfg(test)]
+mod request_lifecycle_tests;

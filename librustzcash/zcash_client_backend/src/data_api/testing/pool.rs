@@ -3905,12 +3905,22 @@ where
         usize::try_from(DEFAULT_TX_EXPIRY_DELTA).unwrap(),
     );
 
-    // Simulate the situation where the enhancement request results in `TxidNotRecognized`
+    // An explicit payload-not-found response completes ordinary enhancement.
+    // A status-only observation must leave that independent obligation intact.
     st.wallet_mut()
         .set_transaction_status(
             *spent_outpoint.txid(),
             data_api::TransactionStatus::TxidNotRecognized,
         )
+        .unwrap();
+    assert!(
+        st.wallet()
+            .transaction_data_requests()
+            .unwrap()
+            .contains(&TransactionDataRequest::Enhancement(*spent_outpoint.txid()))
+    );
+    st.wallet_mut()
+        .notify_transaction_enhancement_not_found(*spent_outpoint.txid())
         .unwrap();
 
     // Verify that the transaction enhancement request for the invalid txid has been deleted.

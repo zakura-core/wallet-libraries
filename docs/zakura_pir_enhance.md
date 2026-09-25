@@ -17,6 +17,15 @@ The wallet persists the ephemeral key and 52-byte ciphertext prefix from compact
 
 The service publishes a `Manifest` at `GET /v1/enhance/init`. It contains the chain anchor, fixed query domains, canonical routing, recovery epochs, and immutable session references. Shard query domains are 4,096, 8,192, 16,384, or 32,768 rows. The client validates domain geometry, coverage, routing, and session identities before use. It uses P16Q48 parameters with the published `ipir-sp =0.1.0-rc.3` crate. Earlier v5/q46 and v6/q48 manifests and sessions are rejected; schema-11 records and the deterministic public setup domain are unchanged.
 
+## Status and enhancement completion
+
+Status observation and payload enhancement are independent obligations.
+`set_transaction_status` never retires enhancement or private recovery work.
+An explicit payload-not-found response uses
+`notify_transaction_enhancement_not_found`; SQLite retains incomplete PIR-routed
+recovery even for that outcome. See the [transaction request lifecycle](transaction_request_lifecycle.md)
+for completion rules, response ordering, and the consumer migration.
+
 ## Wallet acceptance and resources
 
 A manifest must be checked against locally scanned wallet state before allocating expanded PIR setup. Check network, activation height, anchor block hash, and `coverage.records` as the Ironwood tree size. The manifest's displayed hash is reversed when used as the wallet's internal `BlockHash`. Only an accepted pending client can become usable.
