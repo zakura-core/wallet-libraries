@@ -29,6 +29,38 @@ use crate::{AccountUuid, error::SqliteClientError};
 
 use super::{TxQueryType, get_account, memo_repr, orchard::parse_note_version};
 
+// SQL fragments are macros so that `concat!` can assemble constant statements.
+// Defined before the submodules so that they can use them too.
+macro_rules! private_protected {
+    () => {
+        0
+    };
+}
+
+/// Joins transaction `t` to its routing row `r`, keeping only transactions that still await
+/// private enhancement: protected route, no raw data, mined. Extend the WHERE with `AND`.
+macro_rules! active_private_tx {
+    () => {
+        concat!(
+            "JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
+             WHERE r.route = ",
+            private_protected!(),
+            " AND t.raw IS NULL AND t.mined_height IS NOT NULL"
+        )
+    };
+}
+
+/// Whether transaction `:tx` has queued memo, outgoing or metadata work.
+macro_rules! has_private_work {
+    () => {
+        "(EXISTS(SELECT 1 FROM ironwood_memo_retrieval_queue q
+                 JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
+                 WHERE rn.transaction_id = :tx)
+          OR EXISTS(SELECT 1 FROM ironwood_enhance_outgoing_queue WHERE transaction_id = :tx)
+          OR EXISTS(SELECT 1 FROM ironwood_enhance_metadata_queue WHERE transaction_id = :tx))"
+    };
+}
+
 pub(crate) mod discovery;
 mod metadata;
 
@@ -37,37 +69,40 @@ mod metadata;
 // transaction deletion with retrieval-intent cleanup ends protection. No row retains
 // ordinary enhancement semantics for unclassified and legacy transactions. Its
 // history expiry is display-only and never controls spendability.
-const PRIVATE_PROTECTED: i64 = 0;
+const PRIVATE_PROTECTED: i64 = private_protected!();
 const LWD_REQUIRED: i64 = 1;
 
 type PendingOutgoingRow = ([u8; 32], u32, [u8; 32], [u8; 32], [u8; 32], [u8; 52]);
 
-const OUTSTANDING_OUTGOING: &str = "
+const ACTIVE_PRIVATE_TX: &str = active_private_tx!();
+
+const OUTSTANDING_OUTGOING: &str = concat!(
+    "
     FROM ironwood_enhance_outgoing_queue q
     JOIN transactions t ON t.id_tx = q.transaction_id
-    JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-    WHERE t.raw IS NULL AND t.mined_height IS NOT NULL AND r.route = 0";
+    ",
+    active_private_tx!()
+);
 
 fn retire_enhancement_if_complete(
     tx: &Connection,
     tx_ref: crate::TxRef,
 ) -> Result<(), SqliteClientError> {
     tx.execute(
-        "DELETE FROM tx_retrieval_queue
+        concat!(
+            "DELETE FROM tx_retrieval_queue
          WHERE txid = (SELECT txid FROM transactions WHERE id_tx = :tx)
            AND query_type = :enhancement
            AND EXISTS (SELECT 1 FROM ironwood_enhance_routing
-                       WHERE transaction_id = :tx AND route = 0)
+                       WHERE transaction_id = :tx AND route = ",
+            private_protected!(),
+            ")
+           AND NOT ",
+            has_private_work!(),
+            "
            AND NOT EXISTS (
-               SELECT 1 FROM ironwood_memo_retrieval_queue q
-               JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
-               WHERE rn.transaction_id = :tx)
-           AND NOT EXISTS (
-               SELECT 1 FROM ironwood_enhance_outgoing_queue WHERE transaction_id = :tx)
-           AND NOT EXISTS (
-               SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx)
-           AND NOT EXISTS (
-               SELECT 1 FROM ironwood_enhance_metadata_queue WHERE transaction_id = :tx)",
+               SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx)"
+        ),
         named_params![":tx": tx_ref.0, ":enhancement": TxQueryType::Enhancement.code()],
     )?;
     Ok(())
@@ -76,6 +111,16 @@ fn retire_enhancement_if_complete(
 /// Clears private work without removing recovered data or an ordinary request.
 pub(crate) fn clear_work(conn: &Connection, tx_ref: crate::TxRef) -> Result<(), SqliteClientError> {
     super::clear_ironwood_enhancement_work(conn, tx_ref)
+}
+
+fn route(conn: &Connection, tx_ref: crate::TxRef) -> Result<Option<i64>, SqliteClientError> {
+    conn.query_row(
+        "SELECT route FROM ironwood_enhance_routing WHERE transaction_id = :tx",
+        named_params![":tx": tx_ref.0],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn require_lwd(conn: &Connection, tx_ref: crate::TxRef) -> Result<(), SqliteClientError> {
@@ -97,8 +142,12 @@ fn require_lwd(conn: &Connection, tx_ref: crate::TxRef) -> Result<(), SqliteClie
 
 pub(crate) fn is_protected(conn: &Connection, txid: TxId) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_enhance_routing r
-         JOIN transactions t ON t.id_tx = r.transaction_id WHERE t.txid = :txid AND r.route = 0)",
+        concat!(
+            "SELECT EXISTS(SELECT 1 FROM ironwood_enhance_routing r
+         JOIN transactions t ON t.id_tx = r.transaction_id WHERE t.txid = :txid AND r.route = ",
+            private_protected!(),
+            ")"
+        ),
         named_params![":txid": txid.as_ref()],
         |row| row.get(0),
     )?)
@@ -120,15 +169,13 @@ pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClien
              JOIN transactions t ON t.id_tx = q.transaction_id
              LEFT JOIN blocks b ON b.height = t.mined_height
              LEFT JOIN blocks prior ON prior.height = t.mined_height - 1
-             JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-             WHERE t.raw IS NULL AND t.mined_height IS NOT NULL AND r.route = 0
+             {ACTIVE_PRIVATE_TX}
          ), queries AS (
              SELECT q.commitment_tree_position AS position, t.txid, rn.action_index AS output_index
              FROM ironwood_memo_retrieval_queue q
              JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
              JOIN transactions t ON t.id_tx = rn.transaction_id
-             JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-             WHERE r.route = 0 AND t.raw IS NULL AND t.mined_height IS NOT NULL
+             {ACTIVE_PRIVATE_TX}
                AND rn.memo IS NULL AND rn.commitment_tree_position = q.commitment_tree_position
              UNION
              SELECT q.commitment_tree_position, t.txid, q.output_index {OUTSTANDING_OUTGOING}
@@ -137,9 +184,8 @@ pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClien
              SELECT q.commitment_tree_position, t.txid, q.output_index
              FROM ironwood_enhance_metadata_queue q
              JOIN transactions t ON t.id_tx = q.transaction_id
-             JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-             WHERE q.commitment_tree_position IS NOT NULL AND r.route = 0
-               AND t.raw IS NULL AND t.mined_height IS NOT NULL
+             {ACTIVE_PRIVATE_TX}
+               AND q.commitment_tree_position IS NOT NULL
          )
          SELECT DISTINCT 0 AS kind, height AS ordinal, hash AS identity, NULL AS output_index,
                          NULL AS reason, NULL AS tx_index FROM discovery WHERE reason IS NULL
@@ -360,13 +406,7 @@ fn queue_transaction(
     if has_raw || !mined {
         return clear_work(conn, tx_ref);
     }
-    let route: Option<i64> = conn
-        .query_row(
-            "SELECT route FROM ironwood_enhance_routing WHERE transaction_id = :tx",
-            named_params![":tx": tx_ref.0],
-            |row| row.get(0),
-        )
-        .optional()?;
+    let route = route(conn, tx_ref)?;
     if route == Some(LWD_REQUIRED) {
         return require_lwd(conn, tx_ref);
     }
@@ -485,11 +525,7 @@ fn queue_transaction(
     metadata::queue(conn, tx_ref, candidates)?;
 
     let has_work: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_memo_retrieval_queue q
-                       JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
-                       WHERE rn.transaction_id = :tx)
-             OR EXISTS(SELECT 1 FROM ironwood_enhance_outgoing_queue WHERE transaction_id = :tx)
-             OR EXISTS(SELECT 1 FROM ironwood_enhance_metadata_queue WHERE transaction_id = :tx)",
+        concat!("SELECT ", has_private_work!()),
         named_params![":tx": tx_ref.0],
         |row| row.get(0),
     )?;
@@ -553,7 +589,8 @@ fn pending_note<P: Parameters>(
         [u8; 52],
     )> = conn
         .query_row(
-            "WITH q AS (
+            concat!(
+                "WITH q AS (
                 SELECT received_note_id, commitment_tree_position FROM ironwood_memo_retrieval_queue WHERE NOT :metadata
                 UNION ALL
                 SELECT rn.id, m.commitment_tree_position FROM ironwood_enhance_metadata_queue m
@@ -566,11 +603,13 @@ fn pending_note<P: Parameters>(
              JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
              JOIN transactions t ON t.id_tx = rn.transaction_id
              JOIN accounts a ON a.id = rn.account_id
-             JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-             WHERE q.commitment_tree_position = :position
-               AND (:metadata OR rn.memo IS NULL) AND r.route = 0
-               AND t.raw IS NULL AND t.mined_height IS NOT NULL
-               AND rn.commitment_tree_position = q.commitment_tree_position",
+             ",
+                active_private_tx!(),
+                "
+               AND q.commitment_tree_position = :position
+               AND (:metadata OR rn.memo IS NULL)
+               AND rn.commitment_tree_position = q.commitment_tree_position"
+            ),
             named_params![":position": u64::from(position), ":metadata": metadata_only],
             |row| {
                 let value = u64::try_from(row.get::<_, i64>(4)?)
@@ -682,9 +721,11 @@ pub(crate) fn apply<P: Parameters>(
     let id = request.request_id();
     let target: Option<crate::TxRef> = tx
         .query_row(
-            "SELECT t.id_tx FROM transactions t
-         JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-         WHERE t.txid = :txid AND t.raw IS NULL AND t.mined_height IS NOT NULL AND r.route = 0",
+            concat!(
+                "SELECT t.id_tx FROM transactions t ",
+                active_private_tx!(),
+                " AND t.txid = :txid"
+            ),
             named_params![":txid": id.txid().as_ref()],
             |row| row.get(0).map(crate::TxRef),
         )

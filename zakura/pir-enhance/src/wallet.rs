@@ -231,9 +231,7 @@ mod tests {
 #[cfg(test)]
 mod acceptance_tests {
     use super::*;
-    use crate::types::Lifecycle;
     use crate::*;
-    use sha2::{Digest, Sha256};
     use zcash_client_backend::data_api::{WalletRead, testing::TestBuilder};
     use zcash_client_sqlite::testing::{BlockCache, db::TestDbFactory};
     use zcash_protocol::local_consensus::LocalNetwork;
@@ -254,48 +252,9 @@ mod acceptance_tests {
             .with_account_from_sapling_activation(BlockHash([0; 32]))
             .build();
         let (height, _) = state.generate_empty_block();
-        let geometry = Geometry::default();
-        let coverage = Lifecycle::default().coverage(1, geometry).unwrap();
-        let shard = &coverage.shards[0];
-        let shard_id = shard.id;
-        let shard_logical_rows = shard.logical_rows;
-        let unit_identities = BTreeMap::from([(
-            shard.id,
-            shard
-                .units
-                .iter()
-                .map(|unit| UnitIdentity {
-                    recovery_epoch: 0,
-                    table: "enhance".into(),
-                    shard_id: shard.id,
-                    local_row_start: unit.local_row_start,
-                    allocated_rows: unit.allocated_rows,
-                    setup_sha256: hex::encode(Sha256::digest(setup_seed(shard.id))),
-                    parameter_id: unit_parameter_id(unit.allocated_rows).unwrap(),
-                    content_sha256: "00".repeat(32),
-                })
-                .collect(),
-        )]);
-        let mut manifest = Manifest {
-            recovery_epoch: 0,
-            placement_revision: 1,
-            domain_recovery_epochs: [(0, "0".into())].into(),
-            schema_version: SCHEMA_VERSION,
-            protocol_revision: PROTOCOL_REVISION.into(),
-            network: "main".into(),
-            pool: POOL.into(),
-            generation: 1,
-            anchor_height: u64::from(u32::from(height)),
-            anchor_block_hash: "00".repeat(32),
-            geometry,
-            coverage,
-            sessions: vec![SessionRef {
-                shard_id,
-                public_params_sha256: "00".repeat(32),
-                parameter_id: parameter_id(shard_logical_rows).unwrap(),
-            }],
-            unit_identities,
-        };
+        let mut manifest =
+            crate::test_support::synthetic_manifest(1, |_| "00".repeat(32), &"00".repeat(32));
+        manifest.anchor_height = u64::from(u32::from(height));
         manifest.validate().unwrap();
         assert!(matches!(
             state

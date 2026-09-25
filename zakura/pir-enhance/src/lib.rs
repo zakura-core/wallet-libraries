@@ -4,6 +4,9 @@ pub mod client;
 pub mod transport;
 pub mod types;
 
+#[cfg(test)]
+mod test_support;
+
 pub use client::{
     AcceptedAnchor, ClientError, ClientResourceLimits, GenerationAcceptance, PreparedQuery,
     QuerySession,

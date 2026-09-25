@@ -19,12 +19,14 @@ use crate::{AccountUuid, TxRef, error::SqliteClientError, wallet::KeyScope};
 
 use super::{
     LWD_REQUIRED, TxQueryType, outgoing_position_owned_by_other, queue_transaction,
-    retire_enhancement_if_complete,
+    retire_enhancement_if_complete, route,
 };
 
 struct ReconstructedCandidates {
     outgoing: Vec<IronwoodEnhanceCandidate<AccountUuid>>,
     received_context: Vec<(u32, [u8; 32], [u8; 52])>,
+    /// Whether the actions reveal every funding nullifier.
+    funded: bool,
 }
 
 /// Reopens outgoing discovery in the same transaction that persists the spend link.
@@ -51,14 +53,7 @@ pub(crate) fn queue(conn: &Connection, tx_ref: TxRef) -> Result<(), SqliteClient
          )",
         named_params![":tx": tx_ref.0, ":internal_scope": KeyScope::INTERNAL.encode()],
     )?;
-    let route: Option<i64> = conn
-        .query_row(
-            "SELECT route FROM ironwood_enhance_routing WHERE transaction_id = :tx",
-            named_params![":tx": tx_ref.0],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if route == Some(LWD_REQUIRED) {
+    if route(conn, tx_ref)? == Some(LWD_REQUIRED) {
         return super::require_lwd(conn, tx_ref);
     }
     conn.execute(
@@ -67,8 +62,12 @@ pub(crate) fn queue(conn: &Connection, tx_ref: TxRef) -> Result<(), SqliteClient
         named_params![":tx": tx_ref.0, ":suspended": funding(conn, tx_ref)?.is_empty()],
     )?;
     conn.execute(
-        "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (:tx, 0)
-         ON CONFLICT(transaction_id) DO NOTHING",
+        concat!(
+            "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (:tx, ",
+            private_protected!(),
+            ")
+         ON CONFLICT(transaction_id) DO NOTHING"
+        ),
         named_params![":tx": tx_ref.0],
     )?;
     conn.execute(
@@ -136,7 +135,7 @@ pub(crate) fn rebuild(
     {
         return Ok(Rejected);
     }
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare_cached(concat!(
         "WITH jobs AS (
             SELECT transaction_id FROM ironwood_enhance_discovery_queue WHERE suspended = 0
             UNION SELECT transaction_id FROM ironwood_enhance_metadata_queue WHERE commitment_tree_position IS NULL
@@ -144,10 +143,12 @@ pub(crate) fn rebuild(
             EXISTS(SELECT 1 FROM ironwood_enhance_discovery_queue d WHERE d.transaction_id = t.id_tx AND d.suspended = 0)
          FROM jobs q
          JOIN transactions t ON t.id_tx = q.transaction_id
-         JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-         WHERE t.mined_height = :height AND t.raw IS NULL AND r.route = 0
-         ORDER BY t.tx_index, t.txid",
-    )?;
+         ",
+        active_private_tx!(),
+        "
+           AND t.mined_height = :height
+         ORDER BY t.tx_index, t.txid"
+    ))?;
     let jobs = stmt
         .query_map(named_params![":height": u32::from(request.height)], |row| {
             Ok((
@@ -209,85 +210,65 @@ pub(crate) fn rebuild(
     let mut unresolved = vec![];
     let mut suspend = vec![];
     for (tx_ref, txid, index, needs_outgoing) in jobs {
-        if let Some((position, compact_tx)) = transactions.get(txid.as_slice()) {
-            // Validate geometry, locators and received positions even for metadata-only jobs.
-            if let Some(reconstructed) =
-                candidates(conn, tx_ref, index, *position, compact_tx, &[])?
+        let funding = if needs_outgoing {
+            funding(conn, tx_ref)?
+        } else {
+            vec![]
+        };
+        let tx = transactions.get(txid.as_slice());
+        // Validate geometry, locators and received positions even for metadata-only jobs.
+        let reconstructed = match tx {
+            Some((position, compact_tx)) => {
+                candidates(conn, tx_ref, index, *position, compact_tx, &funding)?
+                    .map(|reconstructed| (*position, *compact_tx, reconstructed))
+            }
+            None => None,
+        };
+        if let Some((position, compact_tx, _)) = &reconstructed {
+            // Every action position covers every outgoing candidate, so ownership is checked
+            // before mixed transactions discard their candidates. A locally contradictory
+            // reconstruction must not change routing to LWD.
+            for index in 0..compact_tx.ironwood_actions.len() {
+                if outgoing_position_owned_by_other(
+                    conn,
+                    tx_ref,
+                    u64::from(*position) + index as u64,
+                )? {
+                    return Ok(Rejected);
+                }
+            }
+            if let Some(action) = compact_tx.ironwood_actions.first() {
+                let epk: [u8; 32] =
+                    action.ephemeral_key.as_slice().try_into().map_err(|_| {
+                        SqliteClientError::CorruptedData("invalid compact epk".into())
+                    })?;
+                let ciphertext: [u8; 52] =
+                    action.ciphertext.as_slice().try_into().map_err(|_| {
+                        SqliteClientError::CorruptedData("invalid compact ciphertext".into())
+                    })?;
+                metadata_plans.push((
+                    tx_ref,
+                    *position,
+                    epk,
+                    ciphertext,
+                    is_ironwood_pir_candidate(compact_tx),
+                ));
+            }
+        }
+        let reason = match reconstructed {
+            _ if needs_outgoing && funding.is_empty() => {
+                // Defensive handling for an active orphan, even if deletion cleanup was missed.
+                suspend.push(tx_ref);
+                NoFundingAccounts
+            }
+            Some((_, compact_tx, reconstructed))
+                if !needs_outgoing && !compact_tx.ironwood_actions.is_empty() =>
             {
-                for index in 0..compact_tx.ironwood_actions.len() {
-                    if outgoing_position_owned_by_other(
-                        conn,
-                        tx_ref,
-                        u64::from(*position) + index as u64,
-                    )? {
-                        return Ok(Rejected);
-                    }
-                }
-                if let Some(action) = compact_tx.ironwood_actions.first() {
-                    if outgoing_position_owned_by_other(conn, tx_ref, u64::from(*position))? {
-                        return Ok(Rejected);
-                    }
-                    let epk: [u8; 32] =
-                        action.ephemeral_key.as_slice().try_into().map_err(|_| {
-                            SqliteClientError::CorruptedData("invalid compact epk".into())
-                        })?;
-                    let ciphertext: [u8; 52] =
-                        action.ciphertext.as_slice().try_into().map_err(|_| {
-                            SqliteClientError::CorruptedData("invalid compact ciphertext".into())
-                        })?;
-                    metadata_plans.push((
-                        tx_ref,
-                        *position,
-                        epk,
-                        ciphertext,
-                        is_ironwood_pir_candidate(compact_tx),
-                    ));
-                    if !needs_outgoing {
-                        received_context_plans.push((tx_ref, reconstructed.received_context));
-                        metadata_rebuilt += 1;
-                        continue;
-                    }
-                } else if !needs_outgoing {
-                    unresolved.push(IronwoodEnhanceDiscoveryFailure {
-                        txid: TxId::from_bytes(txid),
-                        reason: ContextMismatch,
-                    });
-                    continue;
-                }
-            } else if !needs_outgoing {
-                unresolved.push(IronwoodEnhanceDiscoveryFailure {
-                    txid: TxId::from_bytes(txid),
-                    reason: ContextMismatch,
-                });
+                received_context_plans.push((tx_ref, reconstructed.received_context));
+                metadata_rebuilt += 1;
                 continue;
             }
-        } else if !needs_outgoing {
-            unresolved.push(IronwoodEnhanceDiscoveryFailure {
-                txid: TxId::from_bytes(txid),
-                reason: TransactionMissing,
-            });
-            continue;
-        }
-        let funding = funding(conn, tx_ref)?;
-        let reason = if funding.is_empty() {
-            // Defensive handling for an active orphan, even if deletion cleanup was missed.
-            suspend.push(tx_ref);
-            Some(NoFundingAccounts)
-        } else if let Some((position, compact_tx)) = transactions.get(txid.as_slice()) {
-            if let Some(reconstructed) =
-                candidates(conn, tx_ref, index, *position, compact_tx, &funding)?
-            {
-                // Check ownership before mixed transactions discard their candidates.
-                // A locally contradictory reconstruction must not change routing to LWD.
-                for candidate in &reconstructed.outgoing {
-                    if outgoing_position_owned_by_other(
-                        conn,
-                        tx_ref,
-                        u64::from(candidate.position()),
-                    )? {
-                        return Ok(Rejected);
-                    }
-                }
+            Some((_, compact_tx, reconstructed)) if needs_outgoing && reconstructed.funded => {
                 plans.push((
                     tx_ref,
                     if is_ironwood_pir_candidate(compact_tx) {
@@ -299,19 +280,15 @@ pub(crate) fn rebuild(
                     },
                     reconstructed.received_context,
                 ));
-                None
-            } else {
-                Some(ContextMismatch)
+                continue;
             }
-        } else {
-            Some(TransactionMissing)
+            _ if tx.is_some() => ContextMismatch,
+            _ => TransactionMissing,
         };
-        if let Some(reason) = reason {
-            unresolved.push(IronwoodEnhanceDiscoveryFailure {
-                txid: TxId::from_bytes(txid),
-                reason,
-            });
-        }
+        unresolved.push(IronwoodEnhanceDiscoveryFailure {
+            txid: TxId::from_bytes(txid),
+            reason,
+        });
     }
 
     // Transaction-local failures retain intent while valid siblings progress.
@@ -376,6 +353,8 @@ fn restore_received_context(
 
 /// Returns None for transaction-local context mismatches. Database errors remain errors;
 /// neither case is permission to declare the transaction complete or fetch it publicly.
+/// Unspent funding nullifiers are reported through `funded` so metadata-only validation
+/// sees the same reconstruction.
 fn candidates(
     conn: &Connection,
     tx_ref: TxRef,
@@ -451,11 +430,9 @@ fn candidates(
             ));
         }
     }
-    if funding.iter().any(|(_, nf)| !nullifiers.contains(nf)) {
-        return Ok(None);
-    }
     Ok(Some(ReconstructedCandidates {
         outgoing: candidates,
         received_context,
+        funded: funding.iter().all(|(_, nf)| nullifiers.contains(nf)),
     }))
 }
