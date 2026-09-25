@@ -2000,51 +2000,6 @@ fn account_deletion_across_pir_feature_builds() {
 }
 
 #[test]
-fn initialization_repairs_orphaned_work_atomically() {
-    let mut send = shared_and_independent_jobs();
-    let outgoing = super::outgoing(&send.st, send.tx_ref(), 99, 9);
-    let account = send.st.test_account().unwrap().id();
-    send.st
-        .wallet_mut()
-        .db_mut()
-        .delete_account(account)
-        .unwrap();
-    let reopened = send.st.wallet_mut().db_mut();
-    // Emulate the persisted state left by an older feature-disabled binary.
-    reopened
-        .conn
-        .execute_batch(
-            "UPDATE ironwood_enhance_outgoing_queue SET not_recoverable = 0;
-        UPDATE ironwood_enhance_discovery_queue SET suspended = 0;
-        CREATE TRIGGER fail_repair BEFORE UPDATE OF suspended ON ironwood_enhance_discovery_queue
-        BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
-        )
-        .unwrap();
-    assert!(
-        crate::wallet::init::WalletMigrator::new()
-            .init_or_migrate(reopened)
-            .is_err()
-    );
-    assert!(reopened.discovery_suspensions().unwrap().is_empty());
-    assert!(
-        reopened.query_requests().unwrap().contains(&outgoing),
-        "first update rolls back if second fails"
-    );
-    reopened
-        .conn
-        .execute_batch("DROP TRIGGER fail_repair")
-        .unwrap();
-    for _ in 0..2 {
-        crate::wallet::init::WalletMigrator::new()
-            .init_or_migrate(reopened)
-            .unwrap();
-        assert_eq!(reopened.discovery_suspensions().unwrap().len(), 1);
-        assert!(!reopened.query_requests().unwrap().contains(&outgoing));
-        assert_eq!(reopened.discovery_requests().unwrap().len(), 1);
-    }
-}
-
-#[test]
 fn rewind_preserves_discovery_for_existing_spend_links() {
     for change in [false, true] {
         for funding_first in [false, true] {

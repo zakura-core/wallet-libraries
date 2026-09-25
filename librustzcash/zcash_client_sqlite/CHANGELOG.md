@@ -20,6 +20,14 @@ workspace.
 - Successful payload ingestion continues to complete enhancement independently.
   No schema migration is required. Downstream payload-not-found handlers must
   adopt the new API; status-only handlers continue to use `set_transaction_status`.
+- The `ironwood_enhance` migration now adds the Ironwood compact encryption
+  columns itself; the separate `ironwood_compact_encryption` migration and
+  `migrations::ids::IRONWOOD_COMPACT_ENCRYPTION` are removed. The Enhance PIR
+  schema is treated as undeployed, so pre-release databases that already carry
+  those columns are no longer tolerated.
+- `WalletMigrator::init_or_migrate` no longer repairs orphaned Ironwood
+  enhancement work on every full initialization; account deletion already
+  suspends it atomically.
 
 ## [0.1.0-rc6] - 2026-09-24
 

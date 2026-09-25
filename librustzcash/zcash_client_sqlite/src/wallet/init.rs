@@ -551,10 +551,6 @@ impl WalletMigrator {
 
     /// Sets up the internal structure of the given wallet database to be compatible with
     /// this library version.
-    ///
-    /// Also repairs orphaned Ironwood enhancement jobs left by account deletion in
-    /// older builds, even when no migrations are pending or PIR is disabled. The
-    /// queue repair is atomic; a repair failure is returned to the caller.
     pub fn init_or_migrate<
         C: BorrowMut<rusqlite::Connection>,
         P: consensus::Parameters + 'static,
@@ -682,21 +678,6 @@ fn init_wallet_db_internal<
                 return Err(WalletMigrationError::SeedNotRelevant.into());
             }
         }
-    }
-
-    // Full initialization also repairs orphaned work left by older builds that
-    // deleted accounts without PIR enabled. Partial migration targets may not
-    // contain these tables yet.
-    if target_migrations.is_empty() {
-        let tx = wdb
-            .conn
-            .borrow_mut()
-            .transaction()
-            .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
-        super::ironwood_hooks::suspend_orphaned_ironwood_enhancement(&tx)
-            .map_err(sqlite_client_error_to_wallet_migration_error)?;
-        tx.commit()
-            .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
     }
 
     Ok(())
