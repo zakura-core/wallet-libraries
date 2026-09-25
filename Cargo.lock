@@ -7689,6 +7689,20 @@ name = "zakura-pir-enhance-types"
 version = "0.0.1-rc0"
 
 [[package]]
+name = "zakura-pir-status"
+version = "0.0.1-rc0"
+dependencies = [
+ "hex",
+ "ipir-sp",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "zakura-primitives"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
