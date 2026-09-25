@@ -1,8 +1,9 @@
 //! Experimental durable swap receiving-key registration.
 //!
 //! Reserve before exposing an address, and persist the returned key ID with the
-//! operation. Retries reuse that ID rather than reserving again. Registration
-//! does not yet add these keys to block scanning or make their notes spendable.
+//! operation. Retries reuse that ID rather than reserving again. Registered keys
+//! are loaded by compact scanning. Historical replay and key retirement are managed
+//! separately by the caller.
 
 use std::borrow::{Borrow, BorrowMut};
 
@@ -313,6 +314,101 @@ fn register<P: Parameters>(
         scan_from: scan_from.into(),
         advances_allocation,
     })
+}
+
+/// Reconstruct a note's key and check that its registry account is the selected account.
+pub(super) fn note_key<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    id: i64,
+    parent: &FullViewingKey,
+) -> Result<(KeyId, FullViewingKey), SqliteClientError> {
+    let (account, purpose, version, index, receiver): (AccountUuid, u8, u8, Vec<u8>, Vec<u8>) =
+        conn.query_row(
+            "SELECT a.uuid, k.purpose, k.derivation_version, k.key_index, k.receiver
+         FROM ironwood_receiving_keys k JOIN accounts a ON a.id = k.account_id
+         WHERE k.id = ?1",
+            [id],
+            |row| {
+                Ok((
+                    AccountUuid(row.get(0)?),
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+    let (_, registered_parent) = account_key(conn, params, account).map_err(wallet_error)?;
+    if registered_parent.to_bytes() != parent.to_bytes() || version != 1 {
+        return Err(SqliteClientError::CorruptedData(
+            "swap note key belongs to another account or version".into(),
+        ));
+    }
+    let purpose = match purpose {
+        0 => Purpose::Refund,
+        1 => Purpose::Receive,
+        _ => {
+            return Err(SqliteClientError::CorruptedData(
+                "invalid swap key purpose".into(),
+            ));
+        }
+    };
+    let key_id = KeyId::new(purpose, decode_index(index).map_err(wallet_error)?);
+    let fvk = key_id.derive(parent).map_err(|e| wallet_error(e.into()))?;
+    if receiver != fvk.address_at(0u32, Scope::External).to_raw_address_bytes() {
+        return Err(SqliteClientError::CorruptedData(
+            "stored swap receiver does not match its derived key".into(),
+        ));
+    }
+    Ok((key_id, fvk))
+}
+
+/// Validate scan metadata before it can change a note or advance sequence allocation.
+pub(super) fn validate_received_key<
+    P: Parameters,
+    T: zcash_client_backend::data_api::ll::ReceivedOrchardOutput<AccountId = AccountUuid>,
+>(
+    conn: &Connection,
+    params: &P,
+    pool: zcash_protocol::ShieldedPool,
+    output: &T,
+) -> Result<Option<i64>, SqliteClientError> {
+    let Some(key_id) = output.swap_key_id() else {
+        return Ok(None);
+    };
+    let (account, parent) = account_key(conn, params, output.account_id()).map_err(wallet_error)?;
+    let id: i64 = conn.query_row(
+        "SELECT id FROM ironwood_receiving_keys WHERE account_id = ?1
+         AND purpose = ?2 AND derivation_version = 1 AND key_index = ?3",
+        rusqlite::params![
+            account.0,
+            purpose_code(key_id.purpose()),
+            key_id.index().to_be_bytes()
+        ],
+        |row| row.get(0),
+    )?;
+    let (_, fvk) = note_key(conn, params, id, &parent)?;
+    if pool != zcash_protocol::ShieldedPool::Ironwood
+        || output.note().version() != orchard::note::NoteVersion::V3
+        || output.recipient_key_scope() != Some(Scope::External)
+        || output.note().recipient() != fvk.address_at(0u32, Scope::External)
+        || output
+            .nullifier()
+            .is_some_and(|nf| *nf != output.note().nullifier(&fvk))
+    {
+        return Err(SqliteClientError::CorruptedData(
+            "swap note does not match its registered key".into(),
+        ));
+    }
+    Ok(Some(id))
+}
+
+fn wallet_error(error: Error) -> SqliteClientError {
+    match error {
+        Error::Wallet(error) => error,
+        other => SqliteClientError::CorruptedData(other.to_string()),
+    }
 }
 
 fn purpose_code(purpose: Purpose) -> u8 {

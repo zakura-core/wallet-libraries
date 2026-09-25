@@ -25,6 +25,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
+zakura-swap-receiving = { version = "0.0.0", path = "../../zakura/swap-receiving", optional = true }
 zakura-pir-enhance-types = { version = "=0.0.1-rc0", path = "../../zakura/pir-enhance-types", optional = true }
 zcash_address.workspace = true
 zcash_encoding.workspace = true
@@ -209,6 +210,9 @@ spend-index = ["transparent-inputs"]
 ## carries an Orchard bundle type); this feature gates the wallet's
 ## Orchard note-handling code, not the crate linkage.
 orchard = ["dep:pasta_curves", "zcash_keys/orchard"]
+
+## Enables experimental derived Ironwood receiving keys for the local swap POC.
+experimental-swap-receiving = ["orchard", "dep:zakura-swap-receiving"]
 
 ## Enables position-keyed Ironwood compact-action enhancement APIs.
 zakura-pir-enhance = ["orchard", "dep:zakura-pir-enhance-types"]

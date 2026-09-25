@@ -281,3 +281,5 @@ fn account_deletion_cascades_and_unknown_accounts_cannot_reserve() {
         Err(Error::Wallet(SqliteClientError::AccountUnknown))
     ));
 }
+
+mod scanning;

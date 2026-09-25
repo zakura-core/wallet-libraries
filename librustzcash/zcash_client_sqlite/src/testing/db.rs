@@ -1,6 +1,9 @@
 //! An in-memory [`WalletDb`]-backed data store and [`DataStoreFactory`] for the
 //! `zcash_client_backend` testing framework.
 
+#[cfg(feature = "experimental-swap-receiving")]
+use zcash_client_backend::scanning::swap_receiving::SwapScanningKey;
+
 use ambassador::Delegate;
 use rusqlite::Connection;
 use std::num::NonZeroU32;

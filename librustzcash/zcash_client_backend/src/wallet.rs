@@ -642,6 +642,8 @@ pub struct WalletOutput<Note, Nullifier, AccountId> {
     nf: Option<Nullifier>,
     account_id: AccountId,
     recipient_key_scope: Option<zip32::Scope>,
+    #[cfg(feature = "experimental-swap-receiving")]
+    swap_key_id: Option<zakura_swap_receiving::KeyId>,
 }
 
 /// Compact action encryption fields retained from scanning for later enhancement.
@@ -674,7 +676,22 @@ impl<Note, Nullifier, AccountId> WalletOutput<Note, Nullifier, AccountId> {
             nf,
             account_id,
             recipient_key_scope,
+            #[cfg(feature = "experimental-swap-receiving")]
+            swap_key_id: None,
         }
+    }
+
+    /// Records the derived Ironwood receiving key used for decryption.
+    #[cfg(feature = "experimental-swap-receiving")]
+    pub fn with_swap_key_id(mut self, key_id: Option<zakura_swap_receiving::KeyId>) -> Self {
+        self.swap_key_id = key_id;
+        self
+    }
+
+    /// The derived receiving key, or `None` for an ordinary account key.
+    #[cfg(feature = "experimental-swap-receiving")]
+    pub fn swap_key_id(&self) -> Option<zakura_swap_receiving::KeyId> {
+        self.swap_key_id
     }
 
     /// Attaches the compact encryption prefix retained by scanning.
@@ -807,6 +824,8 @@ pub struct ReceivedNote<NoteRef, NoteT> {
     output_index: u16,
     note: NoteT,
     spending_key_scope: Scope,
+    #[cfg(feature = "experimental-swap-receiving")]
+    swap_key_id: Option<zakura_swap_receiving::KeyId>,
     note_commitment_tree_position: Position,
     mined_height: Option<BlockHeight>,
     max_shielding_input_height: Option<BlockHeight>,
@@ -831,10 +850,25 @@ impl<NoteRef, NoteT> ReceivedNote<NoteRef, NoteT> {
             output_index,
             note,
             spending_key_scope,
+            #[cfg(feature = "experimental-swap-receiving")]
+            swap_key_id: None,
             note_commitment_tree_position,
             mined_height,
             max_shielding_input_height,
         }
+    }
+
+    /// Associates this Ironwood note with its account's derived receiving key.
+    #[cfg(feature = "experimental-swap-receiving")]
+    pub fn with_swap_key_id(mut self, key_id: Option<zakura_swap_receiving::KeyId>) -> Self {
+        self.swap_key_id = key_id;
+        self
+    }
+
+    /// Receiving key to rederive before spending, relative to the account FVK.
+    #[cfg(feature = "experimental-swap-receiving")]
+    pub fn swap_key_id(&self) -> Option<zakura_swap_receiving::KeyId> {
+        self.swap_key_id
     }
 
     /// Returns the storage backend's internal identifier for the note.
@@ -888,6 +922,8 @@ impl<NoteRef, NoteT> ReceivedNote<NoteRef, NoteT> {
             output_index: self.output_index,
             note: f(self.note),
             spending_key_scope: self.spending_key_scope,
+            #[cfg(feature = "experimental-swap-receiving")]
+            swap_key_id: self.swap_key_id,
             note_commitment_tree_position: self.note_commitment_tree_position,
             mined_height: self.mined_height,
             max_shielding_input_height: self.max_shielding_input_height,

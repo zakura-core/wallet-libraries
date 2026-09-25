@@ -1864,8 +1864,8 @@ where
                                 .iter()
                                 .filter_map(|selected| match selected.note() {
                                     Note::Orchard {
-                                        note,
                                         pool: orchard::ValuePool::Ironwood,
+                                        ..
                                     } => ironwood_tree
                                         .witness_at_checkpoint_id_caching(
                                             selected.note_commitment_tree_position(),
@@ -1876,7 +1876,7 @@ where
                                                 QueryError::CheckpointPruned,
                                             ))
                                         })
-                                        .map(|merkle_path| Some((note, merkle_path.into())))
+                                        .map(|merkle_path| Some((selected, merkle_path.into())))
                                         .map_err(Error::from)
                                         .transpose(),
                                     _ => None,
@@ -2005,14 +2005,24 @@ where
     }
 
     #[cfg(feature = "orchard")]
-    for (ironwood_note, merkle_path) in ironwood_inputs.into_iter() {
-        builder.add_ironwood_spend(
-            ufvk.orchard()
-                .cloned()
-                .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?,
-            *ironwood_note,
-            merkle_path,
-        )?;
+    for (selected, merkle_path) in ironwood_inputs.into_iter() {
+        let Note::Orchard { note, .. } = selected.note() else {
+            unreachable!()
+        };
+        let fvk = ufvk
+            .orchard()
+            .cloned()
+            .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?;
+        #[cfg(feature = "experimental-swap-receiving")]
+        let fvk = match selected.swap_key_id() {
+            // The spending authority is unchanged, but the proof needs the FVK
+            // whose incoming key generated this particular note's recipient.
+            Some(key_id) => key_id
+                .derive(&fvk)
+                .map_err(|_| Error::ProposalNotSupported)?,
+            None => fvk,
+        };
+        builder.add_ironwood_spend(fvk, *note, merkle_path)?;
     }
 
     #[cfg(feature = "transparent-inputs")]

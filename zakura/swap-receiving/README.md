@@ -99,9 +99,15 @@ reopening, lookahead, recovery bounds, rollback, and concurrent connections:
 cargo test -p zakura-client-sqlite --features experimental-swap-receiving --locked swap_receiving
 ```
 
-Note persistence and scanning, a complete transaction on a chain, Vizor, PIR,
-incoming gap discovery, and Keystone remain required for the
-receive/restore/spend milestone.
+The SQLite integration tests also scan both purposes alongside ordinary keys,
+reopen the database, and construct a mixed-input transaction whose change returns
+to the ordinary internal key. They check replay, late payments, and invalid note
+metadata. Registered keys currently remain in every subsequent compact scan.
+
+Per-key historical coverage, retirement, ordinary and PIR memo enhancement,
+automatic seed restore and gap extension, PCZT/firmware qualification, Vizor,
+and receiver PIR remain required before live use. Registration after an earlier
+scan does not yet schedule the missing history automatically.
 
 ## Protocol baseline
 

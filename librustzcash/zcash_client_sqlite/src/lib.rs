@@ -1085,7 +1085,9 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
                     ConfirmationsPolicy::MIN,
                     exclude,
                     ShieldedPool::Orchard,
-                    wallet::orchard::to_received_note,
+                    |params, pool, row| {
+                        wallet::orchard::to_received_note(self.conn.borrow(), params, pool, row)
+                    },
                     wallet::common::NoteRequest::Unspent,
                     lock_filter,
                 )?
@@ -1102,7 +1104,9 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
                     ConfirmationsPolicy::MIN,
                     exclude,
                     ShieldedPool::Ironwood,
-                    wallet::orchard::to_received_note,
+                    |params, pool, row| {
+                        wallet::orchard::to_received_note(self.conn.borrow(), params, pool, row)
+                    },
                     wallet::common::NoteRequest::Unspent,
                     lock_filter,
                 )?
@@ -1461,6 +1465,37 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         &self,
     ) -> Result<HashMap<Self::AccountId, UnifiedFullViewingKey>, Self::Error> {
         wallet::get_unified_full_viewing_keys(self.conn.borrow(), &self.params)
+    }
+
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn get_swap_scanning_keys(
+        &self,
+    ) -> Result<
+        Vec<zcash_client_backend::scanning::swap_receiving::SwapScanningKey<AccountUuid>>,
+        Self::Error,
+    > {
+        self.get_unified_full_viewing_keys()?.into_iter().try_fold(
+            Vec::new(),
+            |mut keys, (account, ufvk)| {
+                let Some(parent) = ufvk.orchard() else {
+                    return Ok(keys);
+                };
+                for key in self
+                    .get_swap_receiving_keys(account)
+                    .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?
+                {
+                    keys.push(
+                        zcash_client_backend::scanning::swap_receiving::SwapScanningKey::derive(
+                            account,
+                            key.key_id(),
+                            parent,
+                        )
+                        .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?,
+                    );
+                }
+                Ok(keys)
+            },
+        )
     }
 
     fn get_memo(&self, note_id: NoteId) -> Result<Option<Memo>, Self::Error> {

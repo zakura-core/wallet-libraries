@@ -639,6 +639,9 @@ where
         .get_unified_full_viewing_keys()
         .map_err(Error::Wallet)?;
     let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
+    #[cfg(feature = "experimental-swap-receiving")]
+    let scanning_keys = scanning_keys
+        .with_swap_receiving_keys(data_db.get_swap_scanning_keys().map_err(Error::Wallet)?);
     let mut runners = BatchRunners::<_, (), (), ()>::for_keys(100, &scanning_keys);
 
     block_source.with_blocks::<_, <DbT as WalletRead>::Error>(

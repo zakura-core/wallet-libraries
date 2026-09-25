@@ -163,7 +163,7 @@ zakura-pir-enhance = ["orchard", "zcash_client_backend/zakura-pir-enhance"]
 
 ## Enables the unpublished swap receiving-key registry for local POC work.
 ## Registration alone does not enable scanning or spending these notes.
-experimental-swap-receiving = ["orchard", "dep:zakura-swap-receiving"]
+experimental-swap-receiving = ["orchard", "dep:zakura-swap-receiving", "zcash_client_backend/experimental-swap-receiving"]
 
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.
 test-dependencies = [

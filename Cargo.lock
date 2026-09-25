@@ -7392,6 +7392,7 @@ dependencies = [
  "zakura-primitives",
  "zakura-proofs",
  "zakura-sapling-crypto",
+ "zakura-swap-receiving",
  "zcash_address",
  "zcash_encoding",
  "zcash_note_encryption",

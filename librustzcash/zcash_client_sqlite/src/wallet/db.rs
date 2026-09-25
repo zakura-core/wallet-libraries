@@ -583,7 +583,8 @@ CREATE TABLE ironwood_received_notes (
     compact_ciphertext BLOB
     CHECK ((ephemeral_key IS NULL AND compact_ciphertext IS NULL) OR
            (ephemeral_key IS NOT NULL AND compact_ciphertext IS NOT NULL AND
-            length(ephemeral_key) = 32 AND length(compact_ciphertext) = 52)),
+            length(ephemeral_key) = 32 AND length(compact_ciphertext) = 52)), receiving_key_id INTEGER
+                REFERENCES ironwood_receiving_keys(id),
     UNIQUE (transaction_id, action_index)
 )";
 pub(super) const INDEX_IRONWOOD_RECEIVED_NOTES_ACCOUNT: &str = "

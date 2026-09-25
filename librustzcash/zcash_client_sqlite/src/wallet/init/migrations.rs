@@ -50,6 +50,7 @@ mod standalone_p2sh;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
 mod swap_receiving_keys;
+mod swap_receiving_notes;
 mod transparent_gap_limit_handling;
 mod tree_retained_checkpoints;
 mod tx_observation_height;
@@ -155,6 +156,7 @@ pub mod ids {
         support_legacy_sqlite::MIGRATION_ID as SUPPORT_LEGACY_SQLITE,
         support_zcashd_wallet_import::MIGRATION_ID as SUPPORT_ZCASHD_WALLET_IMPORT,
         swap_receiving_keys::MIGRATION_ID as SWAP_RECEIVING_KEYS,
+        swap_receiving_notes::MIGRATION_ID as SWAP_RECEIVING_NOTES,
         transparent_gap_limit_handling::MIGRATION_ID as TRANSPARENT_GAP_LIMIT_HANDLING,
         tree_retained_checkpoints::MIGRATION_ID as TREE_RETAINED_CHECKPOINTS,
         tx_observation_height::MIGRATION_ID as TX_OBSERVATION_HEIGHT,
@@ -369,6 +371,7 @@ pub(super) fn all_migrations<
         Box::new(ironwood_compact_encryption::Migration),
         Box::new(ironwood_enhance::Migration),
         Box::new(swap_receiving_keys::Migration),
+        Box::new(swap_receiving_notes::Migration),
         Box::new(ironwood_pool_code_views::Migration),
         Box::new(fix_bad_ironwood_change_flagging::Migration),
         Box::new(v_address_uses_ironwood::Migration),
@@ -592,7 +595,7 @@ pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     ivk_item_cache::MIGRATION_ID,
     add_transparent_receiver_address_index::MIGRATION_ID,
     add_transparent_value_index::MIGRATION_ID,
-    swap_receiving_keys::MIGRATION_ID,
+    swap_receiving_notes::MIGRATION_ID,
     fix_bad_ironwood_change_flagging::MIGRATION_ID,
     v_address_uses_ironwood::MIGRATION_ID,
     orchard_ironwood_migration_unsatisfiability::MIGRATION_ID,
@@ -735,6 +738,7 @@ pub(crate) mod tests {
             ids::SUPPORT_LEGACY_SQLITE,
             ids::SUPPORT_ZCASHD_WALLET_IMPORT,
             ids::SWAP_RECEIVING_KEYS,
+            ids::SWAP_RECEIVING_NOTES,
             ids::TRANSPARENT_GAP_LIMIT_HANDLING,
             ids::TREE_RETAINED_CHECKPOINTS,
             ids::TX_OBSERVATION_HEIGHT,

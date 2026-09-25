@@ -62,6 +62,9 @@
 //! [`propose_shielding`]: crate::data_api::wallet::propose_shielding
 //! [`pczt`]: https://docs.rs/pczt
 
+#[cfg(feature = "experimental-swap-receiving")]
+use crate::scanning::swap_receiving::SwapScanningKey;
+
 use nonempty::NonEmpty;
 use secrecy::SecretVec;
 use std::{
@@ -2386,6 +2389,13 @@ pub trait WalletRead {
     fn get_unified_full_viewing_keys(
         &self,
     ) -> Result<HashMap<Self::AccountId, UnifiedFullViewingKey>, Self::Error>;
+
+    /// Returns registered derived Ironwood keys to include in the next scan.
+    /// Registration alone does not schedule replay of already scanned history.
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn get_swap_scanning_keys(&self) -> Result<Vec<SwapScanningKey<Self::AccountId>>, Self::Error> {
+        Ok(vec![])
+    }
 
     /// Returns the memo for a note.
     ///

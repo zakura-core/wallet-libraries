@@ -10,6 +10,10 @@ workspace.
 
 ## [Unreleased]
 
+- Add opt-in experimental swap-key identity through Ironwood scanning, received
+  notes, and transaction construction. Derived inputs use their own FVK while
+  change continues to use ordinary account keys.
+
 ## [0.1.0-rc6] - 2026-09-24
 
 PIR wallet integration release supporting `zakura-pir-enhance 0.0.1-rc0`.
