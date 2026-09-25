@@ -100,7 +100,7 @@ fn swap_receiving_scan_reopen_and_spend_into_ordinary_change() {
     assert_eq!(
         st.wallet_mut()
             .db_mut()
-            .reserve_swap_receiving_key(account.id(), Purpose::Receive, activation)
+            .reserve_swap_receiving_key(account.id(), Purpose::Receive, height + 1)
             .unwrap()
             .key_id()
             .index(),

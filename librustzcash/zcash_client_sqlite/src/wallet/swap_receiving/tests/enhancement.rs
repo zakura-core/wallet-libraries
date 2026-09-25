@@ -44,12 +44,13 @@ fn full_transaction_roundtrip(full_first: bool) {
         st.scan_cached_blocks(h, 1);
     }
 
+    let scan_from = st.wallet().chain_height().unwrap().unwrap() + 1;
     let keys: Vec<_> = [Purpose::Refund, Purpose::Receive]
         .into_iter()
         .map(|purpose| {
             st.wallet_mut()
                 .db_mut()
-                .reserve_swap_receiving_key(account.id(), purpose, h)
+                .reserve_swap_receiving_key(account.id(), purpose, scan_from)
                 .unwrap()
         })
         .collect();

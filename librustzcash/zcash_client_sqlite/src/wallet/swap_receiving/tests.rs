@@ -285,3 +285,5 @@ fn account_deletion_cascades_and_unknown_accounts_cannot_reserve() {
 mod scanning;
 
 mod enhancement;
+
+mod coverage;

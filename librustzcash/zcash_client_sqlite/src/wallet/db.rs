@@ -2083,3 +2083,13 @@ CREATE TABLE ironwood_enhance_metadata_queue (
     CHECK (ephemeral_key IS NULL OR length(ephemeral_key) = 32),
     CHECK (compact_ciphertext IS NULL OR length(compact_ciphertext) = 52)
 )";
+
+/// Disjoint half-open ranges scanned with each registered swap key.
+pub(super) const TABLE_IRONWOOD_RECEIVING_KEY_SCAN_RANGES: &str = "
+CREATE TABLE ironwood_receiving_key_scan_ranges (
+    receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
+    range_start INTEGER NOT NULL CHECK (range_start >= 0),
+    range_end INTEGER NOT NULL CHECK (range_end > range_start AND range_end <= 4294967295),
+    PRIMARY KEY (receiving_key_id, range_start)
+)
+";

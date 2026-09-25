@@ -32,6 +32,16 @@ pub struct SwapScanningKey<AccountId> {
 }
 
 impl<AccountId> SwapScanningKey<AccountId> {
+    /// The account whose receiving sequence this key belongs to.
+    pub fn account_id(&self) -> &AccountId {
+        &self.account
+    }
+
+    /// The identity to credit when persisting blocks scanned with this key.
+    pub fn key_id(&self) -> KeyId {
+        self.key_id
+    }
+
     /// Derives the receiving FVK from the owning account's ordinary external FVK.
     pub fn derive(
         account: AccountId,

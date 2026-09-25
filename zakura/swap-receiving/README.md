@@ -34,8 +34,19 @@ commit together. Do not expose an address until that transaction commits.
 The registry stores full `u64` indices as fixed-width big-endian blobs for SQLite
 ordering. This is an internal storage encoding; the KDF and memo remain
 little-endian. Registration retains the earliest requested scan height, not
-proof that its history was scanned. Scanning and note association are the next
-integration step. The feature is disabled by default.
+proof that its history was scanned. The feature is disabled by default.
+
+Compact scanning records the keys actually used in each batch, atomically with
+its notes and blocks. `get_swap_receiving_scan_ranges` returns their disjoint,
+end-exclusive coverage. Registration queues missing history through the known
+tip. Later scans and tip updates preserve those gaps until replay completes.
+Rewinds trim coverage even in builds without swap support. Refresh the chain tip
+before scanning after reopening, including after enabling the feature again.
+
+For a newly issued address, use the next height after the accepted tip as
+`scan_from`. For recovery, use the earliest height at which that address could
+have received a payment. Requesting older history queues replay and can delay
+spending until that history is checked. Key retirement remains a separate step.
 
 The planned selector will prefer swap notes during ordinary sends when doing so
 adds neither inputs nor fees, respecting existing input constraints. Confirmed

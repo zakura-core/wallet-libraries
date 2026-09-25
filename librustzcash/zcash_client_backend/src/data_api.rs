@@ -64,6 +64,8 @@
 
 #[cfg(feature = "experimental-swap-receiving")]
 use crate::scanning::swap_receiving::SwapScanningKey;
+#[cfg(feature = "experimental-swap-receiving")]
+use zakura_swap_receiving::KeyId;
 
 use nonempty::NonEmpty;
 use secrecy::SecretVec;
@@ -3972,6 +3974,22 @@ pub trait WalletWrite:
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<<Self as WalletRead>::AccountId>>,
     ) -> Result<(), <Self as WalletRead>::Error>;
+
+    /// Persists scanned blocks and records which swap keys actually scanned them.
+    ///
+    /// `keys` must be the snapshot used for trial decryption, not a fresh registry
+    /// lookup. Implementations tracking coverage must commit it with the blocks.
+    /// The default stores blocks without tracking per-key coverage.
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn put_blocks_with_swap_keys(
+        &mut self,
+        from_state: &ChainState,
+        blocks: Vec<ScannedBlock<<Self as WalletRead>::AccountId>>,
+        keys: &[(<Self as WalletRead>::AccountId, KeyId)],
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        let _ = keys;
+        self.put_blocks(from_state, blocks)
+    }
 
     /// Adds a transparent UTXO received by the wallet to the data store.
     fn put_received_transparent_utxo(

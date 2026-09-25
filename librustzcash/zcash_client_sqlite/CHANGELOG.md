@@ -18,7 +18,9 @@ workspace.
   the feature exclude these notes from reconstruction. Full-transaction and
   Enhance PIR retrieval authenticate memos using the note's registered key.
   Unsupported builds preserve PIR work and report missing swap support.
-  Automatic historical replay and key retirement remain pending.
+  Per-key scan coverage persists with blocks and queues missing history when keys
+  are recovered. Rewinds trim coverage even without the feature. Key retirement
+  remains pending.
 
 ## [0.1.0-rc6] - 2026-09-24
 

@@ -2,8 +2,10 @@
 //!
 //! Reserve before exposing an address, and persist the returned key ID with the
 //! operation. Retries reuse that ID rather than reserving again. Registered keys
-//! are loaded by compact scanning. Historical replay and key retirement are managed
-//! separately by the caller.
+//! are loaded by compact scanning, with missing history queued for replay. Key
+//! retirement is managed separately by the caller.
+
+pub(crate) mod coverage;
 
 use std::borrow::{Borrow, BorrowMut};
 
@@ -105,6 +107,19 @@ impl RegisteredKey {
 }
 
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
+    /// Returns disjoint, end-exclusive ranges actually scanned with this key.
+    ///
+    /// `None` means the key is not registered. An empty list means no coverage.
+    /// Rewinds remove coverage above the retained height. Ordinary account scan
+    /// progress and full-transaction enhancement do not count as key coverage.
+    pub fn get_swap_receiving_scan_ranges(
+        &self,
+        account: AccountUuid,
+        key_id: KeyId,
+    ) -> Result<Option<Vec<std::ops::Range<BlockHeight>>>, SqliteClientError> {
+        coverage::ranges(self.conn.borrow(), account, key_id)
+    }
+
     /// Reloads registered keys, including unpaid lookahead keys, for an account.
     ///
     /// Re-derivation must reproduce the stored receiver. Corrupt or unsupported
@@ -155,6 +170,8 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// Atomically reserves and registers the next index for this purpose.
     ///
+    /// `scan_from` is inclusive. For a new address, use the next height after
+    /// the accepted tip. Older bounds queue missing history for replay.
     /// Only a committed result may be exposed. On a concurrent-write error,
     /// retry the whole operation. To also persist application operation state,
     /// call this on the wallet handle inside `transactionally_with_extension`.
@@ -172,6 +189,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// For refunds the caller must validate its own funding memo. For incoming
     /// keys it must validate a payment, including one already spent. An empty
     /// directory result is not evidence. Repeated registration is idempotent.
+    /// Set `scan_from` no later than the first possible payment. Missing coverage
+    /// from that height through the known tip is queued for replay.
     pub fn recover_swap_receiving_key(
         &mut self,
         account: AccountUuid,
@@ -274,7 +293,7 @@ fn account_key<P: Parameters>(
 }
 
 fn register<P: Parameters>(
-    conn: &Connection,
+    conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     key_id: KeyId,
@@ -307,6 +326,7 @@ fn register<P: Parameters>(
     ).optional()?;
     let (scan_from, advances_allocation) =
         updated.ok_or_else(|| corrupt("stored swap receiver does not match its derived key"))?;
+    coverage::queue_missing(conn)?;
     Ok(RegisteredKey {
         account,
         key_id,

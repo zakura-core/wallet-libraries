@@ -14,7 +14,9 @@ workspace.
   notes, and transaction construction. Derived inputs use their own FVK while
   change continues to use ordinary account keys. Full-transaction enhancement
   decrypts swap memos and retains their receiving-key identity. Enhance PIR
-  authenticates these memos with a storage-resolved receiving key.
+  authenticates these memos with a storage-resolved receiving key. Compact scanning
+  passes the keys actually used to `WalletWrite::put_blocks_with_swap_keys` so
+  storage backends can record their coverage atomically with the blocks.
 - `PendingIronwoodMemo` gains `receiving_ivk`. Storage backends use `None` for
   ordinary account keys and supply a validated key for registered receivers.
 

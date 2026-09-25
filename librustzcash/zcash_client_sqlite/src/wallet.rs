@@ -4280,6 +4280,15 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     // equal to the truncation height + 1. This sets our view of the chain tip back
     // to the retained height.
     trim_scan_queue_to(conn, truncation_height)?;
+    // Coverage must follow canonical blocks even in builds without swap support.
+    conn.execute(
+        "DELETE FROM ironwood_receiving_key_scan_ranges WHERE range_start > ?1",
+        [u32::from(truncation_height)],
+    )?;
+    conn.execute(
+        "UPDATE ironwood_receiving_key_scan_ranges SET range_end = ?1 + 1 WHERE range_end > ?1 + 1",
+        [u32::from(truncation_height)],
+    )?;
 
     // Mark transparent utxos as un-mined. Since the TXO is now not mined, it would ideally be
     // considered to have been returned to the mempool; it _might_ be spendable in this state, but

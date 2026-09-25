@@ -2,6 +2,8 @@
 //! `zcash_client_backend` testing framework.
 
 #[cfg(feature = "experimental-swap-receiving")]
+use zakura_swap_receiving::KeyId;
+#[cfg(feature = "experimental-swap-receiving")]
 use zcash_client_backend::scanning::swap_receiving::SwapScanningKey;
 
 use ambassador::Delegate;
