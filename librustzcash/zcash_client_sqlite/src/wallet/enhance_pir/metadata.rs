@@ -66,11 +66,14 @@ pub(super) fn pending<P: Parameters>(
         return Ok(Some(PendingIronwoodMetadata::Incoming(note)));
     }
     conn.query_row(
-        "SELECT t.txid, q.output_index, q.ephemeral_key, q.compact_ciphertext
+        concat!(
+            "SELECT t.txid, q.output_index, q.ephemeral_key, q.compact_ciphertext
         FROM ironwood_enhance_metadata_queue q JOIN transactions t ON t.id_tx = q.transaction_id
-        JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-        WHERE q.commitment_tree_position = ? AND q.ephemeral_key IS NOT NULL
-        AND r.route = 0 AND t.raw IS NULL AND t.mined_height IS NOT NULL",
+        ",
+            active_private_tx!(),
+            "
+        AND q.commitment_tree_position = ? AND q.ephemeral_key IS NOT NULL"
+        ),
         [u64::from(position)],
         |r| {
             Ok(PendingIronwoodMetadata::Compact(PendingIronwoodOutgoing {

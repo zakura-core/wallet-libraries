@@ -19,7 +19,7 @@ use crate::{AccountUuid, TxRef, error::SqliteClientError, wallet::KeyScope};
 
 use super::{
     LWD_REQUIRED, TxQueryType, outgoing_position_owned_by_other, queue_transaction,
-    retire_enhancement_if_complete,
+    retire_enhancement_if_complete, route,
 };
 
 struct ReconstructedCandidates {
@@ -53,14 +53,7 @@ pub(crate) fn queue(conn: &Connection, tx_ref: TxRef) -> Result<(), SqliteClient
          )",
         named_params![":tx": tx_ref.0, ":internal_scope": KeyScope::INTERNAL.encode()],
     )?;
-    let route: Option<i64> = conn
-        .query_row(
-            "SELECT route FROM ironwood_enhance_routing WHERE transaction_id = :tx",
-            named_params![":tx": tx_ref.0],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if route == Some(LWD_REQUIRED) {
+    if route(conn, tx_ref)? == Some(LWD_REQUIRED) {
         return super::require_lwd(conn, tx_ref);
     }
     conn.execute(
@@ -69,8 +62,12 @@ pub(crate) fn queue(conn: &Connection, tx_ref: TxRef) -> Result<(), SqliteClient
         named_params![":tx": tx_ref.0, ":suspended": funding(conn, tx_ref)?.is_empty()],
     )?;
     conn.execute(
-        "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (:tx, 0)
-         ON CONFLICT(transaction_id) DO NOTHING",
+        concat!(
+            "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (:tx, ",
+            private_protected!(),
+            ")
+         ON CONFLICT(transaction_id) DO NOTHING"
+        ),
         named_params![":tx": tx_ref.0],
     )?;
     conn.execute(
@@ -138,7 +135,7 @@ pub(crate) fn rebuild(
     {
         return Ok(Rejected);
     }
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare_cached(concat!(
         "WITH jobs AS (
             SELECT transaction_id FROM ironwood_enhance_discovery_queue WHERE suspended = 0
             UNION SELECT transaction_id FROM ironwood_enhance_metadata_queue WHERE commitment_tree_position IS NULL
@@ -146,10 +143,12 @@ pub(crate) fn rebuild(
             EXISTS(SELECT 1 FROM ironwood_enhance_discovery_queue d WHERE d.transaction_id = t.id_tx AND d.suspended = 0)
          FROM jobs q
          JOIN transactions t ON t.id_tx = q.transaction_id
-         JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-         WHERE t.mined_height = :height AND t.raw IS NULL AND r.route = 0
-         ORDER BY t.tx_index, t.txid",
-    )?;
+         ",
+        active_private_tx!(),
+        "
+           AND t.mined_height = :height
+         ORDER BY t.tx_index, t.txid"
+    ))?;
     let jobs = stmt
         .query_map(named_params![":height": u32::from(request.height)], |row| {
             Ok((
