@@ -49,14 +49,15 @@ pub struct PendingIronwoodOutgoing<AccountId> {
 /// Binding context for transaction metadata, independent of memo/OVK completion.
 pub enum PendingIronwoodMetadata<AccountId> {
     Incoming(PendingIronwoodMemo<AccountId>),
-    Compact(PendingIronwoodOutgoing<AccountId>),
+    /// A send-only transaction bound to its first compact action.
+    Compact(IronwoodEnhanceRequestId),
 }
 
 impl<AccountId> PendingIronwoodMetadata<AccountId> {
     fn request_id(&self) -> IronwoodEnhanceRequestId {
         match self {
             Self::Incoming(p) => p.request_id,
-            Self::Compact(p) => p.request_id,
+            Self::Compact(request_id) => *request_id,
         }
     }
 }

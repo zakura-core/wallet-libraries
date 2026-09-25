@@ -25,6 +25,9 @@ workspace.
 - Document independent status and enhancement obligations, successful payload
   completion, retry behavior, and dormant status reactivation after a rewind.
   See `docs/transaction_request_lifecycle.md` in the repository for migration details.
+- `data_api::enhance_pir::storage::PendingIronwoodMetadata::Compact` now carries
+  only the `IronwoodEnhanceRequestId`; send-only metadata validation never read
+  the placeholder compact action fields.
 
 ## [0.1.0-rc6] - 2026-09-24
 

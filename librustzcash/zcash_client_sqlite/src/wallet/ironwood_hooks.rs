@@ -14,13 +14,12 @@ use crate::{TxRef, error::SqliteClientError};
 
 /// Preserve incomplete enhancement jobs after funding accounts are removed. This
 /// maintains durable database invariants even in builds without PIR support.
-/// The caller's transaction makes both queue updates atomic with account deletion
-/// or with initialization repair of databases written by older builds.
+/// The caller's transaction makes the queue updates atomic with account deletion.
 pub(crate) fn suspend_orphaned_ironwood_enhancement(
     conn: &rusqlite::Transaction<'_>,
 ) -> Result<(), SqliteClientError> {
     conn.execute("UPDATE ironwood_enhance_metadata_queue AS q SET commitment_tree_position = NULL,
-        output_index = NULL WHERE q.ephemeral_key IS NULL AND q.commitment_tree_position IS NOT NULL
+        output_index = NULL WHERE q.compact_bound = 0 AND q.commitment_tree_position IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM ironwood_received_notes rn WHERE rn.transaction_id = q.transaction_id
             AND rn.action_index = q.output_index AND rn.commitment_tree_position = q.commitment_tree_position)", [])?;
     conn.execute(
@@ -79,7 +78,7 @@ pub(crate) fn truncate_before_unmine(
 
     conn.execute(
         "UPDATE ironwood_enhance_metadata_queue SET commitment_tree_position = NULL,
-        output_index = NULL, ephemeral_key = NULL, compact_ciphertext = NULL
+        output_index = NULL, compact_bound = 0
         WHERE transaction_id IN (SELECT id_tx FROM transactions WHERE mined_height > :height)",
         named_params![":height": u32::from(truncation_height)],
     )?;

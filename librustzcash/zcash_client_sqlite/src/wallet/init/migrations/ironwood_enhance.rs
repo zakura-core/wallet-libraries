@@ -97,13 +97,9 @@ impl RusqliteMigration for Migration {
                 transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
                 commitment_tree_position INTEGER UNIQUE CHECK (commitment_tree_position >= 0),
                 output_index INTEGER CHECK (output_index >= 0),
-                ephemeral_key BLOB,
-                compact_ciphertext BLOB,
+                compact_bound INTEGER NOT NULL DEFAULT 0 CHECK (compact_bound IN (0, 1)),
                 CHECK ((commitment_tree_position IS NULL) = (output_index IS NULL)),
-                CHECK ((ephemeral_key IS NULL) = (compact_ciphertext IS NULL)),
-                CHECK (ephemeral_key IS NULL OR commitment_tree_position IS NOT NULL),
-                CHECK (ephemeral_key IS NULL OR length(ephemeral_key) = 32),
-                CHECK (compact_ciphertext IS NULL OR length(compact_ciphertext) = 52)
+                CHECK (compact_bound = 0 OR commitment_tree_position IS NOT NULL)
             );",
         )?;
         // Keep the existing history view's columns and spendability expression.
@@ -269,23 +265,17 @@ mod tests {
         tx.execute("DELETE FROM ironwood_enhance_routing", [])
             .unwrap();
         // Allow discovery, incoming-note binding, and complete compact binding.
-        for fields in [
-            "NULL, NULL, NULL, NULL",
-            "0, 0, NULL, NULL",
-            "0, 0, zeroblob(32), zeroblob(52)",
-        ] {
+        for fields in ["NULL, NULL, 0", "0, 0, 0", "0, 0, 1"] {
             tx.execute_batch(&format!("INSERT INTO ironwood_enhance_metadata_queue VALUES (1, {fields}); DELETE FROM ironwood_enhance_metadata_queue;")).unwrap();
         }
         for fields in [
-            "-1, 0, NULL, NULL",
-            "0, -1, NULL, NULL",
-            "NULL, 0, NULL, NULL",
-            "0, NULL, NULL, NULL",
-            "0, 0, zeroblob(32), NULL",
-            "0, 0, NULL, zeroblob(52)",
-            "NULL, NULL, zeroblob(32), zeroblob(52)",
-            "0, 0, zeroblob(31), zeroblob(52)",
-            "0, 0, zeroblob(32), zeroblob(51)",
+            "-1, 0, 0",
+            "0, -1, 0",
+            "NULL, 0, 0",
+            "0, NULL, 0",
+            "NULL, NULL, 1",
+            "0, 0, 2",
+            "0, 0, NULL",
         ] {
             assert!(
                 tx.execute_batch(&format!(

@@ -216,16 +216,7 @@ impl EnhancePirStorage for MetadataStore {
             .pending
             .iter()
             .find(|r| r.position() == position)
-            .map(|request| {
-                PendingIronwoodMetadata::Compact(PendingIronwoodOutgoing {
-                    request_id: request.request_id(),
-                    account_ids: vec![],
-                    nullifier: [0; 32],
-                    cmx: [0; 32],
-                    ephemeral_key: [1 + request.request_id().output_index() as u8; 32],
-                    compact_ciphertext: [2; 52],
-                })
-            }))
+            .map(|request| PendingIronwoodMetadata::Compact(request.request_id())))
     }
 
     fn get_account(&self, _: u32) -> Result<Option<Self::Account>, Self::Error> {

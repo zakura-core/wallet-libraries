@@ -28,6 +28,9 @@ workspace.
 - `WalletMigrator::init_or_migrate` no longer repairs orphaned Ironwood
   enhancement work on every full initialization; account deletion already
   suspends it atomically.
+- `ironwood_enhance_metadata_queue` records a compact binding with a single
+  `compact_bound` flag instead of unused `ephemeral_key` and
+  `compact_ciphertext` copies.
 
 ## [0.1.0-rc6] - 2026-09-24
 

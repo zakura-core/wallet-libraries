@@ -23,17 +23,17 @@ pub(super) fn queue(
         )
         .optional()?;
     if let Some((position, index)) = note {
-        conn.execute("UPDATE ironwood_enhance_metadata_queue SET commitment_tree_position = :position,
-            output_index = :index, ephemeral_key = NULL, compact_ciphertext = NULL WHERE transaction_id = :tx",
-            named_params![":position": position, ":index": index, ":tx": tx_ref.0])?;
+        conn.execute(
+            "UPDATE ironwood_enhance_metadata_queue SET commitment_tree_position = :position,
+            output_index = :index, compact_bound = 0 WHERE transaction_id = :tx",
+            named_params![":position": position, ":index": index, ":tx": tx_ref.0],
+        )?;
     } else if let Some(candidate) = candidates.iter().min_by_key(|c| c.output_index()) {
         bind(
             conn,
             tx_ref,
             u64::from(candidate.position()),
             candidate.output_index() as u32,
-            candidate.ephemeral_key(),
-            candidate.compact_ciphertext(),
         )?;
     }
     conn.execute("INSERT INTO tx_retrieval_queue (txid, query_type)
@@ -48,12 +48,12 @@ pub(super) fn bind(
     tx_ref: crate::TxRef,
     position: u64,
     index: u32,
-    epk: &[u8; 32],
-    ciphertext: &[u8; 52],
 ) -> Result<(), SqliteClientError> {
-    conn.execute("UPDATE ironwood_enhance_metadata_queue SET commitment_tree_position = :position,
-        output_index = :index, ephemeral_key = :epk, compact_ciphertext = :ciphertext WHERE transaction_id = :tx",
-        named_params![":position": position, ":index": index, ":epk": epk, ":ciphertext": ciphertext, ":tx": tx_ref.0])?;
+    conn.execute(
+        "UPDATE ironwood_enhance_metadata_queue SET commitment_tree_position = :position,
+        output_index = :index, compact_bound = 1 WHERE transaction_id = :tx",
+        named_params![":position": position, ":index": index, ":tx": tx_ref.0],
+    )?;
     Ok(())
 }
 
@@ -67,23 +67,18 @@ pub(super) fn pending<P: Parameters>(
     }
     conn.query_row(
         concat!(
-            "SELECT t.txid, q.output_index, q.ephemeral_key, q.compact_ciphertext
+            "SELECT t.txid, q.output_index
         FROM ironwood_enhance_metadata_queue q JOIN transactions t ON t.id_tx = q.transaction_id
         ",
             active_private_tx!(),
             "
-        AND q.commitment_tree_position = ? AND q.ephemeral_key IS NOT NULL"
+        AND q.commitment_tree_position = ? AND q.compact_bound = 1"
         ),
         [u64::from(position)],
         |r| {
-            Ok(PendingIronwoodMetadata::Compact(PendingIronwoodOutgoing {
-                request_id: IronwoodEnhanceRequestId::new(TxId::from_bytes(r.get(0)?), r.get(1)?),
-                account_ids: vec![],
-                nullifier: [0; 32],
-                cmx: [0; 32],
-                ephemeral_key: r.get(2)?,
-                compact_ciphertext: r.get(3)?,
-            }))
+            Ok(PendingIronwoodMetadata::Compact(
+                IronwoodEnhanceRequestId::new(TxId::from_bytes(r.get(0)?), r.get(1)?),
+            ))
         },
     )
     .optional()
