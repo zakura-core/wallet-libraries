@@ -210,7 +210,7 @@ mod tests {
         ));
         assert_eq!(transport.requests.load(Ordering::SeqCst), 0);
         assert!(matches!(
-            PendingClient::fetch(&transport, "https://status.example", || 11_001).await,
+            PendingClient::fetch(&transport, "https://status.example", || 21_001).await,
             Err(Error::Stale)
         ));
         assert_eq!(transport.requests.load(Ordering::SeqCst), 1);

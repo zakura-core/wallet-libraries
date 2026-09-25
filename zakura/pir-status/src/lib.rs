@@ -13,7 +13,7 @@ pub const ITEM_BITS: u64 = (ROW_BYTES * 8) as u64;
 pub const MAX_ENTRIES: usize = ROWS * SLOTS * 3 / 4;
 pub const PROTOCOL: &str = "status-pir-v1-q48";
 pub const HEADER_BYTES: usize = 52;
-pub const MAX_AGE_MS: u64 = 10_000;
+pub const MAX_AGE_MS: u64 = 20_000;
 pub type Hash = [u8; 32];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -450,8 +450,8 @@ mod tests {
     fn freshness_coverage_and_binding_are_separate() {
         let m = manifest();
         let row = vec![0; ROW_BYTES];
-        assert_eq!(m.fresh(11_000), Ok(()));
-        assert_eq!(m.fresh(11_001), Err(Error::Stale));
+        assert_eq!(m.fresh(21_000), Ok(()));
+        assert_eq!(m.fresh(21_001), Err(Error::Stale));
         assert_eq!(m.fresh(999), Err(Error::Malformed));
         assert_eq!(
             LocalCoverageContext {
