@@ -11,6 +11,9 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- Add `CompactTxStreamer.GetStatus`, a status-only RPC with explicit live,
+  complete observations and an observation tip. Servers without the method
+  return `Unimplemented`; clients must not downgrade to payload retrieval.
 - Add typed `WalletRead::transaction_status_requests` and
   `public_transaction_enhancement_requests` views of the existing request queue.
   The methods have defaults for custom stores and do not grant disclosure consent.

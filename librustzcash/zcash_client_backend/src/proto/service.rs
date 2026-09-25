@@ -44,6 +44,57 @@ pub struct TxFilter {
     #[prost(bytes = "vec", tag = "3")]
     pub hash: ::prost::alloc::vec::Vec<u8>,
 }
+/// A public status lookup discloses one transaction ID. The minimum tip is the
+/// height already known to the caller; an older server view is inconclusive.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetStatusRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    pub txid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "2")]
+    pub minimum_tip_height: u64,
+}
+/// Empty state messages make absence and mempool/fork observations explicit.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StatusNotFound {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StatusMempool {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StatusForked {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StatusMined {
+    #[prost(uint64, tag = "1")]
+    pub height: u64,
+}
+/// A response must describe a live, complete view taken after receipt of the
+/// request. Complete means main-chain lookup through observedTip and a current
+/// mempool check. A partially indexed server must return an error instead of
+/// asserting liveComplete or reporting NotFound. A fork observation describes
+/// a known non-main-chain transaction; NotFound does not prove non-broadcast.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetStatusResponse {
+    #[prost(bytes = "vec", tag = "1")]
+    pub txid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "2")]
+    pub observed_tip: ::core::option::Option<BlockId>,
+    #[prost(bool, tag = "3")]
+    pub live_complete: bool,
+    #[prost(oneof = "get_status_response::Outcome", tags = "4, 5, 6, 7")]
+    pub outcome: ::core::option::Option<get_status_response::Outcome>,
+}
+/// Nested message and enum types in `GetStatusResponse`.
+pub mod get_status_response {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Outcome {
+        #[prost(message, tag = "4")]
+        NotFound(super::StatusNotFound),
+        #[prost(message, tag = "5")]
+        Mempool(super::StatusMempool),
+        #[prost(message, tag = "6")]
+        Mined(super::StatusMined),
+        #[prost(message, tag = "7")]
+        Forked(super::StatusForked),
+    }
+}
 /// RawTransaction contains the complete transaction data. It also optionally includes
 /// the block height in which the transaction was included, or, when returned
 /// by GetMempoolStream(), the latest block height.
@@ -646,6 +697,37 @@ pub mod compact_tx_streamer_client {
                     GrpcMethod::new(
                         "cash.z.wallet.sdk.rpc.CompactTxStreamer",
                         "GetTransaction",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Observe status without returning serialized transaction bytes. The
+        /// server must return an error if it cannot provide a live, complete view.
+        pub async fn get_status(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetStatusResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetStatus",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "cash.z.wallet.sdk.rpc.CompactTxStreamer",
+                        "GetStatus",
                     ),
                 );
             self.inner.unary(req, path, codec).await

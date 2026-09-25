@@ -51,6 +51,36 @@ message TxFilter {
      bytes hash = 3;        // transaction ID (hash, txid)
 }
 
+// A public status lookup discloses one transaction ID. The minimum tip is the
+// height already known to the caller; an older server view is inconclusive.
+message GetStatusRequest {
+    bytes txid = 1;
+    uint64 minimumTipHeight = 2;
+}
+
+// Empty state messages make absence and mempool/fork observations explicit.
+message StatusNotFound {}
+message StatusMempool {}
+message StatusForked {}
+message StatusMined { uint64 height = 1; }
+
+// A response must describe a live, complete view taken after receipt of the
+// request. Complete means main-chain lookup through observedTip and a current
+// mempool check. A partially indexed server must return an error instead of
+// asserting liveComplete or reporting NotFound. A fork observation describes
+// a known non-main-chain transaction; NotFound does not prove non-broadcast.
+message GetStatusResponse {
+    bytes txid = 1;
+    BlockID observedTip = 2;
+    bool liveComplete = 3;
+    oneof outcome {
+        StatusNotFound notFound = 4;
+        StatusMempool mempool = 5;
+        StatusMined mined = 6;
+        StatusForked forked = 7;
+    }
+}
+
 // RawTransaction contains the complete transaction data. It also optionally includes
 // the block height in which the transaction was included, or, when returned
 // by GetMempoolStream(), the latest block height.
@@ -274,6 +304,10 @@ service CompactTxStreamer {
 
     // Return the requested full (not compact) transaction (as from zcashd)
     rpc GetTransaction(TxFilter) returns (RawTransaction) {}
+
+    // Observe status without returning serialized transaction bytes. The
+    // server must return an error if it cannot provide a live, complete view.
+    rpc GetStatus(GetStatusRequest) returns (GetStatusResponse) {}
 
     // Submit the given transaction to the Zcash network
     rpc SendTransaction(RawTransaction) returns (SendResponse) {}
