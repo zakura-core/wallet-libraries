@@ -10,6 +10,17 @@ workspace.
 
 ## [Unreleased]
 
+### Changed
+- Status observations preserve every enhancement request, including ordinary
+  requests and requests whose raw bytes are already stored. Expiry and rewind
+  behavior for status requests is unchanged.
+- Implement `WalletWrite::notify_transaction_enhancement_not_found` atomically:
+  retire ordinary enhancement only, retaining status and outstanding PIR-routed
+  recovery even when the database is opened without the PIR feature.
+- Successful payload ingestion continues to complete enhancement independently.
+  No schema migration is required. Downstream payload-not-found handlers must
+  adopt the new API; status-only handlers continue to use `set_transaction_status`.
+
 ## [0.1.0-rc6] - 2026-09-24
 
 PIR storage integration release using `zakura-client-backend 0.1.0-rc6`.

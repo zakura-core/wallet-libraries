@@ -708,11 +708,37 @@ fn status_response_preserves_lwd_fallback_enhancement() {
             )
             .unwrap();
         assert_eq!(route, LWD_REQUIRED);
+        st.wallet_mut()
+            .notify_transaction_enhancement_not_found(txid)
+            .unwrap();
+        assert!(
+            visible(&st, request),
+            "a missing payload cannot complete PIR-required fallback"
+        );
     }
 }
 
 #[test]
-fn status_response_still_retires_ordinary_enhancement() {
+fn status_and_payload_absence_preserve_private_recovery_work() {
+    let (mut st, _, request) = fixture();
+    let txid = request.request_id().txid();
+    let work = st.wallet().db().query_requests().unwrap();
+    for status in [
+        TransactionStatus::Mined(BlockHeight::from_u32(100_001)),
+        TransactionStatus::NotInMainChain,
+        TransactionStatus::TxidNotRecognized,
+    ] {
+        st.wallet_mut().set_transaction_status(txid, status).unwrap();
+        st.wallet_mut()
+            .notify_transaction_enhancement_not_found(txid)
+            .unwrap();
+        assert_eq!(st.wallet().db().query_requests().unwrap(), work);
+        assert!(is_protected(st.wallet().conn(), txid).unwrap());
+    }
+}
+
+#[test]
+fn status_response_preserves_ordinary_enhancement() {
     let (mut st, _, request) = fixture();
     let txid = request.request_id().txid();
     // Drop private routing so Enhancement is ordinary LWD intent, not PIR fallback.
@@ -739,8 +765,8 @@ fn status_response_still_retires_ordinary_enhancement() {
         .unwrap();
 
     assert!(
-        !visible(&st, request),
-        "ordinary enhancement still retires when status reports the tx unavailable"
+        visible(&st, request),
+        "status observation does not complete ordinary payload retrieval"
     );
 }
 
@@ -1063,7 +1089,7 @@ fn request_enumeration_requires_mode_even_without_a_chain_tip() {
 #[test]
 fn reopening_requires_mode_before_enumerating_persisted_work() {
     use crate::testing::db::{test_clock, test_rng};
-    let (st, _, _) = fixture_with_factory(TestDbFactory::file_backed());
+    let (st, _, request) = fixture_with_factory(TestDbFactory::file_backed());
     let expected = st.wallet().db().enhance_pir_work().unwrap();
     assert!(!expected.is_empty());
     let db = crate::WalletDb::for_path(
@@ -1083,7 +1109,13 @@ fn reopening_requires_mode_before_enumerating_persisted_work() {
     ));
     let db = db.with_enhancement_mode(EnhancementMode::PrivateIronwood);
     assert_eq!(db.enhance_pir_work().unwrap(), expected);
-    assert!(db.transaction_data_requests().unwrap().is_empty());
+    // Other request kinds (such as transparent address history) are independent
+    // of private enhancement and may remain visible in this feature build.
+    assert!(
+        !db.transaction_data_requests()
+            .unwrap()
+            .contains(&TransactionDataRequest::Enhancement(request.request_id().txid()))
+    );
 }
 
 #[test]

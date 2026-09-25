@@ -10,6 +10,17 @@ workspace.
 
 ## [Unreleased]
 
+### Changed
+- `WalletWrite::set_transaction_status` and the low-level equivalent now update
+  status only; they must not retire enhancement or private recovery work.
+- Add required `WalletWrite::notify_transaction_enhancement_not_found(txid)` for
+  explicit not-found responses to authorized payload lookups. Custom stores must
+  implement it. Consumers that previously reported payload failure through
+  `set_transaction_status` must call this separate method instead.
+- Document independent status and enhancement obligations, successful payload
+  completion, retry behavior, and dormant status reactivation after a rewind.
+  See `docs/transaction_request_lifecycle.md` in the repository for migration details.
+
 ## [0.1.0-rc6] - 2026-09-24
 
 PIR wallet integration release supporting `zakura-pir-enhance 0.0.1-rc0`.

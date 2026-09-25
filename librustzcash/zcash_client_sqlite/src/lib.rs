@@ -2177,6 +2177,13 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         self.transactionally(|wdb| WalletWrite::set_transaction_status(wdb, txid, status))
     }
 
+    fn notify_transaction_enhancement_not_found(
+        &mut self,
+        txid: TxId,
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        self.transactionally(|wdb| wdb.notify_transaction_enhancement_not_found(txid))
+    }
+
     #[cfg(feature = "transparent-inputs")]
     fn schedule_next_check(
         &mut self,
@@ -2676,6 +2683,13 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             txid,
             status,
         )
+    }
+
+    fn notify_transaction_enhancement_not_found(
+        &mut self,
+        txid: TxId,
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        wallet::notify_transaction_enhancement_not_found(self.conn.0, txid)
     }
 
     #[cfg(feature = "transparent-inputs")]

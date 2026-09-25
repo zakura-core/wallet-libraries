@@ -383,8 +383,9 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
         observed_height: BlockHeight,
     ) -> Result<Self::TxRef, Self::Error>;
 
-    /// Updates transaction metadata to reflect that the given transaction status has been
-    /// observed.
+    /// Updates transaction metadata and status-request scheduling to reflect the observation.
+    /// This must not remove enhancement or private recovery work. Payload ingestion completes
+    /// enhancement separately through [`LowLevelWalletWrite::delete_retrieval_queue_entries`].
     fn set_transaction_status(
         &mut self,
         txid: TxId,
@@ -701,7 +702,9 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
 
     /// Deletes the [`TransactionDataRequest::Enhancement`] request for the given transaction ID
     /// from the transaction data request queue, without removing any durable status-observation
-    /// intent for the transaction.
+    /// intent for the transaction. Call only after successful payload ingestion (including an
+    /// irrelevant transaction); invoke it within the same atomic write as payload processing.
+    /// This is not a status-update or network-error handler.
     ///
     /// [`TransactionDataRequest::Enhancement`]: super::TransactionDataRequest
     fn delete_retrieval_queue_entries(&mut self, txid: TxId) -> Result<(), Self::Error>;

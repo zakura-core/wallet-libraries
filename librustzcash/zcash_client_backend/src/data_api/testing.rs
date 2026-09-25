@@ -3778,6 +3778,13 @@ impl WalletWrite for MockWalletDb {
         Ok(())
     }
 
+    fn notify_transaction_enhancement_not_found(
+        &mut self,
+        _txid: TxId,
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        Ok(())
+    }
+
     #[cfg(feature = "transparent-inputs")]
     fn notify_address_checked(
         &mut self,

@@ -1394,19 +1394,28 @@ pub enum TransactionDataRequest {
     /// The caller evaluating this request on behalf of the wallet backend should respond to this
     /// request by determining the status of the specified transaction with respect to the main
     /// chain; if using `lightwalletd` for access to chain data, this may be obtained by
-    /// interpreting the results of the `GetTransaction` RPC method. It should then call
+    /// using a status-only RPC, or interpreting a payload response when no status-only API
+    /// is available. It should then call
     /// [`WalletWrite::set_transaction_status`] to provide the resulting transaction status
-    /// information to the wallet backend.
+    /// information to the wallet backend. This obligation is independent of
+    /// [`TransactionDataRequest::Enhancement`]: observing status does not satisfy payload
+    /// retrieval, and retrieving a payload does not discard durable status-observation intent.
+    /// A mined observation may make status work dormant; a rewind can reactivate it.
     GetStatus(TxId),
     /// Transaction enhancement (download of complete raw transaction data) is requested.
     ///
     /// The caller evaluating this request on behalf of the wallet backend should respond to this
     /// request by providing complete data for the specified transaction to
     /// [`wallet::decrypt_and_store_transaction`]; if using `lightwalletd` for access to chain
-    /// state, this may be obtained via the `GetTransaction` RPC method. If no data is available
-    /// for the specified transaction, this should be reported to the backend using
-    /// [`WalletWrite::set_transaction_status`]. A [`TransactionDataRequest::Enhancement`] request
-    /// subsumes any previously existing [`TransactionDataRequest::GetStatus`] request.
+    /// state, this may be obtained via the `GetTransaction` RPC method. If an authorized payload
+    /// lookup explicitly reports that the transaction was not found, call
+    /// [`WalletWrite::notify_transaction_enhancement_not_found`]. Transport failures,
+    /// cancellation, invalid responses, and missing PIR coverage leave this obligation pending.
+    ///
+    /// Enhancement and [`TransactionDataRequest::GetStatus`] are independent obligations.
+    /// Successful payload ingestion completes enhancement, including when the transaction is
+    /// found to be irrelevant to the wallet. A mined height supplied with the payload may also
+    /// update status, but payload completion must not discard durable status-observation intent.
     Enhancement(TxId),
     /// Information about transactions that receive or spend funds belonging to the specified
     /// transparent address is requested.
@@ -2559,6 +2568,11 @@ pub trait WalletRead {
 
     /// Returns a vector of [`TransactionDataRequest`] values that describe information needed by
     /// the wallet to complete its view of transaction history.
+    ///
+    /// `GetStatus(txid)` and `Enhancement(txid)` may both be returned. Track them by request
+    /// kind as well as transaction ID; neither request supersedes the other. Status responses
+    /// only update observation state, while successful payload ingestion or an explicit payload
+    /// not-found notification completes ordinary enhancement. Failed operations remain retryable.
     ///
     /// Requests for the same transaction data may be returned repeatedly by successive data
     /// requests. The caller of this method should consider the latest set of requests returned
@@ -4125,10 +4139,36 @@ pub trait WalletWrite:
     /// or shielded outputs belonging to the wallet, may not be discovered by the process of chain
     /// scanning; as a consequence, the wallet must actively query to determine whether such
     /// transactions have been mined.
+    ///
+    /// This updates status metadata and status-request scheduling only. It must not complete
+    /// or remove [`TransactionDataRequest::Enhancement`] or private enhancement work, regardless
+    /// of the observation or whether payload bytes are already stored. Mined status intent may
+    /// remain dormant so that a chain rewind can reactivate it. An unmined observation may retire
+    /// status work once the backend's expiry/confirmation policy considers it terminal.
+    ///
+    /// This is not a report of payload retrieval failure. Use
+    /// [`WalletWrite::notify_transaction_enhancement_not_found`] for that separate operation.
     fn set_transaction_status(
         &mut self,
         _txid: TxId,
         _status: TransactionStatus,
+    ) -> Result<(), <Self as WalletRead>::Error>;
+
+    /// Reports an explicit not-found response to an authorized transaction payload lookup.
+    ///
+    /// Retires ordinary [`TransactionDataRequest::Enhancement`] work for `txid`, without changing
+    /// transaction status, status-request scheduling, or private recovery obligations. Backends
+    /// must retain enhancement that is still required by private recovery or its explicit public
+    /// fallback; not-found is not evidence that such recovery is complete. Retrying this
+    /// notification when no ordinary enhancement is queued is a no-op. Rediscovery may queue a
+    /// new enhancement request later.
+    ///
+    /// Do not call this for a status-only observation, transport failure, unsupported endpoint,
+    /// cancellation, malformed payload, or uncovered PIR query. Those outcomes do not establish
+    /// that the authorized payload lookup completed with a not-found response.
+    fn notify_transaction_enhancement_not_found(
+        &mut self,
+        txid: TxId,
     ) -> Result<(), <Self as WalletRead>::Error>;
 
     /// Schedules a UTXO check for the given address at a random time that has an expected value of
