@@ -1,4 +1,6 @@
 //! Wallet-only v7 wire fixtures; legacy v4 server fixtures must be rejected.
+//! The native profile speaks v9 and is pinned in the crate's unit tests.
+#![cfg(not(feature = "native-reinspiring"))]
 use serde::Deserialize;
 use zakura_pir_enhance::{
     AcceptedAnchor, ClientResourceLimits, GenerationAcceptance, HEADER_BYTES, Manifest,

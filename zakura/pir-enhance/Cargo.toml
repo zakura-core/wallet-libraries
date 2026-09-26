@@ -17,6 +17,10 @@ name = "zakura_pir_enhance"
 default = ["https-client"]
 https-client = ["dep:reqwest"]
 wallet = ["dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol"]
+## Experimental: speak the native two-mask v9 protocol
+## (`ironwood-enhance-pir-v9-native-two-mask-m29`) instead of v7. Compile-time
+## selection; a build with this feature cannot talk to a v7 server.
+native-reinspiring = ["dep:reinspiring", "dep:rand_chacha", "ipir-sp/native-reinspiring"]
 
 [dependencies]
 zcash_client_backend = { workspace = true, optional = true, features = ["zakura-pir-enhance"] }
@@ -26,8 +30,10 @@ futures-util = "0.3"
 url = "2"
 base64 = "0.22"
 hex.workspace = true
-ipir-sp = "=0.1.0-rc.3"
+ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", tag = "v0.1.0-rc.6" }
 rand = "0.8"
+rand_chacha = { workspace = true, optional = true }
+reinspiring = { git = "https://github.com/valargroup/ipir-sp.git", tag = "v0.1.0-rc.6", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 serde.workspace = true
 serde_json.workspace = true

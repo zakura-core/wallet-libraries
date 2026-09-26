@@ -54,11 +54,16 @@ jobs:
       - name: PIR wallet integration
         run: cargo test -p zakura-client-backend -p zakura-client-sqlite --features zakura-pir-enhance,test-dependencies --locked
 
+      # `native-reinspiring` replaces the v7 protocol at compile time, so it is
+      # tested on its own rather than through `--all-features`.
       - name: PIR client
         run: |
-          cargo test -p zakura-pir-enhance --all-features --locked
+          cargo test -p zakura-pir-enhance --features https-client,wallet --locked
           cargo test -p zakura-pir-enhance --no-default-features --locked
           cargo test -p zakura-pir-enhance --release --locked --test compatibility -- --ignored
+
+      - name: PIR client (experimental native profile)
+        run: cargo test -p zakura-pir-enhance --features native-reinspiring --locked
 
   feature-compatibility:
     runs-on: ubuntu-latest

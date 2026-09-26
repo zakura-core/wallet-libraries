@@ -2,9 +2,10 @@
 
 Release candidate `0.0.1-rc0` requires Rust 1.91. The default `https-client`
 feature provides the HTTPS transport; the optional `wallet` feature integrates
-with `zakura-client-backend 0.1.0-rc6`. Shared records come from
-`zakura-pir-enhance-types =0.0.1-rc0`. See [CHANGELOG.md](CHANGELOG.md) for release
-notes.
+with `zakura-client-backend 0.1.0-rc6`. The optional `native-reinspiring`
+feature selects the experimental native two-mask protocol (v9) instead of v7;
+see below. Shared records come from `zakura-pir-enhance-types =0.0.1-rc0`. See
+[CHANGELOG.md](CHANGELOG.md) for release notes.
 
 This crate implements the mainnet Ironwood enhancement v7 client. Wire schema 11 uses 653-byte suffix-only records, 33 records per row, independently parameterized shards, and the P16Q48 SimplePIR profile. The wallet retains compact encryption fields and supports same-transaction row queries and atomic batch application. SQLite upgrades existing rc5 wallets with a forward migration that preserves notes and adds nullable compact encryption fields. Rescanning compact blocks fills those fields for older notes. A matching v7 server is required.
 
@@ -37,11 +38,39 @@ Cover is off by default;
 timing, round count, the birthday window and cross-interval intersection remain
 observable. Ordinary streaming batches retain their existing partial-result semantics.
 
-The q48 profile uses the published `ipir-sp` crate, pinned to `=0.1.0-rc.3`. v5/q46 and v6/q48 manifests and
+The q48 profile uses `ipir-sp` from the `valargroup/ipir-sp` git tag `v0.1.0-rc.6`;
+the v7 wire contract (`parameter_id`, request and response lengths) is pinned by
+unit tests and did not change from the `=0.1.0-rc.3` release. v5/q46 and v6/q48 manifests and
 sessions are rejected. Schema-11 records and the deterministic public setup domain
 are unchanged. The v7 `EPQ7` header is 116 bytes and binds routing, domain, packing
 material, recovery epoch, session ID, request ID and accepted anchor. Noise
 qualification remains separate from wallet acceptance and note authentication.
+
+## Native two-mask profile (experimental)
+
+The `native-reinspiring` cargo feature (off by default) switches the client at
+compile time to protocol revision `ironwood-enhance-pir-v9-native-two-mask-m29`,
+mirroring the `enhance-pir` crate in `wallet-pir`. A build with the feature
+speaks only v9 and a build without it speaks only v7: manifests advertising the
+other revision fail validation, and the two profiles never coexist in one
+binary. Routing, session identities, wallet acceptance, the 116-byte `EPQ7`
+binding and the per-shard public setup seed are unchanged; only the PIR
+payloads differ.
+
+Under the feature, `parameters()` reports `query_bits = 49` and
+`q_prime_1 = 2^22`, and every shard's public session material is 89,088 bytes
+(12,288 columns, two masks each rounded to 29 bits). A request is the header,
+one uploaded 27,648-byte `K_g` packing key and a 49-bit selection per row
+(228,468 bytes for a 32,768-row shard); a response is the header plus 33,792
+bytes of 22-bit packed columns. The `native` module exposes the profile
+constants, the mask and length helpers, and `NativeSession`.
+
+This profile is experimental. `ipir-sp`'s cryptographic gates for the native
+path remain open: its noise and correctness qualification is snapshot-specific,
+and the rounded two-mask output has not completed independent review. Do not
+enable the feature in a production wallet build until those gates close and a
+matching v9 server has passed qualification; the default v7 build is the
+supported client.
 
 ## Integration changes
 

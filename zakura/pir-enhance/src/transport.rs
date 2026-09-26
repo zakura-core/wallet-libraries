@@ -1010,8 +1010,11 @@ mod initialization_tests {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[cfg(not(feature = "native-reinspiring"))]
     use crate::{AcceptedAnchor, ClientResourceLimits};
+    #[cfg(not(feature = "native-reinspiring"))]
     use futures::StreamExt;
+    #[cfg(not(feature = "native-reinspiring"))]
     use std::cell::Cell;
 
     #[test]
@@ -1040,6 +1043,8 @@ mod lifecycle_tests {
         assert_eq!(sessions.len(), 1);
     }
 
+    /// Serves the frozen v7 wallet fixture; a native (v9) build rejects it by design.
+    #[cfg(not(feature = "native-reinspiring"))]
     struct FixtureTransport {
         manifest: Vec<u8>,
         session: Vec<u8>,
@@ -1050,6 +1055,7 @@ mod lifecycle_tests {
         query_requests: Cell<usize>,
     }
 
+    #[cfg(not(feature = "native-reinspiring"))]
     impl FixtureTransport {
         fn new(session_status: Option<u16>, query_status: Option<u16>) -> Self {
             let fixture: serde_json::Value =
@@ -1076,6 +1082,7 @@ mod lifecycle_tests {
         }
     }
 
+    #[cfg(not(feature = "native-reinspiring"))]
     impl Transport for FixtureTransport {
         async fn execute(&self, request: Request) -> Result<ResponseBody, ClientError> {
             let bytes = if request.url.ends_with("/v1/enhance/init") {
@@ -1097,23 +1104,9 @@ mod lifecycle_tests {
                 }
                 // Zero public material and zero packed response model an all-zero
                 // database. This exercises client decoding without a server process.
-                let (_, params) = ipir_sp::params_for_simplepir_profile(
-                    4096,
-                    crate::ITEM_SIZE_BITS,
-                    ipir_sp::SimplePirProfile::P16Q48,
-                )
-                .unwrap();
                 let binding = crate::types::QueryBinding::decode(&request.body).unwrap();
                 let mut response = binding.encode();
-                response.resize(
-                    crate::HEADER_BYTES
-                        + params.db_cols / params.poly_len
-                            * ipir_sp::modulus_switch::response_body_len(
-                                params.poly_len,
-                                params.q_prime_1,
-                            ),
-                    0,
-                );
+                response.resize(crate::types::response_len(4096).unwrap(), 0);
                 let mut body = request.response_body();
                 body.extend(&response)?;
                 return Ok(body.finish());
@@ -1126,6 +1119,7 @@ mod lifecycle_tests {
         }
     }
 
+    #[cfg(not(feature = "native-reinspiring"))]
     #[test]
     fn expired_shard_session_requires_new_wallet_acceptance() {
         let transport = FixtureTransport::new(Some(410), None);
@@ -1173,6 +1167,7 @@ mod lifecycle_tests {
         });
     }
 
+    #[cfg(not(feature = "native-reinspiring"))]
     #[test]
     fn retryable_session_status_stops_batch_without_more_dispatch() {
         for status in [429, 503] {
@@ -1207,6 +1202,7 @@ mod lifecycle_tests {
         }
     }
 
+    #[cfg(not(feature = "native-reinspiring"))]
     #[test]
     fn query_status_reuses_one_cached_shard_session() {
         let transport = FixtureTransport::new(None, Some(503));
@@ -1245,6 +1241,7 @@ mod lifecycle_tests {
     }
 
     #[cfg(feature = "wallet")]
+    #[cfg(not(feature = "native-reinspiring"))]
     #[test]
     fn row_requests_decode_one_row_and_preserve_order_and_duplicate_identities() {
         use zcash_client_backend::data_api::enhance_pir::{
@@ -1291,6 +1288,7 @@ mod lifecycle_tests {
     }
 
     #[cfg(feature = "wallet")]
+    #[cfg(not(feature = "native-reinspiring"))]
     #[test]
     fn row_requests_reject_shape_without_io_and_query_only_one_row() {
         use zcash_client_backend::data_api::enhance_pir::{
@@ -1353,6 +1351,7 @@ mod lifecycle_tests {
         });
     }
 
+    #[cfg(not(feature = "native-reinspiring"))]
     #[test]
     fn zero_cache_limit_is_rejected_before_setup() {
         let transport = FixtureTransport::new(None, None);
@@ -1396,19 +1395,7 @@ mod v7_cover_tests {
             let mut manifest = crate::test_support::synthetic_manifest(
                 32768 * 33 + 1,
                 |shard| {
-                    let params = parameters(shard.logical_rows).unwrap();
-                    let (rlwe, _) = ipir_sp::params_for_simplepir_profile(
-                        shard.logical_rows,
-                        ITEM_SIZE_BITS,
-                        ipir_sp::SimplePirProfile::P16Q48,
-                    )
-                    .unwrap();
-                    let public =
-                        vec![
-                            0u8;
-                            params.db_cols / rlwe.d
-                                * ipir_sp::modulus_switch::published_c1_len(rlwe.d, rlwe.q)
-                        ];
+                    let public = vec![0u8; session_public_len(shard.logical_rows).unwrap()];
                     hex::encode(Sha256::digest(&public))
                 },
                 &"00".repeat(32),
@@ -1470,17 +1457,7 @@ mod v7_cover_tests {
                     })
                     .unwrap();
                 let params = parameters(shard.logical_rows).unwrap();
-                let (rlwe, _) = ipir_sp::params_for_simplepir_profile(
-                    shard.logical_rows,
-                    ITEM_SIZE_BITS,
-                    ipir_sp::SimplePirProfile::P16Q48,
-                )
-                .unwrap();
-                let public = vec![
-                    0;
-                    params.db_cols / rlwe.d
-                        * ipir_sp::modulus_switch::published_c1_len(rlwe.d, rlwe.q)
-                ];
+                let public = vec![0; session_public_len(shard.logical_rows).unwrap()];
                 serde_json::to_vec(&ShardSession {
                     session_id: hex::encode(self.manifest.session_id(shard.id).unwrap()),
                     generation: self.manifest.generation,
@@ -1509,17 +1486,8 @@ mod v7_cover_tests {
                     return Err(ClientError::HttpStatus(429));
                 }
                 let shard = &self.manifest.coverage.shards[binding.shard_id as usize];
-                let params = parameters(shard.logical_rows).unwrap();
                 let mut response = binding.encode();
-                response.resize(
-                    HEADER_BYTES
-                        + params.db_cols / params.poly_len
-                            * ipir_sp::modulus_switch::response_body_len(
-                                params.poly_len,
-                                params.q_prime_1,
-                            ),
-                    0,
-                );
+                response.resize(response_len(shard.logical_rows).unwrap(), 0);
                 if self.corrupt && binding.shard_id == 1 {
                     response[HEADER_BYTES..].fill(0x55);
                 }
@@ -1548,7 +1516,7 @@ mod v7_cover_tests {
                 assert_eq!(records.len(), 2);
                 let posts = transport.posts.borrow();
                 assert_eq!(posts.len(), 4);
-                for round in posts.chunks_exact(2) {
+                for round in posts.as_chunks::<2>().0 {
                     let mut set = round.to_vec();
                     set.sort();
                     assert_eq!(set, [0, 1]);
@@ -1613,7 +1581,7 @@ mod v7_cover_tests {
                     assert_eq!(result.is_err(), real);
                     let posts = transport.posts.borrow();
                     assert_eq!(posts.len(), if retry { 6 } else { 4 });
-                    for round in posts.chunks_exact(2) {
+                    for round in posts.as_chunks::<2>().0 {
                         let mut round = round.to_vec();
                         round.sort();
                         assert_eq!(round, [0, 1]);

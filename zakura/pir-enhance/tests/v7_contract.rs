@@ -107,6 +107,9 @@ fn multi_boundary_blocks_and_partial_threshold_use_canonical_coordinates() {
     );
 }
 
+/// The frozen fixture carries v7 identifiers; the native build's session
+/// identity is pinned by its own unit tests.
+#[cfg(not(feature = "native-reinspiring"))]
 #[test]
 fn identity_vector_matches_frozen_bytes() {
     let m = manifest(67);

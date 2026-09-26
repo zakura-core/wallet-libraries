@@ -1,6 +1,9 @@
 //! Wallet-bound v7 client for private Ironwood compact-action enhancement.
 
 pub mod client;
+/// Experimental native two-mask packing profile (protocol v9). See README.
+#[cfg(feature = "native-reinspiring")]
+pub mod native;
 pub mod transport;
 pub mod types;
 
