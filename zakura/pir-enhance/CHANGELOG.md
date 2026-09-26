@@ -29,6 +29,17 @@
   batch queries when a custom `Transport` returns a body larger than the
   request's limit.
 
+### Removed
+
+- The `https-client` feature, `EnhancePirClient`, `PendingEnhancePirClient`,
+  `transport::ReqwestTransport`, `ClientError::Http`, and the `reqwest`
+  dependency. The crate now has no default features; applications supply their
+  own `transport::Transport` implementation.
+- Unused `types::QueryShard::locate` (use `Coverage::locate`),
+  `types::RETAINED_GENERATIONS`, `types::ROW_PAYLOAD_BYTES`, and the
+  write-only `Lifecycle::identities` and `Lifecycle::next_id` fields.
+  `Lifecycle::coverage` now takes `&self`.
+
 ## [0.0.1-rc0] - 2026-09-24
 
 Initial release candidate for the mainnet Ironwood enhancement client.

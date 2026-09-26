@@ -30,7 +30,6 @@ pub const SCHEMA_VERSION: u16 = 11;
 pub const PROTOCOL_REVISION: &str = "ironwood-enhance-pir-v7";
 #[cfg(feature = "native-reinspiring")]
 pub const PROTOCOL_REVISION: &str = "ironwood-enhance-pir-v9-native-two-mask-m29";
-pub const RETAINED_GENERATIONS: usize = 5;
 pub const HEADER_BYTES: usize = 116;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -123,24 +122,10 @@ pub struct QueryShard {
     pub units: Vec<MutableUnit>,
 }
 
-impl QueryShard {
-    pub fn locate(&self, position: u64) -> Option<(usize, usize)> {
-        let first = self.global_row_start.checked_mul(RECORDS_PER_ROW as u64)?;
-        let relative = position.checked_sub(first)?;
-        (relative < self.records).then_some((
-            (relative / RECORDS_PER_ROW as u64) as usize,
-            (relative % RECORDS_PER_ROW as u64) as usize,
-        ))
-    }
-}
-
-/// Persisted fixed-range identities; confirmation is decided from canonical blocks.
+/// Builds canonical fixed-range coverage; confirmation is decided from canonical blocks.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct Lifecycle {
-    pub identities: Vec<u64>,
-    pub next_id: u64,
-}
+pub struct Lifecycle {}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -189,18 +174,13 @@ impl QueryShard {
 impl Lifecycle {
     /// Build one complete fixed-range view. Full ranges are provisional until
     /// their completing block is confirmed by the canonical controller.
-    pub fn coverage(&mut self, records: u64, geometry: Geometry) -> Result<Coverage, String> {
+    pub fn coverage(&self, records: u64, geometry: Geometry) -> Result<Coverage, String> {
         geometry.validate()?;
         let span = geometry.max_shard_rows * RECORDS_PER_ROW as u64;
         let count = records.div_ceil(span);
         if count == 0 || count > MAX_QUERY_SHARDS {
             return Err("unsupported coverage".into());
         }
-        if self.next_id > MAX_QUERY_SHARDS {
-            return Err("invalid persisted identity ceiling".into());
-        }
-        self.next_id = self.next_id.max(count);
-        self.identities = (0..self.next_id).collect();
         let mut shards = Vec::new();
         let mut routes = Vec::new();
         for id in 0..count {
@@ -671,5 +651,3 @@ pub struct ShardSession {
     pub params: ipir_sp::YpirSchemeParams,
     pub public_params_base64: String,
 }
-
-pub const ROW_PAYLOAD_BYTES: usize = ROW_BYTES;

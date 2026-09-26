@@ -5,10 +5,10 @@ family under stable names. Crates that must build both for Gemini and for Vizor
 depend on this instead of naming either family directly.
 
 `zakura` and `lrz` select a backend. Each includes Orchard and the complete
-feature set required by `zcash_voting`. The additive `zakura-pir-enhance` feature
-selects Zakura and enables the private, position-keyed Ironwood enhancement APIs.
-Applications depend directly on `zakura-pir-enhance` for the network client;
-it is intentionally not re-exported by this facade.
+feature set required by `zcash_voting`. Applications that use Enhance PIR
+depend directly on `zakura-client-backend`/`zakura-client-sqlite` with their
+`zakura-pir-enhance` features and on the `zakura-pir-enhance` client; this facade
+does not expose them.
 Keeping the two dependency
 graphs explicit avoids weak cross-family references, so Cargo does not retain
 the disabled family in downstream lockfiles and metadata.

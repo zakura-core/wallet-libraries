@@ -26,7 +26,6 @@ mod fix_transparent_received_outputs;
 mod fix_v_transactions_expired_unmined;
 mod full_account_ids;
 mod initial_setup;
-mod ironwood_compact_encryption;
 mod ironwood_enhance;
 mod ironwood_pool_code_views;
 mod ironwood_received_notes;
@@ -131,7 +130,6 @@ pub mod ids {
         fix_v_transactions_expired_unmined::MIGRATION_ID as FIX_V_TRANSACTIONS_EXPIRED_UNMINED,
         full_account_ids::MIGRATION_ID as FULL_ACCOUNT_IDS,
         initial_setup::MIGRATION_ID as INITIAL_SETUP,
-        ironwood_compact_encryption::MIGRATION_ID as IRONWOOD_COMPACT_ENCRYPTION,
         ironwood_enhance::MIGRATION_ID as IRONWOOD_ENHANCE,
         ironwood_pool_code_views::MIGRATION_ID as IRONWOOD_POOL_CODE_VIEWS,
         ironwood_received_notes::MIGRATION_ID as IRONWOOD_RECEIVED_NOTES,
@@ -364,7 +362,6 @@ pub(super) fn all_migrations<
         Box::new(add_transparent_value_index::Migration),
         Box::new(orchard_note_version::Migration),
         Box::new(ironwood_received_notes::Migration),
-        Box::new(ironwood_compact_encryption::Migration),
         Box::new(ironwood_enhance::Migration),
         Box::new(ironwood_pool_code_views::Migration),
         Box::new(fix_bad_ironwood_change_flagging::Migration),
@@ -709,7 +706,6 @@ pub(crate) mod tests {
             ids::FULL_ACCOUNT_IDS,
             ids::INITIAL_SETUP,
             ids::IRONWOOD_POOL_CODE_VIEWS,
-            ids::IRONWOOD_COMPACT_ENCRYPTION,
             ids::IRONWOOD_ENHANCE,
             ids::IRONWOOD_RECEIVED_NOTES,
             ids::IRONWOOD_SHARDTREE,

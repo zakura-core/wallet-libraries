@@ -58,8 +58,8 @@ jobs:
       # tested on its own rather than through `--all-features`.
       - name: PIR client
         run: |
-          cargo test -p zakura-pir-enhance --features https-client,wallet --locked
-          cargo test -p zakura-pir-enhance --no-default-features --locked
+          cargo test -p zakura-pir-enhance --features wallet --locked
+          cargo test -p zakura-pir-enhance --locked
           cargo test -p zakura-pir-enhance --release --locked --test compatibility -- --ignored
 
       - name: PIR client (experimental native profile)

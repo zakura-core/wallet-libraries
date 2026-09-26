@@ -237,22 +237,8 @@ pub(crate) fn rebuild(
                     return Ok(Rejected);
                 }
             }
-            if let Some(action) = compact_tx.ironwood_actions.first() {
-                let epk: [u8; 32] =
-                    action.ephemeral_key.as_slice().try_into().map_err(|_| {
-                        SqliteClientError::CorruptedData("invalid compact epk".into())
-                    })?;
-                let ciphertext: [u8; 52] =
-                    action.ciphertext.as_slice().try_into().map_err(|_| {
-                        SqliteClientError::CorruptedData("invalid compact ciphertext".into())
-                    })?;
-                metadata_plans.push((
-                    tx_ref,
-                    *position,
-                    epk,
-                    ciphertext,
-                    is_ironwood_pir_candidate(compact_tx),
-                ));
+            if !compact_tx.ironwood_actions.is_empty() {
+                metadata_plans.push((tx_ref, *position, is_ironwood_pir_candidate(compact_tx)));
             }
         }
         let reason = match reconstructed {
@@ -294,9 +280,9 @@ pub(crate) fn rebuild(
     // Transaction-local failures retain intent while valid siblings progress.
     // Any SQL error still rolls back all writes in this call, including suspension.
     let rebuilt = plans.len() + metadata_rebuilt;
-    for (tx_ref, position, epk, ciphertext, eligible) in metadata_plans {
+    for (tx_ref, position, eligible) in metadata_plans {
         if eligible {
-            super::metadata::bind(conn, tx_ref, u64::from(position), 0, &epk, &ciphertext)?;
+            super::metadata::bind(conn, tx_ref, u64::from(position), 0)?;
         } else {
             super::require_lwd(conn, tx_ref)?;
         }

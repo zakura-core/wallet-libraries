@@ -134,9 +134,6 @@ pub enum ClientError {
     Transport(String),
     #[error("HTTP status {0}")]
     HttpStatus(u16),
-    #[cfg(feature = "https-client")]
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("invalid public parameters base64: {0}")]
@@ -449,118 +446,6 @@ pub fn record_in_row(row: &[u8], slot: usize) -> Result<EnhanceRecord, ClientErr
         .try_into()
         .expect("fixed record length");
     EnhanceRecord::from_bytes(bytes).map_err(|e| ClientError::Response(e.to_string()))
-}
-
-#[cfg(feature = "https-client")]
-pub struct EnhancePirClient {
-    http: crate::transport::ReqwestTransport,
-    inner: crate::transport::Client,
-}
-#[cfg(feature = "https-client")]
-pub struct PendingEnhancePirClient {
-    http: crate::transport::ReqwestTransport,
-    inner: crate::transport::PendingClient,
-}
-#[cfg(feature = "https-client")]
-impl PendingEnhancePirClient {
-    pub fn manifest(&self) -> &Manifest {
-        self.inner.manifest()
-    }
-    pub fn generation(&self) -> &Manifest {
-        self.inner.manifest()
-    }
-    pub async fn connect(
-        self,
-        acceptance: &GenerationAcceptance,
-    ) -> Result<EnhancePirClient, ClientError> {
-        Ok(EnhancePirClient {
-            http: self.http,
-            inner: self.inner.accept(acceptance)?,
-        })
-    }
-}
-#[cfg(feature = "https-client")]
-impl EnhancePirClient {
-    pub fn refresh_due(&self) -> bool {
-        self.inner.refresh_due()
-    }
-
-    pub async fn fetch_routing(&self) -> Result<crate::transport::PendingClient, ClientError> {
-        crate::transport::PendingClient::fetch(&self.http, &self.inner.base_url).await
-    }
-
-    pub fn accept_routing(
-        &mut self,
-        pending: crate::transport::PendingClient,
-        acceptance: &GenerationAcceptance,
-    ) -> Result<(), ClientError> {
-        self.inner.accept_routing(pending, acceptance)
-    }
-
-    pub async fn query_positions_with_cover(
-        &mut self,
-        positions: &[u64],
-        birthday_first_position: u64,
-    ) -> Result<Vec<EnhanceRecord>, ClientError> {
-        self.inner
-            .query_positions_with_cover(&self.http, positions, birthday_first_position)
-            .await
-    }
-
-    pub async fn fetch_session(base_url: &str) -> Result<PendingEnhancePirClient, ClientError> {
-        let http = crate::transport::ReqwestTransport::new()?;
-        let inner = crate::transport::PendingClient::fetch(&http, base_url).await?;
-        Ok(PendingEnhancePirClient { http, inner })
-    }
-    pub async fn connect(
-        base_url: &str,
-        acceptance: &GenerationAcceptance,
-    ) -> Result<Self, ClientError> {
-        Self::fetch_session(base_url)
-            .await?
-            .connect(acceptance)
-            .await
-    }
-    pub fn manifest(&self) -> &Manifest {
-        self.inner.manifest()
-    }
-    pub fn generation(&self) -> &Manifest {
-        self.inner.manifest()
-    }
-    pub fn query_batch(
-        &mut self,
-        positions: impl IntoIterator<Item = u64>,
-    ) -> Result<impl futures_util::Stream<Item = crate::transport::PositionResult> + '_, ClientError>
-    {
-        self.inner.query_batch(&self.http, positions)
-    }
-    pub fn query_batch_with_limit(
-        &mut self,
-        positions: impl IntoIterator<Item = u64>,
-        max_items: usize,
-    ) -> Result<impl futures_util::Stream<Item = crate::transport::PositionResult> + '_, ClientError>
-    {
-        self.inner
-            .query_batch_with_limit(&self.http, positions, max_items)
-    }
-    /// Queries one row for one transaction, preserving captured wallet identities.
-    #[cfg(feature = "wallet")]
-    pub async fn query_row_requests(
-        &mut self,
-        requests: &[zcash_client_backend::data_api::enhance_pir::EnhancePirRequest],
-    ) -> Result<crate::wallet::RowQueryResult, ClientError> {
-        self.inner.query_row_requests(&self.http, requests).await
-    }
-
-    pub async fn query_position(&mut self, position: u64) -> Result<EnhanceRecord, ClientError> {
-        use futures_util::StreamExt;
-        let stream = self.query_batch([position])?;
-        futures_util::pin_mut!(stream);
-        stream.next().await.expect("one position").record
-    }
-    pub async fn query_dummy(&mut self, shard_id: u64) -> Result<(), ClientError> {
-        self.inner.query_dummy(&self.http, shard_id).await
-    }
 }
 
 #[cfg(test)]

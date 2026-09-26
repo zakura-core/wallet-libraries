@@ -7,12 +7,27 @@ use zcash_client_backend::data_api::enhance_pir::{
     IronwoodEnhanceRequestId,
     storage::{
         EnhancePirStorage, PendingIronwoodMemo, PendingIronwoodOutgoing,
-        ValidatedIronwoodEnhancement, validate_and_apply_record,
+        ValidatedIronwoodEnhancement, validate_and_apply_records,
     },
 };
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
+
+/// Applies one record as a batch of one, as `zakura-client-sqlite` does.
+fn validate_and_apply_record<DbT: EnhancePirStorage>(
+    db: &mut DbT,
+    request: EnhancePirRequest,
+    record: &EnhanceRecord,
+) -> Result<EnhancePirStoreResult, DbT::Error> {
+    use zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult;
+    Ok(
+        match validate_and_apply_records(db, &[(request, record.clone())])? {
+            EnhancePirBatchResult::Committed(results) => results[0],
+            EnhancePirBatchResult::Rejected { .. } => EnhancePirStoreResult::Rejected,
+        },
+    )
+}
 
 struct TransactionContext {
     request: EnhancePirRequest,
@@ -216,16 +231,7 @@ impl EnhancePirStorage for MetadataStore {
             .pending
             .iter()
             .find(|r| r.position() == position)
-            .map(|request| {
-                PendingIronwoodMetadata::Compact(PendingIronwoodOutgoing {
-                    request_id: request.request_id(),
-                    account_ids: vec![],
-                    nullifier: [0; 32],
-                    cmx: [0; 32],
-                    ephemeral_key: [1 + request.request_id().output_index() as u8; 32],
-                    compact_ciphertext: [2; 52],
-                })
-            }))
+            .map(|request| PendingIronwoodMetadata::Compact(request.request_id())))
     }
 
     fn get_account(&self, _: u32) -> Result<Option<Self::Account>, Self::Error> {
