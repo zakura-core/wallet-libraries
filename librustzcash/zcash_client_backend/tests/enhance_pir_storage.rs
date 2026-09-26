@@ -1,5 +1,5 @@
 //! An external storage implementation needs only the explicit implementation contract.
-#![cfg(all(feature = "zakura-pir-enhance", feature = "test-dependencies"))]
+#![cfg(all(feature = "orchard", feature = "test-dependencies"))]
 
 use incrementalmerkletree::Position;
 use zcash_client_backend::data_api::enhance_pir::{

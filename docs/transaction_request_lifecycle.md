@@ -47,8 +47,8 @@ rediscovery may create new work; a negative result is not a permanent tombstone.
 SQLite preserves incomplete work for either private protection or an explicit
 PIR-to-public routing decision. An outstanding routing obligation with no raw
 payload cannot be completed by a not-found notification. This check also applies
-when reopening the database in a build without the PIR feature. Private record
-acceptance and routing transitions retain their existing completion rules.
+after reopening the database. Private record acceptance and routing transitions
+retain their existing completion rules.
 
 ## Status scheduling and reorgs
 

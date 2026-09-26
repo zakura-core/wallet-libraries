@@ -25,7 +25,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-zakura-pir-enhance-types = { version = "=0.0.1-rc0", path = "../../zakura/pir-enhance-types", optional = true }
+zakura-pir-enhance-types = { version = "=0.0.1-rc0", path = "../../zakura/pir-enhance-types" }
 zcash_address.workspace = true
 zcash_encoding.workspace = true
 zcash_keys = { workspace = true, features = ["std", "sapling"] }
@@ -209,9 +209,6 @@ spend-index = ["transparent-inputs"]
 ## carries an Orchard bundle type); this feature gates the wallet's
 ## Orchard note-handling code, not the crate linkage.
 orchard = ["dep:pasta_curves", "zcash_keys/orchard"]
-
-## Enables position-keyed Ironwood compact-action enhancement APIs.
-zakura-pir-enhance = ["orchard", "dep:zakura-pir-enhance-types"]
 
 ## Enables compatibility with legacy zcashd wallet data
 zcashd-compat = ["zcash_keys/zcashd-compat"]

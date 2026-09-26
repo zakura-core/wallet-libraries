@@ -486,9 +486,7 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
 
     /// Reconciles transaction-wide Enhance PIR work after all scanned notes are stored.
     ///
-    /// This hook is available regardless of backend features: a dependency may enable
-    /// Enhance PIR without enabling it in the backing store. The default does nothing
-    /// and leaves ordinary transaction enhancement intent unchanged.
+    /// The default does nothing and leaves ordinary transaction enhancement intent unchanged.
     ///
     /// Stores supporting private enhancement must override this hook to persist routing
     /// and work atomically with the scanned notes, returning an error if storage fails.

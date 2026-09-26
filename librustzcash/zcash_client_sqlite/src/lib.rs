@@ -53,7 +53,7 @@ use tracing::warn;
 use util::Clock;
 use uuid::Uuid;
 
-#[cfg(feature = "zakura-pir-enhance")]
+#[cfg(feature = "orchard")]
 use zcash_client_backend::data_api::enhance_pir::{
     EnhancePirRead, EnhancePirRequest, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus,
     EnhancePirStoreResult, EnhancePirWrite, EnhanceRecord, EnhancementMode,
@@ -295,7 +295,7 @@ pub struct WalletDb<C, P, CL, R> {
     clock: CL,
     rng: R,
     anchor_retention_interval: AnchorRetentionInterval,
-    #[cfg(feature = "zakura-pir-enhance")]
+    #[cfg(feature = "orchard")]
     enhancement_mode: Option<EnhancementMode>,
     #[cfg(feature = "transparent-inputs")]
     gap_limits: GapLimits,
@@ -465,7 +465,7 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     /// - `rng`: The random number generation capability to be exposed by the created `WalletDb`
     ///   instance.
     ///
-    /// With `zakura-pir-enhance` enabled, configure the handle with
+    /// With Orchard storage enabled, configure the handle with
     /// `set_enhancement_mode` or `with_enhancement_mode` before enumerating
     /// transaction or PIR work. Until then, enumeration returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
@@ -484,7 +484,7 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
                 clock,
                 rng,
                 anchor_retention_interval: AnchorRetentionInterval::default(),
-                #[cfg(feature = "zakura-pir-enhance")]
+                #[cfg(feature = "orchard")]
                 enhancement_mode: None,
                 #[cfg(feature = "transparent-inputs")]
                 gap_limits: GapLimits::default(),
@@ -522,7 +522,7 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     }
 }
 
-#[cfg(feature = "zakura-pir-enhance")]
+#[cfg(feature = "orchard")]
 impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// Changes whether ordinary transaction-ID enhancement exposes protected Ironwood work.
     /// Discard outstanding in-memory request batches when changing mode. Already dispatched
@@ -572,7 +572,7 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// - `rng`: The random number generation capability to be exposed by the created `WalletDb`
     ///   instance.
     ///
-    /// With `zakura-pir-enhance` enabled, configure the handle with
+    /// With Orchard storage enabled, configure the handle with
     /// `set_enhancement_mode` or `with_enhancement_mode` before enumerating
     /// transaction or PIR work. Until then, enumeration returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
@@ -584,7 +584,7 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock,
             rng,
             anchor_retention_interval: AnchorRetentionInterval::default(),
-            #[cfg(feature = "zakura-pir-enhance")]
+            #[cfg(feature = "orchard")]
             enhancement_mode: None,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: GapLimits::default(),
@@ -614,7 +614,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock: &self.clock,
             rng: &mut self.rng,
             anchor_retention_interval: self.anchor_retention_interval,
-            #[cfg(feature = "zakura-pir-enhance")]
+            #[cfg(feature = "orchard")]
             enhancement_mode: self.enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: self.gap_limits,
@@ -674,7 +674,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock: &self.clock,
             rng: &mut self.rng,
             anchor_retention_interval: self.anchor_retention_interval,
-            #[cfg(feature = "zakura-pir-enhance")]
+            #[cfg(feature = "orchard")]
             enhancement_mode: self.enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: self.gap_limits,
@@ -1579,15 +1579,15 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     }
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
-        #[cfg(feature = "zakura-pir-enhance")]
+        #[cfg(feature = "orchard")]
         let enhancement_mode = self.configured_enhancement_mode()?;
         if let Some(_chain_tip_height) = wallet::chain_tip_height(self.conn.borrow())? {
             let protect_ironwood = {
-                #[cfg(feature = "zakura-pir-enhance")]
+                #[cfg(feature = "orchard")]
                 {
                     enhancement_mode == EnhancementMode::PrivateIronwood
                 }
-                #[cfg(not(feature = "zakura-pir-enhance"))]
+                #[cfg(not(feature = "orchard"))]
                 {
                     false
                 }
@@ -1625,7 +1625,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     }
 }
 
-#[cfg(feature = "zakura-pir-enhance")]
+#[cfg(feature = "orchard")]
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePirRead
     for WalletDb<C, P, CL, R>
 {
@@ -1672,7 +1672,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
     }
 }
 
-#[cfg(feature = "zakura-pir-enhance")]
+#[cfg(feature = "orchard")]
 impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
     EnhancePirWrite for WalletDb<C, P, CL, R>
 {
@@ -3066,7 +3066,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         Ok(())
     }
 
-    #[cfg(feature = "zakura-pir-enhance")]
+    #[cfg(feature = "orchard")]
     fn queue_ironwood_enhancement(
         &mut self,
         tx_ref: Self::TxRef,
@@ -4111,7 +4111,7 @@ mod tests {
     use zcash_protocol::{consensus, local_consensus::LocalNetwork};
     use zip32::DiversifierIndex;
 
-    #[cfg(any(feature = "zakura-pir-enhance", feature = "transparent-inputs"))]
+    #[cfg(any(feature = "orchard", feature = "transparent-inputs"))]
     use crate::testing::BlockCache;
     use crate::{
         AccountUuid,
@@ -4161,7 +4161,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "zakura-pir-enhance")]
+    #[cfg(feature = "orchard")]
     #[test]
     fn enhance_pir_snapshot_waits_for_the_scan_frontier() {
         use zcash_client_backend::data_api::enhance_pir::{
@@ -4192,7 +4192,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "zakura-pir-enhance")]
+    #[cfg(feature = "orchard")]
     #[test]
     fn enhance_pir_snapshot_requires_matching_scanned_metadata() {
         use zcash_client_backend::data_api::enhance_pir::{

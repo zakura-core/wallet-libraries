@@ -21,6 +21,9 @@ workspace.
   transparent-address requests remain in `transaction_data_requests`.
 
 ### Removed
+- The `zakura-pir-enhance` feature. Enhance PIR APIs and their wire-record types
+  are now always available; scan integration is included whenever Orchard
+  support is enabled.
 - `EnhancePirRead::enhance_pir_work`. PIR schedulers consume
   `transaction_enhancement_work`, which returns the same private work already
   routed together with public requests.

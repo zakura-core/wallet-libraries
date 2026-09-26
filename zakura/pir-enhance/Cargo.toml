@@ -22,7 +22,7 @@ wallet = ["dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protoco
 native-reinspiring = ["dep:reinspiring", "dep:rand_chacha", "ipir-sp/native-reinspiring"]
 
 [dependencies]
-zcash_client_backend = { workspace = true, optional = true, features = ["zakura-pir-enhance"] }
+zcash_client_backend = { workspace = true, optional = true }
 zcash_primitives = { workspace = true, optional = true }
 zcash_protocol = { workspace = true, optional = true }
 futures-util = "0.3"
@@ -40,8 +40,8 @@ thiserror = "2"
 zakura-pir-enhance-types = { version = "=0.0.1-rc0", path = "../pir-enhance-types" }
 
 [dev-dependencies]
-zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", version = "0.1.0-rc6", features = ["zakura-pir-enhance", "test-dependencies"] }
-zcash_client_backend = { workspace = true, features = ["zakura-pir-enhance", "test-dependencies"] }
+zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", version = "0.1.0-rc6", features = ["orchard", "test-dependencies"] }
+zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 incrementalmerkletree.workspace = true
 futures = "0.3"
 inspiring = "=0.1.0-rc.1"

@@ -505,7 +505,6 @@ where
                 |_account_id| (),
             )
             .map_err(PutBlocksError::Storage)?;
-            #[cfg(feature = "zakura-pir-enhance")]
             wallet_db
                 .queue_ironwood_enhancement(tx_ref, tx)
                 .map_err(PutBlocksError::Storage)?;

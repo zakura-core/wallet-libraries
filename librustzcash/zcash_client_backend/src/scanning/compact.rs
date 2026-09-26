@@ -32,7 +32,7 @@ use {
 #[cfg(not(feature = "orchard"))]
 use std::marker::PhantomData;
 
-#[cfg(feature = "zakura-pir-enhance")]
+#[cfg(feature = "orchard")]
 use crate::data_api::enhance_pir::is_ironwood_pir_candidate;
 
 type TaggedSaplingBatch<IvkTag> = Batch<
@@ -400,7 +400,7 @@ where
             spent_from_accounts.chain(ironwood_spends.iter().map(|spend| spend.account_id()));
         let spent_from_accounts = spent_from_accounts.copied().collect::<HashSet<_>>();
 
-        #[cfg(feature = "zakura-pir-enhance")]
+        #[cfg(feature = "orchard")]
         // Explicit non-Ironwood fields require LWD. Empty transparent lists are
         // only provisional: PIR shape flags may reveal an omitted bundle.
         // The compact source must include every shielded pool, not filter to Ironwood.
@@ -523,7 +523,7 @@ where
         // Same-account change uses the internal OVK, which outgoing recovery does not
         // hold; its memo is handled by incoming decryption. Other received outputs still
         // need outgoing recovery to reconstruct the sender's cross-account history.
-        #[cfg(feature = "zakura-pir-enhance")]
+        #[cfg(feature = "orchard")]
         let ironwood_enhance_candidates = if spent_from_accounts.is_empty()
             || !ironwood_pir_eligible
         {
@@ -593,7 +593,7 @@ where
                 #[cfg(feature = "orchard")]
                 ironwood_outputs,
             );
-            #[cfg(feature = "zakura-pir-enhance")]
+            #[cfg(feature = "orchard")]
             let wallet_tx = wallet_tx.with_ironwood_enhancement_plan(if ironwood_pir_eligible {
                 crate::wallet::IronwoodEnhancementPlan::Eligible {
                     outgoing: ironwood_enhance_candidates,
@@ -851,7 +851,7 @@ impl PositionTracker {
     }
 }
 
-#[cfg(all(test, feature = "zakura-pir-enhance"))]
+#[cfg(all(test, feature = "orchard"))]
 mod pir_tests;
 
 #[cfg(test)]

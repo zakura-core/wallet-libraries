@@ -12,9 +12,9 @@ and this library adheres to Rust's notion of
   `zakura-pir-enhance 0.0.1-rc0` release. The facade is not part of this release.
 
 ### Removed
-- The `zakura-pir-enhance` feature. No consumer enabled it; applications that
-  use Enhance PIR enable the backend and SQLite `zakura-pir-enhance` features
-  directly.
+- The facade's unused `zakura-pir-enhance` feature. Enhance PIR APIs are now
+  always present in the backend and are included with SQLite Orchard storage;
+  applications still depend on the `zakura-pir-enhance` client directly.
 
 ## [0.1.0-rc5] - 2026-09-09
 

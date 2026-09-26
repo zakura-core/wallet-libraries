@@ -157,9 +157,6 @@ orchard = [
     "pczt/tx-extractor",
 ]
 
-## Enables position-keyed incoming and outgoing Ironwood enhancement storage.
-zakura-pir-enhance = ["orchard", "zcash_client_backend/zakura-pir-enhance"]
-
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.
 test-dependencies = [
     "dep:ambassador",

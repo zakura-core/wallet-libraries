@@ -184,7 +184,7 @@ pub mod commitment_tree;
 pub(crate) mod common;
 mod db;
 pub(crate) mod encoding;
-#[cfg(feature = "zakura-pir-enhance")]
+#[cfg(feature = "orchard")]
 pub(crate) mod enhance_pir;
 pub mod init;
 pub(crate) mod ironwood_hooks;
@@ -4294,7 +4294,7 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
             // Truncation removes checkpoints; it never establishes them, so no anchor retention
             // decision is made through this handle and the interval is immaterial.
             anchor_retention_interval: AnchorRetentionInterval::default(),
-            #[cfg(feature = "zakura-pir-enhance")]
+            #[cfg(feature = "orchard")]
             enhancement_mode: None,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: *gap_limits,
@@ -6004,7 +6004,7 @@ mod tests {
     use sapling::zip32::ExtendedSpendingKey;
     use secrecy::{ExposeSecret, SecretVec};
     use uuid::Uuid;
-    #[cfg(feature = "zakura-pir-enhance")]
+    #[cfg(feature = "orchard")]
     use zcash_client_backend::data_api::enhance_pir::EnhancementMode;
     use zcash_client_backend::data_api::{
         Account as _, AccountSource, TransactionDataRequest, TransactionStatus, WalletRead,
@@ -6314,7 +6314,7 @@ mod tests {
         assert!(requests.contains(&TransactionDataRequest::Enhancement(unexpired_txid)));
     }
 
-    #[cfg(not(feature = "zakura-pir-enhance"))]
+    #[cfg(not(feature = "orchard"))]
     #[test]
     fn non_pir_enhancement_hook_preserves_ordinary_intent() {
         use zcash_client_backend::data_api::ll::LowLevelWalletWrite;
@@ -6430,7 +6430,7 @@ mod tests {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap();
-        #[cfg(not(feature = "zakura-pir-enhance"))]
+        #[cfg(not(feature = "orchard"))]
         let _ = mixed_pool_tx_ref;
         for (txid, query_type) in [
             (protected_txid, TxQueryType::Enhancement),
@@ -6459,7 +6459,7 @@ mod tests {
             )
             .unwrap();
 
-        #[cfg(feature = "zakura-pir-enhance")]
+        #[cfg(feature = "orchard")]
         st.wallet()
             .conn()
             .execute(
@@ -6491,7 +6491,7 @@ mod tests {
         assert!(standard_requests.contains(&TransactionDataRequest::Enhancement(unknown_txid)));
         assert!(standard_requests.contains(&TransactionDataRequest::Enhancement(mixed_pool_txid)));
 
-        #[cfg(feature = "zakura-pir-enhance")]
+        #[cfg(feature = "orchard")]
         {
             st.wallet_mut()
                 .db_mut()
@@ -7843,45 +7843,6 @@ mod tests {
             !is_change(&tx, pool),
             "an external-scope note must not be reclassified as change"
         );
-    }
-}
-
-#[cfg(all(test, feature = "orchard", not(feature = "zakura-pir-enhance")))]
-#[test]
-#[ignore = "invoked by scripts/verify-pir-feature-transition.sh"]
-fn maintain_wallet_without_pir() {
-    use crate::testing::db::{test_clock, test_rng};
-    use zcash_client_backend::data_api::{WalletWrite, testing::TestBuilder};
-    use zcash_protocol::local_consensus::LocalNetwork;
-    let activation = BlockHeight::from_u32(100_000);
-    let network = LocalNetwork {
-        nu6: Some(activation),
-        nu6_1: Some(activation),
-        nu6_2: Some(activation),
-        nu6_3: Some(activation),
-        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
-    };
-    let mut db = crate::WalletDb::for_path(
-        std::env::var("PIR_TRANSITION_DB").unwrap(),
-        network,
-        test_clock(),
-        test_rng(),
-    )
-    .unwrap();
-    init::WalletMigrator::new()
-        .init_or_migrate(&mut db)
-        .unwrap();
-    if let Ok(height) = std::env::var("PIR_TRANSITION_REWIND_HEIGHT") {
-        db.truncate_to_height(BlockHeight::from_u32(height.parse().unwrap()))
-            .unwrap();
-    } else {
-        db.delete_account(AccountUuid::from_uuid(
-            std::env::var("PIR_TRANSITION_ACCOUNT")
-                .unwrap()
-                .parse()
-                .unwrap(),
-        ))
-        .unwrap();
     }
 }
 

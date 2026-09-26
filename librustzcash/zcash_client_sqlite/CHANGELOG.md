@@ -16,12 +16,14 @@ workspace.
   No schema migration is required.
 
 ### Changed
+- Enhance PIR storage and routing are now part of Orchard support; the separate
+  `zakura-pir-enhance` feature has been removed.
 - Status observations preserve every enhancement request, including ordinary
   requests and requests whose raw bytes are already stored. Expiry and rewind
   behavior for status requests is unchanged.
 - Implement `WalletWrite::notify_transaction_enhancement_not_found` atomically:
-  retire ordinary enhancement only, retaining status and outstanding PIR-routed
-  recovery even when the database is opened without the PIR feature.
+  retire ordinary enhancement only, retaining status and outstanding
+  PIR-routed recovery.
 - Successful payload ingestion continues to complete enhancement independently.
   No schema migration is required. Downstream payload-not-found handlers must
   adopt the new API; status-only handlers continue to use `set_transaction_status`.

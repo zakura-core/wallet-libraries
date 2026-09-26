@@ -1,5 +1,5 @@
-//! Regression tests for independent status and payload obligations, with and
-//! without the PIR feature. Exercise public writes, not just queue SQL helpers.
+//! Regression tests for independent status and payload obligations. Exercise
+//! public writes, not just queue SQL helpers.
 use rusqlite::params;
 use zcash_client_backend::data_api::{
     TransactionDataRequest, TransactionStatus, WalletRead, WalletWrite,
@@ -326,7 +326,7 @@ fn rewind_reactivates_mined_status_without_completing_enhancement() {
 
 /// The routed payload snapshot never carries status work, and status responses and rewinds
 /// never change payload routing.
-#[cfg(feature = "zakura-pir-enhance")]
+#[cfg(feature = "orchard")]
 #[test]
 fn routed_enhancement_work_is_independent_of_status_lifecycle() {
     use zcash_client_backend::data_api::enhance_pir::{

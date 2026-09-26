@@ -6,9 +6,9 @@ depend on this instead of naming either family directly.
 
 `zakura` and `lrz` select a backend. Each includes Orchard and the complete
 feature set required by `zcash_voting`. Applications that use Enhance PIR
-depend directly on `zakura-client-backend`/`zakura-client-sqlite` with their
-`zakura-pir-enhance` features and on the `zakura-pir-enhance` client; this facade
-does not expose them.
+depend directly on `zakura-client-backend`/`zakura-client-sqlite` with Orchard
+storage enabled and on the `zakura-pir-enhance` client; this facade does not
+expose the client.
 Keeping the two dependency
 graphs explicit avoids weak cross-family references, so Cargo does not retain
 the disabled family in downstream lockfiles and metadata.
