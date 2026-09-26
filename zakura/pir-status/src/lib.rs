@@ -17,13 +17,13 @@ use sha2::{Digest, Sha256};
 
 pub const ROWS: usize = 8192;
 pub const SLOTS: usize = 256;
-pub const SLOT_BYTES: usize = 80;
-pub const ROW_BYTES: usize = 24576;
+pub const SLOT_BYTES: usize = 40;
+pub const ROW_BYTES: usize = 12288;
 pub const ITEM_BITS: u64 = (ROW_BYTES * 8) as u64;
 pub const MAX_ENTRIES: usize = ROWS * SLOTS * 3 / 4;
-pub const PROTOCOL: &str = "status-pir-v1-q48";
+pub const PROTOCOL: &str = "status-pir-v2-q48";
 pub const HEADER_BYTES: usize = 52;
-pub const MAX_AGE_MS: u64 = 10_000;
+pub const MAX_AGE_MS: u64 = 20_000;
 pub type Hash = [u8; 32];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -61,14 +61,13 @@ pub struct Record {
     pub txid: Hash,
     pub tag: u8,
     pub height: u32,
-    pub block: Hash,
 }
 
 impl Record {
     pub fn validate(&self) -> Result<(), Error> {
         match self.tag {
-            1 if self.height == 0 && self.block == [0; 32] => Ok(()),
-            2 | 3 if self.height > 0 && self.block != [0; 32] => Ok(()),
+            1 if self.height == 0 => Ok(()),
+            2 | 3 if self.height > 0 => Ok(()),
             _ => Err(Error::Malformed),
         }
     }
@@ -78,7 +77,6 @@ impl Record {
         out[..32].copy_from_slice(&self.txid);
         out[32] = self.tag;
         out[36..40].copy_from_slice(&self.height.to_le_bytes());
-        out[40..72].copy_from_slice(&self.block);
         Ok(out)
     }
     pub fn decode(bytes: &[u8]) -> Result<Option<Self>, Error> {
@@ -88,14 +86,13 @@ impl Record {
         if bytes.iter().all(|b| *b == 0) {
             return Ok(None);
         }
-        if bytes[33..36].iter().chain(&bytes[72..]).any(|b| *b != 0) {
+        if bytes[33..36].iter().any(|b| *b != 0) {
             return Err(Error::Malformed);
         }
         let r = Self {
             txid: bytes[..32].try_into().unwrap(),
             tag: bytes[32],
             height: u32::from_le_bytes(bytes[36..40].try_into().unwrap()),
-            block: bytes[40..72].try_into().unwrap(),
         };
         r.validate()?;
         Ok(Some(r))
@@ -108,20 +105,17 @@ impl Record {
             _ => Observation::Forked,
         })
     }
-    /// A mined or forked record must lie in the published window. The accepted
-    /// anchor hash belongs only to a mined record at the anchor height.
+    /// Mined and forked observations must lie in the published window.
+    /// Records carry no inclusion proof; the manifest anchor is checked separately.
     pub(crate) fn consistent_with(&self, manifest: &Manifest) -> bool {
         self.tag == 1
-            || (self.height >= manifest.coverage_start
-                && self.height <= manifest.anchor_height
-                && (self.block == manifest.anchor_hash)
-                    == (self.tag == 2 && self.height == manifest.anchor_height))
+            || (self.height >= manifest.coverage_start && self.height <= manifest.anchor_height)
     }
 }
 
 pub fn bucket(network: &Hash, salt: &Hash, txid: &Hash) -> usize {
     let mut h = Sha256::new();
-    h.update(b"status-pir/v1/bucket\0");
+    h.update(b"status-pir/v2/bucket\0");
     h.update(network);
     h.update(salt);
     h.update(txid);
@@ -131,7 +125,7 @@ pub fn bucket(network: &Hash, salt: &Hash, txid: &Hash) -> usize {
 
 pub fn setup_seed(network: &Hash, salt: &Hash) -> Hash {
     let mut h = Sha256::new();
-    h.update(b"status-pir/v1/setup\0");
+    h.update(b"status-pir/v2/setup\0");
     h.update(network);
     h.update(salt);
     h.finalize().into()
@@ -158,7 +152,7 @@ impl Manifest {
     /// Canonical fixed-width identity commits to coverage and observation time too.
     pub fn id(&self) -> Hash {
         let mut h = Sha256::new();
-        h.update(b"status-pir/v1/manifest\0");
+        h.update(b"status-pir/v2/manifest\0");
         h.update((self.protocol.len() as u64).to_le_bytes());
         h.update(self.protocol.as_bytes());
         h.update(self.network);
@@ -248,7 +242,7 @@ pub(crate) fn decode_row(
     let mut previous = None;
     let mut empty = false;
     let mut records = 0;
-    for bytes in row[..SLOTS * SLOT_BYTES].chunks_exact(SLOT_BYTES) {
+    for bytes in row[..SLOTS * SLOT_BYTES].as_chunks::<SLOT_BYTES>().0 {
         match Record::decode(bytes)? {
             None => empty = true,
             Some(r) => {
@@ -370,7 +364,7 @@ impl Client {
         coverage.validate(&self.manifest)?;
         let row = bucket(&self.manifest.network, &self.manifest.salt, &txid);
         let (query, keys, seed) = self.client.generate_fresh_query_simplepir(&self.setup, row);
-        let mut body = b"SPQ1".to_vec();
+        let mut body = b"SPQ2".to_vec();
         body.extend(self.manifest.id());
         body.extend(OsRng.r#gen::<[u8; 16]>());
         body.extend(
@@ -425,27 +419,35 @@ mod tests {
         }
     }
     #[test]
+    fn v2_geometry_and_v1_rejection() {
+        assert_eq!((ROWS, SLOTS, SLOT_BYTES, ROW_BYTES), (8192, 256, 40, 12288));
+        assert_eq!(ROWS * ROW_BYTES, 96 * 1024 * 1024);
+        let mut m = manifest();
+        m.protocol = "status-pir-v1-q48".into();
+        assert_eq!(m.validate(), Err(Error::Unsupported));
+        assert_eq!(Record::decode(&[0; 80]), Err(Error::Malformed));
+    }
+    #[test]
     fn independent_python_hash_vector() {
         let txid = std::array::from_fn(|i| i as u8);
-        assert_eq!(bucket(&[1; 32], &[2; 32], &txid), 2864);
+        assert_eq!(bucket(&[1; 32], &[2; 32], &txid), 6818);
         assert_eq!(
             hex::encode(setup_seed(&[1; 32], &[2; 32])),
-            "123a8be9f96ce15268d7b6c024846c7a1794ebf0698c0510702f32c153415447"
+            "44ada24f0ddb452f8d8a6902d2c32d02fe64fde4088e71e60a81c453d81e9ea8"
         );
     }
     #[test]
     fn slot_codec_rejects_reserved_bytes_empty_garbage_and_invalid_states() {
-        for (tag, height, block) in [(1, 0, [0; 32]), (2, 10, [3; 32]), (3, 10, [3; 32])] {
+        for (tag, height) in [(1, 0), (2, 10), (3, 10)] {
             let r = Record {
                 txid: [4; 32],
                 tag,
                 height,
-                block,
             };
             let bytes = r.encode().unwrap();
             assert_eq!(Record::decode(&bytes), Ok(Some(r)));
             let mut bad = bytes;
-            bad[79] = 1;
+            bad[33] = 1;
             assert_eq!(Record::decode(&bad), Err(Error::Malformed));
             let mut bad = bytes;
             bad[32] = 4;
@@ -459,7 +461,6 @@ mod tests {
                 txid: [0; 32],
                 tag: 1,
                 height: 1,
-                block: [0; 32]
             }
             .encode()
             .is_err()
@@ -469,7 +470,6 @@ mod tests {
                 txid: [0; 32],
                 tag: 2,
                 height: 0,
-                block: [3; 32]
             }
             .encode()
             .is_err()
@@ -479,8 +479,8 @@ mod tests {
     fn freshness_coverage_and_binding_are_separate() {
         let m = manifest();
         let row = vec![0; ROW_BYTES];
-        assert_eq!(m.fresh(11_000), Ok(()));
-        assert_eq!(m.fresh(11_001), Err(Error::Stale));
+        assert_eq!(m.fresh(21_000), Ok(()));
+        assert_eq!(m.fresh(21_001), Err(Error::Stale));
         assert_eq!(m.fresh(999), Err(Error::Malformed));
         assert_eq!(
             LocalCoverageContext {
@@ -530,7 +530,6 @@ mod tests {
             txid,
             tag: 2,
             height: 11,
-            block: [7; 32],
         };
         let mut row = vec![0; ROW_BYTES];
         row[..SLOT_BYTES].copy_from_slice(&r.encode().unwrap());
@@ -544,13 +543,12 @@ mod tests {
         row[SLOT_BYTES..SLOT_BYTES * 2].copy_from_slice(&r.encode().unwrap());
         assert_eq!(decode_row(&m, &txid, None, &row), Err(Error::Malformed));
     }
-    fn single(tag: u8, height: u32, block: Hash) -> Vec<u8> {
+    fn single(tag: u8, height: u32) -> Vec<u8> {
         let mut row = vec![0; ROW_BYTES];
         let r = Record {
             txid: [9; 32],
             tag,
             height,
-            block,
         };
         row[..SLOT_BYTES].copy_from_slice(&r.encode().unwrap());
         row
@@ -558,7 +556,7 @@ mod tests {
     #[test]
     fn row_cannot_hold_more_records_than_the_manifest() {
         let mut m = manifest();
-        let row = single(2, 11, [7; 32]);
+        let row = single(2, 11);
         assert_eq!(
             decode_row(&m, &[9; 32], None, &row),
             Ok(Observation::Mined(11))
@@ -567,32 +565,27 @@ mod tests {
         assert_eq!(decode_row(&m, &[9; 32], None, &row), Err(Error::Malformed));
     }
     #[test]
-    fn anchor_hash_belongs_only_to_a_mined_record_at_the_anchor() {
+    fn records_at_the_anchor_are_status_observations() {
         let m = manifest();
-        for (tag, height, block, expected) in [
-            (2, 20, m.anchor_hash, Ok(Observation::Mined(20))),
-            (2, 20, [7; 32], Err(Error::Malformed)),
-            (3, 20, m.anchor_hash, Err(Error::Malformed)),
-            (3, 20, [7; 32], Ok(Observation::Forked)),
-            (2, 19, m.anchor_hash, Err(Error::Malformed)),
-            (3, 19, m.anchor_hash, Err(Error::Malformed)),
-            (2, 19, [7; 32], Ok(Observation::Mined(19))),
-            (3, 19, [7; 32], Ok(Observation::Forked)),
+        for (tag, expected) in [
+            (2, Ok(Observation::Mined(20))),
+            (3, Ok(Observation::Forked)),
         ] {
-            let row = single(tag, height, block);
+            let row = single(tag, m.anchor_height);
             assert_eq!(decode_row(&m, &[9; 32], None, &row), expected);
         }
     }
+
     #[test]
     fn match_below_local_inclusion_bound_is_malformed() {
         let m = manifest();
-        for (tag, height, block, earliest, expected) in [
-            (2, 11, [7; 32], Some(15), Err(Error::Malformed)),
-            (2, 11, [7; 32], Some(11), Ok(Observation::Mined(11))),
-            (3, 11, [7; 32], Some(15), Err(Error::Malformed)),
-            (1, 0, [0; 32], Some(15), Ok(Observation::Mempool)),
+        for (tag, height, earliest, expected) in [
+            (2, 11, Some(15), Err(Error::Malformed)),
+            (2, 11, Some(11), Ok(Observation::Mined(11))),
+            (3, 11, Some(15), Err(Error::Malformed)),
+            (1, 0, Some(15), Ok(Observation::Mempool)),
         ] {
-            let row = single(tag, height, block);
+            let row = single(tag, height);
             assert_eq!(decode_row(&m, &[9; 32], earliest, &row), expected);
         }
     }

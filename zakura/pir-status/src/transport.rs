@@ -228,7 +228,7 @@ mod tests {
         ));
         assert_eq!(transport.limits().len(), 0);
         assert!(matches!(
-            PendingClient::fetch(&transport, "https://status.example", || 11_001).await,
+            PendingClient::fetch(&transport, "https://status.example", || 21_001).await,
             Err(Error::Stale)
         ));
         assert_eq!(transport.limits().len(), 1);
@@ -246,7 +246,7 @@ mod tests {
 
     #[tokio::test]
     async fn manifest_expiring_during_session_download_is_stale() {
-        let (transport, anchor) = fixture(11_001);
+        let (transport, anchor) = fixture(21_001);
         let pending =
             PendingClient::fetch(&transport, "https://status.example", || transport.now())
                 .await
