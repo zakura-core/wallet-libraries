@@ -54,6 +54,10 @@ jobs:
       - name: PIR wallet integration
         run: cargo test -p zakura-client-backend -p zakura-client-sqlite --features orchard,test-dependencies --locked
 
+      # Without Orchard, the SQLite store routes every payload request to public work.
+      - name: SQLite wallet without Orchard
+        run: cargo test -p zakura-client-sqlite --features test-dependencies --locked
+
       # `native-reinspiring` replaces the v7 protocol at compile time, so it is
       # tested on its own rather than through `--all-features`.
       - name: PIR client

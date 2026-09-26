@@ -13,11 +13,14 @@ workspace.
 ### Added
 - Implement `EnhancePirRead::transaction_enhancement_work` with one SQL statement
   over the ordinary and private queues, partitioned by transaction-wide route.
-  No schema migration is required.
+  No schema migration is required. `EnhancePirRead` is implemented with or without
+  Orchard support; without it, every payload request is public work.
 
 ### Changed
 - Enhance PIR storage and routing are now part of Orchard support; the separate
   `zakura-pir-enhance` feature has been removed.
+- `WalletRead::transaction_data_requests` no longer returns payload work and no
+  longer requires an enhancement mode to be configured.
 - Status observations preserve every enhancement request, including ordinary
   requests and requests whose raw bytes are already stored. Expiry and rewind
   behavior for status requests is unchanged.

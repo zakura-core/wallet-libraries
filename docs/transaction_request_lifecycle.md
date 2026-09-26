@@ -1,32 +1,29 @@
 # Transaction request lifecycle
 
-`TransactionDataRequest::GetStatus(txid)` and `Enhancement(txid)` are independent
-obligations. A wallet may need both for the same transaction. Keep request
-tracking keyed by operation and txid, and reread the queue after processing:
-payload ingestion can discover additional parent transactions to retrieve.
+Status observation and payload retrieval are independent obligations. A wallet
+may need both for the same transaction. Keep request tracking keyed by operation
+and txid, and reread the queues after processing: payload ingestion can discover
+additional parent transactions to retrieve.
 
 ## Read entrypoints and disclosure
 
-`WalletRead::transaction_status_requests()` returns typed status observations.
-`WalletRead::public_transaction_enhancement_requests()` returns typed ordinary
-payload requests eligible under the currently configured enhancement mode.
-Both are views of `transaction_data_requests()` and preserve its scheduling and
-routing rules. The combined method remains available to callers that need one
-snapshot for status, enhancement, and transparent discovery work; its
-`into_status_request()` and `into_public_enhancement_request()` conversions can
-classify entries without rereading the database. Custom wallet stores gain the
-new methods through default trait implementations.
+The two obligations come from two snapshots of the same retrieval queue:
+
+- `WalletRead::transaction_data_requests()` returns status observations
+  (`GetStatus`) and transparent address or outpoint discovery. It never returns
+  payload work. `WalletRead::transaction_status_requests()` is a typed view of
+  its status entries.
+- `EnhancePirRead::transaction_enhancement_work()` is the only source of payload
+  work. It routes each obligation to exactly one of public
+  (`TransactionEnhancementWork::Public`) or private PIR transport in one
+  snapshot. The SQLite store implements it with or without `orchard`; without
+  `orchard` it yields only public work.
 
 A status request says that the wallet needs an observation. It does **not**
 authorize revealing the txid to a public server. The caller must choose a
-status transport independently of the enhancement mode. Likewise, ordinary
-payload eligibility reflects the configured wallet routing, not blanket
-disclosure consent. A caller must authorize its chosen payload transport.
-Payload schedulers built with Enhance PIR should use
-`EnhancePirRead::transaction_enhancement_work()`, which routes each payload
-obligation to exactly one of public or private transport in one snapshot;
-transparent address and outpoint discovery remain distinct requests in the
-combined enumeration.
+status transport independently of the enhancement mode. Likewise, public
+payload work reflects the configured wallet routing, not blanket disclosure
+consent. A caller must authorize its chosen payload transport.
 
 ## Completion contract
 

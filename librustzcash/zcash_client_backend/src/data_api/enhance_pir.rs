@@ -4,6 +4,8 @@
 //! reject stale responses after reorgs. Note plaintext is authenticated, but schema
 //! v11 transaction metadata (shape, fee, expiry) is trusted indexer data, not cryptographic evidence.
 
+#[cfg(feature = "test-dependencies")]
+use ambassador::delegatable_trait;
 use incrementalmerkletree::Position;
 use zcash_primitives::block::BlockHash;
 use zcash_primitives::transaction::TxId;
@@ -255,6 +257,7 @@ pub enum EnhancePirBatchResult {
 }
 
 /// Application read interface for private enhancement.
+#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait EnhancePirRead: WalletRead {
     /// Returns every pending payload-retrieval obligation, each routed to a single transport,
     /// from one consistent wallet-state snapshot.
@@ -266,8 +269,9 @@ pub trait EnhancePirRead: WalletRead {
     ///   suspensions) for privately protected transactions, and public work for unclassified
     ///   transactions or those with a sticky LWD decision. Private errors and suspensions never
     ///   produce public work.
-    /// - Status observation and transparent-address history are not enhancement and are not
-    ///   returned; obtain them from [`WalletRead::transaction_data_requests`].
+    /// - This is the only source of payload work in every mode. Status observation and
+    ///   transparent-address history are not enhancement and are not returned; obtain them from
+    ///   [`WalletRead::transaction_data_requests`], which never returns payload work.
     ///
     /// Rediscovery is grouped by block and ordered by height, followed by private queries by
     /// position, public requests, discovery suspensions by transaction location/identity, and
@@ -285,7 +289,7 @@ pub trait EnhancePirRead: WalletRead {
     /// Returns whether an Ironwood transaction is covered by transaction-wide txid protection.
     ///
     /// This is an informational API. Storage implementations must enforce the configured
-    /// [`EnhancementMode`] in their ordinary transaction-data request path so that callers cannot
+    /// [`EnhancementMode`] in [`Self::transaction_enhancement_work`] so that callers cannot
     /// accidentally dispatch a protected enhancement request.
     fn is_ironwood_enhancement_protected(&self, txid: TxId) -> Result<bool, Self::Error>;
 }

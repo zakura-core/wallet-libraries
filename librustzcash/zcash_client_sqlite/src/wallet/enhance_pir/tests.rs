@@ -134,11 +134,9 @@ fn wire_record(inputs: bool, outputs: bool) -> EnhanceRecord {
 fn visible(st: &State, request: EnhancePirRequest) -> bool {
     st.wallet()
         .db()
-        .transaction_data_requests()
+        .transaction_enhancement_work()
         .unwrap()
-        .contains(&TransactionDataRequest::Enhancement(
-            request.request_id().txid(),
-        ))
+        .contains(&crate::testing::public_work(request.request_id().txid()))
 }
 
 fn validated(
@@ -593,9 +591,8 @@ fn reorg_prunes_positions_but_retains_protection_and_lwd_decisions() {
                 .db_mut()
                 .transactionally(|db| {
                     assert_eq!(
-                        db.transaction_data_requests()?.contains(
-                            &TransactionDataRequest::Enhancement(request.request_id().txid())
-                        ),
+                        db.transaction_enhancement_work()?
+                            .contains(&crate::testing::public_work(request.request_id().txid())),
                         expected
                     );
                     Ok::<_, SqliteClientError>(())
@@ -610,9 +607,10 @@ fn reorg_prunes_positions_but_retains_protection_and_lwd_decisions() {
             .unwrap()
             .with_enhancement_mode(mode);
             assert_eq!(
-                reopened.transaction_data_requests().unwrap().contains(
-                    &TransactionDataRequest::Enhancement(request.request_id().txid())
-                ),
+                reopened
+                    .transaction_enhancement_work()
+                    .unwrap()
+                    .contains(&crate::testing::public_work(request.request_id().txid())),
                 expected
             );
         }
@@ -647,18 +645,27 @@ fn reopening_uses_explicit_mode_and_preserves_routes() {
     .unwrap()
     .with_enhancement_mode(zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard);
     assert_eq!(reopened.query_requests().unwrap(), vec![request]);
-    assert!(reopened.transaction_data_requests().unwrap().contains(
-        &TransactionDataRequest::Enhancement(request.request_id().txid())
-    ));
+    assert!(
+        reopened
+            .transaction_enhancement_work()
+            .unwrap()
+            .contains(&crate::testing::public_work(request.request_id().txid()))
+    );
     reopened.set_enhancement_mode(EnhancementMode::PrivateIronwood);
-    assert!(!reopened.transaction_data_requests().unwrap().contains(
-        &TransactionDataRequest::Enhancement(request.request_id().txid())
-    ));
+    assert!(
+        !reopened
+            .transaction_enhancement_work()
+            .unwrap()
+            .contains(&crate::testing::public_work(request.request_id().txid()))
+    );
     require_lwd(st.wallet().conn(), tx_ref).unwrap();
     assert!(reopened.query_requests().unwrap().is_empty());
-    assert!(reopened.transaction_data_requests().unwrap().contains(
-        &TransactionDataRequest::Enhancement(request.request_id().txid())
-    ));
+    assert!(
+        reopened
+            .transaction_enhancement_work()
+            .unwrap()
+            .contains(&crate::testing::public_work(request.request_id().txid()))
+    );
 }
 
 #[test]
@@ -1016,27 +1023,25 @@ fn unified_work_preserves_both_suspension_kinds_across_reopen() {
         .unwrap()
         .with_enhancement_mode(mode);
         assert_eq!(reopened.private_work().unwrap(), suspended);
-        let exposes =
-            |db: &crate::WalletDb<_, _, _, _>| {
-                db.transaction_data_requests().unwrap().contains(
-                    &TransactionDataRequest::Enhancement(incoming.request_id().txid()),
-                )
-            };
+        let exposes = |db: &crate::WalletDb<_, _, _, _>| {
+            db.transaction_enhancement_work()
+                .unwrap()
+                .contains(&crate::testing::public_work(incoming.request_id().txid()))
+        };
         assert_eq!(exposes(&reopened), mode == EnhancementMode::Standard);
-        let inherited =
-            reopened
-                .transactionally(|db| -> Result<_, SqliteClientError> {
-                    Ok(db.transaction_data_requests()?.contains(
-                        &TransactionDataRequest::Enhancement(incoming.request_id().txid()),
-                    ))
-                })
-                .unwrap();
+        let inherited = reopened
+            .transactionally(|db| -> Result<_, SqliteClientError> {
+                Ok(db
+                    .transaction_enhancement_work()?
+                    .contains(&crate::testing::public_work(incoming.request_id().txid())))
+            })
+            .unwrap();
         assert_eq!(inherited, mode == EnhancementMode::Standard);
     }
 }
 
 #[test]
-fn request_enumeration_requires_mode_even_without_a_chain_tip() {
+fn payload_enumeration_requires_mode_even_without_a_chain_tip() {
     use crate::testing::db::{test_clock, test_rng};
     let file = tempfile::NamedTempFile::new().unwrap();
     for mut db in [
@@ -1057,19 +1062,13 @@ fn request_enumeration_requires_mode_even_without_a_chain_tip() {
         crate::wallet::init::WalletMigrator::new()
             .init_or_migrate(&mut db)
             .unwrap();
-        assert!(matches!(
-            db.transaction_data_requests(),
-            Err(SqliteClientError::EnhancementModeNotConfigured)
-        ));
+        assert!(db.transaction_data_requests().unwrap().is_empty());
         assert!(matches!(
             db.transaction_enhancement_work(),
             Err(SqliteClientError::EnhancementModeNotConfigured)
         ));
         db.transactionally(|tx| {
-            assert!(matches!(
-                tx.transaction_data_requests(),
-                Err(SqliteClientError::EnhancementModeNotConfigured)
-            ));
+            assert!(tx.transaction_data_requests()?.is_empty());
             assert!(matches!(
                 tx.transaction_enhancement_work(),
                 Err(SqliteClientError::EnhancementModeNotConfigured)
@@ -1095,7 +1094,7 @@ fn request_enumeration_requires_mode_even_without_a_chain_tip() {
 #[test]
 fn reopening_requires_mode_before_enumerating_persisted_work() {
     use crate::testing::db::{test_clock, test_rng};
-    let (st, _, request) = fixture_with_factory(TestDbFactory::file_backed());
+    let (st, _, _) = fixture_with_factory(TestDbFactory::file_backed());
     let expected = st
         .wallet()
         .db()
@@ -1112,21 +1111,14 @@ fn reopening_requires_mode_before_enumerating_persisted_work() {
         test_rng(),
     )
     .unwrap();
-    assert!(matches!(
-        db.transaction_data_requests(),
-        Err(SqliteClientError::EnhancementModeNotConfigured)
-    ));
+    // Status and transparent-history work does not depend on payload routing.
+    assert!(db.transaction_data_requests().is_ok());
     assert!(matches!(
         db.transaction_enhancement_work(),
         Err(SqliteClientError::EnhancementModeNotConfigured)
     ));
     let db = db.with_enhancement_mode(EnhancementMode::PrivateIronwood);
     assert_eq!(db.transaction_enhancement_work().unwrap(), expected);
-    // Other request kinds (such as transparent address history) are independent
-    // of private enhancement and may remain visible in this feature build.
-    assert!(!db.transaction_data_requests().unwrap().contains(
-        &TransactionDataRequest::Enhancement(request.request_id().txid())
-    ));
 }
 
 #[test]
