@@ -22,7 +22,9 @@ authorize revealing the txid to a public server. The caller must choose a
 status transport independently of the enhancement mode. Likewise, ordinary
 payload eligibility reflects the configured wallet routing, not blanket
 disclosure consent. A caller must authorize its chosen payload transport.
-Private Ironwood enhancement work remains under `EnhancePirRead::enhance_pir_work()`;
+Payload schedulers built with Enhance PIR should use
+`EnhancePirRead::transaction_enhancement_work()`, which routes each payload
+obligation to exactly one of public or private transport in one snapshot;
 transparent address and outpoint discovery remain distinct requests in the
 combined enumeration.
 

@@ -20,9 +20,10 @@ workspace.
   transport; private errors and suspensions never produce public work. Status and
   transparent-address requests remain in `transaction_data_requests`.
 
-### Deprecated
-- `EnhancePirRead::enhance_pir_work`. PIR schedulers should consume
-  `transaction_enhancement_work` rather than combining it with public requests.
+### Removed
+- `EnhancePirRead::enhance_pir_work`. PIR schedulers consume
+  `transaction_enhancement_work`, which returns the same private work already
+  routed together with public requests.
 
 ### Changed
 - `WalletWrite::set_transaction_status` and the low-level equivalent now update

@@ -277,7 +277,8 @@ fn read_work(
     .map_err(Into::into)
 }
 
-/// A single statement gives callers a consistent view across the independent queues.
+/// Mode-independent private queue contents from one statement, for storage tests.
+#[cfg(test)]
 pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
     let mut stmt = conn.prepare_cached(&work_sql(true, false))?;
     Ok(read_work(&mut stmt, &[])?

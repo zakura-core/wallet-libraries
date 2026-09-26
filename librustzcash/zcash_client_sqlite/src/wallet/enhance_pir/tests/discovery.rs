@@ -1,6 +1,3 @@
-// These suites exercise the deprecated mode-independent private enumerator directly.
-#![allow(deprecated)]
-
 use super::*;
 use group::{Group, GroupEncoding};
 use orchard::{
@@ -1100,7 +1097,7 @@ fn reconstruction_cannot_take_an_outgoing_position_from_another_transaction() {
                 ],
             )
             .unwrap();
-        let before = send.st.wallet().db().enhance_pir_work().unwrap();
+        let before = send.st.wallet().db().private_work().unwrap();
         let ordinary_before = send.st.wallet().db().transaction_data_requests().unwrap();
         let routing_before = routing_and_discovery(send.st.wallet().conn());
 
@@ -1154,7 +1151,7 @@ fn reconstruction_cannot_take_an_outgoing_position_from_another_transaction() {
             )
             .unwrap();
         assert_eq!(retained_owner, owner);
-        assert_eq!(send.st.wallet().db().enhance_pir_work().unwrap(), before);
+        assert_eq!(send.st.wallet().db().private_work().unwrap(), before);
         assert_eq!(
             send.st.wallet().db().transaction_data_requests().unwrap(),
             ordinary_before
@@ -2209,7 +2206,7 @@ fn rewind_across_pir_feature_builds() {
         .unwrap()
         .with_enhancement_mode(EnhancementMode::PrivateIronwood);
         assert!(reopened.is_ironwood_enhancement_protected(txid).unwrap());
-        assert!(reopened.enhance_pir_work().unwrap().is_empty());
+        assert!(reopened.private_work().unwrap().is_empty());
         assert!(
             !reopened
                 .transaction_data_requests()
@@ -2283,7 +2280,7 @@ fn rewind_failure_rolls_back_discovery_and_position_cleanup() {
     let mut send = Send::new(false);
     send.scan_funding();
     send.scan_send();
-    let before = send.st.wallet().db().enhance_pir_work().unwrap();
+    let before = send.st.wallet().db().private_work().unwrap();
     let txid = send.block.vtx[0].txid();
     send.st
         .wallet()
@@ -2301,7 +2298,7 @@ fn rewind_failure_rolls_back_discovery_and_position_cleanup() {
             .truncate_to_height(send.funding_height - 1)
             .is_err()
     );
-    assert_eq!(send.st.wallet().db().enhance_pir_work().unwrap(), before);
+    assert_eq!(send.st.wallet().db().private_work().unwrap(), before);
     assert!(is_protected(send.st.wallet().conn(), txid).unwrap());
     assert!(send.queued());
     assert!(

@@ -256,16 +256,6 @@ pub enum EnhancePirBatchResult {
 
 /// Application read interface for private enhancement.
 pub trait EnhancePirRead: WalletRead {
-    /// Returns active and suspended work from one consistent wallet-state snapshot.
-    /// Rediscovery is grouped by block and ordered by height, followed by queries by position,
-    /// discovery suspensions by transaction location/identity, and outgoing suspensions by
-    /// position/identity. Suspensions are incomplete obligations, not automatic retries.
-    /// Enumeration is mode-independent; applications schedule PIR in private mode.
-    #[deprecated(
-        note = "Use `transaction_enhancement_work`, which routes public and private work together."
-    )]
-    fn enhance_pir_work(&self) -> Result<Vec<EnhancePirWork>, Self::Error>;
-
     /// Returns every pending payload-retrieval obligation, each routed to a single transport,
     /// from one consistent wallet-state snapshot.
     ///
@@ -279,9 +269,10 @@ pub trait EnhancePirRead: WalletRead {
     /// - Status observation and transparent-address history are not enhancement and are not
     ///   returned; obtain them from [`WalletRead::transaction_data_requests`].
     ///
-    /// Private variants follow the ordering of the deprecated `enhance_pir_work`: rediscovery,
-    /// then queries, then suspensions. Public requests follow private queries and precede
-    /// suspensions. After applying any response, callers should reread this snapshot: for
+    /// Rediscovery is grouped by block and ordered by height, followed by private queries by
+    /// position, public requests, discovery suspensions by transaction location/identity, and
+    /// outgoing suspensions by position/identity. Suspensions are incomplete obligations, not
+    /// automatic retries. After applying any response, callers should reread this snapshot: for
     /// example, an authenticated positive transparent flag moves a transaction to public work.
     fn transaction_enhancement_work(&self) -> Result<Vec<TransactionEnhancementWork>, Self::Error>;
 

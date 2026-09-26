@@ -1,6 +1,3 @@
-// These suites exercise the deprecated mode-independent private enumerator directly.
-#![allow(deprecated)]
-
 use super::*;
 use crate::testing::{
     BlockCache,
@@ -914,9 +911,13 @@ fn apply_record<Db: EnhancePirWrite>(
 }
 
 impl<C: std::borrow::Borrow<Connection>, P: Parameters, CL, R> crate::WalletDb<C, P, CL, R> {
+    /// Mode-independent contents of the private queues, for storage assertions.
+    fn private_work(&self) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
+        work(self.conn.borrow())
+    }
     fn query_requests(&self) -> Result<Vec<EnhancePirRequest>, SqliteClientError> {
         Ok(self
-            .enhance_pir_work()?
+            .private_work()?
             .into_iter()
             .filter_map(|work| match work {
                 EnhancePirWork::Query(request) => Some(request),
@@ -928,7 +929,7 @@ impl<C: std::borrow::Borrow<Connection>, P: Parameters, CL, R> crate::WalletDb<C
         &self,
     ) -> Result<Vec<IronwoodEnhanceDiscoveryRequest>, SqliteClientError> {
         Ok(self
-            .enhance_pir_work()?
+            .private_work()?
             .into_iter()
             .filter_map(|work| match work {
                 EnhancePirWork::Rediscover(request) => Some(request),
@@ -940,7 +941,7 @@ impl<C: std::borrow::Borrow<Connection>, P: Parameters, CL, R> crate::WalletDb<C
         &self,
     ) -> Result<Vec<IronwoodEnhanceDiscoveryFailure>, SqliteClientError> {
         Ok(self
-            .enhance_pir_work()?
+            .private_work()?
             .into_iter()
             .filter_map(|work| match work {
                 EnhancePirWork::Suspended(EnhancePirSuspension::Discovery(failure)) => {
@@ -1002,7 +1003,7 @@ fn unified_work_preserves_both_suspension_kinds_across_reopen() {
     let expected = std::iter::once(EnhancePirWork::Query(incoming))
         .chain(suspended.iter().copied())
         .collect::<Vec<_>>();
-    assert_eq!(st.wallet().db().enhance_pir_work().unwrap(), expected);
+    assert_eq!(st.wallet().db().private_work().unwrap(), expected);
     finish_incoming(&mut st, incoming);
 
     for mode in [EnhancementMode::PrivateIronwood, EnhancementMode::Standard] {
@@ -1014,7 +1015,7 @@ fn unified_work_preserves_both_suspension_kinds_across_reopen() {
         )
         .unwrap()
         .with_enhancement_mode(mode);
-        assert_eq!(reopened.enhance_pir_work().unwrap(), suspended);
+        assert_eq!(reopened.private_work().unwrap(), suspended);
         let exposes =
             |db: &crate::WalletDb<_, _, _, _>| {
                 db.transaction_data_requests().unwrap().contains(
@@ -1061,10 +1062,6 @@ fn request_enumeration_requires_mode_even_without_a_chain_tip() {
             Err(SqliteClientError::EnhancementModeNotConfigured)
         ));
         assert!(matches!(
-            db.enhance_pir_work(),
-            Err(SqliteClientError::EnhancementModeNotConfigured)
-        ));
-        assert!(matches!(
             db.transaction_enhancement_work(),
             Err(SqliteClientError::EnhancementModeNotConfigured)
         ));
@@ -1074,7 +1071,7 @@ fn request_enumeration_requires_mode_even_without_a_chain_tip() {
                 Err(SqliteClientError::EnhancementModeNotConfigured)
             ));
             assert!(matches!(
-                tx.enhance_pir_work(),
+                tx.transaction_enhancement_work(),
                 Err(SqliteClientError::EnhancementModeNotConfigured)
             ));
             Ok::<_, SqliteClientError>(())
@@ -1083,12 +1080,10 @@ fn request_enumeration_requires_mode_even_without_a_chain_tip() {
         for mode in [EnhancementMode::Standard, EnhancementMode::PrivateIronwood] {
             db.set_enhancement_mode(mode);
             assert!(db.transaction_data_requests().unwrap().is_empty());
-            assert!(db.enhance_pir_work().unwrap().is_empty());
             assert!(db.transaction_enhancement_work().unwrap().is_empty());
             db.transactionally(|tx| {
                 assert_eq!(tx.enhancement_mode, Some(mode));
                 assert!(tx.transaction_data_requests()?.is_empty());
-                assert!(tx.enhance_pir_work()?.is_empty());
                 assert!(tx.transaction_enhancement_work()?.is_empty());
                 Ok::<_, SqliteClientError>(())
             })
@@ -1101,7 +1096,14 @@ fn request_enumeration_requires_mode_even_without_a_chain_tip() {
 fn reopening_requires_mode_before_enumerating_persisted_work() {
     use crate::testing::db::{test_clock, test_rng};
     let (st, _, request) = fixture_with_factory(TestDbFactory::file_backed());
-    let expected = st.wallet().db().enhance_pir_work().unwrap();
+    let expected = st
+        .wallet()
+        .db()
+        .private_work()
+        .unwrap()
+        .into_iter()
+        .map(TransactionEnhancementWork::Private)
+        .collect::<Vec<_>>();
     assert!(!expected.is_empty());
     let db = crate::WalletDb::for_path(
         st.wallet().data_file_path(),
@@ -1115,11 +1117,11 @@ fn reopening_requires_mode_before_enumerating_persisted_work() {
         Err(SqliteClientError::EnhancementModeNotConfigured)
     ));
     assert!(matches!(
-        db.enhance_pir_work(),
+        db.transaction_enhancement_work(),
         Err(SqliteClientError::EnhancementModeNotConfigured)
     ));
     let db = db.with_enhancement_mode(EnhancementMode::PrivateIronwood);
-    assert_eq!(db.enhance_pir_work().unwrap(), expected);
+    assert_eq!(db.transaction_enhancement_work().unwrap(), expected);
     // Other request kinds (such as transparent address history) are independent
     // of private enhancement and may remain visible in this feature build.
     assert!(!db.transaction_data_requests().unwrap().contains(
