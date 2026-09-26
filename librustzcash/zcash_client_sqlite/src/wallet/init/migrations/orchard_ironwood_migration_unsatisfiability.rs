@@ -132,19 +132,6 @@ impl schemerz::Migration<Uuid> for Migration {
     }
 }
 
-/// The nullifiers of the REAL spends of the PCZT serialized in `pczt_bytes`: the Orchard actions
-/// whose spend carries no Merkle witness (ZIP 374 defers the real spends' witnesses to proving
-/// time, while the padding dummies keep their arbitrary witnesses), in action order. A PCZT that
-/// does not parse is corrupt state and yields [`WalletMigrationError::CorruptedData`].
-///
-/// The witness filter is the real-spend RULE, not a defensive skip: `witness` is a genuinely
-/// optional PCZT field, and in an unproven migration PCZT it is exactly the padding dummies that
-/// have it. Dropping the filter would fold the dummies' nullifiers — which correspond to no note
-/// this wallet holds — into the cache, and the satisfiability oracle would then ask the wallet
-/// about notes it has never seen and answer `NotYetSatisfiable` forever. `zcash_pool_migration`'s
-/// `pczt_spends` module is the canonical statement of the rule and pins it with a proptest over
-/// builder-produced PCZTs; this is its feature-free mirror, because a wallet schema migration must
-
 /// The transaction id of a PCZT stored by the pool-migration engine.
 ///
 /// Inlined from what was `zcash_pool_migration::pczt_txid`: this migration is
@@ -167,6 +154,18 @@ fn stored_pczt_txid(bytes: &[u8]) -> Result<::zcash_protocol::TxId, &'static str
     ))
 }
 
+/// The nullifiers of the REAL spends of the PCZT serialized in `pczt_bytes`: the Orchard actions
+/// whose spend carries no Merkle witness (ZIP 374 defers the real spends' witnesses to proving
+/// time, while the padding dummies keep their arbitrary witnesses), in action order. A PCZT that
+/// does not parse is corrupt state and yields [`WalletMigrationError::CorruptedData`].
+///
+/// The witness filter is the real-spend RULE, not a defensive skip: `witness` is a genuinely
+/// optional PCZT field, and in an unproven migration PCZT it is exactly the padding dummies that
+/// have it. Dropping the filter would fold the dummies' nullifiers — which correspond to no note
+/// this wallet holds — into the cache, and the satisfiability oracle would then ask the wallet
+/// about notes it has never seen and answer `NotYetSatisfiable` forever. `zcash_pool_migration`'s
+/// `pczt_spends` module is the canonical statement of the rule and pins it with a proptest over
+/// builder-produced PCZTs; this is its feature-free mirror, because a wallet schema migration must
 /// run in a build without this crate's `orchard` feature.
 fn real_spend_nullifiers(pczt_bytes: &[u8]) -> Result<Vec<[u8; 32]>, WalletMigrationError> {
     let pczt = pczt::Pczt::parse(pczt_bytes).map_err(|e| {
