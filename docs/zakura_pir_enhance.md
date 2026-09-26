@@ -55,9 +55,19 @@ The application chooses limits for its least capable device. `max_shard_rows` bo
 
 ```rust,ignore
 use zakura_pir_enhance::wallet::PreparedWork;
-use zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult;
+use zcash_client_backend::data_api::enhance_pir::{
+    EnhancePirBatchResult, TransactionEnhancementWork,
+};
 
-let prepared = PreparedWork::new(db.enhance_pir_work()?);
+let (mut public, mut private) = (vec![], vec![]);
+for work in db.transaction_enhancement_work()? {
+    match work {
+        TransactionEnhancementWork::Public(request) => public.push(request),
+        TransactionEnhancementWork::Private(work) => private.push(work),
+    }
+}
+// Only `public` may use GetTransaction; a private failure never moves work there.
+let prepared = PreparedWork::new(private);
 // Schedule prepared.rediscover and retain suspended obligations as before.
 for ((_txid, _row), requests) in prepared.batches_by_tx_and_row() {
     let row = client.query_row_requests(&transport, &requests).await?;

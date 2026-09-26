@@ -14,6 +14,16 @@ workspace.
 - Add typed `WalletRead::transaction_status_requests` and
   `public_transaction_enhancement_requests` views of the existing request queue.
   The methods have defaults for custom stores and do not grant disclosure consent.
+- Add `enhance_pir::TransactionEnhancementWork` and required
+  `EnhancePirRead::transaction_enhancement_work`, which returns public and private
+  payload work routed from one snapshot. Each obligation appears under at most one
+  transport; private errors and suspensions never produce public work. Status and
+  transparent-address requests remain in `transaction_data_requests`.
+
+### Removed
+- `EnhancePirRead::enhance_pir_work`. PIR schedulers consume
+  `transaction_enhancement_work`, which returns the same private work already
+  routed together with public requests.
 
 ### Changed
 - `WalletWrite::set_transaction_status` and the low-level equivalent now update

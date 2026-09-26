@@ -10,6 +10,11 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- Implement `EnhancePirRead::transaction_enhancement_work` with one SQL statement
+  over the ordinary and private queues, partitioned by transaction-wide route.
+  No schema migration is required.
+
 ### Changed
 - Status observations preserve every enhancement request, including ordinary
   requests and requests whose raw bytes are already stored. Expiry and rewind

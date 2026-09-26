@@ -911,9 +911,13 @@ fn apply_record<Db: EnhancePirWrite>(
 }
 
 impl<C: std::borrow::Borrow<Connection>, P: Parameters, CL, R> crate::WalletDb<C, P, CL, R> {
+    /// Mode-independent contents of the private queues, for storage assertions.
+    fn private_work(&self) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
+        work(self.conn.borrow())
+    }
     fn query_requests(&self) -> Result<Vec<EnhancePirRequest>, SqliteClientError> {
         Ok(self
-            .enhance_pir_work()?
+            .private_work()?
             .into_iter()
             .filter_map(|work| match work {
                 EnhancePirWork::Query(request) => Some(request),
@@ -925,7 +929,7 @@ impl<C: std::borrow::Borrow<Connection>, P: Parameters, CL, R> crate::WalletDb<C
         &self,
     ) -> Result<Vec<IronwoodEnhanceDiscoveryRequest>, SqliteClientError> {
         Ok(self
-            .enhance_pir_work()?
+            .private_work()?
             .into_iter()
             .filter_map(|work| match work {
                 EnhancePirWork::Rediscover(request) => Some(request),
@@ -937,7 +941,7 @@ impl<C: std::borrow::Borrow<Connection>, P: Parameters, CL, R> crate::WalletDb<C
         &self,
     ) -> Result<Vec<IronwoodEnhanceDiscoveryFailure>, SqliteClientError> {
         Ok(self
-            .enhance_pir_work()?
+            .private_work()?
             .into_iter()
             .filter_map(|work| match work {
                 EnhancePirWork::Suspended(EnhancePirSuspension::Discovery(failure)) => {
@@ -999,7 +1003,7 @@ fn unified_work_preserves_both_suspension_kinds_across_reopen() {
     let expected = std::iter::once(EnhancePirWork::Query(incoming))
         .chain(suspended.iter().copied())
         .collect::<Vec<_>>();
-    assert_eq!(st.wallet().db().enhance_pir_work().unwrap(), expected);
+    assert_eq!(st.wallet().db().private_work().unwrap(), expected);
     finish_incoming(&mut st, incoming);
 
     for mode in [EnhancementMode::PrivateIronwood, EnhancementMode::Standard] {
@@ -1011,7 +1015,7 @@ fn unified_work_preserves_both_suspension_kinds_across_reopen() {
         )
         .unwrap()
         .with_enhancement_mode(mode);
-        assert_eq!(reopened.enhance_pir_work().unwrap(), suspended);
+        assert_eq!(reopened.private_work().unwrap(), suspended);
         let exposes =
             |db: &crate::WalletDb<_, _, _, _>| {
                 db.transaction_data_requests().unwrap().contains(
@@ -1058,7 +1062,7 @@ fn request_enumeration_requires_mode_even_without_a_chain_tip() {
             Err(SqliteClientError::EnhancementModeNotConfigured)
         ));
         assert!(matches!(
-            db.enhance_pir_work(),
+            db.transaction_enhancement_work(),
             Err(SqliteClientError::EnhancementModeNotConfigured)
         ));
         db.transactionally(|tx| {
@@ -1067,7 +1071,7 @@ fn request_enumeration_requires_mode_even_without_a_chain_tip() {
                 Err(SqliteClientError::EnhancementModeNotConfigured)
             ));
             assert!(matches!(
-                tx.enhance_pir_work(),
+                tx.transaction_enhancement_work(),
                 Err(SqliteClientError::EnhancementModeNotConfigured)
             ));
             Ok::<_, SqliteClientError>(())
@@ -1076,11 +1080,11 @@ fn request_enumeration_requires_mode_even_without_a_chain_tip() {
         for mode in [EnhancementMode::Standard, EnhancementMode::PrivateIronwood] {
             db.set_enhancement_mode(mode);
             assert!(db.transaction_data_requests().unwrap().is_empty());
-            assert!(db.enhance_pir_work().unwrap().is_empty());
+            assert!(db.transaction_enhancement_work().unwrap().is_empty());
             db.transactionally(|tx| {
                 assert_eq!(tx.enhancement_mode, Some(mode));
                 assert!(tx.transaction_data_requests()?.is_empty());
-                assert!(tx.enhance_pir_work()?.is_empty());
+                assert!(tx.transaction_enhancement_work()?.is_empty());
                 Ok::<_, SqliteClientError>(())
             })
             .unwrap();
@@ -1092,7 +1096,14 @@ fn request_enumeration_requires_mode_even_without_a_chain_tip() {
 fn reopening_requires_mode_before_enumerating_persisted_work() {
     use crate::testing::db::{test_clock, test_rng};
     let (st, _, request) = fixture_with_factory(TestDbFactory::file_backed());
-    let expected = st.wallet().db().enhance_pir_work().unwrap();
+    let expected = st
+        .wallet()
+        .db()
+        .private_work()
+        .unwrap()
+        .into_iter()
+        .map(TransactionEnhancementWork::Private)
+        .collect::<Vec<_>>();
     assert!(!expected.is_empty());
     let db = crate::WalletDb::for_path(
         st.wallet().data_file_path(),
@@ -1106,11 +1117,11 @@ fn reopening_requires_mode_before_enumerating_persisted_work() {
         Err(SqliteClientError::EnhancementModeNotConfigured)
     ));
     assert!(matches!(
-        db.enhance_pir_work(),
+        db.transaction_enhancement_work(),
         Err(SqliteClientError::EnhancementModeNotConfigured)
     ));
     let db = db.with_enhancement_mode(EnhancementMode::PrivateIronwood);
-    assert_eq!(db.enhance_pir_work().unwrap(), expected);
+    assert_eq!(db.transaction_enhancement_work().unwrap(), expected);
     // Other request kinds (such as transparent address history) are independent
     // of private enhancement and may remain visible in this feature build.
     assert!(!db.transaction_data_requests().unwrap().contains(
@@ -1930,4 +1941,205 @@ fn rc5_wallet_upgrades_and_scans_private_ironwood_work() {
             .unwrap()
             .contains(&incoming)
     );
+}
+
+/// Splits a routed snapshot and asserts that no transaction appears under both transports.
+fn routed(st: &State) -> (Vec<TxId>, Vec<EnhancePirWork>) {
+    let mut public = vec![];
+    let mut private = vec![];
+    for work in st.wallet().db().transaction_enhancement_work().unwrap() {
+        match work {
+            TransactionEnhancementWork::Public(request) => public.push(request.txid()),
+            TransactionEnhancementWork::Private(work) => private.push(work),
+        }
+    }
+    for work in &private {
+        let txid = match work {
+            EnhancePirWork::Query(request)
+            | EnhancePirWork::Suspended(EnhancePirSuspension::OutgoingNotRecoverable(request)) => {
+                Some(request.request_id().txid())
+            }
+            EnhancePirWork::Suspended(EnhancePirSuspension::Discovery(failure)) => {
+                Some(failure.txid)
+            }
+            EnhancePirWork::Rediscover(_) => None,
+        };
+        assert!(
+            txid.is_none_or(|txid| !public.contains(&txid)),
+            "{txid:?} is routed to both transports"
+        );
+    }
+    public.sort();
+    (public, private)
+}
+
+/// Inserts an unmined transaction with ordinary enhancement and status intent, and an optional
+/// transaction-wide route.
+fn queue_ordinary(st: &State, txid: TxId, route: Option<i64>) {
+    let conn = st.wallet().conn();
+    conn.execute(
+        "INSERT INTO transactions (txid, expiry_height, min_observed_height) VALUES (:txid, 0, 1)",
+        named_params![":txid": txid.as_ref()],
+    )
+    .unwrap();
+    for query_type in [TxQueryType::Status, TxQueryType::Enhancement] {
+        conn.execute(
+            "INSERT INTO tx_retrieval_queue (txid, query_type) VALUES (:txid, :query_type)",
+            named_params![":txid": txid.as_ref(), ":query_type": query_type.code()],
+        )
+        .unwrap();
+    }
+    if let Some(route) = route {
+        conn.execute(
+            "INSERT INTO ironwood_enhance_routing (transaction_id, route)
+             SELECT id_tx, :route FROM transactions WHERE txid = :txid",
+            named_params![":txid": txid.as_ref(), ":route": route],
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn routed_work_partitions_each_transaction_to_one_transport() {
+    let (mut st, tx_ref, incoming) = fixture();
+    let outgoing = outgoing(&st, tx_ref, 99, 4);
+    let protected = incoming.request_id().txid();
+    let unclassified = TxId::from_bytes([0xa1; 32]);
+    let lwd_required = TxId::from_bytes([0xa2; 32]);
+    let protected_idle = TxId::from_bytes([0xa3; 32]);
+    queue_ordinary(&st, unclassified, None);
+    queue_ordinary(&st, lwd_required, Some(LWD_REQUIRED));
+    queue_ordinary(&st, protected_idle, Some(PRIVATE_PROTECTED));
+
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::Standard);
+    let (public, private) = routed(&st);
+    let mut all = vec![protected, unclassified, lwd_required, protected_idle];
+    all.sort();
+    assert_eq!(public, all, "standard mode routes every payload publicly");
+    assert!(private.is_empty(), "standard mode never schedules PIR");
+
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    let (public, private) = routed(&st);
+    let mut ordinary = vec![unclassified, lwd_required];
+    ordinary.sort();
+    assert_eq!(
+        public, ordinary,
+        "protected transactions, even without queued PIR work, are never public"
+    );
+    let mut queries = vec![
+        EnhancePirWork::Query(incoming),
+        EnhancePirWork::Query(outgoing),
+    ];
+    queries.sort_by_key(|work| match work {
+        EnhancePirWork::Query(request) => request.position(),
+        _ => unreachable!(),
+    });
+    assert_eq!(private, queries);
+
+    // Private queries are actionable before public requests in the snapshot order.
+    let kinds = st
+        .wallet()
+        .db()
+        .transaction_enhancement_work()
+        .unwrap()
+        .into_iter()
+        .map(|work| matches!(work, TransactionEnhancementWork::Public(_)))
+        .collect::<Vec<_>>();
+    assert!(kinds.is_sorted(), "{kinds:?}");
+}
+
+#[test]
+fn transparent_flag_moves_the_whole_transaction_to_public_work() {
+    let (mut st, tx_ref, incoming) = fixture();
+    let outgoing = outgoing(&st, tx_ref, 99, 4);
+    let txid = incoming.request_id().txid();
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    assert_eq!(routed(&st).0, vec![]);
+
+    assert_eq!(
+        apply_record(
+            st.wallet_mut().db_mut(),
+            outgoing,
+            &wire_record(true, false)
+        )
+        .unwrap(),
+        EnhancePirStoreResult::LwdRequired
+    );
+    assert_eq!(routed(&st), (vec![txid], vec![]));
+
+    // A later false flag cannot restore private routing.
+    assert_eq!(
+        apply_record(
+            st.wallet_mut().db_mut(),
+            outgoing,
+            &wire_record(false, false)
+        )
+        .unwrap(),
+        EnhancePirStoreResult::AlreadyResolved
+    );
+    assert_eq!(routed(&st), (vec![txid], vec![]));
+}
+
+#[test]
+fn private_suspensions_are_never_routed_publicly() {
+    let (mut st, tx_ref, incoming) = fixture();
+    let outgoing = outgoing(&st, tx_ref, 99, 4);
+    let txid = incoming.request_id().txid();
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    assert_eq!(
+        apply_record(
+            st.wallet_mut().db_mut(),
+            outgoing,
+            &wire_record(false, false)
+        )
+        .unwrap(),
+        EnhancePirStoreResult::NotRecoverable
+    );
+    finish_incoming(&mut st, incoming);
+    // This incoming-only fixture has no durable spending associations.
+    super::discovery::queue(st.wallet().conn(), tx_ref).unwrap();
+
+    assert_eq!(
+        routed(&st),
+        (
+            vec![],
+            vec![
+                EnhancePirWork::Suspended(EnhancePirSuspension::Discovery(
+                    IronwoodEnhanceDiscoveryFailure {
+                        txid,
+                        reason: IronwoodEnhanceDiscoveryFailureReason::NoFundingAccounts,
+                    },
+                )),
+                EnhancePirWork::Suspended(EnhancePirSuspension::OutgoingNotRecoverable(outgoing)),
+            ]
+        )
+    );
+
+    // Leaving private mode exposes the outstanding ordinary obligation instead.
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::Standard);
+    assert_eq!(routed(&st), (vec![txid], vec![]));
+}
+
+#[test]
+fn private_completion_leaves_no_payload_work_in_either_mode() {
+    let (mut st, _, incoming) = fixture();
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    assert_eq!(routed(&st), (vec![], vec![EnhancePirWork::Query(incoming)]));
+    finish_incoming(&mut st, incoming);
+    for mode in [EnhancementMode::PrivateIronwood, EnhancementMode::Standard] {
+        st.wallet_mut().db_mut().set_enhancement_mode(mode);
+        assert_eq!(routed(&st), (vec![], vec![]), "{mode:?}");
+    }
 }

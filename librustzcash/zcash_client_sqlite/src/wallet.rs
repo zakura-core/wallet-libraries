@@ -5326,26 +5326,32 @@ pub(crate) fn queue_tx_status(
     Ok(())
 }
 
+/// Selects enhancement rows from `tx_retrieval_queue q` (joined with `transactions t`) that may use
+/// ordinary public transport. When `:protect_ironwood` is set, privately protected transactions
+/// (`ironwood_enhance_routing.route = 0`) are excluded. Shared with private routing so that the two
+/// transports partition payload work on the same predicate.
+pub(crate) const PUBLIC_ENHANCEMENT_ROUTE: &str = "(
+    NOT :protect_ironwood
+    OR NOT EXISTS (
+        SELECT 1
+        FROM ironwood_enhance_routing p
+        WHERE p.transaction_id = t.id_tx AND p.route = 0
+    )
+)";
+
 /// Returns the vector of [`TransactionDataRequest`]s that represents the information needed by the
 /// wallet backend in order to be able to present a complete view of wallet history and memo data.
 pub(crate) fn transaction_data_requests(
     conn: &rusqlite::Connection,
     protect_ironwood: bool,
 ) -> Result<Vec<TransactionDataRequest>, SqliteClientError> {
-    let mut tx_retrieval_stmt = conn.prepare_cached(
+    let mut tx_retrieval_stmt = conn.prepare_cached(&format!(
         "SELECT q.txid, q.query_type
          FROM tx_retrieval_queue q
          LEFT JOIN transactions t ON t.txid = q.txid
          WHERE (
             q.query_type = :enhancement_type
-            AND (
-                NOT :protect_ironwood
-                OR NOT EXISTS (
-                    SELECT 1
-                    FROM ironwood_enhance_routing p
-                    WHERE p.transaction_id = t.id_tx AND p.route = 0
-                )
-            )
+            AND {PUBLIC_ENHANCEMENT_ROUTE}
          )
          OR (
             q.query_type = :status_type
@@ -5363,8 +5369,8 @@ pub(crate) fn transaction_data_requests(
                         < t.min_observed_height + :certainty_depth
                 )
             )
-         )",
-    )?;
+         )"
+    ))?;
 
     let result = tx_retrieval_stmt
         .query_and_then(

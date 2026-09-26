@@ -9,7 +9,7 @@ use zcash_primitives::block::BlockHash;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 
-use super::WalletRead;
+use super::{PublicTransactionEnhancementRequest, WalletRead};
 use crate::proto::compact_formats::{CompactBlock, CompactTx};
 
 /// A compact block needed to rediscover outgoing actions after retroactive spend linkage.
@@ -62,6 +62,20 @@ pub enum EnhancePirWork {
     Suspended(EnhancePirSuspension),
 }
 
+/// One payload-retrieval obligation, routed to exactly one transport.
+///
+/// Returned by [`EnhancePirRead::transaction_enhancement_work`]. The route is decided by the
+/// wallet from the configured [`EnhancementMode`] and durable transaction-wide routing state;
+/// callers dispatch each variant to its transport and must not re-route it. In particular, a
+/// failure servicing [`Self::Private`] work never authorizes a [`Self::Public`] request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransactionEnhancementWork {
+    /// Retrieve the full transaction by ID over the ordinary (LWD) payload transport.
+    Public(PublicTransactionEnhancementRequest),
+    /// Service private Enhance PIR work; never disclose its transaction ID to a server.
+    Private(EnhancePirWork),
+}
+
 /// Durable work waiting for new local context or user intervention.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnhancePirSuspension {
@@ -85,7 +99,7 @@ pub enum IronwoodEnhanceDiscoveryResult {
         unresolved: Vec<IronwoodEnhanceDiscoveryFailure>,
     },
     /// No matching active work remains, or the request belongs to an old chain branch.
-    /// Suspended jobs may still exist in `enhance_pir_work()`.
+    /// Suspended jobs may still exist in `transaction_enhancement_work()`.
     AlreadyResolved,
     /// Block-wide identity, ordering, or tree geometry is invalid. No state was changed.
     Rejected,
@@ -242,12 +256,25 @@ pub enum EnhancePirBatchResult {
 
 /// Application read interface for private enhancement.
 pub trait EnhancePirRead: WalletRead {
-    /// Returns active and suspended work from one consistent wallet-state snapshot.
-    /// Rediscovery is grouped by block and ordered by height, followed by queries by position,
-    /// discovery suspensions by transaction location/identity, and outgoing suspensions by
-    /// position/identity. Suspensions are incomplete obligations, not automatic retries.
-    /// Enumeration is mode-independent; applications schedule PIR in private mode.
-    fn enhance_pir_work(&self) -> Result<Vec<EnhancePirWork>, Self::Error>;
+    /// Returns every pending payload-retrieval obligation, each routed to a single transport,
+    /// from one consistent wallet-state snapshot.
+    ///
+    /// - A transaction's payload obligation appears under at most one of
+    ///   [`TransactionEnhancementWork::Public`] or [`TransactionEnhancementWork::Private`].
+    /// - [`EnhancementMode::Standard`] yields only public work.
+    /// - [`EnhancementMode::PrivateIronwood`] yields private work (including rediscovery and
+    ///   suspensions) for privately protected transactions, and public work for unclassified
+    ///   transactions or those with a sticky LWD decision. Private errors and suspensions never
+    ///   produce public work.
+    /// - Status observation and transparent-address history are not enhancement and are not
+    ///   returned; obtain them from [`WalletRead::transaction_data_requests`].
+    ///
+    /// Rediscovery is grouped by block and ordered by height, followed by private queries by
+    /// position, public requests, discovery suspensions by transaction location/identity, and
+    /// outgoing suspensions by position/identity. Suspensions are incomplete obligations, not
+    /// automatic retries. After applying any response, callers should reread this snapshot: for
+    /// example, an authenticated positive transparent flag moves a transaction to public work.
+    fn transaction_enhancement_work(&self) -> Result<Vec<TransactionEnhancementWork>, Self::Error>;
 
     /// Compares the snapshot anchor to locally scanned chain state.
     fn enhance_pir_snapshot_status(

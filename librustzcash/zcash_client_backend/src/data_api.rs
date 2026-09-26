@@ -1482,7 +1482,8 @@ impl TransactionStatusRequest {
 ///
 /// This includes transaction-ID enhancement exposed by the configured mode. Callers must still
 /// choose an authorized payload transport before disclosing the transaction ID. Private PIR work
-/// is returned separately by `EnhancePirRead::enhance_pir_work` when that feature is enabled.
+/// and public work are routed together by `EnhancePirRead::transaction_enhancement_work` when that
+/// feature is enabled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PublicTransactionEnhancementRequest(TxId);
 
@@ -2650,7 +2651,8 @@ pub trait WalletRead {
 
     /// Returns pending ordinary payload enhancements eligible under the configured enhancement
     /// routing. This is a convenience view of [`WalletRead::transaction_data_requests`]; private
-    /// PIR work remains available through `EnhancePirRead::enhance_pir_work` when enabled.
+    /// PIR work is routed with public work by `EnhancePirRead::transaction_enhancement_work` when
+    /// enabled; PIR schedulers should use that single snapshot instead of combining the two.
     ///
     /// Eligibility describes wallet routing, not blanket consent to disclose a transaction ID.
     /// The caller must select an authorized payload transport before issuing the request.

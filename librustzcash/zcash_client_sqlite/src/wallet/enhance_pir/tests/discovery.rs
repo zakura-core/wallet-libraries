@@ -1097,7 +1097,7 @@ fn reconstruction_cannot_take_an_outgoing_position_from_another_transaction() {
                 ],
             )
             .unwrap();
-        let before = send.st.wallet().db().enhance_pir_work().unwrap();
+        let before = send.st.wallet().db().private_work().unwrap();
         let ordinary_before = send.st.wallet().db().transaction_data_requests().unwrap();
         let routing_before = routing_and_discovery(send.st.wallet().conn());
 
@@ -1151,7 +1151,7 @@ fn reconstruction_cannot_take_an_outgoing_position_from_another_transaction() {
             )
             .unwrap();
         assert_eq!(retained_owner, owner);
-        assert_eq!(send.st.wallet().db().enhance_pir_work().unwrap(), before);
+        assert_eq!(send.st.wallet().db().private_work().unwrap(), before);
         assert_eq!(
             send.st.wallet().db().transaction_data_requests().unwrap(),
             ordinary_before
@@ -2206,7 +2206,7 @@ fn rewind_across_pir_feature_builds() {
         .unwrap()
         .with_enhancement_mode(EnhancementMode::PrivateIronwood);
         assert!(reopened.is_ironwood_enhancement_protected(txid).unwrap());
-        assert!(reopened.enhance_pir_work().unwrap().is_empty());
+        assert!(reopened.private_work().unwrap().is_empty());
         assert!(
             !reopened
                 .transaction_data_requests()
@@ -2280,7 +2280,7 @@ fn rewind_failure_rolls_back_discovery_and_position_cleanup() {
     let mut send = Send::new(false);
     send.scan_funding();
     send.scan_send();
-    let before = send.st.wallet().db().enhance_pir_work().unwrap();
+    let before = send.st.wallet().db().private_work().unwrap();
     let txid = send.block.vtx[0].txid();
     send.st
         .wallet()
@@ -2298,7 +2298,7 @@ fn rewind_failure_rolls_back_discovery_and_position_cleanup() {
             .truncate_to_height(send.funding_height - 1)
             .is_err()
     );
-    assert_eq!(send.st.wallet().db().enhance_pir_work().unwrap(), before);
+    assert_eq!(send.st.wallet().db().private_work().unwrap(), before);
     assert!(is_protected(send.st.wallet().conn(), txid).unwrap());
     assert!(send.queued());
     assert!(
@@ -2435,4 +2435,50 @@ fn pir_expiry_does_not_pin_notes_across_reorg_or_reopen_completed_work() {
             "unmined spend must age out regardless of PIR expiry"
         );
     }
+}
+
+#[test]
+fn rediscovery_is_routed_privately_and_can_change_the_next_route() {
+    let mut send = Send::new(true);
+    send.scan_send();
+    let change = send.requests()[0];
+    finish_incoming(&mut send.st, change);
+    send.scan_funding();
+    let job = send.discovery();
+    let txid = change.request_id().txid();
+    let queries_for = |private: &[EnhancePirWork]| {
+        private
+            .iter()
+            .filter(|work| {
+                matches!(work, EnhancePirWork::Query(request) if request.request_id().txid() == txid)
+            })
+            .count()
+    };
+
+    let (public, private) = routed(&send.st);
+    assert!(
+        !public.contains(&txid),
+        "pending rediscovery never falls back"
+    );
+    assert!(private.contains(&EnhancePirWork::Rediscover(job)));
+    assert_eq!(queries_for(&private), 0);
+
+    send.st
+        .wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::Standard);
+    let (public, private) = routed(&send.st);
+    assert!(public.contains(&txid));
+    assert!(private.is_empty());
+    send.st
+        .wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+
+    // Reconstruction replaces the discovery job with a private outgoing query.
+    send.rebuild();
+    let (public, private) = routed(&send.st);
+    assert!(!public.contains(&txid));
+    assert!(!private.contains(&EnhancePirWork::Rediscover(job)));
+    assert_eq!(queries_for(&private), 1);
 }
