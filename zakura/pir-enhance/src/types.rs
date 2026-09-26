@@ -601,10 +601,48 @@ pub fn request_len(logical_rows: u64) -> Result<usize, String> {
     Ok(HEADER_BYTES + crate::native::request_len(params.db_rows))
 }
 
+/// Native identity binds the q48 transport profile to every native packing
+/// parameter, so a change to any of them changes the published identity.
+/// Must stay byte-identical to the server's `NativeIdentity`.
+#[cfg(feature = "native-reinspiring")]
+#[derive(Serialize)]
+struct NativeIdentity<'a> {
+    q48: &'a ipir_sp::YpirSchemeParams,
+    native_encoding: Vec<u8>,
+    mask_bits: usize,
+    query_bits: usize,
+    response_bits: usize,
+    cols: usize,
+}
+
+#[cfg(feature = "native-reinspiring")]
+fn native_identity(q48: &ipir_sp::YpirSchemeParams, mask_bits: usize) -> String {
+    use crate::native::{COLS, QUERY_BITS, RESPONSE_BITS, params};
+    digest(&NativeIdentity {
+        q48,
+        native_encoding: params().encoding(),
+        mask_bits,
+        query_bits: QUERY_BITS,
+        response_bits: RESPONSE_BITS,
+        cols: COLS,
+    })
+}
+
+fn parameter_identity(params: &ipir_sp::YpirSchemeParams) -> String {
+    #[cfg(feature = "native-reinspiring")]
+    {
+        native_identity(params, crate::native::MASK_BITS)
+    }
+    #[cfg(not(feature = "native-reinspiring"))]
+    {
+        digest(params)
+    }
+}
+
 pub fn parameter_id(logical_rows: u64) -> Result<String, String> {
     Ok(format!(
         "{PROTOCOL_REVISION}/{}",
-        digest(&parameters(logical_rows)?)
+        parameter_identity(&parameters(logical_rows)?)
     ))
 }
 
@@ -618,7 +656,10 @@ pub fn unit_parameter_id(rows: u64) -> Result<String, String> {
         ipir_sp::SimplePirProfile::P16Q48,
     )
     .map_err(|e| e.to_string())?;
-    Ok(format!("{PROTOCOL_REVISION}/unit/{}", digest(&params)))
+    Ok(format!(
+        "{PROTOCOL_REVISION}/unit/{}",
+        parameter_identity(&params)
+    ))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

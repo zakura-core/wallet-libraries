@@ -637,13 +637,31 @@ mod tests {
     #[test]
     fn v9_native_wire_contract_is_pinned() {
         use crate::native::{COLS, KEY_BYTES, public_len};
+        use crate::types::unit_parameter_id;
         assert_eq!(
             crate::PROTOCOL_REVISION,
             "ironwood-enhance-pir-v9-native-two-mask-m29"
         );
         let id = parameter_id(32768).unwrap();
         println!("v9 parameter_id(32768) = {id}");
-        assert!(id.starts_with("ironwood-enhance-pir-v9-native-two-mask-m29/"));
+        // Frozen against wallet-pir's server crate; both bind every native
+        // packing parameter into the identity.
+        assert_eq!(
+            id,
+            "ironwood-enhance-pir-v9-native-two-mask-m29/04612c53c821f0c235e8dd44036ac43cbf605bebd8012742a3d71bda18ec13f6"
+        );
+        assert_eq!(
+            unit_parameter_id(8192).unwrap(),
+            "ironwood-enhance-pir-v9-native-two-mask-m29/unit/0ce2b7a68ec0ea3bc9cbee600eb8a300bb2f06d121a2cc9caca7f6673537e070"
+        );
+        assert_eq!(
+            unit_parameter_id(4096).unwrap(),
+            "ironwood-enhance-pir-v9-native-two-mask-m29/unit/ac16d8451fb2cb1c523ec4b6a8ad17b20ba67c58b367b2ae40ba1783ddfc29f1"
+        );
+        assert_eq!(
+            unit_parameter_id(2048).unwrap(),
+            "ironwood-enhance-pir-v9-native-two-mask-m29/unit/2e03e17451928e9498fa614db9077f27709feda2d5a45c40ef2c4f0643dc478a"
+        );
         let session = zero_session(32768);
         assert_eq!(session.params.query_bits, 49);
         assert_eq!(session.params.q_prime_1, 1 << 22);
