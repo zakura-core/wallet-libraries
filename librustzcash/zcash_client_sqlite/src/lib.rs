@@ -468,10 +468,11 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     ///   instance.
     ///
     /// With Orchard storage enabled, configure the handle with
-    /// `set_enhancement_mode` or `with_enhancement_mode` before enumerating
-    /// transaction or PIR work. Until then, enumeration returns
+    /// `set_enhancement_mode` or `with_enhancement_mode` before calling
+    /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// Mode is not persisted; reopened handles must be configured again.
+    /// `WalletRead::transaction_data_requests` (status and transparent history) does not
+    /// depend on the mode. Mode is not persisted; reopened handles must be configured again.
     pub fn for_path<F: AsRef<Path>>(
         path: F,
         params: P,
@@ -575,10 +576,11 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     ///   instance.
     ///
     /// With Orchard storage enabled, configure the handle with
-    /// `set_enhancement_mode` or `with_enhancement_mode` before enumerating
-    /// transaction or PIR work. Until then, enumeration returns
+    /// `set_enhancement_mode` or `with_enhancement_mode` before calling
+    /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// Mode is not persisted; reopened handles must be configured again.
+    /// `WalletRead::transaction_data_requests` (status and transparent history) does not
+    /// depend on the mode. Mode is not persisted; reopened handles must be configured again.
     pub fn from_connection(conn: C, params: P, clock: CL, rng: R) -> Self {
         WalletDb {
             conn,
