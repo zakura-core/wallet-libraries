@@ -10,7 +10,7 @@ keywords = ["zcash", "privacy", "pir"]
 
 [dependencies]
 hex.workspace = true
-ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", tag = "v0.1.0-rc.5" }
+ipir-sp = { git = "https://github.com/valargroup/ipir-sp.git", tag = "v0.1.0-rc.6" }
 rand = "0.8"
 serde.workspace = true
 serde_json.workspace = true

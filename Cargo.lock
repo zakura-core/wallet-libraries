@@ -2585,7 +2585,7 @@ dependencies = [
 [[package]]
 name = "inspiring"
 version = "0.1.0-rc.2"
-source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.5#c5075a4059dadedf63d14e9009711338d202a022"
+source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6#1f2aec654d42d8c180373036eb1f6d30ff4ad30c"
 dependencies = [
  "bytemuck",
  "memmap2",
@@ -2627,8 +2627,8 @@ dependencies = [
 
 [[package]]
 name = "ipir-sp"
-version = "0.1.0-rc.5"
-source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.5#c5075a4059dadedf63d14e9009711338d202a022"
+version = "0.1.0-rc.6"
+source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6#1f2aec654d42d8c180373036eb1f6d30ff4ad30c"
 dependencies = [
  "clap",
  "env_logger",
@@ -4165,12 +4165,13 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reinspiring"
-version = "0.1.1"
-source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.5#c5075a4059dadedf63d14e9009711338d202a022"
+version = "0.1.2"
+source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6#1f2aec654d42d8c180373036eb1f6d30ff4ad30c"
 dependencies = [
  "bytemuck",
  "inspiring 0.1.0-rc.2",
  "memmap2",
+ "rand 0.8.7",
  "rand_chacha 0.3.1",
  "rayon",
  "sha2 0.10.9",
@@ -4837,7 +4838,7 @@ dependencies = [
 [[package]]
 name = "simplepir-kernel"
 version = "0.1.0-rc.3"
-source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.5#c5075a4059dadedf63d14e9009711338d202a022"
+source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6#1f2aec654d42d8c180373036eb1f6d30ff4ad30c"
 dependencies = [
  "inspiring 0.1.0-rc.2",
  "rayon",
@@ -7754,7 +7755,7 @@ name = "zakura-pir-status"
 version = "0.0.1-rc0"
 dependencies = [
  "hex",
- "ipir-sp 0.1.0-rc.5",
+ "ipir-sp 0.1.0-rc.6",
  "rand 0.8.7",
  "serde",
  "serde_json",

@@ -24,6 +24,9 @@ pub const MAX_ENTRIES: usize = ROWS * SLOTS * 3 / 4;
 pub const PROTOCOL: &str = "status-pir-v2-q48";
 pub const HEADER_BYTES: usize = 52;
 pub const MAX_AGE_MS: u64 = 20_000;
+/// A manifest observed this far ahead of the wallet clock is treated as
+/// observed now; anything further ahead is malformed rather than fresh.
+pub const MAX_FUTURE_SKEW_MS: u64 = 5_000;
 pub type Hash = [u8; 32];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -184,22 +187,80 @@ impl Manifest {
         }
         Ok(())
     }
+    /// Fresh while `observed_ms` is at most [`MAX_AGE_MS`] behind `now_ms`.
+    /// Up to [`MAX_FUTURE_SKEW_MS`] of clock skew ahead of the wallet counts
+    /// as age zero; a manifest further in the future is `Malformed`.
     pub fn fresh(&self, now_ms: u64) -> Result<(), Error> {
         self.validate()?;
-        // No future timestamp tolerance in the synthetic backend.
-        match now_ms.checked_sub(self.observed_ms) {
-            Some(age) if age <= MAX_AGE_MS => Ok(()),
-            Some(_) => Err(Error::Stale),
-            None => Err(Error::Malformed),
+        let age = match now_ms.checked_sub(self.observed_ms) {
+            Some(age) => age,
+            None if self.observed_ms - now_ms <= MAX_FUTURE_SKEW_MS => 0,
+            None => return Err(Error::Malformed),
+        };
+        if age <= MAX_AGE_MS {
+            Ok(())
+        } else {
+            Err(Error::Stale)
         }
     }
 }
 
+/// Decides whether a manifest anchor is one the wallet has verified itself.
+/// Implementations must be built from the wallet's own chain state, never
+/// from server metadata: the manifest's `anchor_height` and `anchor_hash` are
+/// assertions until this trait accepts them.
+pub trait AnchorVerifier {
+    fn network(&self) -> Hash;
+    fn accepts(&self, height: u32, hash: &Hash) -> bool;
+}
+
+impl<T: AnchorVerifier + ?Sized> AnchorVerifier for &T {
+    fn network(&self) -> Hash {
+        (**self).network()
+    }
+    fn accepts(&self, height: u32, hash: &Hash) -> bool {
+        (**self).accepts(height, hash)
+    }
+}
+
 /// Supplied by wallet chain verification, never copied from server metadata.
+/// Accepts exactly one anchor.
 pub struct AcceptedAnchor {
     pub network: Hash,
     pub height: u32,
     pub hash: Hash,
+}
+
+impl AnchorVerifier for AcceptedAnchor {
+    fn network(&self) -> Hash {
+        self.network
+    }
+    fn accepts(&self, height: u32, hash: &Hash) -> bool {
+        self.height == height && self.hash == *hash
+    }
+}
+
+/// A window of wallet-verified `(height, hash)` anchors, so a manifest a few
+/// blocks behind the wallet tip is still acceptable. An empty window accepts
+/// nothing.
+pub struct AcceptedAnchors {
+    pub network: Hash,
+    pub known: Vec<(u32, Hash)>,
+}
+
+impl AnchorVerifier for AcceptedAnchors {
+    fn network(&self) -> Hash {
+        self.network
+    }
+    fn accepts(&self, height: u32, hash: &Hash) -> bool {
+        self.known.iter().any(|(h, x)| *h == height && x == hash)
+    }
+}
+
+/// The manifest anchor must be verified by the wallet, not asserted by the server.
+pub(crate) fn anchor_accepted(manifest: &Manifest, accepted: &dyn AnchorVerifier) -> bool {
+    manifest.network == accepted.network()
+        && accepted.accepts(manifest.anchor_height, &manifest.anchor_hash)
 }
 
 /// Wallet-held evidence. Neither bound is sent to the PIR service.
@@ -317,13 +378,10 @@ impl Client {
     pub fn new(
         manifest: Manifest,
         public: &[u8],
-        accepted: &AcceptedAnchor,
+        accepted: &dyn AnchorVerifier,
     ) -> Result<Self, Error> {
         manifest.validate()?;
-        if manifest.network != accepted.network
-            || manifest.anchor_height != accepted.height
-            || manifest.anchor_hash != accepted.hash
-        {
+        if !anchor_accepted(&manifest, accepted) {
             return Err(Error::Malformed);
         }
         let client = IPIRClient::from_profile(ROWS as u64, ITEM_BITS, SimplePirProfile::P16Q48)
@@ -481,7 +539,7 @@ mod tests {
         let row = vec![0; ROW_BYTES];
         assert_eq!(m.fresh(21_000), Ok(()));
         assert_eq!(m.fresh(21_001), Err(Error::Stale));
-        assert_eq!(m.fresh(999), Err(Error::Malformed));
+        assert_eq!(m.fresh(999), Ok(()));
         assert_eq!(
             LocalCoverageContext {
                 earliest_possible_inclusion: Some(10),
@@ -521,6 +579,81 @@ mod tests {
         let mut changed = m;
         changed.protocol = "other".into();
         assert_eq!(changed.validate(), Err(Error::Unsupported));
+    }
+    #[test]
+    fn freshness_tolerates_bounded_future_skew() {
+        let mut m = manifest();
+        m.observed_ms = 10_000;
+        assert_eq!(m.fresh(10_000 - 4_000), Ok(()));
+        assert_eq!(m.fresh(10_000 - MAX_FUTURE_SKEW_MS), Ok(()));
+        assert_eq!(
+            m.fresh(10_000 - MAX_FUTURE_SKEW_MS - 1),
+            Err(Error::Malformed)
+        );
+        assert_eq!(m.fresh(10_000 - 6_000), Err(Error::Malformed));
+        assert_eq!(m.fresh(10_000 + MAX_AGE_MS), Ok(()));
+        assert_eq!(m.fresh(10_000 + 20_001), Err(Error::Stale));
+    }
+    #[test]
+    fn anchor_verifiers_bind_network_height_and_hash() {
+        let m = manifest();
+        let exact = AcceptedAnchor {
+            network: m.network,
+            height: m.anchor_height,
+            hash: m.anchor_hash,
+        };
+        assert!(anchor_accepted(&m, &exact));
+        assert!(!anchor_accepted(
+            &m,
+            &AcceptedAnchor {
+                height: m.anchor_height - 1,
+                ..exact
+            }
+        ));
+        assert!(!anchor_accepted(
+            &m,
+            &AcceptedAnchor {
+                hash: [7; 32],
+                ..exact
+            }
+        ));
+        assert!(!anchor_accepted(
+            &m,
+            &AcceptedAnchor {
+                network: [8; 32],
+                ..exact
+            }
+        ));
+        let window = AcceptedAnchors {
+            network: m.network,
+            known: vec![(19, [9; 32]), (20, m.anchor_hash), (21, [10; 32])],
+        };
+        assert!(anchor_accepted(&m, &window));
+        assert!(anchor_accepted(&m, &&window));
+        let mut other = m.clone();
+        other.anchor_height = 19;
+        other.anchor_hash = [9; 32];
+        assert!(anchor_accepted(&other, &window));
+        other.anchor_hash = m.anchor_hash;
+        assert!(!anchor_accepted(&other, &window));
+        let wrong_network = AcceptedAnchors {
+            network: [8; 32],
+            known: window.known.clone(),
+        };
+        assert!(!anchor_accepted(&m, &wrong_network));
+        let empty = AcceptedAnchors {
+            network: m.network,
+            known: Vec::new(),
+        };
+        assert!(!anchor_accepted(&m, &empty));
+        let public = vec![0; session_len().unwrap()];
+        let mut m = m;
+        m.public_digest = Sha256::digest(&public).into();
+        assert!(Client::new(m.clone(), &public, &window).is_ok());
+        assert_eq!(
+            Client::new(m, &public, &empty).err(),
+            Some(Error::Malformed)
+        );
     }
     #[test]
     fn complete_row_is_validated_even_after_a_match() {

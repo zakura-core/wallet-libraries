@@ -1,7 +1,7 @@
 //! Transport-neutral HTTP scheduling for one wallet-accepted status generation.
 use crate::{
-    AcceptedAnchor, Client, Error, LocalCoverageContext, Manifest, Observation, response_len,
-    session_len,
+    AnchorVerifier, Client, Error, LocalCoverageContext, Manifest, Observation, anchor_accepted,
+    response_len, session_len,
 };
 use std::future::Future;
 
@@ -64,19 +64,17 @@ impl<C: Fn() -> u64> PendingClient<C> {
         &self.manifest
     }
 
-    /// The anchor must come from independently verified wallet chain state.
-    /// Reject it before fetching the public session material, and recheck
-    /// freshness once that material arrives.
+    /// The verifier must be built from independently verified wallet chain
+    /// state; it decides whether the manifest's asserted anchor is one the
+    /// wallet knows. Reject before fetching the public session material, and
+    /// recheck freshness once that material arrives.
     pub async fn accept(
         self,
         transport: &impl Transport,
-        anchor: &AcceptedAnchor,
+        anchor: &dyn AnchorVerifier,
     ) -> Result<StatusPirClient<C>, Error> {
         self.manifest.fresh((self.now_ms)())?;
-        if self.manifest.network != anchor.network
-            || self.manifest.anchor_height != anchor.height
-            || self.manifest.anchor_hash != anchor.hash
-        {
+        if !anchor_accepted(&self.manifest, anchor) {
             return Err(Error::Malformed);
         }
         let url = route(
@@ -126,7 +124,7 @@ impl<C: Fn() -> u64> StatusPirClient<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PROTOCOL;
+    use crate::{AcceptedAnchor, AcceptedAnchors, MAX_FUTURE_SKEW_MS, PROTOCOL};
     use sha2::{Digest, Sha256};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -217,6 +215,55 @@ mod tests {
             Err(Error::Malformed)
         ));
         assert_eq!(transport.limits().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn anchor_window_accepts_a_known_anchor_and_rejects_unknown_ones() {
+        let (transport, exact) = fixture(1000);
+        let window = AcceptedAnchors {
+            network: exact.network,
+            known: vec![(19, [9; 32]), (exact.height, exact.hash)],
+        };
+        let pending = PendingClient::fetch(&transport, "https://status.example", || 1000)
+            .await
+            .unwrap();
+        assert!(pending.accept(&transport, &window).await.is_ok());
+        assert_eq!(transport.limits().len(), 2);
+        let unknown = AcceptedAnchors {
+            network: exact.network,
+            known: vec![(exact.height, [9; 32]), (19, exact.hash)],
+        };
+        let pending = PendingClient::fetch(&transport, "https://status.example", || 1000)
+            .await
+            .unwrap();
+        assert!(matches!(
+            pending.accept(&transport, &unknown).await,
+            Err(Error::Malformed)
+        ));
+        assert_eq!(transport.limits().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn init_ahead_of_wallet_clock_is_fresh_within_skew() {
+        let (transport, anchor) = fixture(1000);
+        // The manifest is observed at 1000; a wallet clock 4 s behind accepts it.
+        let client = PendingClient::fetch(&transport, "https://status.example", || 1000 - 999)
+            .await
+            .unwrap()
+            .accept(&transport, &anchor)
+            .await;
+        assert!(client.is_ok());
+        let (transport, _) = fixture(1000);
+        let mut manifest: Manifest = serde_json::from_slice(&transport.manifest).unwrap();
+        manifest.observed_ms = 1000 + MAX_FUTURE_SKEW_MS + 1;
+        let transport = Fixture {
+            manifest: serde_json::to_vec(&manifest).unwrap(),
+            ..transport
+        };
+        assert!(matches!(
+            PendingClient::fetch(&transport, "https://status.example", || 1000).await,
+            Err(Error::Malformed)
+        ));
     }
 
     #[tokio::test]
