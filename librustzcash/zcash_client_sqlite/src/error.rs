@@ -43,7 +43,7 @@ use {
 #[non_exhaustive]
 pub enum SqliteClientError {
     /// Request enumeration requires an explicit enhancement mode on this handle.
-    #[cfg(feature = "zakura-pir-enhance")]
+    #[cfg(feature = "orchard")]
     EnhancementModeNotConfigured,
 
     /// Decoding of a stored value from its serialized form has failed.
@@ -322,7 +322,7 @@ impl From<GapAddressesError<SqliteClientError>> for SqliteClientError {
 impl fmt::Display for SqliteClientError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self {
-            #[cfg(feature = "zakura-pir-enhance")]
+            #[cfg(feature = "orchard")]
             SqliteClientError::EnhancementModeNotConfigured => write!(
                 f,
                 "Enhancement mode is not configured; call set_enhancement_mode before enumerating requests"

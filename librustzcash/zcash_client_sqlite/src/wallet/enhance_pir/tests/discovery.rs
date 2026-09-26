@@ -1929,77 +1929,6 @@ fn rewind_and_full_data_clear_discovery() {
 }
 
 #[test]
-#[ignore = "run scripts/verify-pir-feature-transition.sh"]
-fn account_deletion_across_pir_feature_builds() {
-    use crate::testing::db::{test_clock, test_rng};
-    let send = shared_and_independent_jobs();
-    let funding_txid: Vec<u8> = send
-        .st
-        .wallet()
-        .conn()
-        .query_row(
-            "SELECT txid FROM transactions WHERE mined_height = ?1",
-            [u32::from(send.funding_height)],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let tx_ref = send.tx_ref();
-    let outgoing = super::outgoing(&send.st, tx_ref, 99, 9);
-    let status = std::process::Command::new(std::env::var("PIR_DISABLED_TEST_BINARY").unwrap())
-        .args([
-            "wallet::maintain_wallet_without_pir",
-            "--exact",
-            "--ignored",
-            "--nocapture",
-        ])
-        .env("PIR_TRANSITION_DB", send.st.wallet().data_file_path())
-        .env(
-            "PIR_TRANSITION_ACCOUNT",
-            send.st
-                .test_account()
-                .unwrap()
-                .id()
-                .expose_uuid()
-                .to_string(),
-        )
-        .status()
-        .unwrap();
-    assert!(status.success());
-    // Inspect before initialization: initialization repair must not mask a deletion bug.
-    let reopened = crate::WalletDb::for_path(
-        send.st.wallet().data_file_path(),
-        *send.st.network(),
-        test_clock(),
-        test_rng(),
-    )
-    .unwrap()
-    .with_enhancement_mode(EnhancementMode::PrivateIronwood);
-    assert!(
-        !reopened
-            .conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue WHERE txid = ?1)",
-                [&funding_txid],
-                |row| row.get::<_, bool>(0)
-            )
-            .unwrap()
-    );
-    assert!(!reopened.transaction_data_requests().unwrap().contains(
-        &TransactionDataRequest::Enhancement(send.block.vtx[0].txid())
-    ));
-    assert_eq!(reopened.discovery_suspensions().unwrap().len(), 1);
-    assert!(!reopened.query_requests().unwrap().contains(&outgoing));
-    assert!(reopened.conn.query_row(
-        "SELECT not_recoverable FROM ironwood_enhance_outgoing_queue WHERE commitment_tree_position = 99",
-        [], |row| row.get::<_, bool>(0)).unwrap());
-    assert_eq!(
-        reopened.discovery_requests().unwrap().len(),
-        1,
-        "other account remains active"
-    );
-}
-
-#[test]
 fn rewind_preserves_discovery_for_existing_spend_links() {
     for change in [false, true] {
         for funding_first in [false, true] {
@@ -2171,60 +2100,6 @@ fn account_deletion_preserves_shared_intent_and_rolls_back_cleanup() {
             .unwrap()
             .contains(&TransactionDataRequest::Enhancement(shared_txid))
     );
-}
-
-#[test]
-#[ignore = "run scripts/verify-pir-feature-transition.sh"]
-fn rewind_across_pir_feature_builds() {
-    use crate::testing::db::{test_clock, test_rng};
-    for change in [false, true] {
-        let mut send = Send::new(change);
-        send.scan_funding();
-        send.scan_send();
-        let txid = send.block.vtx[0].txid();
-        let status = std::process::Command::new(std::env::var("PIR_DISABLED_TEST_BINARY").unwrap())
-            .args([
-                "wallet::maintain_wallet_without_pir",
-                "--exact",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env("PIR_TRANSITION_DB", send.st.wallet().data_file_path())
-            .env(
-                "PIR_TRANSITION_REWIND_HEIGHT",
-                u32::from(send.funding_height - 1).to_string(),
-            )
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let mut reopened = crate::WalletDb::for_path(
-            send.st.wallet().data_file_path(),
-            *send.st.network(),
-            test_clock(),
-            test_rng(),
-        )
-        .unwrap()
-        .with_enhancement_mode(EnhancementMode::PrivateIronwood);
-        assert!(reopened.is_ironwood_enhancement_protected(txid).unwrap());
-        assert!(reopened.private_work().unwrap().is_empty());
-        assert!(
-            !reopened
-                .transaction_data_requests()
-                .unwrap()
-                .contains(&TransactionDataRequest::Enhancement(txid))
-        );
-        reopened.set_enhancement_mode(EnhancementMode::Standard);
-        assert!(
-            reopened
-                .transaction_data_requests()
-                .unwrap()
-                .contains(&TransactionDataRequest::Enhancement(txid))
-        );
-        send.scan_send();
-        send.scan_funding();
-        send.rebuild();
-        assert!(!send.requests().is_empty());
-    }
 }
 
 #[test]

@@ -214,7 +214,7 @@ fn truncate_to_height<P: consensus::Parameters>(
             // Truncation removes checkpoints; it never establishes them, so no anchor retention
             // decision is made through this handle and the interval is immaterial.
             anchor_retention_interval: AnchorRetentionInterval::default(),
-            #[cfg(feature = "zakura-pir-enhance")]
+            #[cfg(feature = "orchard")]
             enhancement_mode: None,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: *gap_limits,

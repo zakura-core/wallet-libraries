@@ -204,7 +204,7 @@ pub struct TestDbFactory {
 
 impl TestDbFactory {
     /// Constructs a factory pinned to a historical wallet schema.
-    #[cfg(all(test, feature = "zakura-pir-enhance"))]
+    #[cfg(all(test, feature = "orchard"))]
     pub(crate) fn at_migrations(migrations: &[Uuid]) -> Self {
         Self {
             target_migrations: Some(migrations.to_vec()),
@@ -247,7 +247,7 @@ impl DataStoreFactory for TestDbFactory {
                 None,
             )
         };
-        #[cfg(feature = "zakura-pir-enhance")]
+        #[cfg(feature = "orchard")]
         db_data.set_enhancement_mode(
             zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
         );

@@ -1,7 +1,7 @@
 //! Ironwood enhancement bookkeeping invoked from upstream wallet operations.
 //!
 //! The Ironwood enhancement queues are created by schema migrations in every build, so the
-//! invariants maintained here hold with or without the `zakura-pir-enhance` feature. Each hook
+//! invariants maintained here hold whenever Orchard storage is enabled. Each hook
 //! runs on the caller's connection, inside the caller's transaction.
 
 use rusqlite::{Connection, named_params};
@@ -161,7 +161,6 @@ pub(crate) fn put_received_note_spend(
     spent_in: TxRef,
     inserted: usize,
 ) -> Result<(), SqliteClientError> {
-    #[cfg(feature = "zakura-pir-enhance")]
     if shielded_pool == ShieldedPool::Ironwood
         && (inserted != 0
             || conn.query_row(
@@ -176,7 +175,5 @@ pub(crate) fn put_received_note_spend(
         // an existing link must not reopen ordinarily completed work.
         super::enhance_pir::discovery::queue(conn, spent_in)?;
     }
-    #[cfg(not(feature = "zakura-pir-enhance"))]
-    let _ = (conn, shielded_pool, spent_in, inserted);
     Ok(())
 }

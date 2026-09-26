@@ -120,8 +120,8 @@ pub fn is_ironwood_pir_candidate(tx: &CompactTx) -> bool {
 
 /// Selects how ordinary transaction enhancement interacts with private Ironwood enhancement.
 ///
-/// Applications that expose a runtime PIR setting should always compile with
-/// `zakura-pir-enhance`, and update this mode when the setting changes.
+/// Applications that expose a runtime PIR setting should update this mode when the setting
+/// changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnhancementMode {
     /// Exposes ordinary transaction-ID enhancement requests, including for Ironwood transactions.
@@ -334,4 +334,5 @@ pub trait EnhancePirWrite: EnhancePirRead {
 }
 
 /// Contracts for storage implementers. Applications should use [`EnhancePirWrite`].
+#[cfg(feature = "orchard")]
 pub mod storage;
