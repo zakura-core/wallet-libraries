@@ -1635,7 +1635,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
         if wallet::chain_tip_height(self.conn.borrow())?.is_none() {
             return Ok(vec![]);
         }
-        wallet::enhance_pir::routed_work(self.conn.borrow(), mode)
+        wallet::enhance_pir::transaction_enhancement_work(self.conn.borrow(), mode)
     }
 
     fn enhance_pir_snapshot_status(

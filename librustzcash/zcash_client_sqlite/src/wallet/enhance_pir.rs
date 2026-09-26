@@ -164,7 +164,7 @@ const OUTGOING_SUSPENDED: u8 = 4;
 /// Builds one statement over the private queues and, optionally, the public enhancement queue.
 /// Private rows require `route = 0`; public rows use [`super::PUBLIC_ENHANCEMENT_ROUTE`], which
 /// excludes `route = 0` when `:protect_ironwood` is set, so each transaction takes one route.
-fn work_sql(private: bool, public: bool) -> String {
+fn transaction_enhancement_work_sql(private: bool, public: bool) -> String {
     let private_rows = format!(
         "SELECT DISTINCT {REDISCOVER} AS kind, height AS ordinal, hash AS identity,
                          NULL AS output_index, NULL AS reason, NULL AS tx_index
@@ -280,7 +280,7 @@ fn read_work(
 /// Mode-independent private queue contents from one statement, for storage tests.
 #[cfg(test)]
 pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
-    let mut stmt = conn.prepare_cached(&work_sql(true, false))?;
+    let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(true, false))?;
     Ok(read_work(&mut stmt, &[])?
         .into_iter()
         .map(|work| match work {
@@ -294,12 +294,12 @@ pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClien
 ///
 /// `Standard` exposes every ordinary enhancement request and no private work. `PrivateIronwood`
 /// exposes private work for protected transactions and ordinary requests for all others.
-pub(crate) fn routed_work(
+pub(crate) fn transaction_enhancement_work(
     conn: &Connection,
     mode: EnhancementMode,
 ) -> Result<Vec<TransactionEnhancementWork>, SqliteClientError> {
     let private = mode == EnhancementMode::PrivateIronwood;
-    let mut stmt = conn.prepare_cached(&work_sql(private, true))?;
+    let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(private, true))?;
     read_work(
         &mut stmt,
         named_params![
