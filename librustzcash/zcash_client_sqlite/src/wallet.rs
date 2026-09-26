@@ -167,6 +167,10 @@ use {
 
 #[cfg(feature = "orchard")]
 use zcash_client_backend::data_api::{IRONWOOD_SHARD_HEIGHT, ORCHARD_SHARD_HEIGHT};
+#[cfg(not(feature = "orchard"))]
+use zcash_client_backend::data_api::{
+    PublicTransactionEnhancementRequest, enhance_pir::TransactionEnhancementWork,
+};
 
 use FindAccountForAddressError as E;
 #[cfg(feature = "zcashd-compat")]
@@ -5243,14 +5247,6 @@ impl TxQueryType {
             TxQueryType::Enhancement => 1,
         }
     }
-
-    pub(crate) fn from_code(code: i64) -> Option<Self> {
-        match code {
-            0 => Some(TxQueryType::Status),
-            1 => Some(TxQueryType::Enhancement),
-            _ => None,
-        }
-    }
 }
 
 #[cfg(feature = "transparent-inputs")]
@@ -5326,77 +5322,74 @@ pub(crate) fn queue_tx_status(
     Ok(())
 }
 
-/// Selects enhancement rows from `tx_retrieval_queue q` (joined with `transactions t`) that may use
-/// ordinary public transport. When `:protect_ironwood` is set, privately protected transactions
-/// (`ironwood_enhance_routing.route = 0`) are excluded. Shared with private routing so that the two
-/// transports partition payload work on the same predicate.
-pub(crate) const PUBLIC_ENHANCEMENT_ROUTE: &str = "(
-    NOT :protect_ironwood
-    OR NOT EXISTS (
-        SELECT 1
-        FROM ironwood_enhance_routing p
-        WHERE p.transaction_id = t.id_tx AND p.route = 0
-    )
-)";
-
-/// Returns the vector of [`TransactionDataRequest`]s that represents the information needed by the
-/// wallet backend in order to be able to present a complete view of wallet history and memo data.
+/// Returns the vector of [`TransactionDataRequest`]s that represents the status observations needed
+/// by the wallet backend in order to be able to present a complete view of wallet history.
+///
+/// Payload retrieval is returned only by [`public_enhancement_work`] or, with Orchard support,
+/// `enhance_pir::transaction_enhancement_work`.
 pub(crate) fn transaction_data_requests(
     conn: &rusqlite::Connection,
-    protect_ironwood: bool,
 ) -> Result<Vec<TransactionDataRequest>, SqliteClientError> {
-    let mut tx_retrieval_stmt = conn.prepare_cached(&format!(
-        "SELECT q.txid, q.query_type
+    let mut tx_retrieval_stmt = conn.prepare_cached(
+        "SELECT q.txid
          FROM tx_retrieval_queue q
          LEFT JOIN transactions t ON t.txid = q.txid
-         WHERE (
-            q.query_type = :enhancement_type
-            AND {PUBLIC_ENHANCEMENT_ROUTE}
-         )
-         OR (
-            q.query_type = :status_type
-            AND t.mined_height IS NULL
-            AND (
-                t.confirmed_unmined_at_height IS NULL
-                OR t.expiry_height = 0
-                OR (
-                    t.expiry_height > 0
-                    AND t.confirmed_unmined_at_height < t.expiry_height
-                )
-                OR (
-                    t.expiry_height IS NULL
-                    AND t.confirmed_unmined_at_height
-                        < t.min_observed_height + :certainty_depth
-                )
+         WHERE q.query_type = :status_type
+         AND t.mined_height IS NULL
+         AND (
+            t.confirmed_unmined_at_height IS NULL
+            OR t.expiry_height = 0
+            OR (
+                t.expiry_height > 0
+                AND t.confirmed_unmined_at_height < t.expiry_height
             )
-         )"
-    ))?;
+            OR (
+                t.expiry_height IS NULL
+                AND t.confirmed_unmined_at_height
+                    < t.min_observed_height + :certainty_depth
+            )
+         )",
+    )?;
 
     let result = tx_retrieval_stmt
         .query_and_then(
             named_params![
                 ":status_type": TxQueryType::Status.code(),
-                ":enhancement_type": TxQueryType::Enhancement.code(),
-                ":protect_ironwood": protect_ironwood,
                 ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA
             ],
             |row| {
-                let txid = row.get(0).map(TxId::from_bytes)?;
-                let query_type = row.get(1).map(TxQueryType::from_code)?.ok_or_else(|| {
-                    SqliteClientError::CorruptedData(
-                        "Unrecognized transaction data request type.".to_owned(),
-                    )
-                })?;
-
-                Ok::<TransactionDataRequest, SqliteClientError>(match query_type {
-                    TxQueryType::Status => TransactionDataRequest::GetStatus(txid),
-                    TxQueryType::Enhancement => TransactionDataRequest::Enhancement(txid),
-                })
+                row.get(0)
+                    .map(|txid| TransactionDataRequest::GetStatus(TxId::from_bytes(txid)))
             },
         )?
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(result)
+}
+
+/// Returns every pending payload-retrieval request as public work. Without Orchard support no
+/// transaction can be privately protected, so there is no routing decision to make.
+#[cfg(not(feature = "orchard"))]
+pub(crate) fn public_enhancement_work(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<TransactionEnhancementWork>, SqliteClientError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT txid FROM tx_retrieval_queue
+         WHERE query_type = :enhancement_type
+         ORDER BY txid",
+    )?;
+    stmt.query_and_then(
+        named_params![":enhancement_type": TxQueryType::Enhancement.code()],
+        |row| {
+            row.get(0).map(|txid| {
+                TransactionEnhancementWork::Public(PublicTransactionEnhancementRequest::new(
+                    TxId::from_bytes(txid),
+                ))
+            })
+        },
+    )?
+    .collect::<Result<_, _>>()
+    .map_err(Into::into)
 }
 
 pub(crate) fn delete_retrieval_queue_entries(
@@ -6005,7 +5998,9 @@ mod tests {
     use secrecy::{ExposeSecret, SecretVec};
     use uuid::Uuid;
     #[cfg(feature = "orchard")]
+    #[cfg(feature = "orchard")]
     use zcash_client_backend::data_api::enhance_pir::EnhancementMode;
+    use zcash_client_backend::data_api::enhance_pir::{EnhancePirRead, TransactionEnhancementWork};
     use zcash_client_backend::data_api::{
         Account as _, AccountSource, TransactionDataRequest, TransactionStatus, WalletRead,
         WalletWrite,
@@ -6311,7 +6306,12 @@ mod tests {
 
         let requests = st.wallet().transaction_data_requests().unwrap();
         assert!(requests.contains(&TransactionDataRequest::GetStatus(unexpired_txid)));
-        assert!(requests.contains(&TransactionDataRequest::Enhancement(unexpired_txid)));
+        assert!(
+            st.wallet()
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&crate::testing::public_work(unexpired_txid))
+        );
     }
 
     #[cfg(not(feature = "orchard"))]
@@ -6348,8 +6348,8 @@ mod tests {
                 [txid.as_ref()], |row| row.get(0).map(TxRef))?;
             queue_tx_retrieval(db.conn.0, std::iter::once(txid), None)?;
             db.queue_ironwood_enhancement(tx_ref, &scanned)?;
-            assert_eq!(super::transaction_data_requests(db.conn.0, false)?,
-                vec![TransactionDataRequest::Enhancement(txid)]);
+            assert_eq!(super::public_enhancement_work(db.conn.0)?,
+                vec![crate::testing::public_work(txid)]);
             assert!(!db.conn.0.query_row(
                 "SELECT EXISTS(SELECT 1 FROM ironwood_enhance_routing)",
                 [], |row| row.get::<_, bool>(0))?);
@@ -6468,89 +6468,63 @@ mod tests {
             )
             .unwrap();
 
-        let standard_requests = st.wallet().transaction_data_requests().unwrap();
+        let public = |st: &TestState<_, crate::testing::db::TestDb, _>| -> Vec<TxId> {
+            st.wallet()
+                .transaction_enhancement_work()
+                .unwrap()
+                .into_iter()
+                .filter_map(|work| match work {
+                    TransactionEnhancementWork::Public(request) => Some(request.txid()),
+                    TransactionEnhancementWork::Private(_) => None,
+                })
+                .collect()
+        };
+        let status_requests = st.wallet().transaction_data_requests().unwrap();
         assert_eq!(
             st.wallet().transaction_status_requests().unwrap(),
-            standard_requests
+            status_requests
                 .iter()
                 .cloned()
                 .filter_map(TransactionDataRequest::into_status_request)
                 .collect::<Vec<_>>()
         );
-        assert_eq!(
-            st.wallet().public_transaction_enhancement_requests().unwrap(),
-            standard_requests
-                .iter()
-                .cloned()
-                .filter_map(TransactionDataRequest::into_public_enhancement_request)
-                .collect::<Vec<_>>()
-        );
-        assert!(standard_requests.contains(&TransactionDataRequest::Enhancement(protected_txid)));
-        assert!(standard_requests.contains(&TransactionDataRequest::GetStatus(protected_txid)));
-        assert!(standard_requests.contains(&TransactionDataRequest::Enhancement(unprotected_txid)));
-        assert!(standard_requests.contains(&TransactionDataRequest::Enhancement(unknown_txid)));
-        assert!(standard_requests.contains(&TransactionDataRequest::Enhancement(mixed_pool_txid)));
+        assert!(status_requests.contains(&TransactionDataRequest::GetStatus(protected_txid)));
+        let standard_public = public(&st);
+        for txid in [
+            protected_txid,
+            unprotected_txid,
+            unknown_txid,
+            mixed_pool_txid,
+        ] {
+            assert!(standard_public.contains(&txid));
+        }
 
         #[cfg(feature = "orchard")]
         {
             st.wallet_mut()
                 .db_mut()
                 .set_enhancement_mode(EnhancementMode::PrivateIronwood);
-            let private_requests = st.wallet().transaction_data_requests().unwrap();
-            assert_eq!(
-                st.wallet().transaction_status_requests().unwrap(),
-                private_requests
+            assert!(
+                st.wallet()
+                    .transaction_status_requests()
+                    .unwrap()
                     .iter()
-                    .cloned()
-                    .filter_map(TransactionDataRequest::into_status_request)
-                    .collect::<Vec<_>>()
+                    .any(|request| request.txid() == protected_txid),
+                "private enhancement routing does not hide status work"
             );
-            let private_public_enhancements = st
-                .wallet()
-                .public_transaction_enhancement_requests()
-                .unwrap();
-            assert_eq!(
-                private_public_enhancements,
-                private_requests
-                    .iter()
-                    .cloned()
-                    .filter_map(TransactionDataRequest::into_public_enhancement_request)
-                    .collect::<Vec<_>>()
-            );
-            assert!(!private_public_enhancements
-                .iter()
-                .any(|request| request.txid() == protected_txid));
-            assert!(private_public_enhancements
-                .iter()
-                .any(|request| request.txid() == mixed_pool_txid));
-            assert!(st
-                .wallet()
-                .transaction_status_requests()
-                .unwrap()
-                .iter()
-                .any(|request| request.txid() == protected_txid));
+            let private_public = public(&st);
+            assert!(!private_public.contains(&protected_txid));
+            assert!(private_public.contains(&unprotected_txid));
+            assert!(private_public.contains(&unknown_txid));
             assert!(
-                !private_requests.contains(&TransactionDataRequest::Enhancement(protected_txid))
-            );
-            assert!(private_requests.contains(&TransactionDataRequest::GetStatus(protected_txid)));
-            assert!(
-                private_requests.contains(&TransactionDataRequest::Enhancement(unprotected_txid))
-            );
-            assert!(private_requests.contains(&TransactionDataRequest::Enhancement(unknown_txid)));
-            assert!(
-                private_requests.contains(&TransactionDataRequest::Enhancement(mixed_pool_txid)),
+                private_public.contains(&mixed_pool_txid),
                 "mixed-pool transactions stay on standard enhancement"
             );
 
             st.wallet_mut()
                 .db_mut()
                 .set_enhancement_mode(EnhancementMode::Standard);
-            assert!(
-                st.wallet()
-                    .transaction_data_requests()
-                    .unwrap()
-                    .contains(&TransactionDataRequest::Enhancement(protected_txid))
-            );
+            assert!(public(&st).contains(&protected_txid));
         }
     }
 

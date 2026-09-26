@@ -644,13 +644,13 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
         request: UnifiedAddressRequest,
     ) -> Result<(), Self::Error>;
 
-    /// Adds a [`TransactionDataRequest::Enhancement`] request for the enhancement of the given
-    /// transaction to the transaction data request queue. The `dependent_tx_ref` parameter
+    /// Queues payload retrieval ([`TransactionEnhancementWork::Public`] or private PIR work) for
+    /// the given transactions. The `dependent_tx_ref` parameter
     /// specifies the transaction that caused this request to be generated, likely as part of the
     /// process of traversing the transparent transaction graph by inspecting the inputs of a
     /// transaction with outputs that were received by the wallet.
     ///
-    /// [`TransactionDataRequest::Enhancement`]: super::TransactionDataRequest
+    /// [`TransactionEnhancementWork::Public`]: super::enhance_pir::TransactionEnhancementWork::Public
     fn queue_tx_retrieval(
         &mut self,
         txids: impl Iterator<Item = TxId>,
@@ -685,11 +685,10 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
         output_index: u32,
     ) -> Result<(), Self::Error>;
 
-    /// Adds [`TransactionDataRequest::Enhancement`] requests for transactions that generated the
-    /// transparent inputs to the provided [`DecryptedTransaction`] to the transaction data request
-    /// queue.
+    /// Queues payload retrieval ([`TransactionEnhancementWork::Public`]) for transactions that
+    /// generated the transparent inputs to the provided [`DecryptedTransaction`].
     ///
-    /// [`TransactionDataRequest::Enhancement`]: super::TransactionDataRequest
+    /// [`TransactionEnhancementWork::Public`]: super::enhance_pir::TransactionEnhancementWork::Public
     /// [`DecryptedTransaction`]: super::DecryptedTransaction
     #[cfg(feature = "transparent-inputs")]
     fn queue_transparent_input_retrieval(
@@ -698,13 +697,11 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
         d_tx: &super::DecryptedTransaction<Transaction, Self::AccountId>,
     ) -> Result<(), Self::Error>;
 
-    /// Deletes the [`TransactionDataRequest::Enhancement`] request for the given transaction ID
-    /// from the transaction data request queue, without removing any durable status-observation
+    /// Deletes the pending payload-retrieval request for the given transaction ID from the
+    /// retrieval queue, without removing any durable status-observation
     /// intent for the transaction. Call only after successful payload ingestion (including an
     /// irrelevant transaction); invoke it within the same atomic write as payload processing.
     /// This is not a status-update or network-error handler.
-    ///
-    /// [`TransactionDataRequest::Enhancement`]: super::TransactionDataRequest
     fn delete_retrieval_queue_entries(&mut self, txid: TxId) -> Result<(), Self::Error>;
 
     /// Updates the state of the wallet backend to indicate that the given range of blocks has been

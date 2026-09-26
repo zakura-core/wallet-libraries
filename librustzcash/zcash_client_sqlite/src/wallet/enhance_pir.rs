@@ -7,7 +7,7 @@ use orchard::{
 use rusqlite::{Connection, OptionalExtension, Transaction, named_params};
 use uuid::Uuid;
 use zcash_client_backend::data_api::{
-    Account as _, TransactionDataRequest,
+    Account as _, PublicTransactionEnhancementRequest,
     enhance_pir::{
         EnhancePirRequest, EnhancePirStoreResult, EnhancePirSuspension, EnhancePirWork,
         EnhanceRecord, EnhancementMode, IronwoodEnhanceDiscoveryFailure,
@@ -161,8 +161,21 @@ const PUBLIC: u8 = 2;
 const DISCOVERY_SUSPENDED: u8 = 3;
 const OUTGOING_SUSPENDED: u8 = 4;
 
+/// Selects enhancement rows from `tx_retrieval_queue q` (joined with `transactions t`) that may use
+/// ordinary public transport. When `:protect_ironwood` is set, privately protected transactions
+/// (`ironwood_enhance_routing.route = 0`) are excluded. Private rows use the complementary
+/// `route = 0` predicate, so the two transports partition payload work.
+const PUBLIC_ENHANCEMENT_ROUTE: &str = "(
+    NOT :protect_ironwood
+    OR NOT EXISTS (
+        SELECT 1
+        FROM ironwood_enhance_routing p
+        WHERE p.transaction_id = t.id_tx AND p.route = 0
+    )
+)";
+
 /// Builds one statement over the private queues and, optionally, the public enhancement queue.
-/// Private rows require `route = 0`; public rows use [`super::PUBLIC_ENHANCEMENT_ROUTE`], which
+/// Private rows require `route = 0`; public rows use [`PUBLIC_ENHANCEMENT_ROUTE`], which
 /// excludes `route = 0` when `:protect_ironwood` is set, so each transaction takes one route.
 fn transaction_enhancement_work_sql(private: bool, public: bool) -> String {
     let private_rows = format!(
@@ -184,7 +197,7 @@ fn transaction_enhancement_work_sql(private: bool, public: bool) -> String {
          FROM tx_retrieval_queue q
          LEFT JOIN transactions t ON t.txid = q.txid
          WHERE q.query_type = :enhancement_type AND {}",
-        super::PUBLIC_ENHANCEMENT_ROUTE
+        PUBLIC_ENHANCEMENT_ROUTE
     );
     let rows = match (private, public) {
         (true, true) => format!("{private_rows} UNION ALL {public_rows}"),
@@ -252,11 +265,9 @@ fn read_work(
             QUERY => TransactionEnhancementWork::Private(EnhancePirWork::Query(private_request(
                 row.get(1)?,
             )?)),
-            PUBLIC => TransactionEnhancementWork::Public(
-                TransactionDataRequest::Enhancement(TxId::from_bytes(identity))
-                    .into_public_enhancement_request()
-                    .expect("enhancement requests convert to public requests"),
-            ),
+            PUBLIC => TransactionEnhancementWork::Public(PublicTransactionEnhancementRequest::new(
+                TxId::from_bytes(identity),
+            )),
             DISCOVERY_SUSPENDED => TransactionEnhancementWork::Private(EnhancePirWork::Suspended(
                 EnhancePirSuspension::Discovery(IronwoodEnhanceDiscoveryFailure {
                     txid: TxId::from_bytes(identity),

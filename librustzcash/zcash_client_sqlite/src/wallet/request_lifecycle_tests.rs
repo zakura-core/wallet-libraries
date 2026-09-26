@@ -3,6 +3,7 @@
 use rusqlite::params;
 use zcash_client_backend::data_api::{
     TransactionDataRequest, TransactionStatus, WalletRead, WalletWrite,
+    enhance_pir::EnhancePirRead,
     testing::{TestBuilder, TestState},
     wallet::decrypt_and_store_transaction,
 };
@@ -67,53 +68,52 @@ fn queued(st: &State, txid: TxId, query_type: i64) -> bool {
         .unwrap()
 }
 
+/// Whether `txid` has payload work routed to public transport.
+fn payload_pending(st: &State, txid: TxId) -> bool {
+    st.wallet()
+        .transaction_enhancement_work()
+        .unwrap()
+        .contains(&crate::testing::public_work(txid))
+}
+
 #[test]
 fn typed_requests_follow_independent_status_and_payload_lifecycles() {
     let (mut st, height) = fixture();
     let txid = TxId::from_bytes([71; 32]);
     queue_both(&st, txid, height, None);
 
-    let requests = st.wallet().transaction_data_requests().unwrap();
-    assert!(requests.contains(&TransactionDataRequest::GetStatus(txid)));
-    assert!(requests.contains(&TransactionDataRequest::Enhancement(txid)));
-    assert!(st
-        .wallet()
-        .transaction_status_requests()
-        .unwrap()
-        .iter()
-        .any(|request| request.txid() == txid));
-    assert!(st
-        .wallet()
-        .public_transaction_enhancement_requests()
-        .unwrap()
-        .iter()
-        .any(|request| request.txid() == txid));
+    assert!(
+        st.wallet()
+            .transaction_data_requests()
+            .unwrap()
+            .contains(&TransactionDataRequest::GetStatus(txid))
+    );
+    assert!(payload_pending(&st, txid));
+    assert!(
+        st.wallet()
+            .transaction_status_requests()
+            .unwrap()
+            .iter()
+            .any(|request| request.txid() == txid)
+    );
+    assert!(payload_pending(&st, txid));
 
     st.wallet_mut()
         .set_transaction_status(txid, TransactionStatus::Mined(height))
         .unwrap();
-    assert!(!st
-        .wallet()
-        .transaction_status_requests()
-        .unwrap()
-        .iter()
-        .any(|request| request.txid() == txid));
-    assert!(st
-        .wallet()
-        .public_transaction_enhancement_requests()
-        .unwrap()
-        .iter()
-        .any(|request| request.txid() == txid));
+    assert!(
+        !st.wallet()
+            .transaction_status_requests()
+            .unwrap()
+            .iter()
+            .any(|request| request.txid() == txid)
+    );
+    assert!(payload_pending(&st, txid));
 
     st.wallet_mut()
         .notify_transaction_enhancement_not_found(txid)
         .unwrap();
-    assert!(!st
-        .wallet()
-        .public_transaction_enhancement_requests()
-        .unwrap()
-        .iter()
-        .any(|request| request.txid() == txid));
+    assert!(!payload_pending(&st, txid));
 }
 
 #[test]
@@ -319,9 +319,13 @@ fn rewind_reactivates_mined_status_without_completing_enhancement() {
         .db_mut()
         .truncate_to_height(prior_height)
         .unwrap();
-    let requests = st.wallet().transaction_data_requests().unwrap();
-    assert!(requests.contains(&TransactionDataRequest::GetStatus(txid)));
-    assert!(requests.contains(&TransactionDataRequest::Enhancement(txid)));
+    assert!(
+        st.wallet()
+            .transaction_data_requests()
+            .unwrap()
+            .contains(&TransactionDataRequest::GetStatus(txid))
+    );
+    assert!(payload_pending(&st, txid));
 }
 
 /// The routed payload snapshot never carries status work, and status responses and rewinds
@@ -330,7 +334,7 @@ fn rewind_reactivates_mined_status_without_completing_enhancement() {
 #[test]
 fn routed_enhancement_work_is_independent_of_status_lifecycle() {
     use zcash_client_backend::data_api::enhance_pir::{
-        EnhancePirRead, EnhancementMode, TransactionEnhancementWork,
+        EnhancementMode, TransactionEnhancementWork,
     };
 
     let (mut st, prior_height) = fixture();

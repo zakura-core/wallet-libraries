@@ -88,6 +88,7 @@ use super::{
     WalletSummary, WalletTest, WalletWrite, Zip32Derivation,
     anchor_retention::AnchorRetentionInterval,
     chain::{BlockSource, ChainState, CommitmentTreeRoot, ScanSummary, scan_cached_blocks},
+    enhance_pir::EnhancePirRead,
     error::Error,
     scanning::{ScanPriority, ScanRange},
     wallet::{
@@ -1873,7 +1874,8 @@ pub trait DataStoreFactory {
         + WalletRead<AccountId = Self::AccountId, Account = Self::Account, Error = Self::DsError>
         + WalletTest
         + WalletWrite
-        + WalletCommitmentTrees;
+        + WalletCommitmentTrees
+        + EnhancePirRead;
 
     /// Constructs a new data store.
     fn new_data_store(

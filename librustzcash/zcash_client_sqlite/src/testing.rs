@@ -221,3 +221,16 @@ impl TestCache for FsBlockCache {
         self.db_meta.truncate_to_height(height).unwrap()
     }
 }
+
+/// The routed public payload work for `txid`, for comparison against
+/// [`EnhancePirRead::transaction_enhancement_work`].
+///
+/// [`EnhancePirRead::transaction_enhancement_work`]: zcash_client_backend::data_api::enhance_pir::EnhancePirRead::transaction_enhancement_work
+#[cfg(test)]
+pub(crate) fn public_work(
+    txid: TxId,
+) -> zcash_client_backend::data_api::enhance_pir::TransactionEnhancementWork {
+    zcash_client_backend::data_api::enhance_pir::TransactionEnhancementWork::Public(
+        zcash_client_backend::data_api::PublicTransactionEnhancementRequest::new(txid),
+    )
+}

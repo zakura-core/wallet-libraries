@@ -22,6 +22,10 @@ use zcash_client_backend::{
         TargetValue,
         anchor_retention::AnchorRetentionInterval,
         chain::{ChainState, CommitmentTreeRoot},
+        enhance_pir::{
+            EnhancePirRead, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus,
+            TransactionEnhancementWork, ambassador_impl_EnhancePirRead,
+        },
         error::{LockError, RewindError},
         scanning::{ScanPriority, ScanRange},
         testing::{DataStoreFactory, Reset, TestRng, TestState},
@@ -79,6 +83,7 @@ pub(crate) fn test_rng() -> TestRng {
 #[delegate(OutputLockStore, target = "wallet_db")]
 #[delegate(WalletWrite, target = "wallet_db")]
 #[delegate(WalletCommitmentTrees, target = "wallet_db")]
+#[delegate(EnhancePirRead, target = "wallet_db")]
 pub struct TestDb {
     wallet_db: WalletDb<Connection, LocalNetwork, FixedClock, TestRng>,
     data_file: Option<NamedTempFile>,

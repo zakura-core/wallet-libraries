@@ -3865,12 +3865,7 @@ where
 
     // Verify that a transaction enhancement request for the transaction containing the spent
     // outpoint does not yet exist.
-    let requests = st.wallet().transaction_data_requests().unwrap();
-    assert!(
-        !requests
-            .iter()
-            .any(|req| req == &TransactionDataRequest::Enhancement(*spent_outpoint.txid()))
-    );
+    assert!(!has_public_enhancement(st.wallet(), *spent_outpoint.txid()));
 
     // Use `decrypt_and_store_transaction` for the side effect of creating enhancement requests for
     // the transparent inputs of the transaction.
@@ -3883,12 +3878,7 @@ where
     decrypt_and_store_transaction(&params, st.wallet_mut(), &tx, Some(h)).unwrap();
 
     // Verify that a transaction enhancement request for the received transaction was created
-    let requests = st.wallet().transaction_data_requests().unwrap();
-    assert!(
-        requests
-            .iter()
-            .any(|req| req == &TransactionDataRequest::Enhancement(*spent_outpoint.txid()))
-    );
+    assert!(has_public_enhancement(st.wallet(), *spent_outpoint.txid()));
 
     // Now advance the chain by 40 blocks; even though a record for the transaction that created
     // `spent_outpoint` exists in the wallet database, the transaction can't be enhanced because
@@ -3913,23 +3903,32 @@ where
             data_api::TransactionStatus::TxidNotRecognized,
         )
         .unwrap();
-    assert!(
-        st.wallet()
-            .transaction_data_requests()
-            .unwrap()
-            .contains(&TransactionDataRequest::Enhancement(*spent_outpoint.txid()))
-    );
+    assert!(has_public_enhancement(st.wallet(), *spent_outpoint.txid()));
     st.wallet_mut()
         .notify_transaction_enhancement_not_found(*spent_outpoint.txid())
         .unwrap();
 
     // Verify that the transaction enhancement request for the invalid txid has been deleted.
-    let requests = st.wallet().transaction_data_requests().unwrap();
-    assert!(
-        !requests
-            .iter()
-            .any(|req| req == &TransactionDataRequest::Enhancement(*spent_outpoint.txid()))
-    );
+    assert!(!has_public_enhancement(st.wallet(), *spent_outpoint.txid()));
+}
+
+/// Returns whether payload retrieval for `txid` is pending on public transport.
+#[cfg(feature = "transparent-inputs")]
+fn has_public_enhancement<D: data_api::enhance_pir::EnhancePirRead>(
+    wallet: &D,
+    txid: zcash_primitives::transaction::TxId,
+) -> bool
+where
+    D::Error: core::fmt::Debug,
+{
+    wallet
+        .transaction_enhancement_work()
+        .unwrap()
+        .into_iter()
+        .any(|work| {
+            matches!(work, data_api::enhance_pir::TransactionEnhancementWork::Public(r)
+                if r.txid() == txid)
+        })
 }
 
 // FIXME: This requires fixes to the test framework.

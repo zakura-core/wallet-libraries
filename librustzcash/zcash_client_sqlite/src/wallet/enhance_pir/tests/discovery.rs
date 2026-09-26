@@ -684,13 +684,19 @@ fn deleting_a_funder_does_not_block_another_transaction_in_the_block() {
     .unwrap()
     .with_enhancement_mode(zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard);
     assert_eq!(reopened.discovery_suspensions().unwrap(), suspended);
-    assert!(reopened.transaction_data_requests().unwrap().contains(
-        &TransactionDataRequest::Enhancement(incoming.request_id().txid())
-    ));
+    assert!(
+        reopened
+            .transaction_enhancement_work()
+            .unwrap()
+            .contains(&crate::testing::public_work(incoming.request_id().txid()))
+    );
     reopened.set_enhancement_mode(EnhancementMode::PrivateIronwood);
-    assert!(!reopened.transaction_data_requests().unwrap().contains(
-        &TransactionDataRequest::Enhancement(incoming.request_id().txid())
-    ));
+    assert!(
+        !reopened
+            .transaction_enhancement_work()
+            .unwrap()
+            .contains(&crate::testing::public_work(incoming.request_id().txid()))
+    );
 }
 
 #[test]
@@ -1266,9 +1272,18 @@ fn deleting_an_exclusively_owned_transaction_cascades_its_discovery_job() {
         )
         .unwrap()
         .with_enhancement_mode(mode);
-        let requests = reopened.transaction_data_requests().unwrap();
-        assert!(!requests.contains(&TransactionDataRequest::Enhancement(txid)));
-        assert!(!requests.contains(&TransactionDataRequest::GetStatus(txid)));
+        assert!(
+            !reopened
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&crate::testing::public_work(txid))
+        );
+        assert!(
+            !reopened
+                .transaction_data_requests()
+                .unwrap()
+                .contains(&TransactionDataRequest::GetStatus(txid))
+        );
     }
 }
 
@@ -1629,13 +1644,19 @@ fn retro_link_reopens_retired_enhancement_and_recovers_recipient_privately() {
             reopened.discovery_requests().unwrap(),
             vec![send.discovery()]
         );
-        assert!(reopened.transaction_data_requests().unwrap().contains(
-            &TransactionDataRequest::Enhancement(change.request_id().txid())
-        ));
+        assert!(
+            reopened
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&crate::testing::public_work(change.request_id().txid()))
+        );
         reopened.set_enhancement_mode(EnhancementMode::PrivateIronwood);
-        assert!(!reopened.transaction_data_requests().unwrap().contains(
-            &TransactionDataRequest::Enhancement(change.request_id().txid())
-        ));
+        assert!(
+            !reopened
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&crate::testing::public_work(change.request_id().txid()))
+        );
 
         send.rebuild();
         let outgoing = send.requests()[0];
@@ -1958,9 +1979,9 @@ fn rewind_preserves_discovery_for_existing_spend_links() {
                     .st
                     .wallet()
                     .db()
-                    .transaction_data_requests()
+                    .transaction_enhancement_work()
                     .unwrap()
-                    .contains(&TransactionDataRequest::Enhancement(txid))
+                    .contains(&crate::testing::public_work(txid))
             );
             assert!(send.st.wallet().conn().query_row(
                 "SELECT EXISTS(SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = ?1)",
@@ -2084,9 +2105,9 @@ fn account_deletion_preserves_shared_intent_and_rolls_back_cleanup() {
             .st
             .wallet()
             .db()
-            .transaction_data_requests()
+            .transaction_enhancement_work()
             .unwrap()
-            .contains(&TransactionDataRequest::Enhancement(shared_txid))
+            .contains(&crate::testing::public_work(shared_txid))
     );
     send.st
         .wallet_mut()
@@ -2096,9 +2117,9 @@ fn account_deletion_preserves_shared_intent_and_rolls_back_cleanup() {
         send.st
             .wallet()
             .db()
-            .transaction_data_requests()
+            .transaction_enhancement_work()
             .unwrap()
-            .contains(&TransactionDataRequest::Enhancement(shared_txid))
+            .contains(&crate::testing::public_work(shared_txid))
     );
 }
 
@@ -2181,9 +2202,9 @@ fn rewind_failure_rolls_back_discovery_and_position_cleanup() {
             .st
             .wallet()
             .db()
-            .transaction_data_requests()
+            .transaction_enhancement_work()
             .unwrap()
-            .contains(&TransactionDataRequest::Enhancement(txid))
+            .contains(&crate::testing::public_work(txid))
     );
 }
 

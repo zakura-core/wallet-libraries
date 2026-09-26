@@ -1384,8 +1384,14 @@ pub struct TransactionsInvolvingAddress {
     output_status_filter: OutputStatusFilter,
 }
 
-/// A request for transaction data enhancement, spentness check, or discovery
+/// A request for a transaction status observation, spentness check, or discovery
 /// of spends from a given transparent address within a specific block range.
+///
+/// Payload retrieval (download of complete raw transaction data) is not a
+/// transaction-data request; it is returned only by
+/// [`EnhancePirRead::transaction_enhancement_work`].
+///
+/// [`EnhancePirRead::transaction_enhancement_work`]: enhance_pir::EnhancePirRead::transaction_enhancement_work
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TransactionDataRequest {
     /// Information about the chain's view of a transaction is requested.
@@ -1396,26 +1402,11 @@ pub enum TransactionDataRequest {
     /// using a status-only RPC, or interpreting a payload response when no status-only API
     /// is available. It should then call
     /// [`WalletWrite::set_transaction_status`] to provide the resulting transaction status
-    /// information to the wallet backend. This obligation is independent of
-    /// [`TransactionDataRequest::Enhancement`]: observing status does not satisfy payload
+    /// information to the wallet backend. This obligation is independent of payload retrieval
+    /// ([`PublicTransactionEnhancementRequest`]): observing status does not satisfy payload
     /// retrieval, and retrieving a payload does not discard durable status-observation intent.
     /// A mined observation may make status work dormant; a rewind can reactivate it.
     GetStatus(TxId),
-    /// Transaction enhancement (download of complete raw transaction data) is requested.
-    ///
-    /// The caller evaluating this request on behalf of the wallet backend should respond to this
-    /// request by providing complete data for the specified transaction to
-    /// [`wallet::decrypt_and_store_transaction`]; if using `lightwalletd` for access to chain
-    /// state, this may be obtained via the `GetTransaction` RPC method. If an authorized payload
-    /// lookup explicitly reports that the transaction was not found, call
-    /// [`WalletWrite::notify_transaction_enhancement_not_found`]. Transport failures,
-    /// cancellation, invalid responses, and missing PIR coverage leave this obligation pending.
-    ///
-    /// Enhancement and [`TransactionDataRequest::GetStatus`] are independent obligations.
-    /// Successful payload ingestion completes enhancement, including when the transaction is
-    /// found to be irrelevant to the wallet. A mined height supplied with the payload may also
-    /// update status, but payload completion must not discard durable status-observation intent.
-    Enhancement(TxId),
     /// Information about transactions that receive or spend funds belonging to the specified
     /// transparent address is requested.
     ///
@@ -1477,16 +1468,35 @@ impl TransactionStatusRequest {
     }
 }
 
-/// Pending ordinary payload enhancement eligible under the configured enhancement routing.
+/// Pending ordinary payload enhancement (download of complete raw transaction data), routed to
+/// public transport by [`EnhancePirRead::transaction_enhancement_work`].
 ///
-/// This includes transaction-ID enhancement exposed by the configured mode. Callers must still
-/// choose an authorized payload transport before disclosing the transaction ID. Private PIR work
-/// and public work are routed together by `EnhancePirRead::transaction_enhancement_work` when that
-/// feature is enabled.
+/// The caller evaluating this request on behalf of the wallet backend should respond to this
+/// request by providing complete data for the specified transaction to
+/// [`wallet::decrypt_and_store_transaction`]; if using `lightwalletd` for access to chain
+/// state, this may be obtained via the `GetTransaction` RPC method. If an authorized payload
+/// lookup explicitly reports that the transaction was not found, call
+/// [`WalletWrite::notify_transaction_enhancement_not_found`]. Transport failures,
+/// cancellation, invalid responses, and missing PIR coverage leave this obligation pending.
+///
+/// Payload retrieval and [`TransactionDataRequest::GetStatus`] are independent obligations.
+/// Successful payload ingestion completes enhancement, including when the transaction is
+/// found to be irrelevant to the wallet. A mined height supplied with the payload may also
+/// update status, but payload completion must not discard durable status-observation intent.
+///
+/// Routing describes wallet policy, not blanket consent to disclose the transaction ID: callers
+/// must still choose an authorized payload transport before issuing the request.
+///
+/// [`EnhancePirRead::transaction_enhancement_work`]: enhance_pir::EnhancePirRead::transaction_enhancement_work
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PublicTransactionEnhancementRequest(TxId);
 
 impl PublicTransactionEnhancementRequest {
+    /// Constructs a public payload request for the given transaction.
+    pub fn new(txid: TxId) -> Self {
+        Self(txid)
+    }
+
     /// Returns the transaction whose full payload the wallet needs to retrieve.
     pub fn txid(self) -> TxId {
         self.0
@@ -1494,21 +1504,11 @@ impl PublicTransactionEnhancementRequest {
 }
 
 impl TransactionDataRequest {
-    /// Converts a status request from a combined transaction-data request snapshot.
+    /// Converts a status request from a transaction-data request snapshot.
     pub fn into_status_request(self) -> Option<TransactionStatusRequest> {
+        #[allow(unreachable_patterns)]
         match self {
             Self::GetStatus(txid) => Some(TransactionStatusRequest(txid)),
-            _ => None,
-        }
-    }
-
-    /// Converts an ordinary payload request from a combined transaction-data request snapshot.
-    ///
-    /// The request was eligible when the snapshot was read; a caller must still select an
-    /// authorized transport before disclosing its transaction ID.
-    pub fn into_public_enhancement_request(self) -> Option<PublicTransactionEnhancementRequest> {
-        match self {
-            Self::Enhancement(txid) => Some(PublicTransactionEnhancementRequest(txid)),
             _ => None,
         }
     }
@@ -2614,13 +2614,15 @@ pub trait WalletRead {
         )
     }
 
-    /// Returns a vector of [`TransactionDataRequest`] values that describe information needed by
-    /// the wallet to complete its view of transaction history.
+    /// Returns a vector of [`TransactionDataRequest`] values that describe status observations
+    /// and transparent history needed by the wallet to complete its view of transaction history.
     ///
-    /// `GetStatus(txid)` and `Enhancement(txid)` may both be returned. Track them by request
-    /// kind as well as transaction ID; neither request supersedes the other. Status responses
-    /// only update observation state, while successful payload ingestion or an explicit payload
-    /// not-found notification completes ordinary enhancement. Failed operations remain retryable.
+    /// Payload retrieval is not included; it is returned only by
+    /// [`EnhancePirRead::transaction_enhancement_work`]. A transaction may have pending status
+    /// and payload work at the same time; neither supersedes the other. Status responses only
+    /// update observation state. Failed operations remain retryable.
+    ///
+    /// [`EnhancePirRead::transaction_enhancement_work`]: enhance_pir::EnhancePirRead::transaction_enhancement_work
     ///
     /// Requests for the same transaction data may be returned repeatedly by successive data
     /// requests. The caller of this method should consider the latest set of requests returned
@@ -2645,23 +2647,6 @@ pub trait WalletRead {
             .transaction_data_requests()?
             .into_iter()
             .filter_map(TransactionDataRequest::into_status_request)
-            .collect())
-    }
-
-    /// Returns pending ordinary payload enhancements eligible under the configured enhancement
-    /// routing. This is a convenience view of [`WalletRead::transaction_data_requests`]; private
-    /// PIR work is routed with public work by `EnhancePirRead::transaction_enhancement_work` when
-    /// enabled; PIR schedulers should use that single snapshot instead of combining the two.
-    ///
-    /// Eligibility describes wallet routing, not blanket consent to disclose a transaction ID.
-    /// The caller must select an authorized payload transport before issuing the request.
-    fn public_transaction_enhancement_requests(
-        &self,
-    ) -> Result<Vec<PublicTransactionEnhancementRequest>, Self::Error> {
-        Ok(self
-            .transaction_data_requests()?
-            .into_iter()
-            .filter_map(TransactionDataRequest::into_public_enhancement_request)
             .collect())
     }
 
@@ -4221,7 +4206,7 @@ pub trait WalletWrite:
     /// transactions have been mined.
     ///
     /// This updates status metadata and status-request scheduling only. It must not complete
-    /// or remove [`TransactionDataRequest::Enhancement`] or private enhancement work, regardless
+    /// or remove public ([`PublicTransactionEnhancementRequest`]) or private enhancement work, regardless
     /// of the observation or whether payload bytes are already stored. Mined status intent may
     /// remain dormant so that a chain rewind can reactivate it. An unmined observation may retire
     /// status work once the backend's expiry/confirmation policy considers it terminal.
@@ -4236,7 +4221,7 @@ pub trait WalletWrite:
 
     /// Reports an explicit not-found response to an authorized transaction payload lookup.
     ///
-    /// Retires ordinary [`TransactionDataRequest::Enhancement`] work for `txid`, without changing
+    /// Retires public ([`PublicTransactionEnhancementRequest`]) payload work for `txid`, without changing
     /// transaction status, status-request scheduling, or private recovery obligations. Backends
     /// must retain enhancement that is still required by private recovery or its explicit public
     /// fallback; not-found is not evidence that such recovery is complete. Retrying this

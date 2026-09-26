@@ -53,11 +53,13 @@ use tracing::warn;
 use util::Clock;
 use uuid::Uuid;
 
+use zcash_client_backend::data_api::enhance_pir::{
+    EnhancePirRead, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus, TransactionEnhancementWork,
+};
 #[cfg(feature = "orchard")]
 use zcash_client_backend::data_api::enhance_pir::{
-    EnhancePirRead, EnhancePirRequest, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus,
-    EnhancePirStoreResult, EnhancePirWrite, EnhanceRecord, EnhancementMode,
-    IronwoodEnhanceDiscoveryRequest, IronwoodEnhanceDiscoveryResult, TransactionEnhancementWork,
+    EnhancePirRequest, EnhancePirStoreResult, EnhancePirWrite, EnhanceRecord, EnhancementMode,
+    IronwoodEnhanceDiscoveryRequest, IronwoodEnhanceDiscoveryResult,
 };
 use zcash_client_backend::{
     TransferType,
@@ -466,10 +468,11 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     ///   instance.
     ///
     /// With Orchard storage enabled, configure the handle with
-    /// `set_enhancement_mode` or `with_enhancement_mode` before enumerating
-    /// transaction or PIR work. Until then, enumeration returns
+    /// `set_enhancement_mode` or `with_enhancement_mode` before calling
+    /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// Mode is not persisted; reopened handles must be configured again.
+    /// `WalletRead::transaction_data_requests` (status and transparent history) does not
+    /// depend on the mode. Mode is not persisted; reopened handles must be configured again.
     pub fn for_path<F: AsRef<Path>>(
         path: F,
         params: P,
@@ -527,12 +530,12 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// Changes whether ordinary transaction-ID enhancement exposes protected Ironwood work.
     /// Discard outstanding in-memory request batches when changing mode. Already dispatched
     /// network requests cannot be recalled. New handles must choose their mode before
-    /// enumerating requests.
+    /// enumerating enhancement work.
     pub fn set_enhancement_mode(&mut self, mode: EnhancementMode) {
         self.enhancement_mode = Some(mode);
     }
 
-    /// Chooses the enhancement mode before enumerating requests on this handle.
+    /// Chooses the enhancement mode before enumerating enhancement work on this handle.
     ///
     /// This preference is not persisted. See [`Self::set_enhancement_mode`] for
     /// the requirements when changing mode after requests have been obtained.
@@ -573,10 +576,11 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     ///   instance.
     ///
     /// With Orchard storage enabled, configure the handle with
-    /// `set_enhancement_mode` or `with_enhancement_mode` before enumerating
-    /// transaction or PIR work. Until then, enumeration returns
+    /// `set_enhancement_mode` or `with_enhancement_mode` before calling
+    /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// Mode is not persisted; reopened handles must be configured again.
+    /// `WalletRead::transaction_data_requests` (status and transparent history) does not
+    /// depend on the mode. Mode is not persisted; reopened handles must be configured again.
     pub fn from_connection(conn: C, params: P, clock: CL, rng: R) -> Self {
         WalletDb {
             conn,
@@ -1579,21 +1583,8 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     }
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
-        #[cfg(feature = "orchard")]
-        let enhancement_mode = self.configured_enhancement_mode()?;
         if let Some(_chain_tip_height) = wallet::chain_tip_height(self.conn.borrow())? {
-            let protect_ironwood = {
-                #[cfg(feature = "orchard")]
-                {
-                    enhancement_mode == EnhancementMode::PrivateIronwood
-                }
-                #[cfg(not(feature = "orchard"))]
-                {
-                    false
-                }
-            };
-            let iter = wallet::transaction_data_requests(self.conn.borrow(), protect_ironwood)?
-                .into_iter();
+            let iter = wallet::transaction_data_requests(self.conn.borrow())?.into_iter();
 
             #[cfg(feature = "transparent-inputs")]
             let iter = iter.chain(wallet::transparent::transaction_data_requests(
@@ -1625,17 +1616,22 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     }
 }
 
-#[cfg(feature = "orchard")]
+/// Without Orchard support, only public payload work exists: no transaction can be privately
+/// protected, and no Enhance PIR snapshot can be accepted.
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePirRead
     for WalletDb<C, P, CL, R>
 {
     fn transaction_enhancement_work(&self) -> Result<Vec<TransactionEnhancementWork>, Self::Error> {
+        #[cfg(feature = "orchard")]
         let mode = self.configured_enhancement_mode()?;
         // Like `transaction_data_requests`, there is no actionable work before a chain tip.
         if wallet::chain_tip_height(self.conn.borrow())?.is_none() {
             return Ok(vec![]);
         }
-        wallet::enhance_pir::transaction_enhancement_work(self.conn.borrow(), mode)
+        #[cfg(feature = "orchard")]
+        return wallet::enhance_pir::transaction_enhancement_work(self.conn.borrow(), mode);
+        #[cfg(not(feature = "orchard"))]
+        return wallet::public_enhancement_work(self.conn.borrow());
     }
 
     fn enhance_pir_snapshot_status(
@@ -1656,9 +1652,13 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
             // inconsistent local state, not a reason to trust the remote snapshot.
             return Ok(EnhancePirSnapshotStatus::Mismatch);
         };
+        #[cfg(feature = "orchard")]
+        let ironwood_tree_size = metadata.ironwood_tree_size().map(u64::from);
+        #[cfg(not(feature = "orchard"))]
+        let ironwood_tree_size = None;
         Ok(
             if metadata.block_hash() == anchor.block_hash
-                && metadata.ironwood_tree_size().map(u64::from) == Some(anchor.ironwood_tree_size)
+                && ironwood_tree_size == Some(anchor.ironwood_tree_size)
             {
                 EnhancePirSnapshotStatus::Accepted
             } else {
@@ -1667,8 +1667,11 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
         )
     }
 
-    fn is_ironwood_enhancement_protected(&self, txid: TxId) -> Result<bool, Self::Error> {
-        wallet::enhance_pir::is_protected(self.conn.borrow(), txid)
+    fn is_ironwood_enhancement_protected(&self, _txid: TxId) -> Result<bool, Self::Error> {
+        #[cfg(feature = "orchard")]
+        return wallet::enhance_pir::is_protected(self.conn.borrow(), _txid);
+        #[cfg(not(feature = "orchard"))]
+        return Ok(false);
     }
 }
 
