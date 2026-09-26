@@ -323,3 +323,86 @@ fn rewind_reactivates_mined_status_without_completing_enhancement() {
     assert!(requests.contains(&TransactionDataRequest::GetStatus(txid)));
     assert!(requests.contains(&TransactionDataRequest::Enhancement(txid)));
 }
+
+/// The routed payload snapshot never carries status work, and status responses and rewinds
+/// never change payload routing.
+#[cfg(feature = "zakura-pir-enhance")]
+#[test]
+fn routed_enhancement_work_is_independent_of_status_lifecycle() {
+    use zcash_client_backend::data_api::enhance_pir::{
+        EnhancePirRead, EnhancementMode, TransactionEnhancementWork,
+    };
+
+    let (mut st, prior_height) = fixture();
+    let (mined_height, _) = st.generate_empty_block();
+    st.scan_cached_blocks(mined_height, 1);
+    let ordinary = TxId::from_bytes([50; 32]);
+    let protected = TxId::from_bytes([51; 32]);
+    queue_both(&st, ordinary, prior_height, None);
+    queue_both(&st, protected, prior_height, None);
+    st.wallet()
+        .conn()
+        .execute(
+            "INSERT INTO ironwood_enhance_routing (transaction_id, route)
+             SELECT id_tx, 0 FROM transactions WHERE txid = ?1",
+            params![protected.as_ref()],
+        )
+        .unwrap();
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+
+    let public = |st: &State| {
+        let mut txids = st
+            .wallet()
+            .db()
+            .transaction_enhancement_work()
+            .unwrap()
+            .into_iter()
+            .map(|work| match work {
+                TransactionEnhancementWork::Public(request) => request.txid(),
+                TransactionEnhancementWork::Private(work) => {
+                    panic!("no private work was queued: {work:?}")
+                }
+            })
+            .collect::<Vec<_>>();
+        txids.sort();
+        txids
+    };
+    let statuses = |st: &State| {
+        st.wallet()
+            .transaction_status_requests()
+            .unwrap()
+            .into_iter()
+            .map(|request| request.txid())
+            .filter(|txid| [ordinary, protected].contains(txid))
+            .count()
+    };
+    assert_eq!(public(&st), vec![ordinary]);
+    assert_eq!(
+        statuses(&st),
+        2,
+        "status routing ignores private protection"
+    );
+
+    for txid in [ordinary, protected] {
+        st.wallet_mut()
+            .set_transaction_status(txid, TransactionStatus::Mined(mined_height))
+            .unwrap();
+    }
+    assert_eq!(statuses(&st), 0);
+    assert_eq!(public(&st), vec![ordinary]);
+
+    st.wallet_mut()
+        .db_mut()
+        .truncate_to_height(prior_height)
+        .unwrap();
+    assert_eq!(statuses(&st), 2);
+    assert_eq!(public(&st), vec![ordinary]);
+
+    st.wallet_mut()
+        .notify_transaction_enhancement_not_found(ordinary)
+        .unwrap();
+    assert!(public(&st).is_empty());
+    assert_eq!(statuses(&st), 2);
+}

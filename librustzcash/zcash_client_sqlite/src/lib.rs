@@ -57,7 +57,7 @@ use uuid::Uuid;
 use zcash_client_backend::data_api::enhance_pir::{
     EnhancePirRead, EnhancePirRequest, EnhancePirSnapshotAnchor, EnhancePirSnapshotStatus,
     EnhancePirStoreResult, EnhancePirWork, EnhancePirWrite, EnhanceRecord, EnhancementMode,
-    IronwoodEnhanceDiscoveryRequest, IronwoodEnhanceDiscoveryResult,
+    IronwoodEnhanceDiscoveryRequest, IronwoodEnhanceDiscoveryResult, TransactionEnhancementWork,
 };
 use zcash_client_backend::{
     TransferType,
@@ -1632,6 +1632,15 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
     fn enhance_pir_work(&self) -> Result<Vec<EnhancePirWork>, Self::Error> {
         self.configured_enhancement_mode()?;
         wallet::enhance_pir::work(self.conn.borrow())
+    }
+
+    fn transaction_enhancement_work(&self) -> Result<Vec<TransactionEnhancementWork>, Self::Error> {
+        let mode = self.configured_enhancement_mode()?;
+        // Like `transaction_data_requests`, there is no actionable work before a chain tip.
+        if wallet::chain_tip_height(self.conn.borrow())?.is_none() {
+            return Ok(vec![]);
+        }
+        wallet::enhance_pir::routed_work(self.conn.borrow(), mode)
     }
 
     fn enhance_pir_snapshot_status(

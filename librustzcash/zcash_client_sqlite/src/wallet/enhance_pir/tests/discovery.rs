@@ -1,3 +1,6 @@
+// These suites exercise the deprecated mode-independent private enumerator directly.
+#![allow(deprecated)]
+
 use super::*;
 use group::{Group, GroupEncoding};
 use orchard::{
@@ -2435,4 +2438,50 @@ fn pir_expiry_does_not_pin_notes_across_reorg_or_reopen_completed_work() {
             "unmined spend must age out regardless of PIR expiry"
         );
     }
+}
+
+#[test]
+fn rediscovery_is_routed_privately_and_can_change_the_next_route() {
+    let mut send = Send::new(true);
+    send.scan_send();
+    let change = send.requests()[0];
+    finish_incoming(&mut send.st, change);
+    send.scan_funding();
+    let job = send.discovery();
+    let txid = change.request_id().txid();
+    let queries_for = |private: &[EnhancePirWork]| {
+        private
+            .iter()
+            .filter(|work| {
+                matches!(work, EnhancePirWork::Query(request) if request.request_id().txid() == txid)
+            })
+            .count()
+    };
+
+    let (public, private) = routed(&send.st);
+    assert!(
+        !public.contains(&txid),
+        "pending rediscovery never falls back"
+    );
+    assert!(private.contains(&EnhancePirWork::Rediscover(job)));
+    assert_eq!(queries_for(&private), 0);
+
+    send.st
+        .wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::Standard);
+    let (public, private) = routed(&send.st);
+    assert!(public.contains(&txid));
+    assert!(private.is_empty());
+    send.st
+        .wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+
+    // Reconstruction replaces the discovery job with a private outgoing query.
+    send.rebuild();
+    let (public, private) = routed(&send.st);
+    assert!(!public.contains(&txid));
+    assert!(!private.contains(&EnhancePirWork::Rediscover(job)));
+    assert_eq!(queries_for(&private), 1);
 }

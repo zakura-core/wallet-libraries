@@ -7,11 +7,12 @@ use orchard::{
 use rusqlite::{Connection, OptionalExtension, Transaction, named_params};
 use uuid::Uuid;
 use zcash_client_backend::data_api::{
-    Account as _,
+    Account as _, TransactionDataRequest,
     enhance_pir::{
         EnhancePirRequest, EnhancePirStoreResult, EnhancePirSuspension, EnhancePirWork,
-        EnhanceRecord, IronwoodEnhanceDiscoveryFailure, IronwoodEnhanceDiscoveryFailureReason,
-        IronwoodEnhanceDiscoveryRequest, IronwoodEnhanceRequestId,
+        EnhanceRecord, EnhancementMode, IronwoodEnhanceDiscoveryFailure,
+        IronwoodEnhanceDiscoveryFailureReason, IronwoodEnhanceDiscoveryRequest,
+        IronwoodEnhanceRequestId, TransactionEnhancementWork,
         storage::{
             EnhancePirStorage, IronwoodOutgoingResult, PendingIronwoodMemo,
             PendingIronwoodMetadata, PendingIronwoodOutgoing, StoredIronwoodMetadata,
@@ -153,9 +154,45 @@ pub(crate) fn is_protected(conn: &Connection, txid: TxId) -> Result<bool, Sqlite
     )?)
 }
 
-/// A single statement gives callers a consistent view across the independent queues.
-pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
-    let mut stmt = conn.prepare_cached(&format!(
+// Row kinds of the work statement, in scheduling order.
+const REDISCOVER: u8 = 0;
+const QUERY: u8 = 1;
+const PUBLIC: u8 = 2;
+const DISCOVERY_SUSPENDED: u8 = 3;
+const OUTGOING_SUSPENDED: u8 = 4;
+
+/// Builds one statement over the private queues and, optionally, the public enhancement queue.
+/// Private rows require `route = 0`; public rows use [`super::PUBLIC_ENHANCEMENT_ROUTE`], which
+/// excludes `route = 0` when `:protect_ironwood` is set, so each transaction takes one route.
+fn work_sql(private: bool, public: bool) -> String {
+    let private_rows = format!(
+        "SELECT DISTINCT {REDISCOVER} AS kind, height AS ordinal, hash AS identity,
+                         NULL AS output_index, NULL AS reason, NULL AS tx_index
+         FROM discovery WHERE reason IS NULL
+         UNION ALL
+         SELECT {QUERY}, position, txid, output_index, NULL, NULL FROM queries
+         UNION ALL
+         SELECT DISTINCT {DISCOVERY_SUSPENDED}, height, txid, NULL, reason, tx_index
+         FROM discovery WHERE reason IS NOT NULL
+         UNION ALL
+         SELECT {OUTGOING_SUSPENDED}, q.commitment_tree_position, t.txid, q.output_index, NULL, NULL
+           {OUTSTANDING_OUTGOING} AND q.not_recoverable = 1"
+    );
+    let public_rows = format!(
+        "SELECT {PUBLIC} AS kind, 0 AS ordinal, q.txid AS identity, NULL AS output_index,
+                NULL AS reason, NULL AS tx_index
+         FROM tx_retrieval_queue q
+         LEFT JOIN transactions t ON t.txid = q.txid
+         WHERE q.query_type = :enhancement_type AND {}",
+        super::PUBLIC_ENHANCEMENT_ROUTE
+    );
+    let rows = match (private, public) {
+        (true, true) => format!("{private_rows} UNION ALL {public_rows}"),
+        (true, false) => private_rows,
+        (false, true) => public_rows,
+        (false, false) => unreachable!("callers select at least one route"),
+    };
+    format!(
         "WITH discovery_jobs AS (
              SELECT transaction_id, suspended FROM ironwood_enhance_discovery_queue
              UNION ALL SELECT transaction_id, 0 FROM ironwood_enhance_metadata_queue WHERE commitment_tree_position IS NULL
@@ -187,52 +224,88 @@ pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClien
              {ACTIVE_PRIVATE_TX}
                AND q.commitment_tree_position IS NOT NULL
          )
-         SELECT DISTINCT 0 AS kind, height AS ordinal, hash AS identity, NULL AS output_index,
-                         NULL AS reason, NULL AS tx_index FROM discovery WHERE reason IS NULL
-         UNION ALL
-         SELECT 1, position, txid, output_index, NULL, NULL FROM queries
-         UNION ALL
-         SELECT DISTINCT 2, height, txid, NULL, reason, tx_index FROM discovery WHERE reason IS NOT NULL
-         UNION ALL
-         SELECT 3, q.commitment_tree_position, t.txid, q.output_index, NULL, NULL
-           {OUTSTANDING_OUTGOING} AND q.not_recoverable = 1
+         {rows}
          ORDER BY kind, ordinal, tx_index, identity, output_index"
-    ))?;
-    stmt.query_map([], |row| {
+    )
+}
+
+fn read_work(
+    stmt: &mut rusqlite::CachedStatement<'_>,
+    params: &[(&str, &dyn rusqlite::ToSql)],
+) -> Result<Vec<TransactionEnhancementWork>, SqliteClientError> {
+    stmt.query_map(params, |row| {
         let kind: u8 = row.get(0)?;
-        let ordinal: u64 = row.get(1)?;
         let identity: [u8; 32] = row.get(2)?;
+        let private_request = |ordinal: u64| -> rusqlite::Result<_> {
+            Ok(EnhancePirRequest::new(
+                ordinal.into(),
+                IronwoodEnhanceRequestId::new(TxId::from_bytes(identity), row.get(3)?),
+            ))
+        };
         Ok(match kind {
-            0 => EnhancePirWork::Rediscover(IronwoodEnhanceDiscoveryRequest {
-                height: zcash_protocol::consensus::BlockHeight::from_u32(row.get(1)?),
-                block_hash: zcash_primitives::block::BlockHash(identity),
-            }),
-            1 | 3 => {
-                let request = EnhancePirRequest::new(
-                    ordinal.into(),
-                    IronwoodEnhanceRequestId::new(TxId::from_bytes(identity), row.get(3)?),
-                );
-                if kind == 1 {
-                    EnhancePirWork::Query(request)
-                } else {
-                    EnhancePirWork::Suspended(EnhancePirSuspension::OutgoingNotRecoverable(request))
-                }
-            }
-            2 => EnhancePirWork::Suspended(EnhancePirSuspension::Discovery(
-                IronwoodEnhanceDiscoveryFailure {
+            REDISCOVER => TransactionEnhancementWork::Private(EnhancePirWork::Rediscover(
+                IronwoodEnhanceDiscoveryRequest {
+                    height: zcash_protocol::consensus::BlockHeight::from_u32(row.get(1)?),
+                    block_hash: zcash_primitives::block::BlockHash(identity),
+                },
+            )),
+            QUERY => TransactionEnhancementWork::Private(EnhancePirWork::Query(private_request(
+                row.get(1)?,
+            )?)),
+            PUBLIC => TransactionEnhancementWork::Public(
+                TransactionDataRequest::Enhancement(TxId::from_bytes(identity))
+                    .into_public_enhancement_request()
+                    .expect("enhancement requests convert to public requests"),
+            ),
+            DISCOVERY_SUSPENDED => TransactionEnhancementWork::Private(EnhancePirWork::Suspended(
+                EnhancePirSuspension::Discovery(IronwoodEnhanceDiscoveryFailure {
                     txid: TxId::from_bytes(identity),
                     reason: match row.get::<_, u8>(4)? {
                         0 => IronwoodEnhanceDiscoveryFailureReason::NoFundingAccounts,
                         1 => IronwoodEnhanceDiscoveryFailureReason::AnchorUnavailable,
                         _ => unreachable!("closed SQL CASE"),
                     },
-                },
+                }),
+            )),
+            OUTGOING_SUSPENDED => TransactionEnhancementWork::Private(EnhancePirWork::Suspended(
+                EnhancePirSuspension::OutgoingNotRecoverable(private_request(row.get(1)?)?),
             )),
             _ => unreachable!("closed SQL UNION"),
         })
     })?
     .collect::<Result<_, _>>()
     .map_err(Into::into)
+}
+
+/// A single statement gives callers a consistent view across the independent queues.
+pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
+    let mut stmt = conn.prepare_cached(&work_sql(true, false))?;
+    Ok(read_work(&mut stmt, &[])?
+        .into_iter()
+        .map(|work| match work {
+            TransactionEnhancementWork::Private(work) => work,
+            TransactionEnhancementWork::Public(_) => unreachable!("public rows not selected"),
+        })
+        .collect())
+}
+
+/// Routes public and private payload work from one statement, and therefore one snapshot.
+///
+/// `Standard` exposes every ordinary enhancement request and no private work. `PrivateIronwood`
+/// exposes private work for protected transactions and ordinary requests for all others.
+pub(crate) fn routed_work(
+    conn: &Connection,
+    mode: EnhancementMode,
+) -> Result<Vec<TransactionEnhancementWork>, SqliteClientError> {
+    let private = mode == EnhancementMode::PrivateIronwood;
+    let mut stmt = conn.prepare_cached(&work_sql(private, true))?;
+    read_work(
+        &mut stmt,
+        named_params![
+            ":enhancement_type": TxQueryType::Enhancement.code(),
+            ":protect_ironwood": private,
+        ],
+    )
 }
 
 /// Authentication context and writes share the transaction owned by the public operation.
