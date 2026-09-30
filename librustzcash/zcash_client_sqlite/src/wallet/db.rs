@@ -349,6 +349,8 @@ CREATE TABLE "transactions" (
         confirmed_unmined_at_height IS NULL OR mined_height IS NULL
     )
 )"#;
+pub(super) const INDEX_TRANSACTIONS_MINED_HEIGHT: &str = r#"
+CREATE INDEX idx_transactions_mined_height ON transactions (mined_height ASC)"#;
 
 /// Stores the Sapling notes received by the wallet.
 ///

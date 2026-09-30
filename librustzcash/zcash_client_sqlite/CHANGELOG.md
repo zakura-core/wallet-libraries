@@ -9,11 +9,15 @@ and this library adheres to Rust's notion of
 
 ### Added
 
+- Migration `transactions_mined_height_index` adds an index on
+  `transactions.mined_height`.
 - Migration `transparent_spend_map_prevout_index` indexes `transparent_spend_map`
   by `(prevout_txid, prevout_output_index)`.
 
 ### Changed
 
+- Storing a scanned block uses the new index to attach transactions first learned
+  from a transparent UTXO query, avoiding a scan of the whole transactions table.
 - Storing a received transparent output no longer scans `transparent_spend_map`
   to learn whether a wallet transaction already spends it.
 
