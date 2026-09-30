@@ -7,6 +7,14 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Added
+
+- Migration `transactions_mined_height_index` adds an index on `transactions.mined_height`.
+
+### Changed
+
+- Storing a scanned block no longer scans the whole `transactions` table to attach transactions first learned from a transparent UTXO query to their block; the lookup uses the new index.
+
 ## [0.1.0-rc9.4] - 2026-10-23
 
 ### Changed

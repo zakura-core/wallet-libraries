@@ -94,6 +94,7 @@ mod v_tx_outputs_use_legacy_false;
 mod wallet_summaries;
 mod witness_stabilized_notes;
 mod zip318_classification;
+mod transactions_mined_height_index;
 
 use std::{rc::Rc, sync::Mutex};
 
@@ -187,6 +188,7 @@ pub mod ids {
         transparent_policy_generation::MIGRATION_ID as TRANSPARENT_POLICY_GENERATION,
         transparent_recovery_schema::MIGRATION_ID as TRANSPARENT_RECOVERY_SCHEMA,
         transparent_shared_derivations::MIGRATION_ID as TRANSPARENT_SHARED_DERIVATIONS,
+        transactions_mined_height_index::MIGRATION_ID as TRANSACTIONS_MINED_HEIGHT_INDEX,
         transparent_txid_enhancement::MIGRATION_ID as TRANSPARENT_TXID_ENHANCEMENT,
         tree_retained_checkpoints::MIGRATION_ID as TREE_RETAINED_CHECKPOINTS,
         tx_observation_height::MIGRATION_ID as TX_OBSERVATION_HEIGHT,
@@ -417,6 +419,7 @@ pub(super) fn all_migrations<
         Box::new(v_transactions_pool_crossing::Migration),
         Box::new(zip318_classification::Migration),
         Box::new(v_transactions_zip318_kind::Migration),
+        Box::new(transactions_mined_height_index::Migration),
         Box::new(orchard_ironwood_migration_tables::Migration),
         Box::new(tree_retained_checkpoints::Migration),
         Box::new(note_locking::Migration),
@@ -702,10 +705,7 @@ pub(crate) fn forget_txid_enhancement(conn: &rusqlite::Connection) {
 }
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
-    transparent_detail_content_failures::MIGRATION_ID,
-    one_time_pir::MIGRATION_ID,
-];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transactions_mined_height_index::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -853,6 +853,7 @@ pub(crate) mod tests {
             ids::TRANSPARENT_ACTIVITY_METADATA,
             ids::TRANSPARENT_ACTIVATION_SCHEMA,
             ids::TRANSPARENT_SHARED_DERIVATIONS,
+            ids::TRANSACTIONS_MINED_HEIGHT_INDEX,
             ids::TRANSPARENT_GAP_LIMIT_HANDLING,
             ids::TRANSPARENT_LEDGER_SCHEMA,
             ids::TRANSPARENT_POLICY_GENERATION,
