@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, hash::Hash, ops::Range};
+use std::{
+    collections::{BTreeMap, HashMap},
+    hash::Hash,
+    ops::Range,
+};
 #[cfg(feature = "orchard")]
 use {
     crate::data_api::ORCHARD_SHARD_HEIGHT, shardtree::store::Checkpoint, std::collections::BTreeSet,
@@ -22,6 +26,8 @@ use zcash_protocol::{
 };
 use zcash_script::solver::ScriptKind;
 
+use zcash_keys::keys::UnifiedFullViewingKey;
+
 use crate::{
     TransferType,
     data_api::{
@@ -29,6 +35,7 @@ use crate::{
         WalletCommitmentTrees, anchor_retention::AnchorRetention, chain::ChainState,
         ll::ReceivedShieldedOutput,
     },
+    decrypt::decrypt_transaction,
     wallet::{Recipient, WalletTransparentOutput},
 };
 
@@ -425,6 +432,7 @@ where
                 params,
                 tx_ref,
                 None,
+                true,
                 tx.sapling_outputs(),
                 // Check whether this note was spent in a later block range that
                 // we previously scanned.
@@ -453,6 +461,7 @@ where
                 params,
                 tx_ref,
                 None,
+                true,
                 tx.orchard_outputs(),
                 // Check whether this note was spent in a later block range that
                 // we previously scanned.
@@ -481,6 +490,7 @@ where
                 params,
                 tx_ref,
                 None,
+                true,
                 tx.ironwood_outputs(),
                 // Check whether this note was spent in a later block range that
                 // we previously scanned.
@@ -895,17 +905,181 @@ where
     <DbT as LowLevelWalletRead>::Error: From<BalanceError> + From<GapError<DbT>>,
     P: consensus::Parameters,
 {
-    let funding_accounts = wallet_db.get_funding_accounts(d_tx.tx())?;
+    store_decrypted_tx_inner(
+        wallet_db,
+        params,
+        #[cfg(feature = "transparent-inputs")]
+        gap_limits,
+        chain_tip_height,
+        d_tx,
+        false,
+    )
+}
 
-    // TODO(#1305): Correctly track accounts that fund each transaction output.
-    let funding_account = funding_accounts.iter().next().copied();
-    if funding_accounts.len() > 1 {
-        warn!(
-            "More than one wallet account detected as funding transaction {:?}, selecting {:?}",
-            d_tx.tx().txid(),
-            funding_account.unwrap()
-        )
+/// Re-derives the wallet's records of every transaction in the funding attribution queue (see
+/// [`LowLevelWalletRead::get_funding_attribution_queue`]) and empties the queue.
+///
+/// [`store_decrypted_tx`] attributes a transaction's sent outputs to the account that funded it
+/// only once that account is established as the transaction's sole funder. A transaction stored
+/// before the outputs it spends were known to the wallet (as happens when a restored wallet finds
+/// a send through its change before finding the outputs it spent) therefore records no sent
+/// outputs. When such an output is recorded, the backend queues the spender, and this function
+/// decrypts the spender's stored data again with `ufvks` and stores it as [`store_decrypted_tx`]
+/// would have had the evidence been available at first. Sent outputs previously derived for the
+/// transaction are replaced, so an attribution that the new evidence no longer supports is
+/// withdrawn; sent outputs recorded when this wallet constructed the transaction are kept.
+///
+/// The result therefore does not depend on the order in which a transaction and the outputs it
+/// spends were discovered. Re-deriving a transaction can queue others; the function returns once
+/// the queue is empty, which it reaches because a spend is linked to its output only once.
+///
+/// Callers should invoke this in the same database transaction as the operation that recorded the
+/// outputs.
+pub fn reprocess_funding_attribution<DbT, P>(
+    wallet_db: &mut DbT,
+    params: &P,
+    #[cfg(feature = "transparent-inputs")] gap_limits: GapLimits,
+    chain_tip_height: BlockHeight,
+    ufvks: &HashMap<<DbT as LowLevelWalletRead>::AccountId, UnifiedFullViewingKey>,
+) -> Result<(), <DbT as LowLevelWalletRead>::Error>
+where
+    DbT: StoreDecryptedTxDbT,
+    <DbT as LowLevelWalletRead>::AccountId: core::fmt::Debug,
+    <DbT as LowLevelWalletRead>::Error: From<BalanceError> + From<GapError<DbT>>,
+    P: consensus::Parameters,
+{
+    loop {
+        let queued = wallet_db.get_funding_attribution_queue()?;
+        if queued.is_empty() {
+            return Ok(());
+        }
+        for (tx_ref, tx, mined_height) in queued {
+            wallet_db.dequeue_funding_attribution(tx_ref)?;
+            debug!(
+                "Re-deriving funding attribution of transaction {}",
+                tx.txid()
+            );
+            let d_tx =
+                decrypt_transaction(params, mined_height, Some(chain_tip_height), &tx, ufvks);
+            store_decrypted_tx_inner(
+                wallet_db,
+                params,
+                #[cfg(feature = "transparent-inputs")]
+                gap_limits,
+                chain_tip_height,
+                d_tx,
+                true,
+            )?;
+        }
     }
+}
+
+/// How the wallet attributes a transaction's outputs to the wallet accounts that funded it.
+///
+/// A sent output records which account paid for it. Only a transaction that one account funded
+/// entirely supports that claim: when several parties fund a transaction, no output can be
+/// attributed to any one of them, and the transaction's outputs and fee are shared facts. An
+/// account's own effects (the outputs it spent and received) are recorded in every case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FundingAttribution<AccountId> {
+    /// One wallet account funded the transaction: it spent every transparent input, and no other
+    /// wallet account spent any input. Shielded spends cannot be attributed beyond the wallet's
+    /// own nullifiers, so a shielded spend by another party is not detected.
+    Sole(AccountId),
+    /// Several wallet accounts funded the transaction.
+    Joint,
+    /// No wallet account is known to have funded the transaction, or one account did but the
+    /// wallet cannot yet attribute every transparent input to it. An input may belong to
+    /// another party, or its output may not have been discovered yet.
+    Undetermined,
+}
+
+impl<AccountId: Copy> FundingAttribution<AccountId> {
+    /// The account that sent outputs are attributed to, if any.
+    fn sole_funder(&self) -> Option<AccountId> {
+        match self {
+            FundingAttribution::Sole(account) => Some(*account),
+            FundingAttribution::Joint | FundingAttribution::Undetermined => None,
+        }
+    }
+}
+
+/// Determines how the wallet can attribute `tx`'s outputs to the accounts in `funding_accounts`,
+/// the wallet accounts that spent at least one of its inputs.
+fn funding_attribution<DbT>(
+    _wallet_db: &DbT,
+    tx: &Transaction,
+    funding_accounts: &std::collections::HashSet<<DbT as LowLevelWalletRead>::AccountId>,
+) -> Result<
+    FundingAttribution<<DbT as LowLevelWalletRead>::AccountId>,
+    <DbT as LowLevelWalletRead>::Error,
+>
+where
+    DbT: LowLevelWalletRead,
+{
+    let mut accounts = funding_accounts.iter();
+    let (Some(account), None) = (accounts.next(), accounts.next()) else {
+        return Ok(if funding_accounts.is_empty() {
+            FundingAttribution::Undetermined
+        } else {
+            FundingAttribution::Joint
+        });
+    };
+
+    // Every transparent input must spend a wallet output. Since only `account` funded the
+    // transaction, each such output is necessarily one of its own.
+    if let Some(bundle) = tx.transparent_bundle().filter(|b| !b.is_coinbase()) {
+        for _txin in &bundle.vin {
+            #[cfg(feature = "transparent-inputs")]
+            let owned = _wallet_db
+                .get_wallet_transparent_output(_txin.prevout(), None)?
+                .is_some();
+            // Without transparent support the wallet owns no transparent output.
+            #[cfg(not(feature = "transparent-inputs"))]
+            let owned = false;
+            if !owned {
+                return Ok(FundingAttribution::Undetermined);
+            }
+        }
+    }
+
+    Ok(FundingAttribution::Sole(*account))
+}
+
+/// Stores a decrypted transaction as [`store_decrypted_tx`] does. When `rederive` is set, the
+/// transaction's previously derived sent outputs are replaced rather than extended.
+fn store_decrypted_tx_inner<DbT, P>(
+    wallet_db: &mut DbT,
+    params: &P,
+    #[cfg(feature = "transparent-inputs")] gap_limits: GapLimits,
+    chain_tip_height: BlockHeight,
+    d_tx: DecryptedTransaction<Transaction, <DbT as LowLevelWalletRead>::AccountId>,
+    rederive: bool,
+) -> Result<(), <DbT as LowLevelWalletRead>::Error>
+where
+    DbT: StoreDecryptedTxDbT,
+    <DbT as LowLevelWalletRead>::AccountId: core::fmt::Debug,
+    <DbT as LowLevelWalletRead>::Error: From<BalanceError> + From<GapError<DbT>>,
+    P: consensus::Parameters,
+{
+    let funding_accounts = wallet_db.get_funding_accounts(d_tx.tx())?;
+    let attribution = funding_attribution(wallet_db, d_tx.tx(), &funding_accounts)?;
+    match attribution {
+        FundingAttribution::Joint => info!(
+            "Transaction {} is funded by {} wallet accounts; its outputs are not attributed to any one of them",
+            d_tx.tx().txid(),
+            funding_accounts.len()
+        ),
+        FundingAttribution::Undetermined if !funding_accounts.is_empty() => debug!(
+            "Not every transparent input of transaction {} is attributed to its funding account yet",
+            d_tx.tx().txid()
+        ),
+        _ => {}
+    }
+    let funding_account = attribution.sole_funder();
+    // An output decrypted with an account's outgoing viewing key shows that the account
+    // constructed it, but in a jointly funded transaction not that the account paid for it.
+    let record_outgoing = attribution != FundingAttribution::Joint;
 
     let wallet_transparent_outputs =
         detect_wallet_transparent_outputs::<_, _, <DbT as LowLevelWalletRead>::Error>(
@@ -918,8 +1092,8 @@ where
         )?;
 
     // If there is no wallet involvement, we don't need to store the transaction, so just return
-    // here.
-    if funding_account.is_none()
+    // here. Spending a wallet output is involvement even when no output can be attributed.
+    if funding_accounts.is_empty()
         && wallet_transparent_outputs.is_empty()
         && !d_tx.has_decrypted_outputs()
     {
@@ -935,6 +1109,9 @@ where
     let fee = determine_fee(wallet_db, d_tx.tx())?;
 
     let tx_ref = wallet_db.put_tx_data(d_tx.tx(), fee, None, None, observed_height)?;
+    if rederive {
+        wallet_db.delete_derived_sent_outputs(tx_ref)?;
+    }
     if let Some(height) = d_tx.mined_height() {
         wallet_db.set_transaction_status(d_tx.tx().txid(), TransactionStatus::Mined(height))?;
     }
@@ -989,6 +1166,10 @@ where
         // - Even if we know the funding account, we don't know that we have
         //   information for all of the transparent inputs to the transaction.
         tx_has_wallet_outputs |= !wallet_transparent_outputs.is_empty();
+
+        // A transaction the wallet helped fund needs every input's owner to establish how its
+        // outputs are attributed.
+        tx_has_wallet_outputs |= !funding_accounts.is_empty();
     }
 
     // The set of account/scope pairs for which to update the gap limit.
@@ -1000,6 +1181,7 @@ where
         Some(params),
         tx_ref,
         funding_account,
+        record_outgoing,
         d_tx.sapling_outputs(),
         |_, _| Ok(None),
         |wallet_db, output, tx_ref, spent_in| {
@@ -1017,6 +1199,7 @@ where
         Some(params),
         tx_ref,
         funding_account,
+        record_outgoing,
         d_tx.orchard_outputs(),
         |_, _| Ok(None),
         |wallet_db, output, tx_ref, spent_in| {
@@ -1036,6 +1219,7 @@ where
         Some(params),
         tx_ref,
         funding_account,
+        record_outgoing,
         d_tx.ironwood_outputs(),
         |_, _| Ok(None),
         |wallet_db, output, tx_ref, spent_in| {
@@ -1094,6 +1278,10 @@ where
     // Receiving complete transaction data satisfies enhancement intent, but must not erase a
     // durable status-observation intent created when the transaction was sent.
     wallet_db.delete_retrieval_queue_entries(d_tx.tx().txid())?;
+
+    // The transaction has just been derived from all current evidence, including any spend links
+    // created while storing it.
+    wallet_db.dequeue_funding_attribution(tx_ref)?;
 
     // A shielded bundle is observable through compact-block scanning only when this wallet can
     // match one of its real nullifiers or decrypt one of its outputs. Transactions without either
@@ -1261,6 +1449,7 @@ fn put_shielded_outputs<DbT, P, Output>(
     params: Option<&P>,
     tx_ref: <DbT as LowLevelWalletRead>::TxRef,
     funding_account: Option<DbT::AccountId>,
+    record_outgoing: bool,
     outputs: &[Output],
     detect_note_spent_in: impl Fn(
         &mut DbT,
@@ -1284,6 +1473,7 @@ where
 {
     for output in outputs {
         let sent_output = match output.transfer_type() {
+            TransferType::Outgoing if !record_outgoing => None,
             TransferType::Outgoing => {
                 let note = output.to_wallet_note();
 

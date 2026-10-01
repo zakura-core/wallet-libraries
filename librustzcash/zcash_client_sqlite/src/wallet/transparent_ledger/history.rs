@@ -10,8 +10,9 @@ use std::rc::Rc;
 use rusqlite::{OptionalExtension as _, named_params, types::Value};
 use zcash_client_backend::data_api::transparent_ledger::{
     AccountMovement, AggregatePayment, DetailCompleteness, EffectCompleteness, FeeState,
-    HistoryClassification, MetadataProvenance, PoolEffect, TransactionHistoryDetails,
-    TransactionMetadata, TransactionMetadataEvidence, TransparentLedgerMode, WholeTransactionFee,
+    HistoryClassification, MetadataProvenance, PoolEffect, TransactionFunding,
+    TransactionHistoryDetails, TransactionMetadata, TransactionMetadataEvidence,
+    TransparentLedgerMode, WholeTransactionFee,
 };
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
@@ -378,7 +379,9 @@ fn has_unrecorded_sent_output(
 }
 
 /// Whether a parent of one of the transaction's unresolved transparent inputs is queued for
-/// retrieval. Until it arrives, the input may spend one of the account's outputs.
+/// retrieval. Until it arrives, the input may spend one of the account's outputs. A transaction
+/// whose funding attribution awaits re-derivation is likewise pending: an input it spends was
+/// found after it was stored.
 #[cfg(feature = "transparent-inputs")]
 fn has_pending_parent(
     conn: &rusqlite::Connection,
@@ -395,6 +398,8 @@ fn has_pending_parent(
                      WHERE m.spending_transaction_id = :transaction_id
                  )
              )
+         ) OR EXISTS (
+             SELECT 1 FROM tx_attribution_queue WHERE transaction_id = :transaction_id
          )",
         named_params![":transaction_id": transaction_id],
         |row| row.get(0),
@@ -441,6 +446,62 @@ fn has_unresolved_spend(
         named_params![":account_id": account_id, ":txid": txid.as_ref()],
         |row| row.get(0),
     )?)
+}
+
+/// Who funded the transaction, from the account's view. `transparent_settled` says whether the
+/// account's transparent evidence for it is settled, so that an input it does not own belongs to
+/// another party rather than awaiting discovery.
+fn transaction_funding(
+    conn: &rusqlite::Connection,
+    account_id: i64,
+    tx: &TransactionFacts,
+    account_spent: bool,
+    transparent_settled: bool,
+) -> Result<TransactionFunding, SqliteClientError> {
+    if !account_spent {
+        return Ok(TransactionFunding::NotFunded);
+    }
+    let other_wallet_funder: bool = conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM v_received_output_spends
+             WHERE transaction_id = :transaction_id AND account_id != :account_id
+         )",
+        named_params![":transaction_id": tx.id, ":account_id": account_id],
+        |row| row.get(0),
+    )?;
+    if other_wallet_funder {
+        return Ok(TransactionFunding::Shared);
+    }
+    if tx.constructed {
+        return Ok(TransactionFunding::Sole);
+    }
+    if !tx.has_full_data {
+        return Ok(TransactionFunding::Undetermined);
+    }
+    let raw: Vec<u8> = conn.query_row(
+        "SELECT raw FROM transactions WHERE id_tx = ?1",
+        [tx.id],
+        |row| row.get(0),
+    )?;
+    // Only the transparent inputs are inspected. The pre-v5 branch ID affects the decoded
+    // transaction's identity, which is unused here.
+    let inputs = Transaction::read(&raw[..], BranchId::Sprout)?
+        .transparent_bundle()
+        .filter(|bundle| !bundle.is_coinbase())
+        .map_or(0, |bundle| bundle.vin.len());
+    // No other wallet account spent in the transaction, so every linked spend is the account's.
+    let owned: usize = conn.query_row(
+        "SELECT COUNT(*) FROM transparent_received_output_spends WHERE transaction_id = ?1",
+        [tx.id],
+        |row| row.get(0),
+    )?;
+    Ok(if owned >= inputs {
+        TransactionFunding::Sole
+    } else if transparent_settled {
+        TransactionFunding::Shared
+    } else {
+        TransactionFunding::Undetermined
+    })
 }
 
 /// Returns `account`'s history view of each of `txids` that it has a recorded output or spend
@@ -631,7 +692,9 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
                 .and_then(|v| Zatoshis::from_u64(v).ok())
         });
         let recorded_sent = sent_elsewhere(conn, account_id, tx.id)?;
-        let aggregate_payment = if tx.constructed {
+        // Once every spent unit is accounted for, the recorded outputs sent elsewhere are all of
+        // the account's payments.
+        let aggregate_payment = if tx.constructed || payments_accounted {
             AggregatePayment::Exact(
                 Zatoshis::from_u64(recorded_sent)
                     .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?,
@@ -676,6 +739,12 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             HistoryClassification::Provisional
         };
 
+        let transparent_settled = effects
+            .iter()
+            .filter(|e| e.pool == PoolType::Transparent)
+            .all(|e| e.completeness.is_settled());
+        let funding = transaction_funding(conn, account_id, &tx, spent > 0, transparent_settled)?;
+
         entries.push(TransactionHistoryDetails {
             transaction_metadata,
             aggregate_payment,
@@ -691,6 +760,7 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             effects,
             payment_details,
             fee,
+            funding,
             classification,
             pending_private_details: pending_details(conn, mode, Some(tx.id))?,
         });

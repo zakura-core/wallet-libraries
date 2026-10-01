@@ -1066,6 +1066,26 @@ CREATE INDEX idx_sent_notes_transaction_id ON sent_notes (
     transaction_id
 )"#;
 
+/// Transactions whose stored wallet records must be re-derived from their raw data, because
+/// the evidence of which wallet accounts funded them changed after they were stored.
+///
+/// A transaction's sent outputs are attributed to the account that funded it only once the wallet
+/// can establish that account as the transaction's sole funder (see
+/// `zcash_client_backend::data_api::ll::wallet::store_decrypted_tx`). When a spend link from an
+/// already-stored transaction to a wallet output or note is created later (a transparent output
+/// recorded after its spender, or a note that scanning links to a transaction stored from its
+/// raw data), the spender is queued here, unless this wallet constructed it. The
+/// `WalletWrite::store_decrypted_tx`, `put_received_transparent_utxo` and `put_blocks` calls
+/// re-derive the queue within their database transaction.
+///
+/// ### Columns
+/// - `transaction_id`: the queued transaction. It always has raw data when queued.
+pub(super) const TABLE_TX_ATTRIBUTION_QUEUE: &str = r#"
+CREATE TABLE tx_attribution_queue (
+    transaction_id INTEGER PRIMARY KEY
+        REFERENCES transactions(id_tx) ON DELETE CASCADE
+)"#;
+
 /// Stores the set of transaction ids for which the backend required additional data.
 ///
 /// ### Columns:
@@ -1079,18 +1099,46 @@ CREATE INDEX idx_sent_notes_transaction_id ON sent_notes (
 ///   to blockchain scanning.
 /// - `policy_generation`: The durable transparent-policy generation that produced this row.
 ///   Public dispatch requires a matching current generation.
+/// - `reconfirm_mined`: `1` for a status obligation whose transaction was mined before a rewind
+///   un-mined it, and whose mined state has not been observed since. Compact-block rescanning
+///   cannot re-observe such a transaction, so its scanned height says nothing about whether it is
+///   mined, and the obligation is exempt from expiry dormancy until one status observation
+///   completes, whatever its result. The observation resets it to `0`, after which the ordinary
+///   rules apply.
 pub(super) const TABLE_TX_RETRIEVAL_QUEUE: &str = r#"
 CREATE TABLE "tx_retrieval_queue" (
     txid BLOB NOT NULL,
     query_type INTEGER NOT NULL,
     dependent_transaction_id INTEGER
         REFERENCES transactions(id_tx) ON DELETE CASCADE,
-    policy_generation INTEGER NOT NULL DEFAULT 0,
+    policy_generation INTEGER NOT NULL DEFAULT 0, reconfirm_mined INTEGER NOT NULL DEFAULT 0,
     CONSTRAINT tx_retrieval_intent UNIQUE (txid, query_type)
 )"#;
 pub(super) const INDEX_TX_RETIREVAL_QUEUE_DEPENDENT_TX: &str = r#"
 CREATE INDEX idx_tx_retrieval_queue_dependent_tx ON tx_retrieval_queue (
     dependent_transaction_id
+)"#;
+
+/// Wallet transparent outputs that a complete query of their address's unspent outputs did not
+/// return, recording that the output was spent although the wallet does not yet know by which
+/// transaction.
+///
+/// A row is recorded by `WalletWrite::notify_transparent_utxos_observed` for an output whose
+/// creating transaction is mined at or below the observed height and that has no spend by a
+/// transaction mined at or below that height. The output counts as spent while `observed_height`
+/// exceeds its `max_observed_unspent_height`; later evidence that it is unspent at or above the
+/// observed height supersedes the absence, and a rewind below the observed height removes it.
+/// The output is also queued for spend detection, so that ordinary enhancement finds and links
+/// the spending transaction.
+///
+/// ### Columns
+/// - `output_id`: the absent output.
+/// - `observed_height`: the chain height at which the output was observed to be absent.
+pub(super) const TABLE_TRANSPARENT_UTXO_ABSENCES: &str = r#"
+CREATE TABLE transparent_utxo_absences (
+    output_id INTEGER PRIMARY KEY
+        REFERENCES transparent_received_outputs(id) ON DELETE CASCADE,
+    observed_height INTEGER NOT NULL
 )"#;
 
 /// Stores the set of transaction outputs received by the wallet for which spend information
@@ -1586,7 +1634,9 @@ sent_note_counts AS (
     FROM sent_notes
     LEFT JOIN v_received_outputs ro ON sent_notes.id = ro.sent_note_id
     WHERE COALESCE(ro.is_change, 0) = 0
-    GROUP BY account_id, sent_notes.transaction_id
+    -- Group by the sending account. A bare `account_id` here would resolve to the joined
+    -- `ro.account_id`, splitting one sender's notes into a group per receiving account.
+    GROUP BY sent_notes.from_account_id, sent_notes.transaction_id
 ),
 -- Identifies the transactions that are wallet-internal transfers moving an account's own
 -- funds between shielded pools, and reports the value that crossed. `crossing_value` is

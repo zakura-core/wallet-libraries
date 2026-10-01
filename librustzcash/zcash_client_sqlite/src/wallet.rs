@@ -3819,6 +3819,17 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
 ) -> Result<(), SqliteClientError> {
     let chain_tip = chain_tip_height(conn)?.ok_or(SqliteClientError::ChainHeightUnknown)?;
 
+    // A completed observation is the re-confirmation a rewound transaction awaited; from now on the
+    // ordinary rules govern its obligation.
+    conn.execute(
+        "UPDATE tx_retrieval_queue SET reconfirm_mined = 0
+         WHERE txid = :txid AND query_type = :status_type",
+        named_params![
+            ":txid": txid.as_ref(),
+            ":status_type": TxQueryType::Status.code(),
+        ],
+    )?;
+
     match status {
         TransactionStatus::TxidNotRecognized | TransactionStatus::NotInMainChain => {
             conn.execute(
@@ -4277,7 +4288,19 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         named_params![":height": u32::from(truncation_height)],
     )?;
 
+    // An absence observed above the truncation height no longer describes the accepted chain.
+    conn.execute(
+        "DELETE FROM transparent_utxo_absences WHERE observed_height > :height",
+        named_params![":height": u32::from(truncation_height)],
+    )?;
+
     ironwood_hooks::truncate_before_unmine(conn, truncation_height)?;
+
+    // Rescanning re-observes a transaction only through the wallet's shielded spends or outputs in
+    // it. Every other transaction about to be un-mined needs a status observation to be marked
+    // mined again, so it receives the same durable intent as an unmined transaction stored without
+    // shielded involvement.
+    queue_status_for_unobservable_transactions(conn, Some(truncation_height))?;
 
     // Un-mine transactions. This must be done outside of the last_scanned_height check because
     // transaction entries may be created as a consequence of receiving transparent TXOs.
@@ -4669,7 +4692,11 @@ pub(crate) fn truncate_to_chain_state<P: consensus::Parameters, CL, R>(
 /// the deepest such checkpoint retained by *any* pool (via
 /// [`commitment_tree::min_checkpoint_id_at_or_above`]) — so that
 /// [`truncate_to_height_internal`] has a real checkpoint to truncate to under non-contiguous
-/// scan orders. A pool whose own checkpoints do not cover that height is handled by the
+/// scan orders. When no pool retains such a checkpoint, no tree holds state above the target,
+/// and the wallet is truncated at the target itself with every tree left untouched. Scanning
+/// checkpoints a block only when it appends note commitments, so this is the normal state of a
+/// wallet that has seen no shielded outputs near the tip, such as one adding an account whose
+/// birthday is the current tip. A pool whose own checkpoints do not cover that height is handled by the
 /// per-pool [`TreeTruncation`] classification: a tree with no checkpoint above the height is
 /// left untouched, a tree whose checkpoints all lie above it is reset to its completed
 /// subtree roots (with the requeued rescan re-creating the rest), and a tree whose
@@ -4794,7 +4821,15 @@ pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
             window_floor = window_floor.into_iter().chain(pool_floor).min();
         }
 
-        let truncation_height = window_floor.unwrap_or(pruning_floor);
+        // When no pool retains a checkpoint at or above `truncation_target`, no tree holds
+        // state above it: scanning checkpoints every block that appends a note commitment,
+        // and checkpoint pruning removes the oldest first. Truncating at the target then
+        // leaves every tree untouched (`TreeTruncation::Unaffected`). Any lower height,
+        // such as the pruning floor, would discard wallet data for no reason, and would be
+        // misreported as corruption whenever a tree retains checkpoints on both sides of
+        // that height, which is the normal state of a wallet whose last shielded activity
+        // lies inside the pruning window.
+        let truncation_height = window_floor.unwrap_or(truncation_target);
 
         // Use `truncate_to_height_internal` to perform full truncation of data within the
         // pruning window. Blocks above `target_height` are re-scanned by the `Historic`
@@ -5032,14 +5067,13 @@ pub(crate) fn get_txs_spending_transparent_outputs_of<P: consensus::Parameters>(
         "SELECT DISTINCT t.id_tx, t.raw, t.mined_height, t.expiry_height
          FROM transactions t
          -- find transactions that spend transparent outputs of the decrypted tx
-         LEFT OUTER JOIN transparent_received_output_spends ts
+         JOIN transparent_received_output_spends ts
             ON ts.transaction_id = t.id_tx
-         LEFT OUTER JOIN transparent_received_outputs tro
-            ON tro.transaction_id = :transaction_id
-            AND tro.id = ts.transparent_received_output_id
-         WHERE t.fee IS NULL
-         AND t.raw IS NOT NULL
-         AND ts.transaction_id IS NOT NULL",
+         JOIN transparent_received_outputs tro
+            ON tro.id = ts.transparent_received_output_id
+         WHERE tro.transaction_id = :transaction_id
+         AND t.fee IS NULL
+         AND t.raw IS NOT NULL",
     )?;
 
     spending_txs_stmt
@@ -5059,6 +5093,81 @@ pub(crate) fn get_txs_spending_transparent_outputs_of<P: consensus::Parameters>(
             Ok((spending_tx_ref, spending_tx))
         })?
         .collect()
+}
+
+/// Returns the queued transactions whose wallet records must be re-derived, with their mined
+/// heights. See [`LowLevelWalletRead::get_funding_attribution_queue`].
+///
+/// [`LowLevelWalletRead::get_funding_attribution_queue`]: zcash_client_backend::data_api::ll::LowLevelWalletRead::get_funding_attribution_queue
+pub(crate) fn get_funding_attribution_queue<P: consensus::Parameters>(
+    conn: &rusqlite::Connection,
+    params: &P,
+) -> Result<Vec<(TxRef, Transaction, Option<BlockHeight>)>, SqliteClientError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT t.id_tx, t.raw, t.mined_height, t.expiry_height
+         FROM tx_attribution_queue q
+         JOIN transactions t ON t.id_tx = q.transaction_id
+         WHERE t.raw IS NOT NULL
+         ORDER BY t.id_tx",
+    )?;
+    stmt.query_and_then([], |row| {
+        let tx_ref = row.get(0).map(TxRef)?;
+        let tx_bytes: Vec<u8> = row.get(1)?;
+        let mined_height = row.get::<_, Option<u32>>(2)?.map(BlockHeight::from);
+        let expiry: Option<u32> = row.get(3)?;
+        let (_, tx) = parse_tx(
+            params,
+            &tx_bytes,
+            mined_height,
+            expiry.map(BlockHeight::from),
+        )?;
+        Ok((tx_ref, tx, mined_height))
+    })?
+    .collect()
+}
+
+/// Queues `tx_ref` for re-derivation, after a spend link to one of its inputs was created, if its
+/// records were derived from raw data: a transaction this wallet constructed keeps its
+/// construction records, and one without raw data is derived when its data arrives. See
+/// [`TABLE_TX_ATTRIBUTION_QUEUE`].
+///
+/// [`TABLE_TX_ATTRIBUTION_QUEUE`]: db::TABLE_TX_ATTRIBUTION_QUEUE
+pub(crate) fn queue_funding_attribution(
+    conn: &rusqlite::Connection,
+    tx_ref: TxRef,
+) -> Result<(), SqliteClientError> {
+    conn.prepare_cached(
+        "INSERT INTO tx_attribution_queue (transaction_id)
+         SELECT id_tx FROM transactions
+         WHERE id_tx = :transaction_id AND raw IS NOT NULL AND created IS NULL
+         ON CONFLICT (transaction_id) DO NOTHING",
+    )?
+    .execute(named_params![":transaction_id": tx_ref.0])?;
+    Ok(())
+}
+
+pub(crate) fn dequeue_funding_attribution(
+    conn: &rusqlite::Connection,
+    tx_ref: TxRef,
+) -> Result<(), SqliteClientError> {
+    conn.prepare_cached("DELETE FROM tx_attribution_queue WHERE transaction_id = :transaction_id")?
+        .execute(named_params![":transaction_id": tx_ref.0])?;
+    Ok(())
+}
+
+/// Deletes the sent outputs derived from the decrypted data of `tx_ref`. A transaction the wallet
+/// constructed (`transactions.created` is set) keeps the records made at construction.
+pub(crate) fn delete_derived_sent_outputs(
+    conn: &rusqlite::Connection,
+    tx_ref: TxRef,
+) -> Result<(), SqliteClientError> {
+    conn.prepare_cached(
+        "DELETE FROM sent_notes
+         WHERE transaction_id = :transaction_id
+         AND (SELECT created FROM transactions WHERE id_tx = :transaction_id) IS NULL",
+    )?
+    .execute(named_params![":transaction_id": tx_ref.0])?;
+    Ok(())
 }
 
 pub(crate) fn update_tx_fee(
@@ -5334,6 +5443,50 @@ pub(crate) fn queue_tx_status(
     Ok(())
 }
 
+/// Queues a durable obligation to re-confirm the mined state of every transaction that
+/// compact-block scanning cannot observe, because the wallet has neither a shielded spend nor a
+/// shielded output in it: those mined above `above`, which a truncation is about to un-mine, or,
+/// without a height, those already unmined. Such a transaction was mined before, so its
+/// obligation is exempt from expiry dormancy until one status observation completes (see
+/// `tx_retrieval_queue.reconfirm_mined`).
+pub(crate) fn queue_status_for_unobservable_transactions(
+    conn: &rusqlite::Transaction<'_>,
+    above: Option<BlockHeight>,
+) -> Result<(), SqliteClientError> {
+    let expected = transparent_ledger::capture_policy_generation(conn)?;
+    transparent_ledger::ensure_policy_generation(conn, expected)?;
+    let shielded_involvement = ["sapling", "orchard", "ironwood"]
+        .iter()
+        .map(|pool| {
+            format!(
+                "EXISTS (SELECT 1 FROM {pool}_received_notes n WHERE n.transaction_id = t.id_tx)
+                 OR EXISTS (SELECT 1 FROM {pool}_received_note_spends s
+                            WHERE s.transaction_id = t.id_tx)"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    conn.execute(
+        &format!(
+            "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation, reconfirm_mined)
+             SELECT t.txid, :status_type, :policy_generation, 1
+             FROM transactions t
+             WHERE CASE WHEN :above IS NULL THEN t.mined_height IS NULL
+                        ELSE t.mined_height > :above END
+             AND NOT ({shielded_involvement})
+             ON CONFLICT (txid, query_type) DO UPDATE SET reconfirm_mined = 1"
+        ),
+        named_params![
+            ":status_type": TxQueryType::Status.code(),
+            ":policy_generation": i64::try_from(expected).map_err(|_| {
+                SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
+            })?,
+            ":above": above.map(u32::from),
+        ],
+    )?;
+    Ok(())
+}
+
 /// Returns routed status work representing the observations needed
 /// by the wallet backend in order to be able to present a complete view of wallet history.
 ///
@@ -5372,6 +5525,7 @@ pub(crate) fn transaction_status_work(
             OR t.expiry_height = 0
             OR :scanned_height IS NULL
             OR :scanned_height < t.expiry_height + :reorg_depth
+            OR q.reconfirm_mined = 1
          )
          AND (
             t.confirmed_unmined_at_height IS NULL
@@ -7442,6 +7596,72 @@ mod tests {
             table_row_count(st.wallet().conn(), "ironwood_tree_shards"),
             0
         );
+    }
+
+    /// A rewind to a height above every retained checkpoint touches no tree state, so it must
+    /// truncate the wallet to that height and leave the trees untouched. Scanning checkpoints a
+    /// block only at its last note commitment, so a wallet that has seen no shielded outputs
+    /// for a while has no checkpoint near the tip. This is the state of a wallet that adds an
+    /// account whose birthday is the current tip.
+    ///
+    /// Here the pruning window (the last `PRUNING_DEPTH` scanned blocks) holds one checkpoint,
+    /// below the target, and older checkpoints lie below the window. Falling back to the
+    /// window's floor would select a height with checkpoints both above and below it and none
+    /// at it, and the rewind would wrongly report `CorruptedData`.
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn rewind_to_chain_state_above_every_checkpoint_leaves_trees_untouched() {
+        let (mut st, start_height) = wallet_with_scanned_blocks();
+        let dfvk = ExtendedSpendingKey::master(&[]).to_diversifiable_full_viewing_key();
+        let value = Zatoshis::const_from_u64(10000);
+
+        for _ in 0..50 {
+            st.generate_empty_block();
+        }
+        let (inner_checkpoint, _, _) =
+            st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        for _ in 0..60 {
+            st.generate_empty_block();
+        }
+        let (tip, _) = st.generate_empty_block();
+        st.scan_cached_blocks(
+            start_height + 5,
+            usize::try_from(tip - start_height).unwrap(),
+        );
+        assert_eq!(max_block_height(st.wallet().conn()), Some(tip));
+
+        let checkpoints = |st: &TestState<BlockCache, TestDb, LocalNetwork>| -> Vec<u32> {
+            let mut stmt = st
+                .wallet()
+                .conn()
+                .prepare(
+                    "SELECT checkpoint_id FROM sapling_tree_checkpoints ORDER BY checkpoint_id",
+                )
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let before = checkpoints(&st);
+        let pruning_floor = tip - (crate::PRUNING_DEPTH - 1);
+        // The precondition the old fallback mishandled: checkpoints below the pruning floor,
+        // one inside the window, and none at or above the target.
+        assert!(before.iter().any(|h| *h < u32::from(pruning_floor)));
+        assert!(before.contains(&u32::from(inner_checkpoint)));
+        assert!(inner_checkpoint > pruning_floor);
+        let target_height = tip - 1;
+        assert!(before.iter().all(|h| *h < u32::from(target_height)));
+
+        let result = st.wallet_mut().rewind_to_chain_state(
+            ChainState::empty(target_height, BlockHash([0; 32])),
+            HashSet::new(),
+        );
+        assert_matches!(result, Ok(()));
+
+        assert_eq!(max_block_height(st.wallet().conn()), Some(target_height));
+        assert!(rescan_queued_from(st.wallet().conn(), target_height + 1));
+        assert_eq!(checkpoints(&st), before);
     }
 
     /// `rewind_to_chain_state` must not report `CorruptedData` when the Orchard tree is

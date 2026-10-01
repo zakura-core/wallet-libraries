@@ -11,6 +11,27 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- `WalletWrite::notify_transparent_utxos_observed` (behind `transparent-inputs`) reports a
+  complete query of an address's unspent transparent outputs (start height, the height it
+  reflects, and the outpoints returned). A wallet output mined in that range that the query did
+  not return, and that no transaction mined by then is known to spend, stops counting as
+  spendable and is requested through `transaction_data_requests` until its spender is stored.
+  Implementors of `WalletWrite` with `transparent-inputs` must provide it.
+- `data_api::ll::wallet::reprocess_funding_attribution` re-derives stored transactions whose
+  funding evidence changed after they were stored (for example, a send a restored wallet found
+  through its change before the outputs it spends). Backends call it in the same database
+  transaction as the operation that recorded the newly known outputs.
+- `data_api::transparent_ledger::TransactionFunding` and
+  `TransactionHistoryDetails::funding`: whether the account funded a transaction alone, with
+  other wallet accounts or outside parties (`Shared`), not at all, or undetermined. For a
+  `Shared` transaction the reported fee is the whole transaction's fee, and consumers must not
+  infer the account's payment amount or fee share from its net movement. Adding the field is a
+  breaking change for code that constructs `TransactionHistoryDetails`.
+- Re-derivation also covers shielded funding: a stored transaction is queued when scanning or a
+  later note links it to a note it spends.
+- `LowLevelWalletRead::get_funding_attribution_queue`, and
+  `LowLevelWalletWrite::{dequeue_funding_attribution, delete_derived_sent_outputs}`, which
+  implementors must provide. This is a breaking change for `LowLevelWallet*` implementors.
 - `tor::Client::connect_lightwalletd_channel` returns the Tor-routed `tonic` channel that
   `connect_to_lightwalletd` wraps, so callers can layer `tower` services over it.
 - `TransparentLedgerRead::transparent_recovery_work` and typed bounded batches of pending pages and missing coverage ranges. Requery after committing each batch; scheduling grants no source or financial authority.
@@ -75,6 +96,16 @@ workspace.
   details.
 
 ### Changed
+- `data_api::ll::wallet::store_decrypted_tx` attributes a transaction's sent outputs to a funding
+  account only when that account is the transaction's sole wallet funder and every transparent
+  input spends one of its outputs (TODO #1305). A transaction funded by several wallet accounts,
+  or sharing inputs with an outside party, records each account's spends and receipts and the
+  whole fee, but no sent outputs: no payment, recipient, or fee share is attributed to a single
+  account. Outputs recovered with an outgoing viewing key are not attributed in a jointly funded
+  transaction either. A transaction that spends a wallet output is stored even when it has no
+  attributable outputs, and the parents of its transparent inputs are queued for retrieval.
+- `scanning::full` no longer attributes the outputs of a transaction funded by several wallet
+  accounts to the account with the lowest identifier.
 - `sync::run` requires `TransparentLedgerRead` and refreshes UTXOs only when the
   configured transparent ledger mode retains public authority. The mode is
   resolved before any request, so an unconfigured store fails instead of

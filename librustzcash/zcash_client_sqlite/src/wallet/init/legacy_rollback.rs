@@ -213,6 +213,28 @@ pub(super) fn resume_current(conn: &mut Connection) -> Result<(), WalletMigratio
     // continue to resolve while SQLite validates the schema.
     tx.execute_batch(&updated)?;
     tx.execute_batch("ALTER TABLE transactions DROP COLUMN zip318_kind")?;
+    // Older writers attribute sent outputs under their own rules. Re-derive the transactions they
+    // may have stored once the queue exists; a wallet prepared before it existed has every
+    // affected transaction queued when the migration that creates it runs.
+    let queue_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tx_attribution_queue')",
+        [],
+        |r| r.get(0),
+    )?;
+    if queue_exists {
+        tx.execute(migrations::QUEUE_AFFECTED_TRANSACTIONS, [])?;
+    }
+    // Older writers' rewinds do not request status for the transactions they un-mine. A wallet
+    // prepared before re-confirmation provenance existed gets it from the migrations that follow.
+    let reconfirmation: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tx_retrieval_queue')
+                       WHERE name = 'reconfirm_mined')",
+        [],
+        |r| r.get(0),
+    )?;
+    if reconfirmation {
+        crate::wallet::queue_status_for_unobservable_transactions(&tx, None)?;
+    }
     tx.commit()?;
     Ok(())
 }

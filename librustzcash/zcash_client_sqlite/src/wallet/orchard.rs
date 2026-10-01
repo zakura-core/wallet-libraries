@@ -584,6 +584,10 @@ pub(crate) fn put_received_note<
             ],
         )?;
         super::ironwood_hooks::put_received_note_spend(conn, shielded_pool, spent_in, inserted)?;
+        if inserted > 0 {
+            // The spender was stored before the wallet found the note it spends.
+            super::queue_funding_attribution(conn, spent_in)?;
+        }
     }
 
     Ok(account_id)
@@ -735,7 +739,11 @@ fn mark_note_spent(
 
     match stmt_mark_note_spent.execute(sql_params)? {
         0 => Ok(false),
-        1 => Ok(true),
+        1 => {
+            // The transaction may have been stored before the wallet knew it spent this note.
+            super::queue_funding_attribution(conn, tx_ref)?;
+            Ok(true)
+        }
         _ => unreachable!("nf column is marked as UNIQUE"),
     }
 }

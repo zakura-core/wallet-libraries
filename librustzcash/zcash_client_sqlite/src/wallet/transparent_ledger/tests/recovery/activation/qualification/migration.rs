@@ -297,13 +297,34 @@ impl PreLedgerWallet {
         let wallet_rows = |conn: &Connection| {
             production_dump(conn)
                 .into_iter()
-                .filter(|(table, _)| table != "schemer_migrations")
+                // Later migrations' work queue and absence records, not wallet data.
+                .filter(|(table, _)| {
+                    ![
+                        "schemer_migrations",
+                        "tx_attribution_queue",
+                        "transparent_utxo_absences",
+                    ]
+                    .contains(&table.as_str())
+                })
                 .collect::<Vec<_>>()
         };
         let before = wallet_rows(&self.db.conn);
         WalletMigrator::new().init_or_migrate(&mut self.db).unwrap();
-        // The upgrade changes nothing the wallet already held.
-        assert_eq!(wallet_rows(&self.db.conn), before);
+        // The upgrade changes nothing the wallet already held. Later migrations may add status
+        // observations to the retrieval queue, keeping every row queued before.
+        let split = |rows: Vec<(String, Vec<String>)>| {
+            let (queue, rest): (Vec<_>, Vec<_>) = rows
+                .into_iter()
+                .partition(|(table, _)| table == "tx_retrieval_queue");
+            (
+                queue.into_iter().flat_map(|(_, r)| r).collect::<Vec<_>>(),
+                rest,
+            )
+        };
+        let (queued_before, before) = split(before);
+        let (queued_after, after) = split(wallet_rows(&self.db.conn));
+        assert_eq!(after, before);
+        assert!(queued_before.iter().all(|row| queued_after.contains(row)));
         assert_eq!(
             super::super::super::super::records_without_origin(&self.db.conn),
             0

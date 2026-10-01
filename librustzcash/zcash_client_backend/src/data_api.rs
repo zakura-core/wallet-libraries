@@ -4119,6 +4119,40 @@ pub trait WalletWrite:
         )
     }
 
+    /// Reports the result of a complete query of the unspent transparent outputs received at
+    /// `address`, so that the wallet learns of spends by transactions it has not seen.
+    ///
+    /// Call this after storing each returned output with [`Self::put_received_transparent_utxo`]
+    /// and only when the query is complete: it was not truncated by an entry limit, and its
+    /// response stream ended without error.
+    ///
+    /// # Arguments
+    /// - `address`: the queried address.
+    /// - `start_height`: the query's start height. Only outputs mined at or above it are judged.
+    /// - `as_of_height`: a height at or below the chain state the query reflects, such as the
+    ///   chain tip the caller observed immediately before issuing the query.
+    /// - `unspent`: every outpoint the query returned for `address`.
+    ///
+    /// A wallet output at `address` whose creating transaction is mined in
+    /// `start_height..=as_of_height`, that was not returned, and that the wallet does not know to be spent by a
+    /// transaction mined at or below that height, has been spent by a transaction the wallet has
+    /// not linked. The wallet stops counting it as spendable and requests the spend through
+    /// [`WalletRead::transaction_data_requests`]; storing the spending transaction links it.
+    /// Evidence that the output is unspent at or above `as_of_height`, such as a later query that
+    /// returns it, supersedes the absence, and so does a rewind below `as_of_height`.
+    #[cfg(feature = "transparent-inputs")]
+    fn notify_transparent_utxos_observed(
+        &mut self,
+        _address: &TransparentAddress,
+        _start_height: BlockHeight,
+        _as_of_height: BlockHeight,
+        _unspent: &[OutPoint],
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        unimplemented!(
+            "WalletWrite::notify_transparent_utxos_observed must be overridden for wallets to use the `transparent-inputs` feature"
+        )
+    }
+
     /// Notifies the wallet backend that a specific transparent output was confirmed unspent as of
     /// the given height, in response to a [`TransactionDataRequest::GetSpendingTx`]
     /// request.
