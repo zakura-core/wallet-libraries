@@ -222,10 +222,7 @@ fn a_rewound_transaction_is_reconfirmed_even_after_rescanning_past_its_expiry() 
     // birthday to far past the send's expiry in one pass, before any status work runs.
     import_account(&mut st, 9);
     let birthday = st.test_account().unwrap().birthday().height();
-    st.scan_cached_blocks(
-        birthday,
-        usize::try_from(u32::from(mined - birthday) + 1).unwrap(),
-    );
+    st.scan_cached_blocks(birthday, usize::try_from((mined - birthday) + 1).unwrap());
     scan_new_blocks(&mut st, 110);
     assert_eq!(mined_height(&st, &send), None);
 
