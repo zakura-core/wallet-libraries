@@ -4277,7 +4277,19 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         named_params![":height": u32::from(truncation_height)],
     )?;
 
+    // An absence observed above the truncation height no longer describes the accepted chain.
+    conn.execute(
+        "DELETE FROM transparent_utxo_absences WHERE observed_height > :height",
+        named_params![":height": u32::from(truncation_height)],
+    )?;
+
     ironwood_hooks::truncate_before_unmine(conn, truncation_height)?;
+
+    // Rescanning re-observes a transaction only through the wallet's shielded spends or outputs in
+    // it. Every other transaction about to be un-mined needs a status observation to be marked
+    // mined again, so it receives the same durable intent as an unmined transaction stored without
+    // shielded involvement.
+    queue_status_for_unobservable_transactions(conn, Some(truncation_height))?;
 
     // Un-mine transactions. This must be done outside of the last_scanned_height check because
     // transaction entries may be created as a consequence of receiving transparent TXOs.
@@ -5091,17 +5103,20 @@ pub(crate) fn get_funding_attribution_queue<P: consensus::Parameters>(
     .collect()
 }
 
-/// Queues `tx_ref` for re-derivation if it has raw data. See [`TABLE_TX_ATTRIBUTION_QUEUE`].
+/// Queues `tx_ref` for re-derivation, after a spend link to one of its inputs was created, if its
+/// records were derived from raw data: a transaction this wallet constructed keeps its
+/// construction records, and one without raw data is derived when its data arrives. See
+/// [`TABLE_TX_ATTRIBUTION_QUEUE`].
 ///
 /// [`TABLE_TX_ATTRIBUTION_QUEUE`]: db::TABLE_TX_ATTRIBUTION_QUEUE
-#[cfg(feature = "transparent-inputs")]
 pub(crate) fn queue_funding_attribution(
     conn: &rusqlite::Connection,
     tx_ref: TxRef,
 ) -> Result<(), SqliteClientError> {
     conn.prepare_cached(
         "INSERT INTO tx_attribution_queue (transaction_id)
-         SELECT id_tx FROM transactions WHERE id_tx = :transaction_id AND raw IS NOT NULL
+         SELECT id_tx FROM transactions
+         WHERE id_tx = :transaction_id AND raw IS NOT NULL AND created IS NULL
          ON CONFLICT (transaction_id) DO NOTHING",
     )?
     .execute(named_params![":transaction_id": tx_ref.0])?;
@@ -5402,6 +5417,48 @@ pub(crate) fn queue_tx_status(
         ],
     )?;
 
+    Ok(())
+}
+
+/// Queues a durable status-observation intent for every transaction that compact-block scanning
+/// cannot observe, because the wallet has neither a shielded spend nor a shielded output in it:
+/// those mined above `above`, which a truncation is about to un-mine, or, without a height, those
+/// already unmined.
+pub(crate) fn queue_status_for_unobservable_transactions(
+    conn: &rusqlite::Transaction<'_>,
+    above: Option<BlockHeight>,
+) -> Result<(), SqliteClientError> {
+    let expected = transparent_ledger::capture_policy_generation(conn)?;
+    transparent_ledger::ensure_policy_generation(conn, expected)?;
+    let shielded_involvement = ["sapling", "orchard", "ironwood"]
+        .iter()
+        .map(|pool| {
+            format!(
+                "EXISTS (SELECT 1 FROM {pool}_received_notes n WHERE n.transaction_id = t.id_tx)
+                 OR EXISTS (SELECT 1 FROM {pool}_received_note_spends s
+                            WHERE s.transaction_id = t.id_tx)"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    conn.execute(
+        &format!(
+            "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation)
+             SELECT t.txid, :status_type, :policy_generation
+             FROM transactions t
+             WHERE CASE WHEN :above IS NULL THEN t.mined_height IS NULL
+                        ELSE t.mined_height > :above END
+             AND NOT ({shielded_involvement})
+             ON CONFLICT (txid, query_type) DO NOTHING"
+        ),
+        named_params![
+            ":status_type": TxQueryType::Status.code(),
+            ":policy_generation": i64::try_from(expected).map_err(|_| {
+                SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
+            })?,
+            ":above": above.map(u32::from),
+        ],
+    )?;
     Ok(())
 }
 

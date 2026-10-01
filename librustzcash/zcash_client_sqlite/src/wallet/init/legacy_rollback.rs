@@ -224,6 +224,8 @@ pub(super) fn resume_current(conn: &mut Connection) -> Result<(), WalletMigratio
     if queue_exists {
         tx.execute(migrations::QUEUE_AFFECTED_TRANSACTIONS, [])?;
     }
+    // Older writers' rewinds do not request status for the transactions they un-mine.
+    crate::wallet::queue_status_for_unobservable_transactions(&tx, None)?;
     tx.commit()?;
     Ok(())
 }

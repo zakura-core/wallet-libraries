@@ -1279,6 +1279,10 @@ where
     // durable status-observation intent created when the transaction was sent.
     wallet_db.delete_retrieval_queue_entries(d_tx.tx().txid())?;
 
+    // The transaction has just been derived from all current evidence, including any spend links
+    // created while storing it.
+    wallet_db.dequeue_funding_attribution(tx_ref)?;
+
     // A shielded bundle is observable through compact-block scanning only when this wallet can
     // match one of its real nullifiers or decrypt one of its outputs. Transactions without either
     // capability require explicit status observation by txid.

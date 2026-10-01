@@ -11,6 +11,12 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- `WalletWrite::notify_transparent_utxos_observed` (behind `transparent-inputs`) reports a
+  complete query of an address's unspent transparent outputs (start height, the height it
+  reflects, and the outpoints returned). A wallet output mined in that range that the query did
+  not return, and that no transaction mined by then is known to spend, stops counting as
+  spendable and is requested through `transaction_data_requests` until its spender is stored.
+  Implementors of `WalletWrite` with `transparent-inputs` must provide it.
 - `data_api::ll::wallet::reprocess_funding_attribution` re-derives stored transactions whose
   funding evidence changed after they were stored (for example, a send a restored wallet found
   through its change before the outputs it spends). Backends call it in the same database
@@ -21,12 +27,8 @@ workspace.
   `Shared` transaction the reported fee is the whole transaction's fee, and consumers must not
   infer the account's payment amount or fee share from its net movement. Adding the field is a
   breaking change for code that constructs `TransactionHistoryDetails`.
-- `data_api::transparent_ledger::TransactionFunding` and
-  `TransactionHistoryDetails::funding`: whether the account funded a transaction alone, with
-  other wallet accounts or outside parties (`Shared`), not at all, or undetermined. For a
-  `Shared` transaction the reported fee is the whole transaction's fee, and consumers must not
-  infer the account's payment amount or fee share from its net movement. Adding the field is a
-  breaking change for code that constructs `TransactionHistoryDetails`.
+- Re-derivation also covers shielded funding: a stored transaction is queued when scanning or a
+  later note links it to a note it spends.
 - `LowLevelWalletRead::get_funding_attribution_queue`, and
   `LowLevelWalletWrite::{dequeue_funding_attribution, delete_derived_sent_outputs}`, which
   implementors must provide. This is a breaking change for `LowLevelWallet*` implementors.

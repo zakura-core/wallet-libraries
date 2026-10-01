@@ -1449,6 +1449,8 @@ mod history;
 
 mod attribution;
 
+mod spend_evidence;
+
 mod qualification;
 
 mod gating {

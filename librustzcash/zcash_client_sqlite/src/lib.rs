@@ -2745,6 +2745,19 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         self.transactionally(|wdb| wdb.notify_address_checked(request, as_of_height))
     }
 
+    #[cfg(feature = "transparent-inputs")]
+    fn notify_transparent_utxos_observed(
+        &mut self,
+        address: &TransparentAddress,
+        start_height: BlockHeight,
+        as_of_height: BlockHeight,
+        unspent: &[OutPoint],
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        self.transactionally(|wdb| {
+            wdb.notify_transparent_utxos_observed(address, start_height, as_of_height, unspent)
+        })
+    }
+
     #[cfg(feature = "spend-index")]
     fn notify_output_verified_unspent(
         &mut self,
@@ -3080,7 +3093,9 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             blocks,
             anchor_retention.as_ref(),
         )
-        .map_err(SqliteClientError::from)
+        .map_err(SqliteClientError::from)?;
+        // Scanning links stored transactions to the notes they spend.
+        self.reprocess_funding_attribution()
     }
 
     fn put_received_transparent_utxo(
@@ -3330,6 +3345,29 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             &self.params,
             request.address(),
             as_of_height,
+        )
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn notify_transparent_utxos_observed(
+        &mut self,
+        address: &TransparentAddress,
+        start_height: BlockHeight,
+        as_of_height: BlockHeight,
+        unspent: &[OutPoint],
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        // The query is public discovery, admitted on the same terms as the outputs it returned.
+        wallet::transparent_ledger::check_public_discovery(
+            self.conn.0,
+            self.transparent_ledger_mode,
+        )?;
+        wallet::transparent::notify_transparent_utxos_observed(
+            self.conn.0,
+            &self.params,
+            address,
+            start_height,
+            as_of_height,
+            unspent,
         )
     }
 

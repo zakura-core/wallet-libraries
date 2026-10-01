@@ -296,9 +296,11 @@ pub trait LowLevelWalletRead {
     /// data, because the evidence of which wallet accounts funded them has changed since they were
     /// stored, each with its mined height if known.
     ///
-    /// A backend queues a stored transaction here when it records a transparent output that the
-    /// transaction was already known to spend. [`wallet::reprocess_funding_attribution`] drains
-    /// the queue.
+    /// A backend queues a stored transaction, other than one this wallet constructed, when it
+    /// links the transaction to a wallet output or note that the transaction spends but that was
+    /// found after the transaction was stored: a transparent output recorded later, or a note
+    /// that scanning links to the transaction. [`wallet::store_decrypted_tx`] removes the
+    /// transaction it stores, and [`wallet::reprocess_funding_attribution`] drains the queue.
     #[allow(clippy::type_complexity)]
     fn get_funding_attribution_queue(
         &self,

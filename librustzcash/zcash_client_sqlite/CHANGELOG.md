@@ -26,9 +26,27 @@ workspace.
   transaction, and `store_decrypted_tx` / `put_received_transparent_utxo` re-derive the queue in
   the same database transaction. `transaction_history_details` reports a queued transaction's
   public transparent effects as incomplete.
-- `transaction_history_details` reports `TransactionHistoryDetails::funding`. A transaction is
-  `Shared` when another wallet account spent in it, or when one of its transparent inputs is not
-  the account's once the account's transparent evidence is settled.
+- Fixed transactions left unmined by a rewind. A truncation (a reorg, or importing an account
+  whose birthday is below the scanned tip) un-mined every transaction above it, and compact-block
+  rescanning re-observes only transactions with the wallet's shielded spends or outputs. A
+  transparent-only transaction was therefore never marked mined again and was eventually reported
+  as expired. Truncation now queues a status observation for each such transaction it un-mines,
+  and the `unmined_status_obligations` migration (and returning from a legacy writer) queues one
+  for every unmined transaction rescanning cannot observe.
+- `notify_transparent_utxos_observed` records outputs a complete UTXO query did not return in the
+  new `transparent_utxo_absences` table (migration `transparent_utxo_absences`). Such an output is
+  excluded from balances and input selection while the absence is newer than its last observation
+  as unspent; a rewind below the observation removes it. It is queued for spend detection, and the
+  address search reaches the observed height instead of stopping at the expiry delta.
+- Spend detection for a transparent output is kept while its only known spender is unmined, and a
+  spend by an expired transaction no longer suppresses the search. Previously storing an unmined
+  spend dropped the search for good, so a withheld or expired local spend hid a conflicting spend
+  by another transaction.
+- The address-based spend search now joins the queued output itself rather than every wallet
+  output of the same transaction.
+- A transaction stored from raw data is also queued for re-derivation when scanning, or a note found
+  later, links it to a note it spends; `put_blocks` drains the queue. Transactions this wallet
+  constructed are never queued, and storing a transaction removes it from the queue.
 - `transaction_history_details` reports `TransactionHistoryDetails::funding`. A transaction is
   `Shared` when another wallet account spent in it, or when one of its transparent inputs is not
   the account's once the account's transparent evidence is settled.

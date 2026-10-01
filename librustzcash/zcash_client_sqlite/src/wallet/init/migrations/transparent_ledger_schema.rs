@@ -215,13 +215,27 @@ mod tests {
     }
 
     /// Every row of every table that is not ledger-owned or migration bookkeeping.
+    /// Wallet tables are unchanged by the upgrade, except that later migrations may add status
+    /// observations to the retrieval queue; every row queued before is kept.
+    fn assert_retained(
+        mut after: BTreeMap<String, Vec<Vec<Value>>>,
+        before: &BTreeMap<String, Vec<Vec<Value>>>,
+    ) {
+        let mut before = before.clone();
+        let queued_before = before.remove("tx_retrieval_queue").unwrap_or_default();
+        let queued_after = after.remove("tx_retrieval_queue").unwrap_or_default();
+        assert!(queued_before.iter().all(|row| queued_after.contains(row)));
+        assert_eq!(after, before);
+    }
+
     fn wallet_tables(conn: &Connection) -> BTreeMap<String, Vec<Vec<Value>>> {
         let names: Vec<String> = conn
             .prepare(
                 "SELECT name FROM sqlite_master WHERE type = 'table'
                  AND name NOT LIKE 'tpir!_%' ESCAPE '!'
-                 -- A later migration's work queue, not wallet data.
-                 AND name NOT IN ('schemer_migrations', 'sqlite_sequence', 'tx_attribution_queue')",
+                 -- Later migrations' work queue and absence records, not wallet data.
+                 AND name NOT IN ('schemer_migrations', 'sqlite_sequence',
+                                  'tx_attribution_queue', 'transparent_utxo_absences')",
             )
             .unwrap()
             .query_map([], |row| row.get(0))
@@ -299,7 +313,7 @@ mod tests {
 
         // Balances, locks, local sends, and sent-note details are read from these tables only;
         // none changed.
-        assert_eq!(wallet_tables(&db.conn), before);
+        assert_retained(wallet_tables(&db.conn), &before);
 
         // Every record is legacy evidence; records with local creation evidence are also local.
         // A mined observation (the coinbase and remote receive) does not make a record local.
@@ -362,14 +376,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(recorded, 0);
-        assert_eq!(wallet_tables(&db.conn), before);
+        assert_retained(wallet_tables(&db.conn), &before);
 
         // After the obstacle is removed, the migration completes from the untouched state.
         db.conn
             .execute_batch("DROP VIEW tpir_spend_origins")
             .unwrap();
         WalletMigrator::new().init_or_migrate(&mut db).unwrap();
-        assert_eq!(wallet_tables(&db.conn), before);
+        assert_retained(wallet_tables(&db.conn), &before);
         assert_eq!(count(&db.conn, "tpir_output_origins"), 4);
     }
 }

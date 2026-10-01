@@ -19,11 +19,11 @@ use super::*;
 use crate::wallet::init::WalletMigrator;
 
 /// An address that belongs to no wallet account.
-const EXTERNAL: TransparentAddress = TransparentAddress::PublicKeyHash([7; 20]);
+pub(super) const EXTERNAL: TransparentAddress = TransparentAddress::PublicKeyHash([7; 20]);
 
 /// A file-backed wallet under the public policy, holding the test account and `extra` imported
 /// accounts.
-fn public_wallet(extra: u8) -> (State, Vec<AccountUuid>) {
+pub(super) fn public_wallet(extra: u8) -> (State, Vec<AccountUuid>) {
     let mut st = wallet_state(TestDbFactory::file_backed());
     let mut accounts = vec![st.test_account().unwrap().id()];
     for seed in 0..extra {
@@ -54,21 +54,33 @@ fn derived(
         .address
 }
 
-fn external_of(st: &State, account: AccountUuid) -> TransparentAddress {
+pub(super) fn external_of(st: &State, account: AccountUuid) -> TransparentAddress {
     derived(st, account, TransparentKeyScope::EXTERNAL, 0)
 }
 
-fn internal_of(st: &State, account: AccountUuid) -> TransparentAddress {
+pub(super) fn internal_of(st: &State, account: AccountUuid) -> TransparentAddress {
     derived(st, account, TransparentKeyScope::INTERNAL, 0)
 }
 
 /// A transparent-only transaction spending `inputs` to `outputs`.
-fn transaction(inputs: Vec<OutPoint>, outputs: Vec<(TransparentAddress, u64)>) -> Transaction {
+pub(super) fn transaction(
+    inputs: Vec<OutPoint>,
+    outputs: Vec<(TransparentAddress, u64)>,
+) -> Transaction {
+    expiring_transaction(inputs, outputs, BlockHeight::from_u32(1_000_000))
+}
+
+/// A transparent-only transaction spending `inputs` to `outputs` that expires after `expiry`.
+pub(super) fn expiring_transaction(
+    inputs: Vec<OutPoint>,
+    outputs: Vec<(TransparentAddress, u64)>,
+    expiry: BlockHeight,
+) -> Transaction {
     TransactionData::<zcash_primitives::transaction::Authorized>::from_parts(
         TxVersion::V5,
         BranchId::Nu5,
         0,
-        BlockHeight::from_u32(1_000_000),
+        expiry,
         Some(Bundle {
             vin: inputs
                 .into_iter()
@@ -91,22 +103,26 @@ fn transaction(inputs: Vec<OutPoint>, outputs: Vec<(TransparentAddress, u64)>) -
 }
 
 /// A transaction from an outside party paying `value` to `to`.
-fn funding(tag: u8, to: TransparentAddress, value: u64) -> Transaction {
+pub(super) fn funding(tag: u8, to: TransparentAddress, value: u64) -> Transaction {
     transaction(vec![OutPoint::new([tag; 32], 0)], vec![(to, value)])
 }
 
-fn outpoint(tx: &Transaction, index: u32) -> OutPoint {
+pub(super) fn outpoint(tx: &Transaction, index: u32) -> OutPoint {
     OutPoint::new(*tx.txid().as_ref(), index)
 }
 
 /// Stores `tx` as payload retrieval does, mined at the chain tip.
-fn store(st: &mut State, tx: &Transaction) {
+pub(super) fn store(st: &mut State, tx: &Transaction) {
     let network = *st.network();
     let tip = st.wallet().chain_height().unwrap().unwrap();
     decrypt_and_store_transaction(&network, st.wallet_mut(), tx, Some(tip)).unwrap();
 }
 
-fn history(st: &State, account: AccountUuid, tx: &Transaction) -> TransactionHistoryDetails {
+pub(super) fn history(
+    st: &State,
+    account: AccountUuid,
+    tx: &Transaction,
+) -> TransactionHistoryDetails {
     let mut entries = st
         .wallet()
         .db()
@@ -129,7 +145,10 @@ fn movement(st: &State, account: AccountUuid, tx: &Transaction) -> (i64, i64, i6
 }
 
 /// The sent outputs recorded for `tx`: sending account, output index, receiving account and value.
-fn sent_outputs(st: &State, tx: &Transaction) -> Vec<(AccountUuid, u32, Option<AccountUuid>, u64)> {
+pub(super) fn sent_outputs(
+    st: &State,
+    tx: &Transaction,
+) -> Vec<(AccountUuid, u32, Option<AccountUuid>, u64)> {
     conn(st)
         .prepare(
             "SELECT f.uuid, s.output_index, r.uuid, s.value
@@ -156,7 +175,7 @@ fn sent_outputs(st: &State, tx: &Transaction) -> Vec<(AccountUuid, u32, Option<A
         .unwrap()
 }
 
-fn queued(st: &State) -> i64 {
+pub(super) fn queued(st: &State) -> i64 {
     count(st, "tx_attribution_queue")
 }
 
@@ -190,7 +209,7 @@ fn assert_send_with_change(st: &State, account: AccountUuid, send: &Transaction)
     assert_eq!(entry.funding, TransactionFunding::Sole);
 }
 
-fn zat(value: u64) -> Zatoshis {
+pub(super) fn zat(value: u64) -> Zatoshis {
     Zatoshis::const_from_u64(value)
 }
 
@@ -464,4 +483,42 @@ fn upgrading_rederives_history_that_earlier_writers_stored() {
     assert_eq!(queued(&st), 0);
     assert_send_with_change(&st, a, &send);
     assert_joint_payment(&st, a, b, &joint);
+}
+
+#[test]
+fn a_shielded_spender_stored_before_its_note_was_linked_is_rederived_when_scanned() {
+    let (mut st, accounts) = public_wallet(0);
+    let account = accounts[0];
+    let (txid, output_index) = pay_from_sapling(&mut st, EXTERNAL, 50_000);
+    let send = st.wallet().get_transaction(txid).unwrap().unwrap();
+
+    // What a restored wallet holds for a send it retrieved from the mempool before scanning
+    // found the note it spends: the transaction's data, but no link to the note and no
+    // construction records.
+    conn(&st)
+        .execute_batch(&format!(
+            "UPDATE transactions SET created = NULL, target_height = NULL WHERE txid = X'{tx}';
+             DELETE FROM sent_notes WHERE transaction_id =
+                 (SELECT id_tx FROM transactions WHERE txid = X'{tx}');
+             DELETE FROM sapling_received_note_spends WHERE transaction_id =
+                 (SELECT id_tx FROM transactions WHERE txid = X'{tx}');",
+            tx = hex::encode(txid.as_ref()),
+        ))
+        .unwrap();
+    assert!(
+        !sent_outputs(&st, &send)
+            .iter()
+            .any(|(_, index, _, _)| *index == output_index)
+    );
+
+    // Scanning the block that mines it links the spend, which establishes the account as the
+    // send's funder.
+    let (height, _) = st.generate_next_block_including(txid);
+    st.scan_cached_blocks(height, 1);
+    assert_eq!(queued(&st), 0);
+    assert!(sent_outputs(&st, &send).contains(&(account, output_index, None, 50_000)));
+    assert_eq!(
+        history(&st, account, &send).funding,
+        TransactionFunding::Sole
+    );
 }

@@ -65,6 +65,7 @@ mod transparent_ledger_schema;
 mod transparent_policy_generation;
 mod transparent_recovery_schema;
 mod transparent_shared_derivations;
+mod transparent_utxo_absences;
 pub(super) const TRANSPARENT_SHARED_DERIVATIONS_ID: Uuid =
     transparent_shared_derivations::MIGRATION_ID;
 mod tree_retained_checkpoints;
@@ -73,6 +74,7 @@ mod tx_retrieval_queue;
 mod tx_retrieval_queue_expiry;
 mod tx_status_observation_intent;
 mod ufvk_support;
+mod unmined_status_obligations;
 mod utxos_table;
 mod utxos_to_txos;
 mod v_address_uses_ironwood;
@@ -179,13 +181,15 @@ pub mod ids {
         transparent_policy_generation::MIGRATION_ID as TRANSPARENT_POLICY_GENERATION,
         transparent_recovery_schema::MIGRATION_ID as TRANSPARENT_RECOVERY_SCHEMA,
         transparent_shared_derivations::MIGRATION_ID as TRANSPARENT_SHARED_DERIVATIONS,
+        transparent_utxo_absences::MIGRATION_ID as TRANSPARENT_UTXO_ABSENCES,
         tree_retained_checkpoints::MIGRATION_ID as TREE_RETAINED_CHECKPOINTS,
         tx_observation_height::MIGRATION_ID as TX_OBSERVATION_HEIGHT,
         tx_retrieval_queue::MIGRATION_ID as TX_RETRIEVAL_QUEUE,
         tx_retrieval_queue_expiry::MIGRATION_ID as TX_RETRIEVAL_QUEUE_EXPIRY,
         tx_status_observation_intent::MIGRATION_ID as TX_STATUS_OBSERVATION_INTENT,
-        ufvk_support::MIGRATION_ID as UFVK_SUPPORT, utxos_table::MIGRATION_ID as UTXOS_TABLE,
-        utxos_to_txos::MIGRATION_ID as UTXOS_TO_TXOS,
+        ufvk_support::MIGRATION_ID as UFVK_SUPPORT,
+        unmined_status_obligations::MIGRATION_ID as UNMINED_STATUS_OBLIGATIONS,
+        utxos_table::MIGRATION_ID as UTXOS_TABLE, utxos_to_txos::MIGRATION_ID as UTXOS_TO_TXOS,
         v_address_uses_ironwood::MIGRATION_ID as V_ADDRESS_USES_IRONWOOD,
         v_received_output_spends_account::MIGRATION_ID as V_RECEIVED_OUTPUT_SPENDS_ACCOUNT,
         v_sapling_shard_unscanned_ranges::MIGRATION_ID as V_SAPLING_SHARD_UNSCANNED_RANGES,
@@ -419,6 +423,8 @@ pub(super) fn all_migrations<
         Box::new(transparent_activity_metadata::Migration),
         Box::new(transparent_shared_derivations::Migration),
         Box::new(funding_attribution::Migration),
+        Box::new(transparent_utxo_absences::Migration),
+        Box::new(unmined_status_obligations::Migration),
     ]
 }
 
@@ -640,7 +646,7 @@ pub const V_ZAKURA_0_1_0_RC7: &[Uuid] = &[
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[funding_attribution::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[unmined_status_obligations::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -786,6 +792,8 @@ pub(crate) mod tests {
             ids::TRANSPARENT_ACTIVITY_METADATA,
             ids::TRANSPARENT_ACTIVATION_SCHEMA,
             ids::TRANSPARENT_SHARED_DERIVATIONS,
+            ids::TRANSPARENT_UTXO_ABSENCES,
+            ids::UNMINED_STATUS_OBLIGATIONS,
             ids::TRANSPARENT_GAP_LIMIT_HANDLING,
             ids::TRANSPARENT_LEDGER_SCHEMA,
             ids::TRANSPARENT_POLICY_GENERATION,
