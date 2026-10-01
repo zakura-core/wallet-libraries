@@ -3819,6 +3819,17 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
 ) -> Result<(), SqliteClientError> {
     let chain_tip = chain_tip_height(conn)?.ok_or(SqliteClientError::ChainHeightUnknown)?;
 
+    // A completed observation is the re-confirmation a rewound transaction awaited; from now on the
+    // ordinary rules govern its obligation.
+    conn.execute(
+        "UPDATE tx_retrieval_queue SET reconfirm_mined = 0
+         WHERE txid = :txid AND query_type = :status_type",
+        named_params![
+            ":txid": txid.as_ref(),
+            ":status_type": TxQueryType::Status.code(),
+        ],
+    )?;
+
     match status {
         TransactionStatus::TxidNotRecognized | TransactionStatus::NotInMainChain => {
             conn.execute(
@@ -5420,10 +5431,12 @@ pub(crate) fn queue_tx_status(
     Ok(())
 }
 
-/// Queues a durable status-observation intent for every transaction that compact-block scanning
-/// cannot observe, because the wallet has neither a shielded spend nor a shielded output in it:
-/// those mined above `above`, which a truncation is about to un-mine, or, without a height, those
-/// already unmined.
+/// Queues a durable obligation to re-confirm the mined state of every transaction that
+/// compact-block scanning cannot observe, because the wallet has neither a shielded spend nor a
+/// shielded output in it: those mined above `above`, which a truncation is about to un-mine, or,
+/// without a height, those already unmined. Such a transaction was mined before, so its
+/// obligation is exempt from expiry dormancy until one status observation completes (see
+/// `tx_retrieval_queue.reconfirm_mined`).
 pub(crate) fn queue_status_for_unobservable_transactions(
     conn: &rusqlite::Transaction<'_>,
     above: Option<BlockHeight>,
@@ -5443,13 +5456,13 @@ pub(crate) fn queue_status_for_unobservable_transactions(
         .join(" OR ");
     conn.execute(
         &format!(
-            "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation)
-             SELECT t.txid, :status_type, :policy_generation
+            "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation, reconfirm_mined)
+             SELECT t.txid, :status_type, :policy_generation, 1
              FROM transactions t
              WHERE CASE WHEN :above IS NULL THEN t.mined_height IS NULL
                         ELSE t.mined_height > :above END
              AND NOT ({shielded_involvement})
-             ON CONFLICT (txid, query_type) DO NOTHING"
+             ON CONFLICT (txid, query_type) DO UPDATE SET reconfirm_mined = 1"
         ),
         named_params![
             ":status_type": TxQueryType::Status.code(),
@@ -5500,6 +5513,7 @@ pub(crate) fn transaction_status_work(
             OR t.expiry_height = 0
             OR :scanned_height IS NULL
             OR :scanned_height < t.expiry_height + :reorg_depth
+            OR q.reconfirm_mined = 1
          )
          AND (
             t.confirmed_unmined_at_height IS NULL

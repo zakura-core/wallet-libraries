@@ -54,6 +54,7 @@ mod shardtree_support;
 mod spend_key_available;
 mod standalone_p2sh;
 mod status_inclusion_evidence;
+mod status_reconfirmation;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
 mod transparent_activation_schema;
@@ -172,6 +173,7 @@ pub mod ids {
         spend_key_available::MIGRATION_ID as SPEND_KEY_AVAILABLE,
         standalone_p2sh::MIGRATION_ID as STANDALONE_P2SH,
         status_inclusion_evidence::MIGRATION_ID as STATUS_INCLUSION_EVIDENCE,
+        status_reconfirmation::MIGRATION_ID as STATUS_RECONFIRMATION,
         support_legacy_sqlite::MIGRATION_ID as SUPPORT_LEGACY_SQLITE,
         support_zcashd_wallet_import::MIGRATION_ID as SUPPORT_ZCASHD_WALLET_IMPORT,
         transparent_activation_schema::MIGRATION_ID as TRANSPARENT_ACTIVATION_SCHEMA,
@@ -425,6 +427,7 @@ pub(super) fn all_migrations<
         Box::new(funding_attribution::Migration),
         Box::new(transparent_utxo_absences::Migration),
         Box::new(unmined_status_obligations::Migration),
+        Box::new(status_reconfirmation::Migration),
     ]
 }
 
@@ -646,7 +649,7 @@ pub const V_ZAKURA_0_1_0_RC7: &[Uuid] = &[
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[unmined_status_obligations::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[status_reconfirmation::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -804,6 +807,7 @@ pub(crate) mod tests {
             ids::TX_RETRIEVAL_QUEUE_EXPIRY,
             ids::TX_STATUS_OBSERVATION_INTENT,
             ids::STATUS_INCLUSION_EVIDENCE,
+            ids::STATUS_RECONFIRMATION,
             ids::UFVK_SUPPORT,
             ids::UTXOS_TABLE,
             ids::UTXOS_TO_TXOS,

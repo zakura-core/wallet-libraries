@@ -1099,13 +1099,19 @@ CREATE TABLE tx_attribution_queue (
 ///   to blockchain scanning.
 /// - `policy_generation`: The durable transparent-policy generation that produced this row.
 ///   Public dispatch requires a matching current generation.
+/// - `reconfirm_mined`: `1` for a status obligation whose transaction was mined before a rewind
+///   un-mined it, and whose mined state has not been observed since. Compact-block rescanning
+///   cannot re-observe such a transaction, so its scanned height says nothing about whether it is
+///   mined, and the obligation is exempt from expiry dormancy until one status observation
+///   completes, whatever its result. The observation resets it to `0`, after which the ordinary
+///   rules apply.
 pub(super) const TABLE_TX_RETRIEVAL_QUEUE: &str = r#"
 CREATE TABLE "tx_retrieval_queue" (
     txid BLOB NOT NULL,
     query_type INTEGER NOT NULL,
     dependent_transaction_id INTEGER
         REFERENCES transactions(id_tx) ON DELETE CASCADE,
-    policy_generation INTEGER NOT NULL DEFAULT 0,
+    policy_generation INTEGER NOT NULL DEFAULT 0, reconfirm_mined INTEGER NOT NULL DEFAULT 0,
     CONSTRAINT tx_retrieval_intent UNIQUE (txid, query_type)
 )"#;
 pub(super) const INDEX_TX_RETIREVAL_QUEUE_DEPENDENT_TX: &str = r#"

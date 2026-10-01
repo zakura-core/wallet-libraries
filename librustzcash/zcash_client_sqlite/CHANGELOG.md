@@ -33,6 +33,11 @@ workspace.
   as expired. Truncation now queues a status observation for each such transaction it un-mines,
   and the `unmined_status_obligations` migration (and returning from a legacy writer) queues one
   for every unmined transaction rescanning cannot observe.
+- Status obligations that re-confirm a previously mined transaction carry the new
+  `tx_retrieval_queue.reconfirm_mined` flag (migration `status_reconfirmation`, which also flags
+  the backfilled obligations). They are exempt from expiry dormancy until one status observation
+  completes, whatever its result, so a deep rewind followed by a rescan past the transaction's
+  expiry cannot leave it unmined. After that observation the ordinary rules apply.
 - `notify_transparent_utxos_observed` records outputs a complete UTXO query did not return in the
   new `transparent_utxo_absences` table (migration `transparent_utxo_absences`). Such an output is
   excluded from balances and input selection while the absence is newer than its last observation

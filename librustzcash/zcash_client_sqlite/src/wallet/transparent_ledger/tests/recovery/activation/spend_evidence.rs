@@ -199,3 +199,51 @@ fn importing_an_account_below_the_scanned_tip_requests_status_for_transactions_s
     assert_eq!(mined_height(&st, &send), Some(h));
     assert_eq!(status_work(&st), vec![parent.txid()]);
 }
+
+#[test]
+fn a_rewound_transaction_is_reconfirmed_even_after_rescanning_past_its_expiry() {
+    use zcash_client_backend::data_api::status::TransactionStatusMode;
+
+    let (mut st, accounts) = public_wallet(0);
+    st.wallet_mut()
+        .db_mut()
+        .set_status_mode(TransactionStatusMode::Public);
+    let parent = funding(0xe2, external_of(&st, accounts[0]), 1_000_000);
+    store(&mut st, &parent);
+    let mined = tip(&st);
+    let send = expiring_transaction(
+        vec![outpoint(&parent, 0)],
+        vec![(EXTERNAL, 990_000)],
+        mined + 3,
+    );
+    store(&mut st, &send);
+
+    // Importing a second account rewinds to its birthday. The next sync rescans from the
+    // birthday to far past the send's expiry in one pass, before any status work runs.
+    import_account(&mut st, 9);
+    let birthday = st.test_account().unwrap().birthday().height();
+    st.scan_cached_blocks(
+        birthday,
+        usize::try_from(u32::from(mined - birthday) + 1).unwrap(),
+    );
+    scan_new_blocks(&mut st, 110);
+    assert_eq!(mined_height(&st, &send), None);
+
+    // Rescanning cannot have seen the send, so its re-confirmation is still owed.
+    assert!(status_work(&st).contains(&send.txid()));
+    st.wallet_mut()
+        .set_transaction_status(send.txid(), TransactionStatus::Mined(mined))
+        .unwrap();
+    assert_eq!(mined_height(&st, &send), Some(u32::from(mined)));
+    assert!(!status_work(&st).contains(&send.txid()));
+
+    // After its one observation, a rewound transaction follows the ordinary rules: observed
+    // absent past its expiry, its obligation is settled.
+    st.wallet_mut().truncate_to_height(mined - 1).unwrap();
+    st.scan_cached_blocks(mined, 111);
+    assert!(status_work(&st).contains(&send.txid()));
+    st.wallet_mut()
+        .set_transaction_status(send.txid(), TransactionStatus::TxidNotRecognized)
+        .unwrap();
+    assert!(!status_work(&st).contains(&send.txid()));
+}
