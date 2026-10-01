@@ -4692,7 +4692,11 @@ pub(crate) fn truncate_to_chain_state<P: consensus::Parameters, CL, R>(
 /// the deepest such checkpoint retained by *any* pool (via
 /// [`commitment_tree::min_checkpoint_id_at_or_above`]) — so that
 /// [`truncate_to_height_internal`] has a real checkpoint to truncate to under non-contiguous
-/// scan orders. A pool whose own checkpoints do not cover that height is handled by the
+/// scan orders. When no pool retains such a checkpoint, no tree holds state above the target,
+/// and the wallet is truncated at the target itself with every tree left untouched. Scanning
+/// checkpoints a block only when it appends note commitments, so this is the normal state of a
+/// wallet that has seen no shielded outputs near the tip, such as one adding an account whose
+/// birthday is the current tip. A pool whose own checkpoints do not cover that height is handled by the
 /// per-pool [`TreeTruncation`] classification: a tree with no checkpoint above the height is
 /// left untouched, a tree whose checkpoints all lie above it is reset to its completed
 /// subtree roots (with the requeued rescan re-creating the rest), and a tree whose
@@ -4817,7 +4821,15 @@ pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
             window_floor = window_floor.into_iter().chain(pool_floor).min();
         }
 
-        let truncation_height = window_floor.unwrap_or(pruning_floor);
+        // When no pool retains a checkpoint at or above `truncation_target`, no tree holds
+        // state above it: scanning checkpoints every block that appends a note commitment,
+        // and checkpoint pruning removes the oldest first. Truncating at the target then
+        // leaves every tree untouched (`TreeTruncation::Unaffected`). Any lower height,
+        // such as the pruning floor, would discard wallet data for no reason, and would be
+        // misreported as corruption whenever a tree retains checkpoints on both sides of
+        // that height, which is the normal state of a wallet whose last shielded activity
+        // lies inside the pruning window.
+        let truncation_height = window_floor.unwrap_or(truncation_target);
 
         // Use `truncate_to_height_internal` to perform full truncation of data within the
         // pruning window. Blocks above `target_height` are re-scanned by the `Historic`
@@ -7584,6 +7596,72 @@ mod tests {
             table_row_count(st.wallet().conn(), "ironwood_tree_shards"),
             0
         );
+    }
+
+    /// A rewind to a height above every retained checkpoint touches no tree state, so it must
+    /// truncate the wallet to that height and leave the trees untouched. Scanning checkpoints a
+    /// block only at its last note commitment, so a wallet that has seen no shielded outputs
+    /// for a while has no checkpoint near the tip. This is the state of a wallet that adds an
+    /// account whose birthday is the current tip.
+    ///
+    /// Here the pruning window (the last `PRUNING_DEPTH` scanned blocks) holds one checkpoint,
+    /// below the target, and older checkpoints lie below the window. Falling back to the
+    /// window's floor would select a height with checkpoints both above and below it and none
+    /// at it, and the rewind would wrongly report `CorruptedData`.
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn rewind_to_chain_state_above_every_checkpoint_leaves_trees_untouched() {
+        let (mut st, start_height) = wallet_with_scanned_blocks();
+        let dfvk = ExtendedSpendingKey::master(&[]).to_diversifiable_full_viewing_key();
+        let value = Zatoshis::const_from_u64(10000);
+
+        for _ in 0..50 {
+            st.generate_empty_block();
+        }
+        let (inner_checkpoint, _, _) =
+            st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        for _ in 0..60 {
+            st.generate_empty_block();
+        }
+        let (tip, _) = st.generate_empty_block();
+        st.scan_cached_blocks(
+            start_height + 5,
+            usize::try_from(tip - start_height).unwrap(),
+        );
+        assert_eq!(max_block_height(st.wallet().conn()), Some(tip));
+
+        let checkpoints = |st: &TestState<BlockCache, TestDb, LocalNetwork>| -> Vec<u32> {
+            let mut stmt = st
+                .wallet()
+                .conn()
+                .prepare(
+                    "SELECT checkpoint_id FROM sapling_tree_checkpoints ORDER BY checkpoint_id",
+                )
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let before = checkpoints(&st);
+        let pruning_floor = tip - (crate::PRUNING_DEPTH - 1);
+        // The precondition the old fallback mishandled: checkpoints below the pruning floor,
+        // one inside the window, and none at or above the target.
+        assert!(before.iter().any(|h| *h < u32::from(pruning_floor)));
+        assert!(before.contains(&u32::from(inner_checkpoint)));
+        assert!(inner_checkpoint > pruning_floor);
+        let target_height = tip - 1;
+        assert!(before.iter().all(|h| *h < u32::from(target_height)));
+
+        let result = st.wallet_mut().rewind_to_chain_state(
+            ChainState::empty(target_height, BlockHash([0; 32])),
+            HashSet::new(),
+        );
+        assert_matches!(result, Ok(()));
+
+        assert_eq!(max_block_height(st.wallet().conn()), Some(target_height));
+        assert!(rescan_queued_from(st.wallet().conn(), target_height + 1));
+        assert_eq!(checkpoints(&st), before);
     }
 
     /// `rewind_to_chain_state` must not report `CorruptedData` when the Orchard tree is
