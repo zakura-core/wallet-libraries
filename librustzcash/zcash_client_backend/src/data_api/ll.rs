@@ -292,6 +292,18 @@ pub trait LowLevelWalletRead {
         tx_ref: Self::TxRef,
     ) -> Result<Vec<(Self::TxRef, Transaction)>, Self::Error>;
 
+    /// Returns the stored transactions whose wallet records must be re-derived from their raw
+    /// data, because the evidence of which wallet accounts funded them has changed since they were
+    /// stored, each with its mined height if known.
+    ///
+    /// A backend queues a stored transaction here when it records a transparent output that the
+    /// transaction was already known to spend. [`wallet::reprocess_funding_attribution`] drains
+    /// the queue.
+    #[allow(clippy::type_complexity)]
+    fn get_funding_attribution_queue(
+        &self,
+    ) -> Result<Vec<(Self::TxRef, Transaction, Option<BlockHeight>)>, Self::Error>;
+
     /// Finds the reference to the transaction that reveals the given Sapling nullifier in the
     /// backing data store, if known.
     fn detect_sapling_spend(
@@ -570,6 +582,17 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
     /// Updates the wallet's view of a transaction to indicate the miner's fee paid by the
     /// transaction.
     fn update_tx_fee(&mut self, tx_ref: Self::TxRef, fee: Zatoshis) -> Result<(), Self::Error>;
+
+    /// Removes the given transaction from the queue returned by
+    /// [`LowLevelWalletRead::get_funding_attribution_queue`].
+    fn dequeue_funding_attribution(&mut self, tx_ref: Self::TxRef) -> Result<(), Self::Error>;
+
+    /// Deletes the sent outputs that were derived from the decrypted data of the given
+    /// transaction, so that they can be derived again under the wallet's current evidence.
+    ///
+    /// Sent outputs recorded when this wallet constructed the transaction are authoritative and
+    /// must be retained.
+    fn delete_derived_sent_outputs(&mut self, tx_ref: Self::TxRef) -> Result<(), Self::Error>;
 
     /// Adds a transparent output observed by the wallet to the data store, or updates any existing
     /// record for that output.

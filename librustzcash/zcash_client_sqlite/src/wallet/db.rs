@@ -1066,6 +1066,24 @@ CREATE INDEX idx_sent_notes_transaction_id ON sent_notes (
     transaction_id
 )"#;
 
+/// Transactions whose stored wallet records must be re-derived from their raw data, because
+/// the evidence of which wallet accounts funded them changed after they were stored.
+///
+/// A transaction's sent outputs are attributed to the account that funded it only once the wallet
+/// can establish that account as the transaction's sole funder (see
+/// `zcash_client_backend::data_api::ll::wallet::store_decrypted_tx`). When a transparent output
+/// spent by an already-stored transaction is recorded later, the spender is queued here, and the
+/// next `WalletWrite::store_decrypted_tx` or `WalletWrite::put_received_transparent_utxo` call
+/// re-derives it within the same database transaction.
+///
+/// ### Columns
+/// - `transaction_id`: the queued transaction. It always has raw data when queued.
+pub(super) const TABLE_TX_ATTRIBUTION_QUEUE: &str = r#"
+CREATE TABLE tx_attribution_queue (
+    transaction_id INTEGER PRIMARY KEY
+        REFERENCES transactions(id_tx) ON DELETE CASCADE
+)"#;
+
 /// Stores the set of transaction ids for which the backend required additional data.
 ///
 /// ### Columns:
@@ -1586,7 +1604,9 @@ sent_note_counts AS (
     FROM sent_notes
     LEFT JOIN v_received_outputs ro ON sent_notes.id = ro.sent_note_id
     WHERE COALESCE(ro.is_change, 0) = 0
-    GROUP BY account_id, sent_notes.transaction_id
+    -- Group by the sending account. A bare `account_id` here would resolve to the joined
+    -- `ro.account_id`, splitting one sender's notes into a group per receiving account.
+    GROUP BY sent_notes.from_account_id, sent_notes.transaction_id
 ),
 -- Identifies the transactions that are wallet-internal transfers moving an account's own
 -- funds between shielded pools, and reports the value that crossed. `crossing_value` is

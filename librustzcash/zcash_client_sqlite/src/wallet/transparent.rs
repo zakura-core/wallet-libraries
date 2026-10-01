@@ -3108,8 +3108,25 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
         .optional()?;
 
     if let Some(spending_transaction_id) = spending_tx_ref {
+        let newly_linked = !conn.query_row(
+            "SELECT EXISTS (
+                 SELECT 1 FROM transparent_received_output_spends
+                 WHERE transparent_received_output_id = :output_id
+                 AND transaction_id = :spending_transaction_id
+             )",
+            named_params![
+                ":output_id": utxo_id.0,
+                ":spending_transaction_id": spending_transaction_id.0,
+            ],
+            |row| row.get::<_, bool>(0),
+        )?;
         // The spend's origins were recorded with its spend-map entry.
         mark_transparent_utxo_spent(conn, spending_transaction_id, output.outpoint(), None)?;
+        // The spender was stored before the wallet knew it spent this output, so its funding
+        // attribution must be derived again.
+        if newly_linked {
+            super::queue_funding_attribution(conn, spending_transaction_id)?;
+        }
     }
 
     #[cfg(feature = "transparent-inputs")]

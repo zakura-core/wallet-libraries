@@ -955,6 +955,7 @@ mod tests {
             db::TABLE_TRANSPARENT_RECEIVED_OUTPUTS,
             db::TABLE_TRANSPARENT_SPEND_MAP,
             db::TABLE_TRANSPARENT_SPEND_SEARCH_QUEUE,
+            db::TABLE_TX_ATTRIBUTION_QUEUE,
             db::TABLE_TX_LOCATOR_MAP,
             db::TABLE_TX_RETRIEVAL_QUEUE,
         ];

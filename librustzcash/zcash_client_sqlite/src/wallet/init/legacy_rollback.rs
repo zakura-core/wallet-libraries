@@ -213,6 +213,17 @@ pub(super) fn resume_current(conn: &mut Connection) -> Result<(), WalletMigratio
     // continue to resolve while SQLite validates the schema.
     tx.execute_batch(&updated)?;
     tx.execute_batch("ALTER TABLE transactions DROP COLUMN zip318_kind")?;
+    // Older writers attribute sent outputs under their own rules. Re-derive the transactions they
+    // may have stored once the queue exists; a wallet prepared before it existed has every
+    // affected transaction queued when the migration that creates it runs.
+    let queue_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tx_attribution_queue')",
+        [],
+        |r| r.get(0),
+    )?;
+    if queue_exists {
+        tx.execute(migrations::QUEUE_AFFECTED_TRANSACTIONS, [])?;
+    }
     tx.commit()?;
     Ok(())
 }

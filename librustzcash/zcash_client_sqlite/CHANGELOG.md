@@ -10,6 +10,33 @@ workspace.
 
 ## [Unreleased]
 
+- Fixed `v_transactions.account_balance_delta`, `total_spent` and `total_received` being
+  multiplied for a send whose sent notes include an output a wallet account received
+  (transparent change, or a transfer to another account): `sent_note_counts` grouped by the
+  receiving rather than the sending account. The `funding_attribution` migration recreates the
+  view.
+- The `funding_attribution` migration also adds `tx_attribution_queue` and queues every stored
+  transaction, not constructed by this wallet, that spends a wallet transparent output or the
+  outputs of more than one account. The next `WalletWrite::store_decrypted_tx` or
+  `put_received_transparent_utxo` call re-derives them, repairing sent outputs that earlier
+  writers recorded for an arbitrary funder of a jointly funded transaction or never recorded for
+  a send stored before its inputs were known. Returning from a legacy rc5/rc7 writer queues them
+  again.
+- Recording a transparent output that a stored transaction already spends queues that
+  transaction, and `store_decrypted_tx` / `put_received_transparent_utxo` re-derive the queue in
+  the same database transaction. `transaction_history_details` reports a queued transaction's
+  public transparent effects as incomplete.
+- `transaction_history_details` reports `TransactionHistoryDetails::funding`. A transaction is
+  `Shared` when another wallet account spent in it, or when one of its transparent inputs is not
+  the account's once the account's transparent evidence is settled.
+- `transaction_history_details` reports `TransactionHistoryDetails::funding`. A transaction is
+  `Shared` when another wallet account spent in it, or when one of its transparent inputs is not
+  the account's once the account's transparent evidence is settled.
+- `transaction_history_details` reports `AggregatePayment::Exact` once every spent unit of a
+  reconstructed transaction is accounted for, rather than `Partial`.
+- `get_txs_spending_transparent_outputs_of` returns only spenders of the given transaction's
+  outputs; it previously returned every fee-less transaction spending any wallet output.
+
 - Shared derivation origins survive promotion and reopen without transferring receiver ownership.
   Activity at those receivers schedules new gaps and withholds private authority until coverage
   completes. Active recovery materializes its discovered addresses before projecting receipts.

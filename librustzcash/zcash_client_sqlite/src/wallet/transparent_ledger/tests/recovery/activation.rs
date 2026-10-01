@@ -1447,6 +1447,8 @@ fn leaving_private_required_demotes_every_account() {
 
 mod history;
 
+mod attribution;
+
 mod qualification;
 
 mod gating {

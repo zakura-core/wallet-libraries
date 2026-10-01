@@ -18,6 +18,7 @@ mod add_utxo_account;
 mod addresses_table;
 mod drop_zip318_pool_migration;
 pub(super) use drop_zip318_pool_migration::remove_zip318_column;
+pub(super) use funding_attribution::QUEUE_AFFECTED_TRANSACTIONS;
 pub(super) const DROP_ZIP318_POOL_MIGRATION_ID: Uuid = drop_zip318_pool_migration::MIGRATION_ID;
 mod ensure_default_transparent_address;
 mod ensure_orchard_ua_receiver;
@@ -28,6 +29,9 @@ mod fix_broken_commitment_trees;
 mod fix_transparent_received_outputs;
 mod fix_v_transactions_expired_unmined;
 mod full_account_ids;
+mod funding_attribution;
+#[cfg(test)]
+pub(crate) const FUNDING_ATTRIBUTION_ID: Uuid = funding_attribution::MIGRATION_ID;
 mod initial_setup;
 mod ironwood_enhance;
 mod ironwood_pool_code_views;
@@ -144,6 +148,7 @@ pub mod ids {
         fix_transparent_received_outputs::MIGRATION_ID as FIX_TRANSPARENT_RECEIVED_OUTPUTS,
         fix_v_transactions_expired_unmined::MIGRATION_ID as FIX_V_TRANSACTIONS_EXPIRED_UNMINED,
         full_account_ids::MIGRATION_ID as FULL_ACCOUNT_IDS,
+        funding_attribution::MIGRATION_ID as FUNDING_ATTRIBUTION,
         initial_setup::MIGRATION_ID as INITIAL_SETUP,
         ironwood_enhance::MIGRATION_ID as IRONWOOD_ENHANCE,
         ironwood_pool_code_views::MIGRATION_ID as IRONWOOD_POOL_CODE_VIEWS,
@@ -413,6 +418,7 @@ pub(super) fn all_migrations<
         Box::new(transparent_activation_schema::Migration),
         Box::new(transparent_activity_metadata::Migration),
         Box::new(transparent_shared_derivations::Migration),
+        Box::new(funding_attribution::Migration),
     ]
 }
 
@@ -634,7 +640,7 @@ pub const V_ZAKURA_0_1_0_RC7: &[Uuid] = &[
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_shared_derivations::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[funding_attribution::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -753,6 +759,7 @@ pub(crate) mod tests {
             ids::FIX_TRANSPARENT_RECEIVED_OUTPUTS,
             ids::FIX_V_TRANSACTIONS_EXPIRED_UNMINED,
             ids::FULL_ACCOUNT_IDS,
+            ids::FUNDING_ATTRIBUTION,
             ids::INITIAL_SETUP,
             ids::IRONWOOD_POOL_CODE_VIEWS,
             ids::IRONWOOD_ENHANCE,
