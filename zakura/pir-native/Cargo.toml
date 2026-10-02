@@ -16,7 +16,7 @@ default = []
 test-server = []
 
 [dependencies]
-ipir-sp = { version = "=0.1.0-rc.6", features = ["native-reinspiring"] }
+ipir-sp = { version = "0.1.0-rc.6", features = ["native-reinspiring"] }
 rand = "0.8"
 rand_chacha.workspace = true
-reinspiring = "=0.1.2"
+reinspiring = "0.1.2"

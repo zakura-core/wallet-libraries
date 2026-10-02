@@ -25,7 +25,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-zakura-pir-enhance-types = { version = "=0.0.1-rc0", path = "../../zakura/pir-enhance-types" }
+zakura-pir-enhance-types = { version = "0.0.1-rc0", path = "../../zakura/pir-enhance-types" }
 zcash_address.workspace = true
 zcash_encoding.workspace = true
 zcash_keys = { workspace = true, features = ["std", "sapling"] }
