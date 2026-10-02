@@ -10,6 +10,15 @@ workspace.
 
 ## [Unreleased]
 
+### Changed
+- Migrated to `secp256k1 0.33` and `zcash_script 0.6`,
+  and to the revision of the Common v2.0.0 crates that uses them. Transparent
+  signing no longer takes a `secp256k1` context; see the Common changes to
+  `TransparentSignatureContext`, `prepare_transparent_signatures`, and the
+  transparent PCZT `Input` signing methods. Until Common publishes that
+  revision, consumers must declare the `[patch.crates-io]` table from this
+  repository's `manifests/sources.toml`.
+
 ## [0.1.0-rc4] - 2026-09-28
 
 ### Changed

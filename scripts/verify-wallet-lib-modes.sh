@@ -49,6 +49,24 @@ print("^(" + "|".join(names) + ") v")
 PY
 )"
 
+# The `[patch]` tables of the generated workspace. A consumer outside this
+# workspace does not inherit them, so every Zakura probe declares them itself.
+patches="$(python3 - "$manifest" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as manifest_file:
+    patches = tomllib.load(manifest_file).get("patch", {})
+
+for registry, entries in patches.items():
+    print(f"[patch.{registry}]")
+    for name, source in entries.items():
+        fields = ", ".join(f'{key} = "{value}"' for key, value in source.items())
+        print(f"{name} = {{ {fields} }}")
+PY
+)"
+export WALLET_LIB_PATCHES="$patches"
+
 check_mode() {
   local feature="$1"
   local pattern="$2"
@@ -115,9 +133,14 @@ dependencies = {
     "zakura-default": f'zakura-wallet-lib = {{ path = "{wallet_lib}" }}',
 }
 
+patches = os.environ["WALLET_LIB_PATCHES"]
+
 for name, dependency in dependencies.items():
     consumer = probe_root / name
     (consumer / "src").mkdir(parents=True)
+    # The LRZ probe must not name the Zakura packages at all, not even as
+    # unused patches recorded in its lockfile.
+    consumer_patches = "" if name == "lrz" else patches
     (consumer / "Cargo.toml").write_text(
         f"""\
 [package]
@@ -127,6 +150,8 @@ edition = "2021"
 
 [dependencies]
 {dependency}
+
+{consumer_patches}
 """
     )
     (consumer / "src" / "main.rs").write_text(
@@ -249,6 +274,8 @@ rust-version = "1.91"
 
 [dependencies]
 zakura-wallet-lib = { path = "$repo_root/wallet-lib" }
+
+$patches
 EOF
 cat > "$consumer/src/lib.rs" <<'EOF'
 pub use zakura_wallet_lib::*;
@@ -289,11 +316,11 @@ expected = {
     "zakura-sapling-crypto",
     "zakura-sinsemilla",
 }
-required_version = "2.0.0"
+required_major = "2"
 problems = [
-    f"{name}: expected {required_version}, found {packages.get(name, 'missing')}"
+    f"{name}: expected a {required_major}.x release, found {packages.get(name, 'missing')}"
     for name in sorted(expected)
-    if packages.get(name) != required_version
+    if packages.get(name, "").split(".")[0] != required_major
 ]
 if problems:
     print("fresh consumer did not stay on the Common v2 family:", file=sys.stderr)

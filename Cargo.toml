@@ -82,13 +82,11 @@ orchard = { version = "2.0.0", default-features = false, package = "zakura-orcha
 pasta_curves = { version = "2.0.0", package = "zakura-pasta-curves" }
 
 # - Transparent
-bip32 = { version = "=0.6.0-pre.1", default-features = false, features = ["alloc"] }
-block-buffer = { version = "=0.11.0-rc.3" } # later RCs require edition2024
-crypto-common = { version = "=0.2.0-rc.1" } # later RCs require edition2024
+bip32 = { version = "0.6", default-features = false, features = ["alloc"] }
 ripemd = { version = "0.1", default-features = false }
-secp256k1 = { version = "0.29", default-features = false, features = ["alloc"] }
+secp256k1 = { version = "0.33", default-features = false, features = ["alloc"] }
 transparent = { package = "zakura-transparent", version = "2.0.0", default-features = false }
-zcash_script = { version = "0.4.3", default-features = false }
+zcash_script = { version = "0.6", default-features = false }
 zeroize = { version = "1.7", default-features = false }
 
 # Boilerplate & missing stdlib
@@ -240,3 +238,26 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(zcash_unstable, values("nu7"))',
   'cfg(live_network_tests)',
 ] }
+
+[patch.crates-io]
+zakura-bellman = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-pairing = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-bls12-381 = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-halo2-gadgets = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-halo2-poseidon = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-pasta-curves = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-halo2-proofs = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-halo2-legacy-pdqsort = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-sinsemilla = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-jubjub = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-orchard = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-reddsa = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-redjubjub = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-sapling-crypto = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-address = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-protocol = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-keys = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-transparent = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-primitives = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-proofs = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }
+zakura-zip321 = { git = "https://github.com/zodl-inc/zakura-common", rev = "c714f350a629d5419a1c341c192812ce58cb4013" }

@@ -152,6 +152,13 @@ workspace.
   completion marker is stored.
 
 ### Changed
+- Migrated to `bip32 0.6`, `secp256k1 0.33`, and `zcash_script 0.6`,
+  and to the revision of the Common v2.0.0 crates that uses them. Transparent
+  signing no longer takes a `secp256k1` context; see the Common changes to
+  `TransparentSignatureContext`, `prepare_transparent_signatures`, and the
+  transparent PCZT `Input` signing methods. Until Common publishes that
+  revision, consumers must declare the `[patch.crates-io]` table from this
+  repository's `manifests/sources.toml`.
 - Unmined shielded history remains incomplete when scanning discovers a funding
   note whose spend was not linked at payload ingestion. A scanned chain tip and
   stored raw data certify completeness only once all known owned nullifiers

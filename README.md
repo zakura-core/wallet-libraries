@@ -70,9 +70,14 @@ vendored crates inherit these through `workspace = true`. The small source
 patches in this repository expose NU7 through the wallet APIs and remove the
 obsolete ZIP 233 feature that Common no longer provides.
 
-There is no `[patch.crates-io]` anywhere in this design. Package names differ
-from their upstream originals, so consumers declare these crates directly and
-every edge is explicit — the same reasoning `libraries` documents.
+Package names differ from their upstream originals, so consumers declare these
+crates directly and every edge is explicit — the same reasoning `libraries`
+documents. The one `[patch.crates-io]` table, taken from `[patch.crates-io]` in
+`manifests/sources.toml`, replaces every crate published from Common with a
+pinned revision that uses the stable `bip32 0.6` / `secp256k1 0.33` /
+`zcash_script 0.6` stack. The published Common v2.0.0 crates require
+`bip32 0.6.0-pre.1`, which cannot share a lockfile with the upstream LRZ
+backend of the facade.
 
 ## Development
 
@@ -136,7 +141,9 @@ pczt = { version = "0.1.0-rc4", package = "zakura-pczt" }
 ```
 
 The crypto stack comes from crates.io as `zakura-*`; do not also declare the
-upstream crates.
+upstream crates. Until Common publishes the stable transparent stack, a
+consumer must also declare the `[patch.crates-io]` table from
+`manifests/sources.toml`.
 
 ## Working on the fork
 

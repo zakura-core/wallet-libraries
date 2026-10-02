@@ -9,8 +9,19 @@ and this library adheres to Rust's notion of
 
 ### Changed
 - Updated the Zakura PCZT dependency to `zakura-pczt 0.1.0-rc4`.
-- Pinned the Common v2 dependencies exactly so a fresh consumer cannot select
-  `2.1.0` while this facade requires the `2.0.0` family.
+- Updated the Zakura backend to the Common v2 release family (`2.0`), at the
+  revision that migrates it to `bip32 0.6`, `secp256k1 0.33`, and
+  `zcash_script 0.6`. Transparent signing in the re-exported crates no longer
+  takes a `secp256k1` context: `TransparentSignatureContext`,
+  `Bundle<Unauthorized>::prepare_transparent_signatures`, and the transparent
+  PCZT `Input::{sign, append_signature}` drop their context parameters, and
+  `zcash_keys::keys::transparent::Key::{pubkey_with_context,
+  der_encode_with_context}` are replaced by `pubkey` and `der_encode`. Until
+  Common publishes that revision, consumers must declare the
+  `[patch.crates-io]` table from this repository's `manifests/sources.toml`.
+- Updated the LRZ backend to `zcash_client_backend 0.25.0-pre.0`,
+  `zcash_client_sqlite 0.23.0-pre.0`, `zcash_keys 0.17.0-pre.0`,
+  `orchard 0.16`, `pczt 0.10.0-pre.0`, and `zcash_primitives 0.31.0-pre.0`.
 
 ## [0.1.0-rc6] - 2026-09-27
 
