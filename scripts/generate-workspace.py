@@ -9,7 +9,7 @@ than merging this file is what keeps the Zakura rewiring out of every upstream
 merge: the rules live in manifests/sources.toml, and the manifest they are
 applied to arrives untouched on the vendor branch.
 
-Four rules are applied to `[workspace.dependencies]`:
+Five rules are applied to `[workspace.dependencies]`:
 
 1. a dependency named in the manifest's `[rewire]` table is redirected at the
    configured Zakura fork and immutable revision, keeping the upstream key so
@@ -21,7 +21,11 @@ Four rules are applied to `[workspace.dependencies]`:
    requirement, because `libraries` resolves those same crates from crates.io
    and a second local copy would be a distinct type.
 4. a dependency named in `[versions]` keeps its upstream metadata but takes the
-   configured version required by the selected Zakura release family.
+   configured version required by the selected Zakura release family;
+5. a dependency listed in `[unused].dependencies` is omitted.
+
+The manifest's `[patch]` tables are written verbatim as the workspace's
+`[patch]` tables.
 
 `workspace.package.repository` is rewritten to this repository so published
 crates do not advertise the upstream librustzcash URL, and
@@ -68,6 +72,18 @@ def render(fields: dict[str, str]) -> str:
     return "{ " + ", ".join(f"{key} = {value}" for key, value in fields.items()) + " }"
 
 
+def render_patches(patches: dict[str, dict[str, dict[str, str]]]) -> str:
+    """Render the manifest's `[patch.<registry>]` tables as TOML."""
+    sections = []
+    for registry, entries in patches.items():
+        lines = [f"[patch.{registry}]"]
+        for name, source in entries.items():
+            fields = {key: f'"{value}"' for key, value in source.items()}
+            lines.append(f"{name} = {render(fields)}")
+        sections.append("\n".join(lines) + "\n")
+    return "\n".join(sections)
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print(__doc__.strip(), file=sys.stderr)
@@ -91,6 +107,7 @@ def main(argv: list[str]) -> int:
 
     rewire = manifest["rewire"]
     versions = manifest.get("versions", {})
+    unused = set(manifest.get("unused", {}).get("dependencies", []))
     layout = manifest["layout"]
     vendored_directory = layout["vendored_directory"]
 
@@ -166,7 +183,22 @@ def main(argv: list[str]) -> int:
     start = text.index(heading)
     end = text.find("\n[", start + len(heading))
     end = len(text) if end == -1 else end
-    text = text[:start] + DEPENDENCY.sub(rewrite, text[start:end]) + text[end:]
+    section = text[start:end]
+    for key in unused:
+        section, removed = re.subn(
+            rf"^{re.escape(key)} = [^\n]*\n", "", section, count=1, flags=re.MULTILINE
+        )
+        if removed != 1:
+            print(f"unused dependency {key} is not in the workspace", file=sys.stderr)
+            return 1
+    text = text[:start] + DEPENDENCY.sub(rewrite, section) + text[end:]
+
+    patches = manifest.get("patch")
+    if patches:
+        if re.search(r"^\[patch\.", text, re.MULTILINE):
+            print("the upstream manifest already has [patch] tables", file=sys.stderr)
+            return 1
+        text = text.rstrip("\n") + "\n\n" + render_patches(patches)
 
     (repo_root / "Cargo.toml").write_text(BANNER + "\n" + text)
     return 0
