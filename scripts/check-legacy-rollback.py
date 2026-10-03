@@ -11,9 +11,23 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import tempfile
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "librustzcash/zcash_client_backend/tests/fixtures/ironwood-fee-expiry.hex"
+
+
+def workspace_patches():
+    """The `[patch]` tables the current sources build against, as TOML."""
+    with (ROOT / "manifests/sources.toml").open("rb") as manifest_file:
+        patches = tomllib.load(manifest_file).get("patch", {})
+    lines = []
+    for registry, entries in patches.items():
+        lines.append(f"[patch.{registry}]")
+        for name, source in entries.items():
+            fields = ", ".join(f"{key} = {json.dumps(value)}" for key, value in source.items())
+            lines.append(f"{name} = {{ {fields} }}")
+    return "".join(f"{line}\n" for line in lines)
 
 
 def consumer(root, version):
@@ -27,14 +41,25 @@ def consumer(root, version):
     ]:
         source = f'path = {json.dumps(str(ROOT / "librustzcash" / directory))}' if version == "current" else f'version = "=0.1.0-{version}"'
         manifest += f'{alias} = {{ package = "{package}", {source}, features = ["orchard", "transparent-inputs", "test-dependencies"] }}\n'
-    manifest += 'zcash_primitives = { package = "zakura-primitives", version = "=1.2.0" }\nzcash_protocol = "=0.10.4"\n' if version == "rc5" else 'zcash_primitives = { package = "zakura-primitives", version = "=2.0.0" }\nzcash_protocol = { package = "zakura-protocol", version = "=2.0.0" }\n'
-    manifest += 'transparent = { package = "zcash_transparent", version = "=0.10.0" }\n' if version == "rc5" else 'transparent = { package = "zakura-transparent", version = "=2.0.0" }\n'
+    # The published writers keep the exact dependency family they were released against.
+    # The current sources build against the patched Common family of this workspace.
+    if version == "rc5":
+        manifest += 'zcash_primitives = { package = "zakura-primitives", version = "=1.2.0" }\nzcash_protocol = "=0.10.4"\n'
+        manifest += 'transparent = { package = "zcash_transparent", version = "=0.10.0" }\n'
+    elif version == "rc7":
+        manifest += 'zcash_primitives = { package = "zakura-primitives", version = "=2.0.0" }\nzcash_protocol = { package = "zakura-protocol", version = "=2.0.0" }\n'
+        manifest += 'transparent = { package = "zakura-transparent", version = "=2.0.0" }\n'
+    else:
+        manifest += 'zcash_primitives = { package = "zakura-primitives", version = "2.0" }\nzcash_protocol = { package = "zakura-protocol", version = "2.0" }\n'
+        manifest += 'transparent = { package = "zakura-transparent", version = "2.0" }\n'
     # Pin the PCZT prerelease used by Vizor: caret prerelease resolution otherwise selects
     # rc4's newer dependency family while testing rc5's published writer.
     if version == "rc5":
         manifest += 'pczt = { package = "zakura-pczt", version = "=0.1.0-rc3", default-features = false, features = ["io-finalizer"] }\n'
     elif version == "rc7":
         manifest += 'pczt = { package = "zakura-pczt", version = "=0.1.0-rc4", features = ["io-finalizer"] }\n'
+    if version == "current":
+        manifest += workspace_patches()
     (dest / "Cargo.toml").write_text(manifest)
     # Retain this repository's locked common dependency versions instead of floating to a
     # newer minor release. Cargo adjusts only the legacy families absent from this lockfile.

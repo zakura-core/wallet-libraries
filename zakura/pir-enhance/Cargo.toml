@@ -25,22 +25,22 @@ futures-util = "0.3"
 url = "2"
 base64 = "0.22"
 hex.workspace = true
-ipir-sp = { version = "=0.1.0-rc.6", features = ["native-reinspiring"] }
+ipir-sp = { version = "0.1.0-rc.6", features = ["native-reinspiring"] }
 rand = "0.8"
 rand_chacha.workspace = true
-reinspiring = "=0.1.2"
+reinspiring = "0.1.2"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror = "2"
-zakura-pir-enhance-types = { version = "=0.0.1-rc0", path = "../pir-enhance-types" }
-zakura-pir-native = { version = "=0.0.1-rc0", path = "../pir-native" }
+zakura-pir-enhance-types = { version = "0.0.1-rc0", path = "../pir-enhance-types" }
+zakura-pir-native = { version = "0.0.1-rc0", path = "../pir-native" }
 
 [dev-dependencies]
-zakura-pir-native = { version = "=0.0.1-rc0", path = "../pir-native", features = ["test-server"] }
+zakura-pir-native = { version = "0.0.1-rc0", path = "../pir-native", features = ["test-server"] }
 zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", version = "0.1.0-rc7", features = ["orchard", "test-dependencies"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 incrementalmerkletree.workspace = true
 futures = "0.3"
-inspiring = "=0.1.0-rc.2"
+inspiring = "0.1.0-rc.2"
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }

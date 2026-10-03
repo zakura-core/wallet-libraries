@@ -11,7 +11,7 @@ categories.workspace = true
 keywords = ["zcash", "wallet", "privacy"]
 
 [dependencies]
-zakura-pir-status = { version = "=0.0.1-rc0", path = "../pir-status" }
+zakura-pir-status = { version = "0.0.1-rc0", path = "../pir-status" }
 zcash_client_backend = { workspace = true, features = ["lightwalletd-tonic", "lightwalletd-tonic-transport"] }
 zcash_primitives.workspace = true
 zcash_protocol.workspace = true
