@@ -28,8 +28,10 @@ the convention `libraries` already follows.
 stack and `libraries` does not already ship it. A crate that `zakura-*` resolves
 from crates.io must *not* be vendored here — two copies of a package whose types
 cross the boundary are two different types, and the build only fails later, in a
-consumer. `zcash_address`, `zip321`, `zcash_protocol`, `zcash_transparent`,
-`zcash_encoding` and `equihash` therefore stay on crates.io.
+consumer. Shared protocol, address, transparent, and payment-request crates are supplied
+by Common under their `zakura-*` package names. Encoding is provided by
+`zcash_protocol::encoding`; note encryption resolves to
+`zakura-note-encryption` with the `zcash_note_encryption` library target.
 
 `zcash_client_sqlite` upstream also depends on `zcash_pool_migration`. Vizor
 does not use the pool-migration engine, so this fork cuts that dependency

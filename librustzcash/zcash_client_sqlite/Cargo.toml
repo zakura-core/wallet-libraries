@@ -28,7 +28,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 zcash_address.workspace = true
 zcash_client_backend = { workspace = true, features = ["unstable-serialization", "unstable-spanning-tree"] }
-zcash_encoding.workspace = true
 zcash_keys = { workspace = true, features = ["sapling"] }
 zcash_primitives.workspace = true
 zcash_protocol.workspace = true
@@ -115,7 +114,7 @@ rand_core.workspace = true
 secp256k1 = { workspace = true, features = ["rand"] }
 tempfile = "3.5.0"
 zcash_keys = { workspace = true, features = ["test-dependencies"] }
-zcash_note_encryption.workspace = true
+zcash_note_encryption = { workspace = true, features = ["alloc"] }
 zcash_proofs = { workspace = true, features = ["bundled-prover"] }
 zcash_primitives = { workspace = true, features = ["test-dependencies", "non-standard-fees"] }
 zcash_protocol = { workspace = true, features = ["local-consensus"] }

@@ -10,6 +10,12 @@ workspace.
 
 ## [Unreleased]
 
+### Changed
+- Migrated the Zakura backend to the coordinated Common 3.0.0 family,
+  including `zakura-note-encryption`. Library target names are retained, but
+  Common traits and byte wrappers have different Rust type identity from
+  upstream packages; rebuild dependent callers as one coherent family.
+
 ## [0.1.0-rc4] - 2026-09-28
 
 ### Changed

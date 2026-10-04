@@ -5,8 +5,8 @@ use core::ops::Deref;
 use shardtree::{Node, PrunableTree, RetentionFlags, Tree};
 use std::io::{self, Read, Write};
 use std::sync::Arc;
-use zcash_encoding::Optional;
 use zcash_primitives::merkle_tree::HashSer;
+use zcash_protocol::encoding::Optional;
 
 const SER_V1: u8 = 1;
 

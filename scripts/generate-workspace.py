@@ -9,7 +9,7 @@ than merging this file is what keeps the Zakura rewiring out of every upstream
 merge: the rules live in manifests/sources.toml, and the manifest they are
 applied to arrives untouched on the vendor branch.
 
-Four rules are applied to `[workspace.dependencies]`:
+Five rules are applied to `[workspace.dependencies]`:
 
 1. a dependency named in the manifest's `[rewire]` table is redirected at the
    configured Zakura fork and immutable revision, keeping the upstream key so
@@ -22,6 +22,8 @@ Four rules are applied to `[workspace.dependencies]`:
    and a second local copy would be a distinct type.
 4. a dependency named in `[versions]` keeps its upstream metadata but takes the
    configured version required by the selected Zakura release family.
+5. dependencies listed in `[remove].workspace_dependencies` are omitted,
+   together with their adjacent upstream comments.
 
 `workspace.package.repository` is rewritten to this repository so published
 crates do not advertise the upstream librustzcash URL, and
@@ -91,6 +93,7 @@ def main(argv: list[str]) -> int:
 
     rewire = manifest["rewire"]
     versions = manifest.get("versions", {})
+    removed = set(manifest.get("remove", {}).get("workspace_dependencies", []))
     layout = manifest["layout"]
     vendored_directory = layout["vendored_directory"]
 
@@ -143,9 +146,14 @@ def main(argv: list[str]) -> int:
             fields.pop("path", None)
             for source_field in ("git", "rev", "branch"):
                 fields.pop(source_field, None)
-            for target_field in ("version", "package", "git", "rev"):
+            for target_field in ("version", "package", "git", "rev", "default-features"):
                 if target_field in target:
-                    fields[target_field] = f'"{target[target_field]}"'
+                    value = target[target_field]
+                    fields[target_field] = (
+                        str(value).lower()
+                        if isinstance(value, bool)
+                        else f'"{value}"'
+                    )
         elif "path" in fields:
             if package in vendored:
                 crate = vendored[package]
@@ -166,7 +174,16 @@ def main(argv: list[str]) -> int:
     start = text.index(heading)
     end = text.find("\n[", start + len(heading))
     end = len(text) if end == -1 else end
-    text = text[:start] + DEPENDENCY.sub(rewrite, text[start:end]) + text[end:]
+    dependency_lines: list[str] = []
+    for line in text[start:end].splitlines(keepends=True):
+        match = DEPENDENCY.fullmatch(line.rstrip("\n"))
+        if match and match.group("key") in removed:
+            while dependency_lines and dependency_lines[-1].startswith("#"):
+                dependency_lines.pop()
+            continue
+        dependency_lines.append(line)
+    dependencies = "".join(dependency_lines)
+    text = text[:start] + DEPENDENCY.sub(rewrite, dependencies) + text[end:]
 
     (repo_root / "Cargo.toml").write_text(BANNER + "\n" + text)
     return 0

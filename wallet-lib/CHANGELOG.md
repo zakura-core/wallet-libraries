@@ -8,9 +8,15 @@ and this library adheres to Rust's notion of
 ## [Unreleased]
 
 ### Changed
+- Migrated the Zakura backend to the coordinated Common 3.0.0 family,
+  including `zakura-note-encryption`. Library target names are retained, but
+  Common traits and byte wrappers have different Rust type identity from
+  upstream packages; rebuild dependent callers as one coherent family.
+
+### Changed
 - Updated the Zakura PCZT dependency to `zakura-pczt 0.1.0-rc4`.
-- Pinned the Common v2 dependencies exactly so a fresh consumer cannot select
-  `2.1.0` while this facade requires the `2.0.0` family.
+- Pinned the Common v3 dependencies exactly so a fresh consumer selects
+  the coherent `3.0.0` family.
 
 ## [0.1.0-rc6] - 2026-09-27
 

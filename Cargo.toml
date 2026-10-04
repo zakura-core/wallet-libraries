@@ -39,28 +39,21 @@ categories = ["cryptography::cryptocurrencies"]
 [workspace.dependencies]
 # Intra-workspace dependencies
 equihash = { version = "0.3", default-features = false }
-zcash_address = { version = "2.0.0", default-features = false, package = "zakura-address" }
+zcash_address = { version = "=3.0.0", default-features = false, package = "zakura-address" }
 zcash_client_backend = { version = "0.1.0-rc7", path = "librustzcash/zcash_client_backend", package = "zakura-client-backend" }
-# zcash_encoding 0.5.0 is a breaking release (MSRV bump + `CompactSize::write` now
-# rejects values above `MAX_COMPACT_SIZE`). To avoid forcing every dependent to
-# migrate at once, the workspace default stays pinned to the published 0.4; only
-# `zcash_history` (a leaf crate, and the sole consumer of the new API) takes an
-# explicit path dependency on the local 0.5. Migrate the remaining crates one at a
-# time, then flip this back to `path = "components/zcash_encoding"` at "0.5".
-zcash_encoding = { version = "0.4", default-features = false }
-zcash_keys = { version = "2.0.0", default-features = false, package = "zakura-keys" }
+zcash_keys = { version = "=3.0.0", default-features = false, package = "zakura-keys" }
 zcash_pool_migration = { version = "0.1.0-rc.6" }
-zcash_protocol = { version = "2.0.0", default-features = false, package = "zakura-protocol" }
-zip321 = { version = "2.0.0", package = "zakura-zip321" }
+zcash_protocol = { version = "=3.0.0", default-features = false, package = "zakura-protocol" }
+zip321 = { version = "=3.0.0", package = "zakura-zip321" }
 
-zcash_note_encryption = "0.4.1"
-zcash_primitives = { version = "2.0.0", default-features = false, package = "zakura-primitives" }
-zcash_proofs = { version = "2.0.0", default-features = false, package = "zakura-proofs" }
+zcash_note_encryption = { version = "=3.0.0", package = "zakura-note-encryption", default-features = false }
+zcash_primitives = { version = "=3.0.0", default-features = false, package = "zakura-primitives" }
+zcash_proofs = { version = "=3.0.0", default-features = false, package = "zakura-proofs" }
 
 pczt = { version = "0.1.0-rc4", path = "librustzcash/pczt", package = "zakura-pczt" }
 
 # Shielded protocols
-bellman = { version = "2.0.0", default-features = false, features = ["groth16"], package = "zakura-bellman" }
+bellman = { version = "=3.0.0", default-features = false, features = ["groth16"], package = "zakura-bellman" }
 ff = { version = "0.14", default-features = false }
 group = { version = "0.14" }
 incrementalmerkletree = { version = "0.8.2", default-features = false }
@@ -72,14 +65,14 @@ zcash_spec = "0.2"
 # - Sapling
 bitvec = { version = "1", default-features = false, features = ["alloc"] }
 blake2s_simd = { version = "1", default-features = false }
-bls12_381 = { version = "2.0.0", package = "zakura-bls12-381" }
-jubjub = { version = "2.0.0", package = "zakura-jubjub" }
-redjubjub = { version = "2.0.0", default-features = false, package = "zakura-redjubjub" }
-sapling = { package = "zakura-sapling-crypto", version = "2.0.0", default-features = false }
+bls12_381 = { version = "=3.0.0", package = "zakura-bls12-381" }
+jubjub = { version = "=3.0.0", package = "zakura-jubjub" }
+redjubjub = { version = "=3.0.0", default-features = false, package = "zakura-redjubjub" }
+sapling = { package = "zakura-sapling-crypto", version = "=3.0.0", default-features = false }
 
 # - Orchard
-orchard = { version = "2.0.0", default-features = false, package = "zakura-orchard" }
-pasta_curves = { version = "2.0.0", package = "zakura-pasta-curves" }
+orchard = { version = "=3.0.0", default-features = false, package = "zakura-orchard" }
+pasta_curves = { version = "=3.0.0", package = "zakura-pasta-curves" }
 
 # - Transparent
 bip32 = { version = "=0.6.0-pre.1", default-features = false, features = ["alloc"] }
@@ -87,7 +80,7 @@ block-buffer = { version = "=0.11.0-rc.3" } # later RCs require edition2024
 crypto-common = { version = "=0.2.0-rc.1" } # later RCs require edition2024
 ripemd = { version = "0.1", default-features = false }
 secp256k1 = { version = "0.29", default-features = false, features = ["alloc"] }
-transparent = { package = "zakura-transparent", version = "2.0.0", default-features = false }
+transparent = { package = "zakura-transparent", version = "=3.0.0", default-features = false }
 zcash_script = { version = "0.4.3", default-features = false }
 zeroize = { version = "1.7", default-features = false }
 

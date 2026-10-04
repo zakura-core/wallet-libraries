@@ -10,6 +10,12 @@ workspace.
 
 ## [Unreleased]
 
+### Changed
+- Migrated the Zakura backend to the coordinated Common 3.0.0 family,
+  including `zakura-note-encryption`. Library target names are retained, but
+  Common traits and byte wrappers have different Rust type identity from
+  upstream packages; rebuild dependent callers as one coherent family.
+
 ### Added
 - `tor::Client::connect_lightwalletd_channel` returns the Tor-routed `tonic` channel that
   `connect_to_lightwalletd` wraps, so callers can layer `tower` services over it.
