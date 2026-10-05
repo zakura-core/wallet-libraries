@@ -189,7 +189,8 @@ def main(argv=None) -> int:
     parser.add_argument("--profile", help="Cargo profile; final validation uses test")
     parser.add_argument("--exact", action="store_true")
     parser.add_argument("--only", choices=VERIFY, help="one repository verification script")
-    args = parser.parse_args(argv)
+    # Options may follow the command or the test filter, as documented.
+    args = parser.parse_intermixed_args(argv)
     if args.profile and not re.fullmatch(r"[A-Za-z0-9_-]+", args.profile):
         parser.error("profile names must contain only letters, digits, underscores, or hyphens")
     if (args.filter or args.exact) and args.command != "test":
