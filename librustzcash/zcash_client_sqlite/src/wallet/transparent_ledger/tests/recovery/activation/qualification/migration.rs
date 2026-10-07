@@ -300,6 +300,16 @@ impl PreLedgerWallet {
                 .filter(|(table, _)| {
                     table != "schemer_migrations" && table != "tx_reconfirmation_receipts"
                 })
+                // Txid enhancement tables are added empty: no wallet here has ledger-origin or
+                // route-2 transactions before the upgrade.
+                .filter(|(table, rows)| {
+                    !(table.starts_with("transparent_detail_work")
+                        || table.starts_with("transparent_tx_display"))
+                        || {
+                            assert!(rows.is_empty(), "{table} is not empty");
+                            false
+                        }
+                })
                 .collect::<Vec<_>>()
         };
         let before = wallet_rows(&self.db.conn);
