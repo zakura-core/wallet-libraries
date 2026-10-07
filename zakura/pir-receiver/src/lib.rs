@@ -21,7 +21,7 @@ use std::{
 };
 
 use futures_util::StreamExt;
-use receiver_directory::{Receiver, witness::WitnessSnapshot};
+use receiver_directory::{Receiver, filter::Filters, witness::WitnessSnapshot};
 use receiver_pir::{AcceptedCoverage, transport::DirectoryClient};
 use rusqlite::Connection;
 use zakura_pir_enhance::{
@@ -36,6 +36,7 @@ use zcash_client_sqlite::{
     util::Clock,
     wallet::swap_receiving::{
         DirectoryPayment, DiscoveryWork, Error as WalletError, KeyId, PaymentApplication,
+        ProviderView,
     },
 };
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
@@ -180,12 +181,16 @@ pub struct Swept {
 /// publication must commit to `genesis` ([`MAINNET_GENESIS`] on mainnet), cover
 /// history from Ironwood activation, and end at a block the wallet scanned at most
 /// [`MAX_PUBLICATION_LAG`](zcash_client_sqlite::wallet::swap_receiving::MAX_PUBLICATION_LAG)
-/// blocks below `through`. New payments a lookup finds take
-/// their note data from `notes`. After each batch the incoming lookahead moves past
-/// paid indices and its new keys are swept too. A key that fails is backed off and
-/// listed in [`Swept::deferred`], and the others go on, unless the directory's session
-/// or connection failed: then the run stops before leasing more keys. `now` is the
-/// caller's clock in seconds, for retry backoff.
+/// blocks below `through`. Each key's receiver is first tested against the
+/// publication's filters, which every wallet downloads alike: only a receiver in the
+/// paid filter is looked up over PIR, and only one in the recent filter keeps
+/// scanning after its sweep (see [`WalletDb::apply_swap_sweep`]). A run that looks
+/// nothing up opens no PIR session and fetches no witnesses. New payments a lookup
+/// finds take their note data from `notes`. After each batch the incoming lookahead
+/// moves past paid indices and its new keys are swept too. A key that fails is backed
+/// off and listed in [`Swept::deferred`], and the others go on, unless the directory's
+/// session or connection failed: then the run stops before leasing more keys. `now` is
+/// the caller's clock in seconds, for retry backoff.
 #[allow(clippy::too_many_arguments)]
 pub async fn sweep<C, P, CL, R, T, N, L>(
     wallet: &mut WalletDb<C, P, CL, R>,
@@ -208,17 +213,28 @@ where
 {
     let mut swept = Swept::default();
     if wallet.chain_height()? == Some(through.height) {
-        let (mut work, remaining) = due(wallet, accounts, through, lock, now)?;
+        let mut work = due(wallet, accounts, through, lock, now)?;
         if !work.is_empty() {
             let mut directory =
-                connect(wallet, through, genesis, origin, transport, remaining).await?;
+                Directory::accept(wallet, through, genesis, origin, transport).await?;
             'run: loop {
-                for (account, item) in work {
+                let checks = directory.check(&work)?;
+                let lookups = work
+                    .iter()
+                    .zip(&checks)
+                    .filter(|((_, item), check)| item.lookup.is_none() && check.paid)
+                    .count();
+                if let Some(session) = &mut directory.session {
+                    session.client.use_file_for_work(lookups).await?;
+                }
+                for ((account, item), check) in work.into_iter().zip(checks) {
                     let swept_key = sweep_key(
                         wallet,
                         &mut directory,
                         account,
                         &item,
+                        check,
+                        lookups,
                         through,
                         notes,
                         lock,
@@ -246,12 +262,10 @@ where
                         .iter()
                         .try_for_each(|account| wallet.maintain_swap_receiving(*account))
                 })?;
-                let (next, remaining) = due(wallet, accounts, through, lock, now)?;
-                if next.is_empty() {
+                work = due(wallet, accounts, through, lock, now)?;
+                if work.is_empty() {
                     break;
                 }
-                directory.client.use_file_for_work(remaining).await?;
-                work = next;
             }
         }
     }
@@ -264,90 +278,155 @@ where
     Ok(swept)
 }
 
-/// A receiver-directory publication accepted at a block the wallet scanned.
-struct Directory<T> {
-    client: DirectoryClient<T>,
+/// What a publication's filters say about one key's receiver.
+#[derive(Clone, Copy)]
+struct Check {
+    /// The paid filter holds it, so a lookup may find payments.
+    paid: bool,
+    /// What the swap provider filters say.
+    provider: ProviderView,
+}
+
+/// A receiver-directory publication accepted at a block the wallet scanned, with its
+/// filters. Its PIR session and common witnesses are fetched only once a key needs a
+/// lookup or has payments to apply.
+struct Directory<'a, T> {
+    origin: &'a str,
+    /// Moves into the session when one opens.
+    transport: Option<T>,
+    manifest: receiver_pir::Manifest,
     accepted: AcceptedCoverage,
     anchor: ChainPoint,
+    filters: Filters,
+    session: Option<Session<T>>,
+}
+
+/// An open PIR session and the publication's common witnesses, which every wallet
+/// fetches identically.
+struct Session<T> {
+    client: DirectoryClient<T>,
     witnesses: WitnessSnapshot,
 }
 
-/// `accounts`' due sweeps at `through`, a bounded batch per account, with the whole
-/// job's remaining lookup count, which decides between PIR and the full row file.
+impl<'a, T: Transport> Directory<'a, T> {
+    /// Accepts the publication `origin` serves, at the block of the wallet's chain it
+    /// ends at, and downloads its filters.
+    async fn accept<C, P, CL, R>(
+        wallet: &WalletDb<C, P, CL, R>,
+        through: ChainPoint,
+        genesis: [u8; 32],
+        origin: &'a str,
+        transport: T,
+    ) -> Result<Self, Error>
+    where
+        C: Borrow<Connection>,
+        P: Parameters,
+    {
+        let manifest = DirectoryClient::fetch_manifest(origin, &transport).await?;
+        let end = BlockHeight::from(manifest.directory.end_height);
+        let anchor = wallet.swap_publication_anchor(end, through)?;
+        let activation = wallet
+            .params()
+            .activation_height(NetworkUpgrade::Nu6_3)
+            .ok_or(Error::Unavailable("Ironwood is not active on this network"))?;
+        let accepted = AcceptedCoverage {
+            genesis,
+            required_start: activation.into(),
+            height: anchor.height.into(),
+            hash: anchor.hash.0,
+        };
+        accepted.check(&manifest.directory)?;
+        let filters = DirectoryClient::fetch_filters(origin, &transport, &manifest).await?;
+        Ok(Self {
+            origin,
+            transport: Some(transport),
+            manifest,
+            accepted,
+            anchor,
+            filters,
+            session: None,
+        })
+    }
+
+    /// What the filters say about each item's receiver.
+    fn check(&self, work: &[(AccountUuid, DiscoveryWork)]) -> Result<Vec<Check>, Error> {
+        let receivers = work
+            .iter()
+            .map(|(_, item)| Receiver::from_bytes(item.receiver))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DirectoryError::from)?;
+        let key = &self.manifest.directory.salt;
+        let paid = self.filters.paid.matches(key, &receivers);
+        let recent = self.filters.recent.matches(key, &receivers);
+        let seen = self.filters.seen.matches(key, &receivers);
+        Ok((0..receivers.len())
+            .map(|i| Check {
+                paid: paid[i],
+                provider: ProviderView {
+                    recent: recent[i],
+                    seen: seen[i],
+                },
+            })
+            .collect())
+    }
+
+    /// The PIR session, opened for `lookups` lookups if none is open yet.
+    async fn session(&mut self, lookups: usize) -> Result<&mut Session<T>, Error> {
+        if self.session.is_none() {
+            let transport = self
+                .transport
+                .take()
+                .ok_or(Error::Unavailable("the receiver directory session failed"))?;
+            let client = DirectoryClient::connect_manifest(
+                self.origin,
+                transport,
+                self.accepted,
+                self.manifest.clone(),
+                lookups,
+            )
+            .await?;
+            let witnesses = client.witnesses().await?;
+            self.session = Some(Session { client, witnesses });
+        }
+        Ok(self.session.as_mut().expect("opened above"))
+    }
+}
+
+/// `accounts`' due sweeps at `through`, a bounded batch per account.
 fn due<C, P, CL, R, L>(
     wallet: &mut WalletDb<C, P, CL, R>,
     accounts: &[AccountUuid],
     through: ChainPoint,
     lock: &L,
     now: i64,
-) -> Result<(Vec<(AccountUuid, DiscoveryWork)>, usize), Error>
+) -> Result<Vec<(AccountUuid, DiscoveryWork)>, Error>
 where
     C: BorrowMut<Connection>,
     P: Parameters,
     L: WriteLock,
 {
     let mut work = Vec::new();
-    let mut remaining = 0;
     for &account in accounts {
         let batch = lock.write("swap_sweep.due", || {
             wallet.prepare_swap_discovery_batch(account, through, now, BATCH)
         })?;
-        remaining += batch.remaining_lookups;
-        work.extend(batch.work.into_iter().map(|item| (account, item)));
+        work.extend(batch.into_iter().map(|item| (account, item)));
     }
-    Ok((work, remaining))
+    Ok(work)
 }
 
-/// Connects to the publication `origin` serves, accepted at the block of the wallet's
-/// chain it ends at, and downloads its common witnesses, which every wallet fetches
-/// identically.
-async fn connect<C, P, CL, R, T>(
-    wallet: &WalletDb<C, P, CL, R>,
-    through: ChainPoint,
-    genesis: [u8; 32],
-    origin: &str,
-    transport: T,
-    remaining: usize,
-) -> Result<Directory<T>, Error>
-where
-    C: Borrow<Connection>,
-    P: Parameters,
-    T: Transport,
-{
-    let advertised = DirectoryClient::fetch_manifest(origin, &transport).await?;
-    let end = BlockHeight::from(advertised.directory.end_height);
-    let anchor = wallet.swap_publication_anchor(end, through)?;
-    let activation = wallet
-        .params()
-        .activation_height(NetworkUpgrade::Nu6_3)
-        .ok_or(Error::Unavailable("Ironwood is not active on this network"))?;
-    let accepted = AcceptedCoverage {
-        genesis,
-        required_start: activation.into(),
-        height: anchor.height.into(),
-        hash: anchor.hash.0,
-    };
-    let client =
-        DirectoryClient::connect_manifest(origin, transport, accepted, advertised, remaining)
-            .await?;
-    let witnesses = client.witnesses().await?;
-    Ok(Directory {
-        client,
-        accepted,
-        anchor,
-        witnesses,
-    })
-}
-
-/// Sweeps one key: leases an attempt, looks up its receiver unless an earlier
-/// lookup is already queued, queues the new payments with their note data in
-/// batches, and applies them with the publication's witnesses.
+/// Sweeps one key: leases an attempt, looks up its receiver if the paid filter holds
+/// it and no earlier lookup is queued, queues the new payments with their note data
+/// in batches, and applies them with the publication's witnesses. `lookups` is the
+/// batch's lookup count, which sizes a session that this key opens.
 #[allow(clippy::too_many_arguments)]
 async fn sweep_key<C, P, CL, R, T, N, L>(
     wallet: &mut WalletDb<C, P, CL, R>,
-    directory: &mut Directory<T>,
+    directory: &mut Directory<'_, T>,
     account: AccountUuid,
     item: &DiscoveryWork,
+    check: Check,
+    lookups: usize,
     through: ChainPoint,
     notes: &mut N,
     lock: &L,
@@ -361,19 +440,25 @@ where
     L: WriteLock,
 {
     let key = item.key;
+    let anchor = directory.anchor;
     lock.write("swap_sweep.attempt", || {
         wallet.begin_swap_discovery_attempt(account, key, now)
     })?;
     if item.lookup.is_none() {
-        let receiver = Receiver::from_bytes(item.receiver).map_err(DirectoryError::from)?;
-        let accepted = directory.accepted;
-        let payments: Vec<_> = directory
-            .client
-            .lookup(receiver, accepted)
-            .await?
-            .into_iter()
-            .map(directory_payment)
-            .collect();
+        let payments: Vec<_> = if check.paid {
+            let receiver = Receiver::from_bytes(item.receiver).map_err(DirectoryError::from)?;
+            let accepted = directory.accepted;
+            let session = directory.session(lookups).await?;
+            session
+                .client
+                .lookup(receiver, accepted)
+                .await?
+                .into_iter()
+                .map(directory_payment)
+                .collect()
+        } else {
+            Vec::new()
+        };
         loop {
             let batch: Vec<_> = wallet
                 .swap_note_data_needed(account, key, &payments)?
@@ -383,13 +468,7 @@ where
             let requested = batch.len();
             let note_data = notes.note_data(wallet, batch).await?;
             let done = lock.write("swap_sweep.queue", || {
-                wallet.queue_swap_directory_lookup(
-                    account,
-                    key,
-                    directory.anchor,
-                    &payments,
-                    &note_data,
-                )
+                wallet.queue_swap_directory_lookup(account, key, anchor, &payments, &note_data)
             })?;
             if done {
                 break;
@@ -401,10 +480,20 @@ where
             }
         }
     }
+    let witnesses = if check.paid || item.lookup.is_some() {
+        Some(&directory.session(lookups).await?.witnesses)
+    } else {
+        None
+    };
     let applied = lock.write("swap_sweep.apply", || {
-        wallet.apply_swap_sweep(account, key, through, directory.anchor, |position, cmx| {
-            directory.witnesses.path(position, cmx).ok()
-        })
+        wallet.apply_swap_sweep(
+            account,
+            key,
+            through,
+            anchor,
+            check.provider,
+            |position, cmx| witnesses.and_then(|w| w.path(position, cmx).ok()),
+        )
     })?;
     match applied {
         PaymentApplication::Applied => Ok(()),

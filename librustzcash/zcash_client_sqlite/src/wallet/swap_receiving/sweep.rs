@@ -29,6 +29,16 @@ use crate::{AccountUuid, WalletDb, wallet};
 /// tip is stale: finishing sweeps at it would leave a long rescan behind.
 pub const MAX_PUBLICATION_LAG: u32 = 100;
 
+/// What a publication's swap provider filters say about a swept key's receiver.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProviderView {
+    /// The provider was given the receiver in the last day, so a swap may still pay it.
+    pub recent: bool,
+    /// The provider was ever given the receiver as a payout address, so issuing it
+    /// again would link two swaps.
+    pub seen: bool,
+}
+
 /// A payment the receiver directory reports for a receiver, from public block data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DirectoryPayment {
@@ -243,16 +253,20 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// must wait or was rejected; payments applied before it stay applied. A lookup a
     /// reorg removed defers the sweep to run again.
     ///
-    /// The key then scans from the block after the lookup until it closes, so nothing
-    /// paid between the lookup and the tip is missed: a refund key because the
-    /// provider may still return funds, and an incoming key to catch a payout in
-    /// flight at restore or after a recheck.
+    /// `provider` is what the publication's provider filters say about the key's
+    /// receiver. A recent key then scans from the block after the lookup until it
+    /// closes, so a payment between the lookup and the tip is not missed. Any other
+    /// key that was not already scanning closes at the lookup: no swap reached it in
+    /// the last day, so nothing can arrive in the publication's lag. A seen key is
+    /// marked quoted, so issuance avoids it (see
+    /// [`WalletDb::prepare_swap_receive_reservation`]).
     pub fn apply_swap_sweep(
         &mut self,
         account: AccountUuid,
         key: KeyId,
         through: ChainPoint,
         publication: ChainPoint,
+        provider: ProviderView,
         mut witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
     ) -> Result<PaymentApplication, Error> {
         for candidate in self.pending_swap_payments(account, key)? {
@@ -293,7 +307,28 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 "UPDATE ironwood_swap_sweeps SET done_height = ?2 WHERE receiving_key_id = ?1",
                 params![id, u32::from(lookup.height)],
             )?;
-            activate(conn, id, lookup.height + 1)?;
+            let scanning: bool = conn.query_row(
+                "SELECT active_from IS NOT NULL AND closed_at IS NULL
+                 FROM ironwood_receiving_keys WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )?;
+            if provider.seen {
+                conn.execute(
+                    "UPDATE ironwood_receiving_keys SET quoted = 1 WHERE id = ?1",
+                    [id],
+                )?;
+            }
+            if provider.recent || scanning {
+                activate(conn, id, lookup.height + 1)?;
+            } else {
+                conn.execute(
+                    "UPDATE ironwood_receiving_keys SET closed_at = COALESCE(closed_at,
+                        (SELECT time FROM blocks WHERE height = ?2))
+                     WHERE id = ?1",
+                    params![id, u32::from(lookup.height)],
+                )?;
+            }
             Ok(PaymentApplication::Applied)
         })
     }

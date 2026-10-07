@@ -83,8 +83,9 @@ workspace.
   `finish_swap_receive_quote`, `start_swap_receive_quote`, `swap_receive_quotes_due`,
   `observe_swap_receive_quote` and `reap_swap_receive_reservations`, holding at most
   `RECEIVE_UNFUNDED_LIMIT` unfunded addresses within a `RECEIVE_GAP_LIMIT` recovery
-  gap. During the watch after a restore, incoming issuance starts from the top of that
-  gap.
+  gap. Issuance takes the lowest address never quoted, here or by the provider as a
+  restore sweep reports, and reuses the lowest abandoned one only when the gap leaves
+  no other. A reclaimed address stops scanning.
 - Swap funding: `record_swap_refund_quote`, `swap_funding_memo` and
   `verify_swap_funding_proposal`. The refund index travels in a memo on the funding
   transaction's internal Ironwood change, whose only transparent output is the deposit.
@@ -106,7 +107,10 @@ workspace.
   spend state locally, and then `finish_swap_nullifier_recovery`, which releases the
   Ironwood spend history the sweeps needed. Note data is queued in batches, so a long
   history keeps its progress, and a directory claim that fails a local check
-  (`PaymentApplication::Rejected`) is looked up again. A payment before the account's
+  (`PaymentApplication::Rejected`) is looked up again. `apply_swap_sweep` takes a
+  `ProviderView` of the key's receiver: a recent one keeps scanning after its sweep,
+  any other that was not already scanning closes at its lookup, and a seen one is
+  marked quoted. A payment before the account's
   birthday is checked for inclusion and then raises the recovery bound without being
   tracked. Scanning that later finds the same note moves it to the transaction it is
   found in. `swap_history_pending` reports unfinished sweeps.

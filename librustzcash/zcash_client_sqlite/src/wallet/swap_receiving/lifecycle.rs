@@ -36,9 +36,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
     /// provider reports. Either way it stays open while a receipt is unmined and
     /// unexpired or has fewer than the untrusted confirmations of the default
     /// [`ConfirmationsPolicy`], so a reorg cannot strand a receipt on a closed key.
-    /// Keys with an open reservation, and unpaid incoming keys this wallet issued, stay
-    /// active, so an index can be reissued without a gap in its scanned history. An incoming key found by a restore sweep and never issued here has no
-    /// known swap, so it closes [`RESTORE_WATCH_SECS`] after registration. A payment
+    /// An incoming key stays active while its reservation is open; an abandoned one
+    /// closes when it is reclaimed (see [`WalletDb::reap_swap_receive_reservations`]).
+    /// An incoming key found by a restore sweep and never issued here has no known
+    /// swap, so it closes [`RESTORE_WATCH_SECS`] after registration. A payment
     /// that arrives after its key closed is found by [`WalletDb::recheck_swap_history`]
     /// or a seed restore. Provider status never credits a note; a closed key keeps its
     /// notes.
@@ -82,7 +83,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                         WHERE n.receiving_key_id = k.id
                           AND (t.mined_height > :confirmed_below
                                OR (t.mined_height IS NULL AND ({unexpired})))),
-                    k.used, ({RESTORED_INCOMING}),
+                    ({RESTORED_INCOMING}),
                     (SELECT COUNT(*) FROM ironwood_swap_operations o
                         WHERE o.receiving_key_id = k.id),
                     (SELECT COUNT(*) FROM ironwood_swap_operations o
@@ -113,14 +114,13 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                     let incoming: bool = row.get(2)?;
                     let open_reservation: bool = row.get(3)?;
                     let pending_receipt: bool = row.get(4)?;
-                    let paid: bool = row.get(5)?;
-                    let restored: bool = row.get(6)?;
-                    let operations: u32 = row.get(7)?;
-                    let unresolved: u32 = row.get(8)?;
-                    let deadline: Option<i64> = row.get(9)?;
-                    let expected: i64 = row.get(10)?;
-                    let received: i64 = row.get(11)?;
-                    if incoming && (open_reservation || !(paid || restored)) {
+                    let restored: bool = row.get(5)?;
+                    let operations: u32 = row.get(6)?;
+                    let unresolved: u32 = row.get(7)?;
+                    let deadline: Option<i64> = row.get(8)?;
+                    let expected: i64 = row.get(9)?;
+                    let received: i64 = row.get(10)?;
+                    if incoming && open_reservation {
                         return Ok((id, false));
                     }
                     let limit = if restored {

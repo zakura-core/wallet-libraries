@@ -409,8 +409,10 @@ fn incoming_key_closes_only_once_paid_and_released() {
         .reap_swap_receive_reservations(account, terminal + DAY)
         .unwrap();
     assert_eq!(close(&mut st, terminal + DAY), 1);
-    assert_eq!(close(&mut st, registered_at() + LIMIT), 0);
-    assert_eq!(scanning_keys(&st), [unpaid.key_id()]);
+    // Without an open reservation, an unpaid key closes at its limit like any other.
+    assert_eq!(close(&mut st, registered_at() + LIMIT - 1), 0);
+    assert_eq!(close(&mut st, registered_at() + LIMIT), 1);
+    assert!(scanning_keys(&st).is_empty());
 }
 
 #[test]
@@ -481,7 +483,9 @@ fn reissued_key_limit_ignores_an_earlier_reservations_deadline() {
             .unwrap(),
         [first.id]
     );
-    // Reissued after the first quote's limit has passed.
+    // Reissued after the first quote's limit has passed, once nothing fresher is left.
+    db.abandon_receive_indices(account, 1..RECEIVE_GAP_LIMIT, from)
+        .unwrap();
     let reissued = first_deadline + LIMIT + DAY;
     let second = db
         .prepare_swap_receive_reservation_from(account, reissued, from)

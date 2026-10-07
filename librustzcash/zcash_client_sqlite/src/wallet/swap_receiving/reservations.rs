@@ -1,7 +1,7 @@
 //! Incoming allocation fills old holes without forgetting issued payment instructions.
 use super::{
-    Discovery, Error, KeyId, Purpose, RESTORED_INCOMING, RegisteredKey, account_key, corrupt,
-    decode_index, issuance_start, register,
+    Discovery, Error, KeyId, Purpose, RegisteredKey, account_key, corrupt, decode_index,
+    issuance_start, register,
 };
 use crate::{AccountUuid, WalletDb, util::Clock, wallet};
 use rand_core::Rng;
@@ -147,7 +147,7 @@ fn recovery_end(conn: &Connection, account: i64) -> Result<u64, Error> {
 }
 
 /// Closes reservation `id`, keeping its quote associations. Its quotes are no longer
-/// polled; the key's scanning ends separately under `close_finished_swap_keys`.
+/// polled; the caller decides when the key's scanning ends.
 /// Reaping admits only expired unfunded deposits as still open, which expect no receipt.
 fn close_reservation(conn: &Connection, id: i64, now: i64) -> Result<(), Error> {
     conn.execute(
@@ -306,6 +306,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                  VALUES (?1, ?2, ?3)",
                 params![request, reservation, deadline],
             )?;
+            // The provider now has the address, so issuance avoids it from here on.
+            conn.execute(
+                "UPDATE ironwood_receiving_keys SET quoted = 1 WHERE id = ?1",
+                [key],
+            )?;
             conn.execute(
                 "INSERT INTO ironwood_swap_operations
                     (receiving_key_id, operation_id, observed_at, deadline)
@@ -449,8 +454,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 
     /// Ends settled paid reservations and reclaims abandoned unpaid ones whose
     /// addresses local scanning shows are still empty, in one transaction, and returns
-    /// the reclaimed reservations. A reclaimed key stays active, so a later
-    /// reservation reuses it without a scanning gap. Reconcile the quotes from
+    /// the reclaimed reservations. A reclaimed key stops scanning: each of its quotes
+    /// is past its deadline with a conclusive status, so no swap can pay it. Issuing it
+    /// again scans from the new reservation. Reconcile the quotes from
     /// [`WalletDb::swap_receive_quotes_due`] with the provider first: reclamation needs
     /// fresh conclusive statuses.
     pub fn reap_swap_receive_reservations(
@@ -501,6 +507,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             for (id, key) in open {
                 if reusable(conn, id, now)? && scanned_empty(conn, key)? {
                     close_reservation(conn, id, now)?;
+                    conn.execute(
+                        "UPDATE ironwood_receiving_keys SET closed_at = ?2
+                         WHERE id = ?1 AND closed_at IS NULL",
+                        params![key, now],
+                    )?;
                     reclaimed.push(id);
                 }
             }
@@ -533,9 +544,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R: Rng> WalletDb<C, P, CL, R> 
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
-    /// Atomically resumes the single draft or locks the lowest never-paid free index,
-    /// or the highest one in the recovery window while restored keys are still watched.
-    /// Does not expose the address.
+    /// Atomically resumes the single draft or locks the lowest free index that was never
+    /// quoted, reusing the lowest abandoned one only when the recovery window holds no
+    /// other. Does not expose the address.
     ///
     /// `tip` is the chain tip last observed from the network, within
     /// [`ISSUANCE_TIP_LAG`](super::ISSUANCE_TIP_LAG) blocks of the wallet's scan. A new
@@ -611,54 +622,52 @@ pub(super) fn prepare<P: Parameters>(
     if unfunded >= RECEIVE_UNFUNDED_LIMIT {
         return Err(Error::ReservationPolicy(super::ReservationPolicy::Limit));
     }
-    // While restored keys are watched for payouts in flight at restore, the lowest
-    // unpaid indices may be the old device's open swaps, so issue from the top of the
-    // recovery window instead. A later restore still reaches it.
-    let watching: bool = conn.query_row(
-        &format!(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys k
-             WHERE k.account_id = ?1 AND k.closed_at IS NULL AND {RESTORED_INCOMING})"
-        ),
-        [a.0],
-        |r| r.get(0),
-    )?;
-    let indices: Box<dyn Iterator<Item = u64>> = if watching {
-        Box::new((0..end).rev())
-    } else {
-        Box::new(0..end)
-    };
-    for index in indices {
-        let blocked: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys k
-                WHERE k.account_id = ?1 AND k.purpose = 1 AND k.key_index = ?2 AND (
-                  k.used = 1
-                  OR EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
-                    WHERE r.receiving_key_id = k.id AND r.closed_at IS NULL)
-                  OR EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery p
-                    WHERE p.receiving_key_id = k.id)))",
-            params![a.0, index.to_be_bytes()],
-            |r| r.get(0),
-        )?;
+    // An address the provider was given is reissued only when the gap rule leaves no
+    // fresh one, since reusing it lets the provider link the two swaps.
+    let mut abandoned = None;
+    let mut fresh = None;
+    for index in 0..end {
+        let (blocked, quoted): (bool, bool) = conn
+            .query_row(
+                "SELECT k.used = 1
+                      OR EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
+                        WHERE r.receiving_key_id = k.id AND r.closed_at IS NULL)
+                      OR EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery p
+                        WHERE p.receiving_key_id = k.id),
+                    k.quoted = 1
+                 FROM ironwood_receiving_keys k
+                 WHERE k.account_id = ?1 AND k.purpose = 1 AND k.key_index = ?2",
+                params![a.0, index.to_be_bytes()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or_default();
         if blocked {
             continue;
         }
-        let key_id = KeyId::new(Purpose::Receive, index);
-        let (key, _) = register(
-            conn,
-            params,
-            account,
-            key_id,
-            scan_from,
-            true,
-            Discovery::Scan,
-            now,
-        )?;
-        conn.execute(
-            "INSERT INTO ironwood_swap_receive_reservations (receiving_key_id, created_at)
-             VALUES (?1, ?2)",
-            params![key, now],
-        )?;
-        return Ok(conn.last_insert_rowid());
+        if !quoted {
+            fresh = Some(index);
+            break;
+        }
+        abandoned.get_or_insert(index);
     }
-    Err(Error::ReservationPolicy(super::ReservationPolicy::Gap))
+    let index = fresh
+        .or(abandoned)
+        .ok_or(Error::ReservationPolicy(super::ReservationPolicy::Gap))?;
+    let (key, _) = register(
+        conn,
+        params,
+        account,
+        KeyId::new(Purpose::Receive, index),
+        scan_from,
+        true,
+        Discovery::Scan,
+        now,
+    )?;
+    conn.execute(
+        "INSERT INTO ironwood_swap_receive_reservations (receiving_key_id, created_at)
+         VALUES (?1, ?2)",
+        params![key, now],
+    )?;
+    Ok(conn.last_insert_rowid())
 }

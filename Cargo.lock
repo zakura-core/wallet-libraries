@@ -4265,7 +4265,7 @@ dependencies = [
 [[package]]
 name = "receiver-directory"
 version = "0.0.1"
-source = "git+https://github.com/valargroup/wallet-pir?rev=8e29079e491b440654a2d5a78ee04352520fe988#8e29079e491b440654a2d5a78ee04352520fe988"
+source = "git+https://github.com/valargroup/wallet-pir?rev=493fa6d494878eaceea15570d7529c409dcb0903#493fa6d494878eaceea15570d7529c409dcb0903"
 dependencies = [
  "incrementalmerkletree",
  "serde",
@@ -4279,7 +4279,7 @@ dependencies = [
 [[package]]
 name = "receiver-pir"
 version = "0.0.1"
-source = "git+https://github.com/valargroup/wallet-pir?rev=8e29079e491b440654a2d5a78ee04352520fe988#8e29079e491b440654a2d5a78ee04352520fe988"
+source = "git+https://github.com/valargroup/wallet-pir?rev=493fa6d494878eaceea15570d7529c409dcb0903#493fa6d494878eaceea15570d7529c409dcb0903"
 dependencies = [
  "hex",
  "inspiring 0.1.0-rc.2 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6)",
@@ -4295,7 +4295,7 @@ dependencies = [
 [[package]]
 name = "receiver-pir-server"
 version = "0.0.1"
-source = "git+https://github.com/valargroup/wallet-pir?rev=8e29079e491b440654a2d5a78ee04352520fe988#8e29079e491b440654a2d5a78ee04352520fe988"
+source = "git+https://github.com/valargroup/wallet-pir?rev=493fa6d494878eaceea15570d7529c409dcb0903#493fa6d494878eaceea15570d7529c409dcb0903"
 dependencies = [
  "axum",
  "hex",

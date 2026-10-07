@@ -12,7 +12,7 @@ fn advance(st: &mut State, count: usize) -> ChainPoint {
 }
 
 /// Prepares up to 64 of the test account's due sweeps.
-fn batch(st: &mut State, through: ChainPoint, now: i64) -> DiscoveryBatch {
+fn batch(st: &mut State, through: ChainPoint, now: i64) -> Vec<DiscoveryWork> {
     let account = st.test_account().unwrap().id();
     st.wallet_mut()
         .db_mut()
@@ -22,11 +22,7 @@ fn batch(st: &mut State, through: ChainPoint, now: i64) -> DiscoveryBatch {
 
 /// Keys of the due sweeps, in selection order.
 fn due(st: &mut State, through: ChainPoint, now: i64) -> Vec<KeyId> {
-    batch(st, through, now)
-        .work
-        .into_iter()
-        .map(|w| w.key)
-        .collect()
+    batch(st, through, now).into_iter().map(|w| w.key).collect()
 }
 
 #[test]
@@ -51,7 +47,7 @@ fn restored_keys_are_swept_instead_of_scanned() {
         .key_id();
     db.recover_swap_receiving_key(account, issued, through.height)
         .unwrap();
-    let work = batch(&mut st, through, NOW).work;
+    let work = batch(&mut st, through, NOW);
     let swept: Vec<_> = work.iter().map(|w| (w.key, w.receiver)).collect();
     assert_eq!(
         swept,
@@ -87,19 +83,17 @@ fn bounded_batches_do_not_derive_ten_thousand_restored_keys() {
     let batch = db
         .prepare_swap_discovery_batch(account, through, NOW, limit)
         .unwrap();
-    assert_eq!(batch.work.len(), 64);
-    assert_eq!(batch.remaining_lookups, 10_000);
-    assert!(batch.work.iter().all(|w| w.receiver == [0; 43]));
+    assert_eq!(batch.len(), 64);
+    assert!(batch.iter().all(|w| w.receiver == [0; 43]));
     // Only the started record is leased, so a stopped batch cannot starve its tail.
-    let first = batch.work[0].key;
+    let first = batch[0].key;
     db.begin_swap_discovery_attempt(account, first, NOW)
         .unwrap();
     let batch = db
         .prepare_swap_discovery_batch(account, through, NOW, limit)
         .unwrap();
-    assert_eq!(batch.remaining_lookups, 9_999);
-    assert_eq!(batch.work[0].key.index(), 1);
-    assert!(batch.work.iter().all(|w| w.key != first));
+    assert_eq!(batch[0].key.index(), 1);
+    assert!(batch.iter().all(|w| w.key != first));
 }
 
 #[test]
@@ -139,11 +133,11 @@ fn a_batch_needs_a_canonical_chain_point() {
         ),
         Err(Error::SweepDeferred(SweepDeferral::UnknownAnchor))
     ));
-    assert_eq!(batch(&mut st, replaced, NOW).work.len(), 1);
+    assert_eq!(batch(&mut st, replaced, NOW).len(), 1);
 }
 
 #[test]
-fn remaining_lookups_counts_due_sweeps_without_a_lookup() {
+fn a_batch_resumes_queued_lookups() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let older = tip(&st);
@@ -155,17 +149,15 @@ fn remaining_lookups_counts_due_sweeps_without_a_lookup() {
                 .key_id()
         })
         .collect();
-    // Any canonical lookup counts, however old.
+    // Any canonical lookup is resumed, however old.
     db.queue_swap_lookup(account, keys[2], older, &[]).unwrap();
     let through = advance(&mut st, 1);
-    assert_eq!(batch(&mut st, through, NOW).remaining_lookups, 2);
     st.wallet_mut()
         .db_mut()
         .queue_swap_lookup(account, keys[0], through, &[])
         .unwrap();
     let second = batch(&mut st, through, NOW);
-    assert_eq!(second.remaining_lookups, 1);
-    let lookups: Vec<_> = second.work.iter().map(|w| (w.key, w.lookup)).collect();
+    let lookups: Vec<_> = second.iter().map(|w| (w.key, w.lookup)).collect();
     assert_eq!(
         lookups,
         [
@@ -337,12 +329,66 @@ fn finished_incoming_sweeps_watch_paid_and_unpaid_keys() {
         .unwrap(),
         PaymentApplication::Applied
     );
-    db.apply_swap_sweep(account, paid, through, through, |_, _| None)
+    db.apply_swap_sweep(account, paid, through, through, WATCHED, |_, _| None)
         .unwrap();
     db.finish_sweep(account, unpaid, through).unwrap();
     // A paid key also scans on, so a payment after the lookup is not missed.
     assert_eq!(scanning_keys(&st), [unpaid, paid]);
     assert!(st.wallet().suggest_scan_ranges().unwrap().is_empty());
+}
+
+#[test]
+fn an_unwatched_sweep_closes_only_a_key_that_was_not_scanning() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    // Leave room above the birthday for the rewind below.
+    let through = advance(&mut st, 2);
+    let db = st.wallet_mut().db_mut();
+    let idle = db
+        .watch_swap_receive_key(account, 0, through.height)
+        .unwrap()
+        .key_id();
+    let watched = db
+        .watch_swap_receive_key(account, 1, through.height)
+        .unwrap()
+        .key_id();
+    db.queue_swap_lookup(account, idle, through, &[]).unwrap();
+    assert_eq!(
+        db.apply_swap_sweep(
+            account,
+            idle,
+            through,
+            through,
+            ProviderView::default(),
+            |_, _| None
+        )
+        .unwrap(),
+        PaymentApplication::Applied
+    );
+    db.finish_sweep(account, watched, through).unwrap();
+    // No swap reached the idle key in the last day, so nothing more can arrive.
+    assert_eq!(scanning_keys(&st), [watched]);
+    // A rewind below the lookup runs the watched key's sweep again. Unwatched now,
+    // the key keeps scanning, since something else may still need it.
+    st.generate_and_scan_empty_blocks(1);
+    st.truncate_to_height_retaining_cache(through.height - 1);
+    st.scan_cached_blocks(through.height, 2);
+    let tip = tip(&st);
+    let db = st.wallet_mut().db_mut();
+    db.queue_swap_lookup(account, watched, tip, &[]).unwrap();
+    assert_eq!(
+        db.apply_swap_sweep(
+            account,
+            watched,
+            tip,
+            tip,
+            ProviderView::default(),
+            |_, _| None
+        )
+        .unwrap(),
+        PaymentApplication::Applied
+    );
+    assert_eq!(scanning_keys(&st), [watched]);
 }
 
 #[test]
@@ -522,7 +568,7 @@ fn rewind_reruns_only_sweeps_above_the_retained_chain() {
     assert!(db.swap_history_pending(account, kept.height).unwrap());
     // The rewound sweep needs a new lookup before it can finish.
     assert!(matches!(
-        db.apply_swap_sweep(account, late, kept, kept, |_, _| None),
+        db.apply_swap_sweep(account, late, kept, kept, WATCHED, |_, _| None),
         Err(Error::SweepDeferred(SweepDeferral::UnknownAnchor))
     ));
     assert_eq!(due(&mut st, kept, NOW), [late]);
@@ -563,8 +609,7 @@ fn issuing_a_lookahead_key_does_not_extend_the_lookahead() {
     let issued = db
         .prepare_swap_receive_reservation_from(account, NOW, through.height + 1)
         .unwrap();
-    // During the restore watch, issuance takes the top of the window.
-    assert_eq!(issued.key.key_id().index(), window - 1);
+    assert_eq!(issued.key.key_id().index(), 0);
     db.maintain_swap_receive_lookahead(account, window as u32, through.height)
         .unwrap();
     assert!(due(&mut st, through, NOW).is_empty());
@@ -723,7 +768,7 @@ fn recheck_sweeps_closed_keys_and_finds_a_later_refund() {
         .unwrap(),
         PaymentApplication::Applied
     );
-    db.apply_swap_sweep(account, key, through, through, |_, _| None)
+    db.apply_swap_sweep(account, key, through, through, WATCHED, |_, _| None)
         .unwrap();
     assert_eq!(unspent_keys(&st, through.height), [Some(key)]);
     // The finished sweep reopens the key until it closes again, so no key is left to

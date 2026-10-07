@@ -34,7 +34,7 @@ pub use funding::verify_swap_funding_proposal;
 mod lifecycle;
 mod payments;
 mod planner;
-pub use planner::{DiscoveryBatch, DiscoveryWork};
+pub use planner::DiscoveryWork;
 mod recovery;
 mod reservations;
 mod retention;
@@ -44,7 +44,7 @@ pub use reservations::{
     QuoteOutcome, RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, RECEIVE_UNFUNDED_LIMIT,
     ReceiveDeposit, ReceiveQuote, ReceiveReservation,
 };
-pub use sweep::{DirectoryPayment, MAX_PUBLICATION_LAG, SweepDeferral};
+pub use sweep::{DirectoryPayment, MAX_PUBLICATION_LAG, ProviderView, SweepDeferral};
 
 use std::{
     borrow::{Borrow, BorrowMut},

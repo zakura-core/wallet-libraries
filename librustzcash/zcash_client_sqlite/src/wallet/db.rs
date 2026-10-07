@@ -540,6 +540,7 @@ pub(super) const TABLE_IRONWOOD_RECEIVING_KEYS: &str = "CREATE TABLE ironwood_re
                 used INTEGER NOT NULL DEFAULT 0 CHECK (used IN (0, 1)),
                 paid_before_birthday INTEGER NOT NULL DEFAULT 0
                     CHECK (paid_before_birthday IN (0, 1)),
+                quoted INTEGER NOT NULL DEFAULT 0 CHECK (quoted IN (0, 1)),
                 registered_at INTEGER NOT NULL DEFAULT 0,
                 active_from INTEGER CHECK (active_from BETWEEN 0 AND 4294967295),
                 closed_at INTEGER,

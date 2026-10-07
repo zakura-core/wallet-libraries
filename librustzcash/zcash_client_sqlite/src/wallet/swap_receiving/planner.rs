@@ -18,14 +18,6 @@ pub struct DiscoveryWork {
     /// A completed lookup whose candidates are durably queued. Resume those first.
     pub lookup: Option<ChainPoint>,
 }
-/// Bounded work plus the entire job's due, uncached lookup count for transport choice.
-pub struct DiscoveryBatch {
-    /// At most the requested number of records. Taking a batch does not lease its tail.
-    pub work: Vec<DiscoveryWork>,
-    /// Remaining due receivers needing network discovery, not lifetime registrations.
-    pub remaining_lookups: usize,
-}
-
 /// Returns `anchor` only while its block is still on the wallet's chain.
 pub(super) fn canonical(
     conn: &Connection,
@@ -69,15 +61,16 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Selects due sweeps without reconstructing historical keys. Attempts are leased
-    /// separately just before I/O, so a stopped batch cannot starve its tail.
+    /// Selects at most `limit` due sweeps without reconstructing historical keys.
+    /// Attempts are leased separately just before I/O, so a stopped batch cannot
+    /// starve its tail.
     pub fn prepare_swap_discovery_batch(
         &mut self,
         account: AccountUuid,
         through: ChainPoint,
         now: i64,
         limit: std::num::NonZeroU32,
-    ) -> Result<DiscoveryBatch, Error> {
+    ) -> Result<Vec<DiscoveryWork>, Error> {
         if now < 0 {
             return Err(corrupt("invalid recovery time"));
         }
@@ -86,23 +79,19 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             if canonical(db.conn.0, Some(through))?.is_none() {
                 return Err(Error::SweepDeferred(super::SweepDeferral::UnknownAnchor));
             }
-            // A finished sweep is offered again while a late lookup left candidates queued.
-            let eligible = "FROM ironwood_swap_sweeps s
-                JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
-                WHERE k.account_id = ?1 AND k.scan_from <= ?2 AND s.next_attempt_at <= ?3
-                  AND (s.done_height IS NULL OR EXISTS(
-                      SELECT 1 FROM ironwood_swap_payment_recovery p
-                      WHERE p.receiving_key_id = s.receiving_key_id))";
-            let remaining_lookups = db.conn.0.query_row(
-                &format!("SELECT COUNT(*) {eligible} AND s.lookup_height IS NULL"),
-                params![owner.0, u32::from(through.height), now],
-                |r| r.get::<_, usize>(0),
-            )?;
             let rows = {
-                let mut stmt = db.conn.0.prepare(&format!(
+                // A finished sweep is offered again while a late lookup left candidates
+                // queued.
+                let mut stmt = db.conn.0.prepare(
                     "SELECT k.purpose, k.key_index, k.receiver, s.lookup_height, s.lookup_hash
-                    {eligible} ORDER BY s.next_attempt_at, s.receiving_key_id LIMIT ?4"
-                ))?;
+                     FROM ironwood_swap_sweeps s
+                     JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
+                     WHERE k.account_id = ?1 AND k.scan_from <= ?2 AND s.next_attempt_at <= ?3
+                       AND (s.done_height IS NULL OR EXISTS(
+                           SELECT 1 FROM ironwood_swap_payment_recovery p
+                           WHERE p.receiving_key_id = s.receiving_key_id))
+                     ORDER BY s.next_attempt_at, s.receiving_key_id LIMIT ?4",
+                )?;
                 let through_height = u32::from(through.height);
                 let mut rows = stmt.query(params![owner.0, through_height, now, limit.get()])?;
                 let mut out = Vec::new();
@@ -125,10 +114,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                     lookup: canonical(db.conn.0, lookup)?,
                 });
             }
-            Ok(DiscoveryBatch {
-                work,
-                remaining_lookups,
-            })
+            Ok(work)
         })
     }
 

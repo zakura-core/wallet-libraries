@@ -380,6 +380,12 @@ fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>> {
         .collect()
 }
 
+/// A sweep's view of a receiver a swap reached recently, so its key keeps scanning.
+const WATCHED: ProviderView = ProviderView {
+    recent: true,
+    seen: false,
+};
+
 /// Keys the scanner trial-decrypts with.
 fn scanning_keys(st: &State) -> Vec<KeyId> {
     let keys = st.wallet().get_swap_scanning_keys().unwrap();
@@ -695,6 +701,35 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
         self.record_swap_observation(account, key, operation, observation, now)
     }
 
+    /// Registers incoming `indices` as addresses that were quoted and then abandoned,
+    /// which issuance reuses only when nothing else is left.
+    fn abandon_receive_indices(
+        &mut self,
+        account: AccountUuid,
+        indices: std::ops::Range<u64>,
+        scan_from: BlockHeight,
+    ) -> Result<(), Error> {
+        self.transactionally(|wdb| {
+            for index in indices {
+                let (id, _) = register(
+                    wdb.conn.0,
+                    &wdb.params,
+                    account,
+                    KeyId::new(Purpose::Receive, index),
+                    scan_from,
+                    true,
+                    Discovery::Scan,
+                    0,
+                )?;
+                wdb.conn.0.execute(
+                    "UPDATE ironwood_receiving_keys SET quoted = 1, closed_at = 0 WHERE id = ?1",
+                    [id],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
     /// Finishes `key`'s sweep after an empty lookup at `anchor`.
     fn finish_sweep(
         &mut self,
@@ -703,7 +738,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
         anchor: ChainPoint,
     ) -> Result<(), Error> {
         self.queue_swap_lookup(account, key, anchor, &[])?;
-        match self.apply_swap_sweep(account, key, anchor, anchor, |_, _| None)? {
+        match self.apply_swap_sweep(account, key, anchor, anchor, WATCHED, |_, _| None)? {
             PaymentApplication::Applied => Ok(()),
             _ => Err(corrupt("sweep has unapplied candidates")),
         }

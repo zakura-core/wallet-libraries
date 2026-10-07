@@ -137,8 +137,15 @@ fn pay_restored_key(st: &mut State, index: u64, position: u64) -> (Record, [u8; 
 }
 
 /// A publication of `records` ending at `end`, with the common witnesses over the
-/// chain's Ironwood `commitments`, served by the receiver service's routes.
-fn publish(records: &[Record], commitments: &[[u8; 32]], end: ChainPoint) -> Router {
+/// chain's Ironwood `commitments`, if any, and the swap provider's `recent` and `seen`
+/// receivers in its filters, served by the receiver service's routes.
+fn publish(
+    records: &[Record],
+    commitments: &[[u8; 32]],
+    end: ChainPoint,
+    recent: &[Receiver],
+    seen: &[Receiver],
+) -> Router {
     let manifest = Manifest {
         profile: PROFILE.into(),
         genesis: GENESIS,
@@ -152,15 +159,20 @@ fn publish(records: &[Record], commitments: &[[u8; 32]], end: ChainPoint) -> Rou
         salt: [5; 32],
         records: 0,
         data_sha256: [0; 32],
+        filters_sha256: [0; 32],
     };
-    let snapshot = Snapshot::build(manifest, records).unwrap();
+    let snapshot = Snapshot::build(manifest, records, recent, seen).unwrap();
     let positions = records
         .iter()
         .map(|record| u32::try_from(record.payment.position).unwrap())
         .collect();
-    let witnesses = WitnessSnapshot::build(&snapshot.manifest, commitments, &positions).unwrap();
-    let publication =
-        Publication::new(Server::new(snapshot).unwrap(), Some(witnesses.encode())).unwrap();
+    // A chain without Ironwood outputs has no witnesses to serve.
+    let witnesses = (!commitments.is_empty()).then(|| {
+        WitnessSnapshot::build(&snapshot.manifest, commitments, &positions)
+            .unwrap()
+            .encode()
+    });
+    let publication = Publication::new(Server::new(snapshot).unwrap(), witnesses).unwrap();
     let publications = Publications::default();
     assert!(publications.publish(publication, publications.epoch()));
     router_with_publications(publications)
@@ -287,6 +299,8 @@ async fn a_restore_sweep_finds_a_payout_and_moves_the_lookahead_past_it() {
         std::slice::from_ref(&record),
         &[record.payment.cmx],
         through,
+        &[],
+        &[],
     ));
     let mut notes = Notes {
         data: BTreeMap::from([(record.payment.position, note_data)]),
@@ -361,6 +375,8 @@ async fn a_key_paid_twice_is_imported_in_full() {
         &[first.clone(), second.clone()],
         &[first.payment.cmx, second.payment.cmx],
         through,
+        &[],
+        &[],
     ));
     let mut notes = Notes {
         data: BTreeMap::from([(0, first_data), (1, second_data)]),
@@ -416,7 +432,7 @@ async fn a_long_history_takes_its_note_data_in_batches() {
     restore(&mut st, account);
     let through = tip(&st);
     let commitments: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
-    let directory = Directory::new(publish(&records, &commitments, through));
+    let directory = Directory::new(publish(&records, &commitments, through, &[], &[]));
     let mut notes = Notes {
         data,
         requested: Vec::new(),
@@ -444,6 +460,105 @@ async fn a_long_history_takes_its_note_data_in_batches() {
     );
 }
 
+#[tokio::test]
+async fn a_wallet_without_payments_downloads_only_the_filters() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let directory = Directory::new(publish(&[], &[], through, &[], &[]));
+    let mut notes = Notes {
+        data: BTreeMap::new(),
+        requested: Vec::new(),
+    };
+    let swept = sweep(
+        st.wallet_mut().db_mut(),
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &directory,
+        &mut notes,
+        &NoLock,
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
+    assert_eq!(swept.finished as u64, RECEIVE_GAP_LIMIT);
+    assert!(!swept.pending);
+    // No PIR session, witnesses or note data: one manifest and one filter file.
+    let requests = directory.requests();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(requests[1].starts_with("GET /v1/receiver/filters/"));
+    assert!(notes.requested.is_empty());
+    // No swap reached these addresses recently, so none keeps scanning.
+    assert!(st.wallet().get_swap_scanning_keys().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
+    let receiver = |key: KeyId| {
+        let address = key
+            .derive(&parent)
+            .unwrap()
+            .address_at(0u32, Scope::External);
+        Receiver::from_bytes(address.to_raw_address_bytes()).unwrap()
+    };
+    // The old device quoted addresses 0 and 2, and 2 only today.
+    let (old, quoted) = (
+        KeyId::new(Purpose::Receive, 0),
+        KeyId::new(Purpose::Receive, 2),
+    );
+    let directory = Directory::new(publish(
+        &[],
+        &[],
+        through,
+        &[receiver(quoted)],
+        &[receiver(old), receiver(quoted)],
+    ));
+    let mut notes = Notes {
+        data: BTreeMap::new(),
+        requested: Vec::new(),
+    };
+    let swept = sweep(
+        st.wallet_mut().db_mut(),
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &directory,
+        &mut notes,
+        &NoLock,
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
+    let scanning: Vec<_> = st
+        .wallet()
+        .get_swap_scanning_keys()
+        .unwrap()
+        .iter()
+        .map(|k| k.key_id())
+        .collect();
+    assert_eq!(scanning, [quoted]);
+    // Issuance skips both, and takes the lowest address the provider never had.
+    let issued = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_swap_receive_reservation(account, NOW, through.height)
+        .unwrap();
+    assert_eq!(issued.key.key_id(), KeyId::new(Purpose::Receive, 1));
+}
+
 /// A directory whose queries fail after it accepted the session.
 struct FailingQueries(Directory);
 
@@ -462,7 +577,8 @@ impl Transport for FailingQueries {
 async fn a_revoked_session_stops_the_run_before_leasing_more_keys() {
     let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
-    let (record, _) = pay_restored_key(&mut st, 3, 0);
+    // The first key in the batch is paid, so it needs the failing lookup.
+    let (record, _) = pay_restored_key(&mut st, 0, 0);
     st.generate_and_scan_empty_blocks(1);
     restore(&mut st, account);
     let through = tip(&st);
@@ -470,6 +586,8 @@ async fn a_revoked_session_stops_the_run_before_leasing_more_keys() {
         std::slice::from_ref(&record),
         &[record.payment.cmx],
         through,
+        &[],
+        &[],
     )));
     let mut notes = Notes {
         data: BTreeMap::new(),
@@ -516,6 +634,8 @@ async fn a_publication_off_the_wallets_chain_is_refused_before_any_lookup() {
         std::slice::from_ref(&record),
         &[record.payment.cmx],
         other,
+        &[],
+        &[],
     ));
     let mut notes = Notes {
         data: BTreeMap::from([(record.payment.position, note_data)]),

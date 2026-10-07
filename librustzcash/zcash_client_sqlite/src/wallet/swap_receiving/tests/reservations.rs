@@ -178,7 +178,7 @@ fn unquoted_draft_waits_until_creation_plus_cooldown() {
 }
 
 #[test]
-fn reclaimed_hole_reuses_its_still_scanning_key_and_keeps_old_quotes() {
+fn reclaimed_hole_stops_scanning_and_keeps_its_quotes() {
     let mut st = fixture();
     let mut hole = None;
     for i in 0..5 {
@@ -194,22 +194,47 @@ fn reclaimed_hole_reuses_its_still_scanning_key_and_keeps_old_quotes() {
         }
     }
     let r = hole.unwrap();
-    let issued = active_from(&st, r.key.key_id());
+    assert!(scanning_keys(&st).contains(&r.key.key_id()));
     let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
     observe(&mut st, "quote-1", "PENDING_DEPOSIT", false, now);
     assert_eq!(reap(&mut st, now), [r.id]);
     assert!(operation(&st, "quote-1").is_some());
-    assert_eq!(active_from(&st, r.key.key_id()), issued);
-
-    let recycled = prepare(&mut st, now);
-    assert_eq!(recycled.key.key_id(), r.key.key_id());
-    assert_ne!(recycled.id, r.id);
-    assert_eq!(active_from(&st, r.key.key_id()), issued);
-    quote(&mut st, &recycled, "new-quote-1", true);
+    // Every quote is past its deadline and conclusive, so no swap can pay it.
+    assert!(!scanning_keys(&st).contains(&r.key.key_id()));
+    // The provider has the hole's address, so the next swap gets a fresh one.
     assert_eq!(prepare(&mut st, now).key.key_id().index(), 5);
-    // An old quote's late deposit is still attributed to the same key.
-    pay(&mut st, r.key.full_viewing_key());
-    assert!(holds_note(&st, r.key.key_id()));
+}
+
+#[test]
+fn issuance_reuses_the_lowest_abandoned_address_only_when_none_is_fresh() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let first = prepare(&mut st, NOW);
+    quote(&mut st, &first, "first", true);
+    let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
+    observe(&mut st, "first", "PENDING_DEPOSIT", false, now);
+    assert_eq!(reap(&mut st, now), [first.id]);
+    let from = tip(&st).height + 1;
+    st.wallet_mut()
+        .db_mut()
+        .abandon_receive_indices(account, 2..RECEIVE_GAP_LIMIT, from)
+        .unwrap();
+    // Address 1 is the window's only fresh one, so it goes before the lower 0.
+    let second = prepare(&mut st, now);
+    assert_eq!(second.key.key_id().index(), 1);
+    st.wallet_mut()
+        .db_mut()
+        .begin_swap_receive_quote_as(account, second.id, "second", now + 60, now)
+        .unwrap();
+    st.wallet_mut()
+        .db_mut()
+        .finish_swap_receive_quote(account, "second", &accepted("second", None, now + 60))
+        .unwrap();
+    let later = now + 61 + RECEIVE_RECLAIM_SECONDS;
+    observe(&mut st, "second", "PENDING_DEPOSIT", false, later);
+    assert_eq!(reap(&mut st, later), [second.id]);
+    // With every address in the window quoted, the lowest abandoned one is reused.
+    assert_eq!(prepare(&mut st, later).key.key_id(), first.key.key_id());
 }
 
 #[test]
@@ -513,36 +538,30 @@ fn undone_incoming_sweep_blocks_new_reservations() {
         .db_mut()
         .finish_sweep(account, swept, through)
         .unwrap();
-    // Issuance resumes, from the top of the window while the swept key is watched.
-    assert_eq!(
-        prepare(&mut st, NOW).key.key_id().index(),
-        RECEIVE_GAP_LIMIT - 1
-    );
+    // Issuance resumes at the lowest address never quoted.
+    assert_eq!(prepare(&mut st, NOW).key.key_id().index(), 0);
 }
 
 #[test]
-fn issuance_during_the_restore_watch_starts_at_the_top_of_the_window() {
+fn issuance_skips_restored_addresses_the_provider_saw() {
     let mut st = fixture();
     let account = st.test_account().unwrap().id();
     let swept_at = tip(&st);
     let db = st.wallet_mut().db_mut();
     db.maintain_swap_receive_lookahead(account, RECEIVE_GAP_LIMIT as u32, swept_at.height)
         .unwrap();
+    // The old device quoted the first three addresses.
     for index in 0..RECEIVE_GAP_LIMIT {
-        db.finish_sweep(account, KeyId::new(Purpose::Receive, index), swept_at)
+        let key = KeyId::new(Purpose::Receive, index);
+        db.queue_swap_lookup(account, key, swept_at, &[]).unwrap();
+        let provider = ProviderView {
+            recent: false,
+            seen: index < 3,
+        };
+        db.apply_swap_sweep(account, key, swept_at, swept_at, provider, |_, _| None)
             .unwrap();
     }
-    // The old device's open swaps, if any, hold the lowest unpaid indices.
-    let first = prepare(&mut st, NOW);
-    assert_eq!(first.key.key_id().index(), RECEIVE_GAP_LIMIT - 1);
-    quote(&mut st, &first, "first", true);
-    // Once the watch ends, issuance fills from the lowest free index again.
-    let closes = unix_now(&test_clock()) + zakura_swap_receiving::lifecycle::RESTORE_WATCH_SECS;
-    st.wallet_mut()
-        .db_mut()
-        .close_finished_swap_keys_at(account, closes, swept_at.height)
-        .unwrap();
-    assert_eq!(prepare(&mut st, NOW).key.key_id().index(), 0);
+    assert_eq!(prepare(&mut st, NOW).key.key_id().index(), 3);
 }
 
 #[test]
@@ -563,11 +582,8 @@ fn payout_during_restore_watch_excludes_the_index() {
     pay(&mut st, swept.full_viewing_key());
     confirm(&mut st);
     assert!(holds_note(&st, swept.key_id()));
-    // The payout moves the window up by one; during the watch, issuance takes its top.
-    assert_eq!(
-        prepare(&mut st, NOW).key.key_id().index(),
-        RECEIVE_GAP_LIMIT
-    );
+    // The paid address is never issued again.
+    assert_eq!(prepare(&mut st, NOW).key.key_id().index(), 1);
 }
 
 #[test]
@@ -629,11 +645,8 @@ fn issuance_starts_after_the_scanned_tip_once_the_restore_lookahead_is_swept() {
     let r = db
         .prepare_swap_receive_reservation(account, NOW, near)
         .unwrap();
-    // The swept lookahead is still watched, so issuance takes the top of the window.
-    assert_eq!(
-        r.key.key_id(),
-        KeyId::new(Purpose::Receive, RECEIVE_GAP_LIMIT - 1)
-    );
+    // Issuance takes the lowest address never quoted.
+    assert_eq!(r.key.key_id(), KeyId::new(Purpose::Receive, 0));
     let refund = db
         .reserve_swap_refund_key(account, through.height)
         .unwrap()
@@ -727,7 +740,7 @@ fn begin_requires_a_future_deadline() {
 }
 
 #[test]
-fn reaping_reclaims_abandoned_reservations_for_reuse() {
+fn reaping_reclaims_abandoned_reservations() {
     let mut st = fixture();
     let account = st.test_account().unwrap().id();
     let abandoned = prepare(&mut st, NOW);
@@ -748,7 +761,8 @@ fn reaping_reclaims_abandoned_reservations_for_reuse() {
             .is_empty()
     );
     assert!(reap(&mut st, now).is_empty());
-    assert_eq!(prepare(&mut st, now).key.key_id(), abandoned.key.key_id());
+    assert!(!scanning_keys(&st).contains(&abandoned.key.key_id()));
+    assert_eq!(prepare(&mut st, now).key.key_id().index(), 2);
 }
 
 #[test]
