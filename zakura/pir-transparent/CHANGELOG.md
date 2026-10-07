@@ -60,7 +60,7 @@
 
 ### Changed
 
-- wallet-pir is pinned to `7ed5c87d`; every wallet-pir dependency moves together.
+- wallet-pir is pinned to `3d9eb406`; every wallet-pir dependency moves together.
 - `ReferenceRecovery::recover` takes the caller's `FilterSource` and
   `ShardTransport` for each pass. Before any retrieval it checks the target,
   the script limits, that the filter source does not use parent filters, the
