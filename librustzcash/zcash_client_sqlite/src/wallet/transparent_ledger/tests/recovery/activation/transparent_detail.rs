@@ -4,9 +4,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use zcash_client_backend::data_api::transparent_ledger::{
     TransactionMetadata, TransparentDetailOutcome, TransparentDetailRead as _,
-    TransparentDetailReasons, TransparentDetailWrite as _, TransparentDisplayContradiction,
-    TransparentDisplayFacts, TransparentDisplayOutput, TransparentDisplayProvenance,
-    TransparentDisplaySource, TransparentDisplayStore, TransparentDisplayView, WholeTransactionFee,
+    TransparentDetailWrite as _, TransparentDisplayContradiction, TransparentDisplayFacts,
+    TransparentDisplayOutput, TransparentDisplayProvenance, TransparentDisplaySource,
+    TransparentDisplayStore, TransparentDisplayView, WholeTransactionFee,
 };
 
 use super::*;
