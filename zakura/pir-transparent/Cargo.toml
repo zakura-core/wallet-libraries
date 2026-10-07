@@ -44,6 +44,20 @@ transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "
 transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "648264bb4801ae8faf7a61f4638ea049edb167cf" }
 transparent-shard-server = { git = "https://github.com/valargroup/wallet-pir", rev = "648264bb4801ae8faf7a61f4638ea049edb167cf" }
 axum = "0.7"
+# The mixed shielding qualification authors serialized transactions and serves
+# their Enhance PIR records over the native protocol.
+base64.workspace = true
+incrementalmerkletree.workspace = true
+orchard = { workspace = true, features = ["circuit"] }
+rand = { workspace = true, features = ["std_rng"] }
+sapling = { workspace = true, features = ["test-dependencies"] }
+secp256k1.workspace = true
+transparent = { workspace = true, features = ["transparent-inputs"] }
+zakura-pir-enhance = { path = "../pir-enhance", features = ["wallet"] }
+zakura-pir-native = { path = "../pir-native", features = ["test-server"] }
+zcash_primitives = { workspace = true, features = ["std", "circuits", "transparent-inputs"] }
+zcash_protocol = { workspace = true, features = ["local-consensus"] }
+zip32.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
 regex = { workspace = true, features = ["std"] }
 
@@ -53,4 +67,8 @@ required-features = ["wallet"]
 
 [[test]]
 name = "private_recovery"
+required-features = ["wallet"]
+
+[[test]]
+name = "mixed_shielding"
 required-features = ["wallet"]

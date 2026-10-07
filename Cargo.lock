@@ -8160,9 +8160,13 @@ name = "zakura-pir-transparent"
 version = "0.0.1-rc0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "hex",
+ "incrementalmerkletree",
+ "rand 0.10.3",
  "regex",
  "rusqlite",
+ "secp256k1",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -8178,9 +8182,14 @@ dependencies = [
  "zakura-client-backend",
  "zakura-client-sqlite",
  "zakura-keys",
+ "zakura-orchard",
+ "zakura-pir-enhance",
+ "zakura-pir-native",
  "zakura-primitives",
  "zakura-protocol",
+ "zakura-sapling-crypto",
  "zakura-transparent",
+ "zip32",
 ]
 
 [[package]]
