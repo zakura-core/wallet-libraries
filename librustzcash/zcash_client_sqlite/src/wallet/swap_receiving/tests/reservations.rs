@@ -280,7 +280,7 @@ fn unfunded_quotes_fill_the_recovery_gap_until_one_is_reclaimed() {
         refusal(try_prepare(&mut st, NOW)),
         Some(ReservationPolicy::Limit)
     );
-    // An unused quote frees its address a day after its deadline. The window holds no
+    // An unused quote frees its address two hours after its deadline. The window holds no
     // fresh address, so that one is reused.
     let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
     observe(&mut st, "quote-0", "PENDING_DEPOSIT", false, now);

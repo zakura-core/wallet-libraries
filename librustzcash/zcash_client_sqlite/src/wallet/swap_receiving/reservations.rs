@@ -16,7 +16,9 @@ pub const RECEIVE_GAP_LIMIT: u64 = 30;
 /// [`RECEIVE_GAP_LIMIT`] as a lookahead key count.
 pub(super) const RECEIVE_LOOKAHEAD: u32 = RECEIVE_GAP_LIMIT as u32;
 /// Grace after the last deposit deadline before an unpaid reservation can be recycled.
-pub const RECEIVE_RECLAIM_SECONDS: i64 = 24 * 60 * 60;
+/// The provider refunds a swap it has not completed by the deadline, so this only
+/// covers a late status report and clock differences.
+pub const RECEIVE_RECLAIM_SECONDS: i64 = 2 * 60 * 60;
 const STATUS_FRESH_SECONDS: i64 = 120;
 
 /// A durable draft or started swap, independent of whether it received funds.

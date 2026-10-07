@@ -93,7 +93,7 @@ impl std::fmt::Display for ReservationPolicy {
             }
             Self::Limit => {
                 "Too many swaps into ZEC are in progress. Wait for one to finish; \
-                 an unused quote frees its address a day after its deadline."
+                 an unused quote frees its address two hours after its deadline."
             }
             Self::Stale => "This receive reservation is no longer available. Request a new quote.",
             Self::Coverage => "Finish syncing to the chain tip before requesting a quote.",
