@@ -10,9 +10,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension as _, named_params};
 use transparent::{address::Script, bundle::TxOut};
 use zcash_client_backend::data_api::transparent_ledger::{
-    TransparentDetailOutcome, TransparentDetailParked, TransparentDetailReasons,
-    TransparentDetailRequest, TransparentDetailWork, TransparentDisplayContradiction,
-    TransparentDisplayDetails, TransparentDisplayFacts, TransparentDisplayProvenance,
+    TRANSPARENT_DISPLAY_MAP_RECHECK, TransactionMetadata, TransparentDetailOutcome,
+    TransparentDetailParked, TransparentDetailReasons, TransparentDetailRequest,
+    TransparentDetailWork, TransparentDisplayContradiction, TransparentDisplayDetails,
+    TransparentDisplayFacts, TransparentDisplayOutput, TransparentDisplayProvenance,
     TransparentDisplaySource, TransparentDisplayStore, TransparentDisplayView,
     TransparentDisplayViewOutput, TransparentLedgerMode, WholeTransactionFee,
 };
@@ -66,15 +67,15 @@ fn related() -> String {
     )
 }
 
-/// Rows of `transparent_detail_work w` the listing may return for transaction `t`, before
-/// timing: mined, without raw bytes, still related, and not owned by public payload work.
+/// Rows of `transparent_detail_work w` the listing returns for transaction `t` once it is mined,
+/// before timing: without raw bytes, still related, and not owned by public payload work.
 ///
 /// Under public authority (`:public`), payload retrieval already fetches transactions queued
 /// in `tx_retrieval_queue`, and a privately protected Ironwood transaction (route 0) must not
 /// be fetched publicly.
-fn eligible() -> String {
+fn listable() -> String {
     format!(
-        "t.mined_height IS NOT NULL AND t.raw IS NULL AND {}
+        "t.raw IS NULL AND {}
          AND NOT (:public AND (
              EXISTS (SELECT 1 FROM tx_retrieval_queue q
                      WHERE q.txid = t.txid AND q.query_type = :enhancement)
@@ -83,6 +84,11 @@ fn eligible() -> String {
          ))",
         related()
     )
+}
+
+/// Rows the listing may return now, before timing: [`listable`] and mined.
+fn eligible() -> String {
+    format!("t.mined_height IS NOT NULL AND {}", listable())
 }
 
 /// The mined height changed since the last attempt: due at once, with a fresh backoff.
@@ -105,14 +111,23 @@ fn unix(now: SystemTime) -> i64 {
         .unwrap_or(0)
 }
 
-/// Queues work with `reasons` for the transaction `filter` selects from `transactions t`,
-/// OR-ed into an existing row, while it is mined, has no raw bytes and no stored display facts.
-/// A parent transaction (known only by txid, height unknown) is never queued.
+/// Queues work with `reasons` for the transactions `filter` selects from `transactions t`,
+/// OR-ed into an existing row, while they are mined, have no raw bytes and no stored display
+/// facts. A parent transaction (known only by txid, height unknown) is never queued.
+///
+/// Stored facts are first checked against what the wallet now holds: facts that were valid when
+/// stored can contradict a receive or spend projected later (a withdrawn receive reported
+/// again, say). Contradicted facts are deleted, so the transaction is looked up again.
 fn enqueue(
     conn: &Connection,
     filter: &str,
     params: &[(&str, &dyn rusqlite::ToSql)],
+    reasons: TransparentDetailReasons,
 ) -> Result<(), SqliteClientError> {
+    revalidate(conn, filter, params)?;
+    let bits = reasons.bits();
+    let mut all = params.to_vec();
+    all.push((":reasons", &bits));
     conn.prepare_cached(&format!(
         "INSERT INTO transparent_detail_work (transaction_id, reasons)
          SELECT t.id_tx, :reasons FROM transactions t
@@ -121,7 +136,36 @@ fn enqueue(
                            WHERE d.transaction_id = t.id_tx)
          ON CONFLICT (transaction_id) DO UPDATE SET reasons = reasons | excluded.reasons"
     ))?
-    .execute(params)?;
+    .execute(&all[..])?;
+    Ok(())
+}
+
+/// Deletes the stored display facts of the transactions `filter` selects that contradict the
+/// wallet; see [`enqueue`].
+fn revalidate(
+    conn: &Connection,
+    filter: &str,
+    params: &[(&str, &dyn rusqlite::ToSql)],
+) -> Result<(), SqliteClientError> {
+    let stored: Vec<(i64, Option<u32>, Option<u64>)> = conn
+        .prepare_cached(&format!(
+            "SELECT t.id_tx, t.tx_index, t.fee FROM transactions t
+             JOIN transparent_tx_display d ON d.transaction_id = t.id_tx
+             WHERE {filter}"
+        ))?
+        .query_map(params, |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    for (tx, tx_index, fee) in stored {
+        let Some(facts) = stored_facts(conn, tx)? else {
+            continue;
+        };
+        if validate(conn, tx, tx_index, fee, &facts)?.is_some() {
+            conn.execute(
+                "DELETE FROM transparent_tx_display WHERE transaction_id = :tx",
+                named_params![":tx": tx],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -138,7 +182,8 @@ pub(crate) fn enqueue_txid(
     enqueue(
         conn,
         "t.txid = :txid",
-        named_params![":txid": txid.as_ref(), ":reasons": reasons.bits()],
+        named_params![":txid": txid.as_ref()],
+        reasons,
     )
 }
 
@@ -155,17 +200,32 @@ pub(crate) fn enqueue_tx(
     enqueue(
         conn,
         "t.id_tx = :tx",
-        named_params![":tx": tx_ref.0, ":reasons": reasons.bits()],
+        named_params![":tx": tx_ref.0],
+        reasons,
     )
 }
 
+const ROUTE_TWO: &str = "EXISTS (SELECT 1 FROM ironwood_enhance_routing r
+                                 WHERE r.transaction_id = t.id_tx AND r.route = 2)";
+
 /// Queues mixed-transaction work for every unresolved route-2 transaction; see [`enqueue`].
 pub(crate) fn enqueue_route_two(conn: &Connection) -> Result<(), SqliteClientError> {
+    enqueue(conn, ROUTE_TWO, &[], TransparentDetailReasons::MIXED)
+}
+
+/// Queues mixed-transaction work for `txid` as it is mined, when it is a route-2 transaction.
+///
+/// A route-2 marker written while the transaction was unmined (rewound, or seen unmined) could
+/// not queue it, since work requires a mined height.
+pub(crate) fn enqueue_mined_route_two(
+    conn: &Connection,
+    txid: &TxId,
+) -> Result<(), SqliteClientError> {
     enqueue(
         conn,
-        "EXISTS (SELECT 1 FROM ironwood_enhance_routing r
-                 WHERE r.transaction_id = t.id_tx AND r.route = 2)",
-        named_params![":reasons": TransparentDetailReasons::MIXED.bits()],
+        &format!("t.txid = :txid AND {ROUTE_TWO}"),
+        named_params![":txid": txid.as_ref()],
+        TransparentDetailReasons::MIXED,
     )
 }
 
@@ -228,18 +288,26 @@ pub(crate) fn work(
     })
 }
 
-/// The lookups parked without a map; see `TransparentDetailRead::transparent_detail_parked`.
+fn system_time(unix: i64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(u64::try_from(unix).unwrap_or(0))
+}
+
+/// The lookups parked under the caller's map; see
+/// `TransparentDetailRead::transparent_detail_parked`.
 pub(crate) fn parked_work(
     conn: &Connection,
     configured: Option<TransparentLedgerMode>,
     now: SystemTime,
+    map_sha256: Option<[u8; 32]>,
+    map_checked_at: Option<SystemTime>,
 ) -> Result<TransparentDetailParked, SqliteClientError> {
     let mode = resolve_mode(conn, configured)?;
-    // The longest-parked row's map hash, with the count of all parked rows.
+    // The longest-parked row's map hash, with the count of all parked rows and their newest
+    // attempt.
     let parked = conn
         .query_row(
             &format!(
-                "SELECT COUNT(*) OVER (), w.last_map_sha256
+                "SELECT COUNT(*) OVER (), MAX(w.attempted_at) OVER (), w.last_map_sha256
                  FROM transparent_detail_work w
                  JOIN transactions t ON t.id_tx = w.transaction_id
                  WHERE {eligible} AND NOT {REARMED}
@@ -251,18 +319,32 @@ pub(crate) fn parked_work(
             ),
             named_params![
                 ":now": unix(now),
-                ":map": None::<&[u8]>,
+                ":map": map_sha256.as_ref().map(|m| &m[..]),
                 ":backstop": i64_secs(PARKED_BACKSTOP),
                 ":public": mode.retains_public_authority(),
                 ":enhancement": TxQueryType::Enhancement.code(),
             ],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<[u8; 32]>>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<[u8; 32]>>(2)?,
+                ))
+            },
         )
         .optional()?;
-    let (count, oldest) = parked.unwrap_or((0, None));
+    let Some((count, newest_attempt, oldest)) = parked else {
+        return Ok(TransparentDetailParked::default());
+    };
+    // A refresh is worth trying once the map may have changed since the caller last checked it
+    // or a parked lookup last used it.
+    let checked = newest_attempt
+        .unwrap_or(0)
+        .max(map_checked_at.map_or(0, unix));
     Ok(TransparentDetailParked {
         count: u64::try_from(count).unwrap_or(0),
         oldest_map_sha256: oldest,
+        refresh_at: Some(system_time(checked) + TRANSPARENT_DISPLAY_MAP_RECHECK),
     })
 }
 
@@ -319,6 +401,17 @@ fn outcome_code(outcome: TransparentDetailOutcome) -> i64 {
     }
 }
 
+/// Outcomes sharing a backoff schedule. A change of class starts a fresh backoff, so that
+/// minutes-apart `NotYetPublished` retries do not lengthen a later `Unavailable` or `Absent`
+/// backoff.
+fn outcome_class(code: i64) -> i64 {
+    match code {
+        UNAVAILABLE | PROTOCOL => UNAVAILABLE,
+        NOT_COVERED | UNSUPPORTED | CONTRADICTION => NOT_COVERED,
+        other => other,
+    }
+}
+
 fn record_outcome(
     conn: &Connection,
     txid: &TxId,
@@ -329,7 +422,8 @@ fn record_outcome(
 ) -> Result<(), SqliteClientError> {
     let row = conn
         .query_row(
-            "SELECT w.transaction_id, w.attempts, w.attempted_height, t.mined_height
+            "SELECT w.transaction_id, w.attempts, w.attempted_height, t.mined_height,
+                    w.last_outcome
              FROM transparent_detail_work w JOIN transactions t ON t.id_tx = w.transaction_id
              WHERE t.txid = :txid",
             named_params![":txid": txid.as_ref()],
@@ -339,11 +433,12 @@ fn record_outcome(
                     row.get::<_, u32>(1)?,
                     row.get::<_, Option<u32>>(2)?,
                     row.get::<_, Option<u32>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
                 ))
             },
         )
         .optional()?;
-    let Some((tx, attempts, attempted_height, mined_height)) = row else {
+    let Some((tx, attempts, attempted_height, mined_height, last_outcome)) = row else {
         return Ok(());
     };
     // A late result must not park or back off work for a different placement. This check
@@ -351,8 +446,12 @@ fn record_outcome(
     if mined_height != Some(u32::from(looked_up_height)) {
         return Ok(());
     }
-    // A changed placement starts a fresh backoff.
-    let attempts = if attempted_height.is_some() && attempted_height == mined_height {
+    // A changed placement, or another class of outcome, starts a fresh backoff.
+    let code = outcome_code(outcome);
+    let attempts = if attempted_height.is_some()
+        && attempted_height == mined_height
+        && last_outcome.map(outcome_class) == Some(outcome_class(code))
+    {
         attempts.saturating_add(1)
     } else {
         1
@@ -369,7 +468,7 @@ fn record_outcome(
             ":now": unix(now),
             ":next": unix(now).saturating_add(delay),
             ":height": mined_height,
-            ":outcome": outcome_code(outcome),
+            ":outcome": code,
             ":map": map_sha256.as_ref().map(|m| &m[..]),
         ],
     )?;
@@ -679,6 +778,85 @@ pub(crate) fn store(
     })
 }
 
+/// The display facts stored for transaction `tx`, if any.
+fn stored_facts(
+    conn: &Connection,
+    tx: i64,
+) -> Result<Option<TransparentDisplayFacts>, SqliteClientError> {
+    let display = conn
+        .query_row(
+            "SELECT t.txid, d.coinbase, d.fee_state, d.fee_zat, d.input_count, d.shielded,
+                    d.shard_id, d.revision, d.map_sha256, d.looked_up_height
+             FROM transparent_tx_display d JOIN transactions t ON t.id_tx = d.transaction_id
+             WHERE d.transaction_id = :tx",
+            named_params![":tx": tx],
+            |row| {
+                Ok((
+                    row.get::<_, [u8; 32]>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<u64>>(3)?,
+                    row.get::<_, u32>(4)?,
+                    row.get::<_, bool>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, u32>(7)?,
+                    row.get::<_, [u8; 32]>(8)?,
+                    row.get::<_, u32>(9)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((txid, coinbase, fee_state, fee, input_count, shielded, shard, revision, map, height)) =
+        display
+    else {
+        return Ok(None);
+    };
+    let outputs = conn
+        .prepare_cached(
+            "SELECT output_index, value_zat, script FROM transparent_tx_display_outputs
+             WHERE transaction_id = :tx ORDER BY output_index",
+        )?
+        .query_map(named_params![":tx": tx], |row| {
+            Ok((
+                row.get::<_, u32>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })?
+        .zip(0u32..)
+        .map(|(row, expected)| {
+            let (index, value, script) = row?;
+            if index != expected {
+                return Err(SqliteClientError::CorruptedData(
+                    "display outputs are not contiguous".into(),
+                ));
+            }
+            let value = Zatoshis::from_u64(value).map_err(|_| {
+                SqliteClientError::CorruptedData("display value exceeds MAX_MONEY".into())
+            })?;
+            Ok(TransparentDisplayOutput { value, script })
+        })
+        .collect::<Result<_, SqliteClientError>>()?;
+    Ok(Some(TransparentDisplayFacts {
+        txid: TxId::from_bytes(txid),
+        coinbase,
+        metadata: TransactionMetadata {
+            fee: fee_from_columns(fee_state, fee)?,
+            transparent_input_count: input_count,
+            has_shielded_components: shielded,
+        },
+        outputs,
+        provenance: TransparentDisplayProvenance {
+            shard_id: u64::try_from(shard).map_err(|_| {
+                SqliteClientError::CorruptedData("negative display shard id".into())
+            })?,
+            revision,
+            map_sha256: map,
+            looked_up_height: BlockHeight::from_u32(height),
+        },
+    }))
+}
+
 fn view_output(
     index: u32,
     value: Zatoshis,
@@ -782,73 +960,39 @@ pub(crate) fn view<P: consensus::Parameters>(
         )));
     }
 
-    let display = conn
-        .query_row(
-            "SELECT coinbase, fee_state, fee_zat, input_count, shielded, shard_id, revision,
-                    map_sha256, looked_up_height
-             FROM transparent_tx_display WHERE transaction_id = :tx",
-            named_params![":tx": tx],
-            |row| {
-                Ok((
-                    row.get::<_, bool>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Option<u64>>(2)?,
-                    row.get::<_, u32>(3)?,
-                    row.get::<_, bool>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, u32>(6)?,
-                    row.get::<_, [u8; 32]>(7)?,
-                    row.get::<_, u32>(8)?,
-                ))
-            },
-        )
-        .optional()?;
-    if let Some((coinbase, fee_state, fee, input_count, shielded, shard, revision, map, height)) =
-        display
-    {
-        let outputs = conn
-            .prepare_cached(
-                "SELECT output_index, value_zat, script FROM transparent_tx_display_outputs
-                 WHERE transaction_id = :tx ORDER BY output_index",
-            )?
-            .query_map(named_params![":tx": tx], |row| {
-                Ok((
-                    row.get::<_, u32>(0)?,
-                    row.get::<_, u64>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                ))
-            })?
-            .map(|row| {
-                let (index, value, script) = row?;
-                let value = Zatoshis::from_u64(value).map_err(|_| {
-                    SqliteClientError::CorruptedData("display value exceeds MAX_MONEY".into())
-                })?;
-                Ok(view_output(index, value, script, owned.contains(&index)))
-            })
-            .collect::<Result<_, SqliteClientError>>()?;
+    if let Some(facts) = stored_facts(conn, tx)? {
         return Ok(Some(TransparentDisplayView::Available(
             TransparentDisplayDetails {
-                outputs,
-                coinbase,
-                fee: fee_from_columns(fee_state, fee)?,
-                input_count,
-                shielded,
-                source: TransparentDisplaySource::Display(TransparentDisplayProvenance {
-                    shard_id: u64::try_from(shard).map_err(|_| {
-                        SqliteClientError::CorruptedData("negative display shard id".into())
-                    })?,
-                    revision,
-                    map_sha256: map,
-                    looked_up_height: BlockHeight::from_u32(height),
-                }),
+                outputs: facts
+                    .outputs
+                    .into_iter()
+                    .zip(0u32..)
+                    .map(|(o, index)| view_output(index, o.value, o.script, owned.contains(&index)))
+                    .collect(),
+                coinbase: facts.coinbase,
+                fee: facts.metadata.fee,
+                input_count: facts.metadata.transparent_input_count,
+                shielded: facts.metadata.has_shielded_components,
+                source: TransparentDisplaySource::Display(facts.provenance),
             },
         )));
     }
 
+    // Work counts only while the listing would return it, now or once the transaction is mined
+    // again; otherwise the view is what it would be without work.
     let work: Option<Option<i64>> = conn
         .query_row(
-            "SELECT last_outcome FROM transparent_detail_work WHERE transaction_id = :tx",
-            named_params![":tx": tx],
+            &format!(
+                "SELECT w.last_outcome FROM transparent_detail_work w
+                 JOIN transactions t ON t.id_tx = w.transaction_id
+                 WHERE w.transaction_id = :tx AND {}",
+                listable()
+            ),
+            named_params![
+                ":tx": tx,
+                ":public": mode.retains_public_authority(),
+                ":enhancement": TxQueryType::Enhancement.code(),
+            ],
             |row| row.get(0),
         )
         .optional()?;

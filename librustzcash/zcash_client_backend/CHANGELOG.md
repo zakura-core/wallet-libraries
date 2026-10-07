@@ -14,8 +14,9 @@ workspace.
 - `transparent_ledger::{TransparentDetailRead, TransparentDetailWrite}` (prototype): durable
   transparent txid enhancement work (`transparent_detail_work`, returning the requests with the
   mode and policy generation of the same snapshot as `TransparentDetailWork`;
-  `transparent_detail_parked`, reporting work that waits for a display map change as
-  `TransparentDetailParked`), validated
+  `transparent_detail_parked`, reporting work that waits for a display map change under the
+  caller's map as `TransparentDetailParked`, with a refresh time bounded by
+  `TRANSPARENT_DISPLAY_MAP_RECHECK`), validated
   `TransparentDisplayFacts` (`store_transparent_display`, returning `TransparentDisplayStore`),
   library-computed backoff (`defer_transparent_detail` with the request's mined height and
   `TransparentDetailOutcome`, ignoring results for a changed placement), and the

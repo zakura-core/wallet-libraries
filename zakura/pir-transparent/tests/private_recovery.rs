@@ -1340,7 +1340,11 @@ fn private_details_end_to_end() {
         vec![r2.0]
     );
     assert_eq!(due(&f, later), vec![]);
-    let parked = f.st.wallet().db().transparent_detail_parked(later).unwrap();
+    let parked =
+        f.st.wallet()
+            .db()
+            .transparent_detail_parked(later, client.map_sha256().and_then(map_sha256), None)
+            .unwrap();
     assert_eq!(parked.count, 0);
     // A coverage re-check fetches only the map, which is the one r1 was found through.
     let sent = transport.sent.len();
@@ -1373,4 +1377,28 @@ fn private_details_end_to_end() {
             );
         }
     }
+
+    // Positive control: the same dispatch, under a mode that retains public authority, fetches
+    // r2 publicly and sends nothing to the display service.
+    f.set_policy(TransparentLedgerMode::Public);
+    let at = later + Duration::from_secs(6 * 60);
+    let public =
+        f.st.wallet()
+            .db()
+            .transparent_detail_work(at, 10, None)
+            .unwrap();
+    assert!(public.public_transport());
+    let work: Vec<(TxId, u64)> = public
+        .requests
+        .into_iter()
+        .map(|r| (r.txid, u64::from(u32::from(r.mined_height))))
+        .collect();
+    assert_eq!(
+        work.iter().map(|(t, _)| *t.as_ref()).collect::<Vec<_>>(),
+        vec![r2.0]
+    );
+    let sent = transport.sent.len();
+    lookup_all(&mut f, &mut client, &mut transport, &work, at);
+    assert_eq!(public_fetches.get(), 1);
+    assert_eq!(transport.sent.len(), sent);
 }

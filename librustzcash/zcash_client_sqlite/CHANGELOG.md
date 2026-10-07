@@ -14,10 +14,13 @@ workspace.
   `TransparentDetailWrite`. The additive `transparent_txid_enhancement` migration adds
   `transparent_detail_work`, `transparent_tx_display` and `transparent_tx_display_outputs`, and
   queues work for existing mined route-2 transactions and ledger-origin transactions without raw
-  bytes. Ledger projection and the route-2 marker queue work for mined transactions without
-  stored facts; storing raw bytes clears it and any display facts. Parked work is due again
+  bytes. Ledger projection, the route-2 marker, and mining a route-2 transaction queue work for
+  mined transactions without stored facts; each first deletes stored facts that the wallet now
+  contradicts. Storing raw bytes clears work and any display facts. Parked work is due again
   after seven days without a display map change. Failed lookups and contradictions only
-  change retry state while the looked-up height still matches the transaction's mined height.
+  change retry state while the looked-up height still matches the transaction's mined height;
+  a change of outcome class restarts the backoff. The view shows work as pending only while the
+  listing would return it.
   Facts are validated against the coinbase
   position, owned outputs that financial queries count, recovered metadata, the stored fee,
   known shielded components, and known spends (input indexes and the number of distinct spent
