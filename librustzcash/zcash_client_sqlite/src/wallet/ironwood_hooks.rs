@@ -183,7 +183,8 @@ pub(crate) fn put_received_note_spend(
 }
 
 /// A memo query already carries the shape; otherwise query one owned note even if its memo is
-/// known. No txid retrieval is inserted. Dispatch remains behind the current private authority.
+/// known. A shape recorded where the transaction is no longer mined is unknown and is queried
+/// again. No txid retrieval is inserted. Dispatch remains behind the current private authority.
 pub(crate) fn queue_ironwood_output_shape(
     conn: &rusqlite::Connection,
     tx_ref: Option<crate::TxRef>,
@@ -210,7 +211,8 @@ pub(crate) fn queue_ironwood_output_shape(
          FROM transactions t
          JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
          JOIN ironwood_received_notes rn ON rn.transaction_id = t.id_tx
-         WHERE r.route = 2 AND r.has_transparent_outputs IS NULL
+         WHERE r.route = 2
+           AND r.has_transparent_outputs_height IS NOT t.mined_height
            AND t.raw IS NULL AND t.mined_height IS NOT NULL
            AND (:tx IS NULL OR t.id_tx = :tx)
            AND rn.note_version = 3 AND rn.commitment_tree_position IS NOT NULL

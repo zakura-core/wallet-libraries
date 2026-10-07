@@ -658,7 +658,10 @@ CREATE TABLE "ironwood_enhance_routing" (
     route INTEGER NOT NULL CHECK (route IN (0, 1, 2)),
     history_expiry_height INTEGER
         CHECK (history_expiry_height >= 0 AND history_expiry_height < 500000000),
-    has_transparent_outputs INTEGER CHECK (has_transparent_outputs IN (0, 1))
+    has_transparent_outputs INTEGER CHECK (has_transparent_outputs IN (0, 1)),
+    has_transparent_outputs_height INTEGER
+        CHECK (has_transparent_outputs_height >= 0
+               AND (has_transparent_outputs IS NULL) = (has_transparent_outputs_height IS NULL))
 )"#;
 
 /// Stores the transparent outputs received by the wallet.

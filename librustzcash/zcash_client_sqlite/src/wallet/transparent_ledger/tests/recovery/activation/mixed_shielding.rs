@@ -75,17 +75,20 @@ struct Shielding {
 /// internal address is compact-scanned, and private transparent recovery publishes both spends
 /// with `metadata`. Enhance PIR has not run yet.
 fn shielding(shape: &Shape, metadata: Option<TransactionMetadata>) -> Shielding {
-    padded_shielding(shape, metadata, None, false)
+    padded_shielding(shape, metadata, None, false, None)
 }
 
 /// Like [`shielding`], with `action0` (if any) as a first Ironwood action to a key the wallet
 /// does not hold: a standard builder's zero-value padding, or another party's output.
 /// With `own_action0`, import that key as another wallet account to exercise shared ownership.
+/// With `other_note`, that account also receives an Ironwood note of this value in an earlier
+/// block.
 fn padded_shielding(
     shape: &Shape,
     metadata: Option<TransactionMetadata>,
     action0: Option<u64>,
     own_action0: bool,
+    other_note: Option<u64>,
 ) -> Shielding {
     let mut st = TestBuilder::new()
         .with_network(ironwood_network())
@@ -93,7 +96,7 @@ fn padded_shielding(
         .with_block_cache(BlockCache::new())
         .with_account_from_sapling_activation(BlockHash([0; 32]))
         .build();
-    if own_action0 {
+    if own_action0 || other_note.is_some() {
         import_account(&mut st, 0x77);
     }
     scan_new_blocks(&mut st, 10);
@@ -113,20 +116,21 @@ fn padded_shielding(
     st.wallet_mut()
         .db_mut()
         .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    if let Some(value) = other_note {
+        let other = IronwoodFvk(other_fvk(&st));
+        let (funded, _, _) = st.generate_next_block_multi(&[FakeCompactOutput::new(
+            &other,
+            AddressType::DefaultExternal,
+            zat(value),
+        )]);
+        st.scan_cached_blocks(funded, 1);
+    }
 
     // The shielding account's only owned shielded effect: its Ironwood output to the
     // account's internal address. Compact scanning finds it without its memo.
     let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
     let foreign = IronwoodFvk(if own_action0 {
-        orchard::keys::FullViewingKey::from(
-            zcash_keys::keys::UnifiedSpendingKey::from_seed(
-                st.network(),
-                &[0x77; 32],
-                zip32::AccountId::ZERO,
-            )
-            .unwrap()
-            .orchard(),
-        )
+        other_fvk(&st)
     } else {
         orchard::keys::FullViewingKey::from(
             &orchard::keys::SpendingKey::from_bytes([0x77; 32]).unwrap(),
@@ -192,6 +196,19 @@ fn padded_shielding(
         tx_ref,
         height,
     }
+}
+
+/// The Orchard key of the other wallet account [`padded_shielding`] can import.
+fn other_fvk(st: &State) -> orchard::keys::FullViewingKey {
+    orchard::keys::FullViewingKey::from(
+        zcash_keys::keys::UnifiedSpendingKey::from_seed(
+            st.network(),
+            &[0x77; 32],
+            zip32::AccountId::ZERO,
+        )
+        .unwrap()
+        .orchard(),
+    )
 }
 
 fn reported_metadata() -> TransactionMetadata {
@@ -301,6 +318,24 @@ fn stored(st: &State, tx_ref: i64) -> (Option<i64>, Option<i64>, Option<Vec<u8>>
         .unwrap()
 }
 
+/// The transparent-output flag recorded for the transaction, and the height it was recorded at.
+fn recorded_shape(st: &State, tx_ref: i64) -> (Option<bool>, Option<BlockHeight>) {
+    st.wallet()
+        .conn()
+        .query_row(
+            "SELECT has_transparent_outputs, has_transparent_outputs_height
+             FROM ironwood_enhance_routing WHERE transaction_id = ?1",
+            [tx_ref],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get::<_, Option<u32>>(1)?.map(BlockHeight::from_u32),
+                ))
+            },
+        )
+        .unwrap()
+}
+
 /// Private work rows left for the transaction, across every Enhance PIR queue.
 fn queued(st: &State, tx_ref: i64) -> i64 {
     st.wallet()
@@ -316,6 +351,43 @@ fn queued(st: &State, tx_ref: i64) -> i64 {
             |row| row.get(0),
         )
         .unwrap()
+}
+
+/// Models a recovered memo from an older build, without its discarded shape evidence.
+fn forget_output_shape(st: &State, tx_ref: i64) {
+    conn(st)
+        .execute(
+            "UPDATE ironwood_enhance_routing
+             SET has_transparent_outputs = NULL, has_transparent_outputs_height = NULL
+             WHERE transaction_id = ?1",
+            [tx_ref],
+        )
+        .unwrap();
+}
+
+/// Rolls the schema back to before the transparent output shape was retained, as a database
+/// written by an earlier build.
+fn predate_output_shape(st: &State) {
+    use crate::wallet::init::migrations::{
+        CURRENT_LEAF_MIGRATIONS, ids::IRONWOOD_TRANSPARENT_OUTPUT_SHAPE,
+    };
+    conn(st)
+        .execute_batch(
+            "ALTER TABLE ironwood_enhance_routing DROP COLUMN has_transparent_outputs_height;
+             ALTER TABLE ironwood_enhance_routing DROP COLUMN has_transparent_outputs;",
+        )
+        .unwrap();
+    for migration in CURRENT_LEAF_MIGRATIONS
+        .iter()
+        .chain([&IRONWOOD_TRANSPARENT_OUTPUT_SHAPE])
+    {
+        conn(st)
+            .execute(
+                "DELETE FROM schemer_migrations WHERE id = ?1",
+                [migration.as_bytes().to_vec()],
+            )
+            .unwrap();
+    }
 }
 
 /// Owned financial effects are recovered before, and independently of, enhancement.
@@ -554,8 +626,7 @@ fn transparent_outputs_or_unknown_shape_prevent_net_reconstruction() {
         let record = record_with_outputs(&case.st, request, None, true);
         apply_records(&mut case.st, &[(request, record)]);
         if outputs.is_none() {
-            // Models a recovered memo from an older build, without its discarded shape evidence.
-            conn(&case.st).execute("UPDATE ironwood_enhance_routing SET has_transparent_outputs = NULL WHERE transaction_id = ?", [case.tx_ref]).unwrap();
+            forget_output_shape(&case.st, case.tx_ref);
         }
         let entry = history(&case.st, case.account, case.txid);
         assert_eq!(entry.has_transparent_outputs, outputs);
@@ -783,7 +854,7 @@ fn conflicting_or_stale_responses_leave_recovered_facts_intact() {
 /// upgrade, privately and without a reset.
 #[test]
 fn an_existing_route_two_database_resumes_private_memo_recovery_after_upgrade() {
-    use crate::wallet::init::{WalletMigrator, migrations::CURRENT_LEAF_MIGRATIONS};
+    use crate::wallet::init::WalletMigrator;
 
     let shape = &CASES[1];
     let mut case = shielding(shape, Some(reported_metadata()));
@@ -799,17 +870,7 @@ fn an_existing_route_two_database_resumes_private_memo_recovery_after_upgrade() 
             tx = case.tx_ref
         ))
         .unwrap();
-    conn(&case.st)
-        .execute_batch("ALTER TABLE ironwood_enhance_routing DROP COLUMN has_transparent_outputs")
-        .unwrap();
-    for leaf in CURRENT_LEAF_MIGRATIONS {
-        conn(&case.st)
-            .execute(
-                "DELETE FROM schemer_migrations WHERE id = ?1",
-                [leaf.as_bytes().to_vec()],
-            )
-            .unwrap();
-    }
+    predate_output_shape(&case.st);
     assert_eq!(stored(&case.st, case.tx_ref), (Some(2), None, None, false));
     assert_eq!(queued(&case.st, case.tx_ref), 0);
     assert!(private_queries(&case.st).is_empty(), "stuck before upgrade");
@@ -908,7 +969,7 @@ fn coverage_loss_and_reorg_reevaluate_the_classification() {
 fn foreign_self_balanced_shielded_participation_is_indistinguishable() {
     let shape = &CASES[0];
     let details = [Some(0), Some(100_000)].map(|action0| {
-        let mut case = padded_shielding(shape, Some(reported_metadata()), action0, false);
+        let mut case = padded_shielding(shape, Some(reported_metadata()), action0, false, None);
         // Action 0 is no outgoing candidate: the account spent no Ironwood note.
         let outgoing: i64 = conn(&case.st)
             .query_row(
@@ -942,22 +1003,12 @@ fn foreign_self_balanced_shielded_participation_is_indistinguishable() {
 /// a public payload request, and reopen with the canonical fee still NULL.
 #[test]
 fn existing_memo_complete_wallet_recovers_shape_and_survives_reopen() {
-    use crate::wallet::init::{WalletMigrator, migrations::CURRENT_LEAF_MIGRATIONS};
+    use crate::wallet::init::WalletMigrator;
     use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerRead;
     let mut case = shielding(&CASES[1], Some(reported_metadata()));
     recover_memo(&mut case, None);
     let rows = financial_rows(&case.st, case.tx_ref);
-    conn(&case.st)
-        .execute_batch("ALTER TABLE ironwood_enhance_routing DROP COLUMN has_transparent_outputs")
-        .unwrap();
-    for leaf in CURRENT_LEAF_MIGRATIONS {
-        conn(&case.st)
-            .execute(
-                "DELETE FROM schemer_migrations WHERE id = ?",
-                [leaf.as_bytes().to_vec()],
-            )
-            .unwrap();
-    }
+    predate_output_shape(&case.st);
     assert_eq!(queued(&case.st, case.tx_ref), 0);
     WalletMigrator::new()
         .init_or_migrate(case.st.wallet_mut().db_mut())
@@ -1008,7 +1059,7 @@ fn existing_memo_complete_wallet_recovers_shape_and_survives_reopen() {
 fn shape_only_recovery_obeys_public_authority_transitions() {
     let mut case = shielding(&CASES[1], Some(reported_metadata()));
     recover_memo(&mut case, None);
-    conn(&case.st).execute("UPDATE ironwood_enhance_routing SET has_transparent_outputs = NULL WHERE transaction_id = ?", [case.tx_ref]).unwrap();
+    forget_output_shape(&case.st, case.tx_ref);
     crate::wallet::enhance_pir::queue_unsupported_memos(
         conn(&case.st),
         Some(crate::TxRef(case.tx_ref)),
@@ -1036,7 +1087,13 @@ fn shape_only_recovery_obeys_public_authority_transitions() {
 /// obligation and rebind it to another owned note, without accepting the old response.
 #[test]
 fn deleting_the_shape_binding_account_rebinds_to_a_surviving_note() {
-    let mut case = padded_shielding(&CASES[1], Some(reported_metadata()), Some(100_000), true);
+    let mut case = padded_shielding(
+        &CASES[1],
+        Some(reported_metadata()),
+        Some(100_000),
+        true,
+        None,
+    );
     let queries = private_queries(&case.st);
     assert_eq!(queries.len(), 2);
     let records = queries
@@ -1046,7 +1103,7 @@ fn deleting_the_shape_binding_account_rebinds_to_a_surviving_note() {
     apply_records(&mut case.st, &records);
     assert_reconstructed_shielding(&case, &CASES[1]);
     // Model an older memo-complete wallet whose shape was discarded.
-    conn(&case.st).execute("UPDATE ironwood_enhance_routing SET has_transparent_outputs = NULL WHERE transaction_id = ?", [case.tx_ref]).unwrap();
+    forget_output_shape(&case.st, case.tx_ref);
     crate::wallet::enhance_pir::queue_unsupported_memos(
         conn(&case.st),
         Some(crate::TxRef(case.tx_ref)),
@@ -1112,4 +1169,172 @@ fn deleting_the_shape_binding_account_rebinds_to_a_surviving_note() {
     assert_eq!(entry.fee, FeeState::Unknown);
     assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
     assert!(reopened.transaction_enhancement_work().unwrap().is_empty());
+}
+
+/// Another account of the same wallet spent an Ironwood note in the transaction. The account's
+/// own side is still the reported shape, but the wallet knows the transaction had another funder.
+#[test]
+fn known_funding_by_another_account_is_not_shielding() {
+    let shape = &CASES[0];
+    let mut case = padded_shielding(shape, Some(reported_metadata()), None, false, Some(50_000));
+    // The other account's earlier note has its own memo query.
+    let request = private_queries(&case.st)
+        .into_iter()
+        .find(|request| request.request_id().txid() == case.txid)
+        .unwrap();
+    let response = record(&case.st, request, None);
+    apply_records(&mut case.st, &[(request, response)]);
+    assert_reconstructed_shielding(&case, shape);
+
+    // Scanning linked the other account's note to the shielding transaction as spent.
+    conn(&case.st)
+        .execute(
+            "INSERT INTO ironwood_received_note_spends (ironwood_received_note_id, transaction_id)
+             SELECT rn.id, ?1 FROM ironwood_received_notes rn
+             JOIN accounts a ON a.id = rn.account_id WHERE a.uuid != ?2",
+            rusqlite::params![case.tx_ref, case.account.expose_uuid()],
+        )
+        .unwrap();
+    assert_owned_effects(&case, shape);
+    let entry = history(&case.st, case.account, case.txid);
+    assert_eq!(entry.classification, HistoryClassification::Provisional);
+    assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
+    assert_eq!(entry.fee, FeeState::Unknown);
+    assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
+}
+
+/// A receipt in a shielded pool other than Ironwood is not part of a transparent-to-Ironwood
+/// shielding, even when the account's amounts balance.
+#[test]
+fn a_receipt_outside_ironwood_is_not_shielding() {
+    let shape = Shape {
+        inputs: CASES[0].inputs,
+        shielded: 150_000,
+    };
+    let mut case = shielding(&shape, Some(reported_metadata()));
+    recover_memo(&mut case, None);
+    // The account also received a 30,000-zatoshi Orchard note with its memo in the transaction:
+    // 200,000 = 150,000 + 30,000 + the 20,000 fee.
+    conn(&case.st)
+        .execute(
+            "INSERT INTO orchard_received_notes (
+                 transaction_id, action_index, account_id, diversifier, value, rho, rseed,
+                 is_change, memo, recipient_key_scope
+             )
+             SELECT ?1, 5, a.id, zeroblob(11), 30000, zeroblob(32), zeroblob(32), 1, x'f6', 1
+             FROM accounts a WHERE a.uuid = ?2",
+            rusqlite::params![case.tx_ref, case.account.expose_uuid()],
+        )
+        .unwrap();
+    let entry = history(&case.st, case.account, case.txid);
+    assert_eq!(
+        effect(&entry, PoolType::ORCHARD),
+        PoolEffect {
+            pool: PoolType::ORCHARD,
+            received: zat(30_000),
+            spent: Zatoshis::ZERO,
+            completeness: EffectCompleteness::Complete,
+        }
+    );
+    assert!(entry.account_movement.complete);
+    assert_eq!(entry.account_movement.net(), -i128::from(FEE));
+    assert_eq!(entry.classification, HistoryClassification::Provisional);
+    assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
+}
+
+/// A shape recovered where the transaction was mined before a re-mining elsewhere is unknown:
+/// the history is provisional, the shape is queried again privately at the current placement,
+/// and a fresh answer replaces the stale one instead of being rejected as a contradiction.
+#[test]
+fn a_shape_recorded_at_another_placement_is_recovered_again() {
+    let shape = &CASES[0];
+    let mut case = shielding(shape, Some(reported_metadata()));
+    recover_memo(&mut case, None);
+    assert_reconstructed_shielding(&case, shape);
+    assert_eq!(
+        recorded_shape(&case.st, case.tx_ref),
+        (Some(false), Some(case.height))
+    );
+
+    // The transaction keeps its current placement here; its recorded shape names another one,
+    // and asserts transparent outputs there.
+    conn(&case.st)
+        .execute(
+            "UPDATE ironwood_enhance_routing
+             SET has_transparent_outputs = 1, has_transparent_outputs_height = ?2
+             WHERE transaction_id = ?1",
+            rusqlite::params![case.tx_ref, u32::from(case.height) - 1],
+        )
+        .unwrap();
+    let entry = history(&case.st, case.account, case.txid);
+    assert!(entry.account_movement.complete);
+    assert_eq!(entry.has_transparent_outputs, None);
+    assert_eq!(entry.classification, HistoryClassification::Provisional);
+    assert_eq!(entry.inferred_outgoing, None);
+
+    // Scanning the transaction again requeues the shape privately at its received note.
+    crate::wallet::enhance_pir::queue_unsupported_memos(
+        conn(&case.st),
+        Some(crate::TxRef(case.tx_ref)),
+    )
+    .unwrap();
+    assert_eq!(queued(&case.st, case.tx_ref), 1);
+    let request = private_queries(&case.st)[0];
+    assert_eq!(request.request_id().txid(), case.txid);
+    let response = record(&case.st, request, None);
+    assert_eq!(
+        apply_records(&mut case.st, &[(request, response)]),
+        vec![EnhancePirStoreResult::PrivateDetailsUnsupported]
+    );
+    assert_eq!(
+        recorded_shape(&case.st, case.tx_ref),
+        (Some(false), Some(case.height))
+    );
+    assert_eq!(queued(&case.st, case.tx_ref), 0);
+    assert_reconstructed_shielding(&case, shape);
+}
+
+/// A shape recorded by a build that did not record its placement is unknown after upgrading,
+/// and is recovered again privately.
+#[test]
+fn a_shape_recorded_without_its_placement_is_recovered_again_after_upgrade() {
+    use crate::wallet::init::{WalletMigrator, migrations::CURRENT_LEAF_MIGRATIONS};
+    let shape = &CASES[1];
+    let mut case = shielding(shape, Some(reported_metadata()));
+    recover_memo(&mut case, None);
+    assert_reconstructed_shielding(&case, shape);
+    let rows = financial_rows(&case.st, case.tx_ref);
+    conn(&case.st)
+        .execute_batch(
+            "ALTER TABLE ironwood_enhance_routing DROP COLUMN has_transparent_outputs_height",
+        )
+        .unwrap();
+    for leaf in CURRENT_LEAF_MIGRATIONS {
+        conn(&case.st)
+            .execute(
+                "DELETE FROM schemer_migrations WHERE id = ?1",
+                [leaf.as_bytes().to_vec()],
+            )
+            .unwrap();
+    }
+
+    for _ in 0..2 {
+        WalletMigrator::new()
+            .init_or_migrate(case.st.wallet_mut().db_mut())
+            .unwrap();
+    }
+    assert_eq!(recorded_shape(&case.st, case.tx_ref), (None, None));
+    assert_eq!(queued(&case.st, case.tx_ref), 1);
+    assert_eq!(
+        history(&case.st, case.account, case.txid).classification,
+        HistoryClassification::Provisional
+    );
+    let request = private_queries(&case.st)[0];
+    let response = record(&case.st, request, None);
+    assert_eq!(
+        apply_records(&mut case.st, &[(request, response)]),
+        vec![EnhancePirStoreResult::PrivateDetailsUnsupported]
+    );
+    assert_eq!(financial_rows(&case.st, case.tx_ref), rows);
+    assert_reconstructed_shielding(&case, shape);
 }

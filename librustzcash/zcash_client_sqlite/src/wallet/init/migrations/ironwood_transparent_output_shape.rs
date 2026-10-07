@@ -29,7 +29,8 @@ impl RusqliteMigration for Migration {
             "ALTER TABLE ironwood_enhance_routing ADD COLUMN has_transparent_outputs INTEGER
                  CHECK (has_transparent_outputs IN (0, 1));",
         )?;
-        crate::wallet::ironwood_hooks::queue_ironwood_output_shape(conn, None)?;
+        // `ironwood_transparent_output_shape_height`, which always follows, queues the private
+        // recovery of every unknown shape. The shared queueing statement reads its column.
         Ok(())
     }
     fn down(&self, _conn: &rusqlite::Transaction) -> Result<(), Self::Error> {

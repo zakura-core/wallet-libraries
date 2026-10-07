@@ -1307,6 +1307,9 @@ pub(crate) fn apply<P: Parameters>(
 ///
 /// Keeps only details that do not depend on the transparent data:
 /// - the memo of the authenticated received note at this action, if requested;
+/// - the service's transparent-output flag, with the height the transaction is mined at. A flag
+///   recorded at that height that the response contradicts rejects it; one recorded at another
+///   height is unknown and is replaced;
 /// - the whole-transaction fee, filled only when unknown. The fee is trusted service metadata,
 ///   as for Ironwood-only transactions. Like those, the response must agree with every known
 ///   fee, expiry, and displayed expiry, and the captured snapshot must still be current;
@@ -1347,11 +1350,16 @@ fn store_unsupported_details(
     if displayed_expiry.is_some_and(|expiry| expiry != metadata.expiry_height()) {
         return Ok(EnhancePirStoreResult::Rejected);
     }
-    let known_outputs: Option<bool> = tx.query_row(
-        "SELECT has_transparent_outputs FROM ironwood_enhance_routing WHERE transaction_id = :tx",
-        named_params![":tx": tx_ref.0],
-        |row| row.get(0),
-    )?;
+    // A shape recorded where the transaction is no longer mined is unknown, and is replaced.
+    let known_outputs: Option<bool> = tx
+        .query_row(
+            "SELECT r.has_transparent_outputs FROM ironwood_enhance_routing r
+             JOIN transactions t ON t.id_tx = r.transaction_id
+             WHERE r.transaction_id = :tx AND r.has_transparent_outputs_height = t.mined_height",
+            named_params![":tx": tx_ref.0],
+            |row| row.get(0),
+        )
+        .optional()?;
     if known_outputs.is_some_and(|known| known != has_transparent_outputs) {
         return Ok(EnhancePirStoreResult::Rejected);
     }
@@ -1372,7 +1380,9 @@ fn store_unsupported_details(
     if tx.execute(
         "UPDATE ironwood_enhance_routing
          SET history_expiry_height = COALESCE(history_expiry_height, :expiry),
-             has_transparent_outputs = COALESCE(has_transparent_outputs, :outputs)
+             has_transparent_outputs = :outputs,
+             has_transparent_outputs_height =
+                 (SELECT mined_height FROM transactions WHERE id_tx = :tx)
          WHERE transaction_id = :tx AND route = :route
            AND (history_expiry_height IS NULL OR history_expiry_height = :expiry)",
         named_params![
