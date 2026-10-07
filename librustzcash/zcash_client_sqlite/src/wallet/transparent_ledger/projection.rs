@@ -9,7 +9,9 @@
 use rusqlite::{OptionalExtension as _, named_params};
 use transparent::bundle::TxOut;
 use zcash_client_backend::{
-    data_api::transparent_ledger::{CommitRejection, IntegrityFailure, ReceiveEvent, SpendEvent},
+    data_api::transparent_ledger::{
+        CommitRejection, IntegrityFailure, ReceiveEvent, SpendEvent, TransparentDetailReasons,
+    },
     wallet::WalletTransparentOutput,
 };
 use zcash_keys::keys::transparent::gap_limits::GapLimits;
@@ -127,6 +129,7 @@ pub(super) fn project_receive<P: consensus::Parameters>(
         false,
         ProjectionOrigin::LedgerEvent,
     )?;
+    super::details::enqueue_txid(conn, &txid, TransparentDetailReasons::RECEIVE)?;
     if receive.coinbase {
         // A coinbase transaction is the first in its block. Recording that keeps the output's
         // maturity rule without its raw bytes; un-mining clears it with the placement.
@@ -217,6 +220,7 @@ pub(super) fn project_spend<P: consensus::Parameters>(
         &spend.prevout,
         Some(ProjectionOrigin::LedgerEvent),
     )?;
+    super::details::enqueue_tx(conn, spending_tx, TransparentDetailReasons::SPEND)?;
     update_gap_limits(
         conn,
         params,

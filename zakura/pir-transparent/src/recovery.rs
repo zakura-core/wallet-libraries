@@ -298,7 +298,7 @@ pub(crate) fn block_hash(display: &str) -> Result<BlockHash, RecoveryError> {
     bytes.reverse();
     Ok(BlockHash::from_slice(&bytes))
 }
-fn metadata(
+pub(crate) fn metadata(
     meta: Option<transparent_events::TransactionMetadata>,
 ) -> Result<Option<TransactionMetadata>, RecoveryError> {
     meta.map(|meta| {

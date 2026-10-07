@@ -18,6 +18,9 @@ pub use activity::*;
 mod history;
 pub use history::*;
 
+mod details;
+pub use details::*;
+
 #[cfg(feature = "transparent-inputs")]
 mod recovery;
 #[cfg(feature = "transparent-inputs")]

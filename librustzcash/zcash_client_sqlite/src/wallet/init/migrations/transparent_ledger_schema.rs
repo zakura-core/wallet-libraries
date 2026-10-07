@@ -235,6 +235,15 @@ mod tests {
                 .unwrap_or_default()
                 .is_empty()
         );
+        // Transparent txid enhancement tables start empty for a wallet without ledger-origin or
+        // route-2 transactions.
+        for table in [
+            "transparent_detail_work",
+            "transparent_tx_display",
+            "transparent_tx_display_outputs",
+        ] {
+            assert!(after.remove(table).unwrap_or_default().is_empty());
+        }
         let queued_before = before.remove("tx_retrieval_queue").unwrap_or_default();
         let queued_after = after.remove("tx_retrieval_queue").unwrap_or_default();
         assert!(queued_before.iter().all(|row| queued_after.contains(row)));

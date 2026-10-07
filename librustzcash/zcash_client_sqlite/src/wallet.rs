@@ -5269,7 +5269,9 @@ pub(crate) fn put_tx_data(
         .query_row(tx_params, |row| row.get::<_, i64>(0).map(TxRef))
         .map_err(SqliteClientError::from)
         .and_then(|tx_ref| {
-            ironwood_hooks::clear_ironwood_enhancement_work(conn, tx_ref).map(|()| tx_ref)
+            ironwood_hooks::clear_ironwood_enhancement_work(conn, tx_ref)?;
+            transparent_ledger::details::clear(conn, tx_ref)?;
+            Ok(tx_ref)
         })
 }
 
