@@ -17,10 +17,6 @@ pub const RECEIVE_GAP_LIMIT: u64 = 30;
 pub(super) const RECEIVE_LOOKAHEAD: u32 = RECEIVE_GAP_LIMIT as u32;
 /// Grace after the last deposit deadline before an unpaid reservation can be recycled.
 pub const RECEIVE_RECLAIM_SECONDS: i64 = 24 * 60 * 60;
-/// Maximum number of distinct addresses held by unfunded drafts or swaps per account:
-/// half the [`RECEIVE_GAP_LIMIT`], so issuance stays well inside the recovery gap. A
-/// reservation stops counting once the provider sees its deposit or its payment arrives.
-pub const RECEIVE_UNFUNDED_LIMIT: u32 = RECEIVE_LOOKAHEAD / 2;
 const STATUS_FRESH_SECONDS: i64 = 120;
 
 /// A durable draft or started swap, independent of whether it received funds.
@@ -546,7 +542,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R: Rng> WalletDb<C, P, CL, R> 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
     /// Atomically resumes the single draft or locks the lowest free index that was never
     /// quoted, reusing the lowest abandoned one only when the recovery window holds no
-    /// other. Does not expose the address.
+    /// other. Refuses with [`ReservationPolicy::Limit`] while swaps in progress hold every
+    /// index in the window. Does not expose the address.
     ///
     /// `tip` is the chain tip last observed from the network, within
     /// [`ISSUANCE_TIP_LAG`](super::ISSUANCE_TIP_LAG) blocks of the wallet's scan. A new
@@ -610,18 +607,6 @@ pub(super) fn prepare<P: Parameters>(
         }
         return Ok(id);
     }
-    let unfunded: u32 = conn.query_row(
-        "SELECT COUNT(*) FROM ironwood_swap_receive_reservations r
-         JOIN ironwood_receiving_keys k ON k.id = r.receiving_key_id
-         WHERE k.account_id = ?1 AND r.closed_at IS NULL AND k.used = 0
-           AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_quotes q
-             WHERE q.reservation_id = r.id AND q.funded = 1)",
-        [a.0],
-        |r| r.get(0),
-    )?;
-    if unfunded >= RECEIVE_UNFUNDED_LIMIT {
-        return Err(Error::ReservationPolicy(super::ReservationPolicy::Limit));
-    }
     // An address the provider was given is reissued only when the gap rule leaves no
     // fresh one, since reusing it lets the provider link the two swaps.
     let mut abandoned = None;
@@ -653,7 +638,7 @@ pub(super) fn prepare<P: Parameters>(
     }
     let index = fresh
         .or(abandoned)
-        .ok_or(Error::ReservationPolicy(super::ReservationPolicy::Gap))?;
+        .ok_or(Error::ReservationPolicy(super::ReservationPolicy::Limit))?;
     let (key, _) = register(
         conn,
         params,

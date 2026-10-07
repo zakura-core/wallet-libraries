@@ -41,8 +41,8 @@ mod retention;
 mod sweep;
 use payments::{PendingPayment, SpendStatus};
 pub use reservations::{
-    QuoteOutcome, RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, RECEIVE_UNFUNDED_LIMIT,
-    ReceiveDeposit, ReceiveQuote, ReceiveReservation,
+    QuoteOutcome, RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, ReceiveDeposit, ReceiveQuote,
+    ReceiveReservation,
 };
 pub use sweep::{DirectoryPayment, MAX_PUBLICATION_LAG, ProviderView, SweepDeferral};
 
@@ -74,7 +74,8 @@ use crate::{AccountUuid, SqlTransaction, WalletDb, error::SqliteClientError, uti
 pub enum ReservationPolicy {
     /// Recovery has not established the next safe index.
     Gap,
-    /// Too many unfunded incoming operations are reserved.
+    /// Swaps in progress hold every incoming index the recovery gap allows. An unfunded
+    /// one frees its index [`RECEIVE_RECLAIM_SECONDS`] after its last deposit deadline.
     Limit,
     /// The selected draft is no longer available.
     Stale,
@@ -91,8 +92,8 @@ impl std::fmt::Display for ReservationPolicy {
                  Wait for a payment or abandoned-address reconciliation."
             }
             Self::Limit => {
-                "Too many incoming swaps are awaiting deposits. \
-                 Resume one, or wait for an unused one to expire."
+                "Too many swaps into ZEC are in progress. Wait for one to finish; \
+                 an unused quote frees its address a day after its deadline."
             }
             Self::Stale => "This receive reservation is no longer available. Request a new quote.",
             Self::Coverage => "Finish syncing to the chain tip before requesting a quote.",

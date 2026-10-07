@@ -268,31 +268,24 @@ fn restart_and_rejected_quote_reuse_the_same_draft() {
 }
 
 #[test]
-fn unfunded_reservations_are_capped_until_a_deposit_or_payment_is_seen() {
+fn unfunded_quotes_fill_the_recovery_gap_until_one_is_reclaimed() {
     let mut st = fixture();
     let mut reservations = Vec::new();
-    for i in 0..RECEIVE_UNFUNDED_LIMIT {
+    for i in 0..RECEIVE_GAP_LIMIT {
         let r = prepare(&mut st, NOW);
         quote(&mut st, &r, &format!("quote-{i}"), true);
         reservations.push(r);
     }
-    let limit = u64::from(RECEIVE_UNFUNDED_LIMIT);
     assert_eq!(
         refusal(try_prepare(&mut st, NOW)),
         Some(ReservationPolicy::Limit)
     );
-    // The provider seeing a deposit frees a slot.
-    observe(&mut st, "quote-0", "PROCESSING", true, NOW + 1);
-    let next = prepare(&mut st, NOW + 1);
-    assert_eq!(next.key.key_id().index(), limit);
-    quote(&mut st, &next, "quote-next", true);
-    assert_eq!(
-        refusal(try_prepare(&mut st, NOW + 1)),
-        Some(ReservationPolicy::Limit)
-    );
-    // So does the payment arriving, without any provider status.
-    pay(&mut st, reservations[1].key.full_viewing_key());
-    assert_eq!(prepare(&mut st, NOW + 2).key.key_id().index(), limit + 1);
+    // An unused quote frees its address a day after its deadline. The window holds no
+    // fresh address, so that one is reused.
+    let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
+    observe(&mut st, "quote-0", "PENDING_DEPOSIT", false, now);
+    assert_eq!(reap(&mut st, now), [reservations[0].id]);
+    assert_eq!(prepare(&mut st, now).key.key_id().index(), 0);
 }
 
 #[test]
@@ -311,13 +304,13 @@ fn funded_deposits_without_zec_receipts_cannot_exceed_recovery_gap() {
     }
     assert_eq!(
         refusal(try_prepare(&mut st, NOW)),
-        Some(ReservationPolicy::Gap)
+        Some(ReservationPolicy::Limit)
     );
     pay(&mut st, first.unwrap().key.full_viewing_key());
     // An unconfirmed receipt could still be reorged away, so it moves nothing yet.
     assert_eq!(
         refusal(try_prepare(&mut st, NOW + 2)),
-        Some(ReservationPolicy::Gap)
+        Some(ReservationPolicy::Limit)
     );
     confirm(&mut st);
     assert_eq!(
