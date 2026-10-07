@@ -2386,6 +2386,62 @@ pub(crate) fn put_received_transparent_utxo<P: consensus::Parameters>(
     )
 }
 
+/// Returns the stored transactions that spend the wallet output at `outpoint` but record no sent
+/// output, with their mined heights.
+///
+/// Storing a transaction attributes its sent outputs to the account that funded it only if the
+/// outputs it spends are already known. A restored wallet can store a send, found through an
+/// output it pays the wallet, before it records the output the send spends; once that output is
+/// recorded, the send is a candidate for attribution. A transaction without raw data cannot be
+/// decrypted again and is not returned.
+pub(crate) fn unattributed_spenders(
+    conn: &rusqlite::Connection,
+    outpoint: &OutPoint,
+) -> Result<Vec<(TxId, Option<BlockHeight>)>, SqliteClientError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT st.txid, st.mined_height
+         FROM transparent_received_outputs o
+         JOIN transactions ot ON ot.id_tx = o.transaction_id
+         JOIN transparent_received_output_spends s ON s.transparent_received_output_id = o.id
+         JOIN transactions st ON st.id_tx = s.transaction_id
+         WHERE ot.txid = :prevout_txid AND o.output_index = :prevout_idx
+         AND st.raw IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM sent_notes sn WHERE sn.transaction_id = st.id_tx)",
+    )?;
+    let rows = stmt.query_map(
+        named_params![
+            ":prevout_txid": outpoint.hash(),
+            ":prevout_idx": outpoint.n(),
+        ],
+        |row| {
+            Ok((
+                TxId::from_bytes(row.get(0)?),
+                row.get::<_, Option<u32>>(1)?.map(BlockHeight::from),
+            ))
+        },
+    )?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Whether the output at `outpoint` is recorded as a wallet output, spent or not.
+pub(crate) fn is_wallet_output(
+    conn: &rusqlite::Connection,
+    outpoint: &OutPoint,
+) -> Result<bool, SqliteClientError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM transparent_received_outputs o
+             JOIN transactions t ON t.id_tx = o.transaction_id
+             WHERE t.txid = :prevout_txid AND o.output_index = :prevout_idx
+         )",
+        named_params![
+            ":prevout_txid": outpoint.hash(),
+            ":prevout_idx": outpoint.n(),
+        ],
+        |row| row.get(0),
+    )?)
+}
+
 /// An enumeration of the types of errors that can occur when scheduling an event to happen at a
 /// specific time.
 #[derive(Debug, Clone)]

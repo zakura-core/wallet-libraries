@@ -104,10 +104,32 @@ pub enum HistoryClassification {
 /// One account's history view of one transaction, from one database read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionHistoryDetails {
+    /// Display-only Enhance service assertion that the transaction contains transparent
+    /// outputs. `None` means no assertion has been recovered. This transaction-wide fact
+    /// can classify activity independently of payment-detail completeness; it does not
+    /// establish recipients, output ownership, or account payment/fee attribution.
+    pub has_transparent_outputs: Option<bool>,
     /// Whole-transaction facts, separate from the account-related fee.
     pub transaction_metadata: Option<TransactionMetadataEvidence>,
+    /// The exact fee of the whole transaction, as far as the wallet's evidence establishes it:
+    /// the stored fee (computed from the full transaction, recorded by local construction, or
+    /// supplied by a validated Enhance PIR record) or the exact fee of qualified transparent
+    /// metadata. `None` when neither establishes it or they disagree. Other funders may have
+    /// shared it; the account's share is [`Self::fee`].
+    pub whole_fee: Option<Zatoshis>,
     /// Aggregate outgoing amount with explicit completeness.
     pub aggregate_payment: AggregatePayment,
+    /// Activity-only outgoing value of a transaction whose payment details cannot be recovered:
+    /// the value of the account's spent shielded notes, less the shielded value returned to the
+    /// account and the whole-transaction fee. It is inferred, not attributed: it assumes the
+    /// account paid the whole fee, it may include outputs to the account's own transparent
+    /// addresses, and it names no recipient. Present only for a mined transaction without full
+    /// data for which Enhance asserted transparent outputs, whose shielded effects are complete,
+    /// whose whole fee is known, and in which the account has no transparent spend, no recorded
+    /// sent output, and no co-funding wallet account or transparent input in its evidence. It
+    /// changes neither [`Self::aggregate_payment`], [`Self::payment_details`], [`Self::fee`],
+    /// nor [`Self::classification`].
+    pub inferred_outgoing: Option<Zatoshis>,
     /// Known account movement and whether every effect is established.
     pub account_movement: AccountMovement,
     /// The transaction.

@@ -1,5 +1,7 @@
 use super::*;
 
+mod activity_outgoing;
+
 /// Isolate memo identity from accounting and effects. The integration tests below use the
 /// migrated wallet schema and the private enhancement writer instead.
 fn memo_fixture() -> rusqlite::Connection {

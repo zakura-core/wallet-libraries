@@ -1445,6 +1445,8 @@ fn leaving_private_required_demotes_every_account() {
     );
 }
 
+#[cfg(feature = "orchard")]
+mod activity_outgoing;
 mod history;
 #[cfg(feature = "orchard")]
 mod mixed_shielding;

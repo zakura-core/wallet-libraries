@@ -147,6 +147,7 @@ use {
             CoinbaseFilter, TransactionsInvolvingAddress, TransparentBalances,
             ll::wallet::generate_transparent_gap_addresses,
         },
+        decrypt_transaction,
         fees::StandardFeeRule,
         wallet::TransparentAddressMetadata,
     },
@@ -3196,6 +3197,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                     &self.gap_limits,
                     _output,
                 )?;
+            self.attribute_unattributed_spenders(_output.outpoint())?;
 
             if let Some(t_key_scope) = <Option<TransparentKeyScope>>::from(key_scope) {
                 wallet::transparent::generate_gap_addresses(
@@ -3871,6 +3873,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             known_unspent,
             wallet::transparent_ledger::ProjectionOrigin::LegacyPublic,
         )?;
+        self.attribute_unattributed_spenders(output.outpoint())?;
 
         Ok((account_uuid, key_scope.as_transparent()))
     }
@@ -4328,6 +4331,61 @@ impl<P: consensus::Parameters, CL, R> WalletCommitmentTrees
         let result = callback(&mut shardtree)?;
 
         Ok(Some(result))
+    }
+}
+
+#[cfg(feature = "transparent-inputs")]
+impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clock, R: Rng>
+    WalletDb<C, P, CL, R>
+{
+    /// Attributes the sent outputs of each stored transaction spending the wallet output at
+    /// `outpoint` that was stored before the output was recorded, and so records no sent output.
+    ///
+    /// A restored wallet can find a send through an output it pays the wallet before it records
+    /// the output the send spends. Storing the send then established no funding account, so its
+    /// payments to others were never recorded and its history stayed provisional. Once the spent
+    /// output is recorded, the send is stored again from its raw data, as it would have been had
+    /// the output been known first.
+    ///
+    /// Sent outputs are attributed only to a sole funder: one wallet account spent inputs of the
+    /// transaction, and every transparent input spends a recorded wallet output. A transaction
+    /// that another party or another wallet account helped fund stays unattributed. Shielded
+    /// spends by other parties cannot be detected, as when the transaction was first stored.
+    fn attribute_unattributed_spenders(
+        &mut self,
+        outpoint: &OutPoint,
+    ) -> Result<(), SqliteClientError> {
+        let spenders = wallet::transparent::unattributed_spenders(self.conn.borrow(), outpoint)?;
+        if spenders.is_empty() {
+            return Ok(());
+        }
+        let Some(tip) = chain_tip_height(self.conn.borrow())? else {
+            return Ok(());
+        };
+        let params = self.params.clone();
+        for (txid, mined_height) in spenders {
+            let Some((_, tx)) = wallet::get_transaction(self.conn.borrow(), &params, txid)? else {
+                continue;
+            };
+            if self.get_funding_accounts(&tx)?.len() != 1 {
+                continue;
+            }
+            let mut all_inputs_owned = true;
+            for txin in tx.transparent_bundle().iter().flat_map(|b| b.vin.iter()) {
+                if !wallet::transparent::is_wallet_output(self.conn.borrow(), txin.prevout())? {
+                    all_inputs_owned = false;
+                    break;
+                }
+            }
+            if !all_inputs_owned {
+                continue;
+            }
+            tracing::info!("Attributing the sent outputs of transaction {txid} to its funder");
+            let ufvks = wallet::get_unified_full_viewing_keys(self.conn.borrow(), &params)?;
+            let d_tx = decrypt_transaction(&params, mined_height, Some(tip), &tx, &ufvks);
+            store_decrypted_tx(self, &params, self.gap_limits, tip, d_tx)?;
+        }
+        Ok(())
     }
 }
 

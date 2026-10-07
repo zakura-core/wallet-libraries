@@ -37,6 +37,14 @@ workspace.
   Unknown or conflicting shape, incomplete/unqualified effects, and failed accounting remain
   provisional.
 
+- A stored transaction that spends a wallet transparent output recorded after it, and so has no
+  sent outputs, is stored again from its raw data once that output is recorded through
+  `put_received_transparent_utxo` or a retrieved parent transaction. Its sent outputs are
+  attributed only when one wallet account funded it and every transparent input spends a wallet
+  output; jointly funded transactions stay unattributed. Fixes fresh restores whose sends stayed
+  provisional with no recipient or payment. Ledger projection is not covered. No migration
+  re-derives sends already stored this way; recording their spent output again does.
+
 - Transparent spend discovery retains work for unmined local spenders and resumes after they
   expire. Address and per-outpoint completion advance past expired-spender links, using expiry
   at the current tip; an address range advances only the outputs whose search frontier it covers.

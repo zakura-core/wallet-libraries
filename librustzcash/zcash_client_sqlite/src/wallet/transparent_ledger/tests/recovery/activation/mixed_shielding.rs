@@ -558,9 +558,61 @@ fn transparent_outputs_or_unknown_shape_prevent_net_reconstruction() {
             conn(&case.st).execute("UPDATE ironwood_enhance_routing SET has_transparent_outputs = NULL WHERE transaction_id = ?", [case.tx_ref]).unwrap();
         }
         let entry = history(&case.st, case.account, case.txid);
+        assert_eq!(entry.has_transparent_outputs, outputs);
         assert_eq!(entry.classification, HistoryClassification::Provisional);
         assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
         assert_eq!(entry.fee, FeeState::Unknown);
+    }
+}
+
+/// Enhancement shape reaches consumers without upgrading incomplete payment details, and
+/// survives opening the recovered database again without local construction records.
+#[test]
+fn enhance_output_presence_is_exposed_by_history_after_reopen() {
+    let shape = Shape {
+        inputs: [300_000, 120_000],
+        shielded: 205_000,
+    };
+    for outputs in [false, true] {
+        let mut case = shielding(&shape, Some(reported_metadata()));
+        assert_eq!(
+            history(&case.st, case.account, case.txid).has_transparent_outputs,
+            None
+        );
+        let request = private_queries(&case.st)[0];
+        let response = record_with_outputs(&case.st, request, Some(FEE), outputs);
+        apply_records(&mut case.st, &[(request, response)]);
+        let entry = history(&case.st, case.account, case.txid);
+        assert_eq!(entry.has_transparent_outputs, Some(outputs));
+        assert_eq!(entry.classification, HistoryClassification::Provisional);
+        assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
+        assert_eq!(entry.account_movement.net(), -215_000);
+        assert_eq!(entry.fee, FeeState::Unknown);
+        assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
+        assert!(
+            !stored(&case.st, case.tx_ref).3,
+            "no full transaction record"
+        );
+        private_queries(&case.st); // Fails if private recovery exposes public payload work.
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reopened.sqlite");
+        conn(&case.st)
+            .execute("VACUUM INTO ?", [path.to_str().unwrap()])
+            .unwrap();
+        let reopened = crate::WalletDb::for_path(
+            path,
+            *case.st.network(),
+            crate::testing::db::test_clock(),
+            crate::testing::db::test_rng(),
+        )
+        .unwrap()
+        .with_transparent_ledger_mode(PrivateRequired);
+        let reopened_entry = reopened
+            .transaction_history_details(case.account, &[case.txid])
+            .unwrap()
+            .remove(0);
+        assert_eq!(reopened_entry, entry);
     }
 }
 
@@ -593,6 +645,10 @@ fn conflicting_transparent_output_shape_is_rejected_atomically() {
         (Some(2), None, Some(MEMO.to_vec()), false)
     );
     assert_reconstructed_shielding(&case, &CASES[0]);
+    assert_eq!(
+        history(&case.st, case.account, case.txid).has_transparent_outputs,
+        Some(false)
+    );
 }
 
 /// Memo recovery must not substitute a missing fee, an input count, or a balanced account flow.

@@ -471,6 +471,118 @@ fn has_unresolved_spend(
     )?)
 }
 
+/// The exact whole-transaction fee: the stored fee, or the exact fee of qualified transparent
+/// metadata. Evidence that contradicts the stored fee leaves it unknown.
+fn whole_fee(
+    stored: Option<Zatoshis>,
+    metadata: Option<&TransactionMetadataEvidence>,
+) -> Option<Zatoshis> {
+    match (stored, metadata.map(|e| e.metadata.fee)) {
+        (Some(stored), Some(WholeTransactionFee::Exact(fee))) => (stored == fee).then_some(stored),
+        (Some(_), Some(WholeTransactionFee::NotApplicable)) => None,
+        (Some(stored), _) => Some(stored),
+        (None, Some(WholeTransactionFee::Exact(fee))) => Some(fee),
+        (None, _) => None,
+    }
+}
+
+/// Whether the account recorded an output it sent in the transaction to anyone but itself, even
+/// one of zero value, or another wallet account spent funds in it.
+fn has_other_outgoing_evidence(
+    conn: &rusqlite::Connection,
+    account_id: i64,
+    transaction_id: i64,
+) -> Result<bool, SqliteClientError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM sent_notes s
+             WHERE s.from_account_id = :account_id AND s.transaction_id = :transaction_id
+             AND NOT EXISTS (
+                 SELECT 1 FROM v_received_outputs ro
+                 WHERE ro.account_id = :account_id AND ro.transaction_id = s.transaction_id
+                 AND ro.pool = s.output_pool AND ro.output_index = s.output_index
+             )
+         ) OR EXISTS (
+             SELECT 1 FROM v_received_outputs ro
+             JOIN v_received_output_spends ros
+                  ON ros.pool = ro.pool AND ros.received_output_id = ro.id_within_pool_table
+             WHERE ros.transaction_id = :transaction_id AND ro.account_id != :account_id
+         )",
+        named_params![":account_id": account_id, ":transaction_id": transaction_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// Whether any account's ledger records a transparent spend in `txid`.
+#[cfg(feature = "transparent-inputs")]
+fn has_ledger_spend(conn: &rusqlite::Connection, txid: &TxId) -> Result<bool, SqliteClientError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM tpir_spend_events WHERE spending_txid = :txid)",
+        named_params![":txid": txid.as_ref()],
+        |row| row.get(0),
+    )?)
+}
+
+/// The Activity-only outgoing value of a mixed transaction known without its full data, for
+/// which Enhance asserted transparent outputs: the value of the account's spent shielded notes,
+/// less its shielded receipts and the whole fee `fee`. Outgoing shielded recovery does not run
+/// for such a transaction, so no sent output records where that value went.
+///
+/// The inference assumes the account paid the whole fee. Each condition removes evidence that
+/// another funder shared it, or that the account's funds moved in a way the balance misreads:
+/// - every shielded effect is complete, so no owned spend or receipt is missing;
+/// - the account spent no transparent funds, no account's ledger records a transparent spend in
+///   the transaction, and qualified metadata, when present, counts no transparent input;
+/// - no other wallet account spent funds in it, and the account recorded no sent output, which
+///   other Activity would show;
+/// - the account's net shielded debit exceeds the fee.
+///
+/// What remains unknown is reported as such elsewhere: an unrecovered transparent input of
+/// another party, or a foreign shielded spend, could have paid part of the fee, and the outgoing
+/// value may include outputs to the account's own transparent addresses or to shielded
+/// recipients. The result is therefore an Activity amount, never a payment or a fee attribution.
+fn inferred_outgoing(
+    conn: &rusqlite::Connection,
+    account_id: i64,
+    transaction_id: i64,
+    #[cfg_attr(not(feature = "transparent-inputs"), allow(unused_variables))] txid: &TxId,
+    effects: &[PoolEffect],
+    fee: Zatoshis,
+    metadata: Option<&TransactionMetadataEvidence>,
+) -> Result<Option<Zatoshis>, SqliteClientError> {
+    if metadata.is_some_and(|e| e.metadata.transparent_input_count != 0) {
+        return Ok(None);
+    }
+    let mut spent = Zatoshis::ZERO;
+    let mut received = Zatoshis::ZERO;
+    for effect in effects {
+        match effect.pool {
+            PoolType::Transparent if effect.spent != Zatoshis::ZERO => return Ok(None),
+            PoolType::Transparent => {}
+            PoolType::Shielded(_) if effect.completeness != EffectCompleteness::Complete => {
+                return Ok(None);
+            }
+            PoolType::Shielded(_) => {
+                let (Some(s), Some(r)) = (spent + effect.spent, received + effect.received) else {
+                    return Ok(None);
+                };
+                spent = s;
+                received = r;
+            }
+        }
+    }
+    #[cfg(feature = "transparent-inputs")]
+    if has_ledger_spend(conn, txid)? {
+        return Ok(None);
+    }
+    if has_other_outgoing_evidence(conn, account_id, transaction_id)? {
+        return Ok(None);
+    }
+    Ok((spent - received)
+        .and_then(|net| net - fee)
+        .filter(|outgoing| *outgoing > Zatoshis::ZERO))
+}
+
 /// Whether the account's side of a mixed transaction, known without its full data, is a
 /// transparent-to-shielded self-transfer whose spent value the whole-transaction fee and the
 /// account's shielded receipts account for.
@@ -773,6 +885,33 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             _ if received_only => FeeState::NotApplicable,
             _ => FeeState::Unknown,
         };
+        let whole_fee = whole_fee(tx.fee, transaction_metadata.as_ref());
+        // A database may retain owned amounts from a pool disabled in this build. The effects
+        // above omit that pool, so their completeness cannot justify dropping its known amounts.
+        let effects_cover_known = known.iter().all(|(pool, received, spent)| {
+            (*received == Zatoshis::ZERO && *spent == Zatoshis::ZERO)
+                || effects.iter().any(|effect| effect.pool == *pool)
+        });
+        let inferred_outgoing = match whole_fee {
+            Some(fee)
+                if tx.mixed_without_full_data
+                    && tx.has_transparent_outputs == Some(true)
+                    && !tx.created_locally
+                    && tx.mined_height.is_some()
+                    && effects_cover_known =>
+            {
+                inferred_outgoing(
+                    conn,
+                    account_id,
+                    tx.id,
+                    txid,
+                    &effects,
+                    fee,
+                    transaction_metadata.as_ref(),
+                )?
+            }
+            _ => None,
+        };
         // A missing memo does not change what the transaction did; missing effects or payments
         // can.
         let classification = if tx.created_locally {
@@ -786,8 +925,11 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         };
 
         entries.push(TransactionHistoryDetails {
+            has_transparent_outputs: tx.has_transparent_outputs,
             transaction_metadata,
+            whole_fee,
             aggregate_payment,
+            inferred_outgoing,
             account_movement: AccountMovement {
                 received,
                 spent,

@@ -109,6 +109,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertEqual(result["status"], "invalidated")
 
+    def test_documented_and_options_first_orders_parse_the_same_filter(self):
+        for argv in (
+            ["test", "--config", "transparent", "-p", "zakura-client-sqlite", "transparent_ledger"],
+            ["--config", "transparent", "-p", "zakura-client-sqlite", "test", "transparent_ledger"],
+        ):
+            with patch.object(dev, "execute", return_value=0) as execute:
+                self.assertEqual(dev.main(argv), 0)
+            args = execute.call_args.args[0]
+            self.assertEqual((args.command, args.filter, args.config, args.package), ("test", "transparent_ledger", "transparent", ["zakura-client-sqlite"]))
+
     def test_facade_requires_explicit_verification(self):
         with self.assertRaisesRegex(ValueError, "exclusive backends"):
             dev.cargo_args(argparse.Namespace(package=["zakura-wallet-lib"], config="default"))
