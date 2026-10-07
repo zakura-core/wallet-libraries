@@ -172,8 +172,9 @@ pub enum TransparentDisplayStore {
     /// Raw bytes are already stored, or the wallet neither wants nor relates to the
     /// transaction; nothing was saved.
     Superseded,
-    /// The facts contradict the wallet; nothing was saved and the work is parked until the
-    /// display map changes.
+    /// The facts contradict the wallet; nothing was saved. When the looked-up height still
+    /// matches the transaction's mined height, the work is parked until the display map
+    /// changes; otherwise retry state is unchanged.
     Contradiction(TransparentDisplayContradiction),
 }
 
