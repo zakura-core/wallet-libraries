@@ -134,7 +134,7 @@ pub(crate) fn work(
            AND (
                (w.attempted_height IS NOT NULL AND w.attempted_height != t.mined_height)
                OR (w.next_attempt_at <= :now
-                   AND NOT (w.last_outcome IN {HELD_OUTCOMES}
+                   AND NOT (IFNULL(w.last_outcome, -1) IN {HELD_OUTCOMES}
                             AND (:map IS NULL OR w.last_map_sha256 IS :map)))
            )
            AND NOT (:public AND EXISTS (
