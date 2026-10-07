@@ -783,7 +783,7 @@ fn conflicting_or_stale_responses_leave_recovered_facts_intact() {
 /// upgrade, privately and without a reset.
 #[test]
 fn an_existing_route_two_database_resumes_private_memo_recovery_after_upgrade() {
-    use crate::wallet::init::{WalletMigrator, migrations::CURRENT_LEAF_MIGRATIONS};
+    use crate::wallet::init::{WalletMigrator, migrations::IRONWOOD_TRANSPARENT_OUTPUT_SHAPE_ID};
 
     let shape = &CASES[1];
     let mut case = shielding(shape, Some(reported_metadata()));
@@ -802,14 +802,13 @@ fn an_existing_route_two_database_resumes_private_memo_recovery_after_upgrade() 
     conn(&case.st)
         .execute_batch("ALTER TABLE ironwood_enhance_routing DROP COLUMN has_transparent_outputs")
         .unwrap();
-    for leaf in CURRENT_LEAF_MIGRATIONS {
-        conn(&case.st)
-            .execute(
-                "DELETE FROM schemer_migrations WHERE id = ?1",
-                [leaf.as_bytes().to_vec()],
-            )
-            .unwrap();
-    }
+    // Later migrations stay recorded: only the shape migration reruns.
+    conn(&case.st)
+        .execute(
+            "DELETE FROM schemer_migrations WHERE id = ?1",
+            [IRONWOOD_TRANSPARENT_OUTPUT_SHAPE_ID.as_bytes().to_vec()],
+        )
+        .unwrap();
     assert_eq!(stored(&case.st, case.tx_ref), (Some(2), None, None, false));
     assert_eq!(queued(&case.st, case.tx_ref), 0);
     assert!(private_queries(&case.st).is_empty(), "stuck before upgrade");
@@ -942,7 +941,7 @@ fn foreign_self_balanced_shielded_participation_is_indistinguishable() {
 /// a public payload request, and reopen with the canonical fee still NULL.
 #[test]
 fn existing_memo_complete_wallet_recovers_shape_and_survives_reopen() {
-    use crate::wallet::init::{WalletMigrator, migrations::CURRENT_LEAF_MIGRATIONS};
+    use crate::wallet::init::{WalletMigrator, migrations::IRONWOOD_TRANSPARENT_OUTPUT_SHAPE_ID};
     use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerRead;
     let mut case = shielding(&CASES[1], Some(reported_metadata()));
     recover_memo(&mut case, None);
@@ -950,14 +949,13 @@ fn existing_memo_complete_wallet_recovers_shape_and_survives_reopen() {
     conn(&case.st)
         .execute_batch("ALTER TABLE ironwood_enhance_routing DROP COLUMN has_transparent_outputs")
         .unwrap();
-    for leaf in CURRENT_LEAF_MIGRATIONS {
-        conn(&case.st)
-            .execute(
-                "DELETE FROM schemer_migrations WHERE id = ?",
-                [leaf.as_bytes().to_vec()],
-            )
-            .unwrap();
-    }
+    // Later migrations stay recorded: only the shape migration reruns.
+    conn(&case.st)
+        .execute(
+            "DELETE FROM schemer_migrations WHERE id = ?",
+            [IRONWOOD_TRANSPARENT_OUTPUT_SHAPE_ID.as_bytes().to_vec()],
+        )
+        .unwrap();
     assert_eq!(queued(&case.st, case.tx_ref), 0);
     WalletMigrator::new()
         .init_or_migrate(case.st.wallet_mut().db_mut())

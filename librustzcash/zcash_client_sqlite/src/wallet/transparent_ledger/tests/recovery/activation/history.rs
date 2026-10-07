@@ -1023,9 +1023,12 @@ fn an_accounted_payment_takes_its_change_memo_from_the_owned_receipt() {
             entry.fee,
             FeeState::Known(Zatoshis::from_u64(fee as u64).unwrap())
         );
+        // The account funded the transaction alone and every spent unit is accounted for, so the
+        // recorded payment is all of it.
+        assert_eq!(entry.funding, TransactionFunding::Sole);
         assert_eq!(
             entry.aggregate_payment,
-            AggregatePayment::Partial(zat(50_000))
+            AggregatePayment::Exact(zat(50_000))
         );
         assert_eq!(entry.classification, HistoryClassification::Reconstructed);
     }

@@ -38,6 +38,9 @@ mod ironwood_pool_code_views;
 mod ironwood_received_notes;
 mod ironwood_shardtree;
 mod ironwood_transparent_output_shape;
+#[cfg(all(test, feature = "orchard", feature = "transparent-inputs"))]
+pub(crate) const IRONWOOD_TRANSPARENT_OUTPUT_SHAPE_ID: Uuid =
+    ironwood_transparent_output_shape::MIGRATION_ID;
 mod ironwood_unsupported_memo_retry;
 mod ivk_item_cache;
 mod note_locking;
