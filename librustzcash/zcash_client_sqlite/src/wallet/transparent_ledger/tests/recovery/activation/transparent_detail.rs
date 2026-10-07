@@ -3,16 +3,20 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use zcash_client_backend::data_api::transparent_ledger::{
-    TransactionMetadata, TransparentDetailOutcome, TransparentDetailRead as _,
-    TransparentDetailWrite as _, TransparentDisplayContradiction, TransparentDisplayFacts,
-    TransparentDisplayOutput, TransparentDisplayProvenance, TransparentDisplaySource,
-    TransparentDisplayStore, TransparentDisplayView, WholeTransactionFee,
+    TransactionMetadata, TransparentDetailOutcome, TransparentDetailParked,
+    TransparentDetailRead as _, TransparentDetailReasons, TransparentDetailWrite as _,
+    TransparentDisplayContradiction, TransparentDisplayFacts, TransparentDisplayOutput,
+    TransparentDisplayProvenance, TransparentDisplaySource, TransparentDisplayStore,
+    TransparentDisplayView, WholeTransactionFee,
 };
 
 use super::*;
 use crate::{
     TxRef,
-    wallet::{TxQueryType, transparent_ledger::details::backoff},
+    wallet::{
+        TxQueryType,
+        transparent_ledger::details::{self, PARKED_BACKSTOP, backoff},
+    },
 };
 
 const RECEIVE: u8 = 1;
@@ -82,6 +86,7 @@ fn listing_at(st: &State, at: SystemTime, map: Option<[u8; 32]>) -> Vec<TxId> {
         .db()
         .transparent_detail_work(at, 100, map)
         .unwrap()
+        .requests
         .into_iter()
         .map(|r| r.txid)
         .collect()
@@ -183,26 +188,32 @@ fn migration_additive_and_backfills_route2_and_ledger_origin() {
             )
             .unwrap();
     }
+    // Route-2 transactions that are skipped: one with raw bytes, and a parent (height unknown).
+    let with_raw = TxId::from_bytes([0x67; 32]);
+    let parent = TxId::from_bytes([0x68; 32]);
     conn(&st)
         .execute(
-            "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1, 2)",
-            [tx_ref(&st, mixed).0],
+            "INSERT INTO transactions (txid, mined_height, min_observed_height, raw)
+             VALUES (?1, ?2, ?2, x'00')",
+            rusqlite::params![with_raw.as_ref(), height],
         )
         .unwrap();
+    conn(&st)
+        .execute(
+            "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, ?2)",
+            rusqlite::params![parent.as_ref(), height],
+        )
+        .unwrap();
+    for txid in [mixed, with_raw, parent] {
+        conn(&st)
+            .execute(
+                "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1, 2)",
+                [tx_ref(&st, txid).0],
+            )
+            .unwrap();
+    }
     // The wallet as it was before the migration.
-    conn(&st)
-        .execute_batch(
-            "DROP TABLE transparent_tx_display_outputs;
-             DROP TABLE transparent_tx_display;
-             DROP TABLE transparent_detail_work;",
-        )
-        .unwrap();
-    conn(&st)
-        .execute(
-            "DELETE FROM schemer_migrations WHERE id = ?1",
-            [uuid::Uuid::from_u128(0x73d751a3_dbdc_461a_9154_e061903aae4f).as_bytes()],
-        )
-        .unwrap();
+    crate::wallet::init::migrations::forget_txid_enhancement(conn(&st));
     let dump = |st: &State| -> Vec<_> {
         production_dump(conn(st))
             .into_iter()
@@ -346,27 +357,60 @@ fn public_lanes_no_enqueue() {
 
 #[test]
 fn parent_transactions_not_enqueued() {
-    let (mut st, account, _) = active_wallet();
-    // A parent of a projected spend, queued for retrieval, height unknown.
+    let (mut st, _, unspent) = active_wallet();
+    // A parent of a projected spend, queued for retrieval, height unknown; and a mined control
+    // transaction driven through the same sites.
     let parent = TxId::from_bytes([0x11; 32]);
+    let control = TxId::from_bytes([0x12; 32]);
+    let height = u32::from(unspent.mined_height);
     conn(&st)
         .execute(
             "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1)",
             [parent.as_ref()],
         )
         .unwrap();
+    conn(&st)
+        .execute(
+            "INSERT INTO transactions (txid, mined_height, min_observed_height)
+             VALUES (?1, ?2, ?2)",
+            rusqlite::params![control.as_ref(), height],
+        )
+        .unwrap();
     let dependent = tx_ref(&st, TxId::from_bytes([3; 32]));
     let tx = conn(&st).unchecked_transaction().unwrap();
     crate::wallet::queue_tx_retrieval(&tx, std::iter::once(parent), Some(dependent)).unwrap();
     tx.commit().unwrap();
-    // Further projection still queues only the transactions it records.
-    let ws = watch(&st, account);
-    let mut c = commit(&ws);
-    c.receives = vec![receive(5, external(&ws), 60_000, below_target(&ws, 0))];
-    c.coverage = full_coverage(&ws);
-    apply(&mut st, c).unwrap();
+
+    // Every enqueue site: projection by txid (receive) and by row (spend), and route 2.
+    let sites = |st: &State, txid: TxId| {
+        let tx = tx_ref(st, txid);
+        details::enqueue_txid(conn(st), &txid, TransparentDetailReasons::RECEIVE).unwrap();
+        details::enqueue_tx(conn(st), tx, TransparentDetailReasons::SPEND).unwrap();
+        conn(st)
+            .execute(
+                "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1, 2)",
+                [tx.0],
+            )
+            .unwrap();
+        details::enqueue_route_two(conn(st)).unwrap();
+    };
+    sites(&st, parent);
+    sites(&st, control);
     assert_eq!(reasons(&st, parent), None);
+    assert_eq!(reasons(&st, control), Some(RECEIVE | SPEND | MIXED));
     assert!(!listing(&st).contains(&parent));
+    assert!(listing(&st).contains(&control));
+
+    // And the migration backfill.
+    conn(&st)
+        .execute_batch("DELETE FROM transparent_detail_work")
+        .unwrap();
+    crate::wallet::init::migrations::forget_txid_enhancement(conn(&st));
+    crate::wallet::init::WalletMigrator::new()
+        .init_or_migrate(st.wallet_mut().db_mut())
+        .unwrap();
+    assert_eq!(reasons(&st, parent), None);
+    assert_eq!(reasons(&st, control), Some(MIXED));
 }
 
 #[test]
@@ -426,6 +470,7 @@ fn priority_and_backoff_order() {
             .db()
             .transparent_detail_work(now(), 2, None)
             .unwrap()
+            .requests
             .len(),
         2
     );
@@ -459,8 +504,12 @@ fn priority_and_backoff_order() {
             },
             1
         ),
-        3600
+        7200
     );
+    // A transaction newer than the publication is retried within minutes.
+    let not_yet = TransparentDetailOutcome::NotYetPublished;
+    assert!((60..=75).contains(&secs(not_yet, 1)));
+    assert_eq!(secs(not_yet, 20), 300);
     assert_eq!(
         secs(TransparentDetailOutcome::Protocol, 20),
         secs(unavailable(), 20)
@@ -492,12 +541,22 @@ fn public_listing_excludes_payload_owned() {
             rusqlite::params![txid.as_ref(), TxQueryType::Enhancement.code()],
         )
         .unwrap();
+    // A privately protected Ironwood transaction is never fetched publicly.
+    let protected = TxId::from_bytes([2; 32]);
+    conn(&st)
+        .execute(
+            "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1, 0)",
+            [tx_ref(&st, protected).0],
+        )
+        .unwrap();
     // Without public authority, payload work cannot be dispatched: display work proceeds.
     assert!(listing(&st).contains(&txid));
+    assert!(listing(&st).contains(&protected));
     set_policy(&mut st, Public);
     let listed = listing(&st);
     assert!(!listed.contains(&txid));
-    assert!(listed.contains(&TxId::from_bytes([2; 32])));
+    assert!(!listed.contains(&protected));
+    assert!(listed.contains(&TxId::from_bytes([3; 32])));
 }
 
 #[test]
@@ -506,9 +565,9 @@ fn not_covered_rearmed_on_map_change() {
     let txid = txid_of(&unspent);
     defer(&mut st, txid, TransparentDetailOutcome::NotCovered, now());
     let day = 24 * 3600;
-    // Held under the same map, or without one, however long it waits.
-    assert!(!listing_at(&st, later(30 * day), Some(MAP_A)).contains(&txid));
-    assert!(!listing_at(&st, later(30 * day), None).contains(&txid));
+    // Held under the same map, or without one, until the backstop.
+    assert!(!listing_at(&st, later(6 * day), Some(MAP_A)).contains(&txid));
+    assert!(!listing_at(&st, later(6 * day), None).contains(&txid));
     // A new map re-arms it, but not within a day.
     assert!(!listing_at(&st, later(3600), Some(MAP_B)).contains(&txid));
     assert!(listing_at(&st, later(2 * day), Some(MAP_B)).contains(&txid));
@@ -565,8 +624,8 @@ fn contradicted(
     );
     assert_eq!(display_rows(st), (0, 0));
     assert!(reasons(st, txid).is_some());
-    assert!(!listing_at(st, later(30 * 24 * 3600), Some(MAP_A)).contains(&txid));
-    assert!(listing_at(st, later(30 * 24 * 3600), Some(MAP_B)).contains(&txid));
+    assert!(!listing_at(st, later(6 * 24 * 3600), Some(MAP_A)).contains(&txid));
+    assert!(listing_at(st, later(6 * 24 * 3600), Some(MAP_B)).contains(&txid));
 }
 
 #[test]
@@ -724,17 +783,48 @@ fn raw_present_superseded() {
 #[test]
 fn stale_generation_rejected() {
     let (mut st, _, unspent) = active_wallet();
-    let stale = generation(&st) + 1;
-    let result =
-        st.wallet_mut()
-            .db_mut()
-            .store_transparent_display(facts_for(&unspent), stale, now());
+    // A lookup dispatched under the listing's snapshot, completing after a policy switch.
+    let listed = st
+        .wallet()
+        .db()
+        .transparent_detail_work(now(), 10, None)
+        .unwrap();
+    assert_eq!(listed.policy_generation, generation(&st));
+    set_policy(&mut st, PrivateShadow);
+    assert_ne!(generation(&st), listed.policy_generation);
+    let result = st.wallet_mut().db_mut().store_transparent_display(
+        facts_for(&unspent),
+        listed.policy_generation,
+        now(),
+    );
     assert!(matches!(
         result,
         Err(SqliteClientError::StaleTransparentPolicy { .. })
     ));
     assert_eq!(display_rows(&st), (0, 0));
     assert_eq!(reasons(&st, txid_of(&unspent)), Some(RECEIVE));
+}
+
+#[test]
+fn listing_reports_policy_snapshot() {
+    let (mut st, _, _) = active_wallet();
+    let work = |st: &State| {
+        st.wallet()
+            .db()
+            .transparent_detail_work(now(), 10, None)
+            .unwrap()
+    };
+    let private = work(&st);
+    assert_eq!(private.mode, PrivateRequired);
+    assert_eq!(private.policy_generation, generation(&st));
+    assert!(!private.public_transport());
+    assert!(!private.requests.is_empty());
+    set_policy(&mut st, Public);
+    let public = work(&st);
+    assert_eq!(public.mode, Public);
+    assert_eq!(public.policy_generation, generation(&st));
+    assert!(public.policy_generation > private.policy_generation);
+    assert!(public.public_transport());
 }
 
 #[test]
@@ -835,7 +925,6 @@ fn account_delete_cascades() {
 #[test]
 fn view_state_matrix() {
     let (mut st, account, unspent) = active_wallet();
-    let other = import_account(&mut st, 9);
     let txid = txid_of(&unspent);
     assert_eq!(view(&st, account, TxId::from_bytes([0x77; 32])), None);
     assert_eq!(
@@ -862,14 +951,17 @@ fn view_state_matrix() {
         store(&mut st, facts_for(&unspent)),
         TransparentDisplayStore::Stored
     );
-    let owned = |account| match view(&st, account, txid) {
+    let owned = |st: &State, account| match view(st, account, txid) {
         Some(TransparentDisplayView::Available(d)) => d.outputs[0].owned,
         other => panic!("expected available details, got {other:?}"),
     };
-    assert!(owned(account));
-    assert!(!owned(other));
+    assert!(owned(&st, account));
+    // Another account does not own it. (Importing one unplaces the ledger's receives until
+    // they are recovered again; balances exclude the output meanwhile, and so does the view.)
+    let other = import_account(&mut st, 9);
+    assert!(!owned(&st, other));
 
-    // Without work: pending while payload retrieval owns it, otherwise unavailable.
+    // Without work: pending while public payload retrieval owns it, otherwise unavailable.
     let spent = TxId::from_bytes([2; 32]);
     conn(&st)
         .execute(
@@ -893,8 +985,268 @@ fn view_state_matrix() {
             rusqlite::params![spent.as_ref(), TxQueryType::Enhancement.code()],
         )
         .unwrap();
+    // Under PrivateRequired payload retrieval cannot run publicly: unavailable, not pending.
+    assert_eq!(
+        view(&st, account, spent),
+        Some(TransparentDisplayView::Unavailable)
+    );
+    set_policy(&mut st, Public);
     assert_eq!(
         view(&st, account, spent),
         Some(TransparentDisplayView::Pending)
+    );
+}
+
+const DAY: u64 = 24 * 3600;
+
+fn parked(st: &State, at: SystemTime) -> TransparentDetailParked {
+    st.wallet().db().transparent_detail_parked(at).unwrap()
+}
+
+#[test]
+fn unsupported_parked_until_any_map() {
+    let (mut st, _, unspent) = active_wallet();
+    let txid = txid_of(&unspent);
+    // The service had no display map to offer.
+    st.wallet_mut()
+        .db_mut()
+        .defer_transparent_detail(txid, TransparentDetailOutcome::Unsupported, None, now())
+        .unwrap();
+    assert!(!listing_at(&st, later(2 * DAY), None).contains(&txid));
+    assert_eq!(
+        parked(&st, later(2 * DAY)),
+        TransparentDetailParked {
+            count: 1,
+            oldest_map_sha256: None
+        }
+    );
+    // The first map ever seen re-arms it, but not within the minimum wait.
+    assert!(!listing_at(&st, later(3600), Some(MAP_A)).contains(&txid));
+    assert!(listing_at(&st, later(2 * DAY), Some(MAP_A)).contains(&txid));
+    // Any map re-arms it, including the one it was deferred under.
+    defer(&mut st, txid, TransparentDetailOutcome::Unsupported, now());
+    assert!(listing_at(&st, later(2 * DAY), Some(MAP_A)).contains(&txid));
+    assert!(!listing_at(&st, later(2 * DAY), None).contains(&txid));
+}
+
+#[test]
+fn parked_without_map_reported_and_backstop_rearms() {
+    let (mut st, _, unspent) = active_wallet();
+    let txid = txid_of(&unspent);
+    defer(&mut st, txid, TransparentDetailOutcome::NotCovered, now());
+    let contradicted = TxId::from_bytes([2; 32]);
+    defer(
+        &mut st,
+        contradicted,
+        TransparentDetailOutcome::Contradiction,
+        later(60),
+    );
+    // Within the minimum wait nothing is parked: a map refresh could not help yet.
+    assert_eq!(parked(&st, later(3600)).count, 0);
+    // Then both wait only for a map change, and the caller is told so.
+    let at = later(2 * DAY);
+    assert!(!listing_at(&st, at, None).contains(&txid));
+    assert_eq!(
+        parked(&st, at),
+        TransparentDetailParked {
+            count: 2,
+            oldest_map_sha256: Some(MAP_A)
+        }
+    );
+    // Without any map change, the backstop makes them due again.
+    let backstop = later(PARKED_BACKSTOP.as_secs() + 60);
+    let listed = listing_at(&st, backstop, None);
+    assert!(listed.contains(&txid) && listed.contains(&contradicted));
+    assert_eq!(parked(&st, backstop).count, 0);
+}
+
+#[test]
+fn not_yet_published_short_backoff_pending() {
+    let (mut st, account, unspent) = active_wallet();
+    let txid = txid_of(&unspent);
+    defer(
+        &mut st,
+        txid,
+        TransparentDetailOutcome::NotYetPublished,
+        now(),
+    );
+    assert_eq!(
+        view(&st, account, txid),
+        Some(TransparentDisplayView::Pending)
+    );
+    assert!(!listing_at(&st, later(30), None).contains(&txid));
+    assert!(listing_at(&st, later(80), None).contains(&txid));
+    assert_eq!(parked(&st, later(80)).count, 0);
+    // Repeated, it stays within five minutes.
+    for _ in 0..10 {
+        defer(
+            &mut st,
+            txid,
+            TransparentDetailOutcome::NotYetPublished,
+            now(),
+        );
+    }
+    assert!(listing_at(&st, later(300), None).contains(&txid));
+}
+
+#[test]
+fn no_requeue_after_stored() {
+    let (mut st, account, unspent) = active_wallet();
+    let txid = txid_of(&unspent);
+    assert_eq!(
+        store(&mut st, facts_for(&unspent)),
+        TransparentDisplayStore::Stored
+    );
+    assert_eq!(reasons(&st, txid), None);
+    // The receive is reported again by the active ledger.
+    cover(&mut st, account, &revision(1, true), vec![unspent.clone()]);
+    assert_eq!(reasons(&st, txid), None);
+    // Leaving and re-entering PrivateRequired promotes, and so projects, the ledger again.
+    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, PrivateRequired);
+    promote(&mut st, account).unwrap();
+    assert_eq!(reasons(&st, txid), None);
+    assert!(!listing(&st).contains(&txid));
+    // Transactions without facts are still wanted.
+    assert_eq!(reasons(&st, TxId::from_bytes([2; 32])), Some(RECEIVE));
+    assert!(matches!(
+        view(&st, account, txid),
+        Some(TransparentDisplayView::Available(_))
+    ));
+}
+
+#[test]
+fn withdrawn_receive_not_owned_and_not_related() {
+    let (mut st, account, _) = active_wallet();
+    let provisional = revision(2, false);
+    qualify(&mut st, &provisional);
+    let ws = watch(&st, account);
+    let fresh = receive(5, external(&ws), 60_000, below_target(&ws, 0));
+    let mut c = commit(&ws);
+    c.revision = provisional;
+    c.receives = vec![fresh.clone()];
+    c.coverage = full_coverage(&ws);
+    apply(&mut st, c).unwrap();
+    let txid = txid_of(&fresh);
+    assert!(listing(&st).contains(&txid));
+
+    // A higher provisional lineage replaces it and does not report the receive.
+    let replacement = revision(3, false);
+    qualify(&mut st, &replacement);
+    let ws = watch(&st, account);
+    let mut c = commit(&ws);
+    c.revision = replacement;
+    c.coverage = full_coverage(&ws);
+    apply(&mut st, c).unwrap();
+    // The output row stays for its history, but the wallet no longer relates to the
+    // transaction: not listed, not parked.
+    assert_eq!(count_outputs(&st, txid), 1);
+    assert!(!listing(&st).contains(&txid));
+    assert!(!listing_at(&st, later(2 * DAY), Some(MAP_B)).contains(&txid));
+    assert!(!listing_at(&st, later(30 * DAY), None).contains(&txid));
+
+    // The withdrawn output neither constrains in-flight facts nor shows as owned.
+    let mut facts = facts_for(&fresh);
+    facts.outputs[fresh.outpoint.n() as usize].value = Zatoshis::const_from_u64(1);
+    assert_eq!(store(&mut st, facts), TransparentDisplayStore::Stored);
+    let Some(TransparentDisplayView::Available(details)) = view(&st, account, txid) else {
+        panic!("expected available details");
+    };
+    assert!(details.outputs.iter().all(|o| !o.owned));
+}
+
+fn count_outputs(st: &State, txid: TxId) -> i64 {
+    conn(st)
+        .query_row(
+            "SELECT COUNT(*) FROM transparent_received_outputs o
+             JOIN transactions t ON t.id_tx = o.transaction_id WHERE t.txid = ?1",
+            [txid.as_ref()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn contradiction_public_spend_links() {
+    let (mut st, _, unspent) = active_wallet();
+    // A mined transaction without raw bytes that public discovery linked to two spent
+    // outpoints: the unspent output, and one known only through the spend map.
+    let spender = TxId::from_bytes([0x44; 32]);
+    let height = u32::from(unspent.mined_height) + 1;
+    conn(&st)
+        .execute(
+            "INSERT INTO transactions (txid, mined_height, min_observed_height)
+             VALUES (?1, ?2, ?2)",
+            rusqlite::params![spender.as_ref(), height],
+        )
+        .unwrap();
+    let tx = tx_ref(&st, spender);
+    conn(&st)
+        .execute(
+            "INSERT INTO transparent_received_output_spends (transparent_received_output_id,
+                                                             transaction_id)
+             SELECT o.id, ?1 FROM transparent_received_outputs o
+             JOIN transactions t ON t.id_tx = o.transaction_id
+             WHERE t.txid = ?2 AND o.output_index = ?3",
+            rusqlite::params![tx.0, txid_of(&unspent).as_ref(), unspent.outpoint.n()],
+        )
+        .unwrap();
+    conn(&st)
+        .execute(
+            "INSERT INTO transparent_spend_map
+             (spending_transaction_id, prevout_txid, prevout_output_index)
+             VALUES (?1, ?2, 0)",
+            rusqlite::params![tx.0, [0x45u8; 32].as_slice()],
+        )
+        .unwrap();
+    details::enqueue_tx(conn(&st), tx, TransparentDetailReasons::SPEND).unwrap();
+
+    let mut facts = facts_for(&unspent);
+    facts.txid = spender;
+    facts.outputs = vec![];
+    facts.metadata.transparent_input_count = 1;
+    contradicted(
+        &mut st,
+        facts.clone(),
+        TransparentDisplayContradiction::InputCount { known: 2 },
+    );
+    let mut coinbase = facts.clone();
+    coinbase.coinbase = true;
+    coinbase.metadata = TransactionMetadata {
+        fee: WholeTransactionFee::NotApplicable,
+        transparent_input_count: 0,
+        has_shielded_components: false,
+    };
+    contradicted(&mut st, coinbase, TransparentDisplayContradiction::Coinbase);
+    facts.metadata.transparent_input_count = 2;
+    assert_eq!(store(&mut st, facts), TransparentDisplayStore::Stored);
+}
+
+#[test]
+fn store_requires_work_or_relation() {
+    let (mut st, _, unspent) = active_wallet();
+    // Mined, without raw bytes, but neither wanted nor related.
+    let stranger = TxId::from_bytes([0x46; 32]);
+    conn(&st)
+        .execute(
+            "INSERT INTO transactions (txid, mined_height, min_observed_height)
+             VALUES (?1, ?2, ?2)",
+            rusqlite::params![stranger.as_ref(), u32::from(unspent.mined_height)],
+        )
+        .unwrap();
+    let mut facts = facts_for(&unspent);
+    facts.txid = stranger;
+    assert_eq!(store(&mut st, facts), TransparentDisplayStore::Superseded);
+    assert_eq!(display_rows(&st), (0, 0));
+    // A related transaction whose work row is gone still takes facts.
+    conn(&st)
+        .execute(
+            "DELETE FROM transparent_detail_work WHERE transaction_id = ?1",
+            [tx_ref(&st, txid_of(&unspent)).0],
+        )
+        .unwrap();
+    assert_eq!(
+        store(&mut st, facts_for(&unspent)),
+        TransparentDisplayStore::Stored
     );
 }

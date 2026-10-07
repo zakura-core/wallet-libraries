@@ -43,9 +43,9 @@ use zcash_client_backend::data_api::status::{
 };
 use zcash_client_backend::data_api::transparent_ledger::{
     AppliedTransparentPolicy, PrivateTransparentDetail, TransactionHistoryDetails,
-    TransparentDetailOutcome, TransparentDetailRead, TransparentDetailRequest,
-    TransparentDetailWrite, TransparentDisplayFacts, TransparentDisplayStore,
-    TransparentDisplayView, TransparentLedgerMode, TransparentLedgerRead,
+    TransparentDetailOutcome, TransparentDetailParked, TransparentDetailRead,
+    TransparentDetailWork, TransparentDetailWrite, TransparentDisplayFacts,
+    TransparentDisplayStore, TransparentDisplayView, TransparentLedgerMode, TransparentLedgerRead,
     TransparentLedgerSnapshot, TransparentLedgerWrite,
 };
 #[cfg(feature = "transparent-inputs")]
@@ -2158,7 +2158,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
         now: std::time::SystemTime,
         limit: usize,
         map_sha256: Option<[u8; 32]>,
-    ) -> Result<Vec<TransparentDetailRequest>, Self::Error> {
+    ) -> Result<TransparentDetailWork, Self::Error> {
         wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
             wallet::transparent_ledger::details::work(
                 conn,
@@ -2166,6 +2166,19 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
                 now,
                 limit,
                 map_sha256,
+            )
+        })
+    }
+
+    fn transparent_detail_parked(
+        &self,
+        now: std::time::SystemTime,
+    ) -> Result<TransparentDetailParked, Self::Error> {
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            wallet::transparent_ledger::details::parked_work(
+                conn,
+                self.transparent_ledger_mode,
+                now,
             )
         })
     }

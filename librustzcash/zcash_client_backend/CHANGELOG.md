@@ -12,7 +12,10 @@ workspace.
 
 ### Added
 - `transparent_ledger::{TransparentDetailRead, TransparentDetailWrite}` (prototype): durable
-  transparent txid enhancement work (`transparent_detail_work`), validated
+  transparent txid enhancement work (`transparent_detail_work`, returning the requests with the
+  mode and policy generation of the same snapshot as `TransparentDetailWork`;
+  `transparent_detail_parked`, reporting work that waits for a display map change as
+  `TransparentDetailParked`), validated
   `TransparentDisplayFacts` (`store_transparent_display`, returning `TransparentDisplayStore`),
   library-computed backoff (`defer_transparent_detail` with `TransparentDetailOutcome`), and the
   detail view (`transparent_display_view`, returning `TransparentDisplayView`). Display facts

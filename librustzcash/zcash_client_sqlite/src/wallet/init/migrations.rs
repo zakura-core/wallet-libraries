@@ -657,22 +657,33 @@ pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema:
 /// applies them to an existing wallet. The caller reverts the shape migration's own column.
 #[cfg(test)]
 pub(crate) fn forget_output_shape_and_later(conn: &rusqlite::Connection) {
+    forget_txid_enhancement(conn);
+    conn.execute(
+        "DELETE FROM schemer_migrations WHERE id = ?1",
+        [ironwood_transparent_output_shape::MIGRATION_ID
+            .as_bytes()
+            .to_vec()],
+    )
+    .unwrap();
+}
+
+/// Test support: forgets that `transparent_txid_enhancement` was applied, dropping its tables,
+/// so the next migration run applies it to an existing wallet.
+#[cfg(test)]
+pub(crate) fn forget_txid_enhancement(conn: &rusqlite::Connection) {
     conn.execute_batch(
         "DROP TABLE transparent_tx_display_outputs;
          DROP TABLE transparent_tx_display;
          DROP TABLE transparent_detail_work;",
     )
     .unwrap();
-    for id in [
-        ironwood_transparent_output_shape::MIGRATION_ID,
-        transparent_txid_enhancement::MIGRATION_ID,
-    ] {
-        conn.execute(
-            "DELETE FROM schemer_migrations WHERE id = ?1",
-            [id.as_bytes().to_vec()],
-        )
-        .unwrap();
-    }
+    conn.execute(
+        "DELETE FROM schemer_migrations WHERE id = ?1",
+        [transparent_txid_enhancement::MIGRATION_ID
+            .as_bytes()
+            .to_vec()],
+    )
+    .unwrap();
 }
 
 /// Leaf migrations as of the current repository state.

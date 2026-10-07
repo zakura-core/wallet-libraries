@@ -1160,7 +1160,7 @@ fn private_details_end_to_end() {
     let mut f = Fixture::new(birthday, target);
     f.set_policy(PrivateRequired);
     let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
-    // r1 is published by the display service; r2 is not.
+    // r1 is published by the display service; r2 is mined above its recent shard.
     let (r1, r2) = (txid(1), txid(6));
     let mut tail_events = noise(H0 + 600, target, 3);
     tail_events.push((script(a0), receive(H0 + 620, r1, 0, 20_000)));
@@ -1180,13 +1180,17 @@ fn private_details_end_to_end() {
     let spendable = f.spendable().unwrap();
     assert!(spendable.contains(&outpoint(r1, 0)), "{spendable:?}");
 
-    // Loop 4's work: both recovered transactions lack raw bytes.
+    // Loop 4's work: both recovered transactions lack raw bytes. The listing's snapshot
+    // forbids public transport.
     let now = UNIX_EPOCH + Duration::from_secs(2_000_000_000);
     let due = |f: &Fixture, at: SystemTime| -> Vec<(TxId, u64)> {
-        f.st.wallet()
-            .db()
-            .transparent_detail_work(at, 10, None)
-            .unwrap()
+        let work =
+            f.st.wallet()
+                .db()
+                .transparent_detail_work(at, 10, None)
+                .unwrap();
+        assert!(!work.public_transport());
+        work.requests
             .into_iter()
             .map(|r| (r.txid, u64::from(u32::from(r.mined_height))))
             .collect()
@@ -1225,7 +1229,9 @@ fn private_details_end_to_end() {
             script: unrelated(n as u32).as_slice().to_vec(),
         }],
     }));
-    let service = DisplayService::start(H0 + 600, target, &records);
+    let service = DisplayService::start(H0 + 600, H0 + 622, &records);
+    // What a public `GetTransaction` would have fetched; it must never be called.
+    let public_fetches = std::cell::Cell::new(0usize);
     let mut client = TxidDisplayClient::new();
     let mut transport = DisplayTransport {
         service: &service,
@@ -1254,7 +1260,24 @@ fn private_details_end_to_end() {
                       transport: &mut DisplayTransport,
                       work: &[(TxId, u64)],
                       at: SystemTime| {
+        // As the app dispatches: public transport only under a public snapshot whose generation
+        // is still current, otherwise the private display service.
+        let snapshot =
+            f.st.wallet()
+                .db()
+                .transparent_detail_work(at, 10, None)
+                .unwrap();
+        let current =
+            f.st.wallet()
+                .db()
+                .applied_transparent_policy()
+                .unwrap()
+                .generation;
         for (txid, height) in work {
+            if snapshot.public_transport() && snapshot.policy_generation == current {
+                public_fetches.set(public_fetches.get() + 1);
+                continue;
+            }
             let result = client.lookup(transport, *txid.as_ref(), *height, &|| false);
             let map = client.map_sha256().and_then(map_sha256);
             let db = f.st.wallet_mut().db_mut();
@@ -1286,7 +1309,8 @@ fn private_details_end_to_end() {
     assert_eq!(f.spendable().unwrap(), spendable);
     assert_eq!(f.authority(), TransparentAuthority::Private);
 
-    // The service is back after the advised delay: r1 reconciles, r2 is absent.
+    // The service is back after the advised delay: r1 reconciles; r2 is newer than the
+    // publication, so it stays pending and is retried within minutes.
     transport.unavailable = false;
     let later = now + Duration::from_secs(3_600);
     let work = due(&f, later);
@@ -1303,21 +1327,31 @@ fn private_details_end_to_end() {
     assert!(details.outputs[0].owned);
     assert_eq!(details.outputs[0].address, Some(a0));
     assert_eq!(details.input_count, 1);
-    assert_eq!(view(&f, r2), TransparentDisplayView::Unavailable);
-    let pending = due(&f, later + Duration::from_secs(48 * 3_600));
+    assert_eq!(view(&f, r2), TransparentDisplayView::Pending);
+    let pending = due(&f, later + Duration::from_secs(6 * 60));
     assert_eq!(
         pending.iter().map(|(t, _)| *t.as_ref()).collect::<Vec<_>>(),
         vec![r2.0]
     );
-    // The absent record is retried after hours, not at once.
     assert_eq!(due(&f, later), vec![]);
+    let parked = f.st.wallet().db().transparent_detail_parked(later).unwrap();
+    assert_eq!(parked.count, 0);
+    // A coverage re-check fetches only the map, which is the one r1 was found through.
+    let sent = transport.sent.len();
+    let refreshed = client.refresh_map(&mut transport, &|| false).unwrap();
+    assert_eq!(transport.sent.len(), sent + 1);
+    let TransparentDisplaySource::Display(provenance) = &details.source else {
+        unreachable!()
+    };
+    assert_eq!(refreshed, provenance.map_sha256);
 
     // Display facts never touch wallet state outside their own tables.
     let after = wallet_state(&f);
     assert_eq!(after, before);
     assert_eq!(f.spendable().unwrap(), spendable);
 
-    // Privacy: only the display routes, and no request names either txid.
+    // Privacy: no public fetch, only the display routes, and no request names either txid.
+    assert_eq!(public_fetches.get(), 0);
     assert!(!transport.sent.is_empty());
     for (path, body) in &transport.sent {
         assert!(path.starts_with("/v1/txid/"), "{path}");

@@ -1984,20 +1984,23 @@ CREATE TABLE tpir_transaction_metadata (
 /// ### Columns
 /// - `reasons`: bit set; 1 receive, 2 spend, 4 mixed.
 /// - `next_attempt_at`: Unix seconds; `0` is due at once.
+/// - `attempted_at`: Unix seconds of the last attempt; a parked row is due anyway seven days
+///   later.
 /// - `attempted_height`: the mined height of the last attempt. A different current height
 ///   re-arms the row.
 /// - `last_outcome`: `NULL` before any attempt; otherwise 0 unavailable, 1 absent,
-///   2 not covered, 3 unsupported, 4 protocol, 5 contradiction.
-/// - `last_map_sha256`: the display map of the last attempt. A row whose last outcome is 2, 3
-///   or 5 is held while the caller's map is this one.
+///   2 not covered, 3 unsupported, 4 protocol, 5 contradiction, 6 not yet published.
+/// - `last_map_sha256`: the display map of the last attempt. A row whose last outcome is 2 or
+///   5 is parked while the caller's map is this one or absent; 3 while the caller has no map.
 pub(super) const TABLE_TRANSPARENT_DETAIL_WORK: &str = r#"
 CREATE TABLE transparent_detail_work (
     transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
     reasons INTEGER NOT NULL CHECK (reasons > 0 AND reasons < 8),
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     next_attempt_at INTEGER NOT NULL DEFAULT 0,
+    attempted_at INTEGER,
     attempted_height INTEGER CHECK (attempted_height >= 0),
-    last_outcome INTEGER CHECK (last_outcome BETWEEN 0 AND 5),
+    last_outcome INTEGER CHECK (last_outcome BETWEEN 0 AND 6),
     last_map_sha256 BLOB CHECK (length(last_map_sha256) = 32)
 )"#;
 

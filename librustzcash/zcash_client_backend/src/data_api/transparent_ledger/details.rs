@@ -10,7 +10,7 @@ use transparent::address::TransparentAddress;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
-use super::{TransactionMetadata, WholeTransactionFee};
+use super::{TransactionMetadata, TransparentLedgerMode, WholeTransactionFee};
 
 /// Why the wallet wants a transaction's transparent details, as a set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -56,6 +56,41 @@ pub struct TransparentDetailRequest {
     pub mined_height: BlockHeight,
     /// Why the wallet wants it.
     pub reasons: TransparentDetailReasons,
+}
+
+/// The due lookups, with the policy they were listed under.
+///
+/// The mode and generation are read in the same snapshot as the requests. The caller fetches
+/// publicly (lightwalletd `GetTransaction`) only when [`Self::public_transport`] holds and the
+/// generation is still the wallet's current one; otherwise only through the txid display
+/// service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransparentDetailWork {
+    /// The wallet handle's resolved transparent ledger mode.
+    pub mode: TransparentLedgerMode,
+    /// The durable policy generation (`0` before any policy was applied).
+    pub policy_generation: u64,
+    /// The due lookups, in priority order.
+    pub requests: Vec<TransparentDetailRequest>,
+}
+
+impl TransparentDetailWork {
+    /// Whether these requests may be fetched over public transport.
+    pub fn public_transport(&self) -> bool {
+        self.mode.retains_public_authority()
+    }
+}
+
+/// Lookups held only until the display map changes or the backstop interval passes.
+///
+/// When nothing is due but `count > 0`, the caller re-checks coverage by refreshing its display
+/// map and listing again with the new map hash.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TransparentDetailParked {
+    /// The number of parked lookups.
+    pub count: u64,
+    /// The map hash recorded by the longest-parked lookup, when it had one.
+    pub oldest_map_sha256: Option<[u8; 32]>,
 }
 
 /// One transparent output as published, at its position in the transaction.
@@ -122,6 +157,11 @@ pub enum TransparentDisplayContradiction {
         /// The input index.
         index: u32,
     },
+    /// The wallet knows more distinct spent outpoints than the transparent input count.
+    InputCount {
+        /// The number of distinct outpoints the wallet knows the transaction spends.
+        known: u32,
+    },
 }
 
 /// The result of storing display facts.
@@ -129,9 +169,10 @@ pub enum TransparentDisplayContradiction {
 pub enum TransparentDisplayStore {
     /// The facts were validated and saved; the work is done.
     Stored,
-    /// Raw bytes are already stored, or the transaction left the wallet; nothing was saved.
+    /// Raw bytes are already stored, or the wallet neither wants nor relates to the
+    /// transaction; nothing was saved.
     Superseded,
-    /// The facts contradict the wallet; nothing was saved and the work is held until the
+    /// The facts contradict the wallet; nothing was saved and the work is parked until the
     /// display map changes.
     Contradiction(TransparentDisplayContradiction),
 }
@@ -145,11 +186,15 @@ pub enum TransparentDetailOutcome {
         /// A server-advised minimum delay.
         retry_after: Option<Duration>,
     },
+    /// The mined height is above the newest published shard: the transaction is newer than
+    /// the publication. Retried after minutes; the view stays pending.
+    NotYetPublished,
     /// The covering shard has no record for the txid; retried after hours.
     Absent,
-    /// No display shard covers the mined height; held until the map changes.
+    /// No display shard covers the mined height (it is below the publication); held until the
+    /// map changes.
     NotCovered,
-    /// The service does not offer display lookups; held until the map changes.
+    /// The service does not offer display lookups; held until any display map is seen.
     Unsupported,
     /// The service answered with something unusable; retried like `Unavailable`.
     Protocol,
@@ -203,7 +248,8 @@ pub struct TransparentDisplayDetails {
 pub enum TransparentDisplayView {
     /// Details are known.
     Available(TransparentDisplayDetails),
-    /// A lookup is queued and has not failed, or payload retrieval owns the transaction.
+    /// A lookup is queued and has not failed, waits for the next publication, or public
+    /// payload retrieval owns the transaction.
     Pending,
     /// A lookup failed and will be retried, or no source can supply the details.
     Unavailable,
@@ -213,20 +259,30 @@ pub enum TransparentDisplayView {
 
 /// Reads transparent txid enhancement work and the detail view.
 pub trait TransparentDetailRead: super::TransparentLedgerRead {
-    /// Returns up to `limit` due lookups at `now`.
+    /// Returns up to `limit` due lookups at `now`, with the mode and policy generation read
+    /// in the same snapshot.
     ///
     /// A transaction is due when it is mined, lacks raw bytes, is still related to the
     /// wallet, and either its mined height changed since the last attempt or its next
-    /// attempt time has passed. A row held by a `NotCovered`, `Unsupported` or
-    /// `Contradiction` outcome is due only when `map_sha256` names a different display map
-    /// than the one that produced it. Under a mode retaining public authority, transactions
-    /// whose payload retrieval is already queued are omitted.
+    /// attempt time has passed and it is not parked. A row whose last outcome was
+    /// `NotCovered` or `Contradiction` is parked while `map_sha256` is absent or names the
+    /// display map that produced it; an `Unsupported` row is parked while `map_sha256` is
+    /// absent. Parked rows become due anyway seven days after their last attempt. Under a mode
+    /// retaining public authority, transactions whose payload retrieval is already queued, or
+    /// which are privately protected Ironwood transactions, are omitted.
     fn transparent_detail_work(
         &self,
         now: SystemTime,
         limit: usize,
         map_sha256: Option<[u8; 32]>,
-    ) -> Result<Vec<TransparentDetailRequest>, Self::Error>;
+    ) -> Result<TransparentDetailWork, Self::Error>;
+
+    /// Returns the lookups that are parked at `now` without a display map: those
+    /// [`Self::transparent_detail_work`] would list once given a changed map hash.
+    fn transparent_detail_parked(
+        &self,
+        now: SystemTime,
+    ) -> Result<TransparentDetailParked, Self::Error>;
 
     /// Returns the transparent detail view of `txid` for `account`, or `None` when the
     /// wallet does not hold the transaction.

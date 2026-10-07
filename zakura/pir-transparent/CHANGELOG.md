@@ -8,7 +8,9 @@
   (`TxidDisplayClient`, `TxidTransport`, `TxidRequest`, `TxidReply`, `TxidLookup`, `TxidError`,
   `TransparentDisplayRecord` and related types), `display_facts`, which maps a found record to
   the wallet's `TransparentDisplayFacts`, `deferral`, which maps a lookup that found nothing to
-  a `TransparentDetailOutcome`, and `map_sha256`, which decodes the client's map digest.
+  a `TransparentDetailOutcome` (a height above the publication is `NotYetPublished`, retried
+  within minutes; below it is `NotCovered`), and `map_sha256`, which decodes the client's map
+  digest. `TxidDisplayClient::refresh_map` re-checks coverage when only parked work remains.
 
 - `SCHEMA` (`transparent-shard-v11`), the only shard schema the adapter reads.
 - `RecoveryBatch::retired_revisions()`, exactly the retired provisional
@@ -60,7 +62,7 @@
 
 ### Changed
 
-- wallet-pir is pinned to `3d9eb406`; every wallet-pir dependency moves together.
+- wallet-pir is pinned to `c9a76bb4`; every wallet-pir dependency moves together.
 - `ReferenceRecovery::recover` takes the caller's `FilterSource` and
   `ShardTransport` for each pass. Before any retrieval it checks the target,
   the script limits, that the filter source does not use parent filters, the

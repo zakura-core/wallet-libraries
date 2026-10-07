@@ -3715,7 +3715,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pir-control"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/wallet-pir?rev=3d9eb40695ff24ef90c6b51238a2ebb5d0762e60#3d9eb40695ff24ef90c6b51238a2ebb5d0762e60"
+source = "git+https://github.com/valargroup/wallet-pir?rev=c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5#c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5"
 dependencies = [
  "hex",
  "rand 0.8.8",
@@ -3726,7 +3726,7 @@ dependencies = [
 [[package]]
 name = "pir-native"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/wallet-pir?rev=3d9eb40695ff24ef90c6b51238a2ebb5d0762e60#3d9eb40695ff24ef90c6b51238a2ebb5d0762e60"
+source = "git+https://github.com/valargroup/wallet-pir?rev=c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5#c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5"
 dependencies = [
  "ipir-sp 0.1.0-rc.6 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6)",
  "rand 0.8.8",
@@ -3738,7 +3738,7 @@ dependencies = [
 [[package]]
 name = "pir-observability"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/wallet-pir?rev=3d9eb40695ff24ef90c6b51238a2ebb5d0762e60#3d9eb40695ff24ef90c6b51238a2ebb5d0762e60"
+source = "git+https://github.com/valargroup/wallet-pir?rev=c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5#c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5"
 dependencies = [
  "axum",
  "http-body",
@@ -6815,7 +6815,7 @@ dependencies = [
 [[package]]
 name = "transparent-events"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/wallet-pir?rev=3d9eb40695ff24ef90c6b51238a2ebb5d0762e60#3d9eb40695ff24ef90c6b51238a2ebb5d0762e60"
+source = "git+https://github.com/valargroup/wallet-pir?rev=c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5#c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5"
 dependencies = [
  "hex",
  "thiserror 2.0.21",
@@ -6824,7 +6824,7 @@ dependencies = [
 [[package]]
 name = "transparent-filter"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/wallet-pir?rev=3d9eb40695ff24ef90c6b51238a2ebb5d0762e60#3d9eb40695ff24ef90c6b51238a2ebb5d0762e60"
+source = "git+https://github.com/valargroup/wallet-pir?rev=c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5#c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5"
 dependencies = [
  "bitcoin",
  "hex",
@@ -6836,7 +6836,7 @@ dependencies = [
 [[package]]
 name = "transparent-native"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/wallet-pir?rev=3d9eb40695ff24ef90c6b51238a2ebb5d0762e60#3d9eb40695ff24ef90c6b51238a2ebb5d0762e60"
+source = "git+https://github.com/valargroup/wallet-pir?rev=c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5#c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5"
 dependencies = [
  "hex",
  "pir-native",
@@ -6849,7 +6849,7 @@ dependencies = [
 [[package]]
 name = "transparent-shard"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/wallet-pir?rev=3d9eb40695ff24ef90c6b51238a2ebb5d0762e60#3d9eb40695ff24ef90c6b51238a2ebb5d0762e60"
+source = "git+https://github.com/valargroup/wallet-pir?rev=c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5#c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -6864,7 +6864,7 @@ dependencies = [
 [[package]]
 name = "transparent-shard-server"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/wallet-pir?rev=3d9eb40695ff24ef90c6b51238a2ebb5d0762e60#3d9eb40695ff24ef90c6b51238a2ebb5d0762e60"
+source = "git+https://github.com/valargroup/wallet-pir?rev=c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5#c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -6897,7 +6897,7 @@ dependencies = [
 [[package]]
 name = "transparent-txid-client"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/wallet-pir?rev=3d9eb40695ff24ef90c6b51238a2ebb5d0762e60#3d9eb40695ff24ef90c6b51238a2ebb5d0762e60"
+source = "git+https://github.com/valargroup/wallet-pir?rev=c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5#c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -6912,7 +6912,7 @@ dependencies = [
 [[package]]
 name = "transparent-wallet"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/wallet-pir?rev=3d9eb40695ff24ef90c6b51238a2ebb5d0762e60#3d9eb40695ff24ef90c6b51238a2ebb5d0762e60"
+source = "git+https://github.com/valargroup/wallet-pir?rev=c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5#c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -6930,7 +6930,7 @@ dependencies = [
 [[package]]
 name = "transparent-wallet-store"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/wallet-pir?rev=3d9eb40695ff24ef90c6b51238a2ebb5d0762e60#3d9eb40695ff24ef90c6b51238a2ebb5d0762e60"
+source = "git+https://github.com/valargroup/wallet-pir?rev=c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5#c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5"
 dependencies = [
  "hex",
  "rusqlite",
