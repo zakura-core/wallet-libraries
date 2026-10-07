@@ -513,11 +513,28 @@ fn has_other_outgoing_evidence(
     )?)
 }
 
-/// Whether any account's ledger records a transparent spend in `txid`.
+/// Whether current, qualified evidence from an active account records a transparent spend.
+/// Candidate recovery and withdrawn or quarantined observations are not Activity evidence.
+/// An unresolved parent does not erase an otherwise established funding participant.
 #[cfg(feature = "transparent-inputs")]
 fn has_ledger_spend(conn: &rusqlite::Connection, txid: &TxId) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM tpir_spend_events WHERE spending_txid = :txid)",
+        "SELECT EXISTS (
+             SELECT 1 FROM tpir_spend_events s
+             JOIN tpir_active_accounts a ON a.account_id = s.account_id
+             JOIN transactions t ON t.txid = s.spending_txid AND t.mined_height = s.mined_height
+             WHERE s.spending_txid = :txid
+             AND NOT EXISTS (SELECT 1 FROM tpir_quarantined_accounts qa
+                             WHERE qa.account_id = s.account_id)
+             AND EXISTS (
+                 SELECT 1 FROM tpir_spend_observations o
+                 JOIN tpir_qualified_revisions q ON q.revision_id = o.revision_id
+                 JOIN tpir_revisions r ON r.id = o.revision_id
+                 WHERE o.spend_id = s.id
+                 AND NOT EXISTS (SELECT 1 FROM tpir_quarantined_sources qs
+                                 WHERE qs.source = r.source)
+             )
+         )",
         named_params![":txid": txid.as_ref()],
         |row| row.get(0),
     )?)
@@ -528,10 +545,11 @@ fn has_ledger_spend(conn: &rusqlite::Connection, txid: &TxId) -> Result<bool, Sq
 /// less its shielded receipts and the whole fee `fee`. Outgoing shielded recovery does not run
 /// for such a transaction, so no sent output records where that value went.
 ///
-/// The inference assumes the account paid the whole fee. Each condition removes evidence that
-/// another funder shared it, or that the account's funds moved in a way the balance misreads:
+/// Activity assumes the account funded the transaction and paid the whole fee unless recovered
+/// evidence identifies another contributor. It does not require proof that no unobserved foreign
+/// contributor exists. Each condition excludes observed conflicting funding or effects:
 /// - every shielded effect is complete, so no owned spend or receipt is missing;
-/// - the account spent no transparent funds, no account's ledger records a transparent spend in
+/// - the account spent no transparent funds, no active account's qualified ledger records a spend in
 ///   the transaction, and qualified metadata, when present, counts no transparent input;
 /// - no other wallet account spent funds in it, and the account recorded no sent output, which
 ///   other Activity would show;
