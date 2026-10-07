@@ -9,6 +9,7 @@
 //! (`projection`) and makes the account active; under `PrivateRequired`, only active accounts
 //! whose ledger is complete through the chain tip can authorize transparent inputs.
 
+pub(crate) mod details;
 mod history;
 mod policy;
 #[cfg(feature = "transparent-inputs")]

@@ -325,6 +325,11 @@ fn require_private_details_unsupported(
         named_params![":tx": tx_ref.0, ":route": PRIVATE_DETAILS_UNSUPPORTED],
     )?;
     clear_work(conn, tx_ref)?;
+    transparent_ledger::details::enqueue_tx(
+        conn,
+        tx_ref,
+        zcash_client_backend::data_api::transparent_ledger::TransparentDetailReasons::MIXED,
+    )?;
     queue_unsupported_memos(conn, Some(tx_ref))
 }
 

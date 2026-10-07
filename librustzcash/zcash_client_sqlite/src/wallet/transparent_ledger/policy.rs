@@ -112,6 +112,8 @@ pub(crate) fn apply_transparent_policy(
                    )",
                     [],
                 )?;
+                // Their transparent details are now txid enhancement work.
+                super::details::enqueue_route_two(conn)?;
                 // Their received memos remain privately recoverable.
                 #[cfg(feature = "orchard")]
                 crate::wallet::enhance_pir::queue_unsupported_memos(conn, None)?;

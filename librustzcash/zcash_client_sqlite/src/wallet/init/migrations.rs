@@ -61,6 +61,7 @@ mod transparent_ledger_schema;
 mod transparent_policy_generation;
 mod transparent_recovery_schema;
 mod transparent_shared_derivations;
+mod transparent_txid_enhancement;
 mod tree_retained_checkpoints;
 mod tx_observation_height;
 mod tx_retrieval_queue;
@@ -179,6 +180,7 @@ pub mod ids {
         transparent_policy_generation::MIGRATION_ID as TRANSPARENT_POLICY_GENERATION,
         transparent_recovery_schema::MIGRATION_ID as TRANSPARENT_RECOVERY_SCHEMA,
         transparent_shared_derivations::MIGRATION_ID as TRANSPARENT_SHARED_DERIVATIONS,
+        transparent_txid_enhancement::MIGRATION_ID as TRANSPARENT_TXID_ENHANCEMENT,
         tree_retained_checkpoints::MIGRATION_ID as TREE_RETAINED_CHECKPOINTS,
         tx_observation_height::MIGRATION_ID as TX_OBSERVATION_HEIGHT,
         tx_retrieval_queue::MIGRATION_ID as TX_RETRIEVAL_QUEUE,
@@ -429,6 +431,7 @@ pub(super) fn all_migrations<
         Box::new(transaction_reconfirmation_receipts::Migration),
         Box::new(ironwood_unsupported_memo_retry::Migration),
         Box::new(ironwood_transparent_output_shape::Migration),
+        Box::new(transparent_txid_enhancement::Migration),
     ]
 }
 
@@ -650,7 +653,7 @@ pub const V_ZAKURA_0_1_0_RC7: &[Uuid] = &[
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[ironwood_transparent_output_shape::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_txid_enhancement::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -831,6 +834,7 @@ pub(crate) mod tests {
             ids::TRANSACTION_RECONFIRMATION_RECEIPTS,
             ids::IRONWOOD_UNSUPPORTED_MEMO_RETRY,
             ids::IRONWOOD_TRANSPARENT_OUTPUT_SHAPE,
+            ids::TRANSPARENT_TXID_ENHANCEMENT,
             ids::ZIP318_CLASSIFICATION,
         ]);
 

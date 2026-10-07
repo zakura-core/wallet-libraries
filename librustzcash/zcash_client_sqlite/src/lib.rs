@@ -43,8 +43,10 @@ use zcash_client_backend::data_api::status::{
 };
 use zcash_client_backend::data_api::transparent_ledger::{
     AppliedTransparentPolicy, PrivateTransparentDetail, TransactionHistoryDetails,
-    TransparentLedgerMode, TransparentLedgerRead, TransparentLedgerSnapshot,
-    TransparentLedgerWrite,
+    TransparentDetailOutcome, TransparentDetailRead, TransparentDetailRequest,
+    TransparentDetailWrite, TransparentDisplayFacts, TransparentDisplayStore,
+    TransparentDisplayView, TransparentLedgerMode, TransparentLedgerRead,
+    TransparentLedgerSnapshot, TransparentLedgerWrite,
 };
 #[cfg(feature = "transparent-inputs")]
 use zcash_client_backend::data_api::transparent_ledger::{
@@ -2144,6 +2146,79 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
             &self.gap_limits,
             self.transparent_ledger_mode,
             account,
+        )
+    }
+}
+
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> TransparentDetailRead
+    for WalletDb<C, P, CL, R>
+{
+    fn transparent_detail_work(
+        &self,
+        now: std::time::SystemTime,
+        limit: usize,
+        map_sha256: Option<[u8; 32]>,
+    ) -> Result<Vec<TransparentDetailRequest>, Self::Error> {
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            wallet::transparent_ledger::details::work(
+                conn,
+                self.transparent_ledger_mode,
+                now,
+                limit,
+                map_sha256,
+            )
+        })
+    }
+
+    fn transparent_display_view(
+        &self,
+        account: Self::AccountId,
+        txid: TxId,
+    ) -> Result<Option<TransparentDisplayView>, Self::Error> {
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            wallet::transparent_ledger::details::view(
+                conn,
+                &self.params,
+                self.transparent_ledger_mode,
+                account,
+                txid,
+            )
+        })
+    }
+}
+
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> TransparentDetailWrite
+    for WalletDb<C, P, CL, R>
+{
+    fn store_transparent_display(
+        &mut self,
+        facts: TransparentDisplayFacts,
+        expected_generation: u64,
+        now: std::time::SystemTime,
+    ) -> Result<TransparentDisplayStore, Self::Error> {
+        wallet::transparent_ledger::details::store(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+            facts,
+            expected_generation,
+            now,
+        )
+    }
+
+    fn defer_transparent_detail(
+        &mut self,
+        txid: TxId,
+        outcome: TransparentDetailOutcome,
+        map_sha256: Option<[u8; 32]>,
+        now: std::time::SystemTime,
+    ) -> Result<(), Self::Error> {
+        wallet::transparent_ledger::details::defer(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+            txid,
+            outcome,
+            map_sha256,
+            now,
         )
     }
 }

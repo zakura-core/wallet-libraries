@@ -1976,3 +1976,57 @@ CREATE TABLE tpir_transaction_metadata (
     CHECK (fee_state != 2 OR input_count = 0),
     PRIMARY KEY (account_id, txid, revision_id)
 )"#;
+
+/// Durable transparent txid enhancement work: one row per transaction whose transparent details
+/// the wallet wants and has no raw bytes for. Display only; see
+/// `docs/transparent-txid-enhancement.md`.
+///
+/// ### Columns
+/// - `reasons`: bit set; 1 receive, 2 spend, 4 mixed.
+/// - `next_attempt_at`: Unix seconds; `0` is due at once.
+/// - `attempted_height`: the mined height of the last attempt. A different current height
+///   re-arms the row.
+/// - `last_outcome`: `NULL` before any attempt; otherwise 0 unavailable, 1 absent,
+///   2 not covered, 3 unsupported, 4 protocol, 5 contradiction.
+/// - `last_map_sha256`: the display map of the last attempt. A row whose last outcome is 2, 3
+///   or 5 is held while the caller's map is this one.
+pub(super) const TABLE_TRANSPARENT_DETAIL_WORK: &str = r#"
+CREATE TABLE transparent_detail_work (
+    transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
+    reasons INTEGER NOT NULL CHECK (reasons > 0 AND reasons < 8),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_attempt_at INTEGER NOT NULL DEFAULT 0,
+    attempted_height INTEGER CHECK (attempted_height >= 0),
+    last_outcome INTEGER CHECK (last_outcome BETWEEN 0 AND 5),
+    last_map_sha256 BLOB CHECK (length(last_map_sha256) = 32)
+)"#;
+
+/// Validated transparent display facts of a transaction without raw bytes. Fee codes match
+/// [`TABLE_TPIR_TRANSACTION_METADATA`]. Never read by balance, spendability or history queries.
+pub(super) const TABLE_TRANSPARENT_TX_DISPLAY: &str = r#"
+CREATE TABLE transparent_tx_display (
+    transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
+    coinbase INTEGER NOT NULL CHECK (coinbase IN (0, 1)),
+    fee_state INTEGER NOT NULL CHECK (fee_state IN (0, 1, 2)),
+    fee_zat INTEGER CHECK (fee_zat >= 0 AND fee_zat <= 2100000000000000),
+    input_count INTEGER NOT NULL CHECK (input_count >= 0 AND input_count <= 4294967295),
+    shielded INTEGER NOT NULL CHECK (shielded IN (0, 1)),
+    shard_id INTEGER NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    map_sha256 BLOB NOT NULL CHECK (length(map_sha256) = 32),
+    looked_up_height INTEGER NOT NULL CHECK (looked_up_height >= 0),
+    stored_at INTEGER NOT NULL,
+    CHECK ((fee_state = 0 AND fee_zat IS NOT NULL) OR (fee_state != 0 AND fee_zat IS NULL)),
+    CHECK (fee_state != 2 OR input_count = 0)
+)"#;
+
+/// Every transparent output of a [`TABLE_TRANSPARENT_TX_DISPLAY`] transaction, in order.
+pub(super) const TABLE_TRANSPARENT_TX_DISPLAY_OUTPUTS: &str = r#"
+CREATE TABLE transparent_tx_display_outputs (
+    transaction_id INTEGER NOT NULL
+        REFERENCES transparent_tx_display(transaction_id) ON DELETE CASCADE,
+    output_index INTEGER NOT NULL CHECK (output_index >= 0),
+    value_zat INTEGER NOT NULL CHECK (value_zat >= 0 AND value_zat <= 2100000000000000),
+    script BLOB NOT NULL,
+    PRIMARY KEY (transaction_id, output_index)
+)"#;
