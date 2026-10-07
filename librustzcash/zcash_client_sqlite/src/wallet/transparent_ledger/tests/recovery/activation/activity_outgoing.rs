@@ -506,6 +506,14 @@ fn shared_transparent_funding_infers_nothing() {
 /// cannot change Activity; a qualified active observation establishes conflicting funding.
 fn recover_contributor(case: &mut Restored, active: bool) -> RecoveryRevision {
     let other = import_account(&mut case.st, 9);
+    // Importing an account schedules its birthday range again; finish that compact scan
+    // before capturing recovery commits at the current accepted chain point.
+    let start = case.st.test_account().unwrap().birthday().height();
+    let end = case.height + 2;
+    case.st.scan_cached_blocks(
+        start,
+        usize::try_from(u32::from(end) - u32::from(start) + 1).unwrap(),
+    );
     let initial = source(b"contributor", 1);
     cover(&mut case.st, other, &initial, vec![]);
     qualify(&mut case.st, &initial);
@@ -564,6 +572,20 @@ fn active_contributor_veto_tracks_qualified_current_evidence() {
         .unwrap();
     assert_eq!(case.history().inferred_outgoing, Some(zat(SENT)));
     lift_quarantine(&case.st);
+    assert_eq!(case.history().inferred_outgoing, None);
+
+    conn(&case.st)
+        .execute("INSERT INTO tpir_quarantined_accounts SELECT account_id FROM tpir_spend_events WHERE spending_txid = ?1", [case.tx.txid().as_ref()])
+        .unwrap();
+    assert_eq!(case.history().inferred_outgoing, Some(zat(SENT)));
+    lift_quarantine(&case.st);
+    assert_eq!(case.history().inferred_outgoing, None);
+
+    conn(&case.st)
+        .execute("DELETE FROM tpir_spend_observations", [])
+        .unwrap();
+    assert_eq!(case.history().inferred_outgoing, Some(zat(SENT)));
+    conn(&case.st).execute("INSERT INTO tpir_spend_observations SELECT s.id, r.id FROM tpir_spend_events s CROSS JOIN tpir_revisions r WHERE r.source = ?1", [&observed.source]).unwrap();
     assert_eq!(case.history().inferred_outgoing, None);
 
     // Qualification and accepted placement are checked on every read, not cached as a flag.
