@@ -17,7 +17,8 @@ workspace.
   bytes. Ledger projection, the route-2 marker, and mining a route-2 transaction queue work for
   mined transactions without stored facts; each first deletes stored facts that the wallet now
   contradicts. Storing raw bytes clears work and any display facts. Parked work is due again
-  after seven days without a display map change. Failed lookups and contradictions only
+  after seven days without a display map change; under public authority nothing is parked, and
+  held work is due at its ordinary retry. Failed lookups and contradictions only
   change retry state while the looked-up height still matches the transaction's mined height;
   a change of outcome class restarts the backoff. The view shows work as pending only while the
   listing would return it.
