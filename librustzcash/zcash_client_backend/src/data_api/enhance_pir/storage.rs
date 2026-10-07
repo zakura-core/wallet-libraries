@@ -50,7 +50,8 @@ pub struct PendingIronwoodOutgoing<AccountId> {
 
 /// Binding context for transaction metadata, independent of memo/OVK completion.
 pub enum PendingIronwoodMetadata<AccountId> {
-    Incoming(PendingIronwoodMemo<AccountId>),
+    /// A received note; boxed because its prepared incoming key is large.
+    Incoming(Box<PendingIronwoodMemo<AccountId>>),
     /// A send-only transaction bound to its first compact action.
     Compact(IronwoodEnhanceRequestId),
 }

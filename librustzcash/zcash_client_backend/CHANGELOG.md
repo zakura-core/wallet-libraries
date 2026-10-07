@@ -32,7 +32,7 @@ workspace.
 ### Changed
 - `enhance_pir::storage::PendingIronwoodMemo` carries the incoming key that detected the
   note, `ivk`, in place of `scope`. Storage resolves it, so a registered swap key
-  authenticates its own memos.
+  authenticates its own memos. `PendingIronwoodMetadata::Incoming` boxes it.
 - `enhance_pir::storage::validate_and_apply_records` captures the stored-metadata snapshot for
   has-transparent records too, so storage can compare it before keeping such a record's
   authenticated memo and agreeing fee without public authority. A `PrivateDetailsUnsupported`
