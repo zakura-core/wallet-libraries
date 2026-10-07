@@ -308,11 +308,14 @@ pub trait TransparentDetailWrite: TransparentDetailRead {
 
     /// Records a failed lookup of `txid` and schedules the next attempt.
     ///
+    /// `looked_up_height` is the mined height from the request, not a refreshed wallet height.
     /// `map_sha256` is the display map the lookup used, when one was fetched. Unknown
-    /// transactions and transactions without work are ignored.
+    /// transactions, transactions without work, and results whose mined height has changed
+    /// (including transactions that are now unmined) are ignored without changing retry state.
     fn defer_transparent_detail(
         &mut self,
         txid: TxId,
+        looked_up_height: BlockHeight,
         outcome: TransparentDetailOutcome,
         map_sha256: Option<[u8; 32]>,
         now: SystemTime,

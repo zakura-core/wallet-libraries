@@ -2221,6 +2221,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
     fn defer_transparent_detail(
         &mut self,
         txid: TxId,
+        looked_up_height: BlockHeight,
         outcome: TransparentDetailOutcome,
         map_sha256: Option<[u8; 32]>,
         now: std::time::SystemTime,
@@ -2229,6 +2230,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
             self.conn.borrow(),
             self.transparent_ledger_mode,
             txid,
+            looked_up_height,
             outcome,
             map_sha256,
             now,

@@ -96,10 +96,22 @@ fn listing(st: &State) -> Vec<TxId> {
     listing_at(st, now(), None)
 }
 
+fn mined_height(st: &State, txid: TxId) -> BlockHeight {
+    let height = conn(st)
+        .query_row(
+            "SELECT mined_height FROM transactions WHERE txid = ?1",
+            [txid.as_ref()],
+            |row| row.get::<_, u32>(0),
+        )
+        .unwrap();
+    BlockHeight::from(height)
+}
+
 fn defer(st: &mut State, txid: TxId, outcome: TransparentDetailOutcome, at: SystemTime) {
+    let height = mined_height(st, txid);
     st.wallet_mut()
         .db_mut()
-        .defer_transparent_detail(txid, outcome, Some(MAP_A), at)
+        .defer_transparent_detail(txid, height, outcome, Some(MAP_A), at)
         .unwrap()
 }
 
@@ -458,6 +470,86 @@ fn rewind_remine_resets_backoff() {
 }
 
 #[test]
+fn stale_detail_failure_after_remine_preserves_immediate_retry() {
+    let (mut st, account, unspent) = active_wallet();
+    let txid = txid_of(&unspent);
+    defer(&mut st, txid, unavailable(), now());
+    let before = production_dump(conn(&st));
+    let work_before = before
+        .iter()
+        .find(|(table, _)| table == "transparent_detail_work")
+        .unwrap()
+        .clone();
+
+    let floor = unspent.mined_height - 2;
+    st.truncate_to_height(floor);
+    scan_new_blocks(&mut st, 4);
+    let remined = ReceiveEvent {
+        mined_height: floor + 3,
+        ..unspent.clone()
+    };
+    cover(&mut st, account, &revision(1, true), vec![remined]);
+    assert!(listing(&st).contains(&txid));
+
+    // The lookup started at the original height and finished after re-mining.
+    st.wallet_mut()
+        .db_mut()
+        .defer_transparent_detail(
+            txid,
+            unspent.mined_height,
+            TransparentDetailOutcome::NotCovered,
+            Some(MAP_A),
+            now(),
+        )
+        .unwrap();
+    let after = production_dump(conn(&st));
+    assert_eq!(
+        after
+            .iter()
+            .find(|(table, _)| table == "transparent_detail_work")
+            .unwrap(),
+        &work_before
+    );
+    assert!(listing(&st).contains(&txid));
+
+    // Validation may also discover a contradiction after the placement changes.
+    let mut stale_facts = facts_for(&unspent);
+    stale_facts.coinbase = true;
+    assert!(matches!(
+        store(&mut st, stale_facts),
+        TransparentDisplayStore::Contradiction(_)
+    ));
+    assert_eq!(production_dump(conn(&st)), after);
+    assert!(listing(&st).contains(&txid));
+
+    // A failure for the current placement still starts a fresh backoff.
+    defer(&mut st, txid, unavailable(), now());
+    assert_eq!(attempts(&st, txid), 1);
+    assert!(!listing(&st).contains(&txid));
+}
+
+#[test]
+fn stale_detail_failure_while_unmined_changes_nothing() {
+    let (mut st, _, unspent) = active_wallet();
+    let txid = txid_of(&unspent);
+    defer(&mut st, txid, unavailable(), now());
+    st.truncate_to_height(unspent.mined_height - 2);
+    let before = production_dump(conn(&st));
+    st.wallet_mut()
+        .db_mut()
+        .defer_transparent_detail(
+            txid,
+            unspent.mined_height,
+            TransparentDetailOutcome::NotCovered,
+            Some(MAP_A),
+            now(),
+        )
+        .unwrap();
+    assert_eq!(production_dump(conn(&st)), before);
+    assert!(!listing(&st).contains(&txid));
+}
+
+#[test]
 fn priority_and_backoff_order() {
     let (mut st, _, unspent) = active_wallet();
     let unspent = txid_of(&unspent);
@@ -747,6 +839,7 @@ fn contradiction_input_index() {
     // The projected spend consumes its output at input 0.
     let mut facts = facts_for(&unspent);
     facts.txid = TxId::from_bytes([3; 32]);
+    facts.provenance.looked_up_height = mined_height(&st, facts.txid);
     facts.outputs = vec![];
     facts.metadata.transparent_input_count = 0;
     contradicted(
@@ -1010,7 +1103,13 @@ fn unsupported_parked_until_any_map() {
     // The service had no display map to offer.
     st.wallet_mut()
         .db_mut()
-        .defer_transparent_detail(txid, TransparentDetailOutcome::Unsupported, None, now())
+        .defer_transparent_detail(
+            txid,
+            unspent.mined_height,
+            TransparentDetailOutcome::Unsupported,
+            None,
+            now(),
+        )
         .unwrap();
     assert!(!listing_at(&st, later(2 * DAY), None).contains(&txid));
     assert_eq!(
@@ -1203,6 +1302,7 @@ fn contradiction_public_spend_links() {
 
     let mut facts = facts_for(&unspent);
     facts.txid = spender;
+    facts.provenance.looked_up_height = BlockHeight::from(height);
     facts.outputs = vec![];
     facts.metadata.transparent_input_count = 1;
     contradicted(

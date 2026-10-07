@@ -16,7 +16,9 @@ workspace.
   queues work for existing mined route-2 transactions and ledger-origin transactions without raw
   bytes. Ledger projection and the route-2 marker queue work for mined transactions without
   stored facts; storing raw bytes clears it and any display facts. Parked work is due again
-  after seven days without a display map change. Facts are validated against the coinbase
+  after seven days without a display map change. Failed lookups and contradictions only
+  change retry state while the looked-up height still matches the transaction's mined height.
+  Facts are validated against the coinbase
   position, owned outputs that financial queries count, recovered metadata, the stored fee,
   known shielded components, and known spends (input indexes and the number of distinct spent
   outpoints, including public spend links); a contradiction stores nothing.

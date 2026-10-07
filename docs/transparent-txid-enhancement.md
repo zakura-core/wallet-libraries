@@ -111,7 +111,11 @@ Order: never-attempted and re-armed rows first, then the most recently mined.
 ## Outcomes and backoff
 
 The caller reports a failed lookup with
-`defer_transparent_detail(txid, outcome, map_sha256, now)`. The library computes
+`defer_transparent_detail(txid, looked_up_height, outcome, map_sha256, now)`.
+The caller retains the mined height from the dispatched request. If the transaction's
+current mined height differs, or it is now unmined, the result changes nothing. This
+prevents a late failure from parking work that a rewind and re-mining made due again.
+The library computes
 the next attempt, with jitter derived from the txid and attempt count:
 
 | Outcome | Meaning | Next attempt | View |
@@ -131,8 +135,9 @@ Parked rows are due again seven days after their last attempt regardless.
 - `Stored`: the facts passed validation; they are saved and the work row is deleted.
 - `Superseded`: raw bytes are already stored, or the wallet neither has work for
   nor still relates to the transaction; nothing is saved.
-- `Contradiction(kind)`: nothing is saved; the work row records the outcome as
-  `Contradiction` and is parked until the map changes.
+- `Contradiction(kind)`: nothing is saved; if the looked-up height still matches the
+  transaction's mined height, the work row records the outcome as `Contradiction` and is
+  parked until the map changes. A stale placement leaves retry state unchanged.
 
 A moved policy generation fails with `StaleTransparentPolicy` and changes nothing.
 

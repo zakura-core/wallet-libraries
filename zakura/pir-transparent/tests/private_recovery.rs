@@ -1293,7 +1293,13 @@ fn private_details_end_to_end() {
                     );
                 }
                 (_, Some(outcome)) => db
-                    .defer_transparent_detail(*txid, outcome, map, at)
+                    .defer_transparent_detail(
+                        *txid,
+                        BlockHeight::from(*height as u32),
+                        outcome,
+                        map,
+                        at,
+                    )
                     .unwrap(),
                 (other, None) => panic!("unexpected lookup result {other:?}"),
             }

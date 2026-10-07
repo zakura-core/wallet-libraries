@@ -17,7 +17,8 @@ workspace.
   `transparent_detail_parked`, reporting work that waits for a display map change as
   `TransparentDetailParked`), validated
   `TransparentDisplayFacts` (`store_transparent_display`, returning `TransparentDisplayStore`),
-  library-computed backoff (`defer_transparent_detail` with `TransparentDetailOutcome`), and the
+  library-computed backoff (`defer_transparent_detail` with the request's mined height and
+  `TransparentDetailOutcome`, ignoring results for a changed placement), and the
   detail view (`transparent_display_view`, returning `TransparentDisplayView`). Display facts
   never change balances, history classification or `details_complete`; see
   `docs/transparent-txid-enhancement.md`.

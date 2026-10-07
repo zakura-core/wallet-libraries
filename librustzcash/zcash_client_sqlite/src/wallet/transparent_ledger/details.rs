@@ -322,6 +322,7 @@ fn outcome_code(outcome: TransparentDetailOutcome) -> i64 {
 fn record_outcome(
     conn: &Connection,
     txid: &TxId,
+    looked_up_height: BlockHeight,
     outcome: TransparentDetailOutcome,
     map_sha256: Option<[u8; 32]>,
     now: SystemTime,
@@ -345,6 +346,11 @@ fn record_outcome(
     let Some((tx, attempts, attempted_height, mined_height)) = row else {
         return Ok(());
     };
+    // A late result must not park or back off work for a different placement. This check
+    // and the update run in the caller's snapshot transaction.
+    if mined_height != Some(u32::from(looked_up_height)) {
+        return Ok(());
+    }
     // A changed placement starts a fresh backoff.
     let attempts = if attempted_height.is_some() && attempted_height == mined_height {
         attempts.saturating_add(1)
@@ -375,13 +381,14 @@ pub(crate) fn defer(
     conn: &Connection,
     configured: Option<TransparentLedgerMode>,
     txid: TxId,
+    looked_up_height: BlockHeight,
     outcome: TransparentDetailOutcome,
     map_sha256: Option<[u8; 32]>,
     now: SystemTime,
 ) -> Result<(), SqliteClientError> {
     resolve_mode(conn, configured)?;
     with_read_snapshot(conn, |conn| {
-        record_outcome(conn, &txid, outcome, map_sha256, now)
+        record_outcome(conn, &txid, looked_up_height, outcome, map_sha256, now)
     })
 }
 
@@ -613,6 +620,7 @@ pub(crate) fn store(
             record_outcome(
                 conn,
                 &facts.txid,
+                facts.provenance.looked_up_height,
                 TransparentDetailOutcome::Contradiction,
                 Some(facts.provenance.map_sha256),
                 now,
