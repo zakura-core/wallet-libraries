@@ -25,11 +25,11 @@ sha2.workspace = true
 serde_json = { workspace = true, optional = true }
 thiserror = "2"
 url = "2"
-transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "3d9eb40695ff24ef90c6b51238a2ebb5d0762e60", optional = true }
-transparent-wallet-store = { git = "https://github.com/valargroup/wallet-pir", rev = "3d9eb40695ff24ef90c6b51238a2ebb5d0762e60", optional = true }
-transparent-events = { git = "https://github.com/valargroup/wallet-pir", rev = "3d9eb40695ff24ef90c6b51238a2ebb5d0762e60", optional = true }
-transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "3d9eb40695ff24ef90c6b51238a2ebb5d0762e60", optional = true }
-transparent-txid-client = { git = "https://github.com/valargroup/wallet-pir", rev = "3d9eb40695ff24ef90c6b51238a2ebb5d0762e60", optional = true }
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5", optional = true }
+transparent-wallet-store = { git = "https://github.com/valargroup/wallet-pir", rev = "c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5", optional = true }
+transparent-events = { git = "https://github.com/valargroup/wallet-pir", rev = "c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5", optional = true }
+transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5", optional = true }
+transparent-txid-client = { git = "https://github.com/valargroup/wallet-pir", rev = "c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -39,11 +39,11 @@ zcash_client_backend = { workspace = true, features = ["orchard", "test-dependen
 zcash_keys = { workspace = true, features = ["transparent-inputs"] }
 # The example and the end-to-end test build the reference HTTP adapters; the
 # library takes caller transports.
-transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "3d9eb40695ff24ef90c6b51238a2ebb5d0762e60", features = ["reqwest"] }
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5", features = ["reqwest"] }
 # The end-to-end test publishes shards and serves them in process; it requires
 # `wallet`, which brings the event and filter crates.
-transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "3d9eb40695ff24ef90c6b51238a2ebb5d0762e60" }
-transparent-shard-server = { git = "https://github.com/valargroup/wallet-pir", rev = "3d9eb40695ff24ef90c6b51238a2ebb5d0762e60" }
+transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5" }
+transparent-shard-server = { git = "https://github.com/valargroup/wallet-pir", rev = "c9a76bb4c93ddaec4bb511c8da1b8dd53cad0cb5" }
 axum = "0.7"
 tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
 regex = { workspace = true, features = ["std"] }

@@ -10,7 +10,9 @@ use zcash_primitives::transaction::TxId;
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
 use crate::recovery::{RecoveryError, failure, metadata, require};
-use transparent_txid_client::{Provenance, TransparentDisplayRecord, TxidError, TxidLookup};
+use transparent_txid_client::{
+    Placement, Provenance, TransparentDisplayRecord, TxidError, TxidLookup,
+};
 
 /// Decodes a display map digest as the client reports it (hex).
 pub fn map_sha256(hex: &str) -> Option<[u8; 32]> {
@@ -63,7 +65,13 @@ pub fn deferral(lookup: &Result<TxidLookup, TxidError>) -> Option<TransparentDet
     match lookup {
         Ok(TxidLookup::Found { .. }) | Err(TxidError::Cancelled) => None,
         Ok(TxidLookup::Absent) => Some(TransparentDetailOutcome::Absent),
-        Ok(TxidLookup::PlacementUnknown(_)) => Some(TransparentDetailOutcome::NotCovered),
+        // Above the newest shard is transient: the publication has not caught up yet.
+        Ok(TxidLookup::PlacementUnknown(Placement::Above)) => {
+            Some(TransparentDetailOutcome::NotYetPublished)
+        }
+        Ok(TxidLookup::PlacementUnknown(Placement::Below)) => {
+            Some(TransparentDetailOutcome::NotCovered)
+        }
         Ok(TxidLookup::Unsupported) => Some(TransparentDetailOutcome::Unsupported),
         Err(TxidError::Unavailable { retry_after }) => {
             Some(TransparentDetailOutcome::Unavailable {
@@ -83,7 +91,7 @@ pub fn deferral(lookup: &Result<TxidLookup, TxidError>) -> Option<TransparentDet
 mod tests {
     use super::*;
     use transparent_events::{FeeState, TransactionMetadata, Txid};
-    use transparent_txid_client::{DisplayOutput, Placement, ProtocolKind, Tier};
+    use transparent_txid_client::{DisplayOutput, ProtocolKind, Tier};
     use zcash_client_backend::data_api::transparent_ledger::WholeTransactionFee;
 
     fn provenance() -> Provenance {
@@ -185,6 +193,10 @@ mod tests {
             (Ok(TxidLookup::Absent), Some(O::Absent)),
             (
                 Ok(TxidLookup::PlacementUnknown(Placement::Above)),
+                Some(O::NotYetPublished),
+            ),
+            (
+                Ok(TxidLookup::PlacementUnknown(Placement::Below)),
                 Some(O::NotCovered),
             ),
             (Ok(TxidLookup::Unsupported), Some(O::Unsupported)),
