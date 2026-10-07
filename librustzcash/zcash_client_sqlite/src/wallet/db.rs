@@ -1086,6 +1086,25 @@ CREATE TABLE tx_reconfirmation_receipts (
 )"#;
 pub(super) const INDEX_TX_RECONFIRMATION_RECEIPTS_HEIGHT: &str = r#"
 CREATE INDEX idx_tx_reconfirmation_receipts_height ON tx_reconfirmation_receipts(mined_height)"#;
+/// Transactions whose stored wallet records must be re-derived from their raw data, because
+/// the evidence of which wallet accounts funded them changed after they were stored.
+///
+/// A transaction's sent outputs are attributed to the account that funded it only once the wallet
+/// can establish that account as the transaction's sole funder (see
+/// `zcash_client_backend::data_api::ll::wallet::store_decrypted_tx`). When a spend link from an
+/// already-stored transaction to a wallet output or note is created later (a transparent output
+/// recorded after its spender, or a note that scanning links to a transaction stored from its
+/// raw data), the spender is queued here, unless this wallet constructed it. The
+/// `WalletWrite::store_decrypted_tx`, `put_received_transparent_utxo` and `put_blocks` calls
+/// re-derive the queue within their database transaction.
+///
+/// ### Columns
+/// - `transaction_id`: the queued transaction. It always has raw data when queued.
+pub(super) const TABLE_TX_ATTRIBUTION_QUEUE: &str = r#"
+CREATE TABLE tx_attribution_queue (
+    transaction_id INTEGER PRIMARY KEY
+        REFERENCES transactions(id_tx) ON DELETE CASCADE
+)"#;
 
 /// Stores the set of transaction ids for which the backend required additional data.
 ///

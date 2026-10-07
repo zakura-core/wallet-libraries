@@ -101,6 +101,29 @@ pub enum HistoryClassification {
     Provisional,
 }
 
+/// Who funded a transaction, from the account's point of view.
+///
+/// Only an account that funded a transaction alone can be said to have made its payments or paid
+/// its fee. When others also funded it, the account's own spends and receipts are still exact,
+/// but its payment amount and its share of the fee are unknowable, and must not be inferred from
+/// its net movement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TransactionFunding {
+    /// The account spent nothing in the transaction.
+    NotFunded,
+    /// The account is the transaction's only known funder: every transparent input spends one of
+    /// its outputs, and no other wallet account spent in it. A shielded spend by an outside party
+    /// is not detectable.
+    Sole,
+    /// Other wallet accounts, or outside parties whose transparent inputs the settled evidence
+    /// does not attribute to the account, also funded the transaction. The fee reported for it is
+    /// the whole transaction's fee, not the account's share.
+    Shared,
+    /// The account funded the transaction, but its evidence does not yet establish whether
+    /// others did.
+    Undetermined,
+}
+
 /// One account's history view of one transaction, from one database read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionHistoryDetails {
@@ -141,8 +164,11 @@ pub struct TransactionHistoryDetails {
     pub effects: Vec<PoolEffect>,
     /// Whether the transaction's recipients, payment amounts, and memos are known.
     pub payment_details: DetailCompleteness,
-    /// The fee, as far as it concerns the account.
+    /// The fee, as far as it concerns the account. For [`TransactionFunding::Shared`] this is the
+    /// whole transaction's fee.
     pub fee: FeeState,
+    /// Who funded the transaction.
+    pub funding: TransactionFunding,
     /// How the account's view was established.
     pub classification: HistoryClassification,
     /// Transparent follow-on details for this transaction that the current policy withholds from

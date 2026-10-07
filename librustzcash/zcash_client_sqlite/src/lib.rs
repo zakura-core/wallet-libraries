@@ -88,7 +88,7 @@ use zcash_client_backend::{
         error::{FindAccountForAddressError, LockError, RewindError},
         ll::{
             self, LowLevelWalletRead, LowLevelWalletWrite, ReceivedSaplingOutput,
-            wallet::store_decrypted_tx,
+            wallet::{reprocess_funding_attribution, store_decrypted_tx},
         },
         scanning::{ScanPriority, ScanRange},
         wallet::{ConfirmationsPolicy, TargetHeight, input_selection::LockFilter},
@@ -2851,6 +2851,34 @@ where
     }
 }
 
+impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P, CL, R> {
+    /// Re-derives every transaction in `tx_attribution_queue` within the current database
+    /// transaction; see [`reprocess_funding_attribution`]. Entries stay queued while the chain tip
+    /// is unknown, which the history read reports as unsettled transparent effects.
+    fn reprocess_funding_attribution(&mut self) -> Result<(), SqliteClientError> {
+        let queued: bool = self.conn.0.query_row(
+            "SELECT EXISTS (SELECT 1 FROM tx_attribution_queue)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !queued {
+            return Ok(());
+        }
+        let Some(chain_tip) = wallet::chain_tip_height(self.conn.0)? else {
+            return Ok(());
+        };
+        let ufvks = wallet::get_unified_full_viewing_keys(self.conn.0, &self.params)?;
+        reprocess_funding_attribution(
+            self,
+            &self.params.clone(),
+            #[cfg(feature = "transparent-inputs")]
+            self.gap_limits,
+            chain_tip,
+            &ufvks,
+        )
+    }
+}
+
 impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
     for WalletDb<SqlTransaction<'_>, P, CL, R>
 {
@@ -3117,7 +3145,9 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             #[cfg(feature = "transparent-inputs")]
             &self.gap_limits,
             &scanned_block_identities,
-        )
+        )?;
+        // Scanning links stored transactions to the notes they spend.
+        self.reprocess_funding_attribution()
     }
 
     fn put_received_transparent_utxo(
@@ -3151,6 +3181,9 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                 )?;
             }
 
+            // The output may be one that a stored transaction is already known to spend.
+            self.reprocess_funding_attribution()?;
+
             Ok(utxo_id)
         };
 
@@ -3173,7 +3206,9 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             self.gap_limits,
             chain_tip,
             d_tx,
-        )
+        )?;
+        // Outputs of this transaction may be spent by transactions stored earlier.
+        self.reprocess_funding_attribution()
     }
 
     fn set_tx_trust(
@@ -3516,6 +3551,12 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         wallet::get_txs_spending_transparent_outputs_of(self.conn.borrow(), &self.params, tx_ref)
     }
 
+    fn get_funding_attribution_queue(
+        &self,
+    ) -> Result<Vec<(Self::TxRef, Transaction, Option<BlockHeight>)>, Self::Error> {
+        wallet::get_funding_attribution_queue(self.conn.borrow(), &self.params)
+    }
+
     fn detect_sapling_spend(
         &self,
         nf: &::sapling::Nullifier,
@@ -3809,6 +3850,14 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         fee: zcash_protocol::value::Zatoshis,
     ) -> Result<(), Self::Error> {
         wallet::update_tx_fee(self.conn.borrow(), tx_ref, fee)
+    }
+
+    fn dequeue_funding_attribution(&mut self, tx_ref: Self::TxRef) -> Result<(), Self::Error> {
+        wallet::dequeue_funding_attribution(self.conn.borrow(), tx_ref)
+    }
+
+    fn delete_derived_sent_outputs(&mut self, tx_ref: Self::TxRef) -> Result<(), Self::Error> {
+        wallet::delete_derived_sent_outputs(self.conn.borrow(), tx_ref)
     }
 
     #[cfg(feature = "transparent-inputs")]

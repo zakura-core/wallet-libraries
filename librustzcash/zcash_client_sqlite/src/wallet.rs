@@ -5079,14 +5079,13 @@ pub(crate) fn get_txs_spending_transparent_outputs_of<P: consensus::Parameters>(
         "SELECT DISTINCT t.id_tx, t.raw, t.mined_height, t.expiry_height
          FROM transactions t
          -- find transactions that spend transparent outputs of the decrypted tx
-         LEFT OUTER JOIN transparent_received_output_spends ts
+         JOIN transparent_received_output_spends ts
             ON ts.transaction_id = t.id_tx
-         LEFT OUTER JOIN transparent_received_outputs tro
-            ON tro.transaction_id = :transaction_id
-            AND tro.id = ts.transparent_received_output_id
-         WHERE t.fee IS NULL
-         AND t.raw IS NOT NULL
-         AND ts.transaction_id IS NOT NULL",
+         JOIN transparent_received_outputs tro
+            ON tro.id = ts.transparent_received_output_id
+         WHERE tro.transaction_id = :transaction_id
+         AND t.fee IS NULL
+         AND t.raw IS NOT NULL",
     )?;
 
     spending_txs_stmt
@@ -5106,6 +5105,81 @@ pub(crate) fn get_txs_spending_transparent_outputs_of<P: consensus::Parameters>(
             Ok((spending_tx_ref, spending_tx))
         })?
         .collect()
+}
+
+/// Returns the queued transactions whose wallet records must be re-derived, with their mined
+/// heights. See [`LowLevelWalletRead::get_funding_attribution_queue`].
+///
+/// [`LowLevelWalletRead::get_funding_attribution_queue`]: zcash_client_backend::data_api::ll::LowLevelWalletRead::get_funding_attribution_queue
+pub(crate) fn get_funding_attribution_queue<P: consensus::Parameters>(
+    conn: &rusqlite::Connection,
+    params: &P,
+) -> Result<Vec<(TxRef, Transaction, Option<BlockHeight>)>, SqliteClientError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT t.id_tx, t.raw, t.mined_height, t.expiry_height
+         FROM tx_attribution_queue q
+         JOIN transactions t ON t.id_tx = q.transaction_id
+         WHERE t.raw IS NOT NULL
+         ORDER BY t.id_tx",
+    )?;
+    stmt.query_and_then([], |row| {
+        let tx_ref = row.get(0).map(TxRef)?;
+        let tx_bytes: Vec<u8> = row.get(1)?;
+        let mined_height = row.get::<_, Option<u32>>(2)?.map(BlockHeight::from);
+        let expiry: Option<u32> = row.get(3)?;
+        let (_, tx) = parse_tx(
+            params,
+            &tx_bytes,
+            mined_height,
+            expiry.map(BlockHeight::from),
+        )?;
+        Ok((tx_ref, tx, mined_height))
+    })?
+    .collect()
+}
+
+/// Queues `tx_ref` for re-derivation, after a spend link to one of its inputs was created, if its
+/// records were derived from raw data: a transaction this wallet constructed keeps its
+/// construction records, and one without raw data is derived when its data arrives. See
+/// [`TABLE_TX_ATTRIBUTION_QUEUE`].
+///
+/// [`TABLE_TX_ATTRIBUTION_QUEUE`]: db::TABLE_TX_ATTRIBUTION_QUEUE
+pub(crate) fn queue_funding_attribution(
+    conn: &rusqlite::Connection,
+    tx_ref: TxRef,
+) -> Result<(), SqliteClientError> {
+    conn.prepare_cached(
+        "INSERT INTO tx_attribution_queue (transaction_id)
+         SELECT id_tx FROM transactions
+         WHERE id_tx = :transaction_id AND raw IS NOT NULL AND created IS NULL
+         ON CONFLICT (transaction_id) DO NOTHING",
+    )?
+    .execute(named_params![":transaction_id": tx_ref.0])?;
+    Ok(())
+}
+
+pub(crate) fn dequeue_funding_attribution(
+    conn: &rusqlite::Connection,
+    tx_ref: TxRef,
+) -> Result<(), SqliteClientError> {
+    conn.prepare_cached("DELETE FROM tx_attribution_queue WHERE transaction_id = :transaction_id")?
+        .execute(named_params![":transaction_id": tx_ref.0])?;
+    Ok(())
+}
+
+/// Deletes the sent outputs derived from the decrypted data of `tx_ref`. A transaction the wallet
+/// constructed (`transactions.created` is set) keeps the records made at construction.
+pub(crate) fn delete_derived_sent_outputs(
+    conn: &rusqlite::Connection,
+    tx_ref: TxRef,
+) -> Result<(), SqliteClientError> {
+    conn.prepare_cached(
+        "DELETE FROM sent_notes
+         WHERE transaction_id = :transaction_id
+         AND (SELECT created FROM transactions WHERE id_tx = :transaction_id) IS NULL",
+    )?
+    .execute(named_params![":transaction_id": tx_ref.0])?;
+    Ok(())
 }
 
 pub(crate) fn update_tx_fee(

@@ -6,7 +6,7 @@ use std::hash::Hash;
 use incrementalmerkletree::Retention;
 use sapling::note_encryption::SaplingDomain;
 use subtle::ConditionallySelectable;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace};
 
 use zcash_note_encryption::{Domain, batch};
 use zcash_primitives::{
@@ -566,18 +566,20 @@ where
             spent_from_accounts.chain(ironwood_spends.iter().map(|spend| spend.account_id()));
         let spent_from_accounts = spent_from_accounts.copied().collect::<HashSet<_>>();
 
-        // TODO(#1305): Correctly track accounts that fund each transaction output. For now
-        // we pick a single funding account; when more than one wallet account contributed
-        // inputs we select the lowest account id, so that the choice is deterministic.
-        let funding_account = spent_from_accounts.iter().min().copied();
-        if spent_from_accounts.len() > 1 {
-            warn!(
-                "More than one wallet account detected as funding transaction {:?}, selecting {:?}",
-                txid,
-                funding_account
-                    .expect("funding_account is Some when spent_from_accounts is nonempty")
-            )
-        }
+        // A sent output records the account that paid for it, which only a transaction funded
+        // by one wallet account supports. When several accounts funded it, no output is
+        // attributed to any one of them; each account's spends and receipts are still recorded.
+        let funding_account = match spent_from_accounts.len() {
+            1 => spent_from_accounts.iter().next().copied(),
+            0 => None,
+            n => {
+                info!(
+                    "Transaction {:?} is funded by {} wallet accounts; its outputs are not attributed to any one of them",
+                    txid, n
+                );
+                None
+            }
+        };
 
         // TODO: Transparent spend detection for full blocks is not yet implemented; only
         // received transparent outputs are scanned here.

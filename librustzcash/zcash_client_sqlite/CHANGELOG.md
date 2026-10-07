@@ -80,6 +80,33 @@ workspace.
   by another transaction.
 - The address-based spend search now joins the queued output itself rather than every wallet
   output of the same transaction.
+- The `funding_attribution` migration adds `tx_attribution_queue` and queues every stored
+  transaction with raw data, not constructed by this wallet, that spends any wallet output or
+  shielded note, including sole shielded spenders already linked by an earlier writer.
+  The next `WalletWrite::store_decrypted_tx` or
+  `put_received_transparent_utxo` call re-derives them, repairing sent outputs that earlier
+  writers recorded for an arbitrary funder of a jointly funded transaction or never recorded for
+  a send stored before its inputs were known.
+- Recording a transparent output that a stored transaction already spends queues that
+  transaction, and `store_decrypted_tx` / `put_received_transparent_utxo` re-derive the queue in
+  the same database transaction. `transaction_history_details` reports a queued transaction's
+  public transparent effects as incomplete.
+- A transaction stored from raw data is also queued for re-derivation when scanning, or a note found
+  later, links it to a note it spends; `put_blocks` drains the queue. Transactions this wallet
+  constructed are never queued, and storing a transaction removes it from the queue.
+- `transaction_history_details` reports `TransactionHistoryDetails::funding`. A transaction is
+  `Shared` when another wallet account spent in it, or when one of its transparent inputs is not
+  the account's once the account's transparent evidence is settled. Qualified transaction metadata
+  and complete owned transparent effects can establish `Sole` or `Shared` funding without raw
+  transaction data; incomplete coverage does not establish funding this way.
+  An active ledger's owned spend establishes funding participation even before its parent output
+  supplies the spent value; unresolved funding remains `Undetermined`, rather than `NotFunded`.
+- `transaction_history_details` reports `AggregatePayment::Exact` once every spent unit of a
+  sole-funded reconstructed transaction is accounted for, rather than `Partial`. A shared
+  contribution equal to the whole transaction's fee does not establish a zero payment, complete
+  payment details, or reconstructed payment history.
+- `get_txs_spending_transparent_outputs_of` returns only spenders of the given transaction's
+  outputs; it previously returned every fee-less transaction spending any wallet output.
 
 - Shared derivation origins survive promotion and reopen without transferring receiver ownership.
   Activity at those receivers schedules new gaps and withholds private authority until coverage
