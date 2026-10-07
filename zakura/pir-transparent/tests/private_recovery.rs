@@ -981,3 +981,356 @@ fn young_wallet_rolls_back_below_its_birthday() {
     // No pass read a shard ending below the birthday.
     f.assert_private(&[0, 1, 2]);
 }
+
+/// The txid display service in process: a recent-replica worker serving one
+/// recent shard of `records` over `[start, end]`, reached through its router.
+struct DisplayService {
+    runtime: tokio::runtime::Runtime,
+    router: axum::Router,
+    _root: tempfile::TempDir,
+}
+
+impl DisplayService {
+    fn start(
+        start: u64,
+        end: u64,
+        records: &[zakura_pir_transparent::TransparentDisplayRecord],
+    ) -> Self {
+        use transparent_shard::display::{DisplaySealParams, TXID_2K};
+        use transparent_shard_server::{
+            assignment::WorkerRole,
+            display::{
+                live::{DisplayCommand, DisplayLive, DisplayPublication},
+                service::DisplayRuntime,
+                synth,
+            },
+            service::{ReadinessMode, ServiceConfig},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let shard = synth::write_shard(
+            root.path(),
+            &synth::ShardSpec {
+                shard_id: 0,
+                start_height: start,
+                end_height: end,
+                sealed: false,
+                revision: 0,
+                supersedes: String::new(),
+                parent_manifest_digest: String::new(),
+                n_buckets: 1,
+                archive_target: 1,
+                geometry: &TXID_2K,
+            },
+            records,
+        )
+        .unwrap();
+        let params = DisplaySealParams {
+            n_archive: 1,
+            n_recent: 1,
+            archive_target: 1,
+            recent_floor: 1,
+            reorg_margin: 1,
+        };
+        let (directory, map_sha256) =
+            synth::write_candidate(root.path(), &params, &[shard], "p0").unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let live = DisplayLive::new(
+            DisplayRuntime::new(
+                ServiceConfig {
+                    cache_bytes: 2 << 30,
+                    readiness: ReadinessMode::Warm,
+                    ..ServiceConfig::default()
+                },
+                None,
+            ),
+            WorkerRole::RecentReplica,
+            3,
+            root.path().join("recent.active.json"),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        runtime.block_on(async {
+            let expected = live.expected();
+            live.command(DisplayCommand::Prepare {
+                expected: expected.clone(),
+                publication: DisplayPublication {
+                    directory,
+                    map_sha256: map_sha256.clone(),
+                },
+            })
+            .await
+            .unwrap();
+            live.command(DisplayCommand::Activate {
+                expected,
+                map_sha256,
+            })
+            .await
+            .unwrap();
+        });
+        Self {
+            router: live.router(),
+            runtime,
+            _root: root,
+        }
+    }
+}
+
+/// A transport to the in-process display service that records every request
+/// and can answer 503 in its place.
+struct DisplayTransport<'a> {
+    service: &'a DisplayService,
+    unavailable: bool,
+    sent: Vec<(String, Vec<u8>)>,
+}
+
+impl zakura_pir_transparent::TxidTransport for DisplayTransport<'_> {
+    fn send(
+        &mut self,
+        request: zakura_pir_transparent::TxidRequest,
+    ) -> Result<zakura_pir_transparent::TxidReply, zakura_pir_transparent::TransportError> {
+        use tower::ServiceExt as _;
+        self.sent
+            .push((request.path().to_string(), request.body.clone()));
+        if self.unavailable {
+            return Ok(zakura_pir_transparent::TxidReply {
+                status: 503,
+                retry_after: Some("120".into()),
+                ..Default::default()
+            });
+        }
+        let mut builder = axum::http::Request::builder()
+            .method(request.method.as_str())
+            .uri(request.path())
+            .header("content-length", request.body.len());
+        if let Some(content_type) = request.content_type() {
+            builder = builder.header("content-type", content_type);
+        }
+        let http = builder
+            .body(axum::body::Body::from(request.body.clone()))
+            .unwrap();
+        let router = self.service.router.clone();
+        self.service.runtime.block_on(async move {
+            let response = router.oneshot(http).await.unwrap();
+            let header = |name: &str| {
+                response
+                    .headers()
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string)
+            };
+            let (status, retry_after, map_sha256) = (
+                response.status().as_u16(),
+                header("retry-after"),
+                header("x-txid-map-sha256"),
+            );
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .map_err(|e| zakura_pir_transparent::TransportError(e.to_string()))?;
+            Ok(zakura_pir_transparent::TxidReply {
+                status,
+                retry_after,
+                map_sha256,
+                body: body.to_vec(),
+            })
+        })
+    }
+}
+
+#[test]
+fn private_details_end_to_end() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use zakura_pir_transparent::{
+        DisplayOutput, TransparentDisplayRecord, TxidDisplayClient, TxidLookup, deferral,
+        display_facts, map_sha256,
+    };
+    use zcash_client_backend::data_api::transparent_ledger::{
+        TransparentDetailRead as _, TransparentDetailWrite as _, TransparentDisplaySource,
+        TransparentDisplayStore, TransparentDisplayView,
+    };
+    use zcash_primitives::transaction::TxId;
+
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let birthday = H0 + 610;
+    let target = H0 + 640;
+    let mut f = Fixture::new(birthday, target);
+    f.set_policy(PrivateRequired);
+    let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
+    // r1 is published by the display service; r2 is not.
+    let (r1, r2) = (txid(1), txid(6));
+    let mut tail_events = noise(H0 + 600, target, 3);
+    tail_events.push((script(a0), receive(H0 + 620, r1, 0, 20_000)));
+    tail_events.push((script(a0), receive(H0 + 625, r2, 1, 5_000)));
+    f.publish(
+        &[
+            sealed(H0, H0 + 199, noise(H0, H0 + 199, 0)),
+            sealed(H0 + 200, H0 + 399, noise(H0 + 200, H0 + 399, 1)),
+            sealed(H0 + 400, H0 + 599, noise(H0 + 400, H0 + 599, 2)),
+            tail(target, 0, tail_events),
+        ],
+        SEAL,
+    );
+    assert_eq!(f.drive().batch.state, BatchState::Ready);
+    f.promote();
+    // Both receives are projected; spendability is unchanged by what follows.
+    let spendable = f.spendable().unwrap();
+    assert!(spendable.contains(&outpoint(r1, 0)), "{spendable:?}");
+
+    // Loop 4's work: both recovered transactions lack raw bytes.
+    let now = UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+    let due = |f: &Fixture, at: SystemTime| -> Vec<(TxId, u64)> {
+        f.st.wallet()
+            .db()
+            .transparent_detail_work(at, 10, None)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.txid, u64::from(u32::from(r.mined_height))))
+            .collect()
+    };
+    let work = due(&f, now);
+    assert_eq!(
+        work.iter()
+            .map(|(t, _)| *t.as_ref())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([r1.0, r2.0])
+    );
+
+    let mut records = vec![TransparentDisplayRecord {
+        txid: r1,
+        coinbase: false,
+        metadata: transparent_events::TransactionMetadata {
+            fee: transparent_events::FeeState::Exact(1_000),
+            transparent_input_count: 1,
+            has_shielded_components: false,
+        },
+        outputs: vec![DisplayOutput {
+            value: 20_000,
+            script: script(a0).as_slice().to_vec(),
+        }],
+    }];
+    records.extend((0..40u64).map(|n| TransparentDisplayRecord {
+        txid: txid(500 + n),
+        coinbase: false,
+        metadata: transparent_events::TransactionMetadata {
+            fee: transparent_events::FeeState::Unknown,
+            transparent_input_count: 1,
+            has_shielded_components: n % 2 == 0,
+        },
+        outputs: vec![DisplayOutput {
+            value: n,
+            script: unrelated(n as u32).as_slice().to_vec(),
+        }],
+    }));
+    let service = DisplayService::start(H0 + 600, target, &records);
+    let mut client = TxidDisplayClient::new();
+    let mut transport = DisplayTransport {
+        service: &service,
+        unavailable: true,
+        sent: Vec::new(),
+    };
+    let view = |f: &Fixture, txid: Txid| {
+        f.st.wallet()
+            .db()
+            .transparent_display_view(f.account, TxId::from_bytes(txid.0))
+            .unwrap()
+            .unwrap()
+    };
+    // Every table but the display work and facts.
+    let wallet_state = |f: &Fixture| -> Vec<_> {
+        f.dump(true)
+            .into_iter()
+            .filter(|(table, _)| {
+                table != "transparent_detail_work" && !table.starts_with("transparent_tx_display")
+            })
+            .collect()
+    };
+    let before = wallet_state(&f);
+    let lookup_all = |f: &mut Fixture,
+                      client: &mut TxidDisplayClient,
+                      transport: &mut DisplayTransport,
+                      work: &[(TxId, u64)],
+                      at: SystemTime| {
+        for (txid, height) in work {
+            let result = client.lookup(transport, *txid.as_ref(), *height, &|| false);
+            let map = client.map_sha256().and_then(map_sha256);
+            let db = f.st.wallet_mut().db_mut();
+            match (&result, deferral(&result)) {
+                (Ok(TxidLookup::Found { record, provenance }), None) => {
+                    let facts =
+                        display_facts(record, provenance, BlockHeight::from(*height as u32))
+                            .unwrap();
+                    let generation = db.applied_transparent_policy().unwrap().generation;
+                    assert_eq!(
+                        db.store_transparent_display(facts, generation, at).unwrap(),
+                        TransparentDisplayStore::Stored
+                    );
+                }
+                (_, Some(outcome)) => db
+                    .defer_transparent_detail(*txid, outcome, map, at)
+                    .unwrap(),
+                (other, None) => panic!("unexpected lookup result {other:?}"),
+            }
+        }
+    };
+
+    // The service is down: both lookups are deferred, nothing else changes, and
+    // the details show as unavailable. There is no public fallback.
+    lookup_all(&mut f, &mut client, &mut transport, &work, now);
+    assert_eq!(view(&f, r1), TransparentDisplayView::Unavailable);
+    assert_eq!(view(&f, r2), TransparentDisplayView::Unavailable);
+    assert_eq!(due(&f, now), vec![]);
+    assert_eq!(f.spendable().unwrap(), spendable);
+    assert_eq!(f.authority(), TransparentAuthority::Private);
+
+    // The service is back after the advised delay: r1 reconciles, r2 is absent.
+    transport.unavailable = false;
+    let later = now + Duration::from_secs(3_600);
+    let work = due(&f, later);
+    assert_eq!(work.len(), 2);
+    lookup_all(&mut f, &mut client, &mut transport, &work, later);
+    let TransparentDisplayView::Available(details) = view(&f, r1) else {
+        panic!("expected available details for r1");
+    };
+    assert!(matches!(
+        details.source,
+        TransparentDisplaySource::Display(_)
+    ));
+    assert_eq!(details.outputs.len(), 1);
+    assert!(details.outputs[0].owned);
+    assert_eq!(details.outputs[0].address, Some(a0));
+    assert_eq!(details.input_count, 1);
+    assert_eq!(view(&f, r2), TransparentDisplayView::Unavailable);
+    let pending = due(&f, later + Duration::from_secs(48 * 3_600));
+    assert_eq!(
+        pending.iter().map(|(t, _)| *t.as_ref()).collect::<Vec<_>>(),
+        vec![r2.0]
+    );
+    // The absent record is retried after hours, not at once.
+    assert_eq!(due(&f, later), vec![]);
+
+    // Display facts never touch wallet state outside their own tables.
+    let after = wallet_state(&f);
+    assert_eq!(after, before);
+    assert_eq!(f.spendable().unwrap(), spendable);
+
+    // Privacy: only the display routes, and no request names either txid.
+    assert!(!transport.sent.is_empty());
+    for (path, body) in &transport.sent {
+        assert!(path.starts_with("/v1/txid/"), "{path}");
+        for txid in [r1, r2] {
+            let mut display = txid.0;
+            display.reverse();
+            for needle in [hex::encode(txid.0), hex::encode(display)] {
+                assert!(!path.contains(&needle), "{path}");
+            }
+            assert!(
+                !body.windows(32).any(|w| w == txid.0),
+                "a body carries the txid"
+            );
+        }
+    }
+}

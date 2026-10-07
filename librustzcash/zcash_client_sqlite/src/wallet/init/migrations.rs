@@ -652,6 +652,29 @@ pub const V_ZAKURA_0_1_0_RC7: &[Uuid] = &[
 /// The migration that creates the transparent ledger schema.
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
+/// Test support: forgets that `ironwood_transparent_output_shape` and every migration after it
+/// were applied, dropping the tables those later migrations create, so the next migration run
+/// applies them to an existing wallet. The caller reverts the shape migration's own column.
+#[cfg(test)]
+pub(crate) fn forget_output_shape_and_later(conn: &rusqlite::Connection) {
+    conn.execute_batch(
+        "DROP TABLE transparent_tx_display_outputs;
+         DROP TABLE transparent_tx_display;
+         DROP TABLE transparent_detail_work;",
+    )
+    .unwrap();
+    for id in [
+        ironwood_transparent_output_shape::MIGRATION_ID,
+        transparent_txid_enhancement::MIGRATION_ID,
+    ] {
+        conn.execute(
+            "DELETE FROM schemer_migrations WHERE id = ?1",
+            [id.as_bytes().to_vec()],
+        )
+        .unwrap();
+    }
+}
+
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_txid_enhancement::MIGRATION_ID];
 

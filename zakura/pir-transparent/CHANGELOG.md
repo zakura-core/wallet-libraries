@@ -4,6 +4,12 @@
 
 ### Added
 
+- Txid display lookups: re-exports of wallet-pir's `transparent-txid-client`
+  (`TxidDisplayClient`, `TxidTransport`, `TxidRequest`, `TxidReply`, `TxidLookup`, `TxidError`,
+  `TransparentDisplayRecord` and related types), `display_facts`, which maps a found record to
+  the wallet's `TransparentDisplayFacts`, `deferral`, which maps a lookup that found nothing to
+  a `TransparentDetailOutcome`, and `map_sha256`, which decodes the client's map digest.
+
 - `SCHEMA` (`transparent-shard-v11`), the only shard schema the adapter reads.
 - `RecoveryBatch::retired_revisions()`, exactly the retired provisional
   revisions a `Ready` batch resolves: each was exported by an earlier batch, is
@@ -54,6 +60,7 @@
 
 ### Changed
 
+- wallet-pir is pinned to `7ed5c87d`; every wallet-pir dependency moves together.
 - `ReferenceRecovery::recover` takes the caller's `FilterSource` and
   `ShardTransport` for each pass. Before any retrieval it checks the target,
   the script limits, that the filter source does not use parent filters, the

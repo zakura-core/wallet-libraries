@@ -14,7 +14,14 @@ workspace.
   identifies conflicting funding. The transparent-spend veto now requires an active account's
   qualified, non-quarantined observation at the accepted transaction height; candidate recovery
   cannot suppress the estimate. This display convention does not establish payment or fee attribution.
-
+- Transparent txid enhancement (prototype): `WalletDb` implements `TransparentDetailRead` and
+  `TransparentDetailWrite`. The additive `transparent_txid_enhancement` migration adds
+  `transparent_detail_work`, `transparent_tx_display` and `transparent_tx_display_outputs`, and
+  queues work for existing route-2 transactions and ledger-origin transactions without raw
+  bytes. Ledger projection and the route-2 marker queue work; storing raw bytes clears it and
+  any display facts. Facts are validated against the coinbase position, owned outputs, recovered
+  metadata, the stored fee, known shielded components and known spend input indexes, and a
+  contradiction stores nothing.
 - Private recovery of mixed transparent/Ironwood transactions under `PrivateRequired` keeps
   the details that do not depend on transparent data. A has-transparent Enhance PIR record (or
   a compact scan with explicit non-Ironwood fields) still takes the sticky route-2
