@@ -65,8 +65,10 @@ fn history_with_recorded_pool(
     conn.execute("UPDATE transactions SET fee = 15000 WHERE id_tx = ?", [tx])
         .unwrap();
     conn.execute(
-        "INSERT INTO ironwood_enhance_routing (transaction_id, route, has_transparent_outputs)
-         VALUES (?1, 1, 1)",
+        "INSERT INTO ironwood_enhance_routing (
+             transaction_id, route, has_transparent_outputs, has_transparent_outputs_height
+         )
+         SELECT id_tx, 1, 1, mined_height FROM transactions WHERE id_tx = ?1",
         [tx],
     )
     .unwrap();

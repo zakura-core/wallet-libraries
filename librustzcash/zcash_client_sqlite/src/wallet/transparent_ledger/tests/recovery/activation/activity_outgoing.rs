@@ -515,9 +515,10 @@ fn absent_or_unknown_transparent_shape_infers_nothing() {
     let case = privately_recovered(Destination::OwnTransparent, None, true, Some(FEE));
     conn(&case.st)
         .execute(
-            "UPDATE ironwood_enhance_routing SET has_transparent_outputs = ?1
-             WHERE transaction_id = ?2",
-            rusqlite::params![None::<bool>, case.tx_ref],
+            "UPDATE ironwood_enhance_routing
+             SET has_transparent_outputs = NULL, has_transparent_outputs_height = NULL
+             WHERE transaction_id = ?1",
+            [case.tx_ref],
         )
         .unwrap();
     let entry = case.history();

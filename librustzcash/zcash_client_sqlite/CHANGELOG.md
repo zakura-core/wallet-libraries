@@ -36,6 +36,13 @@ workspace.
   assertion and privately requeues its recovery for existing memo-complete route-2 wallets.
   Unknown or conflicting shape, incomplete/unqualified effects, and failed accounting remain
   provisional.
+- That output-presence assertion counts only where it was recovered: the additive
+  `ironwood_transparent_output_shape_height` migration records the mined height with it. An
+  assertion from another height (the transaction was re-mined elsewhere since), or from before
+  the migration, is unknown: history reports it as `None`, it is queried again privately, and
+  a fresh answer replaces it. Net-shielding reconstruction additionally requires that the
+  account received only Ironwood outputs and that no other wallet account is known to have
+  funded the transaction.
 
 - A stored transaction that spends a wallet transparent output recorded after it, and so has no
   sent outputs, is stored again from its raw data once that output is recorded through

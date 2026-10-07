@@ -16,15 +16,20 @@ A wallet that recovers a transparent-to-Ironwood shielding by private queries on
   transaction's transparent details stay unsupported (route 2).
 - The whole-transaction fee into `transactions.fee`, only when it agrees with every known fee,
   expiry, and displayed expiry. A disagreeing response is rejected without effect.
-- The separate `has_transparent_outputs` assertion, with `NULL` for unknown shape and rejection
-  of conflicting assertions. This is trusted service display evidence; only the memo is
+- The separate `has_transparent_outputs` assertion, with the mined height it was recovered at
+  (`has_transparent_outputs_height`). `NULL` is unknown shape, and so is an assertion recovered
+  at another height (the transaction was re-mined elsewhere since): it is queried again
+  privately and a fresh answer replaces it. An assertion at the current height that a response
+  contradicts rejects the response. This is trusted service display evidence; only the memo is
   authenticated by note decryption.
 - Memo work for route-2 transactions, which is requeued on rescans and policy transitions and,
   for existing wallets, by the `ironwood_unsupported_memo_retry` migration.
 - Shape evidence for existing route-2 wallets whose memos are already known, using one
   received-note-bound private metadata query. The additive `ironwood_transparent_output_shape`
-  migration leaves old shape evidence unknown and queues that recovery. Public authority
-  transitions and reorgs retain their existing dispatch guards; no public fallback is added.
+  migration leaves old shape evidence unknown and queues that recovery; the additive
+  `ironwood_transparent_output_shape_height` migration does the same for assertions recorded
+  without their height. Public authority transitions and reorgs retain their existing dispatch
+  guards; no public fallback is added.
 
 ## What the evidence cannot establish
 
@@ -77,14 +82,24 @@ reported as `HistoryClassification::NetReconstructed` only when:
 - qualified metadata counts exactly the account's published transparent inputs;
 - qualified metadata has an exact whole-transaction fee, which agrees with the canonical fee
   if one is stored; a missing canonical fee does not block reconstruction;
-- recovered Enhance PIR shape evidence explicitly says no transparent outputs exist;
-- the account spent only transparent funds and received only shielded outputs, with no recorded
-  outputs to others;
+- Enhance PIR shape evidence recovered where the transaction is mined now explicitly says no
+  transparent outputs exist;
+- the account spent only transparent funds and received only Ironwood outputs, with no recorded
+  outputs to others, and no other account of the wallet is known to have funded the
+  transaction (spent one of its outputs, published one of its transparent spends, or sent an
+  output);
 - spent = received + fee.
 
 The movement is final; the fee stays the whole transaction's (`FeeState::Unknown`) and no
-aggregate payment is inferred. Anything else stays `Provisional`: another transparent funder, an
-external payment, missing, unknown or disagreeing fees.
+aggregate payment is inferred. Anything else stays `Provisional`: another transparent funder,
+funding by another wallet account, a receipt in another shielded pool, an external payment, an
+unknown or stale shape, missing, unknown or disagreeing fees.
+
+`zakura-pir-transparent`'s `mixed_shielding` test qualifies these rules over serialized
+transactions: it builds, signs, proves and serializes each case, derives transparent events and
+Enhance records from those bytes by the publishers' rules, and recovers through the in-process
+transparent shard service and a native two-mask Enhance service, checking that no request
+exposes public payload work.
 
 ## Qualified-fee workaround
 
