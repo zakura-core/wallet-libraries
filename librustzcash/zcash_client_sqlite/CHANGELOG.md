@@ -10,6 +10,11 @@ workspace.
 
 ## [Unreleased]
 
+- Recovered outgoing Activity assumes account funding and the whole fee unless recovered evidence
+  identifies conflicting funding. The transparent-spend veto now requires an active account's
+  qualified, non-quarantined observation at the accepted transaction height; candidate recovery
+  cannot suppress the estimate. This display convention does not establish payment or fee attribution.
+
 - Private recovery of mixed transparent/Ironwood transactions under `PrivateRequired` keeps
   the details that do not depend on transparent data. A has-transparent Enhance PIR record (or
   a compact scan with explicit non-Ironwood fields) still takes the sticky route-2
