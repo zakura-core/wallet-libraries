@@ -3915,6 +3915,7 @@ fn record_mined_transaction<P: consensus::Parameters>(
          AND blocks.height = :height",
         sql_args,
     )?;
+    transparent_ledger::details::enqueue_mined_route_two(conn, &txid)?;
 
     #[cfg(feature = "transparent-inputs")]
     transparent::update_gap_limits(conn, _params, gap_limits, txid, height)?;
@@ -5165,9 +5166,9 @@ pub(crate) fn put_tx_meta(
         ":tx_index": u16::from(tx.block_index()),
     ];
 
-    stmt_upsert_tx_meta
-        .query_row(tx_params, |row| row.get::<_, i64>(0).map(TxRef))
-        .map_err(SqliteClientError::from)
+    let tx_ref = stmt_upsert_tx_meta.query_row(tx_params, |row| row.get::<_, i64>(0).map(TxRef))?;
+    transparent_ledger::details::enqueue_mined_route_two(conn, &txid_bytes)?;
+    Ok(tx_ref)
 }
 
 /// Returns the most likely wallet address that corresponds to the protocol-level receiver of a

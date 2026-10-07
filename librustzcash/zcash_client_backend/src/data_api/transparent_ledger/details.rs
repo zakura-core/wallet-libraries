@@ -81,16 +81,23 @@ impl TransparentDetailWork {
     }
 }
 
+/// How often, at most, parked lookups ask the caller to re-check the display map.
+pub const TRANSPARENT_DISPLAY_MAP_RECHECK: Duration = Duration::from_secs(6 * 3600);
+
 /// Lookups held only until the display map changes or the backstop interval passes.
 ///
-/// When nothing is due but `count > 0`, the caller re-checks coverage by refreshing its display
-/// map and listing again with the new map hash.
+/// When nothing is due, `count > 0` and `refresh_at` has passed, the caller re-checks coverage
+/// by refreshing its display map and listing again with the new map hash.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransparentDetailParked {
-    /// The number of parked lookups.
+    /// The number of lookups parked under the caller's map.
     pub count: u64,
     /// The map hash recorded by the longest-parked lookup, when it had one.
     pub oldest_map_sha256: Option<[u8; 32]>,
+    /// When a map refresh could next change something: [`TRANSPARENT_DISPLAY_MAP_RECHECK`] after
+    /// the later of the caller's last map check and the newest parked lookup. `None` when
+    /// nothing is parked.
+    pub refresh_at: Option<SystemTime>,
 }
 
 /// One transparent output as published, at its position in the transaction.
@@ -250,7 +257,8 @@ pub enum TransparentDisplayView {
     /// Details are known.
     Available(TransparentDisplayDetails),
     /// A lookup is queued and has not failed, waits for the next publication, or public
-    /// payload retrieval owns the transaction.
+    /// payload retrieval owns the transaction. Queued work counts only while the wallet would
+    /// list it, now or once the transaction is mined again.
     Pending,
     /// A lookup failed and will be retried, or no source can supply the details.
     Unavailable,
@@ -278,11 +286,17 @@ pub trait TransparentDetailRead: super::TransparentLedgerRead {
         map_sha256: Option<[u8; 32]>,
     ) -> Result<TransparentDetailWork, Self::Error>;
 
-    /// Returns the lookups that are parked at `now` without a display map: those
-    /// [`Self::transparent_detail_work`] would list once given a changed map hash.
+    /// Returns the lookups that are parked at `now` under the caller's display map
+    /// `map_sha256`: those [`Self::transparent_detail_work`] would list only once given a
+    /// changed map hash.
+    ///
+    /// `map_checked_at` is when the caller last fetched (or tried to fetch) the display map,
+    /// if ever; it bounds how often [`TransparentDetailParked::refresh_at`] asks for another.
     fn transparent_detail_parked(
         &self,
         now: SystemTime,
+        map_sha256: Option<[u8; 32]>,
+        map_checked_at: Option<SystemTime>,
     ) -> Result<TransparentDetailParked, Self::Error>;
 
     /// Returns the transparent detail view of `txid` for `account`, or `None` when the
