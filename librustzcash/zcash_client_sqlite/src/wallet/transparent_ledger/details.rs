@@ -96,9 +96,14 @@ const REARMED: &str = "(w.attempted_height IS NOT NULL AND w.attempted_height !=
 
 /// Parked under caller map `:map`: `NotCovered` and `Contradiction` until the map differs from
 /// the one that produced them, `Unsupported` until any map is seen; never past the backstop.
+///
+/// Only without public authority (`:public`): a map is the private source's, and a public
+/// lookup answers with the raw transaction whatever the publication covers, so under public
+/// authority these rows are due at their ordinary retry.
 fn parked() -> String {
     format!(
-        "((w.last_outcome IN ({NOT_COVERED}, {CONTRADICTION})
+        "NOT :public
+         AND ((w.last_outcome IN ({NOT_COVERED}, {CONTRADICTION})
            AND (:map IS NULL OR w.last_map_sha256 IS :map))
           OR (w.last_outcome = {UNSUPPORTED} AND :map IS NULL))
          AND IFNULL(w.attempted_at, 0) + :backstop > :now"
