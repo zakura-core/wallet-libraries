@@ -577,6 +577,49 @@ fn not_covered_rearmed_on_map_change() {
     );
 }
 
+/// Work held for the private source's map is due at its ordinary retry once public authority
+/// returns: a public lookup answers with the raw transaction whatever the map covers, and the
+/// public source has no map to change.
+#[test]
+fn held_work_due_at_ordinary_retry_under_public_authority() {
+    let (mut st, _, unspent) = active_wallet();
+    let txid = txid_of(&unspent);
+    let contradicted = TxId::from_bytes([2; 32]);
+    let unsupported = TxId::from_bytes([3; 32]);
+    defer(&mut st, txid, TransparentDetailOutcome::NotCovered, now());
+    defer(
+        &mut st,
+        contradicted,
+        TransparentDetailOutcome::Contradiction,
+        now(),
+    );
+    st.wallet_mut()
+        .db_mut()
+        .defer_transparent_detail(
+            unsupported,
+            TransparentDetailOutcome::Unsupported,
+            None,
+            now(),
+        )
+        .unwrap();
+    let held = [txid, contradicted, unsupported];
+    // Without public authority they wait for a map change.
+    let at = later(2 * DAY);
+    assert!(held.iter().all(|t| !listing_at(&st, at, None).contains(t)));
+    assert_eq!(parked(&st, at).count, 3);
+
+    set_policy(&mut st, Public);
+    // Not before their ordinary retry...
+    assert!(
+        held.iter()
+            .all(|t| !listing_at(&st, later(3600), None).contains(t))
+    );
+    // ...and then without any map, nor a wait for the backstop.
+    let listed = listing_at(&st, at, None);
+    assert!(held.iter().all(|t| listed.contains(t)), "{listed:?}");
+    assert_eq!(parked(&st, at).count, 0);
+}
+
 fn unspent_account(st: &State) -> AccountUuid {
     st.test_account().unwrap().id()
 }

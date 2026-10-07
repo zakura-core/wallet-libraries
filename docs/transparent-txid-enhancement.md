@@ -94,6 +94,10 @@ caller's map hash is absent or is the one that produced the outcome; an
 `Unsupported` row while the caller has no map hash at all (any map, including
 the first one seen, re-arms it). A parked row becomes due anyway seven days
 after its last attempt, so a map that never changes cannot strand it.
+Parking applies only without public authority: a map is the private source's,
+and a public lookup answers with the raw transaction whatever the publication
+covers, so under public authority these rows are due at their ordinary retry,
+and `transparent_detail_parked` counts none.
 
 `transparent_detail_parked(now)` reports the rows parked only for want of a
 map change (`count`, and the map hash of the longest-parked row). When nothing
