@@ -1120,6 +1120,28 @@ CREATE INDEX idx_tx_retrieval_queue_dependent_tx ON tx_retrieval_queue (
     dependent_transaction_id
 )"#;
 
+/// Wallet transparent outputs that a complete query of their address's unspent outputs did not
+/// return, recording that the output was spent although the wallet does not yet know by which
+/// transaction.
+///
+/// A row is recorded by `WalletWrite::notify_transparent_utxos_observed` for an output whose
+/// creating transaction is mined at or below the observed height and that has no spend by a
+/// transaction mined at or below that height. Under public authority it counts as spent while `observed_height`
+/// exceeds its `max_observed_unspent_height`; later evidence that it is unspent at or above the
+/// observed height supersedes the absence, and a rewind below the observed height removes it.
+/// The output is also queued for spend detection, so that ordinary enhancement finds and links
+/// the spending transaction.
+///
+/// ### Columns
+/// - `output_id`: the absent output.
+/// - `observed_height`: the chain height at which the output was observed to be absent.
+pub(super) const TABLE_TRANSPARENT_UTXO_ABSENCES: &str = r#"
+CREATE TABLE transparent_utxo_absences (
+    output_id INTEGER PRIMARY KEY
+        REFERENCES transparent_received_outputs(id) ON DELETE CASCADE,
+    observed_height INTEGER NOT NULL
+)"#;
+
 /// Stores the set of transaction outputs received by the wallet for which spend information
 /// (if any) should be retrieved.
 ///

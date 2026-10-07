@@ -281,7 +281,8 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
             WalletMigrationError::Other(Box::new(SqliteClientError::Scheduling(e)))
         }
         #[cfg(feature = "transparent-inputs")]
-        SqliteClientError::NotificationMismatch { .. } => {
+        SqliteClientError::NotificationMismatch { .. }
+        | SqliteClientError::InvalidTransparentUtxoObservation => {
             unreachable!("we don't service transaction data requests in migrations")
         }
         #[cfg(feature = "transparent-key-import")]
@@ -941,6 +942,7 @@ mod tests {
             db::TABLE_TRANSPARENT_RECEIVED_OUTPUTS,
             db::TABLE_TRANSPARENT_SPEND_MAP,
             db::TABLE_TRANSPARENT_SPEND_SEARCH_QUEUE,
+            db::TABLE_TRANSPARENT_UTXO_ABSENCES,
             db::TABLE_TX_LOCATOR_MAP,
             db::TABLE_TX_RECONFIRMATION_RECEIPTS,
             db::TABLE_TX_RETRIEVAL_QUEUE,

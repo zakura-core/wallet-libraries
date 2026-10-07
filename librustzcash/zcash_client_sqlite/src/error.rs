@@ -67,6 +67,10 @@ pub enum SqliteClientError {
     TransparentAuthorityUnavailable,
     /// Public transparent discovery is forbidden by the handle's transparent ledger mode.
     PublicTransparentDiscoveryForbidden,
+    /// A complete UTXO query did not retain the same provider chain point before and after
+    /// the response, or that point is not the wallet's accepted tip. Retry the whole refresh.
+    #[cfg(feature = "transparent-inputs")]
+    InvalidTransparentUtxoObservation,
     /// The wallet's transparent ledger state requires a newer reader than this build.
     TransparentLedgerIncompatible {
         /// The minimum reader version the wallet requires.
@@ -412,6 +416,13 @@ impl fmt::Display for SqliteClientError {
             #[cfg(feature = "transparent-inputs")]
             SqliteClientError::TransparentLedgerCommitRejected(rejection) => {
                 write!(f, "Transparent ledger commit rejected: {rejection:?}")
+            }
+            #[cfg(feature = "transparent-inputs")]
+            SqliteClientError::InvalidTransparentUtxoObservation => {
+                write!(
+                    f,
+                    "The UTXO query must reflect one stable, locally accepted chain tip"
+                )
             }
             #[cfg(feature = "transparent-inputs")]
             SqliteClientError::TransparentPromotionBlocked(blockers) => {

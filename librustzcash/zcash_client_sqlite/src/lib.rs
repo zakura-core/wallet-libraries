@@ -1961,20 +1961,31 @@ fn admitted_transparent_output(
     target: TargetHeight,
     authority: &wallet::transparent_ledger::InputAuthority,
 ) -> Result<Option<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
+    // Evaluate the current authority first. Public absence evidence may suppress the public
+    // probe but must not veto an output authorized by the private ledger.
     let output = wallet::transparent::get_wallet_transparent_output(
         conn,
         outpoint,
         Some(target),
-        &wallet::transparent_ledger::InputAuthority::Public,
+        authority,
     )?;
-    if output.is_some()
+    // Distinguish unavailable authority from an absent or unspendable output using metadata
+    // lookups. A public spendability query could hide an output that private authority admits,
+    // for example after qualified recovery supersedes a public absence observation.
+    if output.is_none()
+        && matches!(
+            authority,
+            wallet::transparent_ledger::InputAuthority::Private(_)
+        )
         && wallet::transparent::get_wallet_transparent_output(
             conn,
             outpoint,
-            Some(target),
-            authority,
+            None,
+            &wallet::transparent_ledger::InputAuthority::Public,
         )?
-        .is_none()
+        .is_some()
+        && wallet::transparent::get_wallet_transparent_output(conn, outpoint, None, authority)?
+            .is_none()
     {
         return Err(SqliteClientError::TransparentAuthorityUnavailable);
     }
@@ -2766,6 +2777,26 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         self.transactionally(|wdb| wdb.notify_address_checked(request, as_of_height))
     }
 
+    #[cfg(feature = "transparent-inputs")]
+    fn notify_transparent_utxos_observed(
+        &mut self,
+        address: &TransparentAddress,
+        start_height: BlockHeight,
+        query_start: zcash_client_backend::data_api::transparent_ledger::ChainPoint,
+        query_end: zcash_client_backend::data_api::transparent_ledger::ChainPoint,
+        unspent: &[OutPoint],
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        self.transactionally(|wdb| {
+            wdb.notify_transparent_utxos_observed(
+                address,
+                start_height,
+                query_start,
+                query_end,
+                unspent,
+            )
+        })
+    }
+
     #[cfg(feature = "spend-index")]
     fn notify_output_verified_unspent(
         &mut self,
@@ -3333,6 +3364,31 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             request.address(),
             request.block_range_start(),
             as_of_height,
+        )
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn notify_transparent_utxos_observed(
+        &mut self,
+        address: &TransparentAddress,
+        start_height: BlockHeight,
+        query_start: zcash_client_backend::data_api::transparent_ledger::ChainPoint,
+        query_end: zcash_client_backend::data_api::transparent_ledger::ChainPoint,
+        unspent: &[OutPoint],
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        // The query is public discovery, admitted on the same terms as the outputs it returned.
+        wallet::transparent_ledger::check_public_discovery(
+            self.conn.0,
+            self.transparent_ledger_mode,
+        )?;
+        wallet::transparent::notify_transparent_utxos_observed(
+            self.conn.0,
+            &self.params,
+            address,
+            start_height,
+            query_start,
+            query_end,
+            unspent,
         )
     }
 

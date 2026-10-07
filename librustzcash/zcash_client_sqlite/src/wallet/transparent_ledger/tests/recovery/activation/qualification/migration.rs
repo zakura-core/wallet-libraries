@@ -298,7 +298,12 @@ impl PreLedgerWallet {
             production_dump(conn)
                 .into_iter()
                 .filter(|(table, _)| {
-                    table != "schemer_migrations" && table != "tx_reconfirmation_receipts"
+                    ![
+                        "schemer_migrations",
+                        "tx_reconfirmation_receipts",
+                        "transparent_utxo_absences",
+                    ]
+                    .contains(&table.as_str())
                 })
                 .collect::<Vec<_>>()
         };

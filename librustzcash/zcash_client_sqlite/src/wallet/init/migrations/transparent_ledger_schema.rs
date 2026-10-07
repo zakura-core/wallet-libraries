@@ -246,7 +246,9 @@ mod tests {
             .prepare(
                 "SELECT name FROM sqlite_master WHERE type = 'table'
                  AND name NOT LIKE 'tpir!_%' ESCAPE '!'
-                 AND name NOT IN ('schemer_migrations', 'sqlite_sequence')",
+                 -- Later migrations' absence records, not wallet data.
+                 AND name NOT IN ('schemer_migrations', 'sqlite_sequence',
+                                  'transparent_utxo_absences')",
             )
             .unwrap()
             .query_map([], |row| row.get(0))

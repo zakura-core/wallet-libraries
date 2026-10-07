@@ -3770,6 +3770,17 @@ impl WalletWrite for MockWalletDb {
     ) -> Result<(), <Self as WalletRead>::Error> {
         Ok(())
     }
+    #[cfg(feature = "transparent-inputs")]
+    fn notify_transparent_utxos_observed(
+        &mut self,
+        _address: &TransparentAddress,
+        _start_height: BlockHeight,
+        _query_start: crate::data_api::transparent_ledger::ChainPoint,
+        _query_end: crate::data_api::transparent_ledger::ChainPoint,
+        _unspent: &[::transparent::bundle::OutPoint],
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        Ok(())
+    }
 }
 
 impl WalletCommitmentTrees for MockWalletDb {

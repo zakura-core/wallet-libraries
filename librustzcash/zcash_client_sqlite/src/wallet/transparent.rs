@@ -1194,18 +1194,34 @@ fn to_unspent_transparent_output(
 ///
 /// # Usage requirements
 /// - The parent must provide `:target_height` as a named argument.
+/// - `public_authority_condition` admits public absence evidence only for public financial reads.
 /// - The parent is responsible for enclosing this condition in parentheses as appropriate.
-pub(crate) fn spent_utxos_clause() -> String {
+pub(crate) fn spent_utxos_clause(public_authority_condition: &str) -> String {
     format!(
         r#"
         SELECT txo_spends.transparent_received_output_id
         FROM transparent_received_output_spends txo_spends
         JOIN transactions stx ON stx.id_tx = txo_spends.transaction_id
         WHERE {}
+        UNION
+        {} AND ({public_authority_condition})
         "#,
-        super::common::tx_unexpired_condition("stx")
+        super::common::tx_unexpired_condition("stx"),
+        ABSENT_UTXOS_CLAUSE,
     )
 }
+
+/// Selects public absence evidence; callers must restrict its effect to public financial authority.
+///
+/// Selects the identifiers of outputs that a complete query of their address's unspent outputs
+/// did not return, unless later evidence shows them unspent at or above that height. Such an
+/// output is spent by a transaction the wallet has not linked yet. See
+/// [`notify_transparent_utxos_observed`].
+pub(crate) const ABSENT_UTXOS_CLAUSE: &str = "
+        SELECT absence.output_id
+        FROM transparent_utxo_absences absence
+        JOIN transparent_received_outputs absent ON absent.id = absence.output_id
+        WHERE absence.observed_height > IFNULL(absent.max_observed_unspent_height, -1)";
 
 /// Generates an SQL condition that a transaction is mined with at least a required number of
 /// confirmations, or is unexpired if UTXOS are spendable with zero confirmations.
@@ -1399,7 +1415,9 @@ pub(crate) fn get_wallet_transparent_output_for_retry(
             "SELECT txo_spends.transparent_received_output_id
                  FROM transparent_received_output_spends txo_spends
                  JOIN transactions stx ON stx.id_tx = txo_spends.transaction_id
-                 WHERE ({}) AND (:retry_txid IS NULL OR stx.txid != :retry_txid)",
+                 WHERE ({}) AND (:retry_txid IS NULL OR stx.txid != :retry_txid)
+                 UNION
+                 {ABSENT_UTXOS_CLAUSE} AND NOT :private_authority",
             tx_unexpired_condition("stx")
         ),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
@@ -1475,7 +1493,7 @@ fn spendable_transparent_outputs_query(
          AND ({INPUT_AUTHORITY_CONDITION}) -- the transparent authority admits the output
          ORDER BY {order_by_sql}",
         tx_unexpired_condition_minconf_0("t"),
-        spent_utxos_clause(),
+        spent_utxos_clause("NOT :private_authority"),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         excluding_immature_coinbase_outputs("t"),
         super::transparent_ledger::output_observation_condition("u"),
@@ -1822,7 +1840,7 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
          AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
          AND ({}) -- exclude withdrawn ledger-only receives",
         tx_unexpired_condition_minconf_0("t"),
-        spent_utxos_clause(),
+        spent_utxos_clause("TRUE"),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         super::transparent_ledger::output_observation_condition("u"),
     ))?;
@@ -1884,7 +1902,7 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
              AND u.id NOT IN ({}) -- and the output is unspent
              AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
              AND ({}) -- exclude withdrawn ledger-only receives",
-            spent_utxos_clause(),
+            spent_utxos_clause("TRUE"),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
             super::transparent_ledger::output_observation_condition("u"),
         ))?;
@@ -2029,7 +2047,7 @@ pub(crate) fn transparent_balance_provenance(
                  )",
             tx_unexpired_condition_minconf_0("t"),
             tx_unconfirmed_condition("t"),
-            spent_utxos_clause(),
+            spent_utxos_clause("TRUE"),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
             super::transparent_ledger::output_observation_condition("u"),
         ),
@@ -2085,7 +2103,7 @@ pub(crate) fn add_transparent_account_balances(
          AND (:account IS NULL OR accounts.uuid = :account)
          GROUP BY accounts.uuid, lock_expiry_height, is_coinbase, is_mature",
         tx_unexpired_condition_minconf_0("t"),
-        spent_utxos_clause(),
+        spent_utxos_clause("NOT :ledger_only"),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         LEDGER_ORIGIN_CONDITION,
         super::transparent_ledger::output_observation_condition("u"),
@@ -2161,7 +2179,7 @@ pub(crate) fn add_transparent_account_balances(
              AND (:account IS NULL OR accounts.uuid = :account)
          GROUP BY accounts.uuid, lock_expiry_height, is_coinbase",
             tx_unconfirmed_condition("t"),
-            spent_utxos_clause(),
+            spent_utxos_clause("NOT :ledger_only"),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
             LEDGER_ORIGIN_CONDITION,
             super::transparent_ledger::output_observation_condition("u"),
@@ -2281,8 +2299,8 @@ pub(crate) fn mark_transparent_utxo_spent(
 /// Sets the max observed unspent height for all unspent transparent outputs received at the given
 /// address to at least the given height (calling this method will not cause the max observed
 /// unspent height to decrease). Only outputs whose own search frontier is covered by
-/// `range_start..=checked_at` advance; completing a later range at a shared address must not
-/// skip another output's unresolved history.
+/// `range_start..=checked_at` advance: completing a later range at a shared address must not
+/// skip another output's unresolved history or supersede its earlier absence.
 pub(crate) fn update_observed_unspent_heights<P: consensus::Parameters>(
     conn: &rusqlite::Transaction,
     params: &P,
@@ -2323,6 +2341,109 @@ pub(crate) fn update_observed_unspent_heights<P: consensus::Parameters>(
         ":checked_at": u32::from(checked_at),
         ":target_height": u32::from(chain_tip_height + 1),
     ])?;
+
+    Ok(())
+}
+
+/// Records a complete public UTXO query made while both the provider and the wallet retained
+/// the same accepted tip. Missing mined outputs acquire public absence evidence and spend work;
+/// returned outputs are confirmed unspent at that point. A moving or replaced tip is rejected.
+pub(crate) fn notify_transparent_utxos_observed<P: consensus::Parameters>(
+    conn: &rusqlite::Transaction,
+    params: &P,
+    address: &TransparentAddress,
+    start: BlockHeight,
+    query_start: zcash_client_backend::data_api::transparent_ledger::ChainPoint,
+    query_end: zcash_client_backend::data_api::transparent_ledger::ChainPoint,
+    unspent: &[OutPoint],
+) -> Result<(), SqliteClientError> {
+    let chain_tip_height = chain_tip_height(conn)?.ok_or(SqliteClientError::ChainHeightUnknown)?;
+    if query_start != query_end
+        || query_end.height != chain_tip_height
+        || super::get_block_hash(conn, query_end.height)? != Some(query_end.hash)
+    {
+        return Err(SqliteClientError::InvalidTransparentUtxoObservation);
+    }
+    let as_of = query_end.height;
+    let addr_str = address.encode(params);
+    let returned: HashSet<([u8; 32], u32)> = unspent
+        .iter()
+        .map(|outpoint| (*outpoint.hash(), outpoint.n()))
+        .collect();
+
+    let mut stmt_outputs = conn.prepare_cached(
+        "SELECT tro.id, t.txid, tro.output_index, tro.transaction_id,
+                IFNULL(tro.max_observed_unspent_height, -1),
+                EXISTS (
+                    SELECT 1 FROM transparent_received_output_spends s
+                    JOIN transactions st ON st.id_tx = s.transaction_id
+                    WHERE s.transparent_received_output_id = tro.id
+                    AND st.mined_height <= :as_of
+                )
+         FROM transparent_received_outputs tro
+         JOIN transactions t ON t.id_tx = tro.transaction_id
+         WHERE tro.address = :address
+         AND t.mined_height BETWEEN :start AND :as_of",
+    )?;
+    let outputs = stmt_outputs
+        .query_map(
+            named_params![
+                ":address": &addr_str,
+                ":start": u32::from(start),
+                ":as_of": u32::from(as_of),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, [u8; 32]>(1)?,
+                    row.get::<_, u32>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, bool>(5)?,
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (output_id, txid, output_index, transaction_id, max_observed_unspent, spent_by_mined) in
+        outputs
+    {
+        if returned.contains(&(txid, output_index)) {
+            conn.prepare_cached(
+                "UPDATE transparent_received_outputs
+                 SET max_observed_unspent_height = MAX(IFNULL(max_observed_unspent_height, 0), :as_of)
+                 WHERE id = :output_id",
+            )?
+            .execute(named_params![":as_of": u32::from(as_of), ":output_id": output_id])?;
+        } else if !spent_by_mined && max_observed_unspent < i64::from(u32::from(as_of)) {
+            // An absence that later evidence superseded is replaced; a current one keeps its
+            // earlier height, which bounds the spend more tightly.
+            conn.prepare_cached(
+                "INSERT INTO transparent_utxo_absences (output_id, observed_height)
+                 VALUES (:output_id, :as_of)
+                 ON CONFLICT (output_id) DO UPDATE
+                 SET observed_height = CASE
+                     WHEN observed_height > :max_observed_unspent THEN observed_height
+                     ELSE excluded.observed_height
+                 END",
+            )?
+            .execute(named_params![
+                ":output_id": output_id,
+                ":as_of": u32::from(as_of),
+                ":max_observed_unspent": max_observed_unspent,
+            ])?;
+            conn.prepare_cached(
+                "INSERT INTO transparent_spend_search_queue (address, transaction_id, output_index)
+                 VALUES (:address, :transaction_id, :output_index)
+                 ON CONFLICT (transaction_id, output_index) DO NOTHING",
+            )?
+            .execute(named_params![
+                ":address": &addr_str,
+                ":transaction_id": transaction_id,
+                ":output_index": output_index,
+            ])?;
+        }
+    }
 
     Ok(())
 }
@@ -2666,12 +2787,16 @@ pub(crate) fn transaction_data_requests<P: consensus::Parameters>(
         let mut spend_requests_stmt = conn.prepare_cached(&format!(
             "SELECT
                 ssq.address,
-                COALESCE(tro.max_observed_unspent_height + 1, t.mined_height) AS block_range_start
+                COALESCE(tro.max_observed_unspent_height + 1, t.mined_height) AS block_range_start,
+                absence.observed_height
              FROM transparent_spend_search_queue ssq
              JOIN transactions t ON t.id_tx = ssq.transaction_id
              JOIN transparent_received_outputs tro
                 ON tro.transaction_id = t.id_tx AND tro.output_index = ssq.output_index
              JOIN addresses ON addresses.id = tro.address_id
+             LEFT OUTER JOIN transparent_utxo_absences absence
+                ON absence.output_id = tro.id
+                AND absence.observed_height > IFNULL(tro.max_observed_unspent_height, -1)
              WHERE NOT ({resolved_spend})
              AND addresses.key_scope != :ephemeral_key_scope
              AND (
@@ -2700,7 +2825,15 @@ pub(crate) fn transaction_data_requests<P: consensus::Parameters>(
                         .get::<_, Option<u32>>(1)?
                         .map(BlockHeight::from)
                         .unwrap_or(chain_tip_height);
-                    let max_end_height = block_range_start + DEFAULT_TX_EXPIRY_DELTA + 1;
+                    // A spend that a mempool or recently mined receive may have is found
+                    // within the expiry delta. An output observed absent from its address's
+                    // unspent outputs was spent at or below that observation, so the search
+                    // reaches it.
+                    let absent_at = row.get::<_, Option<u32>>(2)?.map(BlockHeight::from);
+                    let max_end_height = std::cmp::max(
+                        block_range_start + DEFAULT_TX_EXPIRY_DELTA + 1,
+                        absent_at.map_or(block_range_start, |h| h + 1),
+                    );
                     Ok::<TransactionDataRequest, SqliteClientError>(
                         TransactionDataRequest::transactions_involving_address(
                             address,
