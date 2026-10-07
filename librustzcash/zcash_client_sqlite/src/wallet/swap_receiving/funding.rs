@@ -127,8 +127,9 @@ pub fn verify_swap_funding_proposal<FeeRuleT, NoteRef>(
     Ok(())
 }
 
-/// Recovery re-encodes the deposit from the funding transaction's only transparent
-/// output, so it must be a canonically encoded P2PKH or P2SH address on this network.
+/// The funding transaction pays the deposit as its only transparent output, matched by
+/// its encoding (see [`verify_swap_funding_proposal`]), so it must be a canonically
+/// encoded P2PKH or P2SH address on this network.
 fn check_deposit<P: Parameters>(params: &P, deposit: &str) -> Result<(), Error> {
     match Address::decode(params, deposit) {
         Some(address) if address.encode(params) != deposit => {
@@ -136,7 +137,7 @@ fn check_deposit<P: Parameters>(params: &P, deposit: &str) -> Result<(), Error> 
         }
         Some(Address::Transparent(_)) => Ok(()),
         Some(_) => Err(corrupt(
-            "swap refund recovery requires a transparent deposit address",
+            "swap funding requires a transparent deposit address",
         )),
         None => Err(corrupt("invalid swap deposit address for this network")),
     }

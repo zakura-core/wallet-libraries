@@ -2,8 +2,8 @@ const MAGIC: &[u8; 5] = b"\xffZSWP";
 
 /// A v1 refund index carried by a swap funding transaction.
 ///
-/// The deposit address is not stored: recovery reads it from the funding
-/// transaction's single transparent output.
+/// The deposit address is not stored: the funding transaction's single transparent
+/// output already pays it, and recovery needs only the index.
 ///
 /// Decoding does not establish provenance. Accept a record only after
 /// authenticating an ordinary internal note and verifying that its transaction

@@ -383,9 +383,10 @@ impl fmt::Display for SqliteClientError {
                 "Enhancement mode is not configured; call set_enhancement_mode before enumerating enhancement work"
             ),
             #[cfg(feature = "orchard")]
-            SqliteClientError::SwapReceivingNotEnabled => {
-                write!(f, "This note requires experimental swap receiving support")
-            }
+            SqliteClientError::SwapReceivingNotEnabled => write!(
+                f,
+                "This wallet's swap receiving keys or notes require experimental swap receiving support"
+            ),
             SqliteClientError::TransparentLedgerModeNotConfigured => write!(
                 f,
                 "Transparent ledger mode is not configured; call set_transparent_ledger_mode first"

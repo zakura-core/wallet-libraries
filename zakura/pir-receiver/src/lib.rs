@@ -51,10 +51,11 @@ pub const MAINNET_GENESIS: [u8; 32] = [
     0x5d, 0xa1, 0x6e, 0x26, 0xb1, 0x1d, 0xaa, 0x1b, 0x91, 0x71, 0x84, 0xec, 0xe8, 0x0f, 0x04, 0x00,
 ];
 
-/// Pages one receiver lookup may return.
-const MAX_PAGES: NonZeroU32 = NonZeroU32::new(32).unwrap();
 /// Due sweeps prepared per account at a time.
 const BATCH: NonZeroU32 = NonZeroU32::new(64).unwrap();
+/// Positions whose note data one request asks for. Each batch is queued as it arrives,
+/// so a long history keeps its progress when a run stops partway.
+const NOTE_BATCH: usize = 64;
 
 /// Why a sweep run, or one key's sweep, stopped.
 #[derive(Debug, thiserror::Error)]
@@ -182,8 +183,9 @@ pub struct Swept {
 /// blocks below `through`. New payments a lookup finds take
 /// their note data from `notes`. After each batch the incoming lookahead moves past
 /// paid indices and its new keys are swept too. A key that fails is backed off and
-/// listed in [`Swept::deferred`], and the others go on. `now` is the caller's clock in
-/// seconds, for retry backoff.
+/// listed in [`Swept::deferred`], and the others go on, unless the directory's session
+/// or connection failed: then the run stops before leasing more keys. `now` is the
+/// caller's clock in seconds, for retry backoff.
 #[allow(clippy::too_many_arguments)]
 pub async fn sweep<C, P, CL, R, T, N, L>(
     wallet: &mut WalletDb<C, P, CL, R>,
@@ -210,14 +212,33 @@ where
         if !work.is_empty() {
             let mut directory =
                 connect(wallet, through, genesis, origin, transport, remaining).await?;
-            loop {
+            'run: loop {
                 for (account, item) in work {
                     let swept_key = sweep_key(
-                        wallet, &directory, account, &item, through, notes, lock, now,
+                        wallet,
+                        &mut directory,
+                        account,
+                        &item,
+                        through,
+                        notes,
+                        lock,
+                        now,
                     );
                     match swept_key.await {
                         Ok(()) => swept.finished += 1,
-                        Err(e) => swept.deferred.push((item.key, e)),
+                        Err(e) => {
+                            // Every later key would fail the same way and back off.
+                            let unavailable = matches!(
+                                e,
+                                Error::Directory(
+                                    DirectoryError::Revision | DirectoryError::Transport(_)
+                                )
+                            );
+                            swept.deferred.push((item.key, e));
+                            if unavailable {
+                                break 'run;
+                            }
+                        }
                     }
                 }
                 lock.write("swap_sweep.lookahead", || {
@@ -319,12 +340,12 @@ where
 }
 
 /// Sweeps one key: leases an attempt, looks up its receiver unless an earlier
-/// lookup is already queued, queues the new payments with their note data, and
-/// applies them with the publication's witnesses.
+/// lookup is already queued, queues the new payments with their note data in
+/// batches, and applies them with the publication's witnesses.
 #[allow(clippy::too_many_arguments)]
 async fn sweep_key<C, P, CL, R, T, N, L>(
     wallet: &mut WalletDb<C, P, CL, R>,
-    directory: &Directory<T>,
+    directory: &mut Directory<T>,
     account: AccountUuid,
     item: &DiscoveryWork,
     through: ChainPoint,
@@ -345,24 +366,40 @@ where
     })?;
     if item.lookup.is_none() {
         let receiver = Receiver::from_bytes(item.receiver).map_err(DirectoryError::from)?;
+        let accepted = directory.accepted;
         let payments: Vec<_> = directory
             .client
-            .lookup(receiver, MAX_PAGES, directory.accepted)
+            .lookup(receiver, accepted)
             .await?
             .into_iter()
             .map(directory_payment)
             .collect();
-        let positions = wallet.swap_note_data_needed(account, key, &payments)?;
-        let note_data = notes.note_data(wallet, positions).await?;
-        lock.write("swap_sweep.queue", || {
-            wallet.queue_swap_directory_lookup(
-                account,
-                key,
-                directory.anchor,
-                &payments,
-                &note_data,
-            )
-        })?;
+        loop {
+            let batch: Vec<_> = wallet
+                .swap_note_data_needed(account, key, &payments)?
+                .into_iter()
+                .take(NOTE_BATCH)
+                .collect();
+            let requested = batch.len();
+            let note_data = notes.note_data(wallet, batch).await?;
+            let done = lock.write("swap_sweep.queue", || {
+                wallet.queue_swap_directory_lookup(
+                    account,
+                    key,
+                    directory.anchor,
+                    &payments,
+                    &note_data,
+                )
+            })?;
+            if done {
+                break;
+            }
+            if note_data.len() < requested {
+                return Err(Error::Unavailable(
+                    "note data is missing for a directory payment",
+                ));
+            }
+        }
     }
     let applied = lock.write("swap_sweep.apply", || {
         wallet.apply_swap_sweep(account, key, through, directory.anchor, |position, cmx| {

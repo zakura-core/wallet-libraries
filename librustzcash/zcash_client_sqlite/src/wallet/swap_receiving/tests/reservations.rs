@@ -86,6 +86,17 @@ fn pay(st: &mut State, key: &FullViewingKey) {
     st.scan_cached_blocks(h, 1);
 }
 
+/// Mines and scans blocks until the latest receipt has the default untrusted
+/// confirmations, after which it raises the recovery bound.
+fn confirm(st: &mut State) {
+    st.generate_and_scan_empty_blocks(
+        (zcash_client_backend::data_api::wallet::ConfirmationsPolicy::default()
+            .untrusted()
+            .get()
+            - 1) as usize,
+    );
+}
+
 /// The policy that refused `result`, or `None` if it succeeded.
 fn refusal<T>(result: Result<T, Error>) -> Option<ReservationPolicy> {
     match result {
@@ -278,6 +289,12 @@ fn funded_deposits_without_zec_receipts_cannot_exceed_recovery_gap() {
         Some(ReservationPolicy::Gap)
     );
     pay(&mut st, first.unwrap().key.full_viewing_key());
+    // An unconfirmed receipt could still be reorged away, so it moves nothing yet.
+    assert_eq!(
+        refusal(try_prepare(&mut st, NOW + 2)),
+        Some(ReservationPolicy::Gap)
+    );
+    confirm(&mut st);
     assert_eq!(
         prepare(&mut st, NOW + 2).key.key_id().index(),
         RECEIVE_GAP_LIMIT
@@ -544,6 +561,7 @@ fn payout_during_restore_watch_excludes_the_index() {
         .unwrap();
     // A swap issued before a restore pays out after the sweep, during the watch.
     pay(&mut st, swept.full_viewing_key());
+    confirm(&mut st);
     assert!(holds_note(&st, swept.key_id()));
     // The payout moves the window up by one; during the watch, issuance takes its top.
     assert_eq!(
@@ -559,6 +577,7 @@ fn reorg_retains_used_marker_and_rechecks_draft_recovery_bound() {
     let first = prepare(&mut st, NOW);
     quote(&mut st, &first, "first", true);
     pay(&mut st, first.key.full_viewing_key());
+    confirm(&mut st);
     for i in 1..RECEIVE_GAP_LIMIT {
         let r = prepare(&mut st, NOW);
         let request = format!("funded-{i}");

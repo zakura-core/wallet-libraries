@@ -18,14 +18,14 @@ zcash_client_backend.workspace = true
 zcash_client_sqlite = { version = "0.1.0-rc7", path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "experimental-swap-receiving"] }
 zcash_protocol.workspace = true
 # The receiver crates live on wallet-pir's swap integration branch until they land on `main`.
-receiver-directory = { git = "https://github.com/valargroup/wallet-pir", rev = "17b059c8fc28b22d6b1ac8247588e01ecb84bb69" }
-receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "17b059c8fc28b22d6b1ac8247588e01ecb84bb69" }
+receiver-directory = { git = "https://github.com/valargroup/wallet-pir", rev = "8e29079e491b440654a2d5a78ee04352520fe988" }
+receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "8e29079e491b440654a2d5a78ee04352520fe988" }
 
 [dev-dependencies]
 axum = "0.7"
 orchard.workspace = true
-receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "17b059c8fc28b22d6b1ac8247588e01ecb84bb69", features = ["server"] }
-receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", rev = "17b059c8fc28b22d6b1ac8247588e01ecb84bb69" }
+receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "8e29079e491b440654a2d5a78ee04352520fe988", features = ["server"] }
+receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", rev = "8e29079e491b440654a2d5a78ee04352520fe988" }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower = { workspace = true, features = ["util"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }

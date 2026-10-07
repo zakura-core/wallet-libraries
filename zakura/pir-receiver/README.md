@@ -24,5 +24,5 @@ until they land on its `main`.
 
 `tests/sweep.rs` serves a directory in process through the receiver service's own
 routes and checks that a restored wallet finds and imports a payout, extends its
-lookahead past it, repeats no finished sweep, and refuses a publication that is not
-on its chain before any lookup.
+lookahead past it, repeats no finished sweep, imports every payment of a key paid
+twice, and refuses a publication that is not on its chain before any lookup.

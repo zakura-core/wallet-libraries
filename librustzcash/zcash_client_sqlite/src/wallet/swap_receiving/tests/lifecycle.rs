@@ -235,6 +235,32 @@ fn rewound_receipt_keeps_key_open_until_mined_again() {
 }
 
 #[test]
+fn a_rewind_reopens_a_closed_key_whose_receipt_it_unmines() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key = refund_key(&mut st);
+    let terminal = registered_at() + HOUR;
+    let status = Terminal(Positive(None));
+    st.wallet_mut()
+        .db_mut()
+        .observe_swap_operation(account, key.key_id(), "swap", status, terminal)
+        .unwrap();
+    let height = pay(&mut st, &key, 10_000);
+    confirm(&mut st);
+    assert_eq!(close(&mut st, terminal), 1);
+    assert!(scanning_keys(&st).is_empty());
+    // A repair rewind below the receipt un-mines it, so the key scans again and the
+    // rescan mines the receipt again; the key closes once it is confirmed again.
+    st.truncate_to_height_retaining_cache(height - 1);
+    assert_eq!(scanning_keys(&st), [key.key_id()]);
+    // Past its limit, it waits for the unmined receipt, which can be mined until it expires.
+    assert_eq!(close(&mut st, terminal + LIMIT), 0);
+    st.scan_cached_blocks(height, 10);
+    assert_eq!(unspent_keys(&st, height + 9), [Some(key.key_id())]);
+    assert_eq!(close(&mut st, terminal), 1);
+}
+
+#[test]
 fn a_key_closes_once_its_last_operation_is_final() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();

@@ -134,6 +134,8 @@ fn scan_reopen_and_spend(close_keys: bool) {
     assert!(notes.iter().any(|n| n.swap_key_id().is_none()));
 
     if close_keys {
+        // A key closes once its receipts have ten confirmations.
+        st.generate_and_scan_empty_blocks(3);
         close(&mut st, &[refund.key_id(), incoming.key_id()]);
         assert!(st.wallet().get_swap_scanning_keys().unwrap().is_empty());
     }

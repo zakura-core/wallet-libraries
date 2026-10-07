@@ -172,6 +172,24 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         payments: &[PendingPayment],
     ) -> Result<(), Error> {
         let id = key_ref(self.conn.0, account, key)?;
+        self.queue_swap_candidates(account, key, anchor, payments)?;
+        self.conn.0.execute(
+            "UPDATE ironwood_swap_sweeps SET lookup_height = ?2, lookup_hash = ?3
+             WHERE receiving_key_id = ?1 AND (lookup_height IS NULL OR lookup_height <= ?2)",
+            params![id, u32::from(anchor.height), anchor.hash.0],
+        )?;
+        Ok(())
+    }
+
+    /// Persists authenticated candidates from a lookup at `anchor` without completing
+    /// it (see [`Self::queue_swap_lookup`]).
+    pub(crate) fn queue_swap_candidates(
+        &mut self,
+        account: AccountUuid,
+        key: KeyId,
+        anchor: ChainPoint,
+        payments: &[PendingPayment],
+    ) -> Result<(), Error> {
         if canonical(self.conn.0, Some(anchor))?.is_none() {
             return Err(Error::SweepDeferred(super::SweepDeferral::UnknownAnchor));
         }
@@ -181,11 +199,6 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             }
             self.queue_swap_payment(account, key, payment)?;
         }
-        self.conn.0.execute(
-            "UPDATE ironwood_swap_sweeps SET lookup_height = ?2, lookup_hash = ?3
-             WHERE receiving_key_id = ?1 AND (lookup_height IS NULL OR lookup_height <= ?2)",
-            params![id, u32::from(anchor.height), anchor.hash.0],
-        )?;
         Ok(())
     }
 }

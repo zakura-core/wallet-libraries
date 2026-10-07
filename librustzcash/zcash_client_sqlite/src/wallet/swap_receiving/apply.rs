@@ -27,9 +27,14 @@ pub enum PaymentApplication {
     /// Locally retained history cannot establish absence of a spend.
     AwaitingSpendHistory,
     /// The authenticated note predates the account's birthday, so the wallet does not
-    /// track it, as with any note before the birthday. Its key is marked used and
-    /// advancing, so the index is never issued again and the lookahead moves past it.
+    /// track it, as with any note before the birthday. Its inclusion is still checked
+    /// against the wallet's chain; its key is then marked used, advancing and paid, so
+    /// the index is never issued again and the lookahead and issuance bound move past it.
     BeforeBirthday,
+    /// The directory's claim failed a local check: the note's block or inclusion path,
+    /// or its transaction identity against stored data. The key's queued lookup is
+    /// discarded, so its next attempt asks the directory again.
+    Rejected,
     /// Note, memo, witness, key identity, and any known spend were committed together,
     /// or the wallet already stored the note under another transaction.
     Applied,
@@ -94,41 +99,33 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             )?;
             return Ok(PaymentApplication::Applied);
         }
-        let birthday: u32 = conn.query_row(
-            "SELECT birthday_height FROM accounts WHERE uuid = ?1",
-            [account.0],
-            |r| r.get(0),
-        )?;
-        if u32::from(candidate.height) < birthday {
-            conn.execute(
-                "UPDATE ironwood_receiving_keys SET advances_allocation = 1, used = 1 WHERE id = ?1",
-                [key_ref],
-            )?;
-            conn.execute(
-                "DELETE FROM ironwood_swap_payment_recovery
-                 WHERE receiving_key_id = ?1 AND txid = ?2 AND action_index = ?3",
-                params![key_ref, candidate.txid.as_ref(), candidate.action_index],
-            )?;
-            return Ok(PaymentApplication::BeforeBirthday);
-        }
-
         if wallet::fully_scanned_height(conn)? != Some(through.height)
             || wallet::chain_tip_height(conn)? != Some(through.height)
         {
             return Ok(PaymentApplication::AwaitingScan);
         }
-        let (end, count): (u64, u64) = conn.query_row(
-            "SELECT ironwood_commitment_tree_size, ironwood_action_count FROM blocks
-             WHERE height = ?1",
-            [u32::from(candidate.height)],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+        let birthday: u32 = conn.query_row(
+            "SELECT birthday_height FROM accounts WHERE uuid = ?1",
+            [account.0],
+            |r| r.get(0),
         )?;
-        if end
-            .checked_sub(count)
-            .is_none_or(|start| u64::from(candidate.position) < start)
-            || u64::from(candidate.position) >= end
-        {
-            return Err(corrupt("swap note position is outside its block"));
+        // The wallet stores no block before its birthday, so an older note's position
+        // is bound by its inclusion path alone.
+        let before_birthday = u32::from(candidate.height) < birthday;
+        if !before_birthday {
+            let (end, count): (u64, u64) = conn.query_row(
+                "SELECT ironwood_commitment_tree_size, ironwood_action_count FROM blocks
+                 WHERE height = ?1",
+                [u32::from(candidate.height)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if end
+                .checked_sub(count)
+                .is_none_or(|start| u64::from(candidate.position) < start)
+                || u64::from(candidate.position) >= end
+            {
+                return reject(conn, key_ref);
+            }
         }
         if anchor.height > through.height
             || through.height - anchor.height > crate::PRUNING_DEPTH
@@ -154,7 +151,50 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             return Ok(PaymentApplication::AwaitingWitness);
         };
         if !recovered.verify_position(u64::from(candidate.position), path, root.into()) {
-            return Err(corrupt("swap note witness does not match accepted chain"));
+            return reject(conn, key_ref);
+        }
+        if before_birthday {
+            conn.execute(
+                "UPDATE ironwood_receiving_keys
+                 SET advances_allocation = 1, used = 1, paid_before_birthday = 1 WHERE id = ?1",
+                [key_ref],
+            )?;
+            conn.execute(
+                "DELETE FROM ironwood_swap_payment_recovery
+                 WHERE receiving_key_id = ?1 AND txid = ?2 AND action_index = ?3",
+                params![key_ref, candidate.txid.as_ref(), candidate.action_index],
+            )?;
+            return Ok(PaymentApplication::BeforeBirthday);
+        }
+        // An unmined transaction is one a rewind or the mempool left: its note may move
+        // to a new position, but a transaction holding no such note is not this one.
+        let conflict: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM transactions WHERE txid = ?1 AND mined_height IS NOT NULL
+                 AND (mined_height != ?2 OR tx_index != ?3))
+             OR EXISTS(SELECT 1 FROM transactions t WHERE t.txid = ?1 AND t.mined_height IS NULL
+                 AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n
+                     WHERE n.transaction_id = t.id_tx AND n.action_index = ?4
+                       AND n.receiving_key_id = ?6))
+             OR EXISTS(SELECT 1 FROM ironwood_received_notes n
+                 JOIN transactions t ON t.id_tx = n.transaction_id
+                 WHERE t.txid = ?1 AND n.action_index = ?4 AND (
+                     (n.nf IS NULL AND t.mined_height IS NOT NULL) OR n.nf != ?5
+                     OR n.receiving_key_id IS NULL OR n.receiving_key_id != ?6
+                     OR (t.mined_height IS NOT NULL AND n.commitment_tree_position IS NOT NULL
+                         AND n.commitment_tree_position != ?7)))",
+            params![
+                candidate.txid.as_ref(),
+                u32::from(candidate.height),
+                candidate.tx_index,
+                candidate.action_index,
+                recovered.nullifier().to_bytes(),
+                key_ref,
+                candidate.position
+            ],
+            |r| r.get(0),
+        )?;
+        if conflict {
+            return reject(conn, key_ref);
         }
         let spent = spend_status(conn, candidate, recovered.nullifier(), through)?;
         if spent == SpendStatus::Unknown {
@@ -197,31 +237,6 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             root.into(),
         ) {
             return Err(corrupt("stored swap witness changed"));
-        }
-
-        let conflict: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM transactions WHERE txid = ?1 AND mined_height IS NOT NULL
-                 AND (mined_height != ?2 OR tx_index != ?3))
-             OR EXISTS(SELECT 1 FROM ironwood_received_notes n
-                 JOIN transactions t ON t.id_tx = n.transaction_id
-                 WHERE t.txid = ?1 AND n.action_index = ?4 AND (
-                     n.nf IS NULL OR n.nf != ?5
-                     OR n.receiving_key_id IS NULL OR n.receiving_key_id != ?6
-                     OR (n.commitment_tree_position IS NOT NULL
-                         AND n.commitment_tree_position != ?7)))",
-            params![
-                candidate.txid.as_ref(),
-                u32::from(candidate.height),
-                candidate.tx_index,
-                candidate.action_index,
-                recovered.nullifier().to_bytes(),
-                key_ref,
-                candidate.position
-            ],
-            |r| r.get(0),
-        )?;
-        if conflict {
-            return Err(corrupt("recovered swap payment conflicts with wallet data"));
         }
         let tx = WalletTx::new(
             candidate.txid,
@@ -301,4 +316,19 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         )?;
         Ok(PaymentApplication::Applied)
     }
+}
+
+/// Discards key `key_ref`'s queued lookup after the directory's claim failed a local
+/// check, so the next attempt asks again. See [`PaymentApplication::Rejected`].
+fn reject(conn: &Connection, key_ref: i64) -> Result<PaymentApplication, Error> {
+    conn.execute(
+        "DELETE FROM ironwood_swap_payment_recovery WHERE receiving_key_id = ?1",
+        [key_ref],
+    )?;
+    conn.execute(
+        "UPDATE ironwood_swap_sweeps SET lookup_height = NULL, lookup_hash = NULL,
+            done_height = NULL WHERE receiving_key_id = ?1",
+        [key_ref],
+    )?;
+    Ok(PaymentApplication::Rejected)
 }

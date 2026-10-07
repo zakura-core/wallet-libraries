@@ -1,7 +1,7 @@
 //! Provider observations and the rule that ends a key's trial decryption.
 use super::{Error, KeyId, RESTORED_INCOMING, account_key, corrupt, payments::key_ref};
-use crate::{AccountUuid, WalletDb, util::Clock, wallet};
-use rusqlite::{Connection, params};
+use crate::{AccountUuid, WalletDb, util::Clock, wallet, wallet::common::tx_unexpired_condition};
+use rusqlite::{Connection, named_params, params};
 use std::borrow::BorrowMut;
 use zakura_swap_receiving::lifecycle::{
     COMPLETION_LIMIT_SECS, Observation, OperationStatus, RESTORE_WATCH_SECS, ReceiptExpectation,
@@ -31,13 +31,13 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
     /// Stops trial decryption for `account`'s finished keys and returns how many closed.
     ///
     /// A key closes as soon as every operation on it has a conclusive terminal status
-    /// and its receipts cover what the provider promised, each with the untrusted
-    /// confirmations of the default [`ConfirmationsPolicy`], so a reorg cannot strand a
-    /// receipt on a closed key. A key also closes [`COMPLETION_LIMIT_SECS`] after its
-    /// latest quote deadline, or after registration without one, whatever the provider
-    /// reports. Keys with an open reservation, and unpaid incoming keys this wallet
-    /// issued, stay active, so an index can be reissued without a gap in its scanned
-    /// history. An incoming key found by a restore sweep and never issued here has no
+    /// and its receipts cover what the provider promised, or [`COMPLETION_LIMIT_SECS`]
+    /// after its latest quote deadline (after registration without one), whatever the
+    /// provider reports. Either way it stays open while a receipt is unmined and
+    /// unexpired or has fewer than the untrusted confirmations of the default
+    /// [`ConfirmationsPolicy`], so a reorg cannot strand a receipt on a closed key.
+    /// Keys with an open reservation, and unpaid incoming keys this wallet issued, stay
+    /// active, so an index can be reissued without a gap in its scanned history. An incoming key found by a restore sweep and never issued here has no
     /// known swap, so it closes [`RESTORE_WATCH_SECS`] after registration. A payment
     /// that arrives after its key closed is found by [`WalletDb::recheck_swap_history`]
     /// or a seed restore. Provider status never credits a note; a closed key keeps its
@@ -77,6 +77,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                 "SELECT k.id, k.registered_at, k.purpose = 1,
                     EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
                         WHERE r.receiving_key_id = k.id AND r.closed_at IS NULL),
+                    EXISTS(SELECT 1 FROM ironwood_received_notes n
+                        JOIN transactions t ON t.id_tx = n.transaction_id
+                        WHERE n.receiving_key_id = k.id
+                          AND (t.mined_height > :confirmed_below
+                               OR (t.mined_height IS NULL AND ({unexpired})))),
                     k.used, ({RESTORED_INCOMING}),
                     (SELECT COUNT(*) FROM ironwood_swap_operations o
                         WHERE o.receiving_key_id = k.id),
@@ -90,23 +95,31 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                         WHERE o.receiving_key_id = k.id AND o.expectation = 2),
                     (SELECT COALESCE(SUM(n.value), 0) FROM ironwood_received_notes n
                         JOIN transactions t ON t.id_tx = n.transaction_id
-                        WHERE n.receiving_key_id = k.id AND t.mined_height <= ?2)
+                        WHERE n.receiving_key_id = k.id AND t.mined_height <= :confirmed_below)
                  FROM ironwood_receiving_keys k
-                 WHERE k.account_id = ?1 AND k.active_from IS NOT NULL AND k.closed_at IS NULL",
+                 WHERE k.account_id = :account AND k.active_from IS NOT NULL
+                   AND k.closed_at IS NULL",
+                unexpired = tx_unexpired_condition("t"),
             ))?;
+            let bounds = named_params![
+                ":account": owner.0,
+                ":confirmed_below": confirmed_below,
+                ":target_height": u32::from(tip + 1),
+            ];
             let finished = stmt
-                .query_map(params![owner.0, confirmed_below], |row| {
+                .query_map(bounds, |row| {
                     let id: i64 = row.get(0)?;
                     let registered_at: i64 = row.get(1)?;
                     let incoming: bool = row.get(2)?;
                     let open_reservation: bool = row.get(3)?;
-                    let paid: bool = row.get(4)?;
-                    let restored: bool = row.get(5)?;
-                    let operations: u32 = row.get(6)?;
-                    let unresolved: u32 = row.get(7)?;
-                    let deadline: Option<i64> = row.get(8)?;
-                    let expected: i64 = row.get(9)?;
-                    let received: i64 = row.get(10)?;
+                    let pending_receipt: bool = row.get(4)?;
+                    let paid: bool = row.get(5)?;
+                    let restored: bool = row.get(6)?;
+                    let operations: u32 = row.get(7)?;
+                    let unresolved: u32 = row.get(8)?;
+                    let deadline: Option<i64> = row.get(9)?;
+                    let expected: i64 = row.get(10)?;
+                    let received: i64 = row.get(11)?;
                     if incoming && (open_reservation || !(paid || restored)) {
                         return Ok((id, false));
                     }
@@ -118,7 +131,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                             .saturating_add(COMPLETION_LIMIT_SECS)
                     };
                     let settled = operations > 0 && unresolved == 0 && received >= expected;
-                    Ok((id, settled || now >= limit))
+                    Ok((id, !pending_receipt && (settled || now >= limit)))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             let mut closed = 0;

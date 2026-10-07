@@ -2,9 +2,10 @@
 //!
 //! For each due [`DiscoveryWork`](super::DiscoveryWork) item, lease it with
 //! [`WalletDb::begin_swap_discovery_attempt`]. Unless its lookup is already queued,
-//! look its receiver up in the directory, retrieve note data for the positions
-//! [`WalletDb::swap_note_data_needed`] returns, and queue the lookup with
-//! [`WalletDb::queue_swap_directory_lookup`]. Then call [`WalletDb::apply_swap_sweep`].
+//! look its receiver up in the directory, then retrieve note data for the positions
+//! [`WalletDb::swap_note_data_needed`] returns and queue it with
+//! [`WalletDb::queue_swap_directory_lookup`], in batches, until the lookup is done.
+//! Then call [`WalletDb::apply_swap_sweep`].
 use std::{
     borrow::{Borrow, BorrowMut},
     collections::BTreeMap,
@@ -18,10 +19,9 @@ use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
-    Error, KeyId, PaymentApplication, PendingPayment, Purpose, activate, corrupt,
+    Error, KeyId, PaymentApplication, PendingPayment, activate, corrupt,
     payments::key_ref,
     planner::{anchor, canonical},
-    reservations::used,
 };
 use crate::{AccountUuid, WalletDb, wallet};
 
@@ -93,8 +93,8 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 
     /// The commitment tree positions of `payments`, the directory's lookup for `key`,
     /// whose note data [`WalletDb::queue_swap_directory_lookup`] needs. Payments
-    /// already imported or queued need none. A payment that contradicts imported or
-    /// queued data is an error.
+    /// already imported or queued unchanged need none. A payment that contradicts an
+    /// imported output is an error; one that corrects a queued candidate needs data.
     pub fn swap_note_data_needed(
         &self,
         account: AccountUuid,
@@ -105,9 +105,9 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         Ok(missing.iter().map(|(p, _)| p.position).collect())
     }
 
-    /// Splits `payments` into the queued candidates they repeat and payments not yet
-    /// known, with their positions, skipping imported ones. A payment that contradicts
-    /// an imported output is an error rather than another payment.
+    /// Splits `payments` into the queued candidates they repeat unchanged and payments
+    /// not yet queued that way, with their positions, skipping imported ones. A payment
+    /// that contradicts an imported output is an error rather than another payment.
     #[allow(clippy::type_complexity)]
     fn sort_directory_payments<'a>(
         &self,
@@ -155,6 +155,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                     if old.position == position
                         && old.height == height
                         && old.block_hash == block_hash
+                        && u32::from(old.tx_index) == payment.tx_index
                         && old.encrypted_note.matches_compact(
                             payment.action_nullifier,
                             payment.cmx,
@@ -164,8 +165,8 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 {
                     kept.push(old.clone())
                 }
-                Some(_) => return Err(corrupt("directory payment conflicts with a queued one")),
-                None => missing.push((payment, position)),
+                // A corrected answer replaces the candidate it contradicts when queued.
+                _ => missing.push((payment, position)),
             }
         }
         Ok((kept, missing))
@@ -173,10 +174,13 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Queues the directory's complete lookup of `key` at `anchor`, from
-    /// [`WalletDb::swap_publication_anchor`]. Each new payment is joined with its note
-    /// data in `note_data`: the 528 ciphertext bytes after the directory's prefix, by
-    /// position. Nothing is credited yet.
+    /// Queues the new payments in `payments`, the directory's complete lookup of `key`
+    /// at `anchor` (from [`WalletDb::swap_publication_anchor`]), that have note data in
+    /// `note_data`: the 528 ciphertext bytes after the directory's prefix, by position.
+    /// Nothing is credited yet. Returns whether the lookup is done, which it is once no
+    /// payment lacks note data; until then the next attempt looks the receiver up again
+    /// and asks only for the rest. Queued candidates that `payments` no longer repeats
+    /// unchanged, from an earlier answer the directory has since corrected, are dropped.
     pub fn queue_swap_directory_lookup(
         &mut self,
         account: AccountUuid,
@@ -184,14 +188,26 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         anchor: ChainPoint,
         payments: &[DirectoryPayment],
         note_data: &BTreeMap<u64, [u8; 528]>,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         self.transactionally(|db| {
-            let (mut candidates, missing) = db.sort_directory_payments(account, key, payments)?;
+            let (kept, missing) = db.sort_directory_payments(account, key, payments)?;
+            for old in db.pending_swap_payments(account, key)? {
+                if !kept.contains(&old) {
+                    db.conn.0.execute(
+                        "DELETE FROM ironwood_swap_payment_recovery
+                         WHERE txid = ?1 AND action_index = ?2",
+                        params![old.txid.as_ref(), old.action_index],
+                    )?;
+                }
+            }
+            let mut fresh = Vec::new();
+            let mut done = true;
             for (payment, position) in missing {
-                let suffix = note_data
-                    .get(&payment.position)
-                    .ok_or_else(|| corrupt("missing note data for a directory payment"))?;
-                candidates.push(PendingPayment {
+                let Some(suffix) = note_data.get(&payment.position) else {
+                    done = false;
+                    continue;
+                };
+                fresh.push(PendingPayment {
                     txid: TxId::from_bytes(payment.txid),
                     action_index: payment.action_index,
                     height: payment.height.into(),
@@ -210,7 +226,12 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                     ),
                 });
             }
-            db.queue_swap_lookup(account, key, anchor, &candidates)
+            if done {
+                db.queue_swap_lookup(account, key, anchor, &fresh)?;
+            } else {
+                db.queue_swap_candidates(account, key, anchor, &fresh)?;
+            }
+            Ok(done)
         })
     }
 
@@ -219,12 +240,13 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// hashes for a commitment tree position and note commitment, or `None` when the
     /// publication has none. `through` is the wallet's fully scanned tip. Returns
     /// [`PaymentApplication::Applied`] once the sweep is finished, or why a payment
-    /// must wait; payments applied before it stay applied. A lookup a reorg removed
-    /// defers the sweep to run again.
+    /// must wait or was rejected; payments applied before it stay applied. A lookup a
+    /// reorg removed defers the sweep to run again.
     ///
-    /// The key then scans from the block after the lookup until it closes: a refund
-    /// key because the provider may still return funds, and an unpaid incoming key to
-    /// catch a payout from a swap in flight at restore.
+    /// The key then scans from the block after the lookup until it closes, so nothing
+    /// paid between the lookup and the tip is missed: a refund key because the
+    /// provider may still return funds, and an incoming key to catch a payout in
+    /// flight at restore or after a recheck.
     pub fn apply_swap_sweep(
         &mut self,
         account: AccountUuid,
@@ -248,7 +270,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             )?;
             match applied {
                 PaymentApplication::Applied | PaymentApplication::BeforeBirthday => {}
-                waiting => return Ok(waiting),
+                other => return Ok(other),
             }
         }
         self.transactionally(|db| {
@@ -271,9 +293,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 "UPDATE ironwood_swap_sweeps SET done_height = ?2 WHERE receiving_key_id = ?1",
                 params![id, u32::from(lookup.height)],
             )?;
-            if key.purpose() == Purpose::Refund || !used(conn, id)? {
-                activate(conn, id, lookup.height + 1)?;
-            }
+            activate(conn, id, lookup.height + 1)?;
             Ok(PaymentApplication::Applied)
         })
     }

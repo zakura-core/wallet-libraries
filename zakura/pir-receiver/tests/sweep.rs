@@ -83,9 +83,9 @@ fn tip(st: &State) -> ChainPoint {
 
 /// Pays incoming swap key `index` in a new scanned block, before any restore has
 /// registered the key, so scanning cannot find it. Returns the payment as the
-/// directory lists it and its note data. The output is the chain's first Ironwood
-/// leaf.
-fn pay_restored_key(st: &mut State, index: u64) -> (Record, [u8; 528]) {
+/// directory lists it and its note data. The output is the chain's Ironwood leaf at
+/// `position`, which is the number of earlier Ironwood outputs.
+fn pay_restored_key(st: &mut State, index: u64, position: u64) -> (Record, [u8; 528]) {
     let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
     let fvk = KeyId::new(Purpose::Receive, index).derive(&parent).unwrap();
     let (height, _, _) = st.generate_next_block(
@@ -126,7 +126,7 @@ fn pay_restored_key(st: &mut State, index: u64) -> (Record, [u8; 528]) {
             txid: *tx.txid().as_ref(),
             tx_index: tx.index.try_into().unwrap(),
             action_index: 0,
-            position: 0,
+            position,
             action_nullifier: compact.nullifier.as_slice().try_into().unwrap(),
             cmx: compact.cmx.as_slice().try_into().unwrap(),
             ephemeral_key: IronwoodDomain::epk_bytes(encryption.epk()).0,
@@ -278,7 +278,7 @@ async fn a_restore_sweep_finds_a_payout_and_moves_the_lookahead_past_it() {
     let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
     let paid = 3;
-    let (record, note_data) = pay_restored_key(&mut st, paid);
+    let (record, note_data) = pay_restored_key(&mut st, paid, 0);
     st.generate_and_scan_empty_blocks(1);
     restore(&mut st, account);
     let through = tip(&st);
@@ -345,10 +345,166 @@ async fn a_restore_sweep_finds_a_payout_and_moves_the_lookahead_past_it() {
 }
 
 #[tokio::test]
+async fn a_key_paid_twice_is_imported_in_full() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let paid = 2;
+    let (mut first, first_data) = pay_restored_key(&mut st, paid, 0);
+    let (mut second, second_data) = pay_restored_key(&mut st, paid, 1);
+    first.total = 2;
+    second.page = 1;
+    second.total = 2;
+    st.generate_and_scan_empty_blocks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let directory = Directory::new(publish(
+        &[first.clone(), second.clone()],
+        &[first.payment.cmx, second.payment.cmx],
+        through,
+    ));
+    let mut notes = Notes {
+        data: BTreeMap::from([(0, first_data), (1, second_data)]),
+        requested: Vec::new(),
+    };
+    let swept = sweep(
+        st.wallet_mut().db_mut(),
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &directory,
+        &mut notes,
+        &NoLock,
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
+    assert!(!swept.pending);
+    assert_eq!(notes.requested, [vec![0, 1]]);
+    assert_eq!(
+        st.get_total_balance(account),
+        Zatoshis::const_from_u64(2 * VALUE)
+    );
+    // Two pages cost less over PIR than the row file.
+    let requests = directory.requests();
+    assert!(
+        !requests
+            .iter()
+            .any(|r| r.starts_with("GET /v1/receiver/rows/")),
+        "{requests:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_long_history_takes_its_note_data_in_batches() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let paid = 1;
+    // One more payment than a batch of note data holds.
+    let count = 65;
+    let mut records = Vec::new();
+    let mut data = BTreeMap::new();
+    for position in 0..count {
+        let (mut record, note_data) = pay_restored_key(&mut st, paid, position);
+        record.page = position.try_into().unwrap();
+        record.total = count.try_into().unwrap();
+        records.push(record);
+        data.insert(position, note_data);
+    }
+    st.generate_and_scan_empty_blocks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let commitments: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
+    let directory = Directory::new(publish(&records, &commitments, through));
+    let mut notes = Notes {
+        data,
+        requested: Vec::new(),
+    };
+    let swept = sweep(
+        st.wallet_mut().db_mut(),
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &directory,
+        &mut notes,
+        &NoLock,
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
+    assert!(!swept.pending);
+    let batches: Vec<_> = notes.requested.iter().map(Vec::len).collect();
+    assert_eq!(batches, [64, 1]);
+    assert_eq!(
+        st.get_total_balance(account),
+        Zatoshis::const_from_u64(count * VALUE)
+    );
+}
+
+/// A directory whose queries fail after it accepted the session.
+struct FailingQueries(Directory);
+
+impl Transport for FailingQueries {
+    async fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>, DirectoryError> {
+        self.0.get(url, limit).await
+    }
+
+    async fn post(&self, url: &str, _: Vec<u8>, _: usize) -> Result<Vec<u8>, DirectoryError> {
+        self.0.requests.lock().unwrap().push(format!("POST {url}"));
+        Err(DirectoryError::Revision)
+    }
+}
+
+#[tokio::test]
+async fn a_revoked_session_stops_the_run_before_leasing_more_keys() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let (record, _) = pay_restored_key(&mut st, 3, 0);
+    st.generate_and_scan_empty_blocks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let directory = FailingQueries(Directory::new(publish(
+        std::slice::from_ref(&record),
+        &[record.payment.cmx],
+        through,
+    )));
+    let mut notes = Notes {
+        data: BTreeMap::new(),
+        requested: Vec::new(),
+    };
+    let swept = sweep(
+        st.wallet_mut().db_mut(),
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &directory,
+        &mut notes,
+        &NoLock,
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert_eq!(swept.finished, 0);
+    assert_eq!(swept.deferred.len(), 1);
+    assert!(swept.pending);
+    let posts = directory
+        .0
+        .requests()
+        .iter()
+        .filter(|r| r.starts_with("POST"))
+        .count();
+    assert_eq!(posts, 1);
+}
+
+#[tokio::test]
 async fn a_publication_off_the_wallets_chain_is_refused_before_any_lookup() {
     let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
-    let (record, note_data) = pay_restored_key(&mut st, 0);
+    let (record, note_data) = pay_restored_key(&mut st, 0, 0);
     st.generate_and_scan_empty_blocks(1);
     restore(&mut st, account);
     let through = tip(&st);

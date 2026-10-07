@@ -310,7 +310,7 @@ fn finished_refund_sweep_scans_from_the_next_block_including_scanned_blocks() {
 }
 
 #[test]
-fn finished_incoming_sweep_watches_only_an_unpaid_key() {
+fn finished_incoming_sweeps_watch_paid_and_unpaid_keys() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let from = tip(&st).height;
@@ -340,7 +340,8 @@ fn finished_incoming_sweep_watches_only_an_unpaid_key() {
     db.apply_swap_sweep(account, paid, through, through, |_, _| None)
         .unwrap();
     db.finish_sweep(account, unpaid, through).unwrap();
-    assert_eq!(scanning_keys(&st), [unpaid]);
+    // A paid key also scans on, so a payment after the lookup is not missed.
+    assert_eq!(scanning_keys(&st), [unpaid, paid]);
     assert!(st.wallet().suggest_scan_ranges().unwrap().is_empty());
 }
 

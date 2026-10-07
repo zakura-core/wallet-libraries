@@ -379,12 +379,24 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             named_params![":account": account_ref.0, ":purpose": purpose_code(purpose)],
             |row| row.get(0),
         )?;
-        let index = match last {
+        let mut index = match last {
             Some(bytes) => decode_index(bytes)?
                 .checked_add(1)
                 .ok_or(Error::IndexExhausted)?,
             None => 0,
         };
+        // A funding memo the wallet could not authenticate registers its refund key
+        // without advancing allocation (see `recover_refund_memos`); skip that index.
+        while purpose == Purpose::Refund
+            && self.conn.0.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys
+                 WHERE account_id = ?1 AND purpose = 0 AND key_index = ?2)",
+                rusqlite::params![account_ref.0, index.to_be_bytes()],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
+            index = index.checked_add(1).ok_or(Error::IndexExhausted)?;
+        }
         let key_id = KeyId::new(purpose, index);
         let now = unix_now(&self.clock);
         register(

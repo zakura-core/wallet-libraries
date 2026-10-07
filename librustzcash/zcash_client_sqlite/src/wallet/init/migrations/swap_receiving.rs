@@ -9,7 +9,7 @@ use super::ironwood_enhance;
 use crate::wallet::init::WalletMigrationError;
 
 /// Identifier for the swap receiving migration.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xa149818b_e384_4632_9103_4d1d1ac51403);
+pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xd4d1c920_ce9e_4cab_86f2_d96974f17a85);
 
 pub(super) struct Migration;
 
@@ -43,6 +43,8 @@ impl RusqliteMigration for Migration {
                 scan_from INTEGER NOT NULL CHECK (scan_from BETWEEN 0 AND 4294967295),
                 advances_allocation INTEGER NOT NULL CHECK (advances_allocation IN (0, 1)),
                 used INTEGER NOT NULL DEFAULT 0 CHECK (used IN (0, 1)),
+                paid_before_birthday INTEGER NOT NULL DEFAULT 0
+                    CHECK (paid_before_birthday IN (0, 1)),
                 registered_at INTEGER NOT NULL DEFAULT 0,
                 active_from INTEGER CHECK (active_from BETWEEN 0 AND 4294967295),
                 closed_at INTEGER,

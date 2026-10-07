@@ -75,7 +75,8 @@ workspace.
   input slots first, so ordinary sends move their value into ordinary internal change
   without changing the fee or transaction shape. Full-transaction and Enhance PIR
   retrieval authenticate swap notes with their registered key. Builds without the
-  feature keep these records and exclude swap notes from spending.
+  feature keep these records, exclude swap notes from spending and refuse to store
+  scanned blocks while a swap key is open, since they could not scan for it.
 - Swap address issuance: `WalletDb::reserve_swap_refund_key` and
   `prepare_swap_receive_reservation`, which require scanning within `ISSUANCE_TIP_LAG`
   blocks of the network tip. Incoming quotes use `begin_swap_receive_quote`,
@@ -90,10 +91,12 @@ workspace.
   A refund key starts scanning when `store_transactions_to_be_sent` stores its
   funding transaction.
 - Swap key lifecycle: `record_swap_observation` and `close_finished_swap_keys`. A key
-  closes once its final provider status is in and its expected receipts have ZIP 315's
-  untrusted confirmations, or 30 days after the quote deadline, and only while the
-  wallet is scanned to the chain tip, by the earlier of the caller's clock and the
-  tip's block time. `recheck_swap_history` sweeps closed keys again on request.
+  closes once its final provider status and expected receipts are in, or 30 days after
+  the quote deadline, but not while a receipt is unmined and unexpired or short of ZIP
+  315's untrusted confirmations, and only while the wallet is scanned to the chain tip,
+  by the earlier of the caller's clock and the tip's block time. `recheck_swap_history`
+  sweeps closed keys again on request, and a rewind reopens a closed key whose receipt
+  it un-mines.
 - Swap recovery: `maintain_swap_receiving`, called at each sync start and tip, recovers
   funding memos and keeps an incoming lookahead. Each recovered key is swept once
   through a receiver directory. `zakura_pir_receiver::sweep` drives the steps
@@ -101,9 +104,12 @@ workspace.
   `swap_publication_anchor`, `swap_note_data_needed`, `queue_swap_directory_lookup`
   and `apply_swap_sweep`, which credit a note only after verifying its inclusion and
   spend state locally, and then `finish_swap_nullifier_recovery`, which releases the
-  Ironwood spend history the sweeps needed. Scanning that later finds the same note
-  moves it to the transaction it is found in. `swap_history_pending` reports
-  unfinished sweeps.
+  Ironwood spend history the sweeps needed. Note data is queued in batches, so a long
+  history keeps its progress, and a directory claim that fails a local check
+  (`PaymentApplication::Rejected`) is looked up again. A payment before the account's
+  birthday is checked for inclusion and then raises the recovery bound without being
+  tracked. Scanning that later finds the same note moves it to the transaction it is
+  found in. `swap_history_pending` reports unfinished sweeps.
 - `get_swap_receiving_key_for_receiver` reads the swap key registered for a receiver.
 - `WalletDb::transaction_history_summaries` returns typed account-scoped transaction
   metadata and monetary effects without reading raw transaction payloads. It shares

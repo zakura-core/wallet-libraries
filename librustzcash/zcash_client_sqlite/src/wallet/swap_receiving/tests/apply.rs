@@ -26,7 +26,9 @@ fn swap_payment_applies_unscanned_key_note_atomically_and_reopens() {
     let account = st.test_account().unwrap().id();
     let mut bad_path = path.auth_path();
     bad_path[0] = MerkleHashOrchard::empty_root(1.into());
-    assert!(
+    // A path that misses the wallet's root rejects the directory's answer: the queued
+    // lookup is discarded so the next attempt asks again.
+    assert_eq!(
         st.wallet_mut()
             .db_mut()
             .apply_pending_swap_payment(
@@ -36,7 +38,8 @@ fn swap_payment_applies_unscanned_key_note_atomically_and_reopens() {
                 through,
                 (through, &MerklePath::from_parts(0, bad_path))
             )
-            .is_err()
+            .unwrap(),
+        PaymentApplication::Rejected
     );
     assert!(
         st.wallet()
@@ -45,14 +48,17 @@ fn swap_payment_applies_unscanned_key_note_atomically_and_reopens() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(
+    assert!(
         st.wallet()
             .db()
             .pending_swap_payments(account, key.key_id())
             .unwrap()
-            .len(),
-        1
+            .is_empty()
     );
+    st.wallet_mut()
+        .db_mut()
+        .transactionally(|db| db.queue_swap_payment(account, key.key_id(), &candidate))
+        .unwrap();
     assert_eq!(
         st.wallet_mut()
             .db_mut()
@@ -426,25 +432,50 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
         [0]
     );
     let note_data = BTreeMap::from([(payment.position, suffix)]);
+    db.begin_swap_discovery_attempt(account, key, 1_700_000_000)
+        .unwrap();
+    let backoff = |conn: &rusqlite::Connection| -> (u32, i64) {
+        conn.query_row(
+            "SELECT attempts, next_attempt_at FROM ironwood_swap_sweeps",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(backoff(std::borrow::Borrow::borrow(&db.conn)).0, 1);
+    // Without its note data the payment is not queued and the lookup is not done.
     assert!(
-        db.queue_swap_directory_lookup(
+        !db.queue_swap_directory_lookup(
             account,
             key,
             anchor,
             std::slice::from_ref(&payment),
             &BTreeMap::new()
         )
-        .is_err()
+        .unwrap()
     );
-    db.queue_swap_directory_lookup(
-        account,
-        key,
-        anchor,
-        std::slice::from_ref(&payment),
-        &note_data,
-    )
-    .unwrap();
-    // Queued now, so a repeated report needs no note data, and a contradicting one fails.
+    assert_eq!(
+        db.swap_note_data_needed(account, key, std::slice::from_ref(&payment))
+            .unwrap(),
+        [0]
+    );
+    assert!(
+        db.queue_swap_directory_lookup(
+            account,
+            key,
+            anchor,
+            std::slice::from_ref(&payment),
+            &note_data,
+        )
+        .unwrap()
+    );
+    // Queuing leaves the attempt's lease alone, so an answer that keeps being rejected
+    // backs off like any other failure.
+    assert_eq!(
+        backoff(std::borrow::Borrow::borrow(&db.conn)),
+        (1, 1_700_000_000 + 60)
+    );
+    // Queued now, so a repeated report needs no note data, and a corrected one needs it again.
     assert!(
         db.swap_note_data_needed(account, key, std::slice::from_ref(&payment))
             .unwrap()
@@ -454,7 +485,10 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
         position: 1,
         ..payment.clone()
     };
-    assert!(db.swap_note_data_needed(account, key, &[moved]).is_err());
+    assert_eq!(
+        db.swap_note_data_needed(account, key, &[moved]).unwrap(),
+        [1]
+    );
 
     assert_eq!(
         db.apply_swap_sweep(account, key, through, anchor, |_, _| None)
@@ -595,6 +629,62 @@ fn a_mislabeled_answer_for_a_scanned_note_is_dropped() {
     assert!(!has_transaction(&st, forged.txid));
 }
 
+/// A corrected directory answer replaces a candidate that an unfinished lookup queued,
+/// instead of conflicting with it on every attempt.
+#[test]
+fn a_corrected_answer_replaces_a_partially_queued_candidate() {
+    let (mut st, key, candidate, through, _) = fixture();
+    let account = st.test_account().unwrap().id();
+    let key = key.key_id();
+    st.wallet()
+        .conn()
+        .execute("DELETE FROM ironwood_swap_payment_recovery", [])
+        .unwrap();
+    let note = candidate.encrypted_note.to_bytes();
+    let right = DirectoryPayment {
+        height: u32::from(candidate.height),
+        block_hash: candidate.block_hash.0,
+        txid: *candidate.txid.as_ref(),
+        tx_index: candidate.tx_index.into(),
+        action_index: candidate.action_index,
+        position: candidate.position.into(),
+        action_nullifier: note[..32].try_into().unwrap(),
+        cmx: note[32..64].try_into().unwrap(),
+        ephemeral_key: note[64..96].try_into().unwrap(),
+        ciphertext_prefix: note[96..148].try_into().unwrap(),
+    };
+    let data = BTreeMap::from([(right.position, note[148..].try_into().unwrap())]);
+    // The first answer misstates the transaction index, and another payment whose note
+    // data never arrived leaves the lookup unfinished.
+    let wrong = DirectoryPayment {
+        tx_index: right.tx_index + 1,
+        ..right.clone()
+    };
+    let other = DirectoryPayment {
+        txid: [7; 32],
+        position: right.position + 1,
+        ..right.clone()
+    };
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        !db.queue_swap_directory_lookup(account, key, through, &[wrong, other], &data)
+            .unwrap()
+    );
+    assert_eq!(db.pending_swap_payments(account, key).unwrap().len(), 1);
+    assert_eq!(
+        db.swap_note_data_needed(account, key, std::slice::from_ref(&right))
+            .unwrap(),
+        [right.position]
+    );
+    assert!(
+        db.queue_swap_directory_lookup(account, key, through, std::slice::from_ref(&right), &data)
+            .unwrap()
+    );
+    let queued = db.pending_swap_payments(account, key).unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].tx_index, candidate.tx_index);
+}
+
 /// A payment from before the account's birthday is not tracked, as no note before it
 /// is, but its index is marked used and its sweep finishes, so a restore with a late
 /// birthday does not hold up incoming issuance.
@@ -612,6 +702,17 @@ fn a_payment_before_the_birthday_marks_its_index_used_and_finishes_the_sweep() {
         .unwrap();
     let siblings = path.auth_path().map(|hash| hash.to_bytes());
     let db = st.wallet_mut().db_mut();
+    // Its inclusion is still checked: a path off the wallet's chain is rejected and
+    // marks nothing.
+    db.queue_swap_lookup(account, id, through, std::slice::from_ref(&candidate))
+        .unwrap();
+    let mut wrong = siblings;
+    wrong[0] = MerkleHashOrchard::empty_root(1.into()).to_bytes();
+    assert_eq!(
+        db.apply_swap_sweep(account, id, through, through, |_, _| Some(wrong))
+            .unwrap(),
+        PaymentApplication::Rejected
+    );
     db.queue_swap_lookup(account, id, through, std::slice::from_ref(&candidate))
         .unwrap();
     assert_eq!(
@@ -622,15 +723,16 @@ fn a_payment_before_the_birthday_marks_its_index_used_and_finishes_the_sweep() {
     assert!(!db.swap_history_pending(account, through.height).unwrap());
     assert!(db.pending_swap_payments(account, id).unwrap().is_empty());
     assert!(unspent_keys(&st, through.height).is_empty());
-    let (used, advances): (bool, bool) = st
+    let (used, advances, paid): (bool, bool, bool) = st
         .wallet()
         .conn()
         .query_row(
-            "SELECT used, advances_allocation FROM ironwood_receiving_keys
+            "SELECT used, advances_allocation, paid_before_birthday FROM ironwood_receiving_keys
              WHERE purpose = 1 AND key_index = ?1",
             [id.index().to_be_bytes()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
-    assert!(used && advances);
+    // The verified payment also raises the recovery bound past its index.
+    assert!(used && advances && paid);
 }

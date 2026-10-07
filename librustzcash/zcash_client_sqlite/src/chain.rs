@@ -548,4 +548,47 @@ mod tests {
     fn scan_cached_blocks_detects_spends_out_of_order_orchard() {
         testing::pool::scan_cached_blocks_detects_spends_out_of_order::<OrchardPoolTester>()
     }
+
+    /// A build without swap receiving must not store blocks an open swap key never saw.
+    #[test]
+    #[cfg(all(feature = "orchard", not(feature = "experimental-swap-receiving")))]
+    fn scanning_without_swap_support_refuses_open_swap_keys() {
+        use zcash_client_backend::data_api::testing::{
+            AddressType, TestBuilder, pool::ShieldedPoolTester,
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(testing::db::TestDbFactory::default())
+            .with_block_cache(testing::BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let (h1, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(5),
+        );
+        st.scan_cached_blocks(h1, 1);
+        st.wallet()
+            .conn()
+            .execute_batch(
+                "INSERT INTO ironwood_receiving_keys
+                 (account_id, purpose, key_index, receiver, scan_from, advances_allocation, active_from)
+                 SELECT id, 1, zeroblob(8), zeroblob(43), 0, 1, 0 FROM accounts LIMIT 1;",
+            )
+            .unwrap();
+        let (h2, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(5),
+        );
+        assert!(st.try_scan_cached_blocks(h2, 1).is_err());
+        st.wallet()
+            .conn()
+            .execute_batch("UPDATE ironwood_receiving_keys SET closed_at = 1")
+            .unwrap();
+        st.scan_cached_blocks(h2, 1);
+    }
 }

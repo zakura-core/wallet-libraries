@@ -2868,6 +2868,17 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             zakura_swap_receiving::KeyId,
         )],
     ) -> Result<(), SqliteClientError> {
+        // Without swap receiving the scanner never tries an open swap key, so storing these
+        // blocks would mark that key's payments scanned without finding them.
+        #[cfg(all(feature = "orchard", not(feature = "experimental-swap-receiving")))]
+        if self.conn.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys
+             WHERE active_from IS NOT NULL AND closed_at IS NULL)",
+            [],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Err(SqliteClientError::SwapReceivingNotEnabled);
+        }
         // Once the NU6.3 (Ironwood) activation height is reached, checkpoints on the anchor
         // retention grids are retained as durable anchors. The activation height is `None` (and so
         // anchor retention is inactive) on networks that do not yet have an assigned NU6.3

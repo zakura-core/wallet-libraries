@@ -4296,7 +4296,17 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         [u32::from(truncation_height)],
     )?;
     // A sweep whose lookup or completion the rewind removed runs again. Active keys
-    // need no repair: the scanner rescans the truncated blocks with them.
+    // need no repair: the scanner rescans the truncated blocks with them. A closed key
+    // is no longer scanned, so reopen any key with a receipt the rewind un-mines; it
+    // closes again once that receipt is confirmed again.
+    conn.execute(
+        "UPDATE ironwood_receiving_keys SET closed_at = NULL
+         WHERE closed_at IS NOT NULL AND id IN (
+             SELECT n.receiving_key_id FROM ironwood_received_notes n
+             JOIN transactions t ON t.id_tx = n.transaction_id
+             WHERE t.mined_height > ?1)",
+        [u32::from(truncation_height)],
+    )?;
     conn.execute(
         "UPDATE ironwood_swap_sweeps SET done_height = NULL, next_attempt_at = 0,
             lookup_height = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_height END,

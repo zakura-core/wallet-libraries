@@ -320,7 +320,7 @@ fn missing_spend_history_queues_replay_and_recovers_after_restart() {
 }
 
 #[test]
-fn retention_waits_for_internal_memos_and_own_send_evidence() {
+fn retention_waits_for_internal_memos_until_their_blocks_are_scanned() {
     let (mut st, _, through) = swept();
     let account = st.test_account().unwrap().id();
     // Model a normal internal note whose memo enhancement has not finished.
@@ -335,21 +335,42 @@ fn retention_waits_for_internal_memos_and_own_send_evidence() {
         crate::wallet::ironwood_nullifier_retention_height(st.wallet().conn()).unwrap(),
         Some(through.height)
     );
-    // Even an enhanced marker waits if its funding-account evidence is unresolved.
+    // A marker without funding-account evidence, once scanning from the birthday covers
+    // its block, was funded before the birthday or is not this wallet's. It no longer
+    // holds back the release.
+    let move_memo = |st: &State, height: BlockHeight, block: Option<u32>| {
+        st.wallet()
+            .conn()
+            .execute(
+                "UPDATE transactions SET mined_height = ?1, block = ?2 WHERE id_tx IN
+                 (SELECT transaction_id FROM ironwood_received_notes)",
+                rusqlite::params![u32::from(height), block],
+            )
+            .unwrap();
+    };
     st.wallet()
         .conn()
         .execute("UPDATE ironwood_received_notes SET memo=X'FF5A535750'", [])
         .unwrap();
+    let mined: u32 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT t.mined_height FROM transactions t
+             JOIN ironwood_received_notes n ON n.transaction_id = t.id_tx",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // One that enhancement found above the scanned height still holds it back.
+    move_memo(&st, through.height + 1, None);
     assert!(
         !st.wallet_mut()
             .db_mut()
             .finish_swap_nullifier_recovery_with(account, through, 1)
             .unwrap()
     );
-    st.wallet()
-        .conn()
-        .execute("UPDATE ironwood_received_notes SET memo=X'F6'", [])
-        .unwrap();
+    move_memo(&st, mined.into(), Some(mined));
     assert!(
         st.wallet_mut()
             .db_mut()

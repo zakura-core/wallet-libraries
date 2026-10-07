@@ -316,9 +316,35 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
         .conn()
         .execute("DELETE FROM ironwood_received_note_spends", [])
         .unwrap();
+    // Without own-send evidence, though scanning covers the funding block, the inputs
+    // predate the birthday or the record is not this wallet's. It no longer holds back
+    // issuance: its key is swept without advancing allocation, which skips its index.
+    let swap_memo = |st: &State, from: &[u8], to: &[u8]| {
+        st.wallet()
+            .conn()
+            .execute(
+                "UPDATE ironwood_received_notes SET memo = ?2 WHERE memo = ?1",
+                rusqlite::params![from, to],
+            )
+            .unwrap();
+    };
+    let unauthenticated = RefundMemo::new(0).encode();
+    swap_memo(&st, memo_bytes.as_slice(), unauthenticated.as_slice());
     assert_eq!(recover_memos(&mut st, restored), 0);
-    assert!(refund_keys(&st).is_empty());
-    assert!(pending(&st));
+    assert_eq!(refund_keys(&st), vec![(0, u32::from(mined), true)]);
+    assert!(!pending(&st));
+    let next = st
+        .wallet_mut()
+        .db_mut()
+        .reserve_swap_refund_key(restored, mined)
+        .unwrap()
+        .key_id();
+    assert_eq!(next, KeyId::new(Purpose::Refund, 1));
+    swap_memo(&st, unauthenticated.as_slice(), memo_bytes.as_slice());
+    st.wallet()
+        .conn()
+        .execute("DELETE FROM ironwood_receiving_keys", [])
+        .unwrap();
     for (note, transaction) in spends {
         st.wallet()
             .conn()

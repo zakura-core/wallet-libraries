@@ -8,6 +8,7 @@ use rand_core::Rng;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::borrow::{Borrow, BorrowMut};
 use zakura_swap_receiving::lifecycle::{ProviderStatus, near_observation};
+use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 /// Incoming seed recovery must search at least this many consecutive empty indices.
@@ -116,14 +117,24 @@ fn scanned_empty(conn: &Connection, key: i64) -> Result<bool, Error> {
 }
 
 /// The first incoming index seed recovery may not reach: [`RECEIVE_GAP_LIMIT`] past
-/// the highest paid one. Local issuance and provider deposits cannot move it.
+/// the highest paid one. Local issuance and provider deposits cannot move it. A
+/// receipt counts once it has the default untrusted confirmations, so a reorg cannot
+/// lower the bound below keys already issued; a payment before the birthday counts
+/// once its inclusion was checked (see `PaymentApplication::BeforeBirthday`).
 fn recovery_end(conn: &Connection, account: i64) -> Result<u64, Error> {
+    let confirmed_below = wallet::chain_tip_height(conn)?.map(|tip| {
+        u32::from(tip)
+            .saturating_add(1)
+            .saturating_sub(ConfirmationsPolicy::default().untrusted().get())
+    });
     let paid: Option<Vec<u8>> = conn.query_row(
         "SELECT MAX(k.key_index) FROM ironwood_receiving_keys k
-         JOIN ironwood_received_notes n ON n.receiving_key_id=k.id
-         JOIN transactions t ON t.id_tx=n.transaction_id JOIN blocks b ON b.height=t.mined_height
-         WHERE k.account_id=?1 AND k.purpose=1",
-        [account],
+         WHERE k.account_id = ?1 AND k.purpose = 1 AND (k.paid_before_birthday = 1
+             OR EXISTS(SELECT 1 FROM ironwood_received_notes n
+                 JOIN transactions t ON t.id_tx = n.transaction_id
+                 JOIN blocks b ON b.height = t.mined_height
+                 WHERE n.receiving_key_id = k.id AND t.mined_height <= ?2))",
+        params![account, confirmed_below],
         |r| r.get(0),
     )?;
     paid.map(decode_index)
@@ -181,11 +192,14 @@ fn reusable(conn: &Connection, id: i64, now: i64) -> Result<bool, Error> {
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// Whether an account-internal funding record may still hold an unregistered refund
     /// index after [`WalletDb::recover_refund_memos`]: its memo is not retrieved yet, or
-    /// a decrypted marker still lacks the own-send evidence that authenticates it.
-    /// Refund issuance and nullifier recovery wait for these records. Unrelated
-    /// outgoing metadata does not block them.
+    /// a decrypted marker lacks the own-send evidence that authenticates it while an
+    /// input could still be found, because scanning from the birthday has not reached
+    /// its block. Refund issuance and nullifier recovery wait for these records.
+    /// Unrelated outgoing metadata does not block them.
     pub(crate) fn swap_refund_memos_pending(&self, account: AccountUuid) -> Result<bool, Error> {
-        Ok(self.conn.borrow().query_row(
+        let conn = self.conn.borrow();
+        let scanned = wallet::fully_scanned_height(conn)?.map(u32::from);
+        Ok(conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n
              JOIN transactions t ON t.id_tx = n.transaction_id
              JOIN accounts a ON a.id = n.account_id
@@ -194,8 +208,9 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                AND (n.memo IS NULL OR (substr(n.memo, 1, 5) = X'FF5A535750'
                  AND NOT EXISTS(SELECT 1 FROM v_received_output_spends s
                    WHERE s.transaction_id = n.transaction_id
-                     AND s.account_id = n.account_id))))",
-            [account.0],
+                     AND s.account_id = n.account_id)
+                 AND (?2 IS NULL OR t.mined_height > ?2))))",
+            params![account.0, scanned],
             |r| r.get(0),
         )?)
     }
