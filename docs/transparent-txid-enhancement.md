@@ -33,7 +33,9 @@ back.
   `TransparentDisplayRecord` to `TransparentDisplayFacts`
   (`display_facts(record, provenance, looked_up_height)`), reusing the metadata
   mapping it already uses for recovery events, and maps a lookup that found
-  nothing to the outcome to defer it with (`deferral`).
+  nothing to the outcome to defer it with (`deferral`). Its client's
+  `refresh_map` fetches only the display map, to re-check coverage when only
+  parked work remains.
 - **Vizor** owns scheduling, transport, mode selection and the UI.
 
 ## How work is created
@@ -41,7 +43,9 @@ back.
 Work is one row per transaction in `transparent_detail_work`, keyed by the
 wallet's transaction id and deleted with the transaction. `reasons` is a bit
 set: 1 receive, 2 spend, 4 mixed. A row is written (reasons OR-ed into any
-existing row) only while the transaction has no raw bytes:
+existing row) only while the transaction is mined, has no raw bytes, and has no
+stored display facts (so re-reported receives, and re-promotion after leaving
+and re-entering `PrivateRequired`, do not look a transaction up again):
 
 - an active account's private ledger projects a receive or a spend (commit and
   promotion both project; candidate commits never do);
@@ -51,13 +55,15 @@ existing row) only while the transaction has no raw bytes:
 
 Public discovery never writes work: public lanes already queue the payload
 through `tx_retrieval_queue`. Parent transactions (the outputs our transparent
-inputs spend, whose height the wallet does not know) are never work.
+inputs spend, whose height the wallet does not know) are never work: every
+enqueue site and the backfill require a mined height.
 
 Storing raw bytes (`put_tx_data`) deletes the work row and any display facts:
 the raw transaction supersedes them.
 
-The leaf migration backfills work for existing route-2 transactions and for
-transactions with ledger-origin outputs or spends that have no raw bytes.
+The leaf migration backfills work for existing mined route-2 transactions and
+for mined transactions with ledger-origin outputs (whose receive is still
+placed) or spends that have no raw bytes.
 
 These are new tables, not `tx_retrieval_queue` rows. That queue is payload work:
 its rows are restamped by policy transitions and read by query type, and mixing
@@ -66,19 +72,39 @@ display work into it would let a display failure or retry hold payload work open
 ## Listing
 
 `transparent_detail_work(now, limit, map_sha256)` returns the due requests
-(`txid`, `mined_height`, `reasons`). A row is due when the transaction is mined,
-has no raw bytes, still has a recorded output, spend or route-2 marker in the
-wallet, and either
+(`txid`, `mined_height`, `reasons`) together with the handle's mode and the
+durable policy generation, read in the same snapshot. Vizor fetches publicly
+(`GetTransaction`) only when that mode retains public authority and the
+generation is still current; otherwise only through the txid display service.
+
+A row is due when the transaction is mined, has no raw bytes, is still related
+to the wallet, and either
 
 - its mined height differs from the height of its last attempt (a reorg re-arms
   it immediately and resets its backoff), or
-- `next_attempt_at <= now` and it is not held: a row whose last outcome was
-  `NotCovered`, `Unsupported` or `Contradiction` is held until the caller's
-  current display map hash differs from the one that produced that outcome.
+- `next_attempt_at <= now` and it is not parked.
+
+Related means the wallet still records an owned output or a spend of one that
+financial queries count, a spend link, or a route-2 marker. A ledger-only
+output whose receive was withdrawn keeps its row for history, but neither
+relates the transaction, nor counts as owned in validation or the view.
+
+Parked: a row whose last outcome was `NotCovered` or `Contradiction` while the
+caller's map hash is absent or is the one that produced the outcome; an
+`Unsupported` row while the caller has no map hash at all (any map, including
+the first one seen, re-arms it). A parked row becomes due anyway seven days
+after its last attempt, so a map that never changes cannot strand it.
+
+`transparent_detail_parked(now)` reports the rows parked only for want of a
+map change (`count`, and the map hash of the longest-parked row). When nothing
+is due and `count > 0`, Vizor calls the client's `refresh_map` and lists again
+with the returned hash. Without it, the client would only refresh its map
+inside a lookup, which no parked row triggers.
 
 An unmined (rewound) transaction is not listed; its row stays and becomes due
 when it is mined again. Under a mode that retains public authority the listing
-omits transactions whose payload retrieval `tx_retrieval_queue` already owns.
+omits transactions whose payload retrieval `tx_retrieval_queue` already owns,
+and privately protected Ironwood transactions (route 0), matching payload work.
 
 Order: never-attempted and re-armed rows first, then the most recently mined.
 
@@ -88,22 +114,25 @@ The caller reports a failed lookup with
 `defer_transparent_detail(txid, outcome, map_sha256, now)`. The library computes
 the next attempt, with jitter derived from the txid and attempt count:
 
-| Outcome | Meaning | Next attempt |
-| --- | --- | --- |
-| `Unavailable { retry_after }` | Transport failure, overload, stale revision | 30 s doubling, capped at 1 h; at least `retry_after` |
-| `Protocol` | The service answered with something unusable | as `Unavailable` |
-| `Absent` | The covering shard has no record for the txid | 1 h doubling, capped at 24 h |
-| `NotCovered` | No shard covers the height | held until the map changes, at least 24 h |
-| `Unsupported` | The service does not offer display tables | held until the map changes, at least 24 h |
-| `Contradiction` | Facts disagreed with the wallet | held until the map changes, at least 24 h |
+| Outcome | Meaning | Next attempt | View |
+| --- | --- | --- | --- |
+| `Unavailable { retry_after }` | Transport failure, overload, stale revision | 30 s doubling, capped at 1 h; at least `retry_after` (up to 24 h) | Unavailable |
+| `Protocol` | The service answered with something unusable | 30 s doubling, capped at 1 h | Unavailable |
+| `NotYetPublished` | The height is above the newest shard (`PlacementUnknown(Above)`) | 1 min doubling, capped at 5 min | Pending |
+| `Absent` | The covering shard has no record for the txid | 1 h doubling, capped at 24 h | Unavailable |
+| `NotCovered` | No shard covers the height (`PlacementUnknown(Below)`) | at least 24 h, then parked until the map changes | NotCovered |
+| `Unsupported` | The service does not offer display tables | at least 24 h, then parked until any map is seen | Unavailable |
+| `Contradiction` | Facts disagreed with the wallet | at least 24 h, then parked until the map changes | Unavailable |
+
+Parked rows are due again seven days after their last attempt regardless.
 
 `store_transparent_display(facts, expected_generation, now)` returns:
 
 - `Stored`: the facts passed validation; they are saved and the work row is deleted.
-- `Superseded`: raw bytes are already stored, or the transaction left the
-  wallet; nothing is saved and the work row is deleted.
+- `Superseded`: raw bytes are already stored, or the wallet neither has work for
+  nor still relates to the transaction; nothing is saved.
 - `Contradiction(kind)`: nothing is saved; the work row records the outcome as
-  `Contradiction` and is held until the map changes.
+  `Contradiction` and is parked until the map changes.
 
 A moved policy generation fails with `StaleTransparentPolicy` and changes nothing.
 
@@ -113,26 +142,32 @@ Before anything is saved, the facts must agree with everything the wallet
 already knows about the transaction:
 
 - the coinbase flag matches a known `tx_index = 0` and recovered receive events,
-  and the metadata is valid for it;
-- every owned output (`transparent_received_outputs`, `tpir_receive_events`) is
-  present at its index with the same value and script;
+  the metadata is valid for it, and no known spend names a coinbase transaction;
+- every owned output that financial queries count (`transparent_received_outputs`)
+  and every recovered receive (`tpir_receive_events`) is present at its index
+  with the same value and script;
 - recovered metadata (`tpir_transaction_metadata`) and the stored fee are equal;
 - the shielded bit is set when the wallet knows a shielded note, sent note or
   spend in the transaction, or a route-2 marker;
-- every known spend input index is below the transparent input count.
+- every known spend input index (`tpir_spend_events`) is below the transparent
+  input count, and the number of distinct outpoints the wallet knows the
+  transaction spends (recovered spends, public spend links, the spend map) does
+  not exceed it.
 
 Display facts are stored apart from financial state. They never change balances,
 spendability, `details_complete`, or history classification.
 
 ## View
 
-`transparent_display_view(account, txid)` returns:
+`transparent_display_view(account, txid)` returns (an output is owned when
+`account` received it and financial queries count it):
 
 - `Available`: outputs (index, value, script, decoded address when the script is
   standard, and whether `account` owns it), coinbase flag, fee, transparent input
   count, shielded bit, and provenance: raw transaction, or the display shard,
   revision, map hash and lookup height.
-- `Pending`: work exists and has not failed yet, or payload retrieval owns it.
+- `Pending`: work exists and has not failed yet or waits for the next
+  publication, or (under public authority only) payload retrieval owns it.
 - `Unavailable`: work failed and will be retried, or no source exists.
 - `NotCovered`: the display service does not cover the transaction.
 

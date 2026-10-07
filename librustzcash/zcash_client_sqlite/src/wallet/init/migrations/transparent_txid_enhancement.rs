@@ -32,8 +32,9 @@ impl RusqliteMigration for Migration {
                 reasons INTEGER NOT NULL CHECK (reasons > 0 AND reasons < 8),
                 attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
                 next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                attempted_at INTEGER,
                 attempted_height INTEGER CHECK (attempted_height >= 0),
-                last_outcome INTEGER CHECK (last_outcome BETWEEN 0 AND 5),
+                last_outcome INTEGER CHECK (last_outcome BETWEEN 0 AND 6),
                 last_map_sha256 BLOB CHECK (length(last_map_sha256) = 32)
             );
             CREATE TABLE transparent_tx_display (
@@ -59,14 +60,25 @@ impl RusqliteMigration for Migration {
                 script BLOB NOT NULL,
                 PRIMARY KEY (transaction_id, output_index)
             );
-            -- Route 2 (private details unsupported) and ledger-origin (2) outputs and spends.
+            -- Route 2 (private details unsupported) and ledger-origin (2) outputs and spends, of
+            -- mined transactions without raw bytes. A ledger-only output whose receive was
+            -- withdrawn (no placed receive event) is not the wallet's.
             INSERT INTO transparent_detail_work (transaction_id, reasons)
             SELECT id_tx, reasons FROM (
                 SELECT t.id_tx,
                     (CASE WHEN EXISTS (
                          SELECT 1 FROM transparent_received_outputs o
                          JOIN tpir_output_origins oo ON oo.output_id = o.id
-                         WHERE o.transaction_id = t.id_tx AND oo.origin = 2) THEN 1 ELSE 0 END)
+                         WHERE o.transaction_id = t.id_tx AND oo.origin = 2
+                         AND (
+                             EXISTS (SELECT 1 FROM tpir_output_origins x
+                                     WHERE x.output_id = o.id AND x.origin != 2)
+                             OR EXISTS (SELECT 1 FROM tpir_receive_events re
+                                        WHERE re.txid = t.txid
+                                        AND re.output_index = o.output_index
+                                        AND re.account_id = o.account_id
+                                        AND re.mined_height IS NOT NULL)
+                         )) THEN 1 ELSE 0 END)
                   | (CASE WHEN EXISTS (
                          SELECT 1 FROM tpir_spend_origins so
                          WHERE so.spending_transaction_id = t.id_tx AND so.origin = 2)
@@ -76,7 +88,7 @@ impl RusqliteMigration for Migration {
                          WHERE r.transaction_id = t.id_tx AND r.route = 2) THEN 4 ELSE 0 END)
                     AS reasons
                 FROM transactions t
-                WHERE t.raw IS NULL
+                WHERE t.raw IS NULL AND t.mined_height IS NOT NULL
             )
             WHERE reasons > 0;
             "#,
