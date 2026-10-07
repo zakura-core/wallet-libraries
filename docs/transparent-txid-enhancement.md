@@ -31,8 +31,9 @@ back.
   `zcash_client_backend::data_api::transparent_ledger`.
 - **zakura-pir-transparent** re-exports the client and maps wallet-pir's
   `TransparentDisplayRecord` to `TransparentDisplayFacts`
-  (`display_facts(record, provenance)`), reusing the metadata mapping it already
-  uses for recovery events.
+  (`display_facts(record, provenance, looked_up_height)`), reusing the metadata
+  mapping it already uses for recovery events, and maps a lookup that found
+  nothing to the outcome to defer it with (`deferral`).
 - **Vizor** owns scheduling, transport, mode selection and the UI.
 
 ## How work is created
