@@ -51,7 +51,11 @@ and re-entering `PrivateRequired`, do not look a transaction up again):
   promotion both project; candidate commits never do);
 - Enhance PIR marks a mixed transaction as having private details it cannot
   supply (route 2), directly or when a transition to `PrivateRequired` rewrites
-  an unresolved route 1 to route 2.
+  an unresolved route 1 to route 2;
+- a route-2 transaction is mined, by scanning (`put_tx_meta`) or a status
+  observation. A route-2 marker written while the transaction was unmined (seen
+  unmined, or rewound when `PrivateRequired` was applied) cannot queue work, so
+  mining it does.
 
 Public discovery never writes work: public lanes already queue the payload
 through `tx_retrieval_queue`. Parent transactions (the outputs our transparent
@@ -60,6 +64,13 @@ enqueue site and the backfill require a mined height.
 
 Storing raw bytes (`put_tx_data`) deletes the work row and any display facts:
 the raw transaction supersedes them.
+
+Every enqueue site first re-validates stored display facts against what the
+wallet now holds. Facts are validated when stored, but a later receive or spend
+can contradict them: for example, facts stored while a ledger-only receive was
+withdrawn (so not checked against it), and the receive reported again by a later
+lineage. Contradicted facts are deleted in the same transaction, and the
+transaction is queued for a fresh lookup.
 
 The leaf migration backfills work for existing mined route-2 transactions and
 for mined transactions with ledger-origin outputs (whose receive is still
@@ -95,11 +106,16 @@ caller's map hash is absent or is the one that produced the outcome; an
 the first one seen, re-arms it). A parked row becomes due anyway seven days
 after its last attempt, so a map that never changes cannot strand it.
 
-`transparent_detail_parked(now)` reports the rows parked only for want of a
-map change (`count`, and the map hash of the longest-parked row). When nothing
-is due and `count > 0`, Vizor calls the client's `refresh_map` and lists again
-with the returned hash. Without it, the client would only refresh its map
-inside a lookup, which no parked row triggers.
+`transparent_detail_parked(now, map_sha256, map_checked_at)` reports the rows
+parked under the caller's current map only for want of a map change (`count`,
+the map hash of the longest-parked row, and `refresh_at`). `map_checked_at` is
+when the caller last fetched, or tried to fetch, the display map. `refresh_at`
+is six hours (`TRANSPARENT_DISPLAY_MAP_RECHECK`) after the later of that time and
+the newest parked lookup, since each lookup also refreshed the client's map.
+When nothing is due, `count > 0` and `refresh_at` has passed, Vizor calls the
+client's `refresh_map` and lists again with the returned hash. Without it, the
+client would only refresh its map inside a lookup, which no parked row
+triggers; with the bound, a parked row costs at most four map fetches a day.
 
 An unmined (rewound) transaction is not listed; its row stays and becomes due
 when it is mined again. Under a mode that retains public authority the listing
@@ -116,7 +132,12 @@ The caller retains the mined height from the dispatched request. If the transact
 current mined height differs, or it is now unmined, the result changes nothing. This
 prevents a late failure from parking work that a rewind and re-mining made due again.
 The library computes
-the next attempt, with jitter derived from the txid and attempt count:
+the next attempt, with jitter derived from the txid and attempt count. The
+attempt count restarts at 1 when the mined height changes or the outcome falls
+in another class than the previous one (classes: `Unavailable` and `Protocol`;
+`NotYetPublished`; `Absent`; the parked outcomes), so that minutes-apart
+`NotYetPublished` retries do not lengthen a later `Unavailable` or `Absent`
+backoff:
 
 | Outcome | Meaning | Next attempt | View |
 | --- | --- | --- | --- |
@@ -173,6 +194,10 @@ spendability, `details_complete`, or history classification.
   revision, map hash and lookup height.
 - `Pending`: work exists and has not failed yet or waits for the next
   publication, or (under public authority only) payload retrieval owns it.
+  Work counts only while the listing would return it, now or once the
+  transaction is mined again: work for a withdrawn or unrelated transaction, or
+  for a route-0 transaction under public authority, shows as it would without
+  work.
 - `Unavailable`: work failed and will be retried, or no source exists.
 - `NotCovered`: the display service does not cover the transaction.
 
