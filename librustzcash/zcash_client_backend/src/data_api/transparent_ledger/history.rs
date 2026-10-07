@@ -121,12 +121,17 @@ pub struct TransactionHistoryDetails {
     pub aggregate_payment: AggregatePayment,
     /// Activity-only outgoing value of a transaction whose payment details cannot be recovered:
     /// the value of the account's spent shielded notes, less the shielded value returned to the
-    /// account and the whole-transaction fee. It is inferred, not attributed: it assumes the
-    /// account paid the whole fee, it may include outputs to the account's own transparent
+    /// account and the whole-transaction fee. Activity assumes this account funded the transaction
+    /// and paid the whole fee unless recovered evidence identifies another contributor; possible
+    /// unobserved contributors do not disable this default. It is inferred, not attributed,
+    /// and may include outputs to the account's own transparent
     /// addresses, and it names no recipient. Present only for a mined transaction without full
     /// data for which Enhance asserted transparent outputs, whose shielded effects are complete,
     /// whose whole fee is known, and in which the account has no transparent spend, no recorded
-    /// sent output, and no co-funding wallet account or transparent input in its evidence. It
+    /// sent output, and no co-funding wallet account or transparent input in its evidence.
+    /// Candidate ledgers and unqualified, quarantined or differently placed spend observations
+    /// do not veto the inference. Consumers may use the default for internal-output Activity
+    /// grouping, but must not turn it into canonical sender or fee-payer attribution. It
     /// changes neither [`Self::aggregate_payment`], [`Self::payment_details`], [`Self::fee`],
     /// nor [`Self::classification`].
     pub inferred_outgoing: Option<Zatoshis>,

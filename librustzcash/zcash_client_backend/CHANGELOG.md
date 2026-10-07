@@ -20,6 +20,9 @@ workspace.
   final while its payment and fee attribution are not.
 
 ### Changed
+- `TransactionHistoryDetails::inferred_outgoing` documents the Activity default that the account
+  funded a recovered send and its fee unless recovered evidence identifies another contributor.
+  This display assumption does not establish payment or fee attribution.
 - `enhance_pir::storage::validate_and_apply_records` captures the stored-metadata snapshot for
   has-transparent records too, so storage can compare it before keeping such a record's
   authenticated memo and agreeing fee without public authority. A `PrivateDetailsUnsupported`
