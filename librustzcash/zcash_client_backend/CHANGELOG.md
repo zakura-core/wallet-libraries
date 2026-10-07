@@ -139,7 +139,7 @@ workspace.
   `anchor_retention::PoolMigrationParams`, `fees::canonical_crossing_fee`,
   `proposal::Step::is_canonical_crossing` and
   `data_api::error::Error::ExpiryHeightConflictsWithCanonicalCrossing` remain
-  for that. See `docs/zip318_removal.md`.
+  for that.
 
 ### Changed
 - `InputSelector::propose_transaction` and `InputSelector::propose_shielding`

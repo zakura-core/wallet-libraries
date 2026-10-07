@@ -100,7 +100,6 @@ Older revisions of the same PR cancel; main runs remain independent. Compiler
 and configuration specific caches accelerate compilation without retaining the
 fresh external-consumer lockfiles.
 
-See [development-speed.md](development-speed.md) for evidence, acceptance results,
-and outstanding measurements. A passing focused check does not prove all
-privacy, migration, protocol, or feature combinations; use their affected lanes
-and final CI. Keep process-local proving-key caches and the cargo test runner.
+A passing focused check does not prove all privacy, migration, protocol, or
+feature combinations; use their affected lanes and final CI. Keep process-local
+proving-key caches and the cargo test runner.

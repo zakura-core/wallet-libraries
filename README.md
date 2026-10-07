@@ -36,7 +36,7 @@ does not use the pool-migration engine, so this fork cuts that dependency
 instead of carrying the crate. The ZIP 318 classification and send policy built
 around the engine are removed too. A forward migration drops the schema they
 left behind, so an existing database still opens. Anchor retention stays,
-because Vizor's own migration depends on it. See `docs/zip318_removal.md`.
+because Vizor's own migration depends on it.
 
 ## Layout
 

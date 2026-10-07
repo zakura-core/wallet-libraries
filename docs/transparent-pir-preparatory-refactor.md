@@ -930,7 +930,7 @@ receivers; perform the explicit production transfer and recover before retrying 
 
 Fresh wallets and upgrades from published `zakura-client-sqlite` rc5/rc7 retain
 `transactions.zip318_kind INTEGER NOT NULL DEFAULT 0` and its matching
-`v_transactions` field in place (see `docs/zip318_removal.md`). Existing
+`v_transactions` field in place. Existing
 classification values survive the upgrade. The unused pool-migration tables
 and engine remain removed. Databases that applied the earlier development
 revision which dropped the column are outside the supported upgrade path.
