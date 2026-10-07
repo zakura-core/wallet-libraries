@@ -473,6 +473,41 @@ fn issuing_a_key_after_its_watch_needs_no_rescan() {
 }
 
 #[test]
+fn restored_refund_key_is_watched_for_a_day() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let anchor = tip(&st);
+    let key = KeyId::new(Purpose::Refund, 0);
+    let db = st.wallet_mut().db_mut();
+    db.recover_swap_receiving_key(account, key, anchor.height)
+        .unwrap();
+    db.finish_sweep(account, key, anchor).unwrap();
+    db.update_chain_tip(anchor.height).unwrap();
+    assert_eq!(scanning_keys(&st), [key]);
+    let registered: i64 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT registered_at FROM ironwood_receiving_keys WHERE purpose = 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(
+        db.close_finished_swap_keys_at(account, registered + RESTORE_WATCH_SECS - 1, anchor.height)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.close_finished_swap_keys_at(account, registered + RESTORE_WATCH_SECS, anchor.height)
+            .unwrap(),
+        1
+    );
+    assert!(scanning_keys(&st).is_empty());
+}
+
+#[test]
 fn swept_key_cannot_be_issued_while_its_sweep_is_pending() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();

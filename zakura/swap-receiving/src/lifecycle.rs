@@ -3,8 +3,8 @@
 
 use zcash_protocol::value::Zatoshis;
 
-/// Seconds an incoming key found only by a restore sweep keeps scanning, for a
-/// payout from a swap in flight at restore. Like [`COMPLETION_LIMIT_SECS`], a
+/// Seconds a key found only by a restore sweep keeps scanning, for a payout or
+/// refund from a swap in flight at restore. Like [`COMPLETION_LIMIT_SECS`], a
 /// wallet convention, not a consensus parameter.
 pub const RESTORE_WATCH_SECS: i64 = 24 * 60 * 60;
 

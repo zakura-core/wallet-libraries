@@ -8,7 +8,7 @@ use zakura_swap_receiving::RefundMemo;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
-    Discovery, Error, KeyId, Purpose, RESTORED_INCOMING, account_key, decode_index, register,
+    Discovery, Error, KeyId, Purpose, RESTORED, account_key, decode_index, register,
     reservations::RECEIVE_LOOKAHEAD, restore_start, retention::retain_spend_history, unix_now,
 };
 use crate::{AccountUuid, SqlTransaction, WalletDb};
@@ -142,18 +142,6 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         if covered {
             return Ok(());
         }
-        // Registering at the funding block's time makes the completion limit count from
-        // the swap, so an old swap's key closes after its sweep.
-        let funded_at = self
-            .conn
-            .0
-            .query_row(
-                "SELECT time FROM blocks WHERE height = ?1",
-                [height],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or_else(|| unix_now(&self.clock));
         register(
             self.conn.0,
             &self.params,
@@ -162,7 +150,7 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             height.into(),
             authenticated,
             Discovery::Sweep,
-            funded_at,
+            unix_now(&self.clock),
         )?;
         Ok(())
     }
@@ -218,7 +206,7 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             .0
             .query_row(
                 &format!(
-                    "SELECT k.key_index, ({RESTORED_INCOMING}) FROM ironwood_receiving_keys k
+                    "SELECT k.key_index, ({RESTORED}) FROM ironwood_receiving_keys k
                      WHERE k.account_id = ?1 AND k.purpose = 1 AND k.advances_allocation = 1
                      ORDER BY k.key_index DESC LIMIT 1"
                 ),

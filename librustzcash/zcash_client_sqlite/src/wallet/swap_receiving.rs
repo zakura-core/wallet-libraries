@@ -513,12 +513,13 @@ fn restore_start<P: Parameters>(
 /// seed already used.
 pub const ISSUANCE_TIP_LAG: u32 = 10;
 
-/// SQL condition on `ironwood_receiving_keys k`: an incoming key that a restore sweep
-/// found and this wallet never reserved, so no swap of its own is known.
-const RESTORED_INCOMING: &str = "k.purpose = 1
-    AND EXISTS(SELECT 1 FROM ironwood_swap_sweeps s WHERE s.receiving_key_id = k.id)
+/// SQL condition on `ironwood_receiving_keys k`: a key that a restore sweep found and
+/// this wallet never reserved or quoted, so no swap of its own is known.
+const RESTORED: &str =
+    "EXISTS(SELECT 1 FROM ironwood_swap_sweeps s WHERE s.receiving_key_id = k.id)
     AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
-        WHERE r.receiving_key_id = k.id)";
+        WHERE r.receiving_key_id = k.id)
+    AND NOT EXISTS(SELECT 1 FROM ironwood_swap_operations o WHERE o.receiving_key_id = k.id)";
 
 /// The first block a key issued now must scan, once the fully scanned height is
 /// within [`ISSUANCE_TIP_LAG`] of both `tip` and the stored chain tip.

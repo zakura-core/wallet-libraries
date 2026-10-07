@@ -1,5 +1,5 @@
 //! Provider observations and the rule that ends a key's trial decryption.
-use super::{Error, KeyId, RESTORED_INCOMING, account_key, corrupt, payments::key_ref};
+use super::{Error, KeyId, RESTORED, account_key, corrupt, payments::key_ref};
 use crate::{AccountUuid, WalletDb, util::Clock, wallet, wallet::common::tx_unexpired_condition};
 use rusqlite::{Connection, named_params, params};
 use std::borrow::BorrowMut;
@@ -38,8 +38,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
     /// [`ConfirmationsPolicy`], so a reorg cannot strand a receipt on a closed key.
     /// An incoming key stays active while its reservation is open; an abandoned one
     /// closes when it is reclaimed (see [`WalletDb::reap_swap_receive_reservations`]).
-    /// An incoming key found by a restore sweep and never issued here has no known
-    /// swap, so it closes [`RESTORE_WATCH_SECS`] after registration. A payment
+    /// A key found by a restore sweep and never issued here has no known swap, so it
+    /// closes [`RESTORE_WATCH_SECS`] after registration. A payment
     /// that arrives after its key closed is found by [`WalletDb::recheck_swap_history`]
     /// or a seed restore. Provider status never credits a note; a closed key keeps its
     /// notes.
@@ -83,7 +83,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                         WHERE n.receiving_key_id = k.id
                           AND (t.mined_height > :confirmed_below
                                OR (t.mined_height IS NULL AND ({unexpired})))),
-                    ({RESTORED_INCOMING}),
+                    ({RESTORED}),
                     (SELECT COUNT(*) FROM ironwood_swap_operations o
                         WHERE o.receiving_key_id = k.id),
                     (SELECT COUNT(*) FROM ironwood_swap_operations o

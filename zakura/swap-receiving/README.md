@@ -65,8 +65,8 @@ index has no valid key, and derivation returns an error.
 | 15 | 497 | Reserved: written as zero, ignored on decode |
 
 The memo does not store the deposit address. A restored refund key needs none: it
-is swept once and then scans until 30 days after its funding block, with no
-provider lookups. Ignoring the reserved bytes keeps prerelease records, which
+is swept once and, if the provider was given its address in the last day, scans for
+another 24 hours, with no provider lookups. Ignoring the reserved bytes keeps prerelease records, which
 appended the address there, decoding to their index. Incoming indices are
 recovered through lookahead, not this memo. `RefundMemo::decode` returns `None`
 for any memo that is not a v1 record. A wallet that selects records by their

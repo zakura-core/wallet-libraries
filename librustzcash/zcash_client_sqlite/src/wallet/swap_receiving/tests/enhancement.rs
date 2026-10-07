@@ -400,8 +400,8 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .unwrap()
     );
 
-    // A restored refund key makes no provider lookups. Its completion limit counts
-    // from the funding block instead.
+    // A restored refund key makes no provider lookups. Like a restored incoming key, it
+    // is watched for a day from its registration.
     let (registered_at, operations): (i64, i64) = st
         .wallet()
         .conn()
@@ -413,16 +413,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    let funded_at: i64 = st
-        .wallet()
-        .conn()
-        .query_row(
-            "SELECT time FROM blocks WHERE height = ?1",
-            [u32::from(mined)],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!((registered_at, operations), (funded_at, 0));
+    assert_eq!((registered_at, operations), (unix_now(&test_clock()), 0));
 
     // Repeated recovery, including after identical re-enhancement, changes nothing,
     // and it widens a key that starts after its funding block.
