@@ -11,6 +11,13 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- `transparent_ledger::{TransparentDetailRead, TransparentDetailWrite}` (prototype): durable
+  transparent txid enhancement work (`transparent_detail_work`), validated
+  `TransparentDisplayFacts` (`store_transparent_display`, returning `TransparentDisplayStore`),
+  library-computed backoff (`defer_transparent_detail` with `TransparentDetailOutcome`), and the
+  detail view (`transparent_display_view`, returning `TransparentDisplayView`). Display facts
+  never change balances, history classification or `details_complete`; see
+  `docs/transparent-txid-enhancement.md`.
 - `IronwoodEnhancementData::has_transparent_outputs` preserves the service's separate
   output-presence assertion for display reconstruction; note decryption authenticates the memo,
   not that assertion.
