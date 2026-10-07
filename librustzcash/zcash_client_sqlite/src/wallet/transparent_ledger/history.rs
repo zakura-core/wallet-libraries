@@ -180,6 +180,11 @@ struct TransactionFacts {
     mixed_without_full_data: bool,
     /// Display-only service assertion; NULL means it has not been recovered.
     has_transparent_outputs: Option<bool>,
+    /// The full transaction is not stored, and an Enhance record applied on the private route
+    /// attested that it has no transparent data: applying such a record records its expiry, and
+    /// a record asserting transparent data moves the transaction off that route in the same
+    /// write. The transaction therefore has no transparent inputs.
+    attested_ironwood_only: bool,
 }
 
 fn transaction_facts(
@@ -196,7 +201,12 @@ fn transaction_facts(
                     WHERE r.transaction_id = id_tx AND r.route IN (1, 2)
                 ),
                 (SELECT has_transparent_outputs FROM ironwood_enhance_routing r
-                 WHERE r.transaction_id = id_tx)
+                 WHERE r.transaction_id = id_tx),
+                raw IS NULL AND EXISTS (
+                    SELECT 1 FROM ironwood_enhance_routing r
+                    WHERE r.transaction_id = id_tx AND r.route = 0
+                    AND r.history_expiry_height IS NOT NULL
+                )
          FROM transactions WHERE txid = :txid",
         named_params![":txid": txid.as_ref()],
         |row| {
@@ -209,12 +219,23 @@ fn transaction_facts(
                 row.get::<_, bool>(5)?,
                 row.get::<_, bool>(6)?,
                 row.get::<_, Option<bool>>(7)?,
+                row.get::<_, bool>(8)?,
             ))
         },
     )
     .optional()?
     .map(
-        |(id, mined_height, has_full_data, fee, constructed, created_locally, mixed, outputs)| {
+        |(
+            id,
+            mined_height,
+            has_full_data,
+            fee,
+            constructed,
+            created_locally,
+            mixed,
+            outputs,
+            attested_ironwood_only,
+        )| {
             Ok(TransactionFacts {
                 id,
                 mined_height: mined_height.map(BlockHeight::from_u32),
@@ -224,6 +245,7 @@ fn transaction_facts(
                 created_locally,
                 mixed_without_full_data: mixed,
                 has_transparent_outputs: outputs,
+                attested_ironwood_only,
             })
         },
     )
@@ -694,6 +716,12 @@ fn transaction_funding(
         {
             return Ok(TransactionFunding::Sole);
         }
+    }
+    // An attested Ironwood-only transaction has no transparent inputs, so, as for full data
+    // without a transparent bundle, no other wallet account spending in it makes the account its
+    // sole known funder. An outside shielded spend is not detectable either way.
+    if tx.attested_ironwood_only {
+        return Ok(TransactionFunding::Sole);
     }
     if !tx.has_full_data {
         return Ok(TransactionFunding::Undetermined);
