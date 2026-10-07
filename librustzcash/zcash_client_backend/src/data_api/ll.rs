@@ -162,6 +162,7 @@ pub trait LowLevelWalletRead {
     /// Earliest Ironwood height whose unlinked spends are still needed by late discovery.
     /// Stores must use the same floor for insertion and pruning. Other pools retain
     /// their ordinary scan policy. `None` permits normal bounded retention.
+    #[cfg(feature = "experimental-swap-receiving")]
     fn ironwood_nullifier_retention_height(
         &self,
     ) -> Result<Option<zcash_protocol::consensus::BlockHeight>, Self::Error> {

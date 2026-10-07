@@ -303,7 +303,8 @@ pub struct PutBlocksRows {
 /// either received in an already-scanned block (so its spend is detected directly against
 /// the wallet's own nullifiers rather than the map) or is received later in this same
 /// ascending batch (so the spend is linked when the receiving transaction is processed).
-/// Late Ironwood discovery can lower that pool's tracking floor independently.
+/// With `experimental-swap-receiving`, late Ironwood discovery can lower that pool's
+/// tracking floor independently.
 /// For every out-of-order range — scanning after a gap, recent-first, or chain-tip
 /// pre-scans — the nullifiers of every block are tracked.
 pub fn put_blocks_rows<DbT, SE, TE>(
@@ -350,13 +351,15 @@ where
         from_state.block_height(),
         blocks.last().map(|block| block.height()),
     );
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "experimental-swap-receiving")]
     let ironwood_tracking_floor = {
         let retention = wallet_db
             .ironwood_nullifier_retention_height()
             .map_err(PutBlocksError::Storage)?;
         nullifier_tracking_floor.map(|floor| retention.map_or(floor, |r| floor.min(r)))
     };
+    #[cfg(all(feature = "orchard", not(feature = "experimental-swap-receiving")))]
+    let ironwood_tracking_floor = nullifier_tracking_floor;
 
     let mut sapling_commitments = vec![];
     #[cfg(feature = "orchard")]

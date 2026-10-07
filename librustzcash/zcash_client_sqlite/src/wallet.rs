@@ -5990,8 +5990,10 @@ pub(crate) fn insert_nullifier_map<N: AsRef<[u8]>>(
         }
     }
 
+    // Swap recovery's spend evidence: record even empty blocks, but only when their
+    // nullifiers were actually retained.
+    #[cfg(feature = "experimental-swap-receiving")]
     if spend_pool == ShieldedPool::Ironwood {
-        // Record even empty blocks, but only when their nullifiers were actually retained.
         conn.execute(
             "INSERT OR IGNORE INTO ironwood_nullifier_scan_blocks (height) VALUES (?1)",
             [u32::from(block_height)],
@@ -6063,6 +6065,7 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
 
 /// Shared retention uses the oldest unfinished account. A completed account cannot
 /// release another account's spend evidence.
+#[cfg(feature = "experimental-swap-receiving")]
 pub(crate) fn ironwood_nullifier_retention_height(
     conn: &Connection,
 ) -> Result<Option<BlockHeight>, SqliteClientError> {
@@ -6082,8 +6085,11 @@ pub(crate) fn prune_nullifier_map(
     conn: &rusqlite::Transaction<'_>,
     block_height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
+    #[cfg(feature = "experimental-swap-receiving")]
     let ironwood_floor = ironwood_nullifier_retention_height(conn)?
         .map_or(block_height, |floor| floor.min(block_height));
+    #[cfg(not(feature = "experimental-swap-receiving"))]
+    let ironwood_floor = block_height;
     conn.execute(
         "DELETE FROM nullifier_map WHERE block_height < ?1
          AND (spend_pool != ?2 OR block_height < ?3)",

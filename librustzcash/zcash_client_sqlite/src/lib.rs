@@ -2859,6 +2859,8 @@ where
 }
 
 impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P, CL, R> {
+    /// Stores scanned blocks for `put_blocks` and `put_blocks_with_swap_keys`. A build
+    /// without swap receiving refuses them while a swap key is open.
     fn store_scanned_blocks(
         &mut self,
         from_state: &ChainState,
@@ -3461,6 +3463,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         )
     }
 
+    #[cfg(feature = "experimental-swap-receiving")]
     fn ironwood_nullifier_retention_height(&self) -> Result<Option<BlockHeight>, Self::Error> {
         wallet::ironwood_nullifier_retention_height(self.conn.borrow())
     }
