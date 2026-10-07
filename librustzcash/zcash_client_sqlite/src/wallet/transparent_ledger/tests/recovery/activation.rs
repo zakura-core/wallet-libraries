@@ -1457,6 +1457,7 @@ mod public_fixtures;
 mod attribution;
 mod history_summaries;
 mod rewind_reconfirmation;
+mod transparent_detail;
 
 mod qualification;
 
