@@ -117,6 +117,21 @@ use zcash_protocol::{
     value::Zatoshis,
 };
 use zip32::{DiversifierIndex, fingerprint::SeedFingerprint};
+#[cfg(feature = "orchard")]
+use {
+    std::collections::BTreeMap,
+    zakura_dynamic_ivk::KeyId,
+    zcash_client_backend::{
+        data_api::{
+            dynamic_ivk::{
+                DirectoryPayment, DiscoveryWork, DynamicIvkRead, DynamicIvkWrite,
+                PaymentApplication, ProviderView, SweepDeferral,
+            },
+            transparent_ledger::ChainPoint,
+        },
+        scanning::dynamic_ivk::DynamicScanningKey,
+    },
+};
 
 use crate::{
     error::SqliteClientError,
@@ -1209,7 +1224,9 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
                     ConfirmationsPolicy::MIN,
                     exclude,
                     ShieldedPool::Orchard,
-                    wallet::orchard::to_received_note,
+                    |params, pool, row| {
+                        wallet::orchard::to_received_note(self.conn.borrow(), params, pool, row)
+                    },
                     wallet::common::NoteRequest::Unspent,
                     lock_filter,
                 )?
@@ -1226,7 +1243,9 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
                     ConfirmationsPolicy::MIN,
                     exclude,
                     ShieldedPool::Ironwood,
-                    wallet::orchard::to_received_note,
+                    |params, pool, row| {
+                        wallet::orchard::to_received_note(self.conn.borrow(), params, pool, row)
+                    },
                     wallet::common::NoteRequest::Unspent,
                     lock_filter,
                 )?
@@ -2425,6 +2444,156 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
     }
 }
 
+#[cfg(feature = "orchard")]
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> DynamicIvkRead
+    for WalletDb<C, P, CL, R>
+{
+    fn get_dynamic_scanning_keys(
+        &self,
+    ) -> Result<Vec<DynamicScanningKey<AccountUuid>>, Self::Error> {
+        wallet::dynamic_ivk::scanning_keys(self.conn.borrow(), &self.params)
+    }
+
+    fn get_dynamic_transaction_keys(
+        &self,
+        txid: TxId,
+        height: Option<BlockHeight>,
+        receivers: &[orchard::Address],
+    ) -> Result<Vec<DynamicScanningKey<AccountUuid>>, Self::Error> {
+        wallet::dynamic_ivk::transaction_keys(
+            self.conn.borrow(),
+            &self.params,
+            txid,
+            height,
+            receivers,
+        )
+    }
+
+    fn directory_publication_anchor(
+        &self,
+        height: BlockHeight,
+        through: ChainPoint,
+    ) -> Result<Result<ChainPoint, SweepDeferral>, Self::Error> {
+        wallet::dynamic_ivk::publication_anchor(self.conn.borrow(), height, through)
+    }
+
+    fn directory_note_data_needed(
+        &self,
+        account: AccountUuid,
+        key: KeyId,
+        payments: &[DirectoryPayment],
+    ) -> Result<Vec<u64>, Self::Error> {
+        wallet::dynamic_ivk::note_data_needed(self.conn.borrow(), account, key, payments)
+    }
+
+    fn dynamic_history_pending(
+        &self,
+        account: AccountUuid,
+        through: BlockHeight,
+    ) -> Result<bool, Self::Error> {
+        wallet::dynamic_ivk::history_pending(self.conn.borrow(), &self.params, account, through)
+    }
+}
+
+#[cfg(feature = "orchard")]
+impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
+    DynamicIvkWrite for WalletDb<C, P, CL, R>
+{
+    fn put_blocks_with_dynamic_ivks(
+        &mut self,
+        from_state: &ChainState,
+        blocks: Vec<ScannedBlock<AccountUuid>>,
+        keys: &[(AccountUuid, KeyId)],
+    ) -> Result<(), SqliteClientError> {
+        self.transactionally(|wdb| wdb.store_scanned_blocks(from_state, blocks, Some(keys)))
+    }
+
+    fn maintain_dynamic_ivks(&mut self, account: AccountUuid) -> Result<(), SqliteClientError> {
+        let now = wallet::dynamic_ivk::unix_now(&self.clock);
+        self.transactionally(|wdb| {
+            wallet::dynamic_ivk::maintain(wdb.conn.0, wdb.params, account, now)
+        })
+    }
+
+    fn prepare_dynamic_sweeps(
+        &mut self,
+        account: AccountUuid,
+        through: ChainPoint,
+        now: i64,
+        limit: NonZeroU32,
+    ) -> Result<Result<Vec<DiscoveryWork>, SweepDeferral>, SqliteClientError> {
+        self.transactionally(|wdb| {
+            wallet::dynamic_ivk::prepare_sweeps(
+                wdb.conn.0, wdb.params, account, through, now, limit,
+            )
+        })
+    }
+
+    fn begin_dynamic_sweep_attempt(
+        &mut self,
+        account: AccountUuid,
+        key: KeyId,
+        now: i64,
+    ) -> Result<(), SqliteClientError> {
+        self.transactionally(|wdb| {
+            wallet::dynamic_ivk::begin_sweep_attempt(wdb.conn.0, account, key, now)
+        })
+    }
+
+    fn queue_directory_lookup(
+        &mut self,
+        account: AccountUuid,
+        key: KeyId,
+        anchor: ChainPoint,
+        payments: &[DirectoryPayment],
+        note_data: &BTreeMap<u64, [u8; 528]>,
+    ) -> Result<Result<bool, SweepDeferral>, SqliteClientError> {
+        self.transactionally(|wdb| {
+            wallet::dynamic_ivk::queue_directory_lookup(
+                wdb.conn.0, wdb.params, account, key, anchor, payments, note_data,
+            )
+        })
+    }
+
+    fn apply_dynamic_sweep(
+        &mut self,
+        account: AccountUuid,
+        key: KeyId,
+        through: ChainPoint,
+        publication: ChainPoint,
+        provider: ProviderView,
+        witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
+    ) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
+        wallet::dynamic_ivk::apply_sweep(
+            self,
+            account,
+            key,
+            through,
+            publication,
+            provider,
+            witness,
+        )
+    }
+
+    fn finish_dynamic_nullifier_recovery(
+        &mut self,
+        account: AccountUuid,
+        through: ChainPoint,
+    ) -> Result<bool, SqliteClientError> {
+        let now = wallet::dynamic_ivk::unix_now(&self.clock);
+        self.transactionally(|wdb| {
+            wallet::dynamic_ivk::finish_nullifier_recovery(
+                wdb.conn.0,
+                wdb.params,
+                account,
+                through,
+                wallet::dynamic_ivk::RECEIVE_LOOKAHEAD,
+                now,
+            )
+        })
+    }
+}
+
 #[cfg(any(test, feature = "test-dependencies"))]
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletTest
     for WalletDb<C, P, CL, R>
@@ -2973,6 +3142,80 @@ where
     }
 }
 
+impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P, CL, R> {
+    /// Stores scanned blocks for `put_blocks` and, with `dynamic_keys`, the dynamic key
+    /// snapshot that scanned them, for `put_blocks_with_dynamic_ivks`. Blocks scanned
+    /// without dynamic keys are refused while one is open: storing them would mark that
+    /// key's payments scanned without finding them.
+    fn store_scanned_blocks(
+        &mut self,
+        from_state: &ChainState,
+        blocks: Vec<ScannedBlock<AccountUuid>>,
+        #[cfg(feature = "orchard")] dynamic_keys: Option<&[(AccountUuid, KeyId)]>,
+    ) -> Result<(), SqliteClientError> {
+        #[cfg(feature = "orchard")]
+        if dynamic_keys.is_none() && wallet::dynamic_ivk::key_open(self.conn.0)? {
+            return Err(SqliteClientError::DynamicIvksNotUsed);
+        }
+        // Once the NU6.3 (Ironwood) activation height is reached, checkpoints on the anchor
+        // retention grids are retained as durable anchors. The activation height is `None` (and so
+        // anchor retention is inactive) on networks that do not yet have an assigned NU6.3
+        // activation height.
+        //
+        // Upstream also unions in the grid every in-flight pool migration was committed under,
+        // read from the database. This fork does not carry the pool-migration engine, so no such
+        // row can exist and the union is exactly this wallet's configured interval. Restoring that
+        // behaviour means restoring the engine, not just this call.
+        let anchor_retention = self
+            .params
+            .activation_height(consensus::NetworkUpgrade::Nu6_3)
+            .map(|from_height| {
+                Ok::<_, SqliteClientError>(AnchorRetention::union(
+                    from_height,
+                    core::iter::once(self.anchor_retention_interval),
+                ))
+            })
+            .transpose()?
+            .flatten();
+
+        let scanned_block_identities: Vec<_> = blocks
+            .iter()
+            .map(|block| (block.height(), block.block_hash()))
+            .collect();
+        #[cfg(feature = "orchard")]
+        let scanned_range = blocks
+            .first()
+            .zip(blocks.last())
+            .map(|(first, last)| first.height()..last.height() + 1);
+
+        ll::wallet::put_blocks::<_, SqliteClientError, commitment_tree::Error>(
+            self,
+            #[cfg(feature = "transparent-inputs")]
+            self.gap_limits,
+            from_state,
+            blocks,
+            anchor_retention.as_ref(),
+            #[cfg(feature = "orchard")]
+            wallet::ironwood_nullifier_retention_height(self.conn.0)?,
+        )
+        .map_err(SqliteClientError::from)?;
+
+        wallet::transaction_reconfirmation::reconcile_scanned_blocks(
+            self.conn.0,
+            &self.params,
+            #[cfg(feature = "transparent-inputs")]
+            &self.gap_limits,
+            &scanned_block_identities,
+        )?;
+        // A key activated after the scanner captured its keys missed this batch.
+        #[cfg(feature = "orchard")]
+        if let Some((keys, range)) = dynamic_keys.zip(scanned_range) {
+            wallet::dynamic_ivk::rescan_missed_keys(self.conn.0, keys, range)?;
+        }
+        Ok(())
+    }
+}
+
 impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
     for WalletDb<SqlTransaction<'_>, P, CL, R>
 {
@@ -3179,8 +3422,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         &mut self,
         tip_height: BlockHeight,
     ) -> Result<(), <Self as WalletRead>::Error> {
-        wallet::scanning::update_chain_tip(self.conn.0, &self.params, tip_height)?;
-        Ok(())
+        wallet::scanning::update_chain_tip(self.conn.0, &self.params, tip_height)
     }
 
     fn prune_scan_queue_below(
@@ -3197,50 +3439,11 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<<Self as WalletRead>::AccountId>>,
     ) -> Result<(), <Self as WalletRead>::Error> {
-        // Once the NU6.3 (Ironwood) activation height is reached, checkpoints on the anchor
-        // retention grids are retained as durable anchors. The activation height is `None` (and so
-        // anchor retention is inactive) on networks that do not yet have an assigned NU6.3
-        // activation height.
-        //
-        // Upstream also unions in the grid every in-flight pool migration was committed under,
-        // read from the database. This fork does not carry the pool-migration engine, so no such
-        // row can exist and the union is exactly this wallet's configured interval. Restoring that
-        // behaviour means restoring the engine, not just this call.
-        let anchor_retention = self
-            .params
-            .activation_height(consensus::NetworkUpgrade::Nu6_3)
-            .map(|from_height| {
-                Ok::<_, SqliteClientError>(AnchorRetention::union(
-                    from_height,
-                    core::iter::once(self.anchor_retention_interval),
-                ))
-            })
-            .transpose()?
-            .flatten();
-
-        let scanned_block_identities: Vec<_> = blocks
-            .iter()
-            .map(|block| (block.height(), block.block_hash()))
-            .collect();
-
-        ll::wallet::put_blocks::<_, SqliteClientError, commitment_tree::Error>(
-            self,
-            #[cfg(feature = "transparent-inputs")]
-            self.gap_limits,
+        self.store_scanned_blocks(
             from_state,
             blocks,
-            anchor_retention.as_ref(),
             #[cfg(feature = "orchard")]
             None,
-        )
-        .map_err(SqliteClientError::from)?;
-
-        wallet::transaction_reconfirmation::reconcile_scanned_blocks(
-            self.conn.0,
-            &self.params,
-            #[cfg(feature = "transparent-inputs")]
-            &self.gap_limits,
-            &scanned_block_identities,
         )
     }
 
@@ -3288,6 +3491,12 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         &mut self,
         d_tx: DecryptedTransaction<Transaction, <Self as WalletRead>::AccountId>,
     ) -> Result<(), <Self as WalletRead>::Error> {
+        // As with scanned blocks, a transaction decrypted without the open dynamic keys
+        // would store their payments as someone else's.
+        #[cfg(feature = "orchard")]
+        if !d_tx.dynamic_ivks_applied() && wallet::dynamic_ivk::key_open(self.conn.0)? {
+            return Err(SqliteClientError::DynamicIvksNotUsed);
+        }
         let chain_tip = wallet::chain_tip_height(self.conn.borrow())?
             .ok_or(SqliteClientError::ChainHeightUnknown)?;
         store_decrypted_tx(
@@ -3337,6 +3546,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                 &self.gap_limits,
                 sent_tx,
             )?;
+            #[cfg(feature = "orchard")]
+            wallet::dynamic_ivk::start_funded_refund_keys(self.conn.0, &self.params, sent_tx.tx())?;
         }
         Ok(())
     }
@@ -4436,6 +4647,22 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             tracing::info!("Attributing the sent outputs of transaction {txid} to its funder");
             let ufvks = wallet::get_unified_full_viewing_keys(self.conn.borrow(), &params)?;
             let d_tx = decrypt_transaction(&params, mined_height, Some(tip), &tx, &ufvks);
+            #[cfg(feature = "orchard")]
+            let d_tx = {
+                let receivers: Vec<_> = d_tx
+                    .ironwood_outputs()
+                    .iter()
+                    .map(|output| output.note().0.recipient())
+                    .collect();
+                let keys = wallet::dynamic_ivk::transaction_keys(
+                    self.conn.borrow(),
+                    &params,
+                    txid,
+                    mined_height,
+                    &receivers,
+                )?;
+                d_tx.with_dynamic_ivks(keys)
+            };
             store_decrypted_tx(self, &params, self.gap_limits, tip, d_tx)?;
         }
         Ok(())

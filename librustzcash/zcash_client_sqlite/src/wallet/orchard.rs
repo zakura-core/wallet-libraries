@@ -36,6 +36,7 @@ use super::{
 };
 
 pub(crate) fn to_received_note<P: consensus::Parameters>(
+    conn: &Connection,
     params: &P,
     pool: ShieldedPool,
     row: &Row,
@@ -44,6 +45,11 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
     // `ReceivedNoteId` must carry the pool the note was selected from, so that pool-filtered
     // exclusion (see `select_unspent_notes`) matches it rather than misrouting it to Orchard.
     let note_id = ReceivedNoteId(pool, row.get("id")?);
+    let receiving_key_id: Option<i64> = if pool == ShieldedPool::Ironwood {
+        row.get("receiving_key_id")?
+    } else {
+        None
+    };
     let txid = row.get::<_, [u8; 32]>("txid").map(TxId::from_bytes)?;
     let action_index = row.get("action_index")?;
     let diversifier = {
@@ -115,12 +121,22 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
                     SqliteClientError::CorruptedData(format!("Invalid key scope code {scope_code}"))
                 })?;
 
-            let recipient = ufvk
-                .orchard()
-                .map(|fvk| fvk.to_ivk(spending_key_scope).address(diversifier))
-                .ok_or_else(|| {
-                    SqliteClientError::CorruptedData("Diversifier invalid.".to_owned())
-                })?;
+            let fvk = ufvk.orchard().ok_or_else(|| {
+                SqliteClientError::CorruptedData("missing Orchard FVK".to_owned())
+            })?;
+            let dynamic_key = receiving_key_id
+                .map(|id| super::dynamic_ivk::note_key(conn, id, fvk))
+                .transpose()?;
+            let fvk = dynamic_key.as_ref().map_or(fvk, |(_, fvk)| fvk);
+            let recipient = fvk.to_ivk(spending_key_scope).address(diversifier);
+            if dynamic_key.is_some()
+                && (spending_key_scope != Scope::External
+                    || recipient != fvk.address_at(0u32, Scope::External))
+            {
+                return Err(SqliteClientError::CorruptedData(
+                    "invalid dynamic-key note recipient".into(),
+                ));
+            }
 
             let note = Option::from(Note::from_parts(
                 recipient,
@@ -131,7 +147,7 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
             ))
             .ok_or_else(|| SqliteClientError::CorruptedData("Invalid Orchard note.".to_string()))?;
 
-            Ok(ReceivedNote::from_parts(
+            let received = ReceivedNote::from_parts(
                 note_id,
                 txid,
                 action_index,
@@ -140,7 +156,8 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
                 note_commitment_tree_position,
                 mined_height,
                 max_shielding_input_height,
-            ))
+            );
+            Ok(received.with_dynamic_key_id(dynamic_key.map(|(id, _)| id)))
         })
         .transpose()
 }
@@ -160,7 +177,7 @@ pub(crate) fn get_spendable_orchard_note<P: consensus::Parameters>(
         index,
         ShieldedPool::Orchard,
         target_height,
-        to_received_note,
+        |params, pool, row| to_received_note(conn, params, pool, row),
         lock_filter,
     )
 }
@@ -183,7 +200,7 @@ pub(crate) fn get_spendable_ironwood_note<P: consensus::Parameters>(
         index,
         ShieldedPool::Ironwood,
         target_height,
-        to_received_note,
+        |params, pool, row| to_received_note(conn, params, pool, row),
         lock_filter,
     )
 }
@@ -211,7 +228,7 @@ pub(crate) fn select_spendable_ironwood_notes<P: consensus::Parameters>(
         confirmations_policy,
         exclude,
         ShieldedPool::Ironwood,
-        to_received_note,
+        |params, pool, row| to_received_note(conn, params, pool, row),
         lock_filter,
     )
 }
@@ -238,7 +255,7 @@ pub(crate) fn select_spendable_ironwood_notes_for_consolidation<P: consensus::Pa
         confirmations_policy,
         exclude,
         ShieldedPool::Ironwood,
-        to_received_note,
+        |params, pool, row| to_received_note(conn, params, pool, row),
         lock_filter,
         max_additional_notes,
     )
@@ -264,7 +281,7 @@ pub(crate) fn select_spendable_orchard_notes<P: consensus::Parameters>(
         confirmations_policy,
         exclude,
         ShieldedPool::Orchard,
-        to_received_note,
+        |params, pool, row| to_received_note(conn, params, pool, row),
         lock_filter,
     )
 }
@@ -291,7 +308,7 @@ pub(crate) fn select_spendable_orchard_notes_for_consolidation<P: consensus::Par
         confirmations_policy,
         exclude,
         ShieldedPool::Orchard,
-        to_received_note,
+        |params, pool, row| to_received_note(conn, params, pool, row),
         lock_filter,
         max_additional_notes,
     )
@@ -364,11 +381,16 @@ fn get_unspent_orchard_shaped_notes_at_historical_height<P: consensus::Parameter
     let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(shielded_pool)?;
     let external_scope = KeyScope::EXTERNAL.encode();
     let internal_scope = KeyScope::INTERNAL.encode();
+    let receiving_key_column = if shielded_pool == ShieldedPool::Ironwood {
+        "rn.receiving_key_id"
+    } else {
+        "NULL AS receiving_key_id"
+    };
 
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT
              rn.id AS id, t.txid, rn.action_index,
-             rn.diversifier, rn.value, rn.rho, rn.rseed, rn.note_version,
+             rn.diversifier, rn.value, rn.rho, rn.rseed, rn.note_version, {receiving_key_column},
              rn.commitment_tree_position,
              accounts.ufvk AS ufvk, rn.recipient_key_scope,
              t.mined_height,
@@ -396,7 +418,7 @@ fn get_unspent_orchard_shaped_notes_at_historical_height<P: consensus::Parameter
             ":account_uuid": account.0,
             ":height": u32::from(height),
         ],
-        |row| to_received_note(params, shielded_pool, row),
+        |row| to_received_note(conn, params, shielded_pool, row),
     )?;
 
     rows.filter_map(|r| r.transpose()).collect()
@@ -507,7 +529,34 @@ pub(crate) fn put_received_note<
     let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(shielded_pool)?;
 
     let account_id = get_account_ref(conn, output.account_id())?;
-    let address_id = ensure_address(conn, params, output, target_or_mined_height)?;
+    let receiving_key_id =
+        super::dynamic_ivk::validate_received_key(conn, params, shielded_pool, output)?;
+    if let (ShieldedPool::Ironwood, Some(nf)) = (shielded_pool, output.nullifier()) {
+        super::dynamic_ivk::adopt_found_note(conn, &nf.to_bytes(), tx_ref, output.index())?;
+    }
+    if shielded_pool == ShieldedPool::Ironwood {
+        use rusqlite::OptionalExtension;
+        let stored_key: Option<i64> = conn
+            .query_row(
+                "SELECT receiving_key_id FROM ironwood_received_notes
+             WHERE transaction_id = ?1 AND action_index = ?2",
+                rusqlite::params![tx_ref.0, output.index() as i64],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        if stored_key.is_some() && stored_key != receiving_key_id {
+            return Err(SqliteClientError::CorruptedData(
+                "dynamic-key note key identity changed".into(),
+            ));
+        }
+    }
+    let address_id = if receiving_key_id.is_some() {
+        // Dynamic-key receivers are not addresses under the ordinary account UIVK.
+        None
+    } else {
+        ensure_address(conn, params, output, target_or_mined_height)?
+    };
     let note_version = output.note().version();
     let mut stmt_upsert_received_note = conn.prepare_cached(&format!(
         "INSERT INTO {table_prefix}_received_notes (
@@ -563,6 +612,20 @@ pub(crate) fn put_received_note<
         .query_row(sql_args, |row| row.get::<_, i64>(0))
         .map_err(SqliteClientError::from)?;
 
+    // Only validated Ironwood dynamic-key outputs carry a key.
+    if let Some(key_id) = receiving_key_id {
+        conn.execute(
+            "UPDATE ironwood_received_notes SET receiving_key_id = ?1 WHERE id = ?2",
+            rusqlite::params![key_id, received_note_id],
+        )?;
+        // A decrypted payment makes its index used, so it advances allocation and is
+        // never issued again. Commit this together with the note so a restart cannot
+        // allocate the paid address again.
+        conn.execute(
+            "UPDATE ironwood_receiving_keys SET advances_allocation = 1, used = 1 WHERE id = ?1",
+            [key_id],
+        )?;
+    }
     super::ironwood_hooks::put_received_note_encryption_fields(
         conn,
         shielded_pool,

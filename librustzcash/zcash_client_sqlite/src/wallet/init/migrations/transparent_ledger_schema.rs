@@ -153,8 +153,12 @@ mod tests {
     fn pre_migration_wallet(file: &NamedTempFile) -> Db {
         let network = Network::TestNetwork;
         let mut db = WalletDb::for_path(file.path(), network, test_clock(), test_rng()).unwrap();
+        // The independent dynamic IVK migration belongs to the baseline, so this test
+        // isolates the transparent migration's effects on existing rows.
+        let mut baseline = DEPENDENCIES.to_vec();
+        baseline.push(super::super::dynamic_ivk::MIGRATION_ID);
         WalletMigrator::new()
-            .init_or_migrate_to(&mut db, DEPENDENCIES)
+            .init_or_migrate_to(&mut db, &baseline)
             .unwrap();
 
         let ufvk = |seed: u8| {

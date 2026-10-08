@@ -312,6 +312,29 @@ fn require_lwd(
     Ok(())
 }
 
+/// Settles enhancement for the Ironwood note at `action_index` of `tx_ref`, whose memo a
+/// dynamic IVK restore sweep retrieved privately: dequeues its memo retrieval, keeps the
+/// transaction on private routing unless it already has a route, and retires its
+/// enhancement if nothing is left.
+pub(crate) fn finish_private_receipt(
+    conn: &Connection,
+    tx_ref: crate::TxRef,
+    action_index: u32,
+) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "DELETE FROM ironwood_memo_retrieval_queue WHERE received_note_id IN
+            (SELECT id FROM ironwood_received_notes
+             WHERE transaction_id = ?1 AND action_index = ?2)",
+        rusqlite::params![tx_ref.0, action_index],
+    )?;
+    conn.execute(
+        "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1,?2)
+        ON CONFLICT(transaction_id) DO NOTHING",
+        rusqlite::params![tx_ref.0, PRIVATE_PROTECTED],
+    )?;
+    retire_enhancement_if_complete(conn, tx_ref)
+}
+
 /// Marks a mixed or otherwise publicly unrecoverable transaction under PrivateRequired.
 /// Clears retryable PIR jobs without deleting financial facts or inserting a public request,
 /// then requeues the memos of its received Ironwood notes, which remain privately recoverable.
@@ -981,6 +1004,7 @@ fn pending_note<P: Parameters>(
         i64,
         [u8; 32],
         [u8; 52],
+        Option<i64>,
     )> = conn
         .query_row(
             concat!(
@@ -992,7 +1016,7 @@ fn pending_note<P: Parameters>(
                 WHERE :metadata AND rn.commitment_tree_position = m.commitment_tree_position
              )
              SELECT t.txid, rn.action_index, a.uuid, rn.diversifier, rn.value,
-                    rn.rho, rn.rseed, rn.note_version, rn.recipient_key_scope, rn.ephemeral_key, rn.compact_ciphertext
+                    rn.rho, rn.rseed, rn.note_version, rn.recipient_key_scope, rn.ephemeral_key, rn.compact_ciphertext, rn.receiving_key_id
              FROM q
              JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
              JOIN transactions t ON t.id_tx = rn.transaction_id
@@ -1024,6 +1048,7 @@ fn pending_note<P: Parameters>(
                     row.get(8)?,
                     row.get(9)?,
                     row.get(10)?,
+                    row.get(11)?,
                 ))
             },
         )
@@ -1040,6 +1065,7 @@ fn pending_note<P: Parameters>(
         scope,
         ephemeral_key,
         compact_ciphertext,
+        receiving_key_id,
     )) = raw
     else {
         return Ok(None);
@@ -1057,22 +1083,22 @@ fn pending_note<P: Parameters>(
     let account =
         get_account(conn, params, account_id)?.ok_or(SqliteClientError::AccountUnknown)?;
     let diversifier = Diversifier::from_bytes(diversifier);
-    let recipient = match scope {
-        Scope::External => account
-            .uivk()
-            .orchard()
-            .as_ref()
-            .map(|ivk| ivk.address(diversifier)),
-        Scope::Internal => account
-            .ufvk()
-            .and_then(|ufvk| ufvk.orchard())
-            .map(|fvk| fvk.to_ivk(Scope::Internal).address(diversifier)),
-    }
-    .ok_or_else(|| {
-        SqliteClientError::CorruptedData(
-            "Account cannot reconstruct queued Ironwood note".to_owned(),
-        )
-    })?;
+    let ivk = match receiving_key_id {
+        Some(id) => super::dynamic_ivk::queued_note_ivk(conn, &account, id, scope, diversifier)?,
+        None => match scope {
+            Scope::External => account.uivk().orchard().clone(),
+            Scope::Internal => account
+                .ufvk()
+                .and_then(|ufvk| ufvk.orchard())
+                .map(|fvk| fvk.to_ivk(Scope::Internal)),
+        }
+        .ok_or_else(|| {
+            SqliteClientError::CorruptedData(
+                "Account cannot reconstruct queued Ironwood note".to_owned(),
+            )
+        })?,
+    };
+    let recipient = ivk.address(diversifier);
     let rho = Option::from(Rho::from_bytes(&rho)).ok_or_else(|| {
         SqliteClientError::CorruptedData("Invalid queued Ironwood rho".to_owned())
     })?;
@@ -1094,7 +1120,7 @@ fn pending_note<P: Parameters>(
         request_id: IronwoodEnhanceRequestId::new(TxId::from_bytes(txid), output_index),
         account_id,
         note,
-        scope,
+        ivk: ivk.prepare(),
         ephemeral_key,
         compact_ciphertext,
     }))

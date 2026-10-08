@@ -17,6 +17,7 @@ mod add_transparent_value_index;
 mod add_utxo_account;
 mod addresses_table;
 mod drop_zip318_pool_migration;
+mod dynamic_ivk;
 mod ensure_default_transparent_address;
 mod ensure_orchard_ua_receiver;
 mod ephemeral_addresses;
@@ -31,7 +32,7 @@ mod ironwood_enhance;
 mod ironwood_pool_code_views;
 mod ironwood_received_notes;
 mod ironwood_shardtree;
-mod ironwood_transparent_output_shape;
+pub(crate) mod ironwood_transparent_output_shape;
 mod ironwood_unsupported_memo_retry;
 mod ivk_item_cache;
 mod note_locking;
@@ -137,6 +138,7 @@ pub mod ids {
         add_utxo_account::MIGRATION_ID as ADD_UTXO_ACCOUNT,
         addresses_table::MIGRATION_ID as ADDRESSES_TABLE,
         drop_zip318_pool_migration::MIGRATION_ID as DROP_ZIP318_POOL_MIGRATION,
+        dynamic_ivk::MIGRATION_ID as DYNAMIC_IVK,
         ensure_default_transparent_address::MIGRATION_ID as ENSURE_DEFAULT_TRANSPARENT_ADDRESS,
         ensure_orchard_ua_receiver::MIGRATION_ID as ENSURE_ORCHARD_UA_RECEIVER,
         ephemeral_addresses::MIGRATION_ID as EPHEMERAL_ADDRESSES,
@@ -403,6 +405,7 @@ pub(super) fn all_migrations<
         Box::new(orchard_note_version::Migration),
         Box::new(ironwood_received_notes::Migration),
         Box::new(ironwood_enhance::Migration),
+        Box::new(dynamic_ivk::Migration),
         Box::new(ironwood_pool_code_views::Migration),
         Box::new(fix_bad_ironwood_change_flagging::Migration),
         Box::new(v_address_uses_ironwood::Migration),
@@ -687,7 +690,10 @@ pub(crate) fn forget_txid_enhancement(conn: &rusqlite::Connection) {
 }
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_txid_enhancement::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
+    transparent_txid_enhancement::MIGRATION_ID,
+    dynamic_ivk::MIGRATION_ID,
+];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -797,6 +803,7 @@ pub(crate) mod tests {
             ids::ADD_UTXO_ACCOUNT,
             ids::ADDRESSES_TABLE,
             ids::DROP_ZIP318_POOL_MIGRATION,
+            ids::DYNAMIC_IVK,
             ids::ENSURE_DEFAULT_TRANSPARENT_ADDRESS,
             ids::ENSURE_ORCHARD_UA_RECEIVER,
             ids::EPHEMERAL_ADDRESSES,

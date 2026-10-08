@@ -123,6 +123,63 @@ workspace.
   facts atomically, and promotion refuses a transfer that introduces missing coverage.
 
 ### Added
+- Dynamic IVKs (with `orchard`; module `wallet::dynamic_ivk`): per-swap Ironwood refund
+  and incoming addresses derived from the account viewing key with `zakura-dynamic-ivk`,
+  recoverable from the seed. `WalletDb` implements the backend's `DynamicIvkRead` and
+  `DynamicIvkWrite`. Keys the wallet issues are trial-decrypted in every batch of
+  `scan_cached_blocks_with_dynamic_ivks` until they close, and their notes spend into
+  ordinary change. Full-transaction and Enhance PIR retrieval authenticate these notes
+  with their registered key. While a dynamic key is open, blocks and transactions
+  processed without the dynamic keys are refused
+  (`SqliteClientError::DynamicIvksNotUsed`). Invalid input to these calls is
+  `SqliteClientError::InvalidDynamicIvkInput`, and a call that must wait returns its
+  `ReservationPolicy` or `SweepDeferral` as an `Ok` value.
+- Issuance: `WalletDb::reserve_refund_key` and `prepare_receive_reservation`, which require
+  scanning within `ISSUANCE_TIP_LAG` blocks of the network tip and hold incoming
+  addresses within a `RECEIVE_GAP_LIMIT` recovery gap. Issuance takes the lowest address
+  never quoted and reuses the lowest abandoned one only when the gap leaves no other. It
+  takes the provider's current seen set as a `ProviderSeen`: an address the set holds,
+  one with an accepted quote, or one with a quote the set's read does not yet cover (or
+  any quote, without a set) is never issued, and a draft whose address was seen is
+  abandoned. Seen addresses move the gap like paid ones, since a restore walks past them.
+- Operations: each quote is one provider operation. An incoming one is
+  `begin_receive_operation`, `finish_receive_operation` (`OperationOutcome`) and
+  `start_receive_operation`, which returns the `ReceiveDeposit` to show; an accepted
+  deadline cannot exceed the requested one. `record_operation_status` takes a provider
+  status the app normalized with `zakura_dynamic_ivk::lifecycle::near_observation` for
+  either kind of operation, by deposit address and memo, and reclaims what it made
+  reclaimable: an unstarted reservation after its latest deadline and
+  `RECEIVE_RECLAIM_SECONDS`, a started one on a fresh conclusive status, and a funded one
+  only once refunded. A reclaimed address stops scanning.
+- Funding: `record_refund_operation`, `refund_funding_memo` and
+  `verify_refund_funding_proposal`. The refund index travels in a memo on the funding
+  transaction's internal Ironwood change, whose only transparent output is the deposit. A
+  refund key starts scanning when `store_transactions_to_be_sent` stores its funding
+  transaction, or when the provider reports a refund owed for a deposit paid from
+  elsewhere.
+- Lifecycle: `close_finished_dynamic_keys`. A key closes once its final provider status
+  and expected receipts are in, or 30 days after the quote deadline (a provider status can
+  fill in a missing deadline but not move one), or a day after a restored key's sweep, but
+  not while a receipt is unmined and unexpired or short of ZIP 315's untrusted
+  confirmations, and only while the wallet is scanned to the chain tip, by the earlier of
+  the caller's clock and the tip's block time. `recheck_dynamic_key_history` sweeps closed
+  keys again on request, and a rewind reopens a closed key whose receipt it un-mines.
+- Recovery: `maintain_dynamic_ivks`, called at each sync start and tip, recovers funding
+  memos and keeps an incoming lookahead. Each recovered key is swept once through a
+  receiver directory. `zakura_pir_receiver::sweep` drives the trait steps
+  `prepare_dynamic_sweeps`, `begin_dynamic_sweep_attempt`, `directory_publication_anchor`,
+  `directory_note_data_needed`, `queue_directory_lookup` and `apply_dynamic_sweep`, which
+  credit a note only after verifying its inclusion and spend state locally, and then
+  `finish_dynamic_nullifier_recovery`, which releases the Ironwood spend history the
+  sweeps needed. Note data is queued in batches, so a long history keeps its progress,
+  and a directory claim that fails a local check (`PaymentApplication::Rejected`) is
+  looked up again. `apply_dynamic_sweep` takes a `ProviderView` of the key's receiver: a
+  recent one keeps scanning after its sweep, any other that was not already scanning
+  closes at its lookup, and a seen one is never issued. A payment before the account's
+  birthday is checked for inclusion ahead of the birthday block and then raises the
+  recovery bound without being tracked. Scanning that later finds the same note moves it
+  to the transaction it is found in. `dynamic_history_pending` reports unfinished sweeps.
+- `get_dynamic_key_for_receiver` reads the dynamic key registered for a receiver.
 - `WalletDb::transaction_history_summaries` returns typed account-scoped transaction
   metadata and monetary effects without reading raw transaction payloads. It shares
   the corrected accounting definition of `v_transactions`, filters account inputs

@@ -528,6 +528,28 @@ CREATE INDEX idx_orchard_received_note_spends_transaction_id ON orchard_received
     transaction_id ASC
 )"#;
 
+/// Registered dynamic keys, each with at most one incoming reservation. Empty lookahead
+/// entries do not advance allocation.
+pub(super) const TABLE_IRONWOOD_RECEIVING_KEYS: &str = "CREATE TABLE ironwood_receiving_keys (
+                id INTEGER PRIMARY KEY,
+                account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                purpose INTEGER NOT NULL CHECK (purpose IN (0, 1)),
+                key_index BLOB NOT NULL CHECK (typeof(key_index) = 'blob' AND length(key_index) = 8),
+                receiver BLOB NOT NULL CHECK (typeof(receiver) = 'blob' AND length(receiver) = 43),
+                scan_from INTEGER NOT NULL CHECK (scan_from BETWEEN 0 AND 4294967295),
+                advances_allocation INTEGER NOT NULL CHECK (advances_allocation IN (0, 1)),
+                used INTEGER NOT NULL DEFAULT 0 CHECK (used IN (0, 1)),
+                paid_before_birthday INTEGER NOT NULL DEFAULT 0
+                    CHECK (paid_before_birthday IN (0, 1)),
+                provider_seen INTEGER NOT NULL DEFAULT 0 CHECK (provider_seen IN (0, 1)),
+                registered_at INTEGER NOT NULL DEFAULT 0,
+                reserved_at INTEGER,
+                released_at INTEGER,
+                active_from INTEGER CHECK (active_from BETWEEN 0 AND 4294967295),
+                closed_at INTEGER,
+                UNIQUE (account_id, purpose, key_index)
+            )";
+
 /// Stores the Ironwood notes received by the wallet.
 ///
 /// Ironwood notes ([ZIP 2005], NU6.3) are Orchard-protocol notes obtained from version 3 note
@@ -568,7 +590,8 @@ CREATE TABLE ironwood_received_notes (
     compact_ciphertext BLOB
     CHECK ((ephemeral_key IS NULL AND compact_ciphertext IS NULL) OR
            (ephemeral_key IS NOT NULL AND compact_ciphertext IS NOT NULL AND
-            length(ephemeral_key) = 32 AND length(compact_ciphertext) = 52)),
+            length(ephemeral_key) = 32 AND length(compact_ciphertext) = 52)), receiving_key_id INTEGER
+                REFERENCES ironwood_receiving_keys(id),
     UNIQUE (transaction_id, action_index)
 )";
 pub(super) const INDEX_IRONWOOD_RECEIVED_NOTES_ACCOUNT: &str = "
@@ -1960,6 +1983,74 @@ CREATE TABLE ironwood_enhance_metadata_queue (
     CHECK ((commitment_tree_position IS NULL) = (output_index IS NULL)),
     CHECK (compact_bound = 0 OR commitment_tree_position IS NOT NULL)
 )";
+
+pub(super) const TABLE_IRONWOOD_NULLIFIER_SCAN_BLOCKS: &str =
+    "CREATE TABLE ironwood_nullifier_scan_blocks (
+                height INTEGER PRIMARY KEY CHECK (height BETWEEN 0 AND 4294967295)
+            )";
+
+pub(super) const TABLE_IRONWOOD_DYNAMIC_PAYMENT_RECOVERY: &str = "CREATE TABLE ironwood_dynamic_payment_recovery (
+                receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
+                txid BLOB NOT NULL CHECK (length(txid) = 32),
+                action_index INTEGER NOT NULL CHECK (action_index BETWEEN 0 AND 4294967295),
+                height INTEGER NOT NULL CHECK (height BETWEEN 0 AND 4294967295),
+                block_hash BLOB NOT NULL CHECK (length(block_hash) = 32),
+                tx_index INTEGER NOT NULL CHECK (tx_index BETWEEN 0 AND 65535),
+                position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 4294967295),
+                encrypted_note BLOB NOT NULL CHECK (length(encrypted_note) = 676),
+                PRIMARY KEY (txid, action_index)
+            )";
+
+/// One provider operation on a dynamic key: an incoming quote request, identified by
+/// `request` and accepted once `reference` holds its deposit address, or a refund quote,
+/// identified by its deposit address. `expectation` is the normalized status (see
+/// `dynamic_ivk::lifecycle::record`).
+pub(super) const TABLE_IRONWOOD_DYNAMIC_OPERATIONS: &str = "CREATE TABLE ironwood_dynamic_operations (
+                id INTEGER PRIMARY KEY,
+                receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
+                request TEXT UNIQUE,
+                reference TEXT,
+                memo TEXT,
+                deadline INTEGER,
+                begun_at INTEGER NOT NULL,
+                started INTEGER NOT NULL DEFAULT 0 CHECK (started IN (0, 1)),
+                funded INTEGER NOT NULL DEFAULT 0 CHECK (funded IN (0, 1)),
+                observed_at INTEGER NOT NULL DEFAULT 0,
+                expectation INTEGER NOT NULL DEFAULT 0 CHECK (expectation IN (0, 1, 2, 3, 4)),
+                expected_value INTEGER CHECK (expected_value > 0),
+                CHECK (request IS NOT NULL OR reference IS NOT NULL)
+            )";
+
+pub(super) const TABLE_IRONWOOD_DYNAMIC_SWEEPS: &str = "CREATE TABLE ironwood_dynamic_sweeps (
+                receiving_key_id INTEGER PRIMARY KEY REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
+                lookup_height INTEGER CHECK (lookup_height BETWEEN 0 AND 4294967295),
+                lookup_hash BLOB CHECK (length(lookup_hash) = 32),
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295)
+            )";
+
+pub(super) const TABLE_IRONWOOD_DYNAMIC_SPEND_RETENTION: &str =
+    "CREATE TABLE ironwood_dynamic_spend_retention (
+                account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+                nullifier_retention_height INTEGER NOT NULL DEFAULT 0
+                    CHECK (nullifier_retention_height BETWEEN 0 AND 4294967295),
+                replay_through INTEGER CHECK (replay_through BETWEEN 0 AND 4294967295)
+            )";
+
+pub(super) const INDEX_IRONWOOD_RECEIVING_KEYS_ACCOUNT_RECEIVER: &str =
+    "CREATE INDEX ironwood_receiving_keys_account_receiver
+                ON ironwood_receiving_keys(account_id, receiver)";
+
+pub(super) const INDEX_IRONWOOD_RECEIVING_KEYS_SCANNING: &str =
+    "CREATE INDEX ironwood_receiving_keys_scanning
+                ON ironwood_receiving_keys(closed_at, active_from)";
+
+pub(super) const INDEX_IRONWOOD_DYNAMIC_OPERATIONS_KEY: &str =
+    "CREATE INDEX ironwood_dynamic_operations_key
+                ON ironwood_dynamic_operations(receiving_key_id)";
+
+pub(super) const INDEX_IRONWOOD_DYNAMIC_SWEEPS_DUE: &str = "CREATE INDEX ironwood_dynamic_sweeps_due ON ironwood_dynamic_sweeps(done_height, next_attempt_at)";
 
 /// Source-bound transaction facts. No fee is attributed to an account by this table.
 pub(super) const TABLE_TPIR_TRANSACTION_METADATA: &str = r#"

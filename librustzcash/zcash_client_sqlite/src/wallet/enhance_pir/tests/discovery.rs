@@ -2668,3 +2668,137 @@ fn rediscovery_is_routed_privately_and_can_change_the_next_route() {
     assert!(!private.contains(&EnhancePirWork::Rediscover(job)));
     assert_eq!(queries_for(&private), 1);
 }
+
+// Notes found by a dynamic key go through the same private discovery. Their memo
+// decrypts with that key, never the account's.
+#[test]
+fn dynamic_key_notes_authenticate_memos_after_reopen() {
+    use crate::{
+        WalletDb,
+        testing::db::{test_clock, test_rng},
+        wallet::dynamic_ivk::Purpose,
+    };
+    use orchard::keys::OutgoingViewingKey;
+    use prost::Message;
+    use zcash_client_backend::proto::compact_formats::CompactTx;
+
+    for purpose in [Purpose::Refund, Purpose::Receive] {
+        let mut st = state_with_factory(TestDbFactory::file_backed());
+        let account = st.test_account().unwrap().id();
+        let key = crate::wallet::dynamic_ivk::tests::reserve_key(
+            st.wallet_mut().db_mut(),
+            account,
+            purpose,
+            BlockHeight::from_u32(100_000),
+        );
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+        let (height, _) = st.generate_empty_block();
+        let mut block = cached(&st, height);
+        let (action, record) = encrypted_action(
+            [9; 32],
+            key.receiver(),
+            OutgoingViewingKey::from([0; 32]),
+            30_000,
+        );
+        block
+            .chain_metadata
+            .as_mut()
+            .unwrap()
+            .ironwood_commitment_tree_size += 1;
+        block.vtx = vec![CompactTx {
+            index: 1,
+            txid: vec![8; 32],
+            ironwood_actions: vec![action],
+            ..Default::default()
+        }];
+        st.cache()
+            .0
+            .execute(
+                "UPDATE compactblocks SET data = ?1 WHERE height = ?2",
+                rusqlite::params![block.encode_to_vec(), u32::from(height)],
+            )
+            .unwrap();
+        st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+        let reopened = WalletDb::for_path(
+            st.wallet().data_file_path(),
+            *st.network(),
+            test_clock(),
+            test_rng(),
+        )
+        .unwrap()
+        .with_enhancement_mode(EnhancementMode::PrivateIronwood)
+        .with_transparent_ledger_mode(TransparentLedgerMode::Public);
+        *st.wallet_mut().db_mut() = reopened;
+        let requests = st.wallet().db().query_requests().unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = requests[0];
+        let pending = st
+            .wallet()
+            .db()
+            .pending_memo(request.position())
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.note.recipient(), key.receiver());
+
+        let mut suffix = *record.enc_ciphertext_suffix();
+        suffix[527] ^= 1;
+        let corrupt = EnhanceRecord::from_parts(EnhanceRecordParts {
+            enc_ciphertext_suffix: suffix,
+            cv_net: *record.cv_net(),
+            out_ciphertext: *record.out_ciphertext(),
+            has_transparent_inputs: false,
+            has_transparent_outputs: false,
+            metadata: record.metadata(),
+        });
+        assert_eq!(
+            apply_record(st.wallet_mut().db_mut(), request, &corrupt).unwrap(),
+            EnhancePirStoreResult::Rejected
+        );
+        assert_eq!(st.wallet().db().query_requests().unwrap(), requests);
+        // A corrupt registration is an error, not fallback to the ordinary IVK.
+        st.wallet()
+            .conn()
+            .execute(
+                "UPDATE ironwood_receiving_keys SET receiver = zeroblob(43)",
+                [],
+            )
+            .unwrap();
+        assert!(apply_record(st.wallet_mut().db_mut(), request, &record).is_err());
+        st.wallet()
+            .conn()
+            .execute(
+                "UPDATE ironwood_receiving_keys SET receiver = ?1",
+                [key.receiver().to_raw_address_bytes()],
+            )
+            .unwrap();
+        assert_eq!(
+            apply_record(st.wallet_mut().db_mut(), request, &record).unwrap(),
+            EnhancePirStoreResult::Stored
+        );
+        assert!(st.wallet().db().query_requests().unwrap().is_empty());
+        let (memo, key_ref): (Vec<u8>, Option<i64>) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT memo, receiving_key_id FROM ironwood_received_notes",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(memo, [4; 512]);
+        assert!(key_ref.is_some());
+        assert!(!visible(&st, request));
+        assert!(
+            st.wallet()
+                .get_transaction(request.request_id().txid())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            apply_record(st.wallet_mut().db_mut(), request, &record).unwrap(),
+            EnhancePirStoreResult::AlreadyResolved
+        );
+    }
+}

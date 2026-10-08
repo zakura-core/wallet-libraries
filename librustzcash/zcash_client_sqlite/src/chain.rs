@@ -548,4 +548,52 @@ mod tests {
     fn scan_cached_blocks_detects_spends_out_of_order_orchard() {
         testing::pool::scan_cached_blocks_detects_spends_out_of_order::<OrchardPoolTester>()
     }
+
+    /// Blocks scanned without the wallet's open dynamic keys are refused.
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn scanning_without_dynamic_ivks_refuses_open_dynamic_keys() {
+        use crate::error::SqliteClientError;
+        use zcash_client_backend::data_api::{
+            chain::error::Error,
+            testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(testing::db::TestDbFactory::default())
+            .with_block_cache(testing::BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let (h1, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(5),
+        );
+        st.scan_cached_blocks(h1, 1);
+        st.wallet()
+            .conn()
+            .execute_batch(
+                "INSERT INTO ironwood_receiving_keys
+                 (account_id, purpose, key_index, receiver, scan_from, advances_allocation, active_from)
+                 SELECT id, 1, zeroblob(8), zeroblob(43), 0, 1, 0 FROM accounts LIMIT 1;",
+            )
+            .unwrap();
+        let (h2, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(5),
+        );
+        assert!(matches!(
+            st.try_scan_cached_blocks(h2, 1),
+            Err(Error::Wallet(SqliteClientError::DynamicIvksNotUsed))
+        ));
+        st.wallet()
+            .conn()
+            .execute_batch("UPDATE ironwood_receiving_keys SET closed_at = 1")
+            .unwrap();
+        st.scan_cached_blocks(h2, 1);
+    }
 }

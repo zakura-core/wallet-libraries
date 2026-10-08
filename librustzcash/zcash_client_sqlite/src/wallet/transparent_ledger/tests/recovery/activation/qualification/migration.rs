@@ -326,6 +326,11 @@ impl PreLedgerWallet {
         };
         let (queued_before, before) = split(before);
         let (queued_after, after) = split(wallet_rows(&self.db.conn));
+        // A table that a later migration creates holds nothing the wallet already had.
+        let after: Vec<_> = after
+            .into_iter()
+            .filter(|(table, _)| before.iter().any(|(existing, _)| existing == table))
+            .collect();
         assert_eq!(after, before);
         assert!(queued_before.iter().all(|row| queued_after.contains(row)));
         assert_eq!(

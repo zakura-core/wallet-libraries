@@ -189,6 +189,8 @@ use {
 pub mod commitment_tree;
 pub(crate) mod common;
 mod db;
+#[cfg(feature = "orchard")]
+pub mod dynamic_ivk;
 pub(crate) mod encoding;
 #[cfg(feature = "orchard")]
 pub(crate) mod enhance_pir;
@@ -826,6 +828,14 @@ pub(crate) fn delete_account(
         detach.execute(named_params![":tx": id, ":account_uuid": account_uuid.0])?;
         delete_intent.execute(named_params![":txid": txid])?;
     }
+    // Known wallet spends are omitted from the unlinked nullifier map. Deleting
+    // their account removes that evidence, so absence needs fresh scan coverage.
+    conn.execute("DELETE FROM ironwood_nullifier_scan_blocks", [])?;
+    conn.execute(
+        "UPDATE ironwood_dynamic_spend_retention SET nullifier_retention_height=0",
+        [],
+    )?;
+
     let mut delete_tx = conn.prepare_cached("DELETE FROM transactions WHERE id_tx = :tx")?;
     for (id, _) in exclusive_transactions {
         delete_tx.execute(named_params![":tx": id])?;
@@ -4280,6 +4290,39 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     // equal to the truncation height + 1. This sets our view of the chain tip back
     // to the retained height.
     trim_scan_queue_to(conn, truncation_height)?;
+    conn.execute(
+        "UPDATE ironwood_dynamic_spend_retention SET
+            nullifier_retention_height = MIN(nullifier_retention_height, ?1 + 1),
+            replay_through = MIN(replay_through, ?1)",
+        [u32::from(truncation_height)],
+    )?;
+    // A sweep whose lookup or completion the rewind removed runs again. Active keys
+    // need no repair: the scanner rescans the truncated blocks with them. A closed key
+    // is no longer scanned, so reopen any key with a receipt the rewind un-mines; it
+    // closes again once that receipt is confirmed again.
+    conn.execute(
+        "UPDATE ironwood_receiving_keys SET closed_at = NULL
+         WHERE closed_at IS NOT NULL AND id IN (
+             SELECT n.receiving_key_id FROM ironwood_received_notes n
+             JOIN transactions t ON t.id_tx = n.transaction_id
+             WHERE t.mined_height > ?1)",
+        [u32::from(truncation_height)],
+    )?;
+    conn.execute(
+        "UPDATE ironwood_dynamic_sweeps SET done_height = NULL, next_attempt_at = 0,
+            lookup_height = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_height END,
+            lookup_hash = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_hash END
+         WHERE done_height > ?1 OR lookup_height > ?1",
+        [u32::from(truncation_height)],
+    )?;
+    conn.execute(
+        "DELETE FROM ironwood_nullifier_scan_blocks WHERE height > ?1",
+        [u32::from(truncation_height)],
+    )?;
+    conn.execute(
+        "DELETE FROM ironwood_dynamic_payment_recovery WHERE height > ?1",
+        [u32::from(truncation_height)],
+    )?;
 
     // Mark transparent utxos as un-mined. Since the TXO is now not mined, it would ideally be
     // considered to have been returned to the mempool; it _might_ be spendable in this state, but
@@ -5950,6 +5993,16 @@ pub(crate) fn insert_nullifier_map<N: AsRef<[u8]>>(
         }
     }
 
+    // Dynamic IVK recovery's spend evidence: record even empty blocks, but only when
+    // their nullifiers were actually retained.
+    #[cfg(feature = "orchard")]
+    if spend_pool == ShieldedPool::Ironwood {
+        conn.execute(
+            "INSERT OR IGNORE INTO ironwood_nullifier_scan_blocks (height) VALUES (?1)",
+            [u32::from(block_height)],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -6013,19 +6066,54 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
     .map(Some)
 }
 
-/// Deletes from the nullifier map any entries with a locator referencing a block height
-/// lower than the pruning height.
+/// The height from which Ironwood nullifiers stay tracked for dynamic IVK restore
+/// sweeps. Shared retention uses the oldest unfinished account, so a completed account
+/// cannot release another account's spend evidence.
+#[cfg(feature = "orchard")]
+pub(crate) fn ironwood_nullifier_retention_height(
+    conn: &Connection,
+) -> Result<Option<BlockHeight>, SqliteClientError> {
+    conn.query_row(
+        "SELECT MIN(nullifier_retention_height) FROM ironwood_dynamic_spend_retention",
+        [],
+        |row| {
+            row.get::<_, Option<u32>>(0)
+                .map(|h| h.map(BlockHeight::from))
+        },
+    )
+    .map_err(SqliteClientError::from)
+}
+
+/// Prunes unrelated spends while retaining Ironwood evidence needed by recovery.
 pub(crate) fn prune_nullifier_map(
     conn: &rusqlite::Transaction<'_>,
     block_height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
-    let mut stmt_delete_locators = conn.prepare_cached(
-        "DELETE FROM tx_locator_map
-        WHERE block_height < :block_height",
+    #[cfg(feature = "orchard")]
+    let ironwood_floor = ironwood_nullifier_retention_height(conn)?
+        .map_or(block_height, |floor| floor.min(block_height));
+    #[cfg(not(feature = "orchard"))]
+    let ironwood_floor = block_height;
+    conn.execute(
+        "DELETE FROM nullifier_map WHERE block_height < ?1
+         AND (spend_pool != ?2 OR block_height < ?3)",
+        rusqlite::params![
+            u32::from(block_height),
+            encoding::pool_code(PoolType::IRONWOOD),
+            u32::from(ironwood_floor)
+        ],
     )?;
-
-    stmt_delete_locators.execute(named_params![":block_height": u32::from(block_height)])?;
-
+    // Locators are shared by pools. Keep one only while some retained nullifier needs it.
+    conn.execute(
+        "DELETE FROM tx_locator_map WHERE block_height < ?1 AND NOT EXISTS (
+            SELECT 1 FROM nullifier_map n WHERE n.block_height=tx_locator_map.block_height
+            AND n.tx_index=tx_locator_map.tx_index)",
+        [u32::from(block_height)],
+    )?;
+    conn.execute(
+        "DELETE FROM ironwood_nullifier_scan_blocks WHERE height < ?1",
+        [u32::from(ironwood_floor)],
+    )?;
     Ok(())
 }
 
