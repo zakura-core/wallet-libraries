@@ -3230,6 +3230,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             from_state,
             blocks,
             anchor_retention.as_ref(),
+            #[cfg(feature = "orchard")]
+            None,
         )
         .map_err(SqliteClientError::from)?;
 

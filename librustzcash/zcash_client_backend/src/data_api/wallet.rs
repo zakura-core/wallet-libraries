@@ -266,6 +266,37 @@ where
     Ok(())
 }
 
+/// [`decrypt_and_store_transaction`], also decrypting with the wallet's dynamic keys
+/// (see [`DynamicIvkRead::get_dynamic_transaction_keys`]). A wallet with open dynamic
+/// keys must decrypt with this function rather than [`decrypt_and_store_transaction`].
+///
+/// [`DynamicIvkRead::get_dynamic_transaction_keys`]: super::dynamic_ivk::DynamicIvkRead::get_dynamic_transaction_keys
+#[cfg(feature = "orchard")]
+pub fn decrypt_and_store_transaction_with_dynamic_ivks<ParamsT, DbT>(
+    params: &ParamsT,
+    data: &mut DbT,
+    tx: &Transaction,
+    mined_height: Option<BlockHeight>,
+) -> Result<(), <DbT as WalletRead>::Error>
+where
+    ParamsT: consensus::Parameters,
+    DbT: WalletWrite + super::dynamic_ivk::DynamicIvkRead,
+{
+    let ufvks = data.get_unified_full_viewing_keys()?;
+    let mined_height =
+        mined_height.map_or_else(|| data.get_tx_height(tx.txid()), |h| Ok(Some(h)))?;
+    let decrypted = decrypt_transaction(params, mined_height, data.chain_height()?, tx, &ufvks);
+    let receivers: Vec<_> = decrypted
+        .ironwood_outputs()
+        .iter()
+        .map(|output| output.note().0.recipient())
+        .collect();
+    let keys = data.get_dynamic_transaction_keys(tx.txid(), mined_height, &receivers)?;
+    data.store_decrypted_tx(decrypted.with_dynamic_ivks(keys))?;
+
+    Ok(())
+}
+
 /// Errors that may be generated in construction of proposals for shielded->shielded or
 /// shielded->transparent transfers.
 pub type ProposeTransferErrT<DbT, CommitmentTreeErrT, InputsT, ChangeT> = Error<
@@ -1645,8 +1676,8 @@ where
                                 .iter()
                                 .filter_map(|selected| match selected.note() {
                                     Note::Orchard {
-                                        note,
                                         pool: orchard::ValuePool::Ironwood,
+                                        ..
                                     } => ironwood_tree
                                         .witness_at_checkpoint_id_caching(
                                             selected.note_commitment_tree_position(),
@@ -1657,7 +1688,7 @@ where
                                                 QueryError::CheckpointPruned,
                                             ))
                                         })
-                                        .map(|merkle_path| Some((note, merkle_path.into())))
+                                        .map(|merkle_path| Some((selected, merkle_path.into())))
                                         .map_err(Error::from)
                                         .transpose(),
                                     _ => None,
@@ -1782,14 +1813,23 @@ where
     }
 
     #[cfg(feature = "orchard")]
-    for (ironwood_note, merkle_path) in ironwood_inputs.into_iter() {
-        builder.add_ironwood_spend(
-            ufvk.orchard()
-                .cloned()
-                .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?,
-            *ironwood_note,
-            merkle_path,
-        )?;
+    for (selected, merkle_path) in ironwood_inputs.into_iter() {
+        let Note::Orchard { note, .. } = selected.note() else {
+            unreachable!()
+        };
+        let fvk = ufvk
+            .orchard()
+            .cloned()
+            .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?;
+        let fvk = match selected.dynamic_key_id() {
+            // The spending authority is unchanged, but the proof needs the FVK
+            // whose incoming key generated this particular note's recipient.
+            Some(key_id) => key_id
+                .derive(&fvk)
+                .map_err(|_| Error::ProposalNotSupported)?,
+            None => fvk,
+        };
+        builder.add_ironwood_spend(fvk, *note, merkle_path)?;
     }
 
     #[cfg(feature = "transparent-inputs")]

@@ -7841,6 +7841,7 @@ dependencies = [
  "which",
  "zakura-address",
  "zakura-bls12-381",
+ "zakura-dynamic-ivk",
  "zakura-jubjub",
  "zakura-keys",
  "zakura-orchard",

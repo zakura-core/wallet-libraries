@@ -64,6 +64,9 @@
 //! [`propose_shielding`]: crate::data_api::wallet::propose_shielding
 //! [`pczt`]: https://docs.rs/pczt
 
+#[cfg(feature = "orchard")]
+use crate::scanning::dynamic_ivk::DynamicScanningKey;
+
 use nonempty::NonEmpty;
 use secrecy::SecretVec;
 use std::{
@@ -106,6 +109,8 @@ use crate::{
     wallet::{Note, NoteId, ReceivedNote, Recipient, WalletTransparentOutput, WalletTx},
 };
 
+#[cfg(feature = "orchard")]
+pub mod dynamic_ivk;
 pub mod enhance_pir;
 pub mod status;
 pub mod transparent_ledger;
@@ -2976,6 +2981,30 @@ pub struct DecryptedTransaction<'a, Tx: DecryptableTransaction<AccountId>, Accou
     orchard_outputs: Vec<Tx::DecryptedOrchardOutput>,
     #[cfg(feature = "orchard")]
     ironwood_outputs: Vec<Tx::DecryptedOrchardOutput>,
+    #[cfg(feature = "orchard")]
+    dynamic_ivks_applied: bool,
+}
+
+#[cfg(feature = "orchard")]
+impl<AccountId: Copy + Eq> DecryptedTransaction<'_, Transaction, AccountId> {
+    /// Adds authenticated incoming outputs from the wallet's dynamic keys.
+    /// A self-payment may already have been recovered with the account OVK.
+    /// In that case, retain one incoming record carrying its receiving-key identity.
+    pub fn with_dynamic_ivks(
+        mut self,
+        keys: impl IntoIterator<Item = DynamicScanningKey<AccountId>>,
+    ) -> Self {
+        for key in keys {
+            for output in key.decrypt_outputs(self.tx) {
+                self.ironwood_outputs.retain(|existing| {
+                    existing.index() != output.index() || existing.account() != output.account()
+                });
+                self.ironwood_outputs.push(output);
+            }
+        }
+        self.dynamic_ivks_applied = true;
+        self
+    }
 }
 
 impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<'a, Tx, AccountId> {
@@ -2998,6 +3027,8 @@ impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<
             orchard_outputs,
             #[cfg(feature = "orchard")]
             ironwood_outputs,
+            #[cfg(feature = "orchard")]
+            dynamic_ivks_applied: false,
         }
     }
 
@@ -3025,6 +3056,14 @@ impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<
     #[cfg(feature = "orchard")]
     pub fn ironwood_outputs(&self) -> &[Tx::DecryptedOrchardOutput] {
         &self.ironwood_outputs
+    }
+
+    /// Whether the wallet's dynamic keys were tried, through
+    /// [`DecryptedTransaction::with_dynamic_ivks`]. While a dynamic key is open, a
+    /// store may refuse a transaction decrypted without them.
+    #[cfg(feature = "orchard")]
+    pub fn dynamic_ivks_applied(&self) -> bool {
+        self.dynamic_ivks_applied
     }
 
     /// Returns whether the transaction has decrypted outputs

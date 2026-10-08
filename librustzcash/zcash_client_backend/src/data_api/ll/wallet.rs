@@ -289,6 +289,9 @@ pub struct PutBlocksRows {
 /// - `blocks`: The scanned block data to be added to the data store. This vector must contain
 ///   data for blocks in sequentially increasing height order;
 ///   [`PutBlocksError::NonSequentialBlocks`] will be returned if this invariant is violated.
+/// - `ironwood_nullifier_retention`: If `Some(height)`, Ironwood nullifiers from `height` are
+///   tracked even below the floor described under "Nullifier tracking", for a store that can
+///   find Ironwood notes after scanning past them. The store must prune with the same floor.
 ///
 /// # Nullifier tracking
 ///
@@ -303,6 +306,7 @@ pub struct PutBlocksRows {
 /// either received in an already-scanned block (so its spend is detected directly against
 /// the wallet's own nullifiers rather than the map) or is received later in this same
 /// ascending batch (so the spend is linked when the receiving transaction is processed).
+/// `ironwood_nullifier_retention` can lower the Ironwood floor independently.
 /// For every out-of-order range — scanning after a gap, recent-first, or chain-tip
 /// pre-scans — the nullifiers of every block are tracked.
 pub fn put_blocks_rows<DbT, SE, TE>(
@@ -310,6 +314,7 @@ pub fn put_blocks_rows<DbT, SE, TE>(
     #[cfg(feature = "transparent-inputs")] gap_limits: GapLimits,
     from_state: &ChainState,
     blocks: Vec<ScannedBlock<<DbT as LowLevelWalletRead>::AccountId>>,
+    #[cfg(feature = "orchard")] ironwood_nullifier_retention: Option<BlockHeight>,
 ) -> Result<PutBlocksRows, PutBlocksError<SE, TE>>
 where
     DbT: PutBlocksRowsDbT<SE, <DbT as LowLevelWalletRead>::AccountRef>,
@@ -349,6 +354,9 @@ where
         from_state.block_height(),
         blocks.last().map(|block| block.height()),
     );
+    #[cfg(feature = "orchard")]
+    let ironwood_tracking_floor = nullifier_tracking_floor
+        .map(|floor| ironwood_nullifier_retention.map_or(floor, |height| floor.min(height)));
 
     let mut sapling_commitments = vec![];
     #[cfg(feature = "orchard")]
@@ -518,8 +526,9 @@ where
             wallet_db
                 .track_block_orchard_nullifiers(block.height(), block.orchard().nullifier_map())
                 .map_err(PutBlocksError::Storage)?;
-
-            #[cfg(feature = "orchard")]
+        }
+        #[cfg(feature = "orchard")]
+        if should_track_nullifiers(ironwood_tracking_floor, block.height()) {
             wallet_db
                 .track_block_ironwood_nullifiers(block.height(), block.ironwood().nullifier_map())
                 .map_err(PutBlocksError::Storage)?;
@@ -629,12 +638,14 @@ where
 ///   boundary block containing no shielded outputs in any pool would otherwise leave a permanent
 ///   hole in the retained grid, and the anchor there could never be proved against. `None`
 ///   disables anchor retention.
+/// - `ironwood_nullifier_retention`: See [`put_blocks_rows`].
 pub fn put_blocks<DbT, SE, TE>(
     wallet_db: &mut DbT,
     #[cfg(feature = "transparent-inputs")] gap_limits: GapLimits,
     from_state: &ChainState,
     blocks: Vec<ScannedBlock<<DbT as LowLevelWalletRead>::AccountId>>,
     anchor_retention: Option<&AnchorRetention>,
+    #[cfg(feature = "orchard")] ironwood_nullifier_retention: Option<BlockHeight>,
 ) -> Result<(), PutBlocksError<SE, TE>>
 where
     DbT: PutBlocksDbT<SE, TE, <DbT as LowLevelWalletRead>::AccountRef>,
@@ -646,6 +657,8 @@ where
         gap_limits,
         from_state,
         blocks,
+        #[cfg(feature = "orchard")]
+        ironwood_nullifier_retention,
     )?;
 
     let mut sapling_commitments = rows.sapling_commitments;
