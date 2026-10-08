@@ -1,0 +1,42 @@
+[package]
+name = "zakura-pir-receiver"
+version = "0.0.1-rc0"
+publish = false
+description = "Restore sweeps of dynamic IVKs through a receiver directory over PIR"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+## The restore sweep, over a wallet store's dynamic IVK traits.
+wallet = ["dep:futures-util", "dep:thiserror", "dep:zakura-pir-enhance", "dep:zakura-dynamic-ivk", "dep:zcash_client_backend", "dep:zcash_protocol"]
+
+[dependencies]
+futures-util = { version = "0.3", optional = true }
+thiserror = { version = "2", optional = true }
+zakura-pir-enhance = { version = "=0.0.1-rc1", path = "../pir-enhance", features = ["wallet"], optional = true }
+zakura-dynamic-ivk = { version = "0.0.0", path = "../dynamic-ivk", optional = true }
+zcash_client_backend = { workspace = true, features = ["orchard"], optional = true }
+zcash_protocol = { workspace = true, optional = true }
+# The receiver crates come from wallet-pir's open receiver stack until they land on its `main`.
+receiver-directory = { git = "https://github.com/valargroup/wallet-pir", rev = "502d930eaa8acdd3ed43c9ed73b9310168de893c" }
+receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "502d930eaa8acdd3ed43c9ed73b9310168de893c" }
+
+[dev-dependencies]
+axum = "0.7"
+orchard.workspace = true
+receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "502d930eaa8acdd3ed43c9ed73b9310168de893c", features = ["server"] }
+receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", rev = "502d930eaa8acdd3ed43c9ed73b9310168de893c" }
+tokio = { workspace = true, features = ["macros", "rt"] }
+tower = { workspace = true, features = ["util"] }
+zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
+zcash_client_sqlite = { path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "test-dependencies"] }
+zcash_note_encryption.workspace = true
+zcash_primitives.workspace = true
+
+[[test]]
+name = "sweep"
+required-features = ["wallet"]

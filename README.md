@@ -57,7 +57,9 @@ regeneration command, separate from ordinary builds.
 The unpublished [dynamic IVK](zakura/dynamic-ivk/README.md) crate provides shared
 derivation of receiving keys that keep an account's spending authority with their
 own incoming viewing keys, and refund memo helpers, with an Ironwood proof test for
-mixed ordinary, refund, and incoming inputs.
+mixed ordinary, refund, and incoming inputs. The unpublished
+[receiver PIR](zakura/pir-receiver/README.md) crate runs the restore sweeps that
+find payments to those keys through a receiver directory.
 
 ## How the rewiring works
 
