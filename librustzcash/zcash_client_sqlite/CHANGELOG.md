@@ -10,18 +10,32 @@ workspace.
 
 ## [Unreleased]
 
+- Transparent receipt ownership now requires current, qualified, non-quarantined private
+  spend evidence or an independently recorded public/local spend. Candidate and withdrawn
+  recovery records cannot suppress funding omissions. Raw sender ownership also requires an
+  outpoint actually spent by the transaction. Conservative contradiction checks are unchanged.
+
 - Transparent txid enhancement (prototype): `WalletDb` implements `TransparentDetailRead` and
   `TransparentDetailWrite`. The additive `transparent_txid_enhancement` migration adds
-  `transparent_detail_work`, `transparent_tx_display` and `transparent_tx_display_outputs`, and
+  `transparent_detail_work`, `transparent_tx_display` (one display entry: fee, counts, sender
+  and omission flags) and `transparent_tx_display_outputs` (outputs 0 and 1), and
   queues work for existing mined route-2 transactions and ledger-origin transactions without raw
-  bytes. Ledger projection and the route-2 marker queue work for mined transactions without
-  stored facts; storing raw bytes clears it and any display facts. Parked work is due again
-  after seven days without a display map change. Failed lookups and contradictions only
-  change retry state while the looked-up height still matches the transaction's mined height.
+  bytes. Ledger projection, the route-2 marker, and mining a route-2 transaction queue work for
+  mined transactions without stored facts; each first deletes stored facts that the wallet now
+  contradicts. Storing raw bytes clears work and any display facts. Parked work is due again
+  after seven days without a display map change; under public authority nothing is parked, and
+  held work is due at its ordinary retry. Failed lookups and contradictions only
+  change retry state while the looked-up height still matches the transaction's mined height;
+  a change of outcome class restarts the backoff. The view shows work as pending only while the
+  listing would return it.
   Facts are validated against the coinbase
   position, owned outputs that financial queries count, recovered metadata, the stored fee,
   known shielded components, and known spends (input indexes and the number of distinct spent
   outpoints, including public spend links); a contradiction stores nothing.
+- Recovered outgoing Activity assumes account funding and the whole fee unless recovered evidence
+  identifies conflicting funding. The transparent-spend veto now requires an active account's
+  qualified, non-quarantined observation at the accepted transaction height; candidate recovery
+  cannot suppress the estimate. This display convention does not establish payment or fee attribution.
 - Private recovery of mixed transparent/Ironwood transactions under `PrivateRequired` keeps
   the details that do not depend on transparent data. A has-transparent Enhance PIR record (or
   a compact scan with explicit non-Ironwood fields) still takes the sticky route-2

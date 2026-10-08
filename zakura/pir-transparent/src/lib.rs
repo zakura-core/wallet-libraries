@@ -20,9 +20,9 @@ pub use recovery::{
 };
 #[cfg(feature = "wallet")]
 pub use transparent_txid_client::{
-    DisplayOutput, Placement, ProfileCache, ProtocolKind, Provenance, Tier,
-    TransparentDisplayRecord, TransportError, TxidDisplayClient, TxidError, TxidLookup, TxidReply,
-    TxidRequest, TxidTransport,
+    Address as EntryAddress, AddressKind, DisplayEntry, EntryOutput, Placement, ProfileCache,
+    ProtocolKind, Provenance, Tier, TransportError, TxidDisplayClient, TxidError, TxidLookup,
+    TxidReply, TxidRequest, TxidTransport,
 };
 // What a caller implements for `recover`: the chain view (or `WalletChain`), and
 // transports that reach the companion's origin and map service refusals.

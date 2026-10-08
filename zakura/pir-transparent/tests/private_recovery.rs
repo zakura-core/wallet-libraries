@@ -991,11 +991,7 @@ struct DisplayService {
 }
 
 impl DisplayService {
-    fn start(
-        start: u64,
-        end: u64,
-        records: &[zakura_pir_transparent::TransparentDisplayRecord],
-    ) -> Self {
+    fn start(start: u64, end: u64, records: &[zakura_pir_transparent::DisplayEntry]) -> Self {
         use transparent_shard::display::{DisplaySealParams, TXID_2K};
         use transparent_shard_server::{
             assignment::WorkerRole,
@@ -1144,13 +1140,13 @@ impl zakura_pir_transparent::TxidTransport for DisplayTransport<'_> {
 #[test]
 fn private_details_end_to_end() {
     use std::time::{SystemTime, UNIX_EPOCH};
+    use transparent_shard::txid::{DisplayFacts, DisplayOutput};
     use zakura_pir_transparent::{
-        DisplayOutput, TransparentDisplayRecord, TxidDisplayClient, TxidLookup, deferral,
-        display_facts, map_sha256,
+        TxidDisplayClient, TxidLookup, deferral, display_facts, map_sha256,
     };
     use zcash_client_backend::data_api::transparent_ledger::{
         TransparentDetailRead as _, TransparentDetailWrite as _, TransparentDisplaySource,
-        TransparentDisplayStore, TransparentDisplayView,
+        TransparentDisplayStore, TransparentDisplayView, TransparentDisplayViewSender,
     };
     use zcash_primitives::transaction::TxId;
 
@@ -1203,31 +1199,44 @@ fn private_details_end_to_end() {
         BTreeSet::from([r1.0, r2.0])
     );
 
-    let mut records = vec![TransparentDisplayRecord {
-        txid: r1,
-        coinbase: false,
-        metadata: transparent_events::TransactionMetadata {
-            fee: transparent_events::FeeState::Exact(1_000),
-            transparent_input_count: 1,
+    // r1 pays a0 from one input of someone else's; the publisher derives its entry from the
+    // spent output. Every other entry is noise.
+    let sender = unrelated(999);
+    let mut records = vec![
+        DisplayFacts {
+            txid: r1,
+            coinbase: false,
+            fee: 1_000,
             has_shielded_components: false,
-        },
-        outputs: vec![DisplayOutput {
-            value: 20_000,
-            script: script(a0).as_slice().to_vec(),
-        }],
-    }];
-    records.extend((0..40u64).map(|n| TransparentDisplayRecord {
-        txid: txid(500 + n),
-        coinbase: false,
-        metadata: transparent_events::TransactionMetadata {
-            fee: transparent_events::FeeState::Unknown,
-            transparent_input_count: 1,
+            spent: vec![DisplayOutput {
+                value: 21_000,
+                script: sender.as_slice().to_vec(),
+            }],
+            outputs: vec![DisplayOutput {
+                value: 20_000,
+                script: script(a0).as_slice().to_vec(),
+            }],
+        }
+        .entry()
+        .unwrap(),
+    ];
+    records.extend((0..40u64).map(|n| {
+        DisplayFacts {
+            txid: txid(500 + n),
+            coinbase: false,
+            fee: 1_000,
             has_shielded_components: n % 2 == 0,
-        },
-        outputs: vec![DisplayOutput {
-            value: n,
-            script: unrelated(n as u32).as_slice().to_vec(),
-        }],
+            spent: vec![DisplayOutput {
+                value: n + 1_000,
+                script: unrelated(n as u32).as_slice().to_vec(),
+            }],
+            outputs: vec![DisplayOutput {
+                value: n,
+                script: unrelated(n as u32).as_slice().to_vec(),
+            }],
+        }
+        .entry()
+        .unwrap()
     }));
     let service = DisplayService::start(H0 + 600, H0 + 622, &records);
     // What a public `GetTransaction` would have fetched; it must never be called.
@@ -1282,9 +1291,9 @@ fn private_details_end_to_end() {
             let map = client.map_sha256().and_then(map_sha256);
             let db = f.st.wallet_mut().db_mut();
             match (&result, deferral(&result)) {
-                (Ok(TxidLookup::Found { record, provenance }), None) => {
+                (Ok(TxidLookup::Found { entry, provenance }), None) => {
                     let facts =
-                        display_facts(record, provenance, BlockHeight::from(*height as u32))
+                        display_facts(*txid, entry, provenance, BlockHeight::from(*height as u32))
                             .unwrap();
                     let generation = db.applied_transparent_policy().unwrap().generation;
                     assert_eq!(
@@ -1331,8 +1340,23 @@ fn private_details_end_to_end() {
     ));
     assert_eq!(details.outputs.len(), 1);
     assert!(details.outputs[0].owned);
-    assert_eq!(details.outputs[0].address, Some(a0));
+    assert_eq!(
+        details.outputs[0].address.as_ref().map(|a| a.address),
+        Some(a0)
+    );
     assert_eq!(details.input_count, 1);
+    // The sender is the spent output's address, which is not the account's.
+    let TransparentDisplayViewSender::Address { address, owned } = &details.sender else {
+        panic!("expected a sender address, got {:?}", details.sender);
+    };
+    assert_eq!(
+        Some(address.address),
+        zcash_client_backend::data_api::transparent_ledger::transparent_display_address(
+            sender.as_slice()
+        )
+    );
+    assert!(!owned);
+    assert!(details.is_complete());
     assert_eq!(view(&f, r2), TransparentDisplayView::Pending);
     let pending = due(&f, later + Duration::from_secs(6 * 60));
     assert_eq!(
@@ -1340,7 +1364,11 @@ fn private_details_end_to_end() {
         vec![r2.0]
     );
     assert_eq!(due(&f, later), vec![]);
-    let parked = f.st.wallet().db().transparent_detail_parked(later).unwrap();
+    let parked =
+        f.st.wallet()
+            .db()
+            .transparent_detail_parked(later, client.map_sha256().and_then(map_sha256), None)
+            .unwrap();
     assert_eq!(parked.count, 0);
     // A coverage re-check fetches only the map, which is the one r1 was found through.
     let sent = transport.sent.len();
@@ -1373,4 +1401,28 @@ fn private_details_end_to_end() {
             );
         }
     }
+
+    // Positive control: the same dispatch, under a mode that retains public authority, fetches
+    // r2 publicly and sends nothing to the display service.
+    f.set_policy(TransparentLedgerMode::Public);
+    let at = later + Duration::from_secs(6 * 60);
+    let public =
+        f.st.wallet()
+            .db()
+            .transparent_detail_work(at, 10, None)
+            .unwrap();
+    assert!(public.public_transport());
+    let work: Vec<(TxId, u64)> = public
+        .requests
+        .into_iter()
+        .map(|r| (r.txid, u64::from(u32::from(r.mined_height))))
+        .collect();
+    assert_eq!(
+        work.iter().map(|(t, _)| *t.as_ref()).collect::<Vec<_>>(),
+        vec![r2.0]
+    );
+    let sent = transport.sent.len();
+    lookup_all(&mut f, &mut client, &mut transport, &work, at);
+    assert_eq!(public_fetches.get(), 1);
+    assert_eq!(transport.sent.len(), sent);
 }

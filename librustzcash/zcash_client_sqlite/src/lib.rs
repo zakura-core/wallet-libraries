@@ -2173,12 +2173,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
     fn transparent_detail_parked(
         &self,
         now: std::time::SystemTime,
+        map_sha256: Option<[u8; 32]>,
+        map_checked_at: Option<std::time::SystemTime>,
     ) -> Result<TransparentDetailParked, Self::Error> {
         wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
             wallet::transparent_ledger::details::parked_work(
                 conn,
                 self.transparent_ledger_mode,
                 now,
+                map_sha256,
+                map_checked_at,
             )
         })
     }

@@ -502,6 +502,106 @@ fn shared_transparent_funding_infers_nothing() {
     assert_only_activity_inferred(&entry);
 }
 
+/// A contributor's spend is deliberately recovered before its parent output. Candidate data
+/// cannot change Activity; a qualified active observation establishes conflicting funding.
+fn recover_contributor(case: &mut Restored, active: bool) -> RecoveryRevision {
+    let other = import_account(&mut case.st, 9);
+    // Importing an account schedules its birthday range again; finish that compact scan
+    // before capturing recovery commits at the current accepted chain point.
+    let start = case.st.test_account().unwrap().birthday().height();
+    let end = case.height + 2;
+    case.st.scan_cached_blocks(
+        start,
+        usize::try_from(u32::from(end) - u32::from(start) + 1).unwrap(),
+    );
+    let initial = source(b"contributor", 1);
+    cover(&mut case.st, other, &initial, vec![]);
+    qualify(&mut case.st, &initial);
+    if active {
+        promote(&mut case.st, other).unwrap();
+    }
+    let observed = source(b"contributor-spend", 1);
+    qualify(&mut case.st, &observed);
+    let ws = watch(&case.st, other);
+    let mut c = commit(&ws);
+    c.revision = observed.clone();
+    c.spends = vec![SpendEvent {
+        metadata: None,
+        spending_txid: case.tx.txid(),
+        input_index: 0,
+        prevout: OutPoint::new([0xd1; 32], 0),
+        prevout_address: external(&ws),
+        mined_height: case.height,
+    }];
+    apply(&mut case.st, c).unwrap();
+    observed
+}
+
+#[test]
+fn candidate_contributor_does_not_veto_activity() {
+    let mut case = privately_recovered(Destination::OwnTransparent, None, true, Some(FEE));
+    recover_contributor(&mut case, false);
+    assert_eq!(count(&case.st, "tpir_spend_events"), 1);
+    let entry = case.history();
+    assert_eq!(entry.inferred_outgoing, Some(zat(SENT)));
+    assert_only_activity_inferred(&entry);
+}
+
+#[test]
+fn active_contributor_veto_tracks_qualified_current_evidence() {
+    let mut case = privately_recovered(Destination::OwnTransparent, None, true, Some(FEE));
+    assert_eq!(case.history().inferred_outgoing, Some(zat(SENT)));
+    let observed = recover_contributor(&mut case, true);
+    // No parent receive was supplied, so the veto must not depend on projected spend links.
+    assert_eq!(
+        case.count(
+            "SELECT COUNT(*) FROM transparent_received_output_spends WHERE transaction_id = ?1"
+        ),
+        0
+    );
+    let entry = case.history();
+    assert_eq!(entry.inferred_outgoing, None);
+    assert_only_activity_inferred(&entry);
+
+    // Quarantined source evidence no longer justifies overriding the default.
+    conn(&case.st)
+        .execute(
+            "INSERT INTO tpir_quarantined_sources (source) VALUES (?1)",
+            [&observed.source],
+        )
+        .unwrap();
+    assert_eq!(case.history().inferred_outgoing, Some(zat(SENT)));
+    lift_quarantine(&case.st);
+    assert_eq!(case.history().inferred_outgoing, None);
+
+    conn(&case.st)
+        .execute("INSERT INTO tpir_quarantined_accounts SELECT account_id FROM tpir_spend_events WHERE spending_txid = ?1", [case.tx.txid().as_ref()])
+        .unwrap();
+    assert_eq!(case.history().inferred_outgoing, Some(zat(SENT)));
+    lift_quarantine(&case.st);
+    assert_eq!(case.history().inferred_outgoing, None);
+
+    conn(&case.st)
+        .execute("DELETE FROM tpir_spend_observations", [])
+        .unwrap();
+    assert_eq!(case.history().inferred_outgoing, Some(zat(SENT)));
+    conn(&case.st).execute("INSERT INTO tpir_spend_observations SELECT s.id, r.id FROM tpir_spend_events s CROSS JOIN tpir_revisions r WHERE r.source = ?1", [&observed.source]).unwrap();
+    assert_eq!(case.history().inferred_outgoing, None);
+
+    // Qualification and accepted placement are checked on every read, not cached as a flag.
+    conn(&case.st).execute("DELETE FROM tpir_qualified_revisions WHERE revision_id IN (SELECT id FROM tpir_revisions WHERE source = ?1)", [&observed.source]).unwrap();
+    assert_eq!(case.history().inferred_outgoing, Some(zat(SENT)));
+    qualify(&mut case.st, &observed);
+    assert_eq!(case.history().inferred_outgoing, None);
+    conn(&case.st)
+        .execute(
+            "UPDATE tpir_spend_events SET mined_height = mined_height - 1 WHERE spending_txid = ?1",
+            [case.tx.txid().as_ref()],
+        )
+        .unwrap();
+    assert_eq!(case.history().inferred_outgoing, Some(zat(SENT)));
+}
+
 /// Without the service's assertion of transparent outputs, absent or unknown, nothing says the
 /// value left through outputs outgoing recovery cannot see.
 #[test]

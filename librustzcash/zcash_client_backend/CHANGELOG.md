@@ -14,14 +14,21 @@ workspace.
 - `transparent_ledger::{TransparentDetailRead, TransparentDetailWrite}` (prototype): durable
   transparent txid enhancement work (`transparent_detail_work`, returning the requests with the
   mode and policy generation of the same snapshot as `TransparentDetailWork`;
-  `transparent_detail_parked`, reporting work that waits for a display map change as
-  `TransparentDetailParked`), validated
+  `transparent_detail_parked`, reporting work that waits for a display map change under the
+  caller's map as `TransparentDetailParked`, with a refresh time bounded by
+  `TRANSPARENT_DISPLAY_MAP_RECHECK`), validated
   `TransparentDisplayFacts` (`store_transparent_display`, returning `TransparentDisplayStore`),
   library-computed backoff (`defer_transparent_detail` with the request's mined height and
   `TransparentDetailOutcome`, ignoring results for a changed placement), and the
   detail view (`transparent_display_view`, returning `TransparentDisplayView`). Display facts
-  never change balances, history classification or `details_complete`; see
-  `docs/transparent-txid-enhancement.md`.
+  are one fixed-size display entry: the first address-shaped sender
+  (`TransparentDisplaySender`), at most two outputs (`TRANSPARENT_DISPLAY_OUTPUT_SLOTS`), and
+  named omissions; `transparent_display_address` classifies a locking script the same way. The
+  view (`TransparentDisplayDetails`) shows the sender (`TransparentDisplayViewSender`), outputs
+  with encoded addresses (`TransparentDisplayAddress`), what it omits
+  (`TransparentDisplayOmission`, including shared funding, which only the wallet can see), and
+  where it came from (`TransparentDisplaySource`). Display facts never change balances,
+  history classification or `details_complete`; see `docs/transparent-txid-enhancement.md`.
 - `IronwoodEnhancementData::has_transparent_outputs` preserves the service's separate
   output-presence assertion for display reconstruction; note decryption authenticates the memo,
   not that assertion.
@@ -31,6 +38,9 @@ workspace.
   final while its payment and fee attribution are not.
 
 ### Changed
+- `TransactionHistoryDetails::inferred_outgoing` documents the Activity default that the account
+  funded a recovered send and its fee unless recovered evidence identifies another contributor.
+  This display assumption does not establish payment or fee attribution.
 - `enhance_pir::storage::validate_and_apply_records` captures the stored-metadata snapshot for
   has-transparent records too, so storage can compare it before keeping such a record's
   authenticated memo and agreeing fee without public authority. A `PrivateDetailsUnsupported`

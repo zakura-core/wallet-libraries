@@ -52,7 +52,7 @@ rows, but give every row explicit assertions and a stable identifier.
 | --- | --- | --- | --- |
 | H01 | Transparent-only send | Alice pays Bob with change | Correct aggregate payment and fee after complete coverage; address/output breakdown deferred |
 | H02 | Several inputs or recipients | Spend several Alice outputs; pay Bob and Carol | Group by spending txid and deduplicate input identities; exact aggregate, no invented per-recipient breakdown |
-| H03 | Ordinary transparent receive | Bob pays Alice without Alice-owned inputs | Correct received amount and confirmed status/date; sender details deferred |
+| H03 | Ordinary transparent receive | Bob pays Alice without Alice-owned inputs | Correct received amount and confirmed status/date; sender from txid display v2 (first address-shaped input, not owned), other inputs named as an omission |
 | H04 | Retained local transaction | Run with retained construction records and separately with a fresh database | Preserve rich local facts; restored view follows reduced capabilities rather than false full-history equality |
 | H05 | Shared funding | Valid transaction with Alice and Bob inputs; repeat across Alice accounts | Correct per-account owned effects and whole fee; no fabricated payment attribution or fee share |
 | H06 | Self/cross-account transfer | Transfer within an account and between two accounts | Correct ownership/scope effects; no double counting or gross self-payment inferred from net movement |
