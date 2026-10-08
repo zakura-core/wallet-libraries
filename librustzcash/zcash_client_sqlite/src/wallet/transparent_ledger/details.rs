@@ -739,12 +739,11 @@ fn validate(
         if index >= facts.output_count {
             return Ok(Some(C::OutputIndexOutOfRange { index }));
         }
-        if let Some(given) = facts.outputs.get(index as usize) {
-            if given.value.into_u64() != value
-                || given.address != transparent_display_address(&script)
-            {
-                return Ok(Some(C::OwnedOutput { index }));
-            }
+        if let Some(given) = facts.outputs.get(index as usize)
+            && (given.value.into_u64() != value
+                || given.address != transparent_display_address(&script))
+        {
+            return Ok(Some(C::OwnedOutput { index }));
         }
     }
 
@@ -768,10 +767,10 @@ fn validate(
     }
 
     // The stored fee must be equal; a coinbase transaction has none.
-    if let Some(stored) = stored_fee {
-        if facts.coinbase || facts.fee.into_u64() != stored {
-            return Ok(Some(C::Fee));
-        }
+    if let Some(stored) = stored_fee
+        && (facts.coinbase || facts.fee.into_u64() != stored)
+    {
+        return Ok(Some(C::Fee));
     }
 
     // A known shielded component, or a route-2 marker, requires the shielded bit.
