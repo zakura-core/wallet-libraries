@@ -469,7 +469,7 @@ precedence over a reconstructed summary.
 | --- | --- | --- |
 | Transparent-only send funded entirely by the selected account | Aggregate amount leaving the account, fee, transparent classification, chain status/date, after complete owned-effect recovery | Recipient addresses and individual external outputs wait until opening |
 | Several owned transparent inputs or external recipients | Group events by spending txid; show the aggregate outgoing amount under the same complete-recovery and ownership conditions | No per-recipient breakdown |
-| Ordinary transparent-only receive | Owned received amount, transparent classification, chain status/date | Sender/input details are deferred |
+| Ordinary transparent-only receive | Owned received amount, transparent classification, chain status/date | Covered by txid display v2: the first address-shaped sender, with other inputs, outputs past two and mixed funding named as omissions (`docs/transparent-txid-enhancement.md`) |
 | Locally created transaction with retained records | Preserve its existing payment details and classification | Do not replace rich records with partial summaries |
 | Shared funding across accounts or parties | Known selected-account movement and whole-transaction fee | Do not infer that account's payment amount or fee share |
 | Self-transfer or cross-account transfer | Ownership/scope-based presentation where supported | Net movement alone does not reproduce gross self-payment presentation |
