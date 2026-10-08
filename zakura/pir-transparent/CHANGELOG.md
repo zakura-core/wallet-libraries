@@ -6,8 +6,9 @@
 
 - Txid display lookups: re-exports of wallet-pir's `transparent-txid-client`
   (`TxidDisplayClient`, `TxidTransport`, `TxidRequest`, `TxidReply`, `TxidLookup`, `TxidError`,
-  `TransparentDisplayRecord` and related types), `display_facts`, which maps a found record to
-  the wallet's `TransparentDisplayFacts`, `deferral`, which maps a lookup that found nothing to
+  the fixed-size `DisplayEntry` and related types), `display_facts`, which maps a found entry
+  to the wallet's `TransparentDisplayFacts` after checking its tag is the txid's, `deferral`,
+  which maps a lookup that found nothing to
   a `TransparentDetailOutcome` (a height above the publication is `NotYetPublished`, retried
   within minutes; below it is `NotCovered`), and `map_sha256`, which decodes the client's map
   digest. `TxidDisplayClient::refresh_map` re-checks coverage when only parked work remains.

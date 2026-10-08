@@ -100,13 +100,49 @@ pub struct TransparentDetailParked {
     pub refresh_at: Option<SystemTime>,
 }
 
-/// One transparent output as published, at its position in the transaction.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The number of outputs display facts hold. A transaction with more says how many it has
+/// ([`TransparentDisplayFacts::output_count`]) and omits the rest.
+pub const TRANSPARENT_DISPLAY_OUTPUT_SLOTS: u32 = 2;
+
+/// The P2PKH or P2SH address a locking script pays, or `None` for any other script.
+///
+/// Only the exact standard templates carry an address, the rule the display publisher applies:
+/// `OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG` and `OP_HASH160 <20 bytes>
+/// OP_EQUAL`, each with a direct 20-byte push.
+pub fn transparent_display_address(script: &[u8]) -> Option<TransparentAddress> {
+    match script {
+        [0x76, 0xa9, 0x14, hash @ .., 0x88, 0xac] => {
+            Some(TransparentAddress::PublicKeyHash(hash.try_into().ok()?))
+        }
+        [0xa9, 0x14, hash @ .., 0x87] => {
+            Some(TransparentAddress::ScriptHash(hash.try_into().ok()?))
+        }
+        _ => None,
+    }
+}
+
+/// Who funded a transaction, as display facts give it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransparentDisplaySender {
+    /// No transparent input: a coinbase transaction, or one funded only from the shielded pools.
+    Absent,
+    /// The address of the first transparent input, in input order, whose spent script is P2PKH
+    /// or P2SH. Other inputs may spend other scripts; see
+    /// [`TransparentDisplayFacts::multiple_source_scripts`].
+    Address(TransparentAddress),
+    /// Transparent inputs exist, but none spends a P2PKH or P2SH script (P2PK, bare multisig,
+    /// other scripts), so there is no address to show.
+    NonStandard,
+}
+
+/// One of a transaction's first two transparent outputs, at its position in the transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransparentDisplayOutput {
     /// The output value.
     pub value: Zatoshis,
-    /// The raw locking script.
-    pub script: Vec<u8>,
+    /// The P2PKH or P2SH address it pays; `None` when its script is anything else (P2PK,
+    /// `OP_RETURN`, empty, ...).
+    pub address: Option<TransparentAddress>,
 }
 
 /// Where display facts were looked up.
@@ -123,37 +159,102 @@ pub struct TransparentDisplayProvenance {
 }
 
 /// A transaction's transparent facts from a trusted display publisher, before validation.
+///
+/// They hold the regular cases whole: any number of inputs, shown by their first address-shaped
+/// sender, and up to two outputs. Everything else is a named omission: other source scripts
+/// ([`Self::multiple_source_scripts`]), outputs past the first two
+/// ([`Self::more_than_two_outputs`]), and shielded value alongside transparent inputs
+/// ([`Self::shielded_and_transparent_funding`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransparentDisplayFacts {
     /// The transaction.
     pub txid: TxId,
     /// Whether it is a coinbase transaction.
     pub coinbase: bool,
-    /// Its fee, transparent input count and shielded bit.
-    pub metadata: TransactionMetadata,
-    /// Every transparent output, in transaction order.
+    /// The exact whole-transaction fee; zero for coinbase.
+    pub fee: Zatoshis,
+    /// Transparent inputs, excluding a coinbase input, including other parties'.
+    pub input_count: u32,
+    /// Every transparent output, including any [`Self::outputs`] omits.
+    pub output_count: u32,
+    /// Whether any Sprout, Sapling, Orchard or Ironwood component is present.
+    pub shielded_components: bool,
+    /// Who funded it: the first address-shaped input; [`TransparentDisplaySender::Absent`]
+    /// exactly when there is no transparent input.
+    pub sender: TransparentDisplaySender,
+    /// Outputs 0 and 1, as far as they exist: `min(output_count, 2)` entries, each at its index.
     pub outputs: Vec<TransparentDisplayOutput>,
+    /// The inputs spend two or more distinct scripts, and only the first address-shaped one is
+    /// given. The publisher cannot tell whether they belong to one wallet.
+    pub multiple_source_scripts: bool,
+    /// There are transparent inputs and the shielded pools also contributed net value.
+    pub shielded_and_transparent_funding: bool,
     /// Where they came from.
     pub provenance: TransparentDisplayProvenance,
+}
+
+impl TransparentDisplayFacts {
+    /// Whether outputs past the first two exist and are omitted.
+    pub fn more_than_two_outputs(&self) -> bool {
+        self.output_count > TRANSPARENT_DISPLAY_OUTPUT_SLOTS
+    }
+
+    /// The fee, input count and shielded bit as transaction metadata: a coinbase transaction
+    /// has no applicable fee.
+    pub fn metadata(&self) -> TransactionMetadata {
+        TransactionMetadata {
+            fee: if self.coinbase {
+                WholeTransactionFee::NotApplicable
+            } else {
+                WholeTransactionFee::Exact(self.fee)
+            },
+            transparent_input_count: self.input_count,
+            has_shielded_components: self.shielded_components,
+        }
+    }
+
+    /// Whether the facts agree with themselves, as the publisher's codec requires: the outputs
+    /// fill exactly the slots the output count implies and sum within `MAX_MONEY`; the sender is
+    /// absent exactly when there is no input; a coinbase transaction spends nothing and pays no
+    /// fee; any other transaction without transparent inputs has shielded components; several
+    /// source scripts need two inputs; and mixed funding needs inputs and shielded components.
+    pub fn is_well_formed(&self) -> bool {
+        let held = self.output_count.min(TRANSPARENT_DISPLAY_OUTPUT_SLOTS) as usize;
+        let has_inputs = self.input_count > 0;
+        self.outputs.len() == held
+            && self
+                .outputs
+                .iter()
+                .try_fold(Zatoshis::ZERO, |total, o| total + o.value)
+                .is_some()
+            && has_inputs == (self.sender != TransparentDisplaySender::Absent)
+            && (!self.coinbase || (self.fee == Zatoshis::ZERO && !has_inputs))
+            && (self.coinbase || has_inputs || self.shielded_components)
+            && (!self.multiple_source_scripts || self.input_count >= 2)
+            && (!self.shielded_and_transparent_funding || (has_inputs && self.shielded_components))
+    }
 }
 
 /// Which wallet fact the display facts contradict.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TransparentDisplayContradiction {
-    /// The coinbase flag disagrees with the transaction's known position or recovered events,
-    /// or the metadata is not valid for it.
+    /// The coinbase flag disagrees with the transaction's known position, recovered events or
+    /// known spends, or a coinbase transaction has inputs or a fee.
     Coinbase,
-    /// An owned output is present with another value or script.
+    /// The facts disagree with themselves; see [`TransparentDisplayFacts::is_well_formed`].
+    Malformed,
+    /// An owned output at index 0 or 1 is present with another value or script.
     OwnedOutput {
         /// The output index.
         index: u32,
     },
-    /// An owned output's index is beyond the published outputs.
+    /// An owned output's index is not below the output count.
     OutputIndexOutOfRange {
         /// The output index.
         index: u32,
     },
-    /// Recovered transaction metadata differs.
+    /// Recovered transaction metadata differs: the input count, the shielded bit, an exact
+    /// fee, or whether a fee applies.
     Metadata,
     /// The stored fee differs.
     Fee,
@@ -169,6 +270,19 @@ pub enum TransparentDisplayContradiction {
         /// The number of distinct outpoints the wallet knows the transaction spends.
         known: u32,
     },
+    /// [`TransparentDisplayFacts::multiple_source_scripts`] disagrees with the spent scripts the
+    /// wallet knows: clear while it knows two distinct ones, or, when it knows the script of
+    /// every input, not equal to whether they differ.
+    SourceScripts,
+    /// The sender disagrees with the spent scripts the wallet knows: non-standard while it knows
+    /// an address-shaped one, not the script every input spends, or, when it knows the script of
+    /// every input, not the first address-shaped one.
+    Sender,
+    /// The transparent value balance disagrees with the inputs the wallet knows. Checked only
+    /// when it knows the value of every input: without shielded components the transaction must
+    /// balance exactly; the mixed funding flag must be set when the fee and the given outputs
+    /// exceed the inputs, and, when every output is given, clear otherwise.
+    Funding,
 }
 
 /// The result of storing display facts.
@@ -213,10 +327,38 @@ pub enum TransparentDetailOutcome {
 /// Where available details came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TransparentDisplaySource {
-    /// The wallet's stored raw transaction.
+    /// The wallet's stored raw transaction: fetched publicly, created locally, or scanned.
     RawTransaction,
     /// Validated facts from the display service.
     Display(TransparentDisplayProvenance),
+}
+
+/// A P2PKH or P2SH address, with its encoding for the wallet's network.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransparentDisplayAddress {
+    /// The address.
+    pub address: TransparentAddress,
+    /// Its Base58Check encoding for the wallet's network.
+    pub encoded: String,
+}
+
+/// Who funded a transaction, as the detail view shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TransparentDisplayViewSender {
+    /// A coinbase transaction: newly issued value, no inputs.
+    Coinbase,
+    /// No transparent input: funded only from the shielded pools (unshielding).
+    Shielded,
+    /// The first transparent input, in input order, whose spent script is P2PKH or P2SH.
+    Address {
+        /// The address.
+        address: TransparentDisplayAddress,
+        /// Whether it is one of the viewing account's addresses, or the account is known to
+        /// have spent an output paying it in this transaction.
+        owned: bool,
+    },
+    /// Transparent inputs exist, but none shows a P2PKH or P2SH address.
+    NonStandard,
 }
 
 /// One output of the detail view.
@@ -226,29 +368,73 @@ pub struct TransparentDisplayViewOutput {
     pub index: u32,
     /// Its value.
     pub value: Zatoshis,
-    /// Its raw locking script.
-    pub script: Vec<u8>,
-    /// The address, when the script is a standard P2PKH or P2SH script.
-    pub address: Option<TransparentAddress>,
+    /// The address it pays, when its script is P2PKH or P2SH.
+    pub address: Option<TransparentDisplayAddress>,
     /// Whether the viewing account received it.
     pub owned: bool,
+}
+
+/// A fact the detail view does not show in full.
+///
+/// Any omission makes the details incomplete ([`TransparentDisplayDetails::is_complete`]). A
+/// regular transaction has none: one source script or the viewing account's own inputs, up to
+/// two outputs with addresses, and no shielded value alongside transparent inputs. Fetching the
+/// raw transaction can fill in only omissions of display facts
+/// ([`TransparentDisplaySource::Display`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TransparentDisplayOmission {
+    /// No input shows a P2PKH or P2SH address; the sender is
+    /// [`TransparentDisplayViewSender::NonStandard`].
+    NonStandardSender,
+    /// The inputs spend more than one script and only the first address-shaped one is shown.
+    /// The viewing account funded none of them. When it funded every input this is its own
+    /// send and not an omission.
+    MultipleSourceScripts,
+    /// The viewing account funded some inputs but not all; the others, which spend other
+    /// scripts, are not shown. This is the only sign that another wallet or account took part.
+    SharedFunding,
+    /// The shielded pools also contributed net value to a transaction with transparent inputs;
+    /// that part has no address.
+    ShieldedAndTransparentFunding,
+    /// A shown output pays a script that is not P2PKH or P2SH, so it has no address.
+    NonStandardOutput {
+        /// The output index.
+        index: u32,
+    },
+    /// Outputs past the first two are not shown;
+    /// [`TransparentDisplayDetails::output_count`] says how many there are.
+    MoreThanTwoOutputs,
 }
 
 /// A transaction's transparent details.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransparentDisplayDetails {
-    /// Every transparent output, in order.
-    pub outputs: Vec<TransparentDisplayViewOutput>,
     /// Whether it is a coinbase transaction.
     pub coinbase: bool,
     /// The whole-transaction fee.
     pub fee: WholeTransactionFee,
     /// Non-coinbase transparent inputs, including other parties'.
     pub input_count: u32,
+    /// Every transparent output, including any [`Self::outputs`] omits.
+    pub output_count: u32,
     /// Whether any shielded component is present.
     pub shielded: bool,
+    /// Who funded it.
+    pub sender: TransparentDisplayViewSender,
+    /// The shown outputs, in order: the first two of display facts, or every output of a raw
+    /// transaction.
+    pub outputs: Vec<TransparentDisplayViewOutput>,
+    /// What is not shown in full, in a fixed order: sender, other inputs, funding, outputs.
+    pub omissions: Vec<TransparentDisplayOmission>,
     /// Where these details came from.
     pub source: TransparentDisplaySource,
+}
+
+impl TransparentDisplayDetails {
+    /// Whether nothing is omitted.
+    pub fn is_complete(&self) -> bool {
+        self.omissions.is_empty()
+    }
 }
 
 /// The transaction detail view's transparent section.

@@ -40,24 +40,35 @@ impl RusqliteMigration for Migration {
             CREATE TABLE transparent_tx_display (
                 transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
                 coinbase INTEGER NOT NULL CHECK (coinbase IN (0, 1)),
-                fee_state INTEGER NOT NULL CHECK (fee_state IN (0, 1, 2)),
-                fee_zat INTEGER CHECK (fee_zat >= 0 AND fee_zat <= 2100000000000000),
+                fee_zat INTEGER NOT NULL CHECK (fee_zat >= 0 AND fee_zat <= 2100000000000000),
                 input_count INTEGER NOT NULL CHECK (input_count >= 0 AND input_count <= 4294967295),
+                output_count INTEGER NOT NULL CHECK (output_count >= 0 AND output_count <= 4294967295),
                 shielded INTEGER NOT NULL CHECK (shielded IN (0, 1)),
+                sender_kind INTEGER NOT NULL CHECK (sender_kind IN (0, 1, 2, 3)),
+                sender_hash BLOB CHECK (length(sender_hash) = 20),
+                multiple_source_scripts INTEGER NOT NULL CHECK (multiple_source_scripts IN (0, 1)),
+                shielded_and_transparent_funding INTEGER NOT NULL
+                    CHECK (shielded_and_transparent_funding IN (0, 1)),
                 shard_id INTEGER NOT NULL,
                 revision INTEGER NOT NULL CHECK (revision >= 0),
                 map_sha256 BLOB NOT NULL CHECK (length(map_sha256) = 32),
                 looked_up_height INTEGER NOT NULL CHECK (looked_up_height >= 0),
                 stored_at INTEGER NOT NULL,
-                CHECK ((fee_state = 0 AND fee_zat IS NOT NULL) OR (fee_state != 0 AND fee_zat IS NULL)),
-                CHECK (fee_state != 2 OR input_count = 0)
+                CHECK ((sender_kind IN (1, 2)) = (sender_hash IS NOT NULL)),
+                CHECK ((sender_kind = 0) = (input_count = 0)),
+                CHECK (coinbase = 0 OR (fee_zat = 0 AND input_count = 0)),
+                CHECK (coinbase = 1 OR input_count > 0 OR shielded = 1),
+                CHECK (multiple_source_scripts = 0 OR input_count >= 2),
+                CHECK (shielded_and_transparent_funding = 0 OR (input_count > 0 AND shielded = 1))
             );
             CREATE TABLE transparent_tx_display_outputs (
                 transaction_id INTEGER NOT NULL
                     REFERENCES transparent_tx_display(transaction_id) ON DELETE CASCADE,
-                output_index INTEGER NOT NULL CHECK (output_index >= 0),
+                output_index INTEGER NOT NULL CHECK (output_index IN (0, 1)),
                 value_zat INTEGER NOT NULL CHECK (value_zat >= 0 AND value_zat <= 2100000000000000),
-                script BLOB NOT NULL,
+                address_kind INTEGER NOT NULL CHECK (address_kind IN (1, 2, 3)),
+                address_hash BLOB CHECK (length(address_hash) = 20),
+                CHECK ((address_kind = 3) = (address_hash IS NULL)),
                 PRIMARY KEY (transaction_id, output_index)
             );
             -- Route 2 (private details unsupported) and ledger-origin (2) outputs and spends, of
