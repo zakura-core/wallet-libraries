@@ -596,6 +596,8 @@ fn known_inputs(
     Ok(inputs)
 }
 
+type OwnedInputScripts = BTreeMap<([u8; 32], u32), Vec<u8>>;
+
 /// Spent outpoints whose ownership the account can affirm now, with their spent scripts.
 /// Private evidence must be active, qualified, non-quarantined and at the transaction's
 /// accepted height. Independently recorded public or local spends retain their semantics;
@@ -605,7 +607,7 @@ fn owned_inputs(
     tx: i64,
     txid: &[u8],
     account: Option<i64>,
-) -> Result<BTreeMap<([u8; 32], u32), Vec<u8>>, SqliteClientError> {
+) -> Result<OwnedInputScripts, SqliteClientError> {
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT e.prevout_txid, e.prevout_output_index, e.prevout_script
          FROM tpir_spend_events e
