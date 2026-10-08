@@ -128,9 +128,11 @@ workspace.
   recoverable from the seed. `WalletDb` implements the backend's `DynamicIvkRead` and
   `DynamicIvkWrite`. Keys the wallet issues are trial-decrypted in every batch of
   `scan_cached_blocks_with_dynamic_ivks` until they close, and their notes spend into
-  ordinary change. Full-transaction and Enhance PIR retrieval authenticate these notes
-  with their registered key. While a dynamic key is open, blocks and transactions
-  processed without the dynamic keys are refused
+  ordinary change. With `NoteSelection::PreferConsolidation`, dynamic-key notes fill spare
+  input slots first, so ordinary sends move their value into ordinary internal change
+  without changing the fee or transaction shape. Full-transaction and Enhance PIR
+  retrieval authenticate these notes with their registered key. While a dynamic key is
+  open, blocks and transactions processed without the dynamic keys are refused
   (`SqliteClientError::DynamicIvksNotUsed`). Invalid input to these calls is
   `SqliteClientError::InvalidDynamicIvkInput`, and a call that must wait returns its
   `ReservationPolicy` or `SweepDeferral` as an `Ok` value.
