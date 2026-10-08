@@ -353,8 +353,9 @@ pub enum TransparentDisplayViewSender {
     Address {
         /// The address.
         address: TransparentDisplayAddress,
-        /// Whether it is one of the viewing account's addresses, or the account is known to
-        /// have spent an output paying it in this transaction.
+        /// Whether trusted spend evidence shows that the viewing account spent an output
+        /// paying it in this transaction. Display records can also match a cached account
+        /// address; raw transactions require an owned outpoint actually present in the inputs.
         owned: bool,
     },
     /// Transparent inputs exist, but none shows a P2PKH or P2SH address.

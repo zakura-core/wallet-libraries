@@ -2141,6 +2141,97 @@ fn view_same_wallet_multi_source() {
 }
 
 #[test]
+fn view_ownership_requires_current_qualified_evidence() {
+    let (mut st, account, _) = active_wallet();
+    let (a, b) = two_addresses(&st, account);
+    let txid = project_spends(&mut st, account, 0x70, &[a, b]);
+    let mut facts = spending_facts(&st, txid, 2, a);
+    facts.multiple_source_scripts = true;
+    assert_eq!(store(&mut st, facts), TransparentDisplayStore::Stored);
+    assert!(available(&st, account, txid).is_complete());
+
+    for (case, withdraw) in [
+        ("candidate account", "DELETE FROM tpir_active_accounts"),
+        (
+            "unqualified revision",
+            "DELETE FROM tpir_qualified_revisions",
+        ),
+        ("missing observation", "DELETE FROM tpir_spend_observations"),
+        (
+            "quarantined account",
+            "INSERT INTO tpir_quarantined_accounts SELECT account_id FROM tpir_active_accounts",
+        ),
+        (
+            "quarantined source",
+            "INSERT INTO tpir_quarantined_sources SELECT DISTINCT source FROM tpir_revisions",
+        ),
+        (
+            "unplaced spend",
+            "UPDATE tpir_spend_events SET mined_height = NULL",
+        ),
+        (
+            "stale placement",
+            "UPDATE tpir_spend_events SET mined_height = mined_height - 1",
+        ),
+    ] {
+        conn(&st)
+            .execute_batch("SAVEPOINT withdraw_ownership")
+            .unwrap();
+        conn(&st).execute_batch(withdraw).unwrap();
+        let details = available(&st, account, txid);
+        assert_eq!(
+            details.omissions,
+            vec![TransparentDisplayOmission::MultipleSourceScripts],
+            "{case} must not prove that the account funded every input"
+        );
+        assert!(!details.is_complete(), "{case}");
+        conn(&st)
+            .execute_batch("ROLLBACK TO withdraw_ownership; RELEASE withdraw_ownership")
+            .unwrap();
+        assert!(
+            available(&st, account, txid).is_complete(),
+            "restored {case}"
+        );
+    }
+}
+
+#[test]
+fn view_ownership_keeps_independent_spend_evidence() {
+    let (mut st, account, _) = active_wallet();
+    let (a, b) = two_addresses(&st, account);
+    let txid = project_spends(&mut st, account, 0x70, &[a, b]);
+    let mut facts = spending_facts(&st, txid, 2, a);
+    facts.multiple_source_scripts = true;
+    assert_eq!(store(&mut st, facts), TransparentDisplayStore::Stored);
+    for origin in [0, 1] {
+        conn(&st)
+            .execute_batch("SAVEPOINT independent_ownership")
+            .unwrap();
+        conn(&st)
+            .execute(
+                "INSERT INTO tpir_spend_origins
+                 SELECT ?1, prevout_txid, prevout_output_index, ?2
+                 FROM tpir_spend_events WHERE spending_txid = ?3",
+                rusqlite::params![tx_ref(&st, txid).0, origin, txid.as_ref()],
+            )
+            .unwrap();
+        conn(&st)
+            .execute_batch(
+                "DELETE FROM tpir_qualified_revisions;
+                 INSERT INTO tpir_quarantined_accounts SELECT account_id FROM tpir_active_accounts;",
+            )
+            .unwrap();
+        assert!(
+            available(&st, account, txid).is_complete(),
+            "origin {origin}"
+        );
+        conn(&st)
+            .execute_batch("ROLLBACK TO independent_ownership; RELEASE independent_ownership")
+            .unwrap();
+    }
+}
+
+#[test]
 fn view_shared_funding() {
     let (mut st, account, _) = active_wallet();
     let spending = TxId::from_bytes([3; 32]);
@@ -2335,6 +2426,18 @@ fn push(data: &[u8]) -> Vec<u8> {
 /// Stores a copy of local transaction `txid` with transparent inputs unlocked by `script_sigs`,
 /// returning the copy's txid.
 fn with_inputs(st: &mut State, txid: TxId, script_sigs: Vec<Vec<u8>>) -> TxId {
+    with_outpoints(
+        st,
+        txid,
+        script_sigs
+            .into_iter()
+            .zip(0x90u8..)
+            .map(|(script_sig, tag)| (OutPoint::new([tag; 32], 0), script_sig))
+            .collect(),
+    )
+}
+
+fn with_outpoints(st: &mut State, txid: TxId, inputs: Vec<(OutPoint, Vec<u8>)>) -> TxId {
     use transparent::bundle::{Authorized, Bundle, TxIn};
     let data = st
         .wallet()
@@ -2342,12 +2445,11 @@ fn with_inputs(st: &mut State, txid: TxId, script_sigs: Vec<Vec<u8>>) -> TxId {
         .unwrap()
         .unwrap()
         .into_data();
-    let vin = script_sigs
+    let vin = inputs
         .into_iter()
-        .zip(0x90u8..)
-        .map(|(script_sig, tag)| {
+        .map(|(outpoint, script_sig)| {
             TxIn::from_parts(
-                OutPoint::new([tag; 32], 0),
+                outpoint,
                 transparent::address::Script(zcash_script::script::Code(script_sig)),
                 u32::MAX,
             )
@@ -2376,6 +2478,61 @@ fn with_inputs(st: &mut State, txid: TxId, script_sigs: Vec<Vec<u8>>) -> TxId {
     let height = st.wallet().chain_height().unwrap().unwrap();
     crate::wallet::put_tx_data(conn(st), &tx, None, None, None, height).unwrap();
     tx.txid()
+}
+
+#[test]
+fn raw_view_ownership_requires_an_actual_input() {
+    let (mut st, account, taddr, txid, output_index) = local_payment_to_self();
+    let ws = watch(&st, account);
+    let WatchOrigin::Derived { scope, index } = ws
+        .addresses
+        .iter()
+        .find(|w| w.address == taddr)
+        .unwrap()
+        .origin
+    else {
+        panic!("expected a derived address");
+    };
+    let key = st
+        .test_account()
+        .unwrap()
+        .usk()
+        .to_unified_full_viewing_key()
+        .transparent()
+        .unwrap()
+        .derive_address_pubkey(scope, index)
+        .unwrap();
+    assert_eq!(TransparentAddress::from_pubkey(&key), taddr);
+    let script_sig = [push(&signature()), push(&key.serialize())].concat();
+    let unrelated = with_inputs(&mut st, txid, vec![script_sig.clone()]);
+    let actual = with_outpoints(
+        &mut st,
+        txid,
+        vec![(OutPoint::new(*txid.as_ref(), output_index), script_sig)],
+    );
+    for (copy, expected_owned) in [(unrelated, false), (actual, true)] {
+        // The independently constructed link is retained even if the raw transaction spends
+        // a different outpoint. It must only attribute ownership when the input is present.
+        conn(&st)
+            .execute(
+                "INSERT INTO transparent_received_output_spends
+                 SELECT id, ?1 FROM transparent_received_outputs
+                 WHERE transaction_id = ?2 AND output_index = ?3",
+                rusqlite::params![tx_ref(&st, copy).0, tx_ref(&st, txid).0, output_index],
+            )
+            .unwrap();
+        crate::wallet::transparent_ledger::record_spend_origin(
+            conn(&st),
+            tx_ref(&st, copy),
+            &OutPoint::new(*txid.as_ref(), output_index),
+            crate::wallet::transparent_ledger::ProjectionOrigin::LocalConstruction,
+        )
+        .unwrap();
+        assert_eq!(
+            sender_of(&available(&st, account, copy)),
+            Some((taddr, expected_owned))
+        );
+    }
 }
 
 #[test]

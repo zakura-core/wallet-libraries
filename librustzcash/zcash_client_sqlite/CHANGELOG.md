@@ -10,6 +10,11 @@ workspace.
 
 ## [Unreleased]
 
+- Transparent receipt ownership now requires current, qualified, non-quarantined private
+  spend evidence or an independently recorded public/local spend. Candidate and withdrawn
+  recovery records cannot suppress funding omissions. Raw sender ownership also requires an
+  outpoint actually spent by the transaction. Conservative contradiction checks are unchanged.
+
 - Transparent txid enhancement (prototype): `WalletDb` implements `TransparentDetailRead` and
   `TransparentDetailWrite`. The additive `transparent_txid_enhancement` migration adds
   `transparent_detail_work`, `transparent_tx_display` (one display entry: fee, counts, sender

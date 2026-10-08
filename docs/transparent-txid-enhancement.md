@@ -233,9 +233,17 @@ spendability, `details_complete`, or history classification.
 - `NotCovered`: the display service does not cover the transaction.
 
 `sender` is `Coinbase`, `Shielded` (no transparent input: unshielding),
-`Address { address, owned }`, or `NonStandard`. The sender is owned when it is
-one of the account's addresses or the account is known to have spent an output
-paying it in this transaction.
+`Address { address, owned }`, or `NonStandard`. A display record's sender is
+owned when it is one of the account's addresses or trusted spend evidence shows
+that the account spent an output paying it in this transaction. Raw transactions
+require trusted spend evidence for an outpoint actually present in their inputs;
+an unlocking script showing an owned address alone does not establish ownership.
+Private spend evidence must belong to an active account, have a qualified
+observation from a non-quarantined source and account, and match the transaction's
+accepted mined height. Independently recorded public or local spends retain
+their semantics. These same checks determine whether the account funded every
+input before suppressing a multiple-source or shared-funding omission. Candidate
+or withdrawn records still participate in conservative contradiction checks.
 
 `omissions` lists what the view does not show in full, in a fixed order:
 

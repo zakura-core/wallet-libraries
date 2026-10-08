@@ -550,14 +550,13 @@ struct KnownInput {
     script: Option<Vec<u8>>,
     /// The value of the spent output, when known.
     value: Option<u64>,
-    /// The accounts known to own the spent output.
-    accounts: BTreeSet<i64>,
 }
 
 /// Every distinct outpoint the wallet knows transaction `tx` (`txid`) spends, by outpoint:
 /// recovered spends (with input index and script, and value once the output is recovered),
-/// spend links to owned outputs (script, value and account only while financial queries count
+/// spend links to owned outputs (script and value only while financial queries count
 /// the output), and public spend links from the spend map (the outpoint only).
+/// These records can reject a contradiction even when they no longer establish ownership.
 fn known_inputs(
     conn: &Connection,
     tx: i64,
@@ -568,21 +567,19 @@ fn known_inputs(
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT e.prevout_txid, e.prevout_output_index, e.input_index, e.prevout_script,
                 (SELECT re.value_zat FROM tpir_receive_events re
-                 WHERE re.txid = e.prevout_txid AND re.output_index = e.prevout_output_index),
-                e.account_id
+                 WHERE re.txid = e.prevout_txid AND re.output_index = e.prevout_output_index)
          FROM tpir_spend_events e
          WHERE e.spending_txid = :txid
          UNION ALL
          SELECT ot.txid, o.output_index, NULL,
                 CASE WHEN ({counted}) THEN o.script END,
-                CASE WHEN ({counted}) THEN o.value_zat END,
-                CASE WHEN ({counted}) THEN o.account_id END
+                CASE WHEN ({counted}) THEN o.value_zat END
          FROM transparent_received_output_spends s
          JOIN transparent_received_outputs o ON o.id = s.transparent_received_output_id
          JOIN transactions ot ON ot.id_tx = o.transaction_id
          WHERE s.transaction_id = :tx
          UNION ALL
-         SELECT m.prevout_txid, m.prevout_output_index, NULL, NULL, NULL, NULL
+         SELECT m.prevout_txid, m.prevout_output_index, NULL, NULL, NULL
          FROM transparent_spend_map m
          WHERE m.spending_transaction_id = :tx"
     ))?;
@@ -595,11 +592,56 @@ fn known_inputs(
             known.script = row.get(3)?;
         }
         known.value = known.value.or(row.get(4)?);
-        if let Some(account) = row.get::<_, Option<i64>>(5)? {
-            known.accounts.insert(account);
-        }
     }
     Ok(inputs)
+}
+
+/// Spent outpoints whose ownership the account can affirm now, with their spent scripts.
+/// Private evidence must be active, qualified, non-quarantined and at the transaction's
+/// accepted height. Independently recorded public or local spends retain their semantics;
+/// ledger projection alone cannot bypass the private evidence checks.
+fn owned_inputs(
+    conn: &Connection,
+    tx: i64,
+    txid: &[u8],
+    account: Option<i64>,
+) -> Result<BTreeMap<([u8; 32], u32), Vec<u8>>, SqliteClientError> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT e.prevout_txid, e.prevout_output_index, e.prevout_script
+         FROM tpir_spend_events e
+         JOIN tpir_active_accounts a ON a.account_id = e.account_id
+         JOIN transactions t ON t.txid = e.spending_txid AND t.mined_height = e.mined_height
+         WHERE e.spending_txid = :txid AND e.account_id = :account
+         AND NOT EXISTS (SELECT 1 FROM tpir_quarantined_accounts qa
+                         WHERE qa.account_id = e.account_id)
+         AND EXISTS (
+             SELECT 1 FROM tpir_spend_observations so
+             JOIN tpir_qualified_revisions q ON q.revision_id = so.revision_id
+             JOIN tpir_revisions r ON r.id = so.revision_id
+             WHERE so.spend_id = e.id
+             AND NOT EXISTS (SELECT 1 FROM tpir_quarantined_sources qs
+                             WHERE qs.source = r.source)
+         )
+         UNION
+         SELECT ot.txid, o.output_index, o.script
+         FROM transparent_received_output_spends s
+         JOIN transparent_received_outputs o ON o.id = s.transparent_received_output_id
+         JOIN transactions ot ON ot.id_tx = o.transaction_id
+         WHERE s.transaction_id = :tx AND o.account_id = :account AND ({})
+         AND EXISTS (
+             SELECT 1 FROM tpir_spend_origins origin
+             WHERE origin.spending_transaction_id = s.transaction_id
+             AND origin.prevout_txid = ot.txid AND origin.prevout_output_index = o.output_index
+             AND origin.origin IN (0, 1)
+         )",
+        output_observation_condition("o"),
+    ))?;
+    Ok(stmt
+        .query_map(
+            named_params![":tx": tx, ":txid": txid, ":account": account],
+            |row| Ok(((row.get(0)?, row.get(1)?), row.get(2)?)),
+        )?
+        .collect::<Result<_, _>>()?)
 }
 
 /// The address the first address-shaped input spends, when the wallet knows the index and
@@ -1233,12 +1275,27 @@ pub(crate) fn view<P: consensus::Parameters>(
             row.get(0)
         })?
         .collect::<Result<_, _>>()?;
-    // The outpoints the account is known to have spent in the transaction.
-    let owned_inputs: BTreeMap<([u8; 32], u32), KnownInput> =
-        known_inputs(conn, tx, txid.as_ref())?
-            .into_iter()
-            .filter(|(_, i)| account_id.is_some_and(|a| i.accounts.contains(&a)))
-            .collect();
+    let transaction = if has_raw {
+        let Some((_, transaction)) = crate::wallet::get_transaction(conn, params, txid)? else {
+            return Ok(None);
+        };
+        Some(transaction)
+    } else {
+        None
+    };
+    let mut owned_inputs = owned_inputs(conn, tx, txid.as_ref(), account_id)?;
+    // A recorded link cannot attribute a raw sender unless the transaction actually spends
+    // that outpoint. Unlocking scripts can reveal a previously used public key on their own.
+    if let Some(transaction) = &transaction {
+        owned_inputs.retain(|(hash, index), _| {
+            transaction.transparent_bundle().is_some_and(|bundle| {
+                bundle
+                    .vin
+                    .iter()
+                    .any(|input| input.prevout().hash() == hash && input.prevout().n() == *index)
+            })
+        });
+    }
     let address = |address: TransparentAddress| TransparentDisplayAddress {
         address,
         encoded: zcash_keys::encoding::encode_transparent_address_p(params, &address),
@@ -1249,16 +1306,17 @@ pub(crate) fn view<P: consensus::Parameters>(
     // signed, so in a raw transaction only a known spend makes the sender the account's.
     let sender_of = |found: TransparentAddress, asserted: bool| -> Result<_, SqliteClientError> {
         let found = address(found);
-        let owned = owned_inputs.values().any(|i| {
-            i.script.as_deref().and_then(transparent_display_address) == Some(found.address)
-        }) || asserted
-            && conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM addresses
+        let owned = owned_inputs
+            .values()
+            .any(|script| transparent_display_address(script) == Some(found.address))
+            || asserted
+                && conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM addresses
                             WHERE account_id IS :account
                             AND cached_transparent_receiver_address = :address)",
-                named_params![":account": account_id, ":address": found.encoded],
-                |row| row.get(0),
-            )?;
+                    named_params![":account": account_id, ":address": found.encoded],
+                    |row| row.get(0),
+                )?;
         Ok(TransparentDisplayViewSender::Address {
             address: found,
             owned,
@@ -1274,10 +1332,7 @@ pub(crate) fn view<P: consensus::Parameters>(
     };
     let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
 
-    if has_raw {
-        let Some((_, transaction)) = crate::wallet::get_transaction(conn, params, txid)? else {
-            return Ok(None);
-        };
+    if let Some(transaction) = transaction {
         let bundle = transaction.transparent_bundle();
         let coinbase = bundle.is_some_and(|b| b.is_coinbase());
         let vin = match bundle {
