@@ -1,0 +1,29 @@
+[package]
+name = "zakura-dynamic-ivk"
+version = "0.0.0"
+publish = false
+description = "Experimental dynamic IVKs: derived Ironwood receiving keys and refund memos"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[dependencies]
+blake2b_simd.workspace = true
+ff.workspace = true
+orchard.workspace = true
+pasta_curves.workspace = true
+zcash_protocol.workspace = true
+zcash_note_encryption.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+incrementalmerkletree.workspace = true
+orchard = { workspace = true, features = ["circuit"] }
+rand = { workspace = true, features = ["thread_rng"] }
+shardtree.workspace = true
+
+[lints]
+workspace = true
