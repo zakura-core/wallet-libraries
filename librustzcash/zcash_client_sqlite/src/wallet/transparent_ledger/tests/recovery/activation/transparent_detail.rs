@@ -1877,6 +1877,17 @@ fn project_spends(
     tag: u8,
     addresses: &[TransparentAddress],
 ) -> TxId {
+    project_spends_from(st, account, tag, addresses, 0)
+}
+
+/// [`project_spends`] with the projected inputs at indices from `first_index` on.
+fn project_spends_from(
+    st: &mut State,
+    account: AccountUuid,
+    tag: u8,
+    addresses: &[TransparentAddress],
+    first_index: u32,
+) -> TxId {
     let ws = watch(st, account);
     let receives: Vec<ReceiveEvent> = addresses
         .iter()
@@ -1885,7 +1896,7 @@ fn project_spends(
         .collect();
     let spends = receives
         .iter()
-        .zip(0u32..)
+        .zip(first_index..)
         .map(|(r, input_index)| SpendEvent {
             input_index,
             ..spend(tag, r, below_target(&ws, 0))
@@ -1975,27 +1986,52 @@ fn contradiction_sender() {
     }
     assert_eq!(store(&mut st, facts), TransparentDisplayStore::Stored);
 
-    // One of two inputs known. With one source script every input spends it.
+    // The first two of three inputs known, in order: the first is still the sender.
+    let prefix = project_spends(&mut st, account, 0x78, &[a, b]);
+    let mut facts = spending_facts(&st, prefix, 3, FOREIGN);
+    facts.multiple_source_scripts = true;
+    contradicted(
+        &mut st,
+        facts.clone(),
+        TransparentDisplayContradiction::Sender,
+    );
+    facts.sender = TransparentDisplaySender::Address(a);
+    assert_eq!(store(&mut st, facts), TransparentDisplayStore::Stored);
+
+    // One of two inputs known, the first. With one source script every input spends it.
     let spending = TxId::from_bytes([3; 32]);
     let spent = spent_address(&st, spending, 0);
+    assert_ne!(spent, FOREIGN);
     let mut facts = spending_facts(&st, spending, 2, FOREIGN);
     contradicted(
         &mut st,
         facts.clone(),
         TransparentDisplayContradiction::Sender,
     );
-    // With several, a known address-shaped script rules out a non-standard sender.
+    // With several, a known address-shaped script rules out a non-standard sender, and a
+    // known first input still fixes the sender.
     facts.multiple_source_scripts = true;
-    facts.sender = TransparentDisplaySender::NonStandard;
-    contradicted(
-        &mut st,
-        facts.clone(),
-        TransparentDisplayContradiction::Sender,
-    );
-    // The other input may come first.
-    facts.sender = TransparentDisplaySender::Address(FOREIGN);
+    for wrong in [
+        TransparentDisplaySender::NonStandard,
+        TransparentDisplaySender::Address(FOREIGN),
+    ] {
+        contradicted(
+            &mut st,
+            TransparentDisplayFacts {
+                sender: wrong,
+                ..facts.clone()
+            },
+            TransparentDisplayContradiction::Sender,
+        );
+    }
+    facts.sender = TransparentDisplaySender::Address(spent);
     assert_eq!(store(&mut st, facts), TransparentDisplayStore::Stored);
-    assert_ne!(spent, FOREIGN);
+
+    // Only the second of two inputs known: the unknown first one may be the sender.
+    let second = project_spends_from(&mut st, account, 0x7c, &[b], 1);
+    let mut facts = spending_facts(&st, second, 2, FOREIGN);
+    facts.multiple_source_scripts = true;
+    assert_eq!(store(&mut st, facts), TransparentDisplayStore::Stored);
 }
 
 #[test]

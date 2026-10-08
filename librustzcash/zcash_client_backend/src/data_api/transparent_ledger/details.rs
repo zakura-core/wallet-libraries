@@ -390,8 +390,10 @@ pub enum TransparentDisplayOmission {
     /// The viewing account funded none of them. When it funded every input this is its own
     /// send and not an omission.
     MultipleSourceScripts,
-    /// The viewing account funded some inputs but not all; the others, which spend other
-    /// scripts, are not shown. This is the only sign that another wallet or account took part.
+    /// As far as the wallet knows, the viewing account funded some inputs but not all; the
+    /// others, which spend other scripts, are not shown. This is the only sign that another
+    /// wallet or account took part. A spend of the account's that the wallet has not recovered
+    /// also counts as another party's.
     SharedFunding,
     /// The shielded pools also contributed net value to a transaction with transparent inputs;
     /// that part has no address.

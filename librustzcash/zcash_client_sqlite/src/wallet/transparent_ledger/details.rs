@@ -602,12 +602,33 @@ fn known_inputs(
     Ok(inputs)
 }
 
+/// The address the first address-shaped input spends, when the wallet knows the index and
+/// spent script of every input up to it: `Some(None)` when it knows all `count` inputs and
+/// none is address-shaped, `None` when an input before the first address-shaped one is unknown.
+fn known_first_address(
+    inputs: &BTreeMap<([u8; 32], u32), KnownInput>,
+    count: u32,
+) -> Option<Option<TransparentAddress>> {
+    let by_index: BTreeMap<u32, Option<&[u8]>> = inputs
+        .values()
+        .filter_map(|i| i.input_index.map(|index| (index, i.script.as_deref())))
+        .collect();
+    for index in 0..count {
+        let script = (*by_index.get(&index)?)?;
+        if let Some(address) = transparent_display_address(script) {
+            return Some(Some(address));
+        }
+    }
+    Some(None)
+}
+
 /// Checks the sender and `multiple_source_scripts` against the spent scripts the wallet knows.
 ///
-/// When it knows the script of every input, the flag must say whether they differ, and the
-/// sender must be the first address-shaped one in input order (one of them, when an input's
-/// index is unknown). Otherwise it can only require the flag when it already knows two distinct
-/// scripts, and, when the flag is clear, the sender to be the one script every input spends.
+/// When it knows the script of every input, the flag must say whether they differ. When it
+/// knows every input in order up to the first address-shaped one, the sender must be that
+/// one's address; knowing every script but not every index, the sender must be one of them.
+/// Otherwise it can only require the flag when it already knows two distinct scripts, and,
+/// when the flag is clear, the sender to be the one script every input spends.
 fn sender_contradiction(
     facts: &TransparentDisplayFacts,
     inputs: &BTreeMap<([u8; 32], u32), KnownInput>,
@@ -629,27 +650,21 @@ fn sender_contradiction(
         .iter()
         .filter_map(|s| transparent_display_address(s))
         .collect();
-    let consistent = match facts.sender {
+    let consistent = match (facts.sender, known_first_address(inputs, facts.input_count)) {
         // Without inputs the wallet knows no spend (`InputCount`).
-        TransparentDisplaySender::Absent => true,
-        TransparentDisplaySender::NonStandard => addressed.is_empty(),
-        TransparentDisplaySender::Address(sender) if all_known => {
-            if inputs.values().all(|i| i.input_index.is_some()) {
-                let mut ordered: Vec<&KnownInput> = inputs.values().collect();
-                ordered.sort_by_key(|i| i.input_index);
-                ordered
-                    .iter()
-                    .find_map(|i| i.script.as_deref().and_then(transparent_display_address))
-                    == Some(sender)
-            } else {
-                addressed.contains(&sender)
-            }
+        (TransparentDisplaySender::Absent, _) => true,
+        (TransparentDisplaySender::NonStandard, _) => addressed.is_empty(),
+        (TransparentDisplaySender::Address(sender), Some(first)) => first == Some(sender),
+        (TransparentDisplaySender::Address(sender), None) if all_known => {
+            addressed.contains(&sender)
         }
         // Every input spends the one script the wallet may know.
-        TransparentDisplaySender::Address(sender) if !facts.multiple_source_scripts => scripts
-            .first()
-            .is_none_or(|s| transparent_display_address(s) == Some(sender)),
-        TransparentDisplaySender::Address(_) => true,
+        (TransparentDisplaySender::Address(sender), None) if !facts.multiple_source_scripts => {
+            scripts
+                .first()
+                .is_none_or(|s| transparent_display_address(s) == Some(sender))
+        }
+        (TransparentDisplaySender::Address(_), None) => true,
     };
     (!consistent).then_some(C::Sender)
 }
@@ -1090,6 +1105,10 @@ fn last_opcode(script: &[u8]) -> Option<u8> {
 /// least one other push; the redeem script must be well formed and end in a signature check
 /// (`OP_CHECKSIG`, `OP_CHECKMULTISIG` or their `VERIFY` forms), which tells it apart from a
 /// signature. Anything else has no address here.
+///
+/// Without the spent output this is a reading, not a proof: a P2SH redeem script shaped like
+/// a public key reads as P2PKH, and a non-standard locking script can accept any key. So a
+/// raw transaction's sender is never taken as the account's own on this alone.
 fn spent_address(script_sig: &[u8]) -> Option<TransparentAddress> {
     let pushes = pushes(script_sig)?;
     let is_signature = |sig: &[u8]| (9..=73).contains(&sig.len()) && sig[0] == 0x30;
@@ -1224,17 +1243,22 @@ pub(crate) fn view<P: consensus::Parameters>(
         address,
         encoded: zcash_keys::encoding::encode_transparent_address_p(params, &address),
     };
-    let sender_of = |found: TransparentAddress| -> Result<_, SqliteClientError> {
+    // A sender is the account's own when the account is known to have spent an output paying
+    // it here or, for a sender the publisher asserts from the spent outputs, when it is one of
+    // the account's addresses. An unlocking script alone can show any public key that has ever
+    // signed, so in a raw transaction only a known spend makes the sender the account's.
+    let sender_of = |found: TransparentAddress, asserted: bool| -> Result<_, SqliteClientError> {
         let found = address(found);
         let owned = owned_inputs.values().any(|i| {
             i.script.as_deref().and_then(transparent_display_address) == Some(found.address)
-        }) || conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM addresses
+        }) || asserted
+            && conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM addresses
                             WHERE account_id IS :account
                             AND cached_transparent_receiver_address = :address)",
-            named_params![":account": account_id, ":address": found.encoded],
-            |row| row.get(0),
-        )?;
+                named_params![":account": account_id, ":address": found.encoded],
+                |row| row.get(0),
+            )?;
         Ok(TransparentDisplayViewSender::Address {
             address: found,
             owned,
@@ -1271,7 +1295,7 @@ pub(crate) fn view<P: consensus::Parameters>(
             TransparentDisplayViewSender::Shielded
         } else {
             match spent.iter().flatten().next() {
-                Some(found) => sender_of(*found)?,
+                Some(found) => sender_of(*found, false)?,
                 None => TransparentDisplayViewSender::NonStandard,
             }
         };
@@ -1336,7 +1360,7 @@ pub(crate) fn view<P: consensus::Parameters>(
                 TransparentDisplayViewSender::Coinbase
             }
             TransparentDisplaySender::Absent => TransparentDisplayViewSender::Shielded,
-            TransparentDisplaySender::Address(found) => sender_of(found)?,
+            TransparentDisplaySender::Address(found) => sender_of(found, true)?,
             TransparentDisplaySender::NonStandard => TransparentDisplayViewSender::NonStandard,
         };
         let outputs: Vec<_> = facts
