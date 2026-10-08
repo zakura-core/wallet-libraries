@@ -12,7 +12,8 @@ workspace.
 
 - Transparent txid enhancement (prototype): `WalletDb` implements `TransparentDetailRead` and
   `TransparentDetailWrite`. The additive `transparent_txid_enhancement` migration adds
-  `transparent_detail_work`, `transparent_tx_display` and `transparent_tx_display_outputs`, and
+  `transparent_detail_work`, `transparent_tx_display` (one display entry: fee, counts, sender
+  and omission flags) and `transparent_tx_display_outputs` (outputs 0 and 1), and
   queues work for existing mined route-2 transactions and ledger-origin transactions without raw
   bytes. Ledger projection, the route-2 marker, and mining a route-2 transaction queue work for
   mined transactions without stored facts; each first deletes stored facts that the wallet now

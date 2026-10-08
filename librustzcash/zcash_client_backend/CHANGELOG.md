@@ -21,8 +21,14 @@ workspace.
   library-computed backoff (`defer_transparent_detail` with the request's mined height and
   `TransparentDetailOutcome`, ignoring results for a changed placement), and the
   detail view (`transparent_display_view`, returning `TransparentDisplayView`). Display facts
-  never change balances, history classification or `details_complete`; see
-  `docs/transparent-txid-enhancement.md`.
+  are one fixed-size display entry: the first address-shaped sender
+  (`TransparentDisplaySender`), at most two outputs (`TRANSPARENT_DISPLAY_OUTPUT_SLOTS`), and
+  named omissions; `transparent_display_address` classifies a locking script the same way. The
+  view (`TransparentDisplayDetails`) shows the sender (`TransparentDisplayViewSender`), outputs
+  with encoded addresses (`TransparentDisplayAddress`), what it omits
+  (`TransparentDisplayOmission`, including shared funding, which only the wallet can see), and
+  where it came from (`TransparentDisplaySource`). Display facts never change balances,
+  history classification or `details_complete`; see `docs/transparent-txid-enhancement.md`.
 - `IronwoodEnhancementData::has_transparent_outputs` preserves the service's separate
   output-presence assertion for display reconstruction; note decryption authenticates the memo,
   not that assertion.

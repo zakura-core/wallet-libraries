@@ -2,16 +2,18 @@
 //!
 //! The wallet validates and stores the facts (`TransparentDetailWrite`); this module only
 //! translates. Under `PrivateRequired` a failed lookup is deferred, never retried publicly.
+use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::transparent_ledger::{
     TransparentDetailOutcome, TransparentDisplayFacts, TransparentDisplayOutput,
-    TransparentDisplayProvenance,
+    TransparentDisplayProvenance, TransparentDisplaySender,
 };
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
-use crate::recovery::{RecoveryError, failure, metadata, require};
+use crate::recovery::{RecoveryError, failure, require};
 use transparent_txid_client::{
-    Placement, Provenance, TransparentDisplayRecord, TxidError, TxidLookup,
+    Address, AddressKind, DisplayEntry, OUTPUT_SLOTS, Placement, Provenance, Tag, TxidError,
+    TxidLookup,
 };
 
 /// Decodes a display map digest as the client reports it (hex).
@@ -19,36 +21,69 @@ pub fn map_sha256(hex: &str) -> Option<[u8; 32]> {
     hex::decode(hex).ok()?.try_into().ok()
 }
 
-/// The wallet's display facts for `record`, found through the publication `provenance`
-/// names by its mined height `looked_up_height`.
+/// The address an entry's address slot names: `None` for a script without one.
+fn address(slot: &Address) -> Result<Option<TransparentAddress>, RecoveryError> {
+    match slot.kind {
+        AddressKind::P2pkh => Ok(Some(TransparentAddress::PublicKeyHash(slot.hash))),
+        AddressKind::P2sh => Ok(Some(TransparentAddress::ScriptHash(slot.hash))),
+        AddressKind::Other => Ok(None),
+        AddressKind::Absent => Err(RecoveryError::Invalid(
+            "display output without a kind".into(),
+        )),
+    }
+}
+
+/// The wallet's display facts for `txid`'s `entry`, found through the publication
+/// `provenance` names by its mined height `looked_up_height`.
 ///
-/// Fails when a value exceeds `MAX_MONEY`, the metadata does not suit the coinbase flag, or
-/// the map digest is malformed; the wallet still validates the facts against its own state.
+/// Fails when the entry's tag is not `txid`'s, a value exceeds `MAX_MONEY`, the entry
+/// disagrees with itself, or the map digest is malformed; the wallet still validates the facts
+/// against its own state.
 pub fn display_facts(
-    record: &TransparentDisplayRecord,
+    txid: TxId,
+    entry: &DisplayEntry,
     provenance: &Provenance,
     looked_up_height: BlockHeight,
 ) -> Result<TransparentDisplayFacts, RecoveryError> {
-    let metadata = metadata(Some(record.metadata))?.expect("metadata is present");
     require(
-        metadata.is_valid_for(record.coinbase),
-        "display metadata does not suit the coinbase flag",
+        entry.tag == Tag::of(&transparent_events::Txid(*txid.as_ref())),
+        "display entry is not the txid's",
     )?;
-    let outputs = record
-        .outputs
+    let sender = match entry.source.kind {
+        AddressKind::Absent => TransparentDisplaySender::Absent,
+        _ => address(&entry.source)?.map_or(
+            TransparentDisplaySender::NonStandard,
+            TransparentDisplaySender::Address,
+        ),
+    };
+    let held = (entry.output_count as usize).min(OUTPUT_SLOTS);
+    require(
+        entry.outputs[held..].iter().all(Option::is_none),
+        "display output beyond the output count",
+    )?;
+    let outputs = entry.outputs[..held]
         .iter()
-        .map(|output| {
+        .map(|slot| {
+            let output = slot.as_ref().ok_or_else(|| {
+                RecoveryError::Invalid("display output missing below the output count".into())
+            })?;
             Ok(TransparentDisplayOutput {
                 value: Zatoshis::from_u64(output.value).map_err(failure)?,
-                script: output.script.clone(),
+                address: address(&output.address)?,
             })
         })
         .collect::<Result<_, RecoveryError>>()?;
-    Ok(TransparentDisplayFacts {
-        txid: TxId::from_bytes(record.txid.0),
-        coinbase: record.coinbase,
-        metadata,
+    let facts = TransparentDisplayFacts {
+        txid,
+        coinbase: entry.coinbase,
+        fee: Zatoshis::from_u64(entry.fee).map_err(failure)?,
+        input_count: entry.input_count,
+        output_count: entry.output_count,
+        shielded_components: entry.shielded_components,
+        sender,
         outputs,
+        multiple_source_scripts: entry.multiple_source_scripts,
+        shielded_and_transparent_funding: entry.shielded_and_transparent_funding,
         provenance: TransparentDisplayProvenance {
             shard_id: provenance.shard_id,
             revision: provenance.revision,
@@ -56,10 +91,15 @@ pub fn display_facts(
                 .ok_or_else(|| RecoveryError::Invalid("malformed display map digest".into()))?,
             looked_up_height,
         },
-    })
+    };
+    require(
+        facts.is_well_formed(),
+        "display entry disagrees with itself",
+    )?;
+    Ok(facts)
 }
 
-/// How to defer a lookup that did not find the record, or `None` when it found it or was
+/// How to defer a lookup that did not find the entry, or `None` when it found it or was
 /// cancelled before completing (which is not an attempt).
 pub fn deferral(lookup: &Result<TxidLookup, TxidError>) -> Option<TransparentDetailOutcome> {
     match lookup {
@@ -90,9 +130,9 @@ pub fn deferral(lookup: &Result<TxidLookup, TxidError>) -> Option<TransparentDet
 #[cfg(test)]
 mod tests {
     use super::*;
-    use transparent_events::{FeeState, TransactionMetadata, Txid};
-    use transparent_txid_client::{DisplayOutput, ProtocolKind, Tier};
-    use zcash_client_backend::data_api::transparent_ledger::WholeTransactionFee;
+    use transparent_txid_client::{EntryOutput, ProtocolKind, Tier};
+
+    const TXID: [u8; 32] = [9; 32];
 
     fn provenance() -> Provenance {
         Provenance {
@@ -104,85 +144,143 @@ mod tests {
         }
     }
 
-    fn record(coinbase: bool, fee: FeeState, inputs: u32) -> TransparentDisplayRecord {
-        TransparentDisplayRecord {
-            txid: Txid([9; 32]),
-            coinbase,
-            metadata: TransactionMetadata {
-                fee,
-                transparent_input_count: inputs,
-                has_shielded_components: true,
-            },
-            outputs: vec![
-                DisplayOutput {
+    fn slot(kind: AddressKind, byte: u8) -> Address {
+        Address {
+            kind,
+            hash: [byte; 20],
+        }
+    }
+
+    /// Two inputs spending two scripts, partly shielded funding, and three outputs: a P2SH one
+    /// and one without an address given, one omitted.
+    fn entry() -> DisplayEntry {
+        DisplayEntry {
+            tag: Tag::of(&transparent_events::Txid(TXID)),
+            coinbase: false,
+            shielded_components: true,
+            multiple_source_scripts: true,
+            shielded_and_transparent_funding: true,
+            fee: 10_000,
+            input_count: 2,
+            output_count: 3,
+            source: slot(AddressKind::P2pkh, 1),
+            outputs: [
+                Some(EntryOutput {
                     value: 5,
-                    script: vec![0x51],
-                },
-                DisplayOutput {
+                    address: slot(AddressKind::P2sh, 2),
+                }),
+                Some(EntryOutput {
                     value: 0,
-                    script: vec![],
-                },
+                    address: Address::OTHER,
+                }),
             ],
         }
     }
 
+    fn facts(entry: &DisplayEntry) -> Result<TransparentDisplayFacts, RecoveryError> {
+        display_facts(
+            TxId::from_bytes(TXID),
+            entry,
+            &provenance(),
+            BlockHeight::from_u32(3_000_000),
+        )
+    }
+
     #[test]
-    fn display_record_to_backend_facts() {
-        let height = BlockHeight::from_u32(3_000_000);
-        let facts =
-            display_facts(&record(false, FeeState::Exact(0), 3), &provenance(), height).unwrap();
-        assert_eq!(facts.txid, TxId::from_bytes([9; 32]));
-        assert!(!facts.coinbase);
+    fn display_entry_to_backend_facts() {
+        let mixed = facts(&entry()).unwrap();
+        assert_eq!(mixed.txid, TxId::from_bytes(TXID));
+        assert!(!mixed.coinbase && mixed.shielded_components);
+        assert_eq!(mixed.fee, Zatoshis::const_from_u64(10_000));
+        assert_eq!((mixed.input_count, mixed.output_count), (2, 3));
+        assert!(mixed.more_than_two_outputs());
         assert_eq!(
-            facts.metadata.fee,
-            WholeTransactionFee::Exact(Zatoshis::ZERO)
+            mixed.sender,
+            TransparentDisplaySender::Address(TransparentAddress::PublicKeyHash([1; 20]))
         );
-        assert_eq!(facts.metadata.transparent_input_count, 3);
-        assert!(facts.metadata.has_shielded_components);
+        assert!(mixed.multiple_source_scripts && mixed.shielded_and_transparent_funding);
         assert_eq!(
-            facts.outputs,
+            mixed.outputs,
             vec![
                 TransparentDisplayOutput {
                     value: Zatoshis::const_from_u64(5),
-                    script: vec![0x51],
+                    address: Some(TransparentAddress::ScriptHash([2; 20])),
                 },
                 TransparentDisplayOutput {
                     value: Zatoshis::ZERO,
-                    script: vec![],
+                    address: None,
                 },
             ]
         );
         assert_eq!(
-            facts.provenance,
+            mixed.provenance,
             TransparentDisplayProvenance {
                 shard_id: 7,
                 revision: 2,
                 map_sha256: [0xab; 32],
-                looked_up_height: height,
+                looked_up_height: BlockHeight::from_u32(3_000_000),
             }
         );
-        let unknown =
-            display_facts(&record(false, FeeState::Unknown, 1), &provenance(), height).unwrap();
-        assert_eq!(unknown.metadata.fee, WholeTransactionFee::Unknown);
-        let coinbase = display_facts(
-            &record(true, FeeState::NotApplicable, 0),
-            &provenance(),
-            height,
-        )
-        .unwrap();
-        assert!(coinbase.coinbase);
-        assert_eq!(coinbase.metadata.fee, WholeTransactionFee::NotApplicable);
 
-        // Inconsistent or malformed input is refused rather than translated.
-        assert!(
-            display_facts(&record(true, FeeState::Exact(1), 0), &provenance(), height).is_err()
+        // Inputs exist but none spends an address-shaped script.
+        let mut other = entry();
+        other.source = Address::OTHER;
+        assert_eq!(
+            facts(&other).unwrap().sender,
+            TransparentDisplaySender::NonStandard
         );
-        let mut excessive = record(false, FeeState::Unknown, 1);
-        excessive.outputs[0].value = u64::MAX;
-        assert!(display_facts(&excessive, &provenance(), height).is_err());
+        // Unshielding: no input, so no sender; one output.
+        let mut unshield = entry();
+        unshield.input_count = 0;
+        unshield.source = Address::ABSENT;
+        unshield.multiple_source_scripts = false;
+        unshield.shielded_and_transparent_funding = false;
+        unshield.output_count = 1;
+        unshield.outputs[1] = None;
+        let unshielding = facts(&unshield).unwrap();
+        assert_eq!(unshielding.sender, TransparentDisplaySender::Absent);
+        assert_eq!(unshielding.outputs.len(), 1);
+        // Coinbase: no input and no fee.
+        let mut coinbase = unshield;
+        coinbase.coinbase = true;
+        coinbase.shielded_components = false;
+        coinbase.fee = 0;
+        assert!(facts(&coinbase).unwrap().coinbase);
+    }
+
+    #[test]
+    fn inconsistent_entries_are_refused() {
+        let refused = |change: &dyn Fn(&mut DisplayEntry)| {
+            let mut entry = entry();
+            change(&mut entry);
+            facts(&entry).is_err()
+        };
+        assert!(!refused(&|_| {}));
+        assert!(refused(
+            &|e| e.tag = Tag::of(&transparent_events::Txid([8; 32]))
+        ));
+        assert!(refused(&|e| e.fee = u64::MAX));
+        assert!(refused(&|e| e.outputs[0].as_mut().unwrap().value = u64::MAX));
+        assert!(refused(&|e| e.outputs[1] = None));
+        assert!(refused(&|e| e.output_count = 1));
+        assert!(refused(
+            &|e| e.outputs[0].as_mut().unwrap().address = Address::ABSENT
+        ));
+        assert!(refused(&|e| e.source = Address::ABSENT));
+        assert!(refused(&|e| e.coinbase = true));
+        assert!(refused(&|e| e.input_count = 1));
+        assert!(refused(&|e| e.shielded_components = false));
         let mut digest = provenance();
         digest.map_sha256 = "zz".into();
-        assert!(display_facts(&record(false, FeeState::Unknown, 1), &digest, height).is_err());
+        assert!(
+            display_facts(
+                TxId::from_bytes(TXID),
+                &entry(),
+                &digest,
+                BlockHeight::from_u32(1)
+            )
+            .is_err()
+        );
     }
 
     #[test]

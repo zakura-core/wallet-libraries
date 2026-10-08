@@ -139,7 +139,6 @@ pub fn publish(
                 txids: 0,
                 excluded_scripts: built.excluded_scripts,
             },
-            txid_display: None,
             directory_choice: None,
         };
         let digest = manifest.digest();

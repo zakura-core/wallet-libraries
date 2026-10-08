@@ -5,22 +5,25 @@
 //! bytes deletes them. Display facts (`transparent_tx_display*`) are display only: no balance,
 //! spendability or history query reads them. See `docs/transparent-txid-enhancement.md`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension as _, named_params};
-use transparent::{address::Script, bundle::TxOut};
+use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::transparent_ledger::{
-    TRANSPARENT_DISPLAY_MAP_RECHECK, TransactionMetadata, TransparentDetailOutcome,
-    TransparentDetailParked, TransparentDetailReasons, TransparentDetailRequest,
-    TransparentDetailWork, TransparentDisplayContradiction, TransparentDisplayDetails,
-    TransparentDisplayFacts, TransparentDisplayOutput, TransparentDisplayProvenance,
-    TransparentDisplaySource, TransparentDisplayStore, TransparentDisplayView,
-    TransparentDisplayViewOutput, TransparentLedgerMode, WholeTransactionFee,
+    TRANSPARENT_DISPLAY_MAP_RECHECK, TransparentDetailOutcome, TransparentDetailParked,
+    TransparentDetailReasons, TransparentDetailRequest, TransparentDetailWork,
+    TransparentDisplayAddress, TransparentDisplayContradiction, TransparentDisplayDetails,
+    TransparentDisplayFacts, TransparentDisplayOmission, TransparentDisplayOutput,
+    TransparentDisplayProvenance, TransparentDisplaySender, TransparentDisplaySource,
+    TransparentDisplayStore, TransparentDisplayView, TransparentDisplayViewOutput,
+    TransparentDisplayViewSender, TransparentLedgerMode, WholeTransactionFee,
+    transparent_display_address,
 };
-use zcash_primitives::transaction::TxId;
+use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
     consensus::{self, BlockHeight},
-    value::Zatoshis,
+    value::{ZatBalance, Zatoshis},
 };
 
 use crate::{AccountUuid, TxRef, error::SqliteClientError, wallet::TxQueryType};
@@ -496,30 +499,194 @@ pub(crate) fn defer(
     })
 }
 
-fn fee_columns(fee: WholeTransactionFee) -> (i64, Option<i64>) {
-    match fee {
-        WholeTransactionFee::Exact(value) => (0, Some(value.into_u64() as i64)),
-        WholeTransactionFee::Unknown => (1, None),
-        WholeTransactionFee::NotApplicable => (2, None),
+/// Address kind codes of `transparent_tx_display.sender_kind` and
+/// `transparent_tx_display_outputs.address_kind`, as the display publisher encodes them.
+const KIND_ABSENT: i64 = 0;
+const KIND_P2PKH: i64 = 1;
+const KIND_P2SH: i64 = 2;
+const KIND_NON_STANDARD: i64 = 3;
+
+fn address_columns(address: Option<TransparentAddress>) -> (i64, Option<[u8; 20]>) {
+    match address {
+        Some(TransparentAddress::PublicKeyHash(hash)) => (KIND_P2PKH, Some(hash)),
+        Some(TransparentAddress::ScriptHash(hash)) => (KIND_P2SH, Some(hash)),
+        None => (KIND_NON_STANDARD, None),
     }
 }
 
-fn fee_from_columns(
-    state: i64,
-    fee: Option<u64>,
-) -> Result<WholeTransactionFee, SqliteClientError> {
-    match (state, fee) {
-        (0, Some(fee)) => Ok(WholeTransactionFee::Exact(
-            Zatoshis::from_u64(fee).map_err(|_| {
-                SqliteClientError::CorruptedData("display fee exceeds MAX_MONEY".into())
-            })?,
+fn sender_columns(sender: TransparentDisplaySender) -> (i64, Option<[u8; 20]>) {
+    match sender {
+        TransparentDisplaySender::Absent => (KIND_ABSENT, None),
+        TransparentDisplaySender::Address(address) => address_columns(Some(address)),
+        TransparentDisplaySender::NonStandard => address_columns(None),
+    }
+}
+
+fn sender_from_columns(
+    kind: i64,
+    hash: Option<[u8; 20]>,
+) -> Result<TransparentDisplaySender, SqliteClientError> {
+    match (kind, hash) {
+        (KIND_ABSENT, None) => Ok(TransparentDisplaySender::Absent),
+        (KIND_P2PKH, Some(hash)) => Ok(TransparentDisplaySender::Address(
+            TransparentAddress::PublicKeyHash(hash),
         )),
-        (1, None) => Ok(WholeTransactionFee::Unknown),
-        (2, None) => Ok(WholeTransactionFee::NotApplicable),
+        (KIND_P2SH, Some(hash)) => Ok(TransparentDisplaySender::Address(
+            TransparentAddress::ScriptHash(hash),
+        )),
+        (KIND_NON_STANDARD, None) => Ok(TransparentDisplaySender::NonStandard),
         _ => Err(SqliteClientError::CorruptedData(
-            "invalid display fee state".into(),
+            "invalid display address kind".into(),
         )),
     }
+}
+
+/// What the wallet knows about one outpoint a transaction spends.
+#[derive(Default)]
+struct KnownInput {
+    /// The spending input's index, when a recovered spend names it.
+    input_index: Option<u32>,
+    /// The script of the spent output, when known.
+    script: Option<Vec<u8>>,
+    /// The value of the spent output, when known.
+    value: Option<u64>,
+    /// The accounts known to own the spent output.
+    accounts: BTreeSet<i64>,
+}
+
+/// Every distinct outpoint the wallet knows transaction `tx` (`txid`) spends, by outpoint:
+/// recovered spends (with input index and script, and value once the output is recovered),
+/// spend links to owned outputs (script, value and account only while financial queries count
+/// the output), and public spend links from the spend map (the outpoint only).
+fn known_inputs(
+    conn: &Connection,
+    tx: i64,
+    txid: &[u8],
+) -> Result<BTreeMap<([u8; 32], u32), KnownInput>, SqliteClientError> {
+    let counted = output_observation_condition("o");
+    let mut inputs: BTreeMap<([u8; 32], u32), KnownInput> = BTreeMap::new();
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT e.prevout_txid, e.prevout_output_index, e.input_index, e.prevout_script,
+                (SELECT re.value_zat FROM tpir_receive_events re
+                 WHERE re.txid = e.prevout_txid AND re.output_index = e.prevout_output_index),
+                e.account_id
+         FROM tpir_spend_events e
+         WHERE e.spending_txid = :txid
+         UNION ALL
+         SELECT ot.txid, o.output_index, NULL,
+                CASE WHEN ({counted}) THEN o.script END,
+                CASE WHEN ({counted}) THEN o.value_zat END,
+                CASE WHEN ({counted}) THEN o.account_id END
+         FROM transparent_received_output_spends s
+         JOIN transparent_received_outputs o ON o.id = s.transparent_received_output_id
+         JOIN transactions ot ON ot.id_tx = o.transaction_id
+         WHERE s.transaction_id = :tx
+         UNION ALL
+         SELECT m.prevout_txid, m.prevout_output_index, NULL, NULL, NULL, NULL
+         FROM transparent_spend_map m
+         WHERE m.spending_transaction_id = :tx"
+    ))?;
+    let mut rows = stmt.query(named_params![":tx": tx, ":txid": txid])?;
+    while let Some(row) = rows.next()? {
+        let outpoint = (row.get::<_, [u8; 32]>(0)?, row.get::<_, u32>(1)?);
+        let known = inputs.entry(outpoint).or_default();
+        known.input_index = known.input_index.or(row.get(2)?);
+        if known.script.is_none() {
+            known.script = row.get(3)?;
+        }
+        known.value = known.value.or(row.get(4)?);
+        if let Some(account) = row.get::<_, Option<i64>>(5)? {
+            known.accounts.insert(account);
+        }
+    }
+    Ok(inputs)
+}
+
+/// Checks the sender and `multiple_source_scripts` against the spent scripts the wallet knows.
+///
+/// When it knows the script of every input, the flag must say whether they differ, and the
+/// sender must be the first address-shaped one in input order (one of them, when an input's
+/// index is unknown). Otherwise it can only require the flag when it already knows two distinct
+/// scripts, and, when the flag is clear, the sender to be the one script every input spends.
+fn sender_contradiction(
+    facts: &TransparentDisplayFacts,
+    inputs: &BTreeMap<([u8; 32], u32), KnownInput>,
+) -> Option<TransparentDisplayContradiction> {
+    use TransparentDisplayContradiction as C;
+    let scripts: BTreeSet<&[u8]> = inputs
+        .values()
+        .filter_map(|i| i.script.as_deref())
+        .collect();
+    let all_known =
+        inputs.len() == facts.input_count as usize && inputs.values().all(|i| i.script.is_some());
+    if (scripts.len() > 1 && !facts.multiple_source_scripts)
+        || (all_known && facts.multiple_source_scripts != (scripts.len() > 1))
+    {
+        return Some(C::SourceScripts);
+    }
+
+    let addressed: BTreeSet<TransparentAddress> = scripts
+        .iter()
+        .filter_map(|s| transparent_display_address(s))
+        .collect();
+    let consistent = match facts.sender {
+        // Without inputs the wallet knows no spend (`InputCount`).
+        TransparentDisplaySender::Absent => true,
+        TransparentDisplaySender::NonStandard => addressed.is_empty(),
+        TransparentDisplaySender::Address(sender) if all_known => {
+            if inputs.values().all(|i| i.input_index.is_some()) {
+                let mut ordered: Vec<&KnownInput> = inputs.values().collect();
+                ordered.sort_by_key(|i| i.input_index);
+                ordered
+                    .iter()
+                    .find_map(|i| i.script.as_deref().and_then(transparent_display_address))
+                    == Some(sender)
+            } else {
+                addressed.contains(&sender)
+            }
+        }
+        // Every input spends the one script the wallet may know.
+        TransparentDisplaySender::Address(sender) if !facts.multiple_source_scripts => scripts
+            .first()
+            .is_none_or(|s| transparent_display_address(s) == Some(sender)),
+        TransparentDisplaySender::Address(_) => true,
+    };
+    (!consistent).then_some(C::Sender)
+}
+
+/// Checks the transparent value balance when the wallet knows the value of every input.
+///
+/// The shielded pools' net contribution is the fee plus the outputs minus the inputs. With
+/// only the first two outputs given, the fee and those outputs bound it from below.
+fn funding_contradiction(
+    facts: &TransparentDisplayFacts,
+    inputs: &BTreeMap<([u8; 32], u32), KnownInput>,
+) -> Option<TransparentDisplayContradiction> {
+    if facts.input_count == 0 || inputs.len() != facts.input_count as usize {
+        return None;
+    }
+    let spent: u128 = inputs
+        .values()
+        .map(|i| i.value.map(u128::from))
+        .sum::<Option<u128>>()?;
+    let paid = u128::from(facts.fee.into_u64())
+        + facts
+            .outputs
+            .iter()
+            .map(|o| u128::from(o.value.into_u64()))
+            .sum::<u128>();
+    let contradicted = if paid > spent {
+        // The shielded pools paid part of it (or, without shielded components, it is
+        // unbalanced: mixed funding requires them).
+        !facts.shielded_and_transparent_funding
+    } else if !facts.more_than_two_outputs() {
+        // Every output is given: the shielded pools contributed nothing, and a transaction
+        // without shielded components balances exactly.
+        facts.shielded_and_transparent_funding || (!facts.shielded_components && paid != spent)
+    } else {
+        false
+    };
+    contradicted.then_some(TransparentDisplayContradiction::Funding)
 }
 
 /// Checks `facts` against everything the wallet holds about transaction `tx`.
@@ -532,29 +699,29 @@ fn validate(
 ) -> Result<Option<TransparentDisplayContradiction>, SqliteClientError> {
     use TransparentDisplayContradiction as C;
     let txid = facts.txid.as_ref();
-    let metadata = facts.metadata;
+    let inputs = known_inputs(conn, tx, txid)?;
+    let known_spends = u32::try_from(inputs.len()).unwrap_or(u32::MAX);
 
-    // Coinbase: the metadata must suit the flag, and agree with the known position and with
-    // recovered receive events.
+    // Coinbase: the flag must agree with the known position and with recovered receive events.
+    // A coinbase transaction spends nothing, so no known spend may name it, and pays no fee.
     let event_coinbase: Vec<bool> = conn
         .prepare_cached("SELECT DISTINCT coinbase FROM tpir_receive_events WHERE txid = :txid")?
         .query_map(named_params![":txid": txid], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
-    if !metadata.is_valid_for(facts.coinbase)
-        || tx_index.is_some_and(|i| (i == 0) != facts.coinbase)
+    if tx_index.is_some_and(|i| (i == 0) != facts.coinbase)
         || event_coinbase.iter().any(|c| *c != facts.coinbase)
+        || (facts.coinbase
+            && (facts.fee != Zatoshis::ZERO || facts.input_count != 0 || known_spends > 0))
     {
         return Ok(Some(C::Coinbase));
     }
-
-    // A coinbase transaction spends nothing: no known spend may name it.
-    let known_spends = known_spent_outpoints(conn, tx, txid)?;
-    if facts.coinbase && known_spends > 0 {
-        return Ok(Some(C::Coinbase));
+    if !facts.is_well_formed() {
+        return Ok(Some(C::Malformed));
     }
 
-    // Every owned output financial queries count, and every recovered receive, must be present
-    // at its index with the same value and script.
+    // Every owned output financial queries count, and every recovered receive, must be below
+    // the output count; at index 0 or 1 it must match the given output by value and by
+    // script (P2PKH and P2SH by address; any other script faces a slot without one).
     let owned: Vec<(u32, u64, Vec<u8>)> = conn
         .prepare_cached(&format!(
             "SELECT output_index, value_zat, script FROM transparent_received_outputs o
@@ -569,27 +736,30 @@ fn validate(
         })?
         .collect::<Result<_, _>>()?;
     for (index, value, script) in owned {
-        match facts.outputs.get(index as usize) {
-            None => return Ok(Some(C::OutputIndexOutOfRange { index })),
-            Some(o) if o.value.into_u64() != value || o.script != script => {
+        if index >= facts.output_count {
+            return Ok(Some(C::OutputIndexOutOfRange { index }));
+        }
+        if let Some(given) = facts.outputs.get(index as usize) {
+            if given.value.into_u64() != value
+                || given.address != transparent_display_address(&script)
+            {
                 return Ok(Some(C::OwnedOutput { index }));
             }
-            Some(_) => {}
         }
     }
 
-    // Recovered metadata must be equal.
-    let (fee_state, fee_zat) = fee_columns(metadata.fee);
+    // Recovered metadata must agree. An unknown recovered fee asserts nothing.
     let metadata_conflict: bool = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM tpir_transaction_metadata WHERE txid = :txid
-         AND (fee_state != :fee_state OR fee_zat IS NOT :fee OR input_count != :inputs
-              OR shielded != :shielded))",
+         AND (input_count != :inputs OR shielded != :shielded
+              OR (fee_state = 2) != :coinbase
+              OR (fee_state = 0 AND fee_zat != :fee)))",
         named_params![
             ":txid": txid,
-            ":fee_state": fee_state,
-            ":fee": fee_zat,
-            ":inputs": metadata.transparent_input_count,
-            ":shielded": metadata.has_shielded_components,
+            ":inputs": facts.input_count,
+            ":shielded": facts.shielded_components,
+            ":coinbase": facts.coinbase,
+            ":fee": facts.fee.into_u64() as i64,
         ],
         |row| row.get(0),
     )?;
@@ -597,19 +767,15 @@ fn validate(
         return Ok(Some(C::Metadata));
     }
 
-    // The stored fee must be equal; an unknown published fee asserts nothing.
+    // The stored fee must be equal; a coinbase transaction has none.
     if let Some(stored) = stored_fee {
-        match metadata.fee {
-            WholeTransactionFee::Exact(fee) if fee.into_u64() != stored => {
-                return Ok(Some(C::Fee));
-            }
-            WholeTransactionFee::NotApplicable => return Ok(Some(C::Fee)),
-            _ => {}
+        if facts.coinbase || facts.fee.into_u64() != stored {
+            return Ok(Some(C::Fee));
         }
     }
 
     // A known shielded component, or a route-2 marker, requires the shielded bit.
-    if !metadata.has_shielded_components {
+    if !facts.shielded_components {
         let shielded: bool = conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM sapling_received_notes WHERE transaction_id = :tx)
                  OR EXISTS (SELECT 1 FROM orchard_received_notes WHERE transaction_id = :tx)
@@ -633,7 +799,7 @@ fn validate(
         .query_row(
             "SELECT MIN(input_index) FROM tpir_spend_events
              WHERE spending_txid = :txid AND input_index >= :inputs",
-            named_params![":txid": txid, ":inputs": metadata.transparent_input_count],
+            named_params![":txid": txid, ":inputs": facts.input_count],
             |row| row.get(0),
         )
         .optional()?
@@ -642,37 +808,13 @@ fn validate(
         return Ok(Some(C::InputIndex { index }));
     }
     // Public spend links carry no input index, but each names a distinct input.
-    if known_spends > metadata.transparent_input_count {
+    if known_spends > facts.input_count {
         return Ok(Some(C::InputCount {
             known: known_spends,
         }));
     }
-    Ok(None)
-}
 
-/// The number of distinct outpoints the wallet knows transaction `tx` (`txid`) spends: recovered
-/// spend events, public spend links, and the spend map.
-fn known_spent_outpoints(
-    conn: &Connection,
-    tx: i64,
-    txid: &[u8],
-) -> Result<u32, SqliteClientError> {
-    Ok(conn.query_row(
-        "SELECT COUNT(*) FROM (
-             SELECT prevout_txid, prevout_output_index FROM tpir_spend_events
-             WHERE spending_txid = :txid
-             UNION
-             SELECT prevout_txid, prevout_output_index FROM transparent_spend_map
-             WHERE spending_transaction_id = :tx
-             UNION
-             SELECT ot.txid, o.output_index FROM transparent_received_output_spends s
-             JOIN transparent_received_outputs o ON o.id = s.transparent_received_output_id
-             JOIN transactions ot ON ot.id_tx = o.transaction_id
-             WHERE s.transaction_id = :tx
-         )",
-        named_params![":tx": tx, ":txid": txid],
-        |row| row.get(0),
-    )?)
+    Ok(sender_contradiction(facts, &inputs).or_else(|| funding_contradiction(facts, &inputs)))
 }
 
 /// Validates and stores display facts; see `TransparentDetailWrite::store_transparent_display`.
@@ -732,25 +874,31 @@ pub(crate) fn store(
             return Ok(TransparentDisplayStore::Contradiction(kind));
         }
 
-        let (fee_state, fee_zat) = fee_columns(facts.metadata.fee);
         let p = &facts.provenance;
+        let (sender_kind, sender_hash) = sender_columns(facts.sender);
         conn.execute(
             "DELETE FROM transparent_tx_display WHERE transaction_id = :tx",
             named_params![":tx": tx],
         )?;
         conn.execute(
             "INSERT INTO transparent_tx_display
-             (transaction_id, coinbase, fee_state, fee_zat, input_count, shielded, shard_id,
-              revision, map_sha256, looked_up_height, stored_at)
-             VALUES (:tx, :coinbase, :fee_state, :fee, :inputs, :shielded, :shard, :revision,
-                     :map, :height, :now)",
+             (transaction_id, coinbase, fee_zat, input_count, output_count, shielded,
+              sender_kind, sender_hash, multiple_source_scripts,
+              shielded_and_transparent_funding, shard_id, revision, map_sha256,
+              looked_up_height, stored_at)
+             VALUES (:tx, :coinbase, :fee, :inputs, :outputs, :shielded, :sender_kind,
+                     :sender_hash, :multiple, :mixed, :shard, :revision, :map, :height, :now)",
             named_params![
                 ":tx": tx,
                 ":coinbase": facts.coinbase,
-                ":fee_state": fee_state,
-                ":fee": fee_zat,
-                ":inputs": facts.metadata.transparent_input_count,
-                ":shielded": facts.metadata.has_shielded_components,
+                ":fee": facts.fee.into_u64() as i64,
+                ":inputs": facts.input_count,
+                ":outputs": facts.output_count,
+                ":shielded": facts.shielded_components,
+                ":sender_kind": sender_kind,
+                ":sender_hash": sender_hash.as_ref().map(|h| &h[..]),
+                ":multiple": facts.multiple_source_scripts,
+                ":mixed": facts.shielded_and_transparent_funding,
                 ":shard": i64::try_from(p.shard_id).map_err(|_| {
                     SqliteClientError::CorruptedData("display shard id does not fit i64".into())
                 })?,
@@ -762,17 +910,17 @@ pub(crate) fn store(
         )?;
         let mut insert = conn.prepare_cached(
             "INSERT INTO transparent_tx_display_outputs
-             (transaction_id, output_index, value_zat, script)
-             VALUES (:tx, :index, :value, :script)",
+             (transaction_id, output_index, value_zat, address_kind, address_hash)
+             VALUES (:tx, :index, :value, :kind, :hash)",
         )?;
-        for (index, output) in facts.outputs.iter().enumerate() {
+        for (output, index) in facts.outputs.iter().zip(0u32..) {
+            let (kind, hash) = address_columns(output.address);
             insert.execute(named_params![
                 ":tx": tx,
-                ":index": u32::try_from(index).map_err(|_| {
-                    SqliteClientError::CorruptedData("display output index overflow".into())
-                })?,
+                ":index": index,
                 ":value": output.value.into_u64() as i64,
-                ":script": output.script,
+                ":kind": kind,
+                ":hash": hash.as_ref().map(|h| &h[..]),
             ])?;
         }
         conn.execute(
@@ -788,95 +936,241 @@ fn stored_facts(
     conn: &Connection,
     tx: i64,
 ) -> Result<Option<TransparentDisplayFacts>, SqliteClientError> {
+    let corrupt = |what: &str| SqliteClientError::CorruptedData(format!("display {what}"));
     let display = conn
         .query_row(
-            "SELECT t.txid, d.coinbase, d.fee_state, d.fee_zat, d.input_count, d.shielded,
-                    d.shard_id, d.revision, d.map_sha256, d.looked_up_height
+            "SELECT t.txid, d.coinbase, d.fee_zat, d.input_count, d.output_count, d.shielded,
+                    d.sender_kind, d.sender_hash, d.multiple_source_scripts,
+                    d.shielded_and_transparent_funding, d.shard_id, d.revision, d.map_sha256,
+                    d.looked_up_height
              FROM transparent_tx_display d JOIN transactions t ON t.id_tx = d.transaction_id
              WHERE d.transaction_id = :tx",
             named_params![":tx": tx],
             |row| {
                 Ok((
-                    row.get::<_, [u8; 32]>(0)?,
-                    row.get::<_, bool>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Option<u64>>(3)?,
-                    row.get::<_, u32>(4)?,
-                    row.get::<_, bool>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, u32>(7)?,
-                    row.get::<_, [u8; 32]>(8)?,
-                    row.get::<_, u32>(9)?,
+                    (
+                        row.get::<_, [u8; 32]>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, u64>(2)?,
+                        row.get::<_, u32>(3)?,
+                        row.get::<_, u32>(4)?,
+                        row.get::<_, bool>(5)?,
+                    ),
+                    (
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<[u8; 20]>>(7)?,
+                        row.get::<_, bool>(8)?,
+                        row.get::<_, bool>(9)?,
+                    ),
+                    (
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, u32>(11)?,
+                        row.get::<_, [u8; 32]>(12)?,
+                        row.get::<_, u32>(13)?,
+                    ),
                 ))
             },
         )
         .optional()?;
-    let Some((txid, coinbase, fee_state, fee, input_count, shielded, shard, revision, map, height)) =
-        display
+    let Some((
+        (txid, coinbase, fee, input_count, output_count, shielded),
+        (sender_kind, sender_hash, multiple_source_scripts, mixed),
+        (shard, revision, map, height),
+    )) = display
     else {
         return Ok(None);
     };
     let outputs = conn
         .prepare_cached(
-            "SELECT output_index, value_zat, script FROM transparent_tx_display_outputs
+            "SELECT output_index, value_zat, address_kind, address_hash
+             FROM transparent_tx_display_outputs
              WHERE transaction_id = :tx ORDER BY output_index",
         )?
         .query_map(named_params![":tx": tx], |row| {
             Ok((
                 row.get::<_, u32>(0)?,
                 row.get::<_, u64>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<[u8; 20]>>(3)?,
             ))
         })?
         .zip(0u32..)
         .map(|(row, expected)| {
-            let (index, value, script) = row?;
+            let (index, value, kind, hash) = row?;
             if index != expected {
-                return Err(SqliteClientError::CorruptedData(
-                    "display outputs are not contiguous".into(),
-                ));
+                return Err(corrupt("outputs are not contiguous"));
             }
-            let value = Zatoshis::from_u64(value).map_err(|_| {
-                SqliteClientError::CorruptedData("display value exceeds MAX_MONEY".into())
-            })?;
-            Ok(TransparentDisplayOutput { value, script })
+            let address = match sender_from_columns(kind, hash)? {
+                TransparentDisplaySender::Address(address) => Some(address),
+                TransparentDisplaySender::NonStandard => None,
+                TransparentDisplaySender::Absent => return Err(corrupt("output without a kind")),
+            };
+            let value =
+                Zatoshis::from_u64(value).map_err(|_| corrupt("value exceeds MAX_MONEY"))?;
+            Ok(TransparentDisplayOutput { value, address })
         })
-        .collect::<Result<_, SqliteClientError>>()?;
-    Ok(Some(TransparentDisplayFacts {
+        .collect::<Result<Vec<_>, SqliteClientError>>()?;
+    let facts = TransparentDisplayFacts {
         txid: TxId::from_bytes(txid),
         coinbase,
-        metadata: TransactionMetadata {
-            fee: fee_from_columns(fee_state, fee)?,
-            transparent_input_count: input_count,
-            has_shielded_components: shielded,
-        },
+        fee: Zatoshis::from_u64(fee).map_err(|_| corrupt("fee exceeds MAX_MONEY"))?,
+        input_count,
+        output_count,
+        shielded_components: shielded,
+        sender: sender_from_columns(sender_kind, sender_hash)?,
         outputs,
+        multiple_source_scripts,
+        shielded_and_transparent_funding: mixed,
         provenance: TransparentDisplayProvenance {
-            shard_id: u64::try_from(shard).map_err(|_| {
-                SqliteClientError::CorruptedData("negative display shard id".into())
-            })?,
+            shard_id: u64::try_from(shard).map_err(|_| corrupt("shard id is negative"))?,
             revision,
             map_sha256: map,
             looked_up_height: BlockHeight::from_u32(height),
         },
-    }))
+    };
+    if !facts.is_well_formed() {
+        return Err(corrupt("facts are malformed"));
+    }
+    Ok(Some(facts))
 }
 
-fn view_output(
-    index: u32,
-    value: Zatoshis,
-    script: Vec<u8>,
-    owned: bool,
-) -> TransparentDisplayViewOutput {
-    let address =
-        TxOut::new(value, Script(zcash_script::script::Code(script.clone()))).recipient_address();
-    TransparentDisplayViewOutput {
-        index,
-        value,
-        script,
-        address,
-        owned,
+/// The pushes of a push-only script, or `None` when it is malformed or not push-only. A small
+/// number opcode (`OP_1NEGATE`, `OP_1` to `OP_16`) pushes its opcode byte.
+fn pushes(script: &[u8]) -> Option<Vec<&[u8]>> {
+    let mut out = Vec::new();
+    let mut rest = script;
+    while let Some((&op, tail)) = rest.split_first() {
+        let (len, tail) = match op {
+            0x00..=0x4b => (usize::from(op), tail),
+            0x4c => (usize::from(*tail.first()?), &tail[1..]),
+            0x4d => (
+                usize::from(u16::from_le_bytes(tail.get(..2)?.try_into().ok()?)),
+                &tail[2..],
+            ),
+            0x4e => (
+                usize::try_from(u32::from_le_bytes(tail.get(..4)?.try_into().ok()?)).ok()?,
+                &tail[4..],
+            ),
+            0x4f | 0x51..=0x60 => {
+                out.push(&rest[..1]);
+                rest = tail;
+                continue;
+            }
+            _ => return None,
+        };
+        out.push(tail.get(..len)?);
+        rest = &tail[len..];
     }
+    Some(out)
+}
+
+/// The last opcode of a well-formed script: every push is within the script.
+fn last_opcode(script: &[u8]) -> Option<u8> {
+    let mut last = None;
+    let mut rest = script;
+    while let Some((&op, tail)) = rest.split_first() {
+        let skip = match op {
+            0x01..=0x4b => usize::from(op),
+            0x4c => 1 + usize::from(*tail.first()?),
+            0x4d => 2 + usize::from(u16::from_le_bytes(tail.get(..2)?.try_into().ok()?)),
+            0x4e => {
+                4 + usize::try_from(u32::from_le_bytes(tail.get(..4)?.try_into().ok()?)).ok()?
+            }
+            _ => 0,
+        };
+        rest = tail.get(skip..)?;
+        last = Some(op);
+    }
+    last
+}
+
+/// The address an input spends, read from its unlocking script alone, without the spent output.
+///
+/// A P2PKH spend is a signature and then a 33-byte compressed or 65-byte uncompressed public
+/// key; its address is the key's HASH160. A P2SH spend pushes its redeem script last, after at
+/// least one other push; the redeem script must be well formed and end in a signature check
+/// (`OP_CHECKSIG`, `OP_CHECKMULTISIG` or their `VERIFY` forms), which tells it apart from a
+/// signature. Anything else has no address here.
+fn spent_address(script_sig: &[u8]) -> Option<TransparentAddress> {
+    let pushes = pushes(script_sig)?;
+    let is_signature = |sig: &[u8]| (9..=73).contains(&sig.len()) && sig[0] == 0x30;
+    let is_key = |key: &[u8]| {
+        (key.len() == 33 && matches!(key[0], 0x02 | 0x03)) || (key.len() == 65 && key[0] == 0x04)
+    };
+    match pushes.as_slice() {
+        [sig, key] if is_signature(sig) && is_key(key) => Some(TransparentAddress::PublicKeyHash(
+            transparent::util::hash160::hash(key),
+        )),
+        [_, .., redeem] if matches!(last_opcode(redeem), Some(0xac..=0xaf)) => Some(
+            TransparentAddress::ScriptHash(transparent::util::hash160::hash(redeem)),
+        ),
+        _ => None,
+    }
+}
+
+/// The net value the shielded pools contribute to the transparent side: the sum of the shielded
+/// value balances, which equals the fee plus the transparent outputs minus the transparent
+/// inputs. `None` when it overflows.
+fn shielded_contribution(transaction: &Transaction) -> Option<i64> {
+    let zero = ZatBalance::zero();
+    let total = [
+        transaction
+            .sprout_bundle()
+            .map_or(Some(zero), |b| b.value_balance())?,
+        transaction
+            .sapling_bundle()
+            .map_or(zero, |b| *b.value_balance()),
+        transaction
+            .orchard_bundle()
+            .map_or(zero, |b| *b.value_balance()),
+        transaction
+            .ironwood_bundle()
+            .map_or(zero, |b| *b.value_balance()),
+    ]
+    .iter()
+    .sum::<Option<ZatBalance>>()?;
+    Some(i64::from(total))
+}
+
+/// The omissions of a view, in their fixed order.
+///
+/// Several source scripts are this account's own send when it funded every input; when it
+/// funded some, the rest came from inputs it does not own (shared funding). With one source
+/// script, an account funding any input owns the script every input spends, so neither applies.
+fn omissions(
+    sender: &TransparentDisplayViewSender,
+    multiple_source_scripts: bool,
+    owned_inputs: u32,
+    input_count: u32,
+    mixed_funding: bool,
+    outputs: &[TransparentDisplayViewOutput],
+    more_than_two_outputs: bool,
+) -> Vec<TransparentDisplayOmission> {
+    use TransparentDisplayOmission as O;
+    let mut omissions = Vec::new();
+    if *sender == TransparentDisplayViewSender::NonStandard {
+        omissions.push(O::NonStandardSender);
+    }
+    if multiple_source_scripts {
+        if owned_inputs == 0 {
+            omissions.push(O::MultipleSourceScripts);
+        } else if owned_inputs < input_count {
+            omissions.push(O::SharedFunding);
+        }
+    }
+    if mixed_funding {
+        omissions.push(O::ShieldedAndTransparentFunding);
+    }
+    omissions.extend(
+        outputs
+            .iter()
+            .filter(|o| o.address.is_none())
+            .map(|o| O::NonStandardOutput { index: o.index }),
+    );
+    if more_than_two_outputs {
+        omissions.push(O::MoreThanTwoOutputs);
+    }
+    omissions
 }
 
 /// The detail view; see `TransparentDetailRead::transparent_display_view`.
@@ -904,17 +1198,58 @@ pub(crate) fn view<P: consensus::Parameters>(
     let Some((tx, has_raw, stored_fee)) = row else {
         return Ok(None);
     };
-    let owned: Vec<u32> = conn
+    let account_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM accounts WHERE uuid = :account",
+            named_params![":account": account.0],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let owned_outputs: Vec<u32> = conn
         .prepare_cached(&format!(
             "SELECT o.output_index FROM transparent_received_outputs o
-             JOIN accounts a ON a.id = o.account_id
-             WHERE o.transaction_id = :tx AND a.uuid = :account AND ({})",
+             WHERE o.transaction_id = :tx AND o.account_id IS :account AND ({})",
             output_observation_condition("o"),
         ))?
-        .query_map(named_params![":tx": tx, ":account": account.0], |row| {
+        .query_map(named_params![":tx": tx, ":account": account_id], |row| {
             row.get(0)
         })?
         .collect::<Result<_, _>>()?;
+    // The outpoints the account is known to have spent in the transaction.
+    let owned_inputs: BTreeMap<([u8; 32], u32), KnownInput> =
+        known_inputs(conn, tx, txid.as_ref())?
+            .into_iter()
+            .filter(|(_, i)| account_id.is_some_and(|a| i.accounts.contains(&a)))
+            .collect();
+    let address = |address: TransparentAddress| TransparentDisplayAddress {
+        address,
+        encoded: zcash_keys::encoding::encode_transparent_address_p(params, &address),
+    };
+    let sender_of = |found: TransparentAddress| -> Result<_, SqliteClientError> {
+        let found = address(found);
+        let owned = owned_inputs.values().any(|i| {
+            i.script.as_deref().and_then(transparent_display_address) == Some(found.address)
+        }) || conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM addresses
+                            WHERE account_id IS :account
+                            AND cached_transparent_receiver_address = :address)",
+            named_params![":account": account_id, ":address": found.encoded],
+            |row| row.get(0),
+        )?;
+        Ok(TransparentDisplayViewSender::Address {
+            address: found,
+            owned,
+        })
+    };
+    let view_output = |index: u32, value: Zatoshis, found: Option<TransparentAddress>| {
+        TransparentDisplayViewOutput {
+            index,
+            value,
+            address: found.map(address),
+            owned: owned_outputs.contains(&index),
+        }
+    };
+    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
 
     if has_raw {
         let Some((_, transaction)) = crate::wallet::get_transaction(conn, params, txid)? else {
@@ -922,23 +1257,55 @@ pub(crate) fn view<P: consensus::Parameters>(
         };
         let bundle = transaction.transparent_bundle();
         let coinbase = bundle.is_some_and(|b| b.is_coinbase());
-        let outputs = bundle
+        let vin = match bundle {
+            Some(b) if !coinbase => &b.vin[..],
+            _ => &[],
+        };
+        // The address each input spends, as far as its unlocking script shows it.
+        let spent: Vec<Option<TransparentAddress>> = vin
+            .iter()
+            .map(|i| spent_address(&i.script_sig().0.0))
+            .collect();
+        let sender = if coinbase {
+            TransparentDisplayViewSender::Coinbase
+        } else if vin.is_empty() {
+            TransparentDisplayViewSender::Shielded
+        } else {
+            match spent.iter().flatten().next() {
+                Some(found) => sender_of(*found)?,
+                None => TransparentDisplayViewSender::NonStandard,
+            }
+        };
+        let outputs: Vec<_> = bundle
             .map(|b| {
                 b.vout
                     .iter()
-                    .enumerate()
-                    .map(|(i, o)| {
-                        let index = i as u32;
+                    .zip(0u32..)
+                    .map(|(o, index)| {
                         view_output(
                             index,
                             o.value(),
-                            o.script_pubkey().0.0.clone(),
-                            owned.contains(&index),
+                            transparent_display_address(&o.script_pubkey().0.0),
                         )
                     })
                     .collect()
             })
             .unwrap_or_default();
+        let owned = count(
+            vin.iter()
+                .filter(|i| owned_inputs.contains_key(&(*i.prevout().hash(), i.prevout().n())))
+                .count(),
+        );
+        let input_count = count(vin.len());
+        let omissions = omissions(
+            &sender,
+            spent.windows(2).any(|w| w[0] != w[1]),
+            owned,
+            input_count,
+            !vin.is_empty() && shielded_contribution(&transaction).is_some_and(|c| c > 0),
+            &outputs,
+            false,
+        );
         let fee = if coinbase {
             WholeTransactionFee::NotApplicable
         } else {
@@ -948,36 +1315,56 @@ pub(crate) fn view<P: consensus::Parameters>(
         };
         return Ok(Some(TransparentDisplayView::Available(
             TransparentDisplayDetails {
-                outputs,
                 coinbase,
                 fee,
-                input_count: if coinbase {
-                    0
-                } else {
-                    bundle.map_or(0, |b| b.vin.len() as u32)
-                },
+                input_count,
+                output_count: count(outputs.len()),
                 shielded: transaction.sprout_bundle().is_some()
                     || transaction.sapling_bundle().is_some()
                     || transaction.orchard_bundle().is_some()
                     || transaction.ironwood_bundle().is_some(),
+                sender,
+                outputs,
+                omissions,
                 source: TransparentDisplaySource::RawTransaction,
             },
         )));
     }
 
     if let Some(facts) = stored_facts(conn, tx)? {
+        let sender = match facts.sender {
+            TransparentDisplaySender::Absent if facts.coinbase => {
+                TransparentDisplayViewSender::Coinbase
+            }
+            TransparentDisplaySender::Absent => TransparentDisplayViewSender::Shielded,
+            TransparentDisplaySender::Address(found) => sender_of(found)?,
+            TransparentDisplaySender::NonStandard => TransparentDisplayViewSender::NonStandard,
+        };
+        let outputs: Vec<_> = facts
+            .outputs
+            .iter()
+            .zip(0u32..)
+            .map(|(o, index)| view_output(index, o.value, o.address))
+            .collect();
+        let omissions = omissions(
+            &sender,
+            facts.multiple_source_scripts,
+            count(owned_inputs.len()),
+            facts.input_count,
+            facts.shielded_and_transparent_funding,
+            &outputs,
+            facts.more_than_two_outputs(),
+        );
         return Ok(Some(TransparentDisplayView::Available(
             TransparentDisplayDetails {
-                outputs: facts
-                    .outputs
-                    .into_iter()
-                    .zip(0u32..)
-                    .map(|(o, index)| view_output(index, o.value, o.script, owned.contains(&index)))
-                    .collect(),
                 coinbase: facts.coinbase,
-                fee: facts.metadata.fee,
-                input_count: facts.metadata.transparent_input_count,
-                shielded: facts.metadata.has_shielded_components,
+                fee: facts.metadata().fee,
+                input_count: facts.input_count,
+                output_count: facts.output_count,
+                shielded: facts.shielded_components,
+                sender,
+                outputs,
+                omissions,
                 source: TransparentDisplaySource::Display(facts.provenance),
             },
         )));
@@ -1024,4 +1411,68 @@ pub(crate) fn view<P: consensus::Parameters>(
             }
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn push(data: &[u8]) -> Vec<u8> {
+        assert!(data.len() <= 75);
+        [&[data.len() as u8][..], data].concat()
+    }
+
+    fn signature() -> Vec<u8> {
+        let mut sig = vec![0x30; 71];
+        sig[70] = 0x01;
+        sig
+    }
+
+    #[test]
+    fn spent_address_from_unlocking_scripts() {
+        use transparent::util::hash160::hash;
+        let key = [&[0x02][..], &[7; 32]].concat();
+        let p2pkh = [push(&signature()), push(&key)].concat();
+        assert_eq!(
+            spent_address(&p2pkh),
+            Some(TransparentAddress::PublicKeyHash(hash(&key)))
+        );
+        let uncompressed = [&[0x04][..], &[7; 64]].concat();
+        assert_eq!(
+            spent_address(&[push(&signature()), push(&uncompressed)].concat()),
+            Some(TransparentAddress::PublicKeyHash(hash(&uncompressed)))
+        );
+        // 2-of-2 multisig P2SH: OP_0, two signatures, the redeem script.
+        let redeem = [
+            &[0x52][..],
+            &push(&key),
+            &push(&[&[0x03][..], &[8; 32]].concat()),
+            &[0x52, 0xae],
+        ]
+        .concat();
+        let p2sh = [
+            &[0x00][..],
+            &push(&signature()),
+            &push(&signature()),
+            &[0x4c, redeem.len() as u8],
+            &redeem,
+        ]
+        .concat();
+        assert_eq!(
+            spent_address(&p2sh),
+            Some(TransparentAddress::ScriptHash(hash(&redeem)))
+        );
+        // A lone signature (P2PK), a non-push opcode, a truncated push, an empty script, and a
+        // last push that does not end in a signature check have no address.
+        for none in [
+            push(&signature()),
+            [push(&signature()), vec![0xac]].concat(),
+            vec![0x05, 0x01],
+            vec![],
+            [push(&signature()), push(&[0x51, 0x87])].concat(),
+            [push(&signature()), push(&[0x02; 20])].concat(),
+        ] {
+            assert_eq!(spent_address(&none), None, "{none:x?}");
+        }
+    }
 }
