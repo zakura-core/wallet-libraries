@@ -172,27 +172,15 @@ fn a_trusted_commit_needs_private_required_on_the_handle_and_durably() {
 
         let before = production_dump(conn(&st));
         let result = trusted(&mut st, c);
-        if durable == PrivateRequired {
-            // A weaker handle cannot operate on a private wallet at all.
-            assert!(
-                matches!(
-                    result,
-                    Err(SqliteClientError::TransparentLedgerPolicyConflict {
-                        configured: Some(configured),
-                        applied: PrivateRequired,
-                    }) if configured == handle
-                ),
-                "{handle:?} over {durable:?}: {result:?}"
-            );
-        } else {
-            assert!(
-                matches!(
-                    result,
-                    Err(SqliteClientError::TransparentRecoveryNotEnabled)
-                ),
-                "{handle:?} over {durable:?}: {result:?}"
-            );
-        }
+        // A weaker handle reads under a durable `PrivateRequired` policy, but never
+        // qualifies under it.
+        assert!(
+            matches!(
+                result,
+                Err(SqliteClientError::TransparentRecoveryNotEnabled)
+            ),
+            "{handle:?} over {durable:?}: {result:?}"
+        );
         assert_eq!(count(&st, "tpir_qualified_revisions"), 0);
         assert_eq!(count(&st, "tpir_revisions"), 0);
         assert_eq!(production_dump(conn(&st)), before);

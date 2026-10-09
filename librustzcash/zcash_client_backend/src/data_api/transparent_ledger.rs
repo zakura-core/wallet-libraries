@@ -236,14 +236,17 @@ pub struct TransparentLedgerSnapshot<AccountId> {
 pub trait TransparentLedgerRead: WalletRead {
     /// Returns the mode this handle operates under.
     ///
-    /// Fails when the handle is unconfigured, or when its mode is weaker than a policy
-    /// durably applied to the wallet. A stored stricter policy is never weakened by reading.
+    /// A durably applied `PrivateRequired` policy governs every handle: a handle configured
+    /// with a weaker mode operates under `PrivateRequired`, even when another connection
+    /// applied it after this handle was configured. Reading never changes the stored policy or
+    /// the handle's configuration. Fails when the handle is unconfigured or the durable policy
+    /// cannot be read.
     fn transparent_ledger_mode(&self) -> Result<TransparentLedgerMode, Self::Error>;
 
     /// Returns the durable policy applied to the wallet, including its generation.
     ///
-    /// The handle must already be configured. A stored `PrivateRequired` policy is never
-    /// weakened by this read.
+    /// The handle must already be configured, with any mode: the durable policy is reported
+    /// as stored, and never changed by this read.
     fn applied_transparent_policy(&self) -> Result<AppliedTransparentPolicy, Self::Error>;
 
     /// Confirms that the durable policy generation still equals `expected`.

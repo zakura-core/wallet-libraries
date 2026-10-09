@@ -27,5 +27,13 @@ fn combined_handle_modes_preserve_durable_policy_and_stale_commit_checks() {
             transparent_ledger: Public,
             enhancement: EnhancementMode::Standard,
         });
-    assert!(st.wallet().db().transparent_ledger_mode().is_err());
+    // The weaker handle operates under the durable policy, which reading never lowers.
+    assert_eq!(
+        st.wallet().db().transparent_ledger_mode().unwrap(),
+        PrivateRequired
+    );
+    assert_eq!(
+        st.wallet().db().applied_transparent_policy().unwrap().mode,
+        PrivateRequired
+    );
 }

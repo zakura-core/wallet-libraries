@@ -247,35 +247,50 @@ pub(crate) fn durable_policy(
     }))
 }
 
-/// Rejects a handle whose configured mode is weaker than a durably applied private-required
-/// policy. The stored policy is never changed here.
-fn check_not_weaker(
-    configured: Option<TransparentLedgerMode>,
+/// The mode a configured handle operates under, given the durable policy: a durably applied
+/// `PrivateRequired` is never weakened by the handle's configuration.
+fn effective_mode(
+    configured: TransparentLedgerMode,
     durable: Option<DurablePolicy>,
-) -> Result<(), SqliteClientError> {
+) -> TransparentLedgerMode {
     match durable {
         Some(DurablePolicy {
-            mode: applied @ TransparentLedgerMode::PrivateRequired,
+            mode: TransparentLedgerMode::PrivateRequired,
             ..
-        }) if configured != Some(TransparentLedgerMode::PrivateRequired) => {
-            Err(SqliteClientError::TransparentLedgerPolicyConflict {
-                configured,
-                applied,
-            })
-        }
-        _ => Ok(()),
+        }) => TransparentLedgerMode::PrivateRequired,
+        _ => configured,
     }
 }
 
 /// Resolves the mode a handle operates under for transparent ledger APIs, which require
 /// explicit configuration even for an empty wallet.
+///
+/// The durable policy is read on every call, so a `PrivateRequired` policy another connection
+/// applied after this handle was configured takes effect at the handle's next read. The
+/// resolution neither changes the stored policy nor the handle's configuration: once the
+/// policy is explicitly lowered, the handle again operates under its configured mode. A
+/// missing, corrupt, or newer-than-this-build policy fails closed.
 pub(crate) fn resolve_mode(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,
 ) -> Result<TransparentLedgerMode, SqliteClientError> {
     let mode = configured.ok_or(SqliteClientError::TransparentLedgerModeNotConfigured)?;
-    check_not_weaker(configured, durable_policy(conn)?)?;
-    Ok(mode)
+    Ok(effective_mode(mode, durable_policy(conn)?))
+}
+
+/// Whether the handle may grant private authority: qualify a revision or promote an account.
+///
+/// That requires a handle explicitly configured `PrivateRequired` over a durable
+/// `PrivateRequired` policy. A weaker handle reads under the durable policy (see
+/// [`resolve_mode`]) but never grants authority under it.
+pub(crate) fn grants_private_authority(
+    conn: &rusqlite::Connection,
+    configured: Option<TransparentLedgerMode>,
+) -> Result<bool, SqliteClientError> {
+    let configured = configured.ok_or(SqliteClientError::TransparentLedgerModeNotConfigured)?;
+    Ok(configured == TransparentLedgerMode::PrivateRequired
+        && durable_policy(conn)?.map(|policy| policy.mode)
+            == Some(TransparentLedgerMode::PrivateRequired))
 }
 
 /// Checks that the handle may authorize consuming transparent inputs.

@@ -584,8 +584,10 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
 
     /// Selects the transparent ledger mode: the source authorization for transparent discovery
     /// and financial authority. This is not persisted; each reopened handle must select a mode.
-    /// Transparent ledger APIs reject unconfigured handles, and a mode weaker than a policy
-    /// durably applied to the wallet is rejected rather than weakening that policy.
+    /// Transparent ledger APIs reject unconfigured handles. A configured handle operates under a
+    /// durably applied `PrivateRequired` policy whatever its own mode, including one another
+    /// connection applies after this call; reads never change the stored policy. Qualifying
+    /// revisions and promoting accounts additionally require this mode to be `PrivateRequired`.
     ///
     /// The mode governs work this handle produces from now on. Discovery requests already
     /// obtained, such as address-bearing [`TransactionDataRequest`]s, are owned values the
@@ -685,6 +687,16 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
             wallet::history::transaction_summaries(conn, account)
         })
+    }
+
+    /// Whether the handle's connection is outside an explicit SQL transaction, so that each
+    /// wallet operation commits in its own transaction.
+    ///
+    /// A caller composing operations whose durable failure effects must survive (such as the
+    /// quarantine an integrity rejection records) checks this first: inside a caller
+    /// transaction, those effects commit only with it.
+    pub fn is_autocommit(&self) -> bool {
+        self.conn.borrow().is_autocommit()
     }
 
     /// Constructs a new wrapper around the given connection.
