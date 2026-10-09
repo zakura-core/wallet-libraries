@@ -21,8 +21,9 @@ needs to map service refusals.
 accepted by the chain view; the watch set and retained scripts are within the
 script limit; the filter source does not use the parent-filter experiment,
 whose selective child requests leak coarse activity; the shard map is within
-the shard limit and names Zcash mainnet's network and genesis block; and the
-service's init names `SCHEMA`. A refused check makes no further requests. A
+the shard limit, declares at most `MAX_SUPERSEDED` superseded revisions in all,
+and names Zcash mainnet's network and genesis block; and the service's init
+names `SCHEMA`. A refused check makes no further requests. A
 watch set with no addresses needs nothing retrieved: once its target is
 accepted, the pass makes no request and completes at the target.
 

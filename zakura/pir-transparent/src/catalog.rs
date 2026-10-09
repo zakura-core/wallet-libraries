@@ -12,7 +12,7 @@
 //! revision it superseded stays current, and facts stored under it are still
 //! exported under it. Only an undeclared change of sealed content withdraws.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, named_params, params,
@@ -260,8 +260,8 @@ pub(crate) fn prepare(conn: &mut Connection, binding: &[u8; 32]) -> Result<(), R
 }
 
 /// The highest re-cut epoch of a map whose ready pass found that this
-/// companion's store followed its newest re-cut, zero if none since the store
-/// last started.
+/// companion's store followed its re-cuts, zero if none since the store last
+/// started.
 pub(crate) fn recut_epoch(conn: &Connection) -> Result<u32, RecoveryError> {
     let epoch: Option<i64> = conn
         .query_row(
@@ -465,22 +465,27 @@ impl<'c> Pass<'c> {
             .map_err(failure)?;
         tx.execute("UPDATE pir_bridge_catalog SET current=0", [])
             .map_err(failure)?;
-        for entry in published.iter().chain(declared) {
-            let revision = &entry.revision;
-            tx.execute(
+        // Prepared once: a map may declare tens of thousands of revisions.
+        let mut current = tx
+            .prepare(
                 "UPDATE pir_bridge_catalog SET current=1 WHERE source=?1 AND digest=?2 AND sealed=?3
                  AND lineage=?4 AND height=?5 AND hash=?6",
-                params![
+            )
+            .map_err(failure)?;
+        for entry in published.iter().chain(declared) {
+            let revision = &entry.revision;
+            current
+                .execute(params![
                     revision.source,
                     entry.digest,
                     revision.sealed,
                     revision.lineage,
                     entry.height(),
                     entry.hash()
-                ],
-            )
-            .map_err(failure)?;
+                ])
+                .map_err(failure)?;
         }
+        drop(current);
         Ok(Self {
             tx,
             withdrawn: None,
@@ -494,38 +499,14 @@ impl<'c> Pass<'c> {
 
     /// Checks the map's re-cut declarations against what it publishes and
     /// against each other, needing no catalog history, so a recreated
-    /// companion checks them too.
-    ///
-    /// A published revision in the source of a declared one must have a higher
-    /// lineage: equal is an `Equivocation`, lower a `Regression`. Two declared
-    /// revisions of one source at one lineage that differ are an
-    /// `Equivocation`. `declarations` is every revision the map declares, the
-    /// superseded tails included.
+    /// companion checks them too. See [`declaration_conflict`].
     pub(crate) fn check_declarations(
         &mut self,
         published: &[Published],
         declarations: &[Published],
     ) {
-        for (index, declared) in declarations.iter().enumerate() {
-            let ours = &declared.revision;
-            for entry in published {
-                let theirs = &entry.revision;
-                if theirs.source != ours.source {
-                    continue;
-                }
-                if theirs.lineage == ours.lineage {
-                    self.withdraw(WithdrawnCause::Equivocation);
-                } else if theirs.lineage < ours.lineage {
-                    self.withdraw(WithdrawnCause::Regression);
-                }
-            }
-            if declarations[index + 1..].iter().any(|other| {
-                other.revision.source == ours.source
-                    && other.revision.lineage == ours.lineage
-                    && other.revision != *ours
-            }) {
-                self.withdraw(WithdrawnCause::Equivocation);
-            }
+        if let Some(cause) = declaration_conflict(published, declarations) {
+            self.withdraw(cause);
         }
     }
 
@@ -858,11 +839,11 @@ impl<'c> Pass<'c> {
     /// map the sync refuses as a rewrite of history the store holds, but whose
     /// epoch is lower, apart as a replica still serving the publication from
     /// before a re-cut the store followed. A pass gives one only when it is
-    /// ready and the store holds a fact under a revision the map's newest
-    /// re-cut superseded, or under one it publishes at or above that re-cut's
-    /// first height, so a map whose declaration is refused, or whose re-cut the
-    /// store did not follow, cannot raise it. A forged epoch can at most turn
-    /// such a refusal from withdrawn into pending.
+    /// ready and the store holds a fact under a revision any of the map's
+    /// re-cuts superseded, or under one it publishes at or above its newest
+    /// re-cut's first height, so a map whose declaration is refused, or whose
+    /// re-cuts the store did not follow, cannot raise it. A forged epoch can at
+    /// most turn such a refusal from withdrawn into pending.
     pub(crate) fn finish(self, digests: &[&str], epoch: Option<u32>) -> Result<(), RecoveryError> {
         prune_catalog(&self.tx)?;
         let named = serde_json::to_string(digests).map_err(failure)?;
@@ -889,6 +870,68 @@ impl<'c> Pass<'c> {
         }
         self.tx.commit().map_err(failure)
     }
+}
+
+/// The first contradiction between a map's re-cut declarations and what it
+/// publishes, or among the declarations, scanning `declarations` in map order.
+///
+/// A published revision in the source of a declared one must have a higher
+/// lineage: equal is an `Equivocation`, lower a `Regression`. Two declared
+/// revisions of one source at one lineage that differ are an `Equivocation`.
+/// `declarations` is every revision the map declares, the superseded tails
+/// included. For each declaration in turn, the first published revision of its
+/// source at or below its lineage decides, else a later declaration differing
+/// from it at its source and lineage.
+///
+/// A map may declare tens of thousands of revisions, so both are found through
+/// indexes by source and lineage rather than by comparing pairs, with the
+/// cause a pairwise scan in the same order would find first.
+pub(crate) fn declaration_conflict(
+    published: &[Published],
+    declarations: &[Published],
+) -> Option<WithdrawnCause> {
+    // Each source's published lineages, in map order.
+    let mut lineages: BTreeMap<&[u8], Vec<u64>> = BTreeMap::new();
+    for entry in published {
+        lineages
+            .entry(entry.revision.source.as_slice())
+            .or_default()
+            .push(entry.revision.lineage);
+    }
+    // Whether a later declaration at the same source and lineage differs,
+    // found from the end: for each source and lineage, the one revision the
+    // declarations after this one name, or `None` once they name two.
+    let mut later: BTreeMap<(&[u8], u64), Option<&RecoveryRevision>> = BTreeMap::new();
+    let mut differs = vec![false; declarations.len()];
+    for (index, declared) in declarations.iter().enumerate().rev() {
+        let ours = &declared.revision;
+        match later.entry((ours.source.as_slice(), ours.lineage)) {
+            Entry::Vacant(slot) => {
+                slot.insert(Some(ours));
+            }
+            Entry::Occupied(mut slot) => {
+                differs[index] = slot.get().is_none_or(|theirs| theirs != ours);
+                if differs[index] {
+                    slot.insert(None);
+                }
+            }
+        }
+    }
+    for (declared, differs) in declarations.iter().zip(differs) {
+        let ours = &declared.revision;
+        let theirs = lineages
+            .get(ours.source.as_slice())
+            .into_iter()
+            .flatten()
+            .find(|theirs| **theirs <= ours.lineage);
+        match theirs {
+            Some(theirs) if *theirs == ours.lineage => return Some(WithdrawnCause::Equivocation),
+            Some(_) => return Some(WithdrawnCause::Regression),
+            None if differs => return Some(WithdrawnCause::Equivocation),
+            None => {}
+        }
+    }
+    None
 }
 
 /// Clears the export intent of `replaced` rows, whose successors the wallet

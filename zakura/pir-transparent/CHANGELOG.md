@@ -6,20 +6,23 @@
 
 - Declared re-cuts. A sealed revision the shard map declares a re-cut
   superseded stays current, and facts stored under it are exported under the
-  revision triple the wallet already holds; the renumbered shards and tail keep
-  their sources, and the renumbered tail is listed as resolving the old one. A
-  pass checks the declarations against the map (`Equivocation`, `Regression`)
-  and, on the first stored fact under a declared revision, against the catalog
-  (`Equivocation`). A ready pass over a re-cut map records its re-cut epoch
-  once the store holds a fact under a revision the re-cut superseded, or under
-  one the map publishes at or above the re-cut's first height. The epoch never
-  stops a sync: a map the reference client refuses as a rewrite of history the
-  store holds is `Pending` with `Outcome::Behind` when its epoch is lower (a
-  replica still serving the map from before the re-cut) and
-  `Withdrawn(ChangedSealed)` otherwise. The shard limit counts declared
-  entries at or above the watch set's floor. Wallet pages under a superseded
-  sealed revision are completed once the batch covers their range, in a
-  completion-only commit after the commits carrying that coverage. An
+  revision triple the wallet already holds; the renumbered shards and tail
+  keep their sources, and the renumbered tail is listed as resolving the old
+  one. A pass checks the declarations against the map (`Equivocation`,
+  `Regression`) and, on the first stored fact under a declared revision,
+  against the catalog (`Equivocation`). A ready pass over a re-cut map records
+  its re-cut epoch once the store holds a fact under a revision any of its
+  re-cuts superseded, or under one the map publishes at or above its newest
+  re-cut's first height. The epoch never stops a sync: a map the reference
+  client refuses as a rewrite of history the store holds is `Pending` with
+  `Outcome::Behind` when its epoch is lower (a replica still serving the map
+  from before the re-cut) and `Withdrawn(ChangedSealed)` otherwise. The shard
+  limit counts declared entries at or above the watch set's floor, and every
+  declaration, at any height, counts toward a separate limit of
+  `MAX_SUPERSEDED` (65,536), refused before any retrieval as
+  `Invalid("publication declaration limit exceeded")`. Wallet pages under a
+  superseded sealed revision are completed once the batch covers their range,
+  in a completion-only commit after the commits carrying that coverage. An
   undeclared change of sealed content never reaches the wallet.
 - A sealed shard changed under its revision number, which the catalog reported
   as `Withdrawn(Equivocation)`, is now refused by the reference client before
