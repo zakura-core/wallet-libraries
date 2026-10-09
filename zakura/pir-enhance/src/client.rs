@@ -281,7 +281,12 @@ impl QuerySession {
                 .try_into()
                 .map_err(|_| ClientError::Generation("anchor length".into()))?,
         };
-        let native = crate::native::NativeSession::new(shard.id, expected.db_rows, bytes)
+        // Queries select over only the rows the domain's units can hold, under
+        // the leading full-shape masks; the count is bound by the session ID.
+        let query_rows = shard
+            .query_rows(manifest.geometry)
+            .map_err(ClientError::Generation)?;
+        let native = crate::native::NativeSession::new(shard.id, query_rows as usize, bytes)
             .map_err(ClientError::Generation)?;
         Ok(Self {
             binding,
@@ -318,11 +323,17 @@ impl QuerySession {
         let slot = (position % 33) as usize;
         Ok((self.prepare_row(row)?, slot))
     }
+    /// Rows every query to this session selects over; see
+    /// [`QueryShard::query_rows`].
+    pub fn query_rows(&self) -> usize {
+        self.native.rows()
+    }
+    /// A cover query, the same length as every real one to this session.
     pub fn prepare_dummy(&self) -> Result<PreparedQuery, ClientError> {
-        self.prepare_row(OsRng.gen_range(0..self.params.db_rows))
+        self.prepare_row(OsRng.gen_range(0..self.query_rows()))
     }
     pub fn prepare_row(&self, row: usize) -> Result<PreparedQuery, ClientError> {
-        if row >= self.params.db_rows {
+        if row >= self.query_rows() {
             return Err(ClientError::OutsideCoverage(row as u64));
         }
         let mut binding = self.binding;
@@ -384,7 +395,14 @@ mod tests {
     /// A session over zero public material for a manifest whose first shard
     /// spans `logical_rows` rows.
     pub(crate) fn zero_session(logical_rows: u64) -> QuerySession {
-        let records = logical_rows * RECORDS_PER_ROW as u64;
+        let session = growing_session(logical_rows * RECORDS_PER_ROW as u64);
+        assert_eq!(session.shard.logical_rows, logical_rows);
+        session
+    }
+
+    /// A session over zero public material for a manifest whose first shard
+    /// holds `records`.
+    fn growing_session(records: u64) -> QuerySession {
         let mut manifest = synthetic_manifest(
             records,
             |shard| {
@@ -395,8 +413,7 @@ mod tests {
         );
         manifest.anchor_height = 3_428_143;
         manifest.anchor_block_hash = "42".repeat(32);
-        let shard = &manifest.coverage.shards[0];
-        assert_eq!(shard.logical_rows, logical_rows);
+        let logical_rows = manifest.coverage.shards[0].logical_rows;
         let public = vec![0u8; session_public_len(logical_rows).unwrap()];
         let session = ShardSession {
             session_id: hex::encode(manifest.session_id(0).unwrap()),
@@ -412,6 +429,30 @@ mod tests {
             ClientResourceLimits::new(32_768),
         );
         QuerySession::from_session(&manifest, session, &acceptance).unwrap()
+    }
+
+    /// A growing domain's queries, real and cover, select over only the
+    /// blocks its data can occupy, all at one length, and never past them.
+    #[test]
+    fn growing_domain_queries_share_one_prefix_length() {
+        use crate::native::KEY_BYTES;
+        let session = growing_session(18_313 * RECORDS_PER_ROW as u64 - 5);
+        assert_eq!(session.shard.logical_rows, 32768);
+        assert_eq!(session.query_rows(), 18_432);
+        let len = crate::types::request_len(18_432).unwrap();
+        assert_eq!(len, HEADER_BYTES + KEY_BYTES + 112_896);
+        for row in [0, 1, 18_312, 18_431] {
+            assert_eq!(session.prepare_row(row).unwrap().body().len(), len);
+        }
+        for _ in 0..4 {
+            assert_eq!(session.prepare_dummy().unwrap().body().len(), len);
+        }
+        let (query, _) = session.prepare_position(18_313 * 33 - 6).unwrap();
+        assert_eq!(query.body().len(), len);
+        assert!(matches!(
+            session.prepare_row(18_432),
+            Err(ClientError::OutsideCoverage(18_432))
+        ));
     }
 
     /// The native profile's identifiers and exact lengths, so a server and

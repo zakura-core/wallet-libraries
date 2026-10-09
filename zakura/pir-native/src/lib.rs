@@ -202,10 +202,14 @@ pub mod test_server {
             &self.public
         }
 
-        /// Answers a [`prepare_with`] payload with a [`response_len`] body.
+        /// Answers a [`prepare_with`] payload with a [`response_len`] body. The
+        /// payload may select over every row or over a whole-block prefix, as
+        /// a client omits rows that hold no data.
         pub fn answer(&self, payload: &[u8]) -> Vec<u8> {
-            let rows = self.db[0].len();
-            assert_eq!(payload.len(), request_len(rows));
+            let rows = (D..=self.db[0].len())
+                .step_by(D)
+                .find(|&rows| request_len(rows) == payload.len())
+                .expect("a full or whole-block prefix selection");
             let keys = NativeKeys::from_kg_words(
                 &self.setup,
                 &contiguous_bytes_to_u64s(&payload[..KEY_BYTES], Q_BITS),
@@ -270,6 +274,30 @@ mod tests {
         let response = server.answer(&body);
         assert_eq!(response.len(), response_len(cols));
         let row = decode_cols(&secret, server.public(), &response, cols).unwrap();
+        let expected: Vec<u8> = db.iter().flat_map(|c| c[target].to_le_bytes()).collect();
+        assert_eq!(row, expected);
+    }
+
+    /// Over a table whose second block is zero, a selection over only the
+    /// first block, under the leading full-shape masks, decodes the target.
+    #[test]
+    fn prefix_selection_over_a_zero_tail_roundtrips() {
+        let (rows, cols) = (2 * D, D);
+        let mut rng = ChaCha20Rng::from_seed([8; 32]);
+        let db: Vec<Vec<u16>> = (0..cols)
+            .map(|_| {
+                (0..rows)
+                    .map(|r| if r < D { rng.r#gen() } else { 0 })
+                    .collect()
+            })
+            .collect();
+        let masks = public_query_masks([3; 32], rows, cols);
+        let setup = packing_setup([9; 32]);
+        let server = test_server::Database::new(db.clone(), &masks, [9; 32]);
+        let target = 1234;
+        let (secret, body) = prepare_with(&setup, &masks, D, target).unwrap();
+        assert_eq!(body.len(), request_len(D));
+        let row = decode_cols(&secret, server.public(), &server.answer(&body), cols).unwrap();
         let expected: Vec<u8> = db.iter().flat_map(|c| c[target].to_le_bytes()).collect();
         assert_eq!(row, expected);
     }
