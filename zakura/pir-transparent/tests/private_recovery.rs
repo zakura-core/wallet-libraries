@@ -1194,8 +1194,8 @@ fn a_declared_re_cut_keeps_the_wallets_history() {
     assert_eq!(new_tail.source, old_tail.source);
     assert_eq!(new_tail.lineage, old_tail.lineage + 1);
     assert_eq!(
-        recut_pass.batch.retired_revisions(),
-        std::slice::from_ref(&old_tail)
+        recut_pass.batch.retired,
+        vec![old_tail.clone()]
     );
     assert!(f.reconciled.contains(&old_tail));
     // Apart from the tail, the wallet is unchanged.
@@ -1253,7 +1253,7 @@ fn a_lagging_pre_re_cut_map_after_the_re_cut_changes_nothing() {
         let lagging = f.pass().expect("a pass");
         assert_eq!(lagging.batch.state, BatchState::Pending);
         assert!(lagging.batch.commits.is_empty());
-        assert!(lagging.batch.retired_revisions().is_empty());
+        assert!(lagging.batch.retired.is_empty());
         assert_eq!(f.dump(true), ledger);
     }
     assert_eq!(
@@ -2062,6 +2062,7 @@ fn stale_middle_retirement_batch_preserves_reconciliation_across_reopen() {
     shards.push(ShardSpec {
         start: H0 + 1000,
         end: target,
+        geometry: GEOMETRY,
         sealed: false,
         revision: 0,
         events: noise(H0 + 1000, target, 5),
