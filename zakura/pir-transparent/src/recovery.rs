@@ -105,7 +105,8 @@ impl Retry {
 }
 
 impl Progress {
-    /// When to pass the account again.
+    /// When to pass the account again, from the outcome alone. A pass's
+    /// [`RecoveryBatch::retry`] also weighs its state; prefer it.
     pub fn retry(&self) -> Retry {
         match self.outcome {
             Outcome::Complete => Retry::Complete,
@@ -228,6 +229,19 @@ impl<A> RecoveryBatch<A> {
     /// has commits or can be acknowledged.
     pub fn state(&self) -> BatchState {
         self.state
+    }
+
+    /// When to pass the account again. A [`BatchState::Withdrawn`] batch is
+    /// [`Retry::Stalled`] whatever its progress, which can even be
+    /// [`Outcome::Complete`]: the publication contradicts the catalog, and
+    /// passing again on a timer reads the same contradiction. Keep the
+    /// companion and pass again for new work. Otherwise this is
+    /// [`Progress::retry`].
+    pub fn retry(&self) -> Retry {
+        match self.state {
+            BatchState::Withdrawn(_) => Retry::Stalled,
+            BatchState::Ready | BatchState::Pending => self.progress.retry(),
+        }
     }
 
     /// Exactly the retired provisional revisions this batch resolves: each was
@@ -1608,6 +1622,43 @@ mod tests {
         // Coverage past the target never wraps.
         assert_eq!(progress(103).behind(100), 0);
         assert_eq!(progress(0).behind(u64::MAX), u64::MAX);
+    }
+
+    /// A withdrawn batch is never retried on a timer, whatever the sync
+    /// reported; any other batch follows its progress.
+    #[test]
+    fn a_withdrawn_batch_waits_for_new_work() {
+        let batch = |state, outcome| RecoveryBatch::<()> {
+            commits: Vec::new(),
+            progress: Progress {
+                covered_through: 7,
+                outcome,
+            },
+            state,
+            replaced: Vec::new(),
+            token: [0; 32],
+        };
+        for outcome in [
+            Outcome::Complete,
+            Outcome::More,
+            Outcome::Behind,
+            Outcome::Overloaded,
+            Outcome::Stalled,
+        ] {
+            for cause in [
+                WithdrawnCause::Regression,
+                WithdrawnCause::Equivocation,
+                WithdrawnCause::ChangedSealed,
+                WithdrawnCause::Retired,
+            ] {
+                let withdrawn = batch(BatchState::Withdrawn(cause), outcome);
+                assert_eq!(withdrawn.retry(), Retry::Stalled, "{cause:?} {outcome:?}");
+            }
+            for state in [BatchState::Ready, BatchState::Pending] {
+                let progress = batch(state, outcome).progress();
+                assert_eq!(batch(state, outcome).retry(), progress.retry());
+            }
+        }
     }
     use std::cell::Cell;
     use transparent_filter::{Recut, SealParameters, ShardMapEntry, SupersededShard};

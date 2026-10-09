@@ -95,14 +95,18 @@ impl CompanionDir {
     /// is dropped.
     ///
     /// First deletes the companions nobody holds of `account` for other
-    /// origins or schemas, and of accounts not in `accounts`, the wallet's
-    /// current accounts. Waits for a companion another handle holds while
+    /// origins or schemas, and of accounts that `accounts`, the wallet's
+    /// current accounts, does not return. As [`Self::retain`] does, lists the
+    /// companions before calling `accounts`, and calls it only if another
+    /// account has one, so a companion created for an account added meanwhile
+    /// is never taken for an orphan; failing to read the accounts opens
+    /// nothing. Waits for a companion another handle holds while
     /// `keep_waiting` returns true, then fails with [`OpenError::Busy`].
     pub fn open(
         &self,
         account: &str,
         config: RecoveryConfig,
-        accounts: &BTreeSet<String>,
+        accounts: impl FnOnce() -> io::Result<BTreeSet<String>>,
         keep_waiting: &dyn Fn() -> bool,
     ) -> Result<Companion, OpenError> {
         if !valid_account(account) {
@@ -110,7 +114,13 @@ impl CompanionDir {
         }
         std::fs::create_dir_all(&self.path)?;
         let path = self.companion_path(account, &config.origin);
-        for (owner, base) in self.companions()? {
+        let found = self.companions()?;
+        let accounts = if found.iter().any(|(owner, _)| owner != account) {
+            accounts()?
+        } else {
+            BTreeSet::new()
+        };
+        for (owner, base) in found {
             if base != path && (owner == account || !accounts.contains(&owner)) {
                 // One in use is left for a later open or sweep.
                 let _ = remove_unless_held(&base);
@@ -338,6 +348,7 @@ mod tests {
 
     const A: &str = "5d1f6e4e-3f0b-4f43-9b0e-6cf1d7c2a001";
     const B: &str = "5d1f6e4e-3f0b-4f43-9b0e-6cf1d7c2a002";
+    const C: &str = "5d1f6e4e-3f0b-4f43-9b0e-6cf1d7c2a003";
     const ORIGIN: &str = "https://transparent-pir.example";
     const OTHER: &str = "https://elsewhere.example";
 
@@ -371,7 +382,7 @@ mod tests {
         dir.open(
             account,
             config(account, origin),
-            &accounts(current),
+            || Ok(accounts(current)),
             &|| false,
         )
         .unwrap()
@@ -411,7 +422,7 @@ mod tests {
         let dir = CompanionDir::new(root.path().join("wallet.db.tpir"));
         let held = open(&dir, A, ORIGIN, &[A]);
         assert!(matches!(
-            dir.open(A, config(A, ORIGIN), &accounts(&[A]), &|| false),
+            dir.open(A, config(A, ORIGIN), || Ok(accounts(&[A])), &|| false),
             Err(OpenError::Busy)
         ));
         // Neither a removal nor a sweep deletes it.
@@ -444,6 +455,49 @@ mod tests {
         assert!(names.contains(&format!("{}.sqlite", name(B, OTHER))));
         assert!(names.contains(&"notes.txt".to_owned()));
         drop(other_b);
+    }
+
+    #[test]
+    fn opening_lists_the_companions_before_it_reads_the_accounts() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = CompanionDir::new(root.path().join("wallet.db.tpir"));
+        // Only the account's own companions: the accounts are not read.
+        drop(open(&dir, A, OTHER, &[A]));
+        drop(
+            dir.open(A, config(A, ORIGIN), || panic!("not read"), &|| false)
+                .unwrap(),
+        );
+        assert!(!dir.companion_path(A, OTHER).exists());
+
+        drop(open(&dir, B, ORIGIN, &[A, B]));
+        // A failed read opens and deletes nothing.
+        assert!(matches!(
+            dir.open(
+                A,
+                config(A, OTHER),
+                || Err(io::Error::other("unreadable")),
+                &|| false
+            ),
+            Err(OpenError::Io(_))
+        ));
+        assert!(dir.companion_path(B, ORIGIN).exists());
+        assert!(!dir.companion_path(A, OTHER).exists());
+
+        // A companion created for an account added after the listing is
+        // kept, though the accounts were read after the account was added.
+        let _a = dir
+            .open(
+                A,
+                config(A, ORIGIN),
+                || {
+                    drop(open(&dir, C, ORIGIN, &[A, B, C]));
+                    Ok(accounts(&[A]))
+                },
+                &|| false,
+            )
+            .unwrap();
+        assert!(!dir.companion_path(B, ORIGIN).exists());
+        assert!(dir.companion_path(C, ORIGIN).exists());
     }
 
     #[test]
@@ -499,7 +553,7 @@ mod tests {
         let held = open(&dir, A, ORIGIN, &[A]);
         std::thread::scope(|scope| {
             let waiting = scope.spawn(|| {
-                dir.open(A, config(A, ORIGIN), &accounts(&[A]), &|| true)
+                dir.open(A, config(A, ORIGIN), || Ok(accounts(&[A])), &|| true)
                     .map(|_| ())
             });
             std::thread::sleep(Duration::from_millis(30));
@@ -557,7 +611,12 @@ mod tests {
         let dir = CompanionDir::new(root.path().join("wallet.db.tpir"));
         for account in ["", "../escape", "a b", &"a".repeat(65)] {
             assert!(matches!(
-                dir.open(account, config("x", ORIGIN), &accounts(&[]), &|| false),
+                dir.open(
+                    account,
+                    config("x", ORIGIN),
+                    || panic!("never read"),
+                    &|| false
+                ),
                 Err(OpenError::Account)
             ));
         }

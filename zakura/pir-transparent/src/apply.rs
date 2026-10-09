@@ -162,7 +162,7 @@ fn rejection_name(rejection: &CommitRejection) -> &'static str {
 }
 
 impl ApplyError {
-    fn from_wallet(index: usize, error: SqliteClientError) -> Self {
+    pub(crate) fn from_wallet(index: usize, error: SqliteClientError) -> Self {
         match error {
             SqliteClientError::TransparentLedgerCommitRejected(rejection) => {
                 ApplyError::Rejected { index, rejection }

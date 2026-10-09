@@ -37,17 +37,33 @@ pub fn batch<A>(
 
 /// Applies `batch` through `ReferenceRecovery::apply_and_acknowledge`'s own commit loop,
 /// with no companion: the same checks before any commit (a ready batch, no outer SQL
-/// transaction, trust for retirements) and the same commits, each in its own wallet
-/// transaction, with the same failures. Without a companion there is no export receipt
-/// to check, no acknowledgment, and so no policy-generation recheck at acknowledgment.
+/// transaction, trust for retirements), the same commits, each in its own wallet
+/// transaction, and the same policy-generation check after them, with the same failures.
+/// Without a companion there is no export receipt to check and nothing to acknowledge.
 #[cfg(feature = "sqlite")]
 pub fn apply<P: zcash_protocol::consensus::Parameters, CL, R>(
     batch: RecoveryBatch<zcash_client_sqlite::AccountUuid>,
     wallet: &mut zcash_client_sqlite::WalletDb<rusqlite::Connection, P, CL, R>,
     trust: crate::Trust,
 ) -> Result<crate::Applied, crate::ApplyFailure> {
+    use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerRead as _;
+
     let progress = batch.progress();
-    let (stats, retired, _) = crate::apply::apply_commits(batch, wallet, trust, || {})?;
+    let (stats, retired, expected_generation) =
+        crate::apply::apply_commits(batch, wallet, trust, || {})?;
+    if let Some(expected) = expected_generation {
+        wallet
+            .with_immediate_read_transaction(|snapshot| {
+                snapshot
+                    .check_transparent_policy_generation(expected)
+                    .map_err(|error| crate::ApplyError::from_wallet(stats.applied, error))
+            })
+            .map_err(|error| crate::ApplyFailure {
+                error,
+                stats,
+                progress,
+            })?;
+    }
     Ok(crate::Applied {
         stats,
         progress,
