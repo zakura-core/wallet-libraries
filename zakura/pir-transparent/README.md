@@ -103,7 +103,8 @@ epoch, as from a replica still serving the map from before the re-cut, is
 pages under a superseded sealed revision are completed once the batch covers
 them. An undeclared change of sealed content never reaches the wallet: the
 reference client refuses a rewrite of history the store holds before reading
-anything (`Pending` at this wallet-pir pin), and the catalog withdraws the rest.
+anything, which a pass returns as `Withdrawn(ChangedSealed)`, and the catalog
+withdraws the rest.
 
 `Ready` assumes the trusted operation. A successor withdraws its predecessor's
 provisional evidence from the wallet only when the wallet qualifies it and

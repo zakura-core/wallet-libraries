@@ -103,12 +103,10 @@ pub enum BatchState {
     /// does not hold, or an exported tail whose successor is not retrieved yet,
     /// or a store a publication change reset that has not bound the new set
     /// again. A publication that diverged from what the sync read (a map
-    /// refreshed mid-pass that does not continue the one the pass started from,
-    /// or, at this wallet-pir pin, one rewriting sealed history the store holds
-    /// without declaring a re-cut), a map under another set that ends below the
-    /// height the store synced to, and a map from before a re-cut the store
-    /// already followed (a lower re-cut epoch than this companion recorded) are
-    /// also `Pending`, with
+    /// refreshed mid-pass that does not continue the one the pass started
+    /// from), a map under another set that ends below the height the store
+    /// synced to, and a map from before a re-cut the store already followed (a
+    /// lower re-cut epoch than this companion recorded) are also `Pending`, with
     /// [`Outcome::Behind`](crate::Outcome::Behind). The batch has no commits or
     /// retired revisions and cannot be acknowledged; a later pass can be
     /// `Ready`.
@@ -139,8 +137,10 @@ pub enum WithdrawnCause {
     Equivocation,
     /// A sealed revision a batch exported is neither published nor declared
     /// superseded by a re-cut, and its source is published at another revision
-    /// that is not merely an older unsealed one. A declared re-cut never
-    /// causes it.
+    /// that is not merely an older unsealed one; or the map rewrites sealed
+    /// history the companion's store holds, over a block the wallet's chain
+    /// still accepts, without declaring a re-cut, which the sync refuses before
+    /// reading anything. A declared re-cut never causes it.
     ChangedSealed,
     /// The heights of a revision a batch exported are published under another
     /// source, as after a geometry change or an undeclared re-cut. A declared

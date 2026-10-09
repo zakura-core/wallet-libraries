@@ -22,7 +22,7 @@ use zcash_client_backend::data_api::transparent_ledger::{
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
-use crate::catalog::{self, BatchState, Published};
+use crate::catalog::{self, BatchState, Published, WithdrawnCause};
 
 /// The only shard schema this adapter reads.
 ///
@@ -722,20 +722,20 @@ fn entries(map: &ShardMap, floor: u64) -> usize {
 ///
 /// A wallet holds no blocks below its birthday, while a publication may start far
 /// below it (the live map starts at genesis). Leniency there is sound because, at
-/// wallet-pir a288d570, `sync_into` asks below the floor only for rollback
+/// wallet-pir c4068c10, `sync_into` asks below the floor only for rollback
 /// anchors:
 ///
-/// - It plans only shards meeting `[required_from, target]` (`sync.rs:919-940`),
-///   so every coverage endpoint it checks (`sync.rs:1331-1332`, `:2163-2164`,
-///   `sync_ahead.rs:255-258`), every stored coverage end its reorg scan asks
-///   about (`sync.rs:609-660`), and the end of a declared revision whose page
-///   work it drops (`:726-731`), opened when that revision met the floor, is at
-///   or above the floor. Required heights only move earlier, so no script the
+/// - It plans only shards meeting `[required_from, target]` (`sync.rs:925-948`),
+///   so every coverage endpoint it checks (`sync.rs:1384-1385`, `:2236-2237`,
+///   `sync_ahead.rs:255-258`), every stored coverage end its reorg and
+///   sealed-rewrite scan asks about (`sync.rs:634-696`), and the earlier target
+///   unfinished page work was read for (`:1250-1252`) is at or above the floor.
+///   Required heights only move earlier and targets only rise, so no script the
 ///   companion retains starts below the floor.
 /// - The block a rollback rewinds to may lie below it: the reorg fallback
-///   `map.start_height - 1` (`:637`), a replaced revision (`:778-790`) or a
-///   revision withdrawn mid-sync (`:1087-1091`), each just below a shard's start
-///   and each resolved by `accepted_at` (`:2501-2520`), which takes the hash
+///   `map.start_height - 1` (`:680`), a replaced revision (`:784-797`) or a
+///   revision withdrawn mid-sync (`:1086-1090`), each just below a shard's start
+///   and each resolved by `accepted_at` (`:2574-2593`), which takes the hash
 ///   from the map when the view has none. Only block 0 has no map entry, so
 ///   [`Self::hash_at`] answers it with the map's genesis hash.
 ///
@@ -904,17 +904,20 @@ impl ReferenceRecovery {
     /// already followed, as a replica still serving the map from before a re-cut:
     /// to the store, that map would rewrite history it holds. That, and any
     /// divergence the sync itself finds (a map refreshed mid-pass that does not
-    /// continue the first, or one rewriting sealed history the store holds
-    /// without declaring a re-cut), is a [`BatchState::Pending`] batch with
+    /// continue the first), is a [`BatchState::Pending`] batch with
     /// [`Outcome::Behind`] that claims no coverage, keeping companion and
-    /// catalog.
+    /// catalog. A map that rewrites sealed history the store holds, over a
+    /// block `chain` still accepts, without declaring a re-cut, is refused by
+    /// the sync before anything is read or rolled back, and the pass returns a
+    /// [`BatchState::Withdrawn`] batch with [`WithdrawnCause::ChangedSealed`],
+    /// claiming no coverage.
     ///
     /// A re-cut the map declares keeps the wallet's history: facts the store
     /// read under a sealed revision the re-cut superseded are exported under
     /// that revision's own identity, which the wallet holds, and the renumbered
     /// shards and tail keep their sources. An undeclared change of sealed
     /// content never reaches the wallet: the sync refuses it, or the catalog
-    /// withdraws it. A ready pass over a re-cut map records its re-cut epoch
+    /// withdraws it, either way as [`BatchState::Withdrawn`]. A ready pass over a re-cut map records its re-cut epoch
     /// once the store holds a fact under a revision the re-cut superseded, or
     /// under one the map publishes at or above the re-cut's first height, so a
     /// re-cut only rolls forward; undoing one takes another at a higher epoch.
@@ -1073,17 +1076,25 @@ impl ReferenceRecovery {
             &sync_anchor,
         ) {
             Ok(report) => report,
+            // The map rewrites sealed history the store holds, over a block the
+            // wallet's chain still accepts, without declaring a re-cut. No later
+            // pass repairs that: the publisher changed history the wallet holds.
+            // A replica still serving a map from before a re-cut the store
+            // followed looks the same to the sync, which keeps no epoch; the
+            // epoch guard above returned before syncing against one.
+            Err(SyncError::SealedRewrite { .. }) => {
+                return Ok(unready(
+                    BatchState::Withdrawn(WithdrawnCause::ChangedSealed),
+                    Progress {
+                        covered_through: 0,
+                        outcome: Outcome::Behind,
+                    },
+                ));
+            }
             // Not a set change, which was checked above: a map refreshed
             // mid-pass does not continue the first (another re-cut epoch, or a
-            // resumed shard id moved to another start), or the map rewrites
-            // sealed history the store holds, below a block the wallet's chain
-            // accepts, without declaring a re-cut. A later pass starts from the
-            // publication it then finds.
-            //
-            // TODO(wallet-pir#138): wallet-pir reports the undeclared rewrite as
-            // `MapDiverged` too at this pin. Once it has an error of its own,
-            // map that error to `Withdrawn(ChangedSealed)` here, before this
-            // arm: no later pass repairs a rewrite of history the wallet holds.
+            // resumed shard id moved to another start). A later pass starts
+            // from the publication it then finds.
             Err(SyncError::MapDiverged(_)) => return Ok(behind_unread()),
             Err(other) => return Err(failure(other)),
         };
@@ -1493,7 +1504,6 @@ impl ReferenceRecovery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::WithdrawnCause;
     use std::cell::Cell;
     use transparent_filter::{Recut, SealParameters, ShardMapEntry, SupersededShard};
     use transparent_wallet::client::Table;
@@ -5381,6 +5391,41 @@ mod tests {
         );
         assert_eq!(batch.state, BatchState::Withdrawn(WithdrawnCause::Retired));
         assert!(batch.commits.is_empty());
+    }
+
+    #[test]
+    fn a_sealed_rewrite_the_sync_refuses_is_withdrawn_before_any_retrieval() {
+        let (before, after) = recut_pair();
+        let mut undeclared = after.clone();
+        undeclared.recuts.clear();
+        let (watch, chain) = (watching(&after), accepting(&[&before, &after]));
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &before);
+        let first = recut_pass(&mut adapter, &watch, &before, &chain);
+        adapter.acknowledge_applied(&first).unwrap();
+        let held = (store_rows(&adapter), catalog_rows(&adapter));
+        // The sync finds sealed coverage the map rewrites over blocks the
+        // wallet's chain still accepts, and refuses it before reading.
+        let mut filters = CountingFilters::serving(serde_json::to_vec(&undeclared).unwrap());
+        let mut shards = CountingShards::serving(SCHEMA);
+        let batch = adapter
+            .recover(&watch, &chain, &mut filters, &mut shards)
+            .unwrap();
+        assert_eq!(
+            batch.state,
+            BatchState::Withdrawn(WithdrawnCause::ChangedSealed)
+        );
+        assert_eq!(
+            batch.progress,
+            Progress {
+                covered_through: 0,
+                outcome: Outcome::Behind,
+            }
+        );
+        assert!(batch.commits.is_empty());
+        assert!(adapter.acknowledge_applied(&batch).is_err());
+        assert_eq!((filters.maps, filters.filters, shards.calls()), (1, 0, 1));
+        assert_eq!((store_rows(&adapter), catalog_rows(&adapter)), held);
     }
 
     #[test]

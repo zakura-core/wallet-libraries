@@ -71,12 +71,8 @@ const SHARD: &str = r"^/v1/(filters/)?shards/([0-9]+)/";
 
 /// What a pass over a map that rewrites sealed history the companion's store
 /// holds, without declaring a re-cut, returns: wallet-pir refuses it before
-/// reading anything.
-///
-/// TODO(wallet-pir#138): `Withdrawn(ChangedSealed)` once wallet-pir reports that
-/// rewrite with an error of its own; at this pin it is `MapDiverged`, which a
-/// pass reports as `Pending` and `Outcome::Behind`.
-const UNDECLARED_REWRITE: BatchState = BatchState::Pending;
+/// reading anything, and no later pass repairs it.
+const UNDECLARED_REWRITE: BatchState = BatchState::Withdrawn(WithdrawnCause::ChangedSealed);
 
 /// Each test runs a PIR service and wallet; one at a time keeps memory and CPU
 /// bounded.

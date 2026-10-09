@@ -330,11 +330,15 @@ wallet already holds; they are never withdrawn or retired.
   that commit, so no page completes twice.
 
 `ChangedSealed` and `Retired` now catch only undeclared changes. The sync
-refuses most of them first: a map that rewrites sealed history the store holds,
-at or below a block the wallet's chain accepts, without declaring a re-cut, is
-`MapDiverged` before anything is read or rolled back, and so `Pending` with
-`Outcome::Behind` at this wallet-pir pin. Once wallet-pir reports that rewrite
-with an error of its own, the adapter maps it to `Withdrawn(ChangedSealed)`.
+refuses most of them first. It judges a settled range the map neither
+publishes nor declares by the block the range rests on: one the wallet's chain
+rejects is a reorg, rolled back as any other; one it cannot place stops the
+pass as `ChainUnknown`; and one it still accepts is a publisher rewriting
+history, refused as `SyncError::SealedRewrite` before anything is read or
+rolled back. The adapter returns that as `Withdrawn(ChangedSealed)` with
+`Outcome::Behind`, claiming no coverage. The sync keeps no re-cut epoch, so a
+replica still serving a map from before a re-cut the store followed looks the
+same to it; the epoch guard returns `Pending` before the sync for that case.
 The catalog withdraws the rest, such as a rewrite of revisions an earlier batch
 exported that the store no longer holds: `Withdrawn(ChangedSealed)` when the
 row's source is published at another revision, and `Withdrawn(Retired)` when
@@ -347,11 +351,12 @@ is exactly the old tail. The wallet-pir sync keeps the companion's store
 consistent across a declared re-cut. Sealed coverage stays under the revisions
 it was read under, and a stored digest the map declares superseded is not a
 reorganization. Unfinished page work under a revision the map no longer
-publishes is dropped: for a sealed declared revision whose last block the
-wallet's chain accepts, what it saved is kept and the script's gap is read
-again under the shard that now covers it, with events kept once per outpoint;
-otherwise what it saved is rolled back first. The old tail is truncated and
-read again.
+publishes is dropped: for a sealed declared revision whose work was read for a
+target the wallet's chain still accepts, what it saved is kept and the
+script's gap is read again under the shard that now covers it, with events
+kept once per outpoint; otherwise what it saved is rolled back first, from the
+lowest height it saved anything at, or the declared start if lower. The old
+tail is truncated and read again.
 
 ### Batch states and causes
 
@@ -428,16 +433,17 @@ successor, whose qualification withdraws them.
 
 wallet-pir also raises `SyncError::MapDiverged` when a mid-pass map refresh is
 not a continuation, including a refresh to a map with another re-cut epoch or
-one that moves a resumed shard id to another start height, and, at this pin,
-when a map rewrites sealed history the store holds without declaring a re-cut
-(see [Declared re-cuts](#declared-re-cuts)). The adapter maps every
-`MapDiverged` from the sync to a `Pending` batch with outcome `Behind`, keeping
-the companion and catalog, so the next pass starts from the publication it then
-finds. Stored page work under a revision the map no longer publishes, as when a
+one that moves a resumed shard id to another start height. The adapter maps
+every `MapDiverged` from the sync to a `Pending` batch with outcome `Behind`,
+keeping the companion and catalog, so the next pass starts from the publication
+it then finds. A rewrite of sealed history the store holds is
+`SyncError::SealedRewrite` instead (see [Declared re-cuts](#declared-re-cuts)).
+Stored page work under a revision the map no longer publishes, as when a
 lagging replica's map lacks the newest shard after a budget-limited pass, is no
 divergence: the sync drops it, rolling back what it saved unless a re-cut
-declared that sealed revision, and reads those heights again once a map
-publishes them.
+declared that sealed revision and the wallet's chain still accepts the target
+the work was read for, and reads those heights again once a map publishes
+them.
 
 ### Cache pruning
 
@@ -534,7 +540,7 @@ These hold under the development flag; PR 2 mirrors them in the design notes.
 | Same seed elsewhere | `UnresolvedSpends` from use of the seed in another wallet is permanent. | After 3 stalled runs the account is held and shows `Stopped(Stalled)`. |
 | Quarantine | Nothing clears a quarantine. | Delete and re-import the account, which gives new sources, or turn the setting off. |
 | Pre-birthday outputs | Legacy public outputs mined below the birthday give a permanent `LegacyDiscrepancy`. | `Stopped(LegacyDiscrepancy)` with a 1 h hold; turn the setting off. |
-| Re-cut | A declared re-cut keeps the wallet's history. An undeclared one stops every account with evidence there: the sync refuses it as `Pending` at this wallet-pir pin, `Withdrawn(ChangedSealed)` once wallet-pir reports it distinctly, and the catalog withdraws what the sync does not refuse as `Withdrawn(ChangedSealed)` or `Withdrawn(Retired)`. One that restarts revision numbers under an unchanged set identity is `Withdrawn(Regression)`, with the tail `Pending` until it passes the old maximum. A declaration that names a revision otherwise than it was published is `Withdrawn(Equivocation)` for a companion that recorded it, but after companion loss the catalog cannot detect it, and the colliding triple yields `Integrity` and a quarantine, as does a restarted lineage. | Turn the setting off, or delete and re-import. See the publisher requirements. |
+| Re-cut | A declared re-cut keeps the wallet's history. An undeclared one stops every account with evidence there: the sync refuses a rewrite of sealed history the store holds, and the adapter returns `Withdrawn(ChangedSealed)`; the catalog withdraws what the sync does not refuse as `Withdrawn(ChangedSealed)` or `Withdrawn(Retired)`. One that restarts revision numbers under an unchanged set identity is `Withdrawn(Regression)`, with the tail `Pending` until it passes the old maximum. A declaration that names a revision otherwise than it was published is `Withdrawn(Equivocation)` for a companion that recorded it, but after companion loss the catalog cannot detect it, and the colliding triple yields `Integrity` and a quarantine, as does a restarted lineage. | Turn the setting off, or delete and re-import. See the publisher requirements. |
 | Set-identity change | The adapter resets the store automatically and keeps the catalog, but old provisional evidence of the changed sources is never superseded, even where a batch listed it as retired and nobody acknowledged it. A shard whose source did not change but whose revision number restarted is treated as an undeclared re-cut. Revisions a re-cut declared are derived under the current set, so a set change that alters their sources orphans them like any changed source. | It is consistent data, and reorgs still rewind it. See the publisher requirements. |
 | Geometry move | Heights an exported revision covered that are published under another geometry, under one set identity and without a declared re-cut, make every pass for an account with that evidence `Withdrawn(Retired)`. | As for a re-cut. See the publisher requirements. |
 | Source format | Opening a v2 companion rebuilds its catalog, so its next pass exports every stored fact again under v3 sources: a new `tpir_revisions` row for every exported revision, once per account. The v2 catalog's export marks are dropped, so the old provisional tail under its v2 source is never superseded, and retirements nobody acknowledged are forgotten. | One time. It is consistent data, and reorgs still rewind it; Vizor's transparent PIR is unreleased. |

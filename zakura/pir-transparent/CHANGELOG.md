@@ -85,12 +85,13 @@
 
 ### Changed
 
-- wallet-pir is pinned to `a288d570`, whose shard map carries re-cut
+- wallet-pir is pinned to `c4068c10`, whose shard map carries re-cut
   declarations and whose sync keeps a store's history across a declared
   re-cut; every wallet-pir dependency moves together. Its sync refuses a map
-  that rewrites sealed history the store holds without declaring a re-cut as
-  `MapDiverged`, which a pass reports as `Pending`, and drops page work under
-  an unpublished revision instead of diverging.
+  that rewrites sealed history the store holds, over a block the wallet's chain
+  still accepts, without declaring a re-cut, as `SyncError::SealedRewrite`,
+  which a pass returns as `Withdrawn(ChangedSealed)`, and drops page work
+  under an unpublished revision instead of diverging.
 - Sources are `transparent-reference-source-v3`: the shard id is no longer
   bound, only the geometry, its seal parameters and the start height, so a
   renumbered shard or tail keeps its source.
