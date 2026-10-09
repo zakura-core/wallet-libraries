@@ -10,6 +10,17 @@ workspace.
 
 ## [Unreleased]
 
+- `WalletDb` implements `TransparentLedgerWrite::forget_transparent_ledger`. Under `Public`
+  on the handle and durably, it removes in one transaction every spend link, pending spend,
+  output and transaction that only the transparent ledger supports, the ledger origin of rows
+  another origin also supports, and recovered events, coverage, pending pages and transaction
+  metadata. Outputs that lost a spend are queued for spend detection again. A ledger-only
+  output that is locked, or that a spend from another origin refers to, stays without value or
+  authority and raises `tpir_meta.min_reader_version` to 5. Revisions, qualification,
+  quarantine, candidate windows and shared derivations stay. A wallet without ledger facts is
+  only read. `PrivateRequired` on either side fails with
+  `PublicTransparentDiscoveryForbidden`. There is no schema change.
+
 - Transparent ledger reads resolve a configured handle under the durable policy: a durably
   applied `PrivateRequired` policy governs every read, including one applied by another
   connection after the handle was configured, instead of failing it with

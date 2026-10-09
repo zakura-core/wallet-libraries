@@ -90,9 +90,9 @@ pub(crate) use diagnostics::candidate_recovery;
 use diagnostics::{AccountLedger, placed_receives, placed_spends, recovery_status};
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use diagnostics::{account_ledger, ledger_blockers};
-#[cfg(feature = "transparent-inputs")]
-pub(crate) use lifecycle::forget_reattributed_script;
 pub(crate) use lifecycle::{clear_pending_pages, truncate};
+#[cfg(feature = "transparent-inputs")]
+pub(crate) use lifecycle::{forget, forget_reattributed_script};
 #[cfg(all(feature = "transparent-inputs", feature = "transparent-key-import"))]
 pub(crate) use ownership::forget_other_candidates;
 #[cfg(feature = "transparent-inputs")]

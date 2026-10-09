@@ -382,6 +382,36 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
     /// [`RecoveryBlocker`]s.
     #[cfg(feature = "transparent-inputs")]
     fn promote_transparent_account(&mut self, account: Self::AccountId) -> Result<(), Self::Error>;
+
+    /// Atomically removes everything private recovery alone contributed to the wallet.
+    ///
+    /// Leaving `PrivateRequired` revokes private authority but keeps what active accounts
+    /// projected: a ledger-only receive still counts while its event is placed, and a
+    /// ledger-only spend still hides its output in every mode. Facts from a bad publication
+    /// would therefore outlive the policy that admitted them. This removes them so that public
+    /// discovery rebuilds the transparent view from its own observations.
+    ///
+    /// Requires `Public` both on the handle and durably; under `PrivateRequired` nothing could
+    /// rebuild what this removes. In one transaction it:
+    ///
+    /// - removes every spend link and pending spend that only the ledger supports, and queues
+    ///   spend detection for each output that remains counted, so public discovery finds a real
+    ///   spend again;
+    /// - removes every output that only the ledger supports, unless it is locked or a spend from
+    ///   another origin refers to it, in which case it stays without contributing value or
+    ///   authorizing an input;
+    /// - removes the ledger origin of outputs and spends that another origin also supports, which
+    ///   keep their other evidence;
+    /// - removes transactions left with no wallet evidence: no outputs, notes, spends, sent
+    ///   notes, raw bytes, or local creation;
+    /// - removes recovered events, coverage, pending pages, and source-bound transaction facts.
+    ///
+    /// Outputs, spends, and transactions supported by public discovery or local construction, and
+    /// all shielded state, are kept. Revision lineage, qualification, and quarantine are kept, so
+    /// returning to `PrivateRequired` cannot accept an older publication or a quarantined
+    /// source. Forgetting a wallet without ledger facts changes nothing.
+    #[cfg(feature = "transparent-inputs")]
+    fn forget_transparent_ledger(&mut self) -> Result<ForgottenTransparentLedger, Self::Error>;
 }
 
 #[cfg(test)]

@@ -64,6 +64,16 @@ durable `PrivateRequired` if one is present, so they fail closed; such a wallet
 shows `Stopped(NotSelected)` with copy telling the user to turn off Private
 queries, which lowers it to `Public` in every build.
 
+Lowering also forgets what private recovery alone contributed
+(`TransparentLedgerWrite::forget_transparent_ledger`). Leaving `PrivateRequired`
+only revokes private authority: a ledger-only receive would keep counting under
+`Public`, and a ledger-only spend would keep hiding its output in both modes, so
+a bad publication's facts would outlive the policy that admitted them. Vizor
+deletes every adapter companion first and forgets nothing unless that succeeds,
+so a companion never outlives the facts it records as held, and retries at each
+sync start while the wallet is public. Public discovery then rebuilds the
+transparent view from its own observations.
+
 The selection is `PrivateRequired` only on mainnet, with the preference on and
 the flag set, outside the `ironwood_masquerade` configuration. The stricter
 state is persisted first. Startup only raises, and only from a preference that
@@ -383,7 +393,9 @@ from the floor to the tip; request counts, sizes and timing; and the network
 origin when Tor is off. Broadcasting a shield or spend publishes its transparent
 outpoints through `SendTransaction`. Turning the setting off re-stamps
 `tx_retrieval_queue` and queues the transactions routed to lightwalletd for
-public retrieval, so txids learned privately are disclosed publicly at once.
+public retrieval, so txids learned privately are disclosed publicly at once,
+and the next sync looks up every transparent address of every account. Vizor
+asks before a toggle-off that does this and names what is sent.
 
 ## Accepted limitations
 
@@ -395,7 +407,7 @@ These hold under the development flag; PR 2 mirrors them in the design notes.
 | Lag | If publication lags sync completion by more than about 90 s, a run ends `Behind`; authority returns only when a run catches the tail. | Lag in blocks and seconds waited is logged. |
 | Ledger | Ledger accounts are `Stopped(Ledger)`. | Recovery from the birthday would miss earlier Ledger history. |
 | Same seed elsewhere | `UnresolvedSpends` from use of the seed in another wallet is permanent. | After 3 stalled runs the account is held and shows `Stopped(Stalled)`. |
-| Quarantine | Nothing clears a quarantine. | Delete and re-import the account, which gives new sources, or turn the setting off. |
+| Quarantine | Nothing clears a quarantine. | Delete and re-import the account, which gives new sources, or turn the setting off, which forgets the ledger's facts and looks up transparent funds publicly. |
 | Pre-birthday outputs | Legacy public outputs mined below the birthday give a permanent `LegacyDiscrepancy`. | `Stopped(LegacyDiscrepancy)` with a 1 h hold; turn the setting off. |
 | Re-cut | A re-cut under an unchanged set identity restarts revision numbers. Sealed shards become `Withdrawn(Regression)`, the tail stays `Pending` until it passes the old maximum, and every account with evidence stops. After companion loss the catalog cannot detect the regression, so a colliding lineage yields `Integrity` and a quarantine. | Turn the setting off, or delete and re-import. See the publisher requirements. |
 | Set-identity change | The adapter resets the store automatically and keeps the catalog, but old provisional evidence of the changed sources is never superseded, even where a batch listed it as retired and nobody acknowledged it. A shard whose source did not change but whose revision number restarted is treated as a re-cut. | It is consistent data, and reorgs still rewind it. See the publisher requirements. |
