@@ -330,16 +330,16 @@ wallet already holds; they are never withdrawn or retired.
   that commit, so no page completes twice.
 
 `ChangedSealed` and `Retired` now catch only undeclared changes. The sync
-refuses most of them first. It judges a settled range the map neither
-publishes nor declares by what the wallet's chain says. A stored end block the
-chain rejects is a reorg, rolled back as any other. When the chain accepts both
-the stored end block and the end block of the map's sealed shard now covering
-the range's start, at or below the target, the publisher contradicts the
-wallet's own chain, and the sync refuses it as `SyncError::SealedRewrite`
-before anything is read or rolled back. Anything else, such as a publisher that
-followed a reorg through a just-sealed shard before the wallet's chain did,
-stops the pass as `ChainUnknown` at the replacement's end height until the
-chain settles it. The adapter returns `SealedRewrite` as
+refuses most of them first. Its reorg scan, on the wallet's chain alone, first
+rolls back any reorg the chain shows, so a map cannot hold one back by changing
+history below it. It then judges each settled range the rollback kept that the
+map neither publishes nor declares. When the chain accepts both the stored end
+block and the end block of the map's sealed shard now covering the range's
+start, at or below the target, the publisher contradicts the wallet's own
+chain, and the sync refuses it as `SyncError::SealedRewrite` before anything is
+read. Anything else, such as a publisher that followed a reorg through a
+just-sealed shard before the wallet's chain did, stops the pass as
+`ChainUnknown` at the replacement's end height until the chain settles it. The adapter returns `SealedRewrite` as
 `Withdrawn(ChangedSealed)` with `Outcome::Behind`, claiming no coverage: a
 hold, never a reset of the store or catalog. A stored range with no recorded
 endpoint matches a declaration when it ends inside the declared range, or at

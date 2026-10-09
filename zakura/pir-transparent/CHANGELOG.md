@@ -85,12 +85,13 @@
 
 ### Changed
 
-- wallet-pir is pinned to `cebef2a8`, whose shard map carries re-cut
+- wallet-pir is pinned to `2faa5518`, whose shard map carries re-cut
   declarations and whose sync keeps a store's history across a declared
-  re-cut; every wallet-pir dependency moves together. Its sync refuses a map
-  that rewrites sealed history the store holds without declaring a re-cut,
-  where the wallet's chain accepts both the stored and the replacing shard's
-  end blocks, as `SyncError::SealedRewrite`, which a pass returns as
+  re-cut; every wallet-pir dependency moves together. After rolling back any
+  reorg the wallet's chain shows, its sync refuses a map that rewrites sealed
+  history the store holds without declaring a re-cut, where the chain accepts
+  both the stored and the replacing shard's end blocks, as
+  `SyncError::SealedRewrite`, which a pass returns as
   `Withdrawn(ChangedSealed)`, and drops page work under an unpublished
   revision instead of diverging.
 - Sources are `transparent-reference-source-v3`: the shard id is no longer
