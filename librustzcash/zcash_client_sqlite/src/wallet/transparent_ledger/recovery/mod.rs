@@ -17,8 +17,8 @@ use crate::error::SqliteClientError;
 #[cfg(feature = "transparent-inputs")]
 use {
     super::{
-        capture_policy_generation, durable_policy, ensure_policy_generation, projection,
-        resolve_mode,
+        capture_policy_generation, durable_policy, ensure_policy_generation,
+        grants_private_authority, projection, resolve_mode,
     },
     crate::{
         AccountRef, AccountUuid,

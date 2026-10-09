@@ -152,22 +152,19 @@ pub(crate) fn require(ok: bool, message: &str) -> Result<(), RecoveryError> {
 
 /// Candidate observations and reference progress from one pass.
 ///
-/// Apply a [`BatchState::Ready`] batch's commits, then acknowledge it: with
-/// [`ReferenceRecovery::acknowledge_applied`] when it lists no
-/// [`RecoveryBatch::retired_revisions`], otherwise with
-/// [`ReferenceRecovery::acknowledge_reconciled`] after the wallet's trusted
-/// operation resolved them. Neither the batch nor a server withdrawal is
+/// The batch is opaque: its commits can be read, never edited. A
+/// [`BatchState::Ready`] batch is settled in one of two ways. With feature
+/// `sqlite`, [`ReferenceRecovery::apply_and_acknowledge`] consumes it, applies
+/// every commit to a SQLite wallet and acknowledges it, reconciling its
+/// [`RecoveryBatch::retired_revisions`] when the caller trusts the commits.
+/// Otherwise the caller applies [`RecoveryBatch::commits`] itself and
+/// acknowledges with [`ReferenceRecovery::acknowledge_applied`], which refuses a
+/// batch listing retirements. Neither the batch nor a server withdrawal is
 /// authority to change local facts or promote an account.
 pub struct RecoveryBatch<AccountId> {
-    /// Source-bound normalized commits, including unfinished page work. Empty
-    /// unless `state` is [`BatchState::Ready`].
-    pub commits: Vec<TransparentLedgerCommit<AccountId>>,
-    /// How far this pass covered the watch set, and why it stopped. Anything but
-    /// [`Outcome::Complete`] is never synchronized.
-    pub progress: Progress,
-    /// Whether the commits may be applied: only a [`BatchState::Ready`] batch
-    /// has commits or can be acknowledged.
-    pub state: BatchState,
+    commits: Vec<TransparentLedgerCommit<AccountId>>,
+    progress: Progress,
+    state: BatchState,
     /// The retired revisions this batch's commits resolve, as its pass recorded
     /// them. Acknowledging the batch forgets them.
     replaced: Vec<RecoveryRevision>,
@@ -175,21 +172,39 @@ pub struct RecoveryBatch<AccountId> {
 }
 
 impl<A> RecoveryBatch<A> {
+    /// Source-bound normalized commits, including unfinished page work, in the
+    /// order they apply. Empty unless [`Self::state`] is [`BatchState::Ready`].
+    pub fn commits(&self) -> &[TransparentLedgerCommit<A>] {
+        &self.commits
+    }
+
+    /// How far this pass covered the watch set, and why it stopped. Anything but
+    /// [`Outcome::Complete`] is never synchronized.
+    pub fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    /// Whether the commits may be applied: only a [`BatchState::Ready`] batch
+    /// has commits or can be acknowledged.
+    pub fn state(&self) -> BatchState {
+        self.state
+    }
+
     /// Exactly the retired provisional revisions this batch resolves: each was
     /// exported by an earlier batch, is no longer published, and has a successor
     /// among [`Self::commits`] for the same source at a higher lineage. Empty
-    /// unless `state` is [`BatchState::Ready`].
+    /// unless [`Self::state`] is [`BatchState::Ready`].
     ///
     /// These are notifications, not authority to withdraw wallet evidence. The
     /// wallet resolves them when it applies every commit through its trusted
     /// operation, `TransparentLedgerWrite::qualify_and_apply_transparent_ledger_commit`,
     /// which qualifies each successor and withdraws its source's older
-    /// provisional evidence in the same wallet transaction. Acknowledge such a
-    /// batch only with [`ReferenceRecovery::acknowledge_reconciled`];
-    /// [`ReferenceRecovery::acknowledge_applied`] refuses it. The trusted
-    /// operation requires `PrivateRequired`, so a caller that cannot use it,
-    /// such as one under `PrivateShadow`, never acknowledges a batch with
-    /// retirements.
+    /// provisional evidence in the same wallet transaction. Only
+    /// [`ReferenceRecovery::apply_and_acknowledge`] with trusted commits
+    /// acknowledges such a batch; [`ReferenceRecovery::acknowledge_applied`]
+    /// refuses it. The trusted operation requires `PrivateRequired`, so a caller
+    /// that cannot use it, such as one under `PrivateShadow`, never acknowledges
+    /// a batch with retirements.
     ///
     /// Until the batch is acknowledged the companion keeps them: the next pass
     /// lists them again, with any retirement found since, or is
@@ -200,6 +215,12 @@ impl<A> RecoveryBatch<A> {
     /// their provisional evidence.
     pub fn retired_revisions(&self) -> &[RecoveryRevision] {
         &self.replaced
+    }
+
+    /// The commits and recorded retirements, for the adapter's own settlement.
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn into_parts(self) -> (Vec<TransparentLedgerCommit<A>>, Vec<RecoveryRevision>) {
+        (self.commits, self.replaced)
     }
 }
 
@@ -213,7 +234,7 @@ pub struct ReferenceRecovery {
     /// The companion binding every derived source includes.
     binding: [u8; 32],
     store: SqliteStore,
-    catalog: Connection,
+    pub(crate) catalog: Connection,
     pending_export: Option<[u8; 32]>,
 }
 
@@ -1148,7 +1169,7 @@ impl ReferenceRecovery {
     }
 
     /// A ready batch, whose token the next acknowledgment must present.
-    fn ready<A>(
+    pub(crate) fn ready<A>(
         &mut self,
         commits: Vec<TransparentLedgerCommit<A>>,
         replaced: Vec<RecoveryRevision>,
@@ -1172,11 +1193,10 @@ impl ReferenceRecovery {
     /// Only a [`BatchState::Ready`] batch from this companion's latest pass, with
     /// no [`RecoveryBatch::retired_revisions`], is acknowledged. A batch with
     /// retirements is refused, even when its commits applied, and its durable
-    /// notifications are left unchanged; acknowledge it with
-    /// [`Self::acknowledge_reconciled`] once its commits went through the
-    /// wallet's trusted operation. A [`BatchState::Pending`] or
-    /// [`BatchState::Withdrawn`] batch, or the receipt of an earlier pass, is
-    /// refused too.
+    /// notifications are left unchanged: only
+    /// [`Self::apply_and_acknowledge`] with trusted commits reconciles them. A
+    /// [`BatchState::Pending`] or [`BatchState::Withdrawn`] batch, or the receipt
+    /// of an earlier pass, is refused too.
     ///
     /// The batch's own revisions were recorded as exported before it was
     /// returned, so a crash before this acknowledgment replays the same candidate
@@ -1190,49 +1210,47 @@ impl ReferenceRecovery {
             batch.retired_revisions().is_empty(),
             "retired revisions require trusted wallet reconciliation",
         )?;
-        self.acknowledge_reconciled(batch)
+        self.acknowledge(batch)
     }
 
-    /// Acknowledge the latest batch after its commits went through the wallet's
-    /// trusted operation, resolving its retired revisions.
+    /// Acknowledge the latest batch, forgetting exactly the retired revisions
+    /// its pass recorded, and prune the catalog.
     ///
-    /// Call it only once every commit was applied with
-    /// `TransparentLedgerWrite::qualify_and_apply_transparent_ledger_commit`,
-    /// which qualifies the successor and withdraws the provisional evidence of
-    /// each [`RecoveryBatch::retired_revisions`] entry in the same wallet
-    /// transaction, and every such transaction committed. Calling it is the
-    /// caller's confirmation of both: the adapter cannot verify the separate
-    /// wallet transaction. A batch without retirements may be acknowledged here
-    /// or with [`Self::acknowledge_applied`].
-    ///
-    /// Only a [`BatchState::Ready`] batch from this companion's latest pass is
-    /// acknowledged; a [`BatchState::Pending`] or [`BatchState::Withdrawn`]
-    /// batch, or the receipt of an earlier pass, is refused. It forgets exactly
-    /// the retired revisions the batch's pass recorded, whatever the caller did
-    /// to the batch's public fields, and prunes the catalog. Until then the
-    /// notifications are durable: after a failed reconciliation or a crash, the
-    /// next pass reports them again, with any retirement found since, or is
-    /// [`BatchState::Pending`] while it cannot export their successors, and
-    /// replaying the trusted operation on its commits changes nothing. The one
-    /// exception is [`RecoveryError::PublicationChanged`], which forgets those
-    /// of sources the new map no longer names.
-    ///
-    /// This method never qualifies revisions or withdraws wallet evidence itself.
-    pub fn acknowledge_reconciled<A>(
-        &mut self,
-        batch: &RecoveryBatch<A>,
-    ) -> Result<(), RecoveryError> {
+    /// Until then the notifications are durable: after a failed reconciliation
+    /// or a crash, the next pass reports them again, with any retirement found
+    /// since, or is [`BatchState::Pending`] while it cannot export their
+    /// successors, and replaying the trusted operation on its commits changes
+    /// nothing. The one exception is [`RecoveryError::PublicationChanged`],
+    /// which forgets those of sources the new map no longer names.
+    fn acknowledge<A>(&mut self, batch: &RecoveryBatch<A>) -> Result<(), RecoveryError> {
         require(
             batch.state == BatchState::Ready,
             "only a ready batch is acknowledged",
         )?;
-        require(
-            self.pending_export == Some(batch.token),
-            "export receipt is stale",
-        )?;
+        require(self.is_pending_export(batch), "export receipt is stale")?;
         catalog::acknowledge(&mut self.catalog, &batch.replaced)?;
         self.pending_export = None;
         Ok(())
+    }
+
+    /// Acknowledges a batch whose retirements a test reconciled by hand.
+    #[cfg(test)]
+    pub(crate) fn acknowledge_reconciled<A>(
+        &mut self,
+        batch: &RecoveryBatch<A>,
+    ) -> Result<(), RecoveryError> {
+        self.acknowledge(batch)
+    }
+
+    /// Whether `batch` is this companion's latest unacknowledged pass.
+    pub(crate) fn is_pending_export<A>(&self, batch: &RecoveryBatch<A>) -> bool {
+        self.pending_export == Some(batch.token)
+    }
+
+    /// Spends the latest pass's receipt.
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn clear_pending_export(&mut self) {
+        self.pending_export = None;
     }
 }
 
@@ -4637,5 +4655,139 @@ mod tests {
             block(sealed.end_height).unwrap()
         );
         assert_eq!(cataloged(&adapter), 1);
+    }
+
+    /// Settlement checks made before any commit applies, against a real SQLite
+    /// wallet. Commit application itself is covered end to end in
+    /// `tests/private_recovery.rs`.
+    #[cfg(feature = "sqlite")]
+    mod apply {
+        use super::*;
+        use crate::apply::{ApplyError, Trust};
+        use zcash_client_backend::data_api::testing::{TestBuilder, TestState};
+        use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
+        use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerWrite as _;
+        use zcash_client_sqlite::{
+            AccountUuid,
+            testing::{
+                BlockCache,
+                db::{TestDb, TestDbFactory},
+            },
+        };
+        use zcash_protocol::local_consensus::LocalNetwork;
+
+        fn wallet() -> TestState<BlockCache, TestDb, LocalNetwork> {
+            let mut st = TestBuilder::new()
+                .with_data_store_factory(TestDbFactory::default())
+                .with_block_cache(BlockCache::new())
+                .build();
+            let db = st.wallet_mut().db_mut();
+            db.apply_transparent_policy(TransparentLedgerMode::PrivateRequired)
+                .unwrap();
+            db.set_transparent_ledger_mode(TransparentLedgerMode::PrivateRequired);
+            st
+        }
+
+        fn retired() -> RecoveryRevision {
+            RecoveryRevision {
+                source: vec![1; 32],
+                revision: vec![2; 32],
+                lineage: 1,
+                sealed: false,
+                publication:
+                    zcash_client_backend::data_api::transparent_ledger::PublicationAnchor {
+                        height: block(1).unwrap(),
+                        hash: BlockHash([3; 32]),
+                    },
+            }
+        }
+
+        #[test]
+        fn an_empty_ready_batch_is_acknowledged_and_spends_its_receipt() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut adapter =
+                ReferenceRecovery::open(dir.path().join("c.sqlite"), config()).unwrap();
+            let mut st = wallet();
+            let batch = adapter.ready::<AccountUuid>(vec![], vec![], MORE).unwrap();
+            let applied = adapter
+                .apply_and_acknowledge(batch, st.wallet_mut().db_mut(), Trust::Observed)
+                .unwrap();
+            assert_eq!(applied.stats, Default::default());
+            assert_eq!(applied.progress, MORE);
+            assert_eq!(applied.retired, 0);
+            assert_eq!(adapter.pending_export, None);
+        }
+
+        #[test]
+        fn unready_and_stale_batches_apply_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut adapter =
+                ReferenceRecovery::open(dir.path().join("c.sqlite"), config()).unwrap();
+            let mut st = wallet();
+            for state in [
+                BatchState::Pending,
+                BatchState::Withdrawn(WithdrawnCause::Equivocation),
+            ] {
+                let failure = adapter
+                    .apply_and_acknowledge(
+                        unready::<AccountUuid>(state, MORE),
+                        st.wallet_mut().db_mut(),
+                        Trust::Trusted,
+                    )
+                    .unwrap_err();
+                assert!(matches!(failure.error, ApplyError::NotReady(s) if s == state));
+                assert_eq!(failure.stats, Default::default());
+            }
+            // A batch superseded by a later, different pass is a stale receipt; the later
+            // one stays acknowledgeable.
+            let earlier = adapter.ready::<AccountUuid>(vec![], vec![], MORE).unwrap();
+            let later = adapter
+                .ready::<AccountUuid>(vec![], vec![retired()], MORE)
+                .unwrap();
+            let failure = adapter
+                .apply_and_acknowledge(earlier, st.wallet_mut().db_mut(), Trust::Trusted)
+                .unwrap_err();
+            assert!(matches!(failure.error, ApplyError::StaleReceipt));
+            assert!(adapter.is_pending_export(&later));
+        }
+
+        #[test]
+        fn a_surrounding_transaction_is_refused_before_anything_applies() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut adapter =
+                ReferenceRecovery::open(dir.path().join("c.sqlite"), config()).unwrap();
+            let mut st = wallet();
+            let batch = adapter
+                .ready::<AccountUuid>(vec![], vec![retired()], MORE)
+                .unwrap();
+            st.wallet().conn().execute_batch("BEGIN").unwrap();
+            let failure = adapter
+                .apply_and_acknowledge(batch, st.wallet_mut().db_mut(), Trust::Trusted)
+                .unwrap_err();
+            assert!(matches!(failure.error, ApplyError::OuterTransaction));
+            st.wallet().conn().execute_batch("ROLLBACK").unwrap();
+            // Nothing was acknowledged: the receipt stands, though the batch is gone.
+            assert!(adapter.pending_export.is_some());
+        }
+
+        #[test]
+        fn observed_trust_refuses_retirements_before_applying() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut adapter =
+                ReferenceRecovery::open(dir.path().join("c.sqlite"), config()).unwrap();
+            let mut st = wallet();
+            let batch = adapter
+                .ready::<AccountUuid>(vec![], vec![retired()], MORE)
+                .unwrap();
+            let failure = adapter
+                .apply_and_acknowledge(batch, st.wallet_mut().db_mut(), Trust::Observed)
+                .unwrap_err();
+            assert!(matches!(failure.error, ApplyError::Unreconciled));
+            assert!(adapter.pending_export.is_some());
+            // This synthetic batch exercises the refusal only. A real Ready
+            // retirement has a successor commit, so successful trusted
+            // reconciliation belongs to the in-process service integration
+            // tests in private_recovery.rs, including stale-prefix replay.
+        }
     }
 }

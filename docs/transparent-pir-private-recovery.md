@@ -253,19 +253,25 @@ adapter withdraws no wallet evidence. The caller resolves them by applying the
 batch's commits through the trusted operation, which qualifies each successor
 and supersedes the retired provisional evidence in the same wallet transaction.
 
-Both acknowledgments refuse a batch that is not `Ready` and a stale token, and
-otherwise clear the export mark on resolved rows and prune; a batch's commits
-were marked exported when it was returned. `acknowledge_applied` acknowledges
-only a batch with no retirements and refuses any batch with retirements; a
-`Ready` batch with retirements always carries their successor commits.
-`acknowledge_reconciled` acknowledges a batch with retirements. Calling it
-confirms that trusted reconciliation and every commit succeeded; the adapter
-cannot verify that separate wallet transaction. Either method acknowledges a
-`Ready` batch without retirements. Until acknowledgment the notifications stay
-durable, so after a failure or a crash the next pass reports them again, with
-any retirement found since. Only a publication change forgets them
-unacknowledged: those of sources the new map no longer names, which no
-successor can resolve; the wallet keeps their provisional evidence.
+Acknowledgment refuses a batch that is not `Ready` and a stale token, and
+otherwise clears the export mark on resolved rows and prunes; a batch's commits
+were marked exported when it was returned. The batch is opaque, so its commits
+cannot be edited or dropped before acknowledgment. `acknowledge_applied`
+acknowledges only a batch with no retirements. With feature `sqlite`,
+`apply_and_acknowledge` consumes the batch, applies every commit to a SQLite
+wallet with the caller's explicit trust, and acknowledges it only once every
+wallet transaction committed; only trusted commits, which qualify the
+successors, acknowledge a batch with retirements. It refuses a wallet
+connection inside a caller's SQL transaction, so that an integrity rejection's
+quarantine commits with its own transaction before it is reported. A stale,
+refused or failed commit, a policy change, a failed acknowledgment or a crash
+leaves the batch unacknowledged and reports the committed prefix; the wallet
+and companion databases are never treated as atomic. Until acknowledgment the
+notifications stay durable, so after a failure or a crash the next pass reports
+them again, with any retirement found since, and replaying the applied prefix
+changes nothing. Only a publication change forgets them unacknowledged: those
+of sources the new map no longer names, which no successor can resolve; the
+wallet keeps their provisional evidence.
 
 The trusted operation requires `PrivateRequired` and is used only for the
 trusted origin. Without it a batch with retirements is never acknowledged, and
@@ -322,13 +328,14 @@ deleting an account removes its companion and sidecars.
 
 A pass runs in `spawn_blocking` over a read-only wallet database and
 `WalletChain`, exiting on cancellation or a 90-second deadline, and retries once
-on `PublicationChanged`, keeping the companion. The async side always joins it,
-and acknowledgment also runs in `spawn_blocking`. Per-pass limits are 10,000
-scripts, 1,024 shards, 500,000 events, 256 queries, 96 MiB of private bytes and
-8 MiB per response. The source answers
-`Ready { commits, retired, next, behind_by }`, `Pending { next }` or
-`Withdrawn(cause)`, or fails with `Unavailable`, `Failed` or `Cancelled`;
-`retired` is the batch's `retired_revisions()`. `More` continues with another
+on `PublicationChanged`, keeping the companion. The async side always joins it.
+Per-pass limits are 10,000 scripts, 1,024 shards, 500,000 events, 256 queries,
+96 MiB of private bytes and 8 MiB per response. The source answers
+`Ready { next, behind_by }`, keeping the opaque batch, `Pending { next }` or
+`Withdrawn(cause)`, or fails with `Unavailable` (the service is unreachable or
+not serving, which stops the run), `Failed` or `Cancelled`. A `Ready` batch is
+settled through the source, which hands it to `apply_and_acknowledge` under the
+wallet write lock with the run's explicit trust. `More` continues with another
 pass, `Overloaded` retries after 30 s, and `Behind`, clamped or not, retries
 after 10 s while the run's publication wait is under 90 s.
 
@@ -340,7 +347,7 @@ are skipped without PIR traffic. For the rest:
 
 | Result | Coordinator action |
 | --- | --- |
-| `Ready` | Apply each commit under the wallet write lock, through the trusted operation when the source is trusted and the policy is `PrivateRequired`. Once every commit applies, call `acknowledge_applied` if `retired` is empty, or `acknowledge_reconciled` if every commit went through the trusted operation. Otherwise acknowledge nothing and hold the account for 1 h: only a trusted pass resolves the retirements, and each pass until then adds any newer revision of their sources to them. |
+| `Ready` | Settle the batch with `apply_and_acknowledge`: `Trust::Trusted` when the source is trusted and the policy is `PrivateRequired` on the handle and durably, `Trust::Observed` otherwise. It acknowledges only once every commit's wallet transaction committed. An observed batch with retirements is refused before anything applies; hold the account for 1 h: only a trusted pass resolves the retirements, and each pass until then adds any newer revision of their sources to them. A failed acknowledgment skips the account; the next pass replays the batch. |
 | Stale rejection | Retry from a fresh watch set, up to 3 times, without acknowledgment. |
 | Integrity, quarantine, invalid or unqualified rejection | Skip the account. |
 | `NotEnabled` | Stop the run. |

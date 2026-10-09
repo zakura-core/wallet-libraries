@@ -194,7 +194,6 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
         SqliteClientError::TransparentLedgerModeNotConfigured
-        | SqliteClientError::TransparentLedgerPolicyConflict { .. }
         | SqliteClientError::TransparentAuthorityUnavailable
         | SqliteClientError::TransparentLedgerIncompatible { .. }
         | SqliteClientError::StaleTransparentPolicy { .. }

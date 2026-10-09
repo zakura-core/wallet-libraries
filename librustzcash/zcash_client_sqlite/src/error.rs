@@ -22,7 +22,6 @@ use zcash_client_backend::data_api::ll::wallet::PutBlocksError;
 use zcash_client_backend::data_api::transparent_ledger::CommitRejection;
 #[cfg(feature = "transparent-inputs")]
 use zcash_client_backend::data_api::transparent_ledger::RecoveryBlocker;
-use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
 use zcash_client_backend::wallet::OutputRef;
 use zcash_keys::address::UnifiedAddress;
 use zcash_keys::keys::AddressGenerationError;
@@ -54,14 +53,6 @@ pub enum SqliteClientError {
     EnhancementModeNotConfigured,
     /// Transparent ledger APIs require an explicit mode on this handle.
     TransparentLedgerModeNotConfigured,
-    /// The handle's transparent ledger mode is weaker than the policy durably applied to the
-    /// wallet. The stored policy is never weakened by a handle's configuration.
-    TransparentLedgerPolicyConflict {
-        /// The handle's configured mode, if any.
-        configured: Option<TransparentLedgerMode>,
-        /// The durably applied mode.
-        applied: TransparentLedgerMode,
-    },
     /// Consuming transparent inputs requires private transparent authority, which is not
     /// available.
     TransparentAuthorityUnavailable,
@@ -381,13 +372,6 @@ impl fmt::Display for SqliteClientError {
             SqliteClientError::TransparentLedgerModeNotConfigured => write!(
                 f,
                 "Transparent ledger mode is not configured; call set_transparent_ledger_mode first"
-            ),
-            SqliteClientError::TransparentLedgerPolicyConflict {
-                configured,
-                applied,
-            } => write!(
-                f,
-                "Transparent ledger mode {configured:?} is weaker than the wallet's applied policy {applied:?}; this build cannot operate on this wallet's transparent funds"
             ),
             SqliteClientError::PublicTransparentDiscoveryForbidden => write!(
                 f,

@@ -13,11 +13,7 @@ pub(crate) fn promote<P: consensus::Parameters>(
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
     atomically(conn, |conn| {
-        let handle = resolve_mode(conn, configured)?;
-        let durable = durable_policy(conn)?.map(|policy| policy.mode);
-        if handle != TransparentLedgerMode::PrivateRequired
-            || durable != Some(TransparentLedgerMode::PrivateRequired)
-        {
+        if !grants_private_authority(conn, configured)? {
             return Err(SqliteClientError::TransparentRecoveryNotEnabled);
         }
         let watch = Watch::load(conn, params, gap_limits, account)?

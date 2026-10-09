@@ -133,19 +133,18 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
 ) -> Result<CommitOutcome, SqliteClientError> {
     check_well_formed(&commit).map_err(|e| reject(CommitRejection::Invalid(e)))?;
     atomically(conn, |conn| {
-        // Private recovery must be authorized both by this handle and durably.
-        let handle = resolve_mode(conn, configured)?;
+        // Private recovery must be selected by this handle and authorized durably. A handle
+        // selecting `Public` records no recovery evidence, even over a durable private policy
+        // it reads under.
+        resolve_mode(conn, configured)?;
         let durable = durable_policy(conn)?.map(|policy| policy.mode);
-        if handle == TransparentLedgerMode::Public
+        if configured == Some(TransparentLedgerMode::Public)
             || durable.is_none_or(|mode| mode == TransparentLedgerMode::Public)
         {
             return Err(SqliteClientError::TransparentRecoveryNotEnabled);
         }
         // Trusting a revision serves private authority only; shadow recovery observes.
-        if trust == CommitTrust::Qualified
-            && (handle != TransparentLedgerMode::PrivateRequired
-                || durable != Some(TransparentLedgerMode::PrivateRequired))
-        {
+        if trust == CommitTrust::Qualified && !grants_private_authority(conn, configured)? {
             return Err(SqliteClientError::TransparentRecoveryNotEnabled);
         }
         ensure_policy_generation(conn, commit.context.policy_generation)?;

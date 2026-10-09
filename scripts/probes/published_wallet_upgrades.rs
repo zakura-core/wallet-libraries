@@ -16,7 +16,25 @@ fn main() {
         TestRng::seed_from_u64(0),
     )
     .unwrap();
+    // A library with explicit ledger modes stores transparent data only under a selected mode.
+    #[cfg(feature = "ledger")]
+    db.set_transparent_ledger_mode(
+        zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+    );
     match args[1].as_str() {
+        #[cfg(feature = "ledger")]
+        "refuse-old" => {
+            use zcash_client_sqlite::wallet::init::WalletMigrationError;
+            let error = WalletMigrator::new()
+                .init_or_migrate(&mut db)
+                .expect_err("older reader accepted unknown migrations");
+            let cause = std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<WalletMigrationError>());
+            assert!(
+                matches!(cause, Some(WalletMigrationError::UnknownMigrations(ids)) if !ids.is_empty()),
+                "older reader failed for an unrelated reason: {error:?}"
+            );
+        }
         "init" => {
             WalletMigrator::new().init_or_migrate(&mut db).unwrap();
             #[cfg(not(feature = "current"))]

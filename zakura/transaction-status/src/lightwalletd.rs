@@ -46,14 +46,27 @@ where
 
 impl<Cancel: Fn() -> bool + Sync> StatusSession for LightwalletdSession<Cancel> {
     async fn observe(&mut self, request: StatusRequest) -> Result<StatusObservation, StatusError> {
-        let client = &mut self.client;
-        let response = guarded(
-            async { Ok(get_transaction(client, request.txid).await) },
+        observe_response(
+            request.txid,
+            get_transaction(&mut self.client, request.txid),
             &self.cancelled,
         )
-        .await?;
-        decode_response(request.txid, response)
+        .await
     }
+}
+
+/// Observes one response supplied by the application's authorized transport.
+/// The application owns dispatch and routing; this function retains the public
+/// source's cancellation, timeout, txid/payload validation and status semantics.
+/// The response future is never polled when already cancelled. A timeout or
+/// cancellation drops it. No retry or fallback is performed.
+pub async fn observe_response(
+    txid: TxId,
+    response: impl Future<Output = Result<RawTransaction, tonic::Status>>,
+    cancelled: &(impl Fn() -> bool + Sync),
+) -> Result<StatusObservation, StatusError> {
+    let response = guarded(async { Ok(response.await) }, cancelled).await?;
+    decode_response(txid, response)
 }
 
 /// Every network step, including opening the source, is bounded by both the
@@ -185,16 +198,34 @@ mod tests {
     #[tokio::test]
     async fn cancellation_prevents_request() {
         let mut ran = false;
-        let result = guarded(
+        let result = observe_response(
+            txid_other(),
             async {
                 ran = true;
-                Ok(())
+                Err(tonic::Status::not_found("absent"))
             },
             &|| true,
         )
         .await;
         assert_eq!(result, Err(StatusError::Cancelled));
         assert!(!ran);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn supplied_response_is_bounded_by_the_status_timeout() {
+        assert_eq!(
+            observe_response(txid_other(), std::future::pending(), &|| false).await,
+            Err(StatusError::Timeout)
+        );
+        assert_eq!(
+            observe_response(
+                txid_other(),
+                std::future::ready(Err(tonic::Status::not_found("absent"))),
+                &|| false,
+            )
+            .await,
+            Ok(StatusObservation::NotFound)
+        );
     }
 
     #[tokio::test(start_paused = true)]

@@ -94,18 +94,40 @@ resolves: provisional revisions an earlier batch exported, which the map no
 longer publishes, and for whose source the batch's commits carry a successor at
 a higher lineage. They are notifications, not authority: the adapter withdraws
 no wallet evidence, and a `Pending` or `Withdrawn` batch lists none.
-Acknowledge a `Ready` batch only after every commit applied:
+A batch is opaque: `commits()`, `progress()`, `state()` and
+`retired_revisions()` read it, and nothing edits it. Acknowledge a `Ready`
+batch only after every commit applied:
 
-- Without retirements, call `acknowledge_applied` (or `acknowledge_reconciled`,
-  which also accepts such a batch).
-- With retirements, apply every commit through the trusted operation, which
-  resolves them, then call `acknowledge_reconciled`; `acknowledge_applied`
-  refuses such a batch and changes nothing. The adapter cannot see the wallet's
-  transaction, so calling `acknowledge_reconciled` is the caller's confirmation
-  that each one committed. Acknowledging forgets the retired revisions.
+- With feature `sqlite`, `apply_and_acknowledge` consumes the batch, applies
+  every commit to a `WalletDb<rusqlite::Connection, ..>` and acknowledges it.
+  The caller states the trust explicitly: `Trust::Observed` applies candidate
+  evidence only and refuses, before applying anything, a batch listing
+  retirements; `Trust::Trusted` qualifies each commit's revision as it applies,
+  which reconciles the retirements, and requires `PrivateRequired` on the
+  handle and durably. The adapter never infers trust, promotes an account or
+  authorizes spending.
+- Without it, apply the commits yourself and call `acknowledge_applied`, which
+  refuses a batch listing retirements and changes nothing. Such a batch can only
+  be settled through `apply_and_acknowledge` with trusted commits.
 
-Both refuse a `Pending` or `Withdrawn` batch and the receipt of any pass but the
-latest. Export intent is persisted before a batch is returned, and retired
+`apply_and_acknowledge` refuses a wallet connection inside an explicit SQL
+transaction (`ApplyError::OuterTransaction`): each commit must commit on its
+own, so that an integrity rejection's quarantine is durable when it is
+reported, rather than rolled back with a caller's transaction. Commits apply in
+order, each in its own wallet transaction; the first one the wallet refuses or
+fails stops the batch. The companion is acknowledged, in its own database, only
+once every wallet transaction committed. The two databases are not atomic: a
+stale or refused commit, a policy change, a failed wallet or companion write,
+or a crash leaves the batch unacknowledged, with the committed prefix reported
+in `ApplyFailure::stats`. The next pass exports the same revisions and lists
+the same retirements again, and replaying commits the wallet already applied
+changes nothing. `Applied` and `ApplyFailure` carry the commit counts, whether a
+window grew, and the pass `Progress`, for scheduling the next pass. Every
+outcome consumes the batch's receipt. Make no network request while holding the
+wallet's write serialization; this call makes none.
+
+Both paths refuse a `Pending` or `Withdrawn` batch and the receipt of any pass
+but the latest. Export intent is persisted before a batch is returned, and retired
 revisions stay recorded until acknowledged, so after a failed reconciliation or
 a crash before acknowledgment the next pass reports those notifications again,
 with any retirement found since, and replaying the trusted operation changes

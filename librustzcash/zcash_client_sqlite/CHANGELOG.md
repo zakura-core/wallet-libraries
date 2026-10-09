@@ -10,6 +10,17 @@ workspace.
 
 ## [Unreleased]
 
+- Transparent ledger reads resolve a configured handle under the durable policy: a durably
+  applied `PrivateRequired` policy governs every read, including one applied by another
+  connection after the handle was configured, instead of failing it with
+  `TransparentLedgerPolicyConflict`, which is removed. Reads never write the policy, and an
+  explicitly lowered policy again resolves to the handle's configured mode. An unconfigured
+  handle, a missing or corrupt policy row, or a newer reader requirement still fails closed.
+  Qualifying a revision or promoting an account still requires a handle configured
+  `PrivateRequired`, and a handle configured `Public` records no recovery evidence.
+- `WalletDb::is_autocommit` reports whether the handle's connection is outside an explicit
+  SQL transaction.
+
 - Transparent receipt ownership now requires current, qualified, non-quarantined private
   spend evidence or an independently recorded public/local spend. Candidate and withdrawn
   recovery records cannot suppress funding omissions. Raw sender ownership also requires an
@@ -233,8 +244,6 @@ workspace.
   only while the transaction has no stored raw payload.
 - `SqliteClientError` variants:
   - `TransparentLedgerModeNotConfigured`;
-  - `TransparentLedgerPolicyConflict`: the handle's mode is weaker than a
-    durably applied `PrivateRequired` policy, which is never weakened;
   - `TransparentAuthorityUnavailable`;
   - `PublicTransparentDiscoveryForbidden`;
   - `TransparentLedgerIncompatible`: the wallet requires a newer ledger reader;

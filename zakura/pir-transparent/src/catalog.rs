@@ -68,8 +68,9 @@ pub enum BatchState {
     /// the wallet qualifies it, so `Ready` assumes the commits are applied
     /// through the trusted operation. The predecessors are the batch's
     /// [`RecoveryBatch::retired_revisions`](crate::RecoveryBatch::retired_revisions),
-    /// and such a batch is acknowledged only by
-    /// [`ReferenceRecovery::acknowledge_reconciled`](crate::ReferenceRecovery::acknowledge_reconciled).
+    /// and such a batch is acknowledged only by applying its commits through
+    /// the trusted operation with `ReferenceRecovery::apply_and_acknowledge`
+    /// (feature `sqlite`).
     Ready,
     /// The publication or this companion's retrieval is behind what the
     /// companion recorded: a lagging replica (one serving a shard unsealed below
@@ -570,9 +571,22 @@ pub(crate) fn acknowledge(
     conn: &mut Connection,
     replaced: &[RecoveryRevision],
 ) -> Result<(), RecoveryError> {
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(failure)?;
+    let tx = acknowledgment_transaction(conn)?;
+    acknowledge_in_transaction(&tx, replaced)?;
+    tx.commit().map_err(failure)
+}
+
+pub(crate) fn acknowledgment_transaction(
+    conn: &mut Connection,
+) -> Result<Transaction<'_>, RecoveryError> {
+    conn.transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(failure)
+}
+
+pub(crate) fn acknowledge_in_transaction(
+    tx: &Transaction<'_>,
+    replaced: &[RecoveryRevision],
+) -> Result<(), RecoveryError> {
     for row in replaced {
         tx.execute(
             "UPDATE pir_bridge_catalog SET exported=0 WHERE source=?1 AND revision=?2 AND current=0",
@@ -580,8 +594,7 @@ pub(crate) fn acknowledge(
         )
         .map_err(failure)?;
     }
-    prune_catalog(&tx)?;
-    tx.commit().map_err(failure)
+    prune_catalog(tx)
 }
 
 /// Whether any batch may have handed a revision to the wallet.

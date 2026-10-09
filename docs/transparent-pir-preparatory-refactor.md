@@ -133,9 +133,12 @@ planned in some places and stricter in others; see the deviations below.
      transparent history requests, and the ledger APIs. Unconfigured handles
      fail. An unconfigured handle on a wallet without a private policy can
      still read balances for display.
-   - A durable `PrivateRequired` is never weakened: weaker handles fail with
-     `TransparentLedgerPolicyConflict`. A missing policy row or table, or a
-     newer reader requirement, fails closed.
+   - A durable `PrivateRequired` is never weakened: every read resolves a
+     weaker configured handle to `PrivateRequired`, including after another
+     connection applied it, without writing the policy. Only an explicit
+     transition lowers it. Qualification and promotion still require a handle
+     configured `PrivateRequired`. A missing policy row or table, or a newer
+     reader requirement, fails closed.
    - Transparent authority is unavailable under `PrivateRequired`, while the
      chain tip is unknown, and in builds without `transparent-inputs`. Then
      selectors and stores with transparent inputs fail,

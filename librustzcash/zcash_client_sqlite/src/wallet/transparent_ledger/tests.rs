@@ -788,45 +788,59 @@ mod handles {
             .apply_transparent_policy(PrivateRequired)
             .unwrap();
 
-        for mode in [Public, PrivateShadow] {
-            set_mode(&mut st, mode);
-            let conflict = |e: &SqliteClientError| {
-                matches!(
-                    e,
-                    SqliteClientError::TransparentLedgerPolicyConflict {
-                        configured: Some(m),
-                        applied: PrivateRequired,
-                    } if *m == mode
-                )
-            };
-            let db = st.wallet().db();
-            assert!(conflict(&db.transparent_ledger_mode().unwrap_err()));
-            assert!(conflict(
-                &db.transparent_ledger_snapshot(account, ConfirmationsPolicy::MIN)
-                    .unwrap_err()
-            ));
-            for error in selector_errors(&st, &funded) {
-                assert!(conflict(&error.unwrap()));
-            }
-        }
-        // An unconfigured handle is blocked too.
-        assert!(matches!(
-            check_transparent_authority(conn(&st), None),
-            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
-        ));
-
-        // A matching handle operates, with transparent inputs still unavailable.
+        // The reference: a matching handle operates, with transparent inputs unavailable.
         set_mode(&mut st, PrivateRequired);
-        assert_eq!(
-            st.wallet().db().transparent_ledger_mode().unwrap(),
-            PrivateRequired
+        let required_selectors = format!("{:?}", selector_errors(&st, &funded));
+        let required_snapshot = format!(
+            "{:?}",
+            st.wallet()
+                .db()
+                .transparent_ledger_snapshot(account, ConfirmationsPolicy::MIN)
+                .unwrap()
         );
         assert!(matches!(
             selector_errors(&st, &funded)[0],
             Some(SqliteClientError::TransparentAuthorityUnavailable)
         ));
 
-        // Nothing weakened the stored policy.
+        // A weaker handle resolves to the durable policy and reads exactly what a matching
+        // handle reads, without changing its own configuration.
+        for mode in [Public, PrivateShadow] {
+            set_mode(&mut st, mode);
+            let db = st.wallet().db();
+            assert_eq!(db.transparent_ledger_mode().unwrap(), PrivateRequired);
+            assert_eq!(db.transparent_ledger_mode, Some(mode));
+            assert_eq!(
+                format!(
+                    "{:?}",
+                    db.transparent_ledger_snapshot(account, ConfirmationsPolicy::MIN)
+                        .unwrap()
+                ),
+                required_snapshot
+            );
+            assert_eq!(
+                format!("{:?}", selector_errors(&st, &funded)),
+                required_selectors
+            );
+            assert!(matches!(
+                check_transparent_authority(conn(&st), Some(mode)),
+                Err(SqliteClientError::TransparentAuthorityUnavailable)
+            ));
+            assert!(
+                !crate::wallet::transparent_ledger::public_discovery_permitted(
+                    conn(&st),
+                    Some(mode)
+                )
+                .unwrap()
+            );
+        }
+        // An unconfigured handle is blocked.
+        assert!(matches!(
+            check_transparent_authority(conn(&st), None),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
+
+        // Nothing weakened or rewrote the stored policy.
         assert_eq!(meta(&st), (2, 1));
     }
 
@@ -1135,15 +1149,135 @@ mod handles {
                 applied: 1,
             })
         ));
-        // The open handle's in-memory configuration is unchanged; resolving against the
-        // durable policy fails closed.
+        // The open handle's in-memory configuration is unchanged, but it resolves to the
+        // policy the other connection applied, at its next read.
+        assert_eq!(reader.transparent_ledger_mode, Some(Public));
+        assert_eq!(reader.transparent_ledger_mode().unwrap(), PrivateRequired);
+        assert_eq!(
+            reader.applied_transparent_policy().unwrap(),
+            zcash_client_backend::data_api::transparent_ledger::AppliedTransparentPolicy {
+                mode: PrivateRequired,
+                generation: 1,
+            }
+        );
+        assert!(
+            !crate::wallet::transparent_ledger::public_discovery_permitted(
+                &reader.conn,
+                reader.transparent_ledger_mode
+            )
+            .unwrap()
+        );
         assert!(matches!(
-            reader.transparent_ledger_mode(),
-            Err(SqliteClientError::TransparentLedgerPolicyConflict {
-                configured: Some(Public),
-                applied: PrivateRequired,
-            })
+            crate::wallet::transparent_ledger::check_public_discovery(
+                &reader.conn,
+                reader.transparent_ledger_mode
+            ),
+            Err(SqliteClientError::PublicTransparentDiscoveryForbidden)
         ));
+
+        // Only an explicit transition lowers the policy; the reader then resolves to its own
+        // configured mode again, under the new generation.
+        writer.apply_transparent_policy(Public).unwrap();
+        assert_eq!(reader.transparent_ledger_mode().unwrap(), Public);
+        assert_eq!(reader.applied_transparent_policy().unwrap().generation, 2);
+    }
+
+    #[test]
+    fn weaker_handle_reads_never_write_or_lower_the_durable_policy() {
+        use crate::testing::db::{test_clock, test_rng};
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut writer =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap()
+                .with_transparent_ledger_mode(PrivateRequired);
+        WalletMigrator::new().init_or_migrate(&mut writer).unwrap();
+        writer.apply_transparent_policy(PrivateRequired).unwrap();
+        let mut reader =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap()
+                .with_transparent_ledger_mode(Public);
+        let changes = || {
+            let conn = rusqlite::Connection::open(file.path()).unwrap();
+            conn.query_row(
+                "SELECT applied_mode, policy_generation FROM tpir_meta",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap()
+        };
+        let before = changes();
+        for _ in 0..3 {
+            assert_eq!(reader.transparent_ledger_mode().unwrap(), PrivateRequired);
+            reader.applied_transparent_policy().unwrap();
+            reader.pending_private_transparent_details().unwrap();
+        }
+        assert_eq!(changes(), before);
+        // A weaker handle reads under the durable policy but grants no authority under it.
+        assert!(
+            !crate::wallet::transparent_ledger::grants_private_authority(
+                &reader.conn,
+                reader.transparent_ledger_mode
+            )
+            .unwrap()
+        );
+        reader.set_transparent_ledger_mode(PrivateShadow);
+        assert!(
+            !crate::wallet::transparent_ledger::grants_private_authority(
+                &reader.conn,
+                reader.transparent_ledger_mode
+            )
+            .unwrap()
+        );
+        assert_eq!(changes(), before);
+    }
+
+    #[test]
+    fn unreadable_policy_fails_closed_for_every_configured_handle() {
+        use crate::testing::db::{test_clock, test_rng};
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut db =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap();
+        WalletMigrator::new().init_or_migrate(&mut db).unwrap();
+        // Unconfigured fails before reading.
+        assert!(matches!(
+            db.transparent_ledger_mode(),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
+        // A corrupt mode code fails every configured handle, whatever its mode.
+        db.conn
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE tpir_meta SET applied_mode = 9;
+                 PRAGMA ignore_check_constraints = OFF;",
+            )
+            .unwrap();
+        for mode in [Public, PrivateShadow, PrivateRequired] {
+            db.set_transparent_ledger_mode(mode);
+            assert!(
+                matches!(
+                    db.transparent_ledger_mode(),
+                    Err(SqliteClientError::CorruptedData(_))
+                ),
+                "{mode:?}"
+            );
+        }
+        // So does a missing policy row.
+        db.conn.execute("DELETE FROM tpir_meta", []).unwrap();
+        for mode in [Public, PrivateShadow, PrivateRequired] {
+            db.set_transparent_ledger_mode(mode);
+            assert!(
+                matches!(
+                    db.transparent_ledger_mode(),
+                    Err(SqliteClientError::CorruptedData(_))
+                ),
+                "{mode:?}"
+            );
+            assert!(matches!(
+                db.applied_transparent_policy(),
+                Err(SqliteClientError::CorruptedData(_))
+            ));
+        }
     }
 
     #[cfg(feature = "orchard")]
@@ -1583,22 +1717,32 @@ mod handles {
 
         snapshot.commit().unwrap();
 
-        assert!(matches!(
-            crate::wallet::enhance_pir::transaction_enhancement_work(
-                &reader.conn,
-                EnhancementMode::Standard,
-                Some(Public),
-            ),
-            Err(SqliteClientError::TransparentLedgerPolicyConflict { .. })
-        ));
-        assert!(matches!(
-            crate::wallet::transaction_status_work(
-                &reader.conn,
-                TransactionStatusMode::Public,
-                Some(Public),
-            ),
-            Err(SqliteClientError::TransparentLedgerPolicyConflict { .. })
-        ));
+        // After the snapshot, the still-`Public` handle resolves to the applied
+        // `PrivateRequired` policy: neither transaction is public work any longer.
+        let enhancement = crate::wallet::enhance_pir::transaction_enhancement_work(
+            &reader.conn,
+            EnhancementMode::Standard,
+            Some(Public),
+        )
+        .unwrap();
+        assert!(
+            !enhancement
+                .iter()
+                .any(|work| matches!(work, TransactionEnhancementWork::Public(_))),
+            "{enhancement:?}"
+        );
+        let status = crate::wallet::transaction_status_work(
+            &reader.conn,
+            TransactionStatusMode::Public,
+            Some(Public),
+        )
+        .unwrap();
+        assert!(
+            !status
+                .iter()
+                .any(|work| matches!(work, TransactionStatusWork::Public(_))),
+            "{status:?}"
+        );
     }
 
     #[test]

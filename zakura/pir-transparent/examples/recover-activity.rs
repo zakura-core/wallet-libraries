@@ -205,11 +205,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err("wallet target differs from independent chain".into());
         }
         let batch = reference.recover(&watch, &chain, &mut filters, &mut transport)?;
-        if let BatchState::Withdrawn(cause) = batch.state {
+        if let BatchState::Withdrawn(cause) = batch.state() {
             return Err(format!("publication withdrawn: {cause:?}").into());
         }
         // Only the wallet's trusted operation resolves retired revisions, and only
-        // `acknowledge_reconciled` acknowledges a batch listing them. This harness
+        // `apply_and_acknowledge` with trusted commits (feature `sqlite`)
+        // acknowledges a batch listing them. This harness
         // never qualifies, so it stops before applying such a batch and leaves
         // the notifications in the companion.
         if !batch.retired_revisions().is_empty() {
@@ -220,7 +221,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut grew = false;
         let mut receives = 0;
         let mut spends = 0;
-        for commit in &batch.commits {
+        for commit in batch.commits() {
             receives += commit.receives.len();
             spends += commit.spends.len();
             if commit.receives.iter().any(|e| e.metadata.is_none())
@@ -236,17 +237,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         // A `Pending` batch has no commits and is not acknowledged. A `Ready` one
         // without retirements is acknowledged once every commit applied.
-        if batch.state == BatchState::Ready {
+        if batch.state() == BatchState::Ready {
             reference.acknowledge_applied(&batch)?;
         }
-        passes.push(json!({"pass":pass,"state":format!("{:?}",batch.state),"receives":receives,"spends":spends,
-            "covered_through":batch.progress.covered_through,"outcome":format!("{:?}",batch.progress.outcome),"window_grew":grew}));
+        passes.push(json!({"pass":pass,"state":format!("{:?}",batch.state()),"receives":receives,"spends":spends,
+            "covered_through":batch.progress().covered_through,"outcome":format!("{:?}",batch.progress().outcome),"window_grew":grew}));
         // Exercise durable companion reopen between passes.
         drop(reference);
         reference = ReferenceRecovery::open(&companion_path, config.clone())?;
-        if batch.state == BatchState::Ready
+        if batch.state() == BatchState::Ready
             && !grew
-            && batch.progress.covered_through >= u64::from(through)
+            && batch.progress().covered_through >= u64::from(through)
         {
             finished = true;
             break;
