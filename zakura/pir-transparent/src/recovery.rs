@@ -805,26 +805,26 @@ fn declarations(map: &ShardMap) -> usize {
 ///
 /// A wallet holds no blocks below its birthday, while a publication may start far
 /// below it (the live map starts at genesis). Leniency there is sound because, at
-/// wallet-pir a317455e, `sync_into` asks below the floor only for rollback
+/// wallet-pir 06a972db, `sync_into` asks below the floor only for rollback
 /// anchors and, in one case below, the end of a replacement shard:
 ///
-/// - It plans only shards meeting `[required_from, target]` (`sync.rs:943-966`),
-///   so every coverage endpoint it checks (`sync.rs:1465-1466`, `:2317-2318`,
+/// - It plans only shards meeting `[required_from, target]` (`sync.rs:949-972`),
+///   so every coverage endpoint it checks (`sync.rs:1471-1472`, `:2323-2324`,
 ///   `sync_ahead.rs:255-258`), every stored coverage end its reorg scan and
-///   sealed-rewrite judgment ask about (`sync.rs:644-694`, `:696-743`, `:1278`),
-///   and the earlier target unfinished page work was read for (`:1331-1333`)
+///   sealed-rewrite judgment ask about (`sync.rs:650-700`, `:702-749`, `:1284`),
+///   and the earlier target unfinished page work was read for (`:1337-1339`)
 ///   is at or above the floor. Required heights only move earlier and targets
 ///   only rise, so no script the companion retains starts below the floor.
 /// - The block a rollback rewinds to may lie below it: the reorg fallback
-///   `map.start_height - 1` (`:663`, rolled back at `:680`), a replaced
-///   revision (`:802-815`) or a revision withdrawn mid-sync (`:1104-1108`), each
+///   `map.start_height - 1` (`:669`, rolled back at `:686`), a replaced
+///   revision (`:808-821`) or a revision withdrawn mid-sync (`:1110-1114`), each
 ///   just below a shard's start and each resolved by `accepted_at`
-///   (`:2655-2675`), which takes the hash from the map when the view has none.
+///   (`:2661-2681`), which takes the hash from the map when the view has none.
 ///   Only block 0 has no map entry, so [`Self::hash_at`] answers it with the
 ///   map's genesis hash.
 /// - Judging an undeclared rewrite of a stored sealed range whose own end the
 ///   chain accepts, it asks about the end of the map's sealed shard now
-///   covering that range's start (`:1282-1286`), which can lie below the floor
+///   covering that range's start (`:1288-1292`), which can lie below the floor
 ///   when the range starts below it. There the view accepts it, so such a
 ///   rewrite is refused as a contradiction (`SealedRewrite`, a withdrawn batch)
 ///   rather than left unsettled (`ChainUnknown`, a stalled pass). Either way

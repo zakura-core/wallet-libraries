@@ -4,6 +4,12 @@
 
 ### Added
 
+- Private queries go at 44 dithered bits when the shard service advertises the
+  dithered schemes (`directory_scheme_dq44`, `pages_scheme_dq44`) and they
+  reproduce locally, and at 49 bits otherwise, so older services keep working.
+  A 44-bit query is 27,648 bytes plus `rows × 44 / 8` after the binding, where
+  the 49-bit one needs `rows × 49 / 8`; the end-to-end tests check that every
+  query they send is the 44-bit length.
 - Declared re-cuts. A sealed revision the shard map declares a re-cut
   superseded stays current, and facts stored under it are exported under the
   revision triple the wallet already holds; the renumbered shards and tail
@@ -135,6 +141,11 @@
   `SyncError::SealedRewrite`, which a pass returns as
   `Withdrawn(ChangedSealed)`, and drops page work under an unpublished
   revision instead of diverging.
+- wallet-pir then moves to `06a972db469f302d8c561416d4674e937fdde0cb` for
+  dithered queries. From `a317455e`, its only library changes to the crates
+  this one uses are the dithered query (wallet-pir's `pir-native` and the
+  transparent client and server); the `BelowFloor` call sites were re-checked
+  there.
 - Sources are `transparent-reference-source-v3`: the shard id is no longer
   bound, only the geometry, its seal parameters and the start height, so a
   renumbered shard or tail keeps its source.
