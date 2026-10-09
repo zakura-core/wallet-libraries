@@ -6,8 +6,9 @@ published rc5 and rc7 releases (rc7 is the mobile 0.0.50 baseline) and this repo
 PRE_MIGRATIONS, the last revision before the unconditional ironwood_unsupported_memo_retry,
 ironwood_transparent_output_shape and transparent_txid_enhancement migrations. The probe verifies
 preserved data, classification values, legacy provenance, that the upgrade queues no private work
-for a wallet that never had a private policy, repeat initialization, and that every older reader
-refuses the upgraded database without changing it.
+for a wallet that never had a private policy, repeat initialization, and how older readers treat
+the upgraded database. The pre-migration fork must refuse unknown migrations without changing it;
+the published releases lack that guard and their successful opens are reported, not qualified.
 Separate consumers retain their own dependency families; no user wallet is accepted.
 """
 import argparse
@@ -24,7 +25,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "librustzcash/zcash_client_backend/tests/fixtures/ironwood-fee-expiry.hex"
 # The last revision before the three unconditional migrations below.
-PRE_MIGRATIONS = "cf1dcfe"
+PRE_MIGRATIONS = "cf1dcfec88062c420322578226d5240328002d3d"
 UNCONDITIONAL_MIGRATIONS = {
     "ironwood_unsupported_memo_retry": "3d1c7a52-8e0b-4f6d-9a47-5be2c0f19e84",
     "ironwood_transparent_output_shape": "8f4c3210-04e1-49eb-9de2-d713ee0a8426",
@@ -152,8 +153,13 @@ def main():
             # for unknown migrations refuses it and changes nothing; the published releases
             # predate that check, which is reported rather than assumed.
             upgraded = dump(db)
-            refused = run(version, "init", db, check=False).returncode != 0
+            # A nonzero exit alone is not evidence of the downgrade guard: a
+            # schema, seed or build error could cause it. The guarded reader
+            # succeeds only after matching its typed UnknownMigrations error.
+            refused = version in REFUSING_READERS
+            run(version, "refuse-old" if refused else "init", db)
             unchanged = dump(db) == upgraded
+            assert unchanged, f"{version}: older reader changed the upgraded wallet"
             downgrade[version] = (refused, unchanged)
             print(f"{'PASS' if refused and unchanged else 'REPORT'} {version} as a prior reader: {'refused' if refused else 'OPENED'} the upgraded database; {'unchanged' if unchanged else 'CHANGED it'}", flush=True)
         # Revisions with the unknown-migration check must refuse a newer database.
