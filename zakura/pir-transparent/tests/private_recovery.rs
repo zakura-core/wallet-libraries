@@ -16,12 +16,12 @@ use std::{
     time::Duration,
 };
 
-use fixture::{SEAL, Server, ShardSpec, synthetic};
+use fixture::{GEOMETRY, SEAL, Server, ShardSpec, WIDE, synthetic};
 use regex::Regex;
 use rusqlite::{Connection, OpenFlags, types::Value};
 use transparent::{address::TransparentAddress, bundle::OutPoint, keys::TransparentKeyScope};
 use transparent_events::{ReceiveEvent, SpendEvent, TransparentEvent, Txid};
-use transparent_filter::{ScriptBytes, SealParameters, ShardMap};
+use transparent_filter::{Recut, ScriptBytes, SealParameters, ShardMap};
 use transparent_wallet::http::{HttpFilterSource, HttpOptions, HttpShardTransport};
 use zakura_pir_transparent::{
     ApplyError, BatchState, Outcome, Progress, RecoveryBatch, RecoveryConfig, RecoveryError,
@@ -68,6 +68,11 @@ const ROUTES: &str = r"^(GET /v1/(filters/shards(/[0-9]+/filter)?|shards/init|sh
 
 /// The shard a request's path names: its filter, manifest, tables or queries.
 const SHARD: &str = r"^/v1/(filters/)?shards/([0-9]+)/";
+
+/// What a pass over a map that rewrites sealed history the companion's store
+/// holds, without declaring a re-cut, returns: wallet-pir refuses it before
+/// reading anything, and no later pass repairs it.
+const UNDECLARED_REWRITE: BatchState = BatchState::Withdrawn(WithdrawnCause::ChangedSealed);
 
 /// Each test runs a PIR service and wallet; one at a time keeps memory and CPU
 /// bounded.
@@ -163,6 +168,7 @@ fn sealed(start: u64, end: u64, events: Vec<(ScriptBytes, TransparentEvent)>) ->
     ShardSpec {
         start,
         end,
+        geometry: GEOMETRY,
         sealed: true,
         revision: 0,
         events,
@@ -174,6 +180,7 @@ fn tail(end: u64, revision: u32, events: Vec<(ScriptBytes, TransparentEvent)>) -
     ShardSpec {
         start: H0 + 600,
         end,
+        geometry: GEOMETRY,
         sealed: false,
         revision,
         events,
@@ -310,14 +317,34 @@ impl Fixture {
 
     /// Publishes `shards` over the wallet's chain and serves the publication.
     fn publish(&mut self, shards: &[ShardSpec], seal: SealParameters) -> ShardMap {
+        self.publish_recut(shards, seal, vec![])
+    }
+
+    /// Publishes `shards` declaring `recuts`, and serves the publication.
+    fn publish_recut(
+        &mut self,
+        shards: &[ShardSpec],
+        seal: SealParameters,
+        recuts: Vec<Recut>,
+    ) -> ShardMap {
         self.publications += 1;
         let dir = self
             .dir
             .path()
             .join(format!("publication-{}", self.publications));
-        let map = fixture::publish(&dir, shards, seal, |at| self.block(at));
+        let map = fixture::publish(&dir, shards, seal, |at| self.block(at), recuts);
         self.url = Some(self.server.serve(&dir));
         map
+    }
+
+    /// Removes the companion's database, as when an application loses it.
+    fn lose_companion(&mut self) {
+        self.companion = None;
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = self.companion_path().into_os_string();
+            path.push(suffix);
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     fn companion_path(&self) -> PathBuf {
@@ -534,18 +561,38 @@ impl Fixture {
     /// `(source, revision)` of every unsealed revision the wallet holds coverage
     /// under.
     fn provisional_coverage(&self) -> BTreeSet<(Vec<u8>, Vec<u8>)> {
+        self.coverage_sealed(false)
+    }
+
+    /// `(source, revision)` of every revision with `sealed` the wallet holds
+    /// coverage under.
+    fn coverage_sealed(&self, sealed: bool) -> BTreeSet<(Vec<u8>, Vec<u8>)> {
         self.st
             .wallet()
             .conn()
             .prepare(
                 "SELECT DISTINCT r.source, r.revision FROM tpir_coverage c
-                 JOIN tpir_revisions r ON r.id = c.revision_id WHERE r.sealed = 0",
+                 JOIN tpir_revisions r ON r.id = c.revision_id WHERE r.sealed = ?1",
             )
             .unwrap()
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_map([sealed], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap()
+    }
+
+    /// The shard ids named by the requests the service received from the
+    /// `from`th on.
+    fn shards_requested(&self, from: usize) -> BTreeSet<u64> {
+        let named = Regex::new(SHARD).unwrap();
+        self.server.requests()[from..]
+            .iter()
+            .filter_map(|request| {
+                named
+                    .captures(&request.path)
+                    .map(|captures| captures[2].parse::<u64>().unwrap())
+            })
+            .collect()
     }
 
     /// Every row of the wallet's tables, those named `tpir_` excluded unless
@@ -590,10 +637,10 @@ impl Fixture {
             .unwrap()
     }
 
-    /// `(shard_id, lineage, exported)` of every catalog row.
+    /// `(start_height, lineage, exported)` of every catalog row.
     fn catalog(&self) -> Vec<(u64, u64, bool)> {
         self.companion_db()
-            .prepare("SELECT shard_id, lineage, exported FROM pir_bridge_catalog ORDER BY 1, 2")
+            .prepare("SELECT start_height, lineage, exported FROM pir_bridge_catalog ORDER BY 1, 2")
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .unwrap()
@@ -793,7 +840,7 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     let catalog = f.catalog();
     assert_eq!(
         catalog.iter().map(|row| row.0).collect::<Vec<_>>(),
-        vec![1, 2, 3]
+        vec![H0 + 200, H0 + 400, H0 + 600]
     );
     assert!(catalog.iter().all(|row| row.2));
 
@@ -877,12 +924,7 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
 
     // Companion loss: a recreated companion derives the triples the wallet
     // holds, so recovery heals without quarantine.
-    f.companion = None;
-    for suffix in ["", "-wal", "-shm"] {
-        let mut path = f.companion_path().into_os_string();
-        path.push(suffix);
-        let _ = std::fs::remove_file(path);
-    }
+    f.lose_companion();
     f.open();
     assert!(f.catalog().is_empty());
     let healed = f.drive();
@@ -940,16 +982,13 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     assert_eq!(f.catalog().len(), before.len() + 3);
 
     // A sealed shard changes under its revision number, and the tail it parents
-    // is republished. The companion withdraws the publication, nothing reaches
-    // the wallet, and the batch cannot be acknowledged. Reopening does not
-    // forget it.
+    // is republished. The pass refuses the rewrite of history the companion
+    // holds, nothing reaches the wallet, and the batch cannot be acknowledged.
+    // Reopening does not change that.
     f.publish(&lifecycle(&owned, t3, 1, true), resealed);
     let wallet = f.dump(true);
     let changed = f.pass().unwrap();
-    assert_eq!(
-        changed.batch.state,
-        BatchState::Withdrawn(WithdrawnCause::Equivocation)
-    );
+    assert_eq!(changed.batch.state, UNDECLARED_REWRITE);
     assert!(changed.batch.commits.is_empty());
     assert!(matches!(
         f.companion
@@ -961,10 +1000,7 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     assert_eq!(f.dump(true), wallet);
     f.open();
     let reopened = f.pass().unwrap();
-    assert_eq!(
-        reopened.batch.state,
-        BatchState::Withdrawn(WithdrawnCause::Equivocation)
-    );
+    assert_eq!(reopened.batch.state, UNDECLARED_REWRITE);
     assert_eq!(f.dump(true), wallet);
 
     // Privacy, over every request of every pass: the service's routes only, no
@@ -1040,6 +1076,230 @@ fn young_wallet_rolls_back_below_its_birthday() {
 
     // No pass read a shard ending below the birthday.
     f.assert_private(&[0, 1, 2]);
+}
+
+/// The last height the re-cut tests publish, and the wallet's tip.
+const RECUT_TIP: u64 = H0 + 549;
+
+/// The re-cut tests' publication before the re-cut: sealed S0–S3 and the tail,
+/// all in the usual geometry. `a0` receives in each of S1, S2 and S3; the tail
+/// holds none of the account's events, so replacing it changes no wallet
+/// output.
+fn before_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
+    let paid = |start: u64, salt: u32| {
+        let mut events = noise(start, start + 99, salt);
+        let tag = u64::from(salt);
+        events.push((script(a0), receive(start + 50, txid(tag), 0, 10_000 * tag)));
+        events
+    };
+    vec![
+        sealed(H0, H0 + 199, noise(H0, H0 + 199, 0)),
+        sealed(H0 + 200, H0 + 299, paid(H0 + 200, 1)),
+        sealed(H0 + 300, H0 + 399, paid(H0 + 300, 2)),
+        sealed(H0 + 400, H0 + 499, paid(H0 + 400, 3)),
+        ShardSpec {
+            start: H0 + 500,
+            end: RECUT_TIP,
+            geometry: GEOMETRY,
+            sealed: false,
+            revision: 0,
+            events: noise(H0 + 500, RECUT_TIP, 4),
+        },
+    ]
+}
+
+/// The same chain re-cut: S1 and S2 merged into one wide shard W, and S3 and
+/// the tail renumbered at their heights, one revision higher.
+fn after_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
+    let mut shards = before_recut(a0).into_iter();
+    let (s0, s1, s2, s3, tail) = (
+        shards.next().unwrap(),
+        shards.next().unwrap(),
+        shards.next().unwrap(),
+        shards.next().unwrap(),
+        shards.next().unwrap(),
+    );
+    vec![
+        s0,
+        ShardSpec {
+            start: s1.start,
+            end: s2.end,
+            geometry: WIDE,
+            sealed: true,
+            revision: 0,
+            events: [s1.events, s2.events].concat(),
+        },
+        ShardSpec { revision: 1, ..s3 },
+        ShardSpec {
+            revision: 1,
+            ..tail
+        },
+    ]
+}
+
+/// A promoted account that recovered the publication before the re-cut under
+/// `PrivateRequired`: the fixture, the account's paid address, the map, the
+/// tail revision the wallet holds, and the outputs it can spend.
+fn recovered_before_recut() -> (
+    Fixture,
+    TransparentAddress,
+    ShardMap,
+    RecoveryRevision,
+    Vec<OutPoint>,
+) {
+    let mut f = Fixture::new(H0 + 100, RECUT_TIP);
+    f.set_policy(PrivateRequired);
+    // Its passes qualify their revisions, so the account can be promoted and a
+    // re-cut's retired tail is reconciled through the trusted operation.
+    f.trust_service();
+    let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
+    let map = f.publish(&before_recut(a0), SEAL);
+    let first = f.drive();
+    assert_eq!(first.batch.state, BatchState::Ready);
+    assert_eq!(first.batch.progress.outcome, Outcome::Complete);
+    let tail = tail_revision(&first.batch);
+    f.promote();
+    assert_eq!(f.authority(), TransparentAuthority::Private);
+    let mut received: Vec<OutPoint> = (1..=3).map(|tag| outpoint(txid(tag), 0)).collect();
+    received.sort_by_key(|outpoint| (*outpoint.hash(), outpoint.n()));
+    assert_eq!(f.spendable().unwrap(), received);
+    (f, a0, map, tail, received)
+}
+
+#[test]
+fn a_declared_re_cut_keeps_the_wallets_history() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, a0, before, old_tail, received) = recovered_before_recut();
+    let history = f.dump(false);
+    let sealed = f.coverage_sealed(true);
+    let seen = f.server.requests().len();
+
+    // The publisher re-cuts S1–S2 into one wide shard behind the same origin,
+    // and declares every entry it superseded.
+    let recut = Recut {
+        epoch: 1,
+        from_height: H0 + 200,
+        superseded: before.shards[1..].iter().map(fixture::superseded).collect(),
+    };
+    let after = f.publish_recut(&after_recut(a0), SEAL, vec![recut]);
+    let recut_pass = f.pass().expect("a pass");
+    assert_eq!(recut_pass.batch.state, BatchState::Ready);
+    assert_eq!(recut_pass.batch.progress.outcome, Outcome::Complete);
+    // The wallet's sealed history needed nothing: only the renumbered tail was
+    // retrieved.
+    assert_eq!(
+        f.shards_requested(seen),
+        BTreeSet::from([after.shards.last().unwrap().shard_id])
+    );
+    // Its successor replaced the old tail in the same source, through the
+    // trusted reconciliation.
+    let new_tail = tail_revision(&recut_pass.batch);
+    assert_eq!(new_tail.source, old_tail.source);
+    assert_eq!(new_tail.lineage, old_tail.lineage + 1);
+    assert_eq!(recut_pass.batch.retired, vec![old_tail.clone()]);
+    assert!(f.reconciled.contains(&old_tail));
+    // Apart from the tail, the wallet is unchanged.
+    assert_eq!(f.dump(false), history);
+    assert_eq!(f.coverage_sealed(true), sealed);
+    assert_eq!(
+        f.provisional_coverage(),
+        BTreeSet::from([(new_tail.source.clone(), new_tail.revision.clone())])
+    );
+    assert_eq!(f.count("tpir_quarantined_sources"), 0);
+    assert_eq!(f.count("tpir_quarantined_accounts"), 0);
+    assert_eq!(f.authority(), TransparentAuthority::Private);
+    assert_eq!(f.spendable().unwrap(), received);
+
+    // Companion loss after the re-cut: the recreated companion retrieves the
+    // re-cut publication, and nothing it derives collides with what the
+    // wallet holds.
+    f.lose_companion();
+    f.open();
+    let healed = f.drive();
+    assert_eq!(healed.batch.state, BatchState::Ready);
+    assert_eq!(tail_revision(&healed.batch), new_tail);
+    assert_eq!(f.count("tpir_quarantined_sources"), 0);
+    assert_eq!(f.count("tpir_quarantined_accounts"), 0);
+    assert_eq!(f.authority(), TransparentAuthority::Private);
+    assert_eq!(f.spendable().unwrap(), received);
+
+    f.assert_private(&[]);
+}
+
+#[test]
+fn a_lagging_pre_re_cut_map_after_the_re_cut_changes_nothing() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, a0, before, _, received) = recovered_before_recut();
+    let recut = Recut {
+        epoch: 1,
+        from_height: H0 + 200,
+        superseded: before.shards[1..].iter().map(fixture::superseded).collect(),
+    };
+    f.publish_recut(&after_recut(a0), SEAL, vec![recut.clone()]);
+    let recut_pass = f.pass().expect("a pass");
+    assert_eq!(recut_pass.batch.state, BatchState::Ready);
+    let new_tail = tail_revision(&recut_pass.batch);
+    let history = f.dump(false);
+    let ledger = f.dump(true);
+
+    // A replica still serving the publication from before the re-cut. The
+    // store finished reading nothing it rewrites, only the tail, so the pass
+    // syncs normally, reads the old tail again, and finds it behind the one
+    // the wallet holds: pending, every time, with nothing applied.
+    let lagging_map = f.publish(&before_recut(a0), SEAL);
+    assert_eq!(lagging_map, before);
+    let seen = f.server.requests().len();
+    for _ in 0..2 {
+        let lagging = f.pass().expect("a pass");
+        assert_eq!(lagging.batch.state, BatchState::Pending);
+        assert!(lagging.batch.commits.is_empty());
+        assert!(lagging.batch.retired.is_empty());
+        assert_eq!(f.dump(true), ledger);
+    }
+    assert_eq!(
+        f.shards_requested(seen),
+        BTreeSet::from([lagging_map.shards.last().unwrap().shard_id])
+    );
+    assert_eq!(f.dump(false), history);
+    assert_eq!(f.count("tpir_quarantined_sources"), 0);
+    assert_eq!(f.count("tpir_quarantined_accounts"), 0);
+    assert_eq!(f.spendable().unwrap(), received);
+
+    // The re-cut map again: the renumbered tail is read once more and is
+    // the one the wallet holds.
+    f.publish_recut(&after_recut(a0), SEAL, vec![recut]);
+    let back = f.pass().expect("a pass");
+    assert_eq!(back.batch.state, BatchState::Ready);
+    assert_eq!(tail_revision(&back.batch), new_tail);
+    assert_eq!(f.dump(false), history);
+    assert_eq!(f.count("tpir_quarantined_sources"), 0);
+    assert_eq!(f.count("tpir_quarantined_accounts"), 0);
+    assert_eq!(f.authority(), TransparentAuthority::Private);
+    assert_eq!(f.spendable().unwrap(), received);
+}
+
+#[test]
+fn an_undeclared_re_cut_reaches_nothing_in_the_wallet() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, a0, _, _, received) = recovered_before_recut();
+    let wallet = f.dump(true);
+    let seen = f.server.requests().len();
+
+    // The same re-cut without a declaration rewrites sealed history the
+    // wallet holds: the pass reads no shard, and nothing reaches the wallet,
+    // before or after a reopen.
+    f.publish(&after_recut(a0), SEAL);
+    for reopen in [false, true] {
+        if reopen {
+            f.open();
+        }
+        let undeclared = f.pass().expect("a pass");
+        assert_eq!(undeclared.batch.state, UNDECLARED_REWRITE);
+        assert!(undeclared.batch.commits.is_empty());
+        assert_eq!(f.dump(true), wallet);
+    }
+    assert!(f.shards_requested(seen).is_empty());
+    assert_eq!(f.spendable().unwrap(), received);
 }
 
 /// The txid display service in process: a recent-replica worker serving one
@@ -1802,6 +2062,7 @@ fn stale_middle_retirement_batch_preserves_reconciliation_across_reopen() {
     shards.push(ShardSpec {
         start: H0 + 1000,
         end: target,
+        geometry: GEOMETRY,
         sealed: false,
         revision: 0,
         events: noise(H0 + 1000, target, 5),

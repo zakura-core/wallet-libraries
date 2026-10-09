@@ -60,10 +60,11 @@ counted, so a recreated companion reproduces the triples the wallet holds:
 - `source` hashes the companion binding with the set-identity fields that never
   change while the publication continues (shard schema, network, genesis block,
   profile, envelope version and start height), the shard's geometry, that
-  geometry's seal parameters, the shard id and the shard's start height. A set
-  growing into a new geometry tier changes no existing source. Re-cutting an
-  earlier geometry can move a later shard's start height while reusing its id;
-  that different height range gets a new source.
+  geometry's seal parameters and the shard's start height, not its shard id. A
+  set growing into a new geometry tier changes no existing source. A re-cut
+  renumbers later shards and the tail without moving their start heights, so
+  they keep their sources; a re-cut range, which starts elsewhere or under
+  another geometry, gets new ones.
 - `revision` hashes the shard's manifest digest and whether it is sealed.
 - `lineage` is the published revision number plus one.
 
@@ -74,16 +75,42 @@ only when it is `Ready`:
 
 | `BatchState` | Meaning |
 | --- | --- |
-| `Ready` | The map agrees with the catalog, and every exported revision is still published or has a successor at a higher lineage in this batch. |
-| `Pending` | A lagging replica (an unsealed revision below one already seen, sealed or not), a map missing a shard, stored facts naming a revision the map no longer names, a shard ending on a block the chain view does not hold, an exported tail whose successor is not retrieved yet, or a publication that diverged from what the sync read (reported as `Behind`). Nothing to apply; a later pass can be ready. |
+| `Ready` | The map agrees with the catalog, and every exported revision is still published, declared superseded by a re-cut, or has a successor at a higher lineage in this batch. |
+| `Pending` | A lagging replica (an unsealed revision below one already seen, sealed or not), a map ending below an exported revision, stored facts naming a revision the map neither publishes nor declares, a shard ending on a block the chain view does not hold, an exported tail whose successor is not retrieved yet, or a publication that diverged from what the sync read or predates a re-cut the store followed (reported as `Behind`). Nothing to apply; a later pass can be ready. |
 | `Withdrawn(cause)` | The publication contradicts the catalog. Nothing to apply. Keep the companion and retry later. |
 
 | `WithdrawnCause` | Meaning |
 | --- | --- |
-| `Regression` | A sealed shard is published below a revision already seen. |
-| `Equivocation` | One revision number is published with other content, seal state or endpoint. |
-| `ChangedSealed` | An exported sealed revision is no longer published, and the map does not merely name an older unsealed revision of its shard. |
-| `Retired` | An exported shard is published under another source, as after a geometry change. |
+| `Regression` | A sealed shard is published below a revision already seen, or a shard below a revision a re-cut declares superseded in its source. |
+| `Equivocation` | One revision number is published or declared with other content, seal state or endpoint. |
+| `ChangedSealed` | An exported sealed revision is neither published nor declared superseded, and its source is published at another revision that is not merely an older unsealed one. |
+| `Retired` | The heights of an exported revision are published under another source, as after a geometry change or an undeclared re-cut. |
+
+A re-cut rebuilds sealed history from some height up under other boundaries,
+renumbering every later shard. A publisher declares it in the map
+(`ShardMap::recuts`), listing every entry it superseded exactly as published.
+The adapter keeps the wallet's history across a declared re-cut: facts the
+store holds under a superseded sealed revision keep being exported under the
+triple the wallet holds, that revision stays current and is never withdrawn,
+and the renumbered tail resolves the old one in their shared source. A pass
+checks the declarations against the map and, on the first stored fact under a
+declared revision, against the catalog and every revision ever exported. A
+ready pass over a re-cut map records its re-cut epoch once the store holds a
+fact under a revision the re-cut superseded, or under one the map publishes at
+or above the re-cut's first height. The epoch never stops a sync: a map at a
+lower epoch that rewrites nothing the store has finished reading is synced
+normally. Only a map the reference client refuses as a rewrite of history the
+store holds is classified by it: one with a lower epoch, as from a replica
+still serving the map from before the re-cut, is `Pending` and behind rather
+than withdrawn. Wallet
+pages under a superseded sealed revision are completed once the batch covers
+them, in a completion-only commit after the coverage. An undeclared change of sealed content never reaches the wallet: the
+reference client, after rolling back any reorg the wallet's chain shows,
+refuses a rewrite of history the store holds that contradicts that chain (it
+accepts both the stored and the replacing shard's end blocks) before reading
+anything, which a pass returns as
+`Withdrawn(ChangedSealed)`; one the chain cannot settle yet stalls the pass;
+and the catalog withdraws the rest.
 
 `Ready` assumes the trusted operation. A successor withdraws its predecessor's
 provisional evidence from the wallet only when the wallet qualifies it and
@@ -171,24 +198,31 @@ cover that range, and refuses a page opened over its own coverage.
 A map under another set that ends below the store's anchor, while the chain
 view still accepts that anchor, is a replica that has not caught up, perhaps
 still serving the previous set; the pass keeps the store. That, and every other
-divergence the reference client finds, a lagging replica withdrawing a shard
-with pending pages or a map refreshed mid-pass that does not continue the
-first, makes the batch `Pending` with `Outcome::Behind`, keeping the companion
-and catalog; a later pass starts from the publication it then finds.
+divergence the reference client finds, a map refreshed mid-pass that does not
+continue the first or one rewriting sealed history the store holds without
+declaring a re-cut, makes the batch `Pending` with `Outcome::Behind`, keeping
+the companion and catalog; a later pass starts from the publication it then
+finds. Page work under a shard a lagging replica's map lacks is dropped, not a
+divergence, and read again once a map publishes it.
 
 Never recreate a companion, whether a batch is `Withdrawn` or after
-`PublicationChanged`. A publisher that re-cuts a set without changing its
-identity restarts revision numbers; the catalog reports that as `Regression`,
-`Equivocation` or `Pending`, but a recreated companion cannot detect it, and the
-wallet refuses its colliding revisions as an integrity failure.
+`PublicationChanged`. A publisher that re-cuts a set without declaring it and
+restarts revision numbers is reported as `Regression`, `Equivocation` or
+`Pending`, and a declaration that misstates a revision as `Equivocation`, but a
+recreated companion cannot detect either, and the wallet refuses colliding
+revisions as an integrity failure.
 
 The messages of `RecoveryError::Invalid` and `RecoveryError::Failure` may quote
 the companion's transparent history or the caller's transport errors. Log the
 variant only.
 
-Companions are format `transparent-reference-companion-v2`. An earlier
-companion, whose lineage was a local counter, is refused with
-`companion format v1; recreate`. Each pass prunes catalog rows that are neither
+Companions are format `transparent-reference-companion-v3`. Opening a v2
+companion, whose sources bound shard ids, rebuilds its catalog empty in place
+and keeps its store, so the next pass exports the stored facts again under v3
+sources without retrieving them. A v1 companion, whose lineage was a local
+counter, is refused with `companion format v1; recreate`. The companion keeps
+every revision a batch exported, never pruned, since the wallet keeps every
+revision it registered. Each pass prunes catalog rows that are neither
 published nor exported, keeping each source's newest row; the store's filter
 and setup caches down to revisions the map names; and the store's commit log
 down to its last entry. Acknowledgment prunes the catalog again.
@@ -239,6 +273,12 @@ watched script in bytes or hex in its path, query, headers or body, and named no
 shard wholly below the birthday. `young_wallet_rolls_back_below_its_birthday`
 follows a wallet born inside the tail through a clamped pass, two
 republications and a reorg that rolls the companion back below its birthday.
+`a_declared_re_cut_keeps_the_wallets_history` re-cuts two sealed shards into
+one wider shard: the next pass requests only the renumbered tail and changes
+nothing else in the wallet, and a companion recreated afterwards heals.
+`an_undeclared_re_cut_reaches_nothing_in_the_wallet` publishes the same re-cut
+undeclared, and `a_lagging_pre_re_cut_map_after_the_re_cut_changes_nothing`
+serves the pre-re-cut map again after the wallet followed the re-cut.
 
 ```sh
 python3 scripts/dev.py test --config transparent-pir

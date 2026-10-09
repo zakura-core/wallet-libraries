@@ -4,6 +4,31 @@
 
 ### Added
 
+- Declared re-cuts. A sealed revision the shard map declares a re-cut
+  superseded stays current, and facts stored under it are exported under the
+  revision triple the wallet already holds; the renumbered shards and tail keep
+  their sources, and the renumbered tail is listed as resolving the old one. A
+  pass checks the declarations against the map (`Equivocation`, `Regression`)
+  and, on the first stored fact under a declared revision, against the catalog
+  (`Equivocation`). A ready pass over a re-cut map records its re-cut epoch
+  once the store holds a fact under a revision the re-cut superseded, or under
+  one the map publishes at or above the re-cut's first height. The epoch never
+  stops a sync: a map the reference client refuses as a rewrite of history the
+  store holds is `Pending` with `Outcome::Behind` when its epoch is lower (a
+  replica still serving the map from before the re-cut) and
+  `Withdrawn(ChangedSealed)` otherwise. The shard limit counts declared
+  entries at or above the watch set's floor. Wallet pages under a superseded
+  sealed revision are completed once the batch covers their range, in a
+  completion-only commit after the commits carrying that coverage. An
+  undeclared change of sealed content never reaches the wallet.
+- A sealed shard changed under its revision number, which the catalog reported
+  as `Withdrawn(Equivocation)`, is now refused by the reference client before
+  anything is read and reported as `Withdrawn(ChangedSealed)`.
+- `pir_bridge_exports`, a never-pruned record of every revision a batch
+  exported. A published or declared revision that differs from one exported at
+  its source and lineage, or under its identity, is `Withdrawn(Equivocation)`,
+  so a pruned catalog row cannot let a colliding revision reach the wallet.
+
 - Txid display lookups: re-exports of wallet-pir's `transparent-txid-client`
   (`TxidDisplayClient`, `TxidTransport`, `TxidRequest`, `TxidReply`, `TxidLookup`, `TxidError`,
   the fixed-size `DisplayEntry` and related types), `display_facts`, which maps a found entry
@@ -65,7 +90,29 @@
 
 ### Changed
 
-- wallet-pir is pinned to `c9a76bb4`; every wallet-pir dependency moves together.
+- wallet-pir is pinned to its `main` at `a317455e`, whose shard map carries
+  re-cut declarations and whose sync keeps a store's history across a
+  declared re-cut (valargroup/wallet-pir#138); every wallet-pir dependency
+  moves together. It also brings #137's txid display client changes: the
+  client follows a fresh display publication, hardens its fresh-publication
+  rules, and refuses display maps with no bucket or too many. After rolling back any
+  reorg the wallet's chain shows, its sync refuses a map that rewrites sealed
+  history the store holds without declaring a re-cut, where the chain accepts
+  both the stored and the replacing shard's end blocks, as
+  `SyncError::SealedRewrite`, which a pass returns as
+  `Withdrawn(ChangedSealed)`, and drops page work under an unpublished
+  revision instead of diverging.
+- Sources are `transparent-reference-source-v3`: the shard id is no longer
+  bound, only the geometry, its seal parameters and the start height, so a
+  renumbered shard or tail keeps its source.
+- Companions are format `transparent-reference-companion-v3`: the catalog
+  records start heights instead of shard ids, and the binding table records the
+  re-cut epoch. Opening a v2 companion rebuilds its catalog empty in place and
+  keeps its store; the next pass exports the stored facts again under v3
+  sources, without retrieving them.
+- Stored facts are matched to commits by revision digest, and exported rows the
+  map no longer publishes are classified by source and start height instead of
+  shard id.
 - `ReferenceRecovery::recover` takes the caller's `FilterSource` and
   `ShardTransport` for each pass. Before any retrieval it checks the target,
   the script limits, that the filter source does not use parent filters, the
@@ -100,13 +147,13 @@
 - Revision identities are stable across companions. `source` covers the
   companion binding, the set-identity fields that never change while the
   publication continues, the shard's geometry and that geometry's seal
-  parameters, the shard id and the shard's start height, so a new geometry tier
-  changes no existing source, while reusing an id for a different height range
-  gives that range a new source. `revision` covers the manifest digest and seal
+  parameters, and the shard's start height, so a new geometry tier changes no
+  existing source, while a different height range gets a new source.
+  `revision` covers the manifest digest and seal
   state, and `lineage` is the published revision number plus one instead of a per-companion
   counter, so a recreated companion reproduces the wallet's triples.
-- Companions are format `transparent-reference-companion-v2`, with a
-  `pir_bridge_catalog` table. Earlier companions are refused at open with
+- Companions record revisions in a `pir_bridge_catalog` table. Companions
+  from before stable identities are refused at open with
   `companion format v1; recreate`.
 - A pass builds its batch from the shard map its sync finished with and fetches
   no second map.
@@ -115,8 +162,9 @@
   shard ending on a block the chain view does not hold, or an exported tail
   without a retrieved successor make the batch `Pending` instead of failing
   the pass. So does every `MapDiverged` from the reference client's sync (a
-  shard with pending pages withdrawn, or a mid-pass refresh that does not
-  continue the first map), with `Outcome::Behind` and no claimed coverage, and
+  mid-pass refresh that does not continue the first map, or an undeclared
+  rewrite of sealed history the store holds), with `Outcome::Behind` and no
+  claimed coverage, and
   a pass on a reset store that stops before binding it while the catalog still
   records exported revisions. A sealed regression, an equivocating revision, a
   changed sealed revision or a retired shard make it `Withdrawn`.
