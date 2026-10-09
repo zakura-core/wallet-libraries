@@ -4771,7 +4771,7 @@ mod tests {
         }
 
         #[test]
-        fn observed_trust_refuses_retirements_and_trusted_reconciles_them() {
+        fn observed_trust_refuses_retirements_before_applying() {
             let dir = tempfile::tempdir().unwrap();
             let mut adapter =
                 ReferenceRecovery::open(dir.path().join("c.sqlite"), config()).unwrap();
@@ -4784,14 +4784,10 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(failure.error, ApplyError::Unreconciled));
             assert!(adapter.pending_export.is_some());
-            let batch = adapter
-                .ready::<AccountUuid>(vec![], vec![retired()], MORE)
-                .unwrap();
-            let applied = adapter
-                .apply_and_acknowledge(batch, st.wallet_mut().db_mut(), Trust::Trusted)
-                .unwrap();
-            assert_eq!(applied.retired, 1);
-            assert_eq!(adapter.pending_export, None);
+            // This synthetic batch exercises the refusal only. A real Ready
+            // retirement has a successor commit, so successful trusted
+            // reconciliation belongs to the in-process service integration
+            // tests in private_recovery.rs, including stale-prefix replay.
         }
     }
 }
