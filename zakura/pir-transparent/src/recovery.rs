@@ -722,7 +722,7 @@ fn entries(map: &ShardMap, floor: u64) -> usize {
 ///
 /// A wallet holds no blocks below its birthday, while a publication may start far
 /// below it (the live map starts at genesis). Leniency there is sound because, at
-/// wallet-pir 2faa5518, `sync_into` asks below the floor only for rollback
+/// wallet-pir a317455e, `sync_into` asks below the floor only for rollback
 /// anchors and, in one case below, the end of a replacement shard:
 ///
 /// - It plans only shards meeting `[required_from, target]` (`sync.rs:943-966`),
@@ -931,10 +931,12 @@ impl ReferenceRecovery {
     /// withdraws it, either way as [`BatchState::Withdrawn`]. A ready pass over
     /// a re-cut map records its re-cut epoch once the store holds a fact under
     /// a revision the re-cut superseded, or under one the map publishes at or
-    /// above the re-cut's first height. The epoch never stops a sync; it only
-    /// tells a lagging replica's refused map from a contradiction, so a forged
-    /// epoch can at most soften a real contradiction to `Pending`, and an
-    /// honest map that rewrites nothing the store holds is never held back.
+    /// above the re-cut's first height. The epoch never stops a sync: a map at a
+    /// lower epoch that rewrites nothing the store has finished reading is
+    /// synced normally, and only a refused `SealedRewrite` is classified by the
+    /// epoch. It tells a lagging replica's refused map from a contradiction, so
+    /// a forged epoch can at most soften a real contradiction to `Pending`, and
+    /// an honest map that rewrites nothing the store holds is never held back.
     pub fn recover<A, C, F, T>(
         &mut self,
         watch: &TransparentWatchSet<A>,

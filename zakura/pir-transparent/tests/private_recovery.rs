@@ -1227,6 +1227,58 @@ fn a_declared_re_cut_keeps_the_wallets_history() {
 }
 
 #[test]
+fn a_lagging_pre_re_cut_map_after_the_re_cut_changes_nothing() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, a0, before, _, received) = recovered_before_recut();
+    let recut = Recut {
+        epoch: 1,
+        from_height: H0 + 200,
+        superseded: before.shards[1..].iter().map(fixture::superseded).collect(),
+    };
+    f.publish_recut(&after_recut(a0), SEAL, vec![recut.clone()]);
+    let recut_pass = f.pass().expect("a pass");
+    assert_eq!(recut_pass.batch.state, BatchState::Ready);
+    let new_tail = tail_revision(&recut_pass.batch);
+    let history = f.dump(false);
+    let ledger = f.dump(true);
+
+    // A replica still serving the publication from before the re-cut. The
+    // store finished reading nothing it rewrites, only the tail, so the pass
+    // syncs normally, reads the old tail again, and finds it behind the one
+    // the wallet holds: pending, every time, with nothing applied.
+    let lagging_map = f.publish(&before_recut(a0), SEAL);
+    assert_eq!(lagging_map, before);
+    let seen = f.server.requests().len();
+    for _ in 0..2 {
+        let lagging = f.pass().expect("a pass");
+        assert_eq!(lagging.batch.state, BatchState::Pending);
+        assert!(lagging.batch.commits.is_empty());
+        assert!(lagging.batch.retired_revisions().is_empty());
+        assert_eq!(f.dump(true), ledger);
+    }
+    assert_eq!(
+        f.shards_requested(seen),
+        BTreeSet::from([lagging_map.shards.last().unwrap().shard_id])
+    );
+    assert_eq!(f.dump(false), history);
+    assert_eq!(f.count("tpir_quarantined_sources"), 0);
+    assert_eq!(f.count("tpir_quarantined_accounts"), 0);
+    assert_eq!(f.spendable().unwrap(), received);
+
+    // The re-cut map again: the renumbered tail is read once more and is
+    // the one the wallet holds.
+    f.publish_recut(&after_recut(a0), SEAL, vec![recut]);
+    let back = f.pass().expect("a pass");
+    assert_eq!(back.batch.state, BatchState::Ready);
+    assert_eq!(tail_revision(&back.batch), new_tail);
+    assert_eq!(f.dump(false), history);
+    assert_eq!(f.count("tpir_quarantined_sources"), 0);
+    assert_eq!(f.count("tpir_quarantined_accounts"), 0);
+    assert_eq!(f.authority(), TransparentAuthority::Private);
+    assert_eq!(f.spendable().unwrap(), received);
+}
+
+#[test]
 fn an_undeclared_re_cut_reaches_nothing_in_the_wallet() {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
     let (mut f, a0, _, _, received) = recovered_before_recut();

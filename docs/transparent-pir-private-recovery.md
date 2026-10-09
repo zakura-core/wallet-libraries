@@ -309,8 +309,12 @@ wallet already holds; they are never withdrawn or retired.
   companion recreated after the re-cut or an account born above it. It keeps
   the highest; a publication change clears it with the store. A map whose
   declaration is refused, or whose re-cut the store did not follow, cannot
-  raise it. The epoch never stops a sync. It only classifies a map the sync
-  refuses as a rewrite of history the store holds (`SealedRewrite`, below):
+  raise it. The epoch never stops a sync: a map at a lower epoch that rewrites
+  nothing the store has finished reading, such as a lagging replica when the
+  store read only the tail above the re-cut, is synced normally, and its old
+  tail is `Pending` behind the one the wallet holds. Only a map the sync
+  refuses as a rewrite of history the store holds (`SealedRewrite`, below) is
+  classified by the epoch:
   one whose epoch is below the recorded one, as a replica still serving the map
   from before a re-cut, is `Pending` with `Outcome::Behind`, and any other is
   `Withdrawn(ChangedSealed)`. The sync refuses before reading anything, so the
@@ -668,6 +672,10 @@ the renumbered tail, and leaves the wallet unchanged apart from the tail, and a
 companion recreated afterwards heals without quarantine.
 `an_undeclared_re_cut_reaches_nothing_in_the_wallet` publishes the same re-cut
 without its declaration: no shard is read and nothing in the wallet changes.
+`a_lagging_pre_re_cut_map_after_the_re_cut_changes_nothing` serves the map from
+before the re-cut again after the wallet followed it: each pass reads only the
+old tail and is `Pending`, nothing in the wallet changes, and the re-cut map
+served once more is `Ready` with the tail the wallet holds.
 
 Focused runs, then final evidence on the mega head:
 

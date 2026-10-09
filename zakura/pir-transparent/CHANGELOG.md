@@ -90,9 +90,12 @@
 
 ### Changed
 
-- wallet-pir is pinned to `2faa5518`, whose shard map carries re-cut
-  declarations and whose sync keeps a store's history across a declared
-  re-cut; every wallet-pir dependency moves together. After rolling back any
+- wallet-pir is pinned to its `main` at `a317455e`, whose shard map carries
+  re-cut declarations and whose sync keeps a store's history across a
+  declared re-cut (valargroup/wallet-pir#138); every wallet-pir dependency
+  moves together. It also brings #137's txid display client changes: the
+  client follows a fresh display publication, hardens its fresh-publication
+  rules, and refuses display maps with no bucket or too many. After rolling back any
   reorg the wallet's chain shows, its sync refuses a map that rewrites sealed
   history the store holds without declaring a re-cut, where the chain accepts
   both the stored and the replacing shard's end blocks, as

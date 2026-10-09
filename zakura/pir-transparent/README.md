@@ -97,10 +97,12 @@ checks the declarations against the map and, on the first stored fact under a
 declared revision, against the catalog and every revision ever exported. A
 ready pass over a re-cut map records its re-cut epoch once the store holds a
 fact under a revision the re-cut superseded, or under one the map publishes at
-or above the re-cut's first height. The epoch never stops a sync. It only
-classifies a map the reference client refuses as a rewrite of history the
-store holds: one with a lower epoch, as from a replica still serving the map
-from before the re-cut, is `Pending` and behind rather than withdrawn. Wallet
+or above the re-cut's first height. The epoch never stops a sync: a map at a
+lower epoch that rewrites nothing the store has finished reading is synced
+normally. Only a map the reference client refuses as a rewrite of history the
+store holds is classified by it: one with a lower epoch, as from a replica
+still serving the map from before the re-cut, is `Pending` and behind rather
+than withdrawn. Wallet
 pages under a superseded sealed revision are completed once the batch covers
 them, in a completion-only commit after the coverage. An undeclared change of sealed content never reaches the wallet: the
 reference client, after rolling back any reorg the wallet's chain shows,
@@ -275,7 +277,8 @@ republications and a reorg that rolls the companion back below its birthday.
 one wider shard: the next pass requests only the renumbered tail and changes
 nothing else in the wallet, and a companion recreated afterwards heals.
 `an_undeclared_re_cut_reaches_nothing_in_the_wallet` publishes the same re-cut
-undeclared.
+undeclared, and `a_lagging_pre_re_cut_map_after_the_re_cut_changes_nothing`
+serves the pre-re-cut map again after the wallet followed the re-cut.
 
 ```sh
 python3 scripts/dev.py test --config transparent-pir
