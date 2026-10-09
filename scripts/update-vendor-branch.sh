@@ -91,9 +91,34 @@ done
 # future merge conflict.
 mv "$extract/Cargo.toml" "$extract/$(basename "$upstream_manifest")"
 
+# The new vendor commit must sit on top of the existing vendor branch: `main`
+# already merges that history, and an unrelated root makes the next merge
+# impossible. A CI checkout has the branch only as `origin/<branch>`, so take it
+# from there, and fetch it if this clone never did. Only a branch that does not
+# exist on the remote at all is started from scratch.
+remote_ref="refs/remotes/origin/$vendor_branch"
+if ! git -C "$repo_root" show-ref --verify --quiet "refs/heads/$vendor_branch" \
+  && ! git -C "$repo_root" show-ref --verify --quiet "$remote_ref" \
+  && git -C "$repo_root" remote get-url origin >/dev/null 2>&1; then
+  ls_remote_status=0
+  git -C "$repo_root" ls-remote --exit-code --heads origin "refs/heads/$vendor_branch" >/dev/null \
+    || ls_remote_status=$?
+  case "$ls_remote_status" in
+    0) git -C "$repo_root" fetch --quiet origin "+refs/heads/$vendor_branch:$remote_ref" ;;
+    2) ;; # not on the remote: start a new vendor branch below
+    *)
+      echo "could not check origin for $vendor_branch (git ls-remote exit $ls_remote_status)" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$vendor_branch"; then
   git -C "$repo_root" worktree add --quiet "$worktree" "$vendor_branch"
+elif git -C "$repo_root" show-ref --verify --quiet "$remote_ref"; then
+  git -C "$repo_root" worktree add --quiet -b "$vendor_branch" "$worktree" "$remote_ref"
 else
+  echo "no $vendor_branch locally or on origin; starting it as a new root" >&2
   git -C "$repo_root" worktree add --quiet --detach "$worktree"
   git -C "$worktree" checkout --quiet --orphan "$vendor_branch"
   git -C "$worktree" rm -rq --cached . 2>/dev/null || true
