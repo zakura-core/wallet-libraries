@@ -4,7 +4,6 @@ use crate::types::{
     parameters, response_len, session_public_len,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use ipir_sp::YpirSchemeParams;
 use rand::{Rng, rngs::OsRng};
 use sha2::{Digest, Sha256};
 
@@ -154,7 +153,6 @@ pub struct QuerySession {
     shard: QueryShard,
     routes: Vec<crate::types::Route>,
     records: u64,
-    params: YpirSchemeParams,
     /// Published two-mask material plus the shard's expanded query masks.
     native: crate::native::NativeSession,
 }
@@ -299,7 +297,6 @@ impl QuerySession {
                 .collect(),
             records: manifest.coverage.records,
             shard,
-            params: expected,
             native,
         })
     }
@@ -486,8 +483,9 @@ mod tests {
             "ironwood-enhance-pir-v9-native-two-mask-m29/unit/2e03e17451928e9498fa614db9077f27709feda2d5a45c40ef2c4f0643dc478a"
         );
         let session = zero_session(32768);
-        assert_eq!(session.params.query_bits, 49);
-        assert_eq!(session.params.q_prime_1, 1 << 22);
+        let params = parameters(32768).unwrap();
+        assert_eq!(params.query_bits, 49);
+        assert_eq!(params.q_prime_1, 1 << 22);
         assert_eq!(session_public_len(32768).unwrap(), public_len(COLS));
         assert_eq!(session_public_len(32768).unwrap(), 89_088);
         assert_eq!(KEY_BYTES, 27_648);
