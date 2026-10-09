@@ -92,6 +92,7 @@ jobs:
             echo "conflicts=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "::error::sync-upstream.sh failed (exit $status) without a merge in progress; see the log above"
           exit "$status"
 
       - name: Push the vendor branch

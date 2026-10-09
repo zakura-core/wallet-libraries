@@ -42,10 +42,26 @@ fi
 
 vendor_commit="$("$repo_root/scripts/update-vendor-branch.sh" "$ref")"
 
+# A vendor commit with no history in common with HEAD means the vendor branch
+# was rebuilt from scratch instead of extended. Git would refuse the merge, and
+# that is not a conflict a person can finish, so say what happened instead.
+if ! git -C "$repo_root" merge-base HEAD "$vendor_commit" >/dev/null; then
+  echo "vendor commit $vendor_commit shares no history with HEAD." >&2
+  echo "$vendor_branch was probably recreated instead of extended; fetch the" >&2
+  echo "existing branch from origin and run this again." >&2
+  exit 1
+fi
+
 # `-X subtree` tells the merge that the vendor branch's root corresponds to the
 # vendored directory here; without it every path looks added-and-deleted.
 if ! git -C "$repo_root" merge --no-edit -X "subtree=$vendored_directory" \
   -m "chore: merge librustzcash $ref" "$vendor_commit"; then
+  # Exit 2 promises CI a merge in progress to commit. A merge git refused to
+  # start (no MERGE_HEAD) is an ordinary failure.
+  if ! git -C "$repo_root" rev-parse --quiet --verify MERGE_HEAD >/dev/null; then
+    echo "git refused to merge $vendor_commit; no merge is in progress" >&2
+    exit 1
+  fi
   echo >&2
   echo "upstream merge conflicts; resolve them, then run:" >&2
   echo "  python3 scripts/generate-workspace.py \"$repo_root\"" >&2
