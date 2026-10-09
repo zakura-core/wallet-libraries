@@ -145,6 +145,14 @@ impl ReferenceRecovery {
     /// pass recorded. An unacknowledged batch's revisions stay exported, so the next pass,
     /// also after a crash or a reopened companion, lists them and its retirements again, and
     /// replaying commits the wallet already applied changes nothing.
+    ///
+    /// A batch with commits checks the policy generation they were built under again
+    /// after acquiring the companion's write transaction. A batch without commits, as
+    /// for a watch set with nothing to watch, has neither facts nor retirements (a
+    /// retirement always comes with its successor commit), so acknowledging it after a
+    /// policy change changes nothing in the wallet and is not refused; it only lets
+    /// the companion prune its catalog.
+    ///
     /// The policy generation is checked again after acquiring the companion's write
     /// transaction. A short immediate wallet read transaction excludes policy writers
     /// until acknowledgment commits; it is rolled back, since all wallet facts are
