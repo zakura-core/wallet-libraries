@@ -2418,7 +2418,10 @@ fn view_sender_owned_by_address() {
              FROM addresses a JOIN accounts acc ON acc.id = a.account_id
              WHERE acc.uuid = ?2 AND a.cached_transparent_receiver_address IS NOT NULL
              LIMIT 1",
-            rusqlite::params![tx_ref(&st, txid).0, other.expose_uuid().as_bytes().as_slice()],
+            rusqlite::params![
+                tx_ref(&st, txid).0,
+                other.expose_uuid().as_bytes().as_slice()
+            ],
         )
         .unwrap();
     assert_eq!(inserted, 1);
