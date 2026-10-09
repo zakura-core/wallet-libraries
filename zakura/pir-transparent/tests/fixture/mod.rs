@@ -5,7 +5,8 @@
 //! Adapted from wallet-pir's shard-server test fixtures at 648264bb
 //! (`transparent-shard-server/tests/common/{mod,prepared}.rs`), through the
 //! crates' public APIs only. Unlike those, a test chooses every shard's range,
-//! seal state and revision number, as a publisher would over time.
+//! geometry, seal state and revision number, and the re-cuts a map declares, as
+//! a publisher would over time.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -15,19 +16,24 @@ use sha2::{Digest, Sha256};
 use tokio::{net::TcpListener, runtime::Runtime, task::JoinHandle};
 use transparent_events::TransparentEvent;
 use transparent_filter::{
-    BlockHash, ScriptBytes, SealParameters, ShardMap, ShardMapEntry, filter_hash,
+    BlockHash, Recut, ScriptBytes, SealParameters, ShardMap, ShardMapEntry, SupersededShard,
+    filter_hash,
 };
 use transparent_shard::build::build_shard;
-use transparent_shard::layout::{Geometry, RECENT_4K};
+use transparent_shard::layout::{Geometry, RECENT_4K, RECENT_8K};
 use transparent_shard::manifest::{
     ManifestLayout, ManifestOccupancy, ManifestSeal, SCHEMA, ShardManifest, TableGeometry,
 };
 use transparent_shard_server::service::{ServiceConfig, ServiceState, router};
 use transparent_shard_server::shardset::{DEFAULT_RETAIN_REVISIONS, ShardSet};
 
-/// Every shard's geometry: the smallest one a build publishes, which keeps the
+/// A shard's usual geometry: the smallest one a build publishes, which keeps the
 /// tables a pass sets up and queries small.
 pub const GEOMETRY: &Geometry = &RECENT_4K;
+
+/// The geometry a re-cut merges sealed shards into, standing in for an archive
+/// geometry, whose tables are far too large for a test.
+pub const WIDE: &Geometry = &RECENT_8K;
 
 /// The seal thresholds the fixture's publisher seals under.
 pub const SEAL: SealParameters = SealParameters {
@@ -44,11 +50,13 @@ pub fn synthetic(height: u64) -> BlockHash {
     BlockHash::from_internal_bytes(bytes)
 }
 
-/// One shard of a publication: its range, whether it is sealed, its published
-/// revision number, and every event in it, keyed by the script it concerns.
+/// One shard of a publication: its range, geometry, whether it is sealed, its
+/// published revision number, and every event in it, keyed by the script it
+/// concerns.
 pub struct ShardSpec {
     pub start: u64,
     pub end: u64,
+    pub geometry: &'static Geometry,
     pub sealed: bool,
     pub revision: u32,
     pub events: Vec<(ScriptBytes, TransparentEvent)>,
@@ -56,13 +64,15 @@ pub struct ShardSpec {
 
 /// Writes a publishable shard set for `shards`, numbered from zero, to `dir`,
 /// as the publisher would: one directory per manifest digest and the map in
-/// `shards.json`. `hash` gives each shard's parent and terminal block. Every
-/// shard has [`GEOMETRY`], sealed under `seal`.
+/// `shards.json`, declaring `recuts`. `hash` gives each shard's parent and
+/// terminal block. Every geometry a shard or a declaration names is sealed
+/// under `seal`.
 pub fn publish(
     dir: &Path,
     shards: &[ShardSpec],
     seal: SealParameters,
     hash: impl Fn(u64) -> BlockHash,
+    recuts: Vec<Recut>,
 ) -> ShardMap {
     let genesis = BlockHash::from_display_hex(transparent_filter::MAINNET_GENESIS_DISPLAY)
         .expect("mainnet's genesis hash");
@@ -77,7 +87,7 @@ pub fn publish(
             genesis,
             hash(spec.end),
             transparent_filter::RANGE_PROFILE,
-            GEOMETRY,
+            spec.geometry,
             &spec.events,
         )
         .expect("a buildable shard");
@@ -94,7 +104,7 @@ pub fn publish(
         let manifest = ShardManifest {
             schema: SCHEMA.to_string(),
             profile: transparent_filter::RANGE_PROFILE.to_string(),
-            geometry: GEOMETRY.name.to_string(),
+            geometry: spec.geometry.name.to_string(),
             network: transparent_filter::NETWORK.to_string(),
             genesis_hash: transparent_filter::MAINNET_GENESIS_DISPLAY.to_string(),
             shard_id,
@@ -126,10 +136,14 @@ pub fn publish(
             filter_hash: filter_hash(built.filter.as_slice()).to_display_hex(),
             directory_segments: segments(
                 &built.directory,
-                GEOMETRY.directory_rows,
-                GEOMETRY.directory_row_bytes,
+                spec.geometry.directory_rows,
+                spec.geometry.directory_row_bytes,
             ),
-            page_segments: segments(&built.pages, GEOMETRY.page_rows, GEOMETRY.page_row_bytes),
+            page_segments: segments(
+                &built.pages,
+                spec.geometry.page_rows,
+                spec.geometry.page_row_bytes,
+            ),
             occupancy: ManifestOccupancy {
                 scripts: built.scripts,
                 page_rows: built.page_rows,
@@ -154,7 +168,7 @@ pub fn publish(
         }
         entries.push(ShardMapEntry {
             shard_id,
-            geometry: GEOMETRY.name.to_string(),
+            geometry: spec.geometry.name.to_string(),
             start_height: spec.start,
             end_height: spec.end,
             parent_block_hash: manifest.parent_block_hash.clone(),
@@ -177,12 +191,37 @@ pub fn publish(
         profile: transparent_filter::RANGE_PROFILE.to_string(),
         range_envelope_version: transparent_filter::RANGE_ENVELOPE_VERSION,
         start_height: shards[0].start,
-        seal: [(GEOMETRY.name.to_string(), seal)].into_iter().collect(),
+        seal: shards
+            .iter()
+            .map(|spec| spec.geometry.name.to_string())
+            .chain(
+                recuts
+                    .iter()
+                    .flat_map(|recut| &recut.superseded)
+                    .map(|shard| shard.geometry.clone()),
+            )
+            .map(|geometry| (geometry, seal))
+            .collect(),
         shards: entries,
+        recuts,
     };
     map.check_shape().expect("a well-formed map");
     std::fs::write(dir.join("shards.json"), serde_json::to_vec(&map).unwrap()).unwrap();
     map
+}
+
+/// `entry` as a re-cut declares it superseded: exactly as it was published.
+pub fn superseded(entry: &ShardMapEntry) -> SupersededShard {
+    SupersededShard {
+        shard_id: entry.shard_id,
+        geometry: entry.geometry.clone(),
+        start_height: entry.start_height,
+        end_height: entry.end_height,
+        terminal_block_hash: entry.terminal_block_hash.clone(),
+        manifest_digest: entry.manifest_digest.clone(),
+        revision: entry.revision,
+        sealed: entry.sealed,
+    }
 }
 
 /// One request as the service received it.

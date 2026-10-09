@@ -7,6 +7,10 @@
 //! catalog lets a pass tell a publication that is merely behind (`Pending`) from
 //! one that contradicts what this companion recorded (`Withdrawn`); only a
 //! `Ready` pass returns commits.
+//!
+//! A re-cut the map declares keeps the identities the wallet holds: a sealed
+//! revision it superseded stays current, and facts stored under it are still
+//! exported under it. Only an undeclared change of sealed content withdraws.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,7 +18,7 @@ use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, named_params, params,
 };
 use sha2::{Digest, Sha256};
-use transparent_filter::ShardMapEntry;
+use transparent_filter::{ShardMapEntry, SupersededShard};
 use transparent_wallet::SetIdentity;
 use zcash_client_backend::data_api::transparent_ledger::{PublicationAnchor, RecoveryRevision};
 use zcash_primitives::block::BlockHash;
@@ -23,7 +27,10 @@ use zcash_protocol::consensus::BlockHeight;
 use crate::recovery::{RecoveryError, block, block_hash, failure, require};
 
 /// The companion layout this build creates and reads.
-const FORMAT: &str = "transparent-reference-companion-v2";
+const FORMAT: &str = "transparent-reference-companion-v3";
+
+/// The previous layout, whose catalog [`prepare`] rebuilds in place.
+const FORMAT_V2: &str = "transparent-reference-companion-v2";
 
 // Pruning names the reference store's cache and commit tables, and a reset names
 // every store table. Re-verify those names, that `wallet_meta` keeps the schema
@@ -43,10 +50,12 @@ const STORE_TABLES: [&str; 8] = [
     "commits",
 ];
 
-const TABLES: &str = "CREATE TABLE pir_bridge_binding (key TEXT PRIMARY KEY, value BLOB NOT NULL);
-    CREATE TABLE pir_bridge_catalog (
+const BINDING: &str =
+    "CREATE TABLE pir_bridge_binding (key TEXT PRIMARY KEY, value BLOB NOT NULL);";
+
+const CATALOG: &str = "CREATE TABLE pir_bridge_catalog (
         source BLOB NOT NULL CHECK(length(source)=32),
-        shard_id INTEGER NOT NULL CHECK(shard_id>=0),
+        start_height INTEGER NOT NULL CHECK(start_height>=0),
         digest TEXT NOT NULL,
         sealed INTEGER NOT NULL CHECK(sealed IN (0,1)),
         lineage INTEGER NOT NULL CHECK(lineage>0),
@@ -61,8 +70,9 @@ const TABLES: &str = "CREATE TABLE pir_bridge_binding (key TEXT PRIMARY KEY, val
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BatchState {
     /// The publication agrees with everything this companion recorded, and every
-    /// revision it exported is still published or has a successor at a higher
-    /// lineage among the batch's commits. Apply the commits, then acknowledge.
+    /// revision it exported is still published, declared superseded by a
+    /// re-cut, or has a successor at a higher lineage among the batch's
+    /// commits. Apply the commits, then acknowledge.
     ///
     /// A successor withdraws its predecessor's provisional evidence only when
     /// the wallet qualifies it, so `Ready` assumes the commits are applied
@@ -74,15 +84,17 @@ pub enum BatchState {
     Ready,
     /// The publication or this companion's retrieval is behind what the
     /// companion recorded: a lagging replica (one serving a shard unsealed below
-    /// a revision the companion saw, even a sealed one), a map missing a shard,
-    /// stored facts naming a revision the map no longer names, a shard ending on
-    /// a block the wallet's chain does not hold, or an exported tail whose
-    /// successor is not retrieved yet, or a store a publication change reset
-    /// that has not bound the new set again. A publication that diverged from
-    /// what the sync read (a shard with pending pages withdrawn, or a map
-    /// refreshed mid-pass that does not continue the one the pass started
-    /// from), and a map under another set that ends below the height the store
-    /// synced to, are also `Pending`, with
+    /// a revision the companion saw, even a sealed one), a map ending below an
+    /// exported revision, stored facts naming a revision the map neither
+    /// publishes nor declares, a shard ending on a block the wallet's chain
+    /// does not hold, or an exported tail whose successor is not retrieved yet,
+    /// or a store a publication change reset that has not bound the new set
+    /// again. A publication that diverged from what the sync read (a shard with
+    /// pending pages withdrawn, or a map refreshed mid-pass that does not
+    /// continue the one the pass started from), a map under another set that
+    /// ends below the height the store synced to, and a map from before a
+    /// re-cut the store already followed (a lower re-cut epoch than this
+    /// companion recorded) are also `Pending`, with
     /// [`Outcome::Behind`](crate::Outcome::Behind). The batch has no commits or
     /// retired revisions and cannot be acknowledged; a later pass can be
     /// `Ready`.
@@ -104,15 +116,19 @@ pub enum BatchState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WithdrawnCause {
     /// A sealed shard is published at a lower revision than this companion
-    /// recorded for its source.
+    /// recorded for its source, or a shard is published below a revision the
+    /// map declares a re-cut superseded in its source.
     Regression,
-    /// One revision of a source is published as two different shard revisions.
+    /// One revision of a source is published or declared as two different
+    /// shard revisions, or a re-cut declares a revision otherwise than this
+    /// companion recorded it.
     Equivocation,
-    /// A sealed revision a batch exported is no longer published, and the map
-    /// does not merely name an older unsealed revision of its shard.
+    /// A sealed revision a batch exported is neither published nor declared
+    /// superseded by a re-cut, and its source is published at another revision
+    /// that is not merely an older unsealed one.
     ChangedSealed,
-    /// A shard a batch exported is published under another source, as after a
-    /// geometry change.
+    /// The heights of a revision a batch exported are published under another
+    /// source, as after a geometry change or an undeclared re-cut.
     Retired,
 }
 
@@ -132,10 +148,14 @@ fn length_prefixed(hash: &mut Sha256, value: &[u8]) {
 }
 
 /// Creates this format's tables in a new companion, or checks that an existing
-/// one has this format and is bound to `binding`.
+/// one is bound to `binding` and brings a v2 companion to this format.
 ///
 /// A v1 companion counted lineage per companion, which no recreated companion
-/// can reproduce, so it is refused rather than migrated.
+/// can reproduce, so it is refused rather than migrated. A v2 catalog derived
+/// its sources from shard ids, which a re-cut renumbers. Its catalog is rebuilt
+/// empty in place, and its store is kept: the next pass exports the stored facts
+/// again under v3 sources without retrieving anything. The application keys
+/// companion files by origin and schema only, so a new file is no option.
 pub(crate) fn prepare(conn: &mut Connection, binding: &[u8; 32]) -> Result<(), RecoveryError> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -165,16 +185,20 @@ pub(crate) fn prepare(conn: &mut Connection, binding: &[u8; 32]) -> Result<(), R
         "companion format v1; recreate",
     )?;
     require(
-        format.as_deref().is_none_or(|format| format == FORMAT),
+        format
+            .as_deref()
+            .is_none_or(|format| format == FORMAT || format == FORMAT_V2),
         "unsupported companion format",
     )?;
     if !bound {
-        tx.execute_batch(TABLES).map_err(failure)?;
+        tx.execute_batch(BINDING).map_err(failure)?;
+        tx.execute_batch(CATALOG).map_err(failure)?;
         tx.execute(
             "INSERT INTO pir_bridge_binding (key, value) VALUES ('format', ?1), ('account-source', ?2)",
             params![FORMAT, binding.as_slice()],
         )
         .map_err(failure)?;
+        record_epoch(&tx, 0)?;
     }
     let prior: Option<Vec<u8>> = tx
         .query_row(
@@ -188,14 +212,55 @@ pub(crate) fn prepare(conn: &mut Connection, binding: &[u8; 32]) -> Result<(), R
         prior.as_deref() == Some(binding.as_slice()),
         "companion account/source/origin/schema binding mismatch",
     )?;
+    if format.as_deref() == Some(FORMAT_V2) {
+        tx.execute_batch("DROP TABLE pir_bridge_catalog;")
+            .map_err(failure)?;
+        tx.execute_batch(CATALOG).map_err(failure)?;
+        tx.execute(
+            "UPDATE pir_bridge_binding SET value=?1 WHERE key='format'",
+            [FORMAT],
+        )
+        .map_err(failure)?;
+        record_epoch(&tx, 0)?;
+    }
     tx.commit().map_err(failure)
 }
 
-/// One published shard revision, identified as the wallet and the catalog
-/// identify it.
+/// The highest re-cut epoch of a map whose pass this companion's store
+/// followed, zero if none since the store last started.
+pub(crate) fn recut_epoch(conn: &Connection) -> Result<u32, RecoveryError> {
+    let epoch: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM pir_bridge_binding WHERE key='recut-epoch'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(failure)?;
+    u32::try_from(epoch.unwrap_or(0)).map_err(failure)
+}
+
+fn record_epoch(tx: &Transaction<'_>, epoch: u32) -> Result<(), RecoveryError> {
+    tx.execute(
+        "INSERT OR REPLACE INTO pir_bridge_binding (key, value) VALUES ('recut-epoch', ?1)",
+        [i64::from(epoch)],
+    )
+    .map(|_| ())
+    .map_err(failure)
+}
+
+/// One shard revision a map publishes, or one a re-cut it declares superseded,
+/// identified as the wallet and the catalog identify it.
+#[derive(Clone)]
 pub(crate) struct Published {
+    /// The shard id it is published, or was published, under. Manifests bind
+    /// the id, so a stored fact under this revision must name it.
     pub(crate) shard_id: u64,
-    digest: String,
+    pub(crate) start_height: u64,
+    pub(crate) end_height: u64,
+    pub(crate) digest: String,
+    /// The block the revision ends on, display hex.
+    pub(crate) terminal: String,
     pub(crate) revision: RecoveryRevision,
 }
 
@@ -207,20 +272,72 @@ impl Published {
         set: &SetIdentity,
         entry: &ShardMapEntry,
     ) -> Result<Self, RecoveryError> {
-        Ok(Self {
-            shard_id: entry.shard_id,
-            digest: entry.manifest_digest.clone(),
-            revision: RecoveryRevision {
-                source: source(binding, set, entry)?.to_vec(),
-                revision: revision(&entry.manifest_digest, entry.sealed).to_vec(),
-                lineage: lineage(entry),
+        Self::new(
+            binding,
+            set,
+            Shape {
+                shard_id: entry.shard_id,
+                geometry: &entry.geometry,
+                start_height: entry.start_height,
+                end_height: entry.end_height,
+                terminal: &entry.terminal_block_hash,
+                digest: &entry.manifest_digest,
+                revision: entry.revision,
                 sealed: entry.sealed,
+            },
+        )
+    }
+
+    /// A revision a re-cut of a publication whose set identity is `set`
+    /// declares superseded, exactly as the wallet received it when it was
+    /// published, for a companion bound to `binding`.
+    pub(crate) fn declared(
+        binding: &[u8; 32],
+        set: &SetIdentity,
+        shard: &SupersededShard,
+    ) -> Result<Self, RecoveryError> {
+        Self::new(
+            binding,
+            set,
+            Shape {
+                shard_id: shard.shard_id,
+                geometry: &shard.geometry,
+                start_height: shard.start_height,
+                end_height: shard.end_height,
+                terminal: &shard.terminal_block_hash,
+                digest: &shard.manifest_digest,
+                revision: shard.revision,
+                sealed: shard.sealed,
+            },
+        )
+    }
+
+    fn new(binding: &[u8; 32], set: &SetIdentity, shape: Shape<'_>) -> Result<Self, RecoveryError> {
+        Ok(Self {
+            shard_id: shape.shard_id,
+            start_height: shape.start_height,
+            end_height: shape.end_height,
+            digest: shape.digest.to_owned(),
+            terminal: shape.terminal.to_owned(),
+            revision: RecoveryRevision {
+                source: source(binding, set, shape.geometry, shape.start_height)?.to_vec(),
+                revision: revision(shape.digest, shape.sealed).to_vec(),
+                // The publisher's revision number, offset so a first
+                // publication is lineage 1.
+                lineage: u64::from(shape.revision) + 1,
+                sealed: shape.sealed,
                 publication: PublicationAnchor {
-                    height: block(entry.end_height)?,
-                    hash: block_hash(&entry.terminal_block_hash)?,
+                    height: block(shape.end_height)?,
+                    hash: block_hash(shape.terminal)?,
                 },
             },
         })
+    }
+
+    /// Where this revision's commit is kept while a pass builds its batch: two
+    /// revisions of one source share a start height but not a digest.
+    pub(crate) fn key(&self) -> (u64, String) {
+        (self.start_height, self.digest.clone())
     }
 
     fn height(&self) -> u32 {
@@ -232,29 +349,43 @@ impl Published {
     }
 }
 
-/// The stable identity of one shard of a publication, for one companion binding.
+/// The fields of a map entry, published or superseded, that identify it.
+struct Shape<'a> {
+    shard_id: u64,
+    geometry: &'a str,
+    start_height: u64,
+    end_height: u64,
+    terminal: &'a str,
+    digest: &'a str,
+    revision: u32,
+    sealed: bool,
+}
+
+/// The stable identity of the shards of a publication that start at
+/// `start_height` under `geometry`, for one companion binding.
 ///
 /// It hashes the set-identity fields [`SetIdentity::continues`] holds fixed,
-/// plus the shard's geometry, that geometry's seal parameters, shard id and
-/// start height. A set growing into a new geometry tier changes no existing
-/// source, and a set-identity change `continues` refuses changes every source
-/// it affects. Shard ids are one gapless sequence across geometries, so
-/// re-cutting another geometry can reuse an id for a different height range;
-/// its start height gives that range a new source even when its own geometry
-/// and seal parameters remain unchanged.
+/// plus the geometry, that geometry's seal parameters and the start height,
+/// and not the shard id. A re-cut renumbers every later shard and the tail
+/// without changing where they start, so their next revisions stay in the
+/// sources the wallet holds, while a re-cut range, which starts elsewhere or
+/// under another geometry, gets new sources. A set growing into a new geometry
+/// tier changes no existing source, and a set-identity change `continues`
+/// refuses changes every source it affects.
 pub(crate) fn source(
     binding: &[u8; 32],
     set: &SetIdentity,
-    entry: &ShardMapEntry,
+    geometry: &str,
+    start_height: u64,
 ) -> Result<[u8; 32], RecoveryError> {
     let seal = set
         .seal
-        .get(&entry.geometry)
+        .get(geometry)
         .ok_or_else(|| RecoveryError::Invalid("shard geometry has no seal parameters".into()))?;
     // Canonical: serde writes the fields in declaration order.
     let seal = serde_json::to_vec(seal).map_err(failure)?;
     let mut hash = Sha256::new();
-    hash.update(b"transparent-reference-source-v2");
+    hash.update(b"transparent-reference-source-v3");
     hash.update(binding);
     length_prefixed(&mut hash, set.shard_schema.as_bytes());
     length_prefixed(&mut hash, set.network.as_bytes());
@@ -262,10 +393,9 @@ pub(crate) fn source(
     length_prefixed(&mut hash, set.profile.as_bytes());
     hash.update(set.range_envelope_version.to_le_bytes());
     hash.update(set.start_height.to_le_bytes());
-    length_prefixed(&mut hash, entry.geometry.as_bytes());
+    length_prefixed(&mut hash, geometry.as_bytes());
     length_prefixed(&mut hash, &seal);
-    hash.update(entry.shard_id.to_le_bytes());
-    hash.update(entry.start_height.to_le_bytes());
+    hash.update(start_height.to_le_bytes());
     Ok(hash.finalize().into())
 }
 
@@ -278,11 +408,6 @@ fn revision(digest: &str, sealed: bool) -> [u8; 32] {
     hash.finalize().into()
 }
 
-/// The publisher's revision number, offset so a first publication is lineage 1.
-fn lineage(entry: &ShardMapEntry) -> u64 {
-    u64::from(entry.revision) + 1
-}
-
 /// One pass's catalog transaction. Dropping it without [`Pass::finish`] changes
 /// nothing.
 pub(crate) struct Pass<'c> {
@@ -292,18 +417,21 @@ pub(crate) struct Pass<'c> {
 }
 
 impl<'c> Pass<'c> {
-    /// Begins a pass over a map publishing `published`, marking current every
-    /// stored row the map still publishes unchanged.
+    /// Begins a pass over a map publishing `published` and declaring the sealed
+    /// revisions `declared` superseded, marking current every stored row that
+    /// either names exactly. A re-cut's sealed revisions stay current: the
+    /// wallet keeps them as its history.
     pub(crate) fn begin(
         conn: &'c mut Connection,
         published: &[Published],
+        declared: &[Published],
     ) -> Result<Self, RecoveryError> {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
         tx.execute("UPDATE pir_bridge_catalog SET current=0", [])
             .map_err(failure)?;
-        for entry in published {
+        for entry in published.iter().chain(declared) {
             let revision = &entry.revision;
             tx.execute(
                 "UPDATE pir_bridge_catalog SET current=1 WHERE source=?1 AND digest=?2 AND sealed=?3
@@ -330,43 +458,51 @@ impl<'c> Pass<'c> {
         self.withdrawn.get_or_insert(cause);
     }
 
+    /// Checks the map's re-cut declarations against what it publishes and
+    /// against each other, needing no catalog history, so a recreated
+    /// companion checks them too.
+    ///
+    /// A published revision in the source of a declared one must have a higher
+    /// lineage: equal is an `Equivocation`, lower a `Regression`. Two declared
+    /// revisions of one source at one lineage that differ are an
+    /// `Equivocation`. `declarations` is every revision the map declares, the
+    /// superseded tails included.
+    pub(crate) fn check_declarations(
+        &mut self,
+        published: &[Published],
+        declarations: &[Published],
+    ) {
+        for (index, declared) in declarations.iter().enumerate() {
+            let ours = &declared.revision;
+            for entry in published {
+                let theirs = &entry.revision;
+                if theirs.source != ours.source {
+                    continue;
+                }
+                if theirs.lineage == ours.lineage {
+                    self.withdraw(WithdrawnCause::Equivocation);
+                } else if theirs.lineage < ours.lineage {
+                    self.withdraw(WithdrawnCause::Regression);
+                }
+            }
+            if declarations[index + 1..].iter().any(|other| {
+                other.revision.source == ours.source
+                    && other.revision.lineage == ours.lineage
+                    && other.revision != *ours
+            }) {
+                self.withdraw(WithdrawnCause::Equivocation);
+            }
+        }
+    }
+
     /// Classifies a published revision this pass may export, recording it when
     /// it is new. Returns whether a commit may be built for it: not for a
     /// lagging revision, which defers the batch and is not recorded, nor for one
     /// that withdraws it.
     pub(crate) fn classify(&mut self, entry: &Published) -> Result<bool, RecoveryError> {
         let revision = &entry.revision;
-        let stored: Option<(u64, u32, Vec<u8>)> = self
-            .tx
-            .query_row(
-                "SELECT lineage, height, hash FROM pir_bridge_catalog
-                 WHERE source=?1 AND digest=?2 AND sealed=?3",
-                params![revision.source, entry.digest, revision.sealed],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(failure)?;
-        if let Some((lineage, height, hash)) = stored {
-            // The same content under another revision number or endpoint.
-            let same = lineage == revision.lineage
-                && height == entry.height()
-                && hash.as_slice() == entry.hash();
-            if !same {
-                self.withdraw(WithdrawnCause::Equivocation);
-            }
+        if let Some(same) = self.recorded(entry)? {
             return Ok(same);
-        }
-        let collides: bool = self
-            .tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pir_bridge_catalog WHERE source=?1 AND lineage=?2)",
-                params![revision.source, revision.lineage],
-                |row| row.get(0),
-            )
-            .map_err(failure)?;
-        if collides {
-            self.withdraw(WithdrawnCause::Equivocation);
-            return Ok(false);
         }
         let newest: Option<u64> = self
             .tx
@@ -386,13 +522,75 @@ impl<'c> Pass<'c> {
             }
             return Ok(false);
         }
+        self.insert(entry)?;
+        Ok(true)
+    }
+
+    /// Admits a sealed revision the map declares a re-cut superseded, on the
+    /// first stored fact under it. Returns whether a commit may be built for
+    /// it.
+    ///
+    /// The declaration must name it exactly as this companion recorded it, if
+    /// at all; otherwise the batch is withdrawn as an `Equivocation`. It is
+    /// recorded as current without the regression check, since its source's
+    /// published successor is newer by construction.
+    pub(crate) fn admit_declared(&mut self, entry: &Published) -> Result<bool, RecoveryError> {
+        if let Some(same) = self.recorded(entry)? {
+            return Ok(same);
+        }
+        self.insert(entry)?;
+        Ok(true)
+    }
+
+    /// Whether the catalog records `entry` exactly (`Some(true)`), records
+    /// something that contradicts it (`Some(false)`, withdrawing the batch as
+    /// an `Equivocation`), or neither.
+    fn recorded(&mut self, entry: &Published) -> Result<Option<bool>, RecoveryError> {
+        let revision = &entry.revision;
+        let stored: Option<(u64, u32, Vec<u8>)> = self
+            .tx
+            .query_row(
+                "SELECT lineage, height, hash FROM pir_bridge_catalog
+                 WHERE source=?1 AND digest=?2 AND sealed=?3",
+                params![revision.source, entry.digest, revision.sealed],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(failure)?;
+        if let Some((lineage, height, hash)) = stored {
+            // The same content under another revision number or endpoint.
+            let same = lineage == revision.lineage
+                && height == entry.height()
+                && hash.as_slice() == entry.hash();
+            if !same {
+                self.withdraw(WithdrawnCause::Equivocation);
+            }
+            return Ok(Some(same));
+        }
+        let collides: bool = self
+            .tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pir_bridge_catalog WHERE source=?1 AND lineage=?2)",
+                params![revision.source, revision.lineage],
+                |row| row.get(0),
+            )
+            .map_err(failure)?;
+        if collides {
+            self.withdraw(WithdrawnCause::Equivocation);
+            return Ok(Some(false));
+        }
+        Ok(None)
+    }
+
+    fn insert(&self, entry: &Published) -> Result<(), RecoveryError> {
+        let revision = &entry.revision;
         self.tx
             .execute(
-                "INSERT INTO pir_bridge_catalog (source, shard_id, digest, sealed, lineage, revision, height, hash, current)
+                "INSERT INTO pir_bridge_catalog (source, start_height, digest, sealed, lineage, revision, height, hash, current)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
                 params![
                     revision.source,
-                    entry.shard_id,
+                    entry.start_height,
                     entry.digest,
                     revision.sealed,
                     revision.lineage,
@@ -401,8 +599,8 @@ impl<'c> Pass<'c> {
                     entry.hash()
                 ],
             )
-            .map_err(failure)?;
-        Ok(true)
+            .map(|_| ())
+            .map_err(failure)
     }
 
     /// Whether a batch before this pass may have handed `revision` to the
@@ -418,42 +616,48 @@ impl<'c> Pass<'c> {
             .map_err(failure)
     }
 
-    /// Defers the batch: a stored fact names a shard the map does not publish,
-    /// or a revision it no longer names, or a shard ends on a block the
-    /// wallet's chain does not hold.
+    /// Defers the batch: a stored fact names a revision the map neither
+    /// publishes nor declares, or does not fit the revision it names, or a
+    /// shard ends on a block the wallet's chain does not hold.
     pub(crate) fn defer(&mut self) {
         self.pending = true;
     }
 
-    /// Classifies every exported row the map no longer publishes unchanged, by
-    /// the first rule that matches:
+    /// Classifies every exported row that is no longer current (neither
+    /// published nor declared superseded exactly as recorded), by the first
+    /// rule that matches. While its source is published:
     ///
-    /// 1. its shard id is in the map under another source: `Retired`;
-    /// 2. its shard id is beyond the map's last shard (the map is behind):
-    ///    pending;
-    /// 3. it is sealed: `ChangedSealed`, unless the map publishes its shard
-    ///    unsealed below it (a replica behind the seal), which is pending;
-    /// 4. this batch commits its source at a higher lineage: replaced;
-    /// 5. otherwise: pending.
+    /// 1. a sealed row whose source is published unsealed at a lower lineage
+    ///    (a replica behind the seal): pending;
+    /// 2. any other sealed row: `ChangedSealed`;
+    /// 3. an unsealed row this batch commits its source above: replaced;
+    /// 4. any other unsealed row: pending.
+    ///
+    /// While its source is not published:
+    ///
+    /// 5. the map ends below its start height, or reaches it inside an
+    ///    unsealed shard that starts below it (the map is behind): pending;
+    /// 6. otherwise its heights are published under another source:
+    ///    `Retired`.
     ///
     /// `published` is every revision the map publishes, and `committed` maps
-    /// each source with a commit in this batch to that commit's lineage. Returns
-    /// the replaced rows, as the wallet identifies them.
+    /// each source with a commit in this batch to the highest lineage
+    /// committed. Returns the replaced rows, as the wallet identifies them.
     pub(crate) fn settle(
         &mut self,
         published: &[Published],
         committed: &BTreeMap<&[u8], u64>,
     ) -> Result<Vec<RecoveryRevision>, RecoveryError> {
-        let published: BTreeMap<u64, &RecoveryRevision> = published
+        let by_source: BTreeMap<&[u8], &RecoveryRevision> = published
             .iter()
-            .map(|entry| (entry.shard_id, &entry.revision))
+            .map(|entry| (entry.revision.source.as_slice(), &entry.revision))
             .collect();
         let mut statement = self
             .tx
             .prepare(
-                "SELECT source, revision, shard_id, sealed, lineage, height, hash
+                "SELECT source, revision, start_height, sealed, lineage, height, hash
                  FROM pir_bridge_catalog
-                 WHERE exported=1 AND current=0 ORDER BY shard_id DESC, lineage DESC",
+                 WHERE exported=1 AND current=0 ORDER BY start_height DESC, lineage DESC",
             )
             .map_err(failure)?;
         let rows = statement
@@ -481,14 +685,9 @@ impl<'c> Pass<'c> {
             .map_err(failure)?;
         drop(statement);
         let mut replaced = vec![];
-        for (row, shard_id, sealed, lineage) in rows {
-            match published.get(&shard_id) {
-                Some(entry) if entry.source != row.source => self.withdraw(WithdrawnCause::Retired),
-                // Shard ids are gapless from 0, so a missing one is beyond the
-                // map's last shard: the map is behind.
-                None => self.pending = true,
-                // The shard published unsealed below the sealed revision: a
-                // replica that has not caught up with the seal.
+        for (row, start, sealed, lineage) in rows {
+            match by_source.get(row.source.as_slice()) {
+                // A replica that has not caught up with the seal.
                 Some(entry) if sealed && !entry.sealed && entry.lineage < lineage => {
                     self.pending = true
                 }
@@ -501,6 +700,20 @@ impl<'c> Pass<'c> {
                         replaced.push(row);
                     } else {
                         self.pending = true;
+                    }
+                }
+                None => {
+                    let covering = published
+                        .iter()
+                        .find(|entry| entry.start_height <= start && start <= entry.end_height);
+                    match covering {
+                        None => self.pending = true,
+                        // A tail the publisher has since cut at this height,
+                        // still served by a replica that has not caught up.
+                        Some(entry) if !entry.revision.sealed && entry.start_height < start => {
+                            self.pending = true
+                        }
+                        Some(_) => self.withdraw(WithdrawnCause::Retired),
                     }
                 }
             }
@@ -539,8 +752,12 @@ impl<'c> Pass<'c> {
     }
 
     /// Prunes the catalog, and the store's caches to the revisions `digests`
-    /// names, then commits the pass.
-    pub(crate) fn finish(self, digests: &[&str]) -> Result<(), RecoveryError> {
+    /// names, records that the store followed a map at re-cut `epoch`, then
+    /// commits the pass.
+    ///
+    /// The recorded epoch only rises: a map below it is one the store moved
+    /// past, which the next pass waits out rather than syncs against.
+    pub(crate) fn finish(self, digests: &[&str], epoch: u32) -> Result<(), RecoveryError> {
         prune_catalog(&self.tx)?;
         let named = serde_json::to_string(digests).map_err(failure)?;
         for table in ["filter_cache", "setup_cache"] {
@@ -560,6 +777,8 @@ impl<'c> Pass<'c> {
                 [],
             )
             .map_err(failure)?;
+        let recorded = recut_epoch(&self.tx)?;
+        record_epoch(&self.tx, recorded.max(epoch))?;
         self.tx.commit().map_err(failure)
     }
 }
@@ -612,15 +831,17 @@ pub(crate) fn exported_any(conn: &Connection) -> Result<bool, RecoveryError> {
 ///
 /// Every store table is emptied, and `wallet_meta` keeps only the schema
 /// version, so the next sync binds the new set and retrieves from the floor.
-/// The catalog stays: each source keeps its highest lineage, so a source the
-/// new set leaves unchanged still recognizes a restarted revision number. Rows
-/// of sources none of `published` names lose their export mark, because no
-/// commit can succeed them, so no batch reports them as retired revisions, even
-/// those a batch already listed and nobody acknowledged; the wallet keeps their
-/// evidence as it is, and a later batch completes its pages under them once it
-/// covers their ranges.
-pub(crate) fn reset(conn: &mut Connection, published: &[Published]) -> Result<(), RecoveryError> {
-    let named: BTreeSet<&[u8]> = published
+/// The recorded re-cut epoch is cleared with it: the empty store follows no
+/// map. The catalog stays: each source keeps its highest lineage, so a source
+/// the new set leaves unchanged still recognizes a restarted revision number.
+/// Rows of sources that none of `named`, the map's published and declared
+/// revisions, names lose their export mark, because no commit can succeed
+/// them, so no batch reports them as retired revisions, even those a batch
+/// already listed and nobody acknowledged; the wallet keeps their evidence as
+/// it is, and a later batch completes its pages under them once it covers
+/// their ranges.
+pub(crate) fn reset(conn: &mut Connection, named: &[Published]) -> Result<(), RecoveryError> {
+    let named: BTreeSet<&[u8]> = named
         .iter()
         .map(|entry| entry.revision.source.as_slice())
         .collect();
@@ -633,6 +854,7 @@ pub(crate) fn reset(conn: &mut Connection, published: &[Published]) -> Result<()
         tx.execute(&format!("DELETE FROM {table}"), [])
             .map_err(failure)?;
     }
+    record_epoch(&tx, 0)?;
     let exported = tx
         .prepare("SELECT DISTINCT source FROM pir_bridge_catalog WHERE exported=1")
         .map_err(failure)?
@@ -652,7 +874,7 @@ pub(crate) fn reset(conn: &mut Connection, published: &[Published]) -> Result<()
     tx.commit().map_err(failure)
 }
 
-/// Forgets rows that are neither published nor exported. Each source's newest
+/// Forgets rows that are neither current nor exported. Each source's newest
 /// row stays, so a later regression or lagging replica is still recognized.
 fn prune_catalog(tx: &Transaction<'_>) -> Result<(), RecoveryError> {
     tx.execute(

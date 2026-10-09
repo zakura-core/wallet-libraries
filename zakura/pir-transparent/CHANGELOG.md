@@ -4,6 +4,19 @@
 
 ### Added
 
+- Declared re-cuts. A sealed revision the shard map declares a re-cut
+  superseded stays current, and facts stored under it are exported under the
+  revision triple the wallet already holds; the renumbered shards and tail keep
+  their sources, and the renumbered tail is listed as resolving the old one. A
+  pass checks the declarations against the map (`Equivocation`, `Regression`)
+  and, on the first stored fact under a declared revision, against the catalog
+  (`Equivocation`). The companion records the highest re-cut epoch its store
+  followed, and a pass over a map with a lower epoch is `Pending` with
+  `Outcome::Behind` before any retrieval. The shard limit counts declared
+  entries. Wallet pages under a superseded sealed revision are completed once
+  the batch covers their range. An undeclared change of sealed content is still
+  `Withdrawn`.
+
 - Txid display lookups: re-exports of wallet-pir's `transparent-txid-client`
   (`TxidDisplayClient`, `TxidTransport`, `TxidRequest`, `TxidReply`, `TxidLookup`, `TxidError`,
   the fixed-size `DisplayEntry` and related types), `display_facts`, which maps a found entry
@@ -65,7 +78,19 @@
 
 ### Changed
 
-- wallet-pir is pinned to `c9a76bb4`; every wallet-pir dependency moves together.
+- wallet-pir is pinned to `e9f128b4`, whose shard map carries re-cut
+  declarations; every wallet-pir dependency moves together.
+- Sources are `transparent-reference-source-v3`: the shard id is no longer
+  bound, only the geometry, its seal parameters and the start height, so a
+  renumbered shard or tail keeps its source.
+- Companions are format `transparent-reference-companion-v3`: the catalog
+  records start heights instead of shard ids, and the binding table records the
+  re-cut epoch. Opening a v2 companion rebuilds its catalog empty in place and
+  keeps its store; the next pass exports the stored facts again under v3
+  sources, without retrieving them.
+- Stored facts are matched to commits by revision digest, and exported rows the
+  map no longer publishes are classified by source and start height instead of
+  shard id.
 - `ReferenceRecovery::recover` takes the caller's `FilterSource` and
   `ShardTransport` for each pass. Before any retrieval it checks the target,
   the script limits, that the filter source does not use parent filters, the
@@ -100,13 +125,13 @@
 - Revision identities are stable across companions. `source` covers the
   companion binding, the set-identity fields that never change while the
   publication continues, the shard's geometry and that geometry's seal
-  parameters, the shard id and the shard's start height, so a new geometry tier
-  changes no existing source, while reusing an id for a different height range
-  gives that range a new source. `revision` covers the manifest digest and seal
+  parameters, and the shard's start height, so a new geometry tier changes no
+  existing source, while a different height range gets a new source.
+  `revision` covers the manifest digest and seal
   state, and `lineage` is the published revision number plus one instead of a per-companion
   counter, so a recreated companion reproduces the wallet's triples.
-- Companions are format `transparent-reference-companion-v2`, with a
-  `pir_bridge_catalog` table. Earlier companions are refused at open with
+- Companions record revisions in a `pir_bridge_catalog` table. Companions
+  from before stable identities are refused at open with
   `companion format v1; recreate`.
 - A pass builds its batch from the shard map its sync finished with and fetches
   no second map.
