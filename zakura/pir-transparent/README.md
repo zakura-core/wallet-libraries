@@ -25,7 +25,8 @@ txid display client's transport over the same exchange, and
 
 `CompanionDir` keeps one wallet's companions, one per account and origin,
 under caller-chosen account names. `open` prunes companions of other origins
-or schemas and of accounts the wallet no longer has, then holds an operating
+or schemas and of accounts the wallet no longer has, reading the wallet's
+accounts only after listing the companions, as `retain` does, then holds an operating
 system lock on the companion until the returned `Companion` drops, so no
 other handle, in this process or another, opens or deletes it meanwhile.
 `remove`, `clear` and `retain` delete an account's companions, every
@@ -101,7 +102,7 @@ only when it is `Ready`:
 | --- | --- |
 | `Ready` | The map agrees with the catalog, and every exported revision is still published, declared superseded by a re-cut, or has a successor at a higher lineage in this batch. |
 | `Pending` | A lagging replica (an unsealed revision below one already seen, sealed or not), a map ending below an exported revision, stored facts naming a revision the map neither publishes nor declares, a shard ending on a block the chain view does not hold, an exported tail whose successor is not retrieved yet, or a publication that diverged from what the sync read or predates a re-cut the store followed (reported as `Behind`). Nothing to apply; a later pass can be ready. |
-| `Withdrawn(cause)` | The publication contradicts the catalog. Nothing to apply. Keep the companion and retry later. |
+| `Withdrawn(cause)` | The publication contradicts the catalog. Nothing to apply. Keep the companion and pass again for new work. |
 
 | `WithdrawnCause` | Meaning |
 | --- | --- |
@@ -165,9 +166,11 @@ A batch that was not acknowledged says what to do next
 (`ApplyFailure::action`): `Refresh` after a stale commit or a policy change,
 `Reconcile` for retirements an observed settlement cannot resolve, `Skip` for
 a refused commit, a failed acknowledgment or an unsettleable batch,
-`NotEnabled`, or `Fail` for a wallet failure. `Progress::retry` says when to
-pass the account again: at once after `More`, after `Retry::BEHIND` or
-`Retry::OVERLOADED`, or only for new work after `Complete` or `Stalled`.
+`NotEnabled`, or `Fail` for a wallet failure. `RecoveryBatch::retry` says when
+to pass the account again: at once after `More`, after `Retry::BEHIND` or
+`Retry::OVERLOADED`, or only for new work after `Complete` or `Stalled` and
+for any `Withdrawn` batch, whatever its outcome. `Progress::retry` reads the
+outcome alone.
 
 `apply_and_acknowledge` refuses a wallet connection inside an explicit SQL
 transaction (`ApplyError::OuterTransaction`): each commit must commit on its
@@ -317,7 +320,8 @@ python3 scripts/dev.py test --config transparent-pir
 ```
 
 Feature `testing` is for applications' own tests: `testing::batch` and
-`testing::apply` build and settle real batches without a companion, and
+`testing::apply` build and settle real batches without a companion, with
+the same checks and failures as `apply_and_acknowledge`, and
 `testing::TxidPublication` answers txid display requests as an empty
 publication would. Never enable it in a production build.
 

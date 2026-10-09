@@ -1873,6 +1873,52 @@ fn a_policy_change_while_acknowledgment_waits_keeps_the_batch_unacknowledged() {
     }
 }
 
+/// Both settlements check the policy generation again after the last commit:
+/// a change inside the last commit's own transaction leaves every commit
+/// applied and is still reported, with or without a companion.
+#[cfg(feature = "testing")]
+#[test]
+fn a_policy_change_in_the_last_commit_is_reported_by_both_settlements() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    for companion in [true, false] {
+        let (mut f, _) = private_fixture();
+        let batch = f.recover().unwrap();
+        assert_eq!(batch.state(), BatchState::Ready);
+        let commits = batch.commits().len();
+        assert!(commits > 0);
+        f.st.wallet()
+            .conn()
+            .execute_batch(&format!(
+                "CREATE TEMP TRIGGER inject AFTER INSERT ON main.tpir_qualified_revisions
+                 WHEN (SELECT COUNT(*) FROM main.tpir_qualified_revisions) = {commits}
+                 BEGIN
+                     UPDATE tpir_meta SET policy_generation = policy_generation + 1;
+                 END;"
+            ))
+            .unwrap();
+        let failure = if companion {
+            f.settle(batch, Trust::Trusted)
+        } else {
+            zakura_pir_transparent::testing::apply(
+                batch,
+                f.st.wallet_mut().db_mut(),
+                Trust::Trusted,
+            )
+        }
+        .expect_err("the policy changed in the last commit");
+        remove_injection(&f);
+        assert!(
+            matches!(failure.error, ApplyError::PolicyChanged),
+            "companion {companion}: {failure:?}"
+        );
+        assert_eq!(failure.stats.applied, commits, "companion {companion}");
+        assert_eq!(
+            f.count("tpir_qualified_revisions"),
+            i64::try_from(commits).unwrap()
+        );
+    }
+}
+
 #[test]
 fn acknowledgment_does_not_add_a_wallet_commit_after_the_facts_are_durable() {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
