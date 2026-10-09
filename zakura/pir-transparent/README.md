@@ -95,9 +95,10 @@ triple the wallet holds, that revision stays current and is never withdrawn,
 and the renumbered tail resolves the old one in their shared source. A pass
 checks the declarations against the map and, on the first stored fact under a
 declared revision, against the catalog and every revision ever exported. A
-ready pass over a map whose declarations name a revision the store holds facts
-under records that map's re-cut epoch, and a later pass over a map with a lower
-one, as from a replica still serving the map from before the re-cut, is
+ready pass over a re-cut map records its re-cut epoch once the store holds a
+fact under a revision the re-cut superseded, or under one the map publishes at
+or above the re-cut's first height, and a later pass over a map with a lower
+epoch, as from a replica still serving the map from before the re-cut, is
 `Pending` before any retrieval; a re-cut therefore only rolls forward. Wallet
 pages under a superseded sealed revision are completed once the batch covers
 them. An undeclared change of sealed content never reaches the wallet: the

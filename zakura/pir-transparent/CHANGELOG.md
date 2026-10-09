@@ -10,9 +10,10 @@
   their sources, and the renumbered tail is listed as resolving the old one. A
   pass checks the declarations against the map (`Equivocation`, `Regression`)
   and, on the first stored fact under a declared revision, against the catalog
-  (`Equivocation`). A ready pass over a map whose declarations name a revision
-  the store holds facts under records the map's re-cut epoch, and a pass over a
-  map with a lower epoch is `Pending` with `Outcome::Behind` before any
+  (`Equivocation`). A ready pass over a re-cut map records its re-cut epoch
+  once the store holds a fact under a revision the re-cut superseded, or under
+  one the map publishes at or above the re-cut's first height, and a pass over
+  a map with a lower epoch is `Pending` with `Outcome::Behind` before any
   retrieval, so a re-cut only rolls forward. The shard limit counts declared
   entries at or above the watch set's floor. Wallet pages under a superseded
   sealed revision are completed once the batch covers their range, in the

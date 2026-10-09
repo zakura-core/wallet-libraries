@@ -256,9 +256,9 @@ pub(crate) fn prepare(conn: &mut Connection, binding: &[u8; 32]) -> Result<(), R
     tx.commit().map_err(failure)
 }
 
-/// The highest re-cut epoch of a map whose ready pass found facts in this
-/// companion's store under a revision that map declares superseded, zero if
-/// none since the store last started.
+/// The highest re-cut epoch of a map whose ready pass found that this
+/// companion's store followed its newest re-cut, zero if none since the store
+/// last started.
 pub(crate) fn recut_epoch(conn: &Connection) -> Result<u32, RecoveryError> {
     let epoch: Option<i64> = conn
         .query_row(
@@ -853,11 +853,12 @@ impl<'c> Pass<'c> {
     ///
     /// The recorded epoch only rises: a map below it is one the store moved
     /// past, which the next pass waits out rather than syncs against. A pass
-    /// gives one only when it is ready and the map's declarations named a
-    /// revision the store holds facts under, so a map whose declaration is
-    /// refused, or names nothing the store holds, cannot raise it. A re-cut
-    /// therefore only rolls forward: undoing one takes another re-cut at a
-    /// higher epoch.
+    /// gives one only when it is ready and the store holds a fact under a
+    /// revision the map's newest re-cut superseded, or under one it publishes
+    /// at or above that re-cut's first height, so a map whose declaration is
+    /// refused, or whose re-cut the store did not follow, cannot raise it. A
+    /// re-cut therefore only rolls forward: undoing one takes another re-cut at
+    /// a higher epoch.
     pub(crate) fn finish(self, digests: &[&str], epoch: Option<u32>) -> Result<(), RecoveryError> {
         prune_catalog(&self.tx)?;
         let named = serde_json::to_string(digests).map_err(failure)?;

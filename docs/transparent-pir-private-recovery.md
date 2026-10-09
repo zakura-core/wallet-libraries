@@ -303,15 +303,19 @@ wallet already holds; they are never withdrawn or retired.
   recorded as current without the regression check, since its source's
   published successor is newer by construction.
 - The companion records a map's re-cut epoch only after a `Ready` pass over it
-  that found facts in the store under a revision it declares superseded, and
-  keeps the highest; a publication change clears it with the store. A map
-  whose declaration is refused, or names nothing the store holds, cannot raise
-  it, so no single map can hold honest ones behind. After the set check, a pass
-  whose map has a lower epoch, as a replica still serving the map from before
-  a re-cut, returns `Pending` with `Outcome::Behind` before any filter or
-  private request: to the store, that map would rewrite history it holds. A
-  re-cut therefore only rolls forward; undoing one takes another re-cut at a
-  higher epoch.
+  that found the store followed its newest re-cut: a stored fact under a
+  revision the re-cut superseded, or under one the map publishes at or above
+  the re-cut's first height, which only the re-cut map publishes, as for a
+  companion recreated after the re-cut or an account born above it. It keeps
+  the highest; a publication change clears it with the store. A map whose
+  declaration is refused, or whose re-cut the store did not follow, cannot
+  raise it. After the set check, a pass whose map has a lower epoch, as a
+  replica still serving the map from before a re-cut, returns `Pending` with
+  `Outcome::Behind` before any filter or private request: to the store, that
+  map would rewrite history it holds. A store that read nothing at or above
+  the re-cut's first height and holds nothing it superseded has nothing such a
+  map rewrites. A re-cut therefore only rolls forward; undoing one takes
+  another re-cut at a higher epoch.
 - The shard limit counts the published entries and the declared ones that end
   at or above the watch set's floor. Declarations are never dropped, and those
   wholly below every watched script's required height cannot name a stored
@@ -534,7 +538,7 @@ These hold under the development flag; PR 2 mirrors them in the design notes.
 | Set-identity change | The adapter resets the store automatically and keeps the catalog, but old provisional evidence of the changed sources is never superseded, even where a batch listed it as retired and nobody acknowledged it. A shard whose source did not change but whose revision number restarted is treated as an undeclared re-cut. Revisions a re-cut declared are derived under the current set, so a set change that alters their sources orphans them like any changed source. | It is consistent data, and reorgs still rewind it. See the publisher requirements. |
 | Geometry move | Heights an exported revision covered that are published under another geometry, under one set identity and without a declared re-cut, make every pass for an account with that evidence `Withdrawn(Retired)`. | As for a re-cut. See the publisher requirements. |
 | Source format | Opening a v2 companion rebuilds its catalog, so its next pass exports every stored fact again under v3 sources: a new `tpir_revisions` row for every exported revision, once per account. The v2 catalog's export marks are dropped, so the old provisional tail under its v2 source is never superseded, and retirements nobody acknowledged are forgotten. | One time. It is consistent data, and reorgs still rewind it; Vizor's transparent PIR is unreleased. |
-| Re-cut epoch | A companion records a re-cut's epoch only after a ready pass found facts under a revision the re-cut superseded. One whose store holds none, as when it was recreated after the re-cut or the account was born above it, records none, so a replica still serving the map from before the re-cut looks to its store like an undeclared rewrite (above). A re-cut only rolls forward. | Replicas converge on the re-cut map; the account retries after its hold. Undo a re-cut with another at a higher epoch. |
+| Re-cut epoch | A re-cut only rolls forward. Once a ready pass shows the store followed a re-cut, every map at a lower epoch is `Pending` for that companion, so a publisher that served an epoch, even by mistake, holds back every account that followed it until it publishes a higher one. | Undo a re-cut with another at a higher epoch, and never serve a lower one. |
 | Re-cut after companion loss in shadow | A tail exported under `PrivateShadow` stays provisional and unqualified until a trusted pass supersedes it. If the companion is lost after a re-cut, the recreated catalog does not know the old tail was exported, so no batch lists it as retired, and under `PrivateShadow` it stays unqualified evidence. | Delete and re-import the account. Follow-up: reconcile unqualified provisional revisions from the wallet side. |
 | Origin change | A debug override creates new sources; the previous origin's provisional tail evidence is never withdrawn. | Debug builds only. |
 | Withdrawn | Every cause holds the account for 1 h, then it retries; holds are in memory, so a restart retries once. | A lagging replica is `Pending`, not `Withdrawn`. No new durable state. |

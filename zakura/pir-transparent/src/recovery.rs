@@ -362,8 +362,13 @@ struct Facts<'p, A> {
     /// Declared revisions already looked at this pass, and whether they have a
     /// commit.
     admitted: BTreeMap<&'p str, bool>,
-    /// Whether a stored fact names a revision the map declares superseded.
-    holds_declared: bool,
+    /// The first height the map's newest re-cut changed, if it declares one.
+    recut_from: Option<u64>,
+    /// Whether a stored fact shows the store followed the map's newest re-cut:
+    /// one under a revision the map declares superseded, or under a revision it
+    /// publishes that starts at or above the re-cut's first height, which only
+    /// the re-cut map publishes.
+    follows_recut: bool,
     context: TransparentRecoveryContext<A>,
 }
 
@@ -371,6 +376,7 @@ impl<'p, A: Copy> Facts<'p, A> {
     fn new(
         published: &'p [Published],
         declared: &'p [Published],
+        recut_from: Option<u64>,
         context: TransparentRecoveryContext<A>,
     ) -> Self {
         Self {
@@ -384,7 +390,8 @@ impl<'p, A: Copy> Facts<'p, A> {
                 .map(|entry| (entry.digest.as_str(), entry))
                 .collect(),
             admitted: BTreeMap::new(),
-            holds_declared: false,
+            recut_from,
+            follows_recut: false,
             context,
         }
     }
@@ -430,6 +437,7 @@ impl<'p, A: Copy> Facts<'p, A> {
                 pass.defer();
                 return Ok(None);
             }
+            self.saw(entry);
             return Ok(self.commits.get_mut(&entry.key()));
         }
         let Some((digest, entry)) = self.declared.get_key_value(digest) else {
@@ -437,7 +445,7 @@ impl<'p, A: Copy> Facts<'p, A> {
             return Ok(None);
         };
         let (digest, entry) = (*digest, *entry);
-        self.holds_declared = true;
+        self.follows_recut = true;
         if entry.shard_id != shard_id || from < entry.start_height || through > entry.end_height {
             pass.defer();
             return Ok(None);
@@ -455,6 +463,16 @@ impl<'p, A: Copy> Facts<'p, A> {
         } else {
             None
         })
+    }
+
+    /// Notes a stored fact under the published revision `entry`.
+    fn saw(&mut self, entry: &Published) {
+        if self
+            .recut_from
+            .is_some_and(|from| entry.start_height >= from)
+        {
+            self.follows_recut = true;
+        }
     }
 
     /// Opens a commit under a declared revision on its first stored fact, if
@@ -896,8 +914,9 @@ impl ReferenceRecovery {
     /// that revision's own identity, which the wallet holds, and the renumbered
     /// shards and tail keep their sources. An undeclared change of sealed
     /// content never reaches the wallet: the sync refuses it, or the catalog
-    /// withdraws it. A ready pass over a map whose declarations name a revision
-    /// the store holds facts under records that map's re-cut epoch, so a
+    /// withdraws it. A ready pass over a re-cut map records its re-cut epoch
+    /// once the store holds a fact under a revision the re-cut superseded, or
+    /// under one the map publishes at or above the re-cut's first height, so a
     /// re-cut only rolls forward; undoing one takes another at a higher epoch.
     pub fn recover<A, C, F, T>(
         &mut self,
@@ -1175,7 +1194,8 @@ impl ReferenceRecovery {
         if off_branch {
             pass.defer();
         }
-        let mut facts = Facts::new(&published, &declared, context);
+        let recut_from = map.recuts.last().map(|recut| recut.from_height);
+        let mut facts = Facts::new(&published, &declared, recut_from, context);
         // Highest first, so a withdrawal reports the newest contradiction.
         for (published, anchor) in relevant.into_iter().rev() {
             if pass.classify(published)? {
@@ -1274,6 +1294,7 @@ impl ReferenceRecovery {
                 pass.defer();
                 continue;
             };
+            facts.saw(entry);
             let from = entry
                 .start_height
                 .max(u64::from(u32::from(address.required_from)));
@@ -1298,7 +1319,7 @@ impl ReferenceRecovery {
             });
             opened.insert(id);
         }
-        let holds_declared = facts.holds_declared;
+        let follows_recut = facts.follows_recut;
         let mut commits = facts.commits;
         for page in &watch.pending_pages {
             for commit in commits.values_mut() {
@@ -1374,10 +1395,11 @@ impl ReferenceRecovery {
         let stranded =
             complete_stranded(watch, context, &published, &declared, &mut commits, chain)?;
         pass.export(commits.iter().map(|commit| &commit.revision))?;
-        // Only a ready pass whose map re-cut something the store holds moves
-        // the epoch: a refused or irrelevant declaration cannot hold honest
-        // maps behind.
-        pass.finish(&digests, holds_declared.then(|| map.recut_epoch()))?;
+        // Only a ready pass over a re-cut the store followed moves the epoch:
+        // its facts name a revision the re-cut superseded or one only the
+        // re-cut map publishes. A refused declaration, or one naming nothing
+        // the store read, cannot hold other maps behind.
+        pass.finish(&digests, follows_recut.then(|| map.recut_epoch()))?;
         commits.extend(stranded);
         self.ready(commits, replaced, progress)
     }
@@ -4686,7 +4708,7 @@ mod tests {
             .map(|entry| Published::of(&adapter.binding, &set, entry).unwrap())
             .collect();
         let chain = StaticChain::from_map(&replaced);
-        let mut facts = Facts::new(&published, &[], watch().context().unwrap());
+        let mut facts = Facts::new(&published, &[], None, watch().context().unwrap());
         facts.open(&published[0], first.commits[0].anchor);
         let mut stale = catalog::Pass::begin(&mut adapter.catalog, &published, &[]).unwrap();
         let range = (sealed.start_height, sealed.end_height);
@@ -5979,16 +6001,27 @@ mod tests {
             BatchState::Withdrawn(WithdrawnCause::Equivocation)
         );
         assert_eq!(catalog::recut_epoch(&adapter.catalog).unwrap(), 0);
-        // Nor does a ready map whose declarations name nothing the store holds.
+        // Nor does a ready map whose re-cut starts above everything the store
+        // read and supersedes nothing it holds: such a map rewrites nothing the
+        // store holds, so a store that read only below it needs no guard.
         let other = tempfile::tempdir().unwrap();
-        let mut plain = covering(&other.path().join("companion.sqlite"), &before);
+        let script = address_script(watch.addresses[0].address);
+        let mut plain = seeded(&other, &script, before.start_height);
+        for entry in &before.shards[..3] {
+            let end = (entry.end_height, entry.terminal_block_hash.as_str());
+            plain
+                .store
+                .commit_shard(covered(entry, &entry.manifest_digest, end, &script, vec![]))
+                .unwrap();
+        }
+        let s3 = &before.shards[3];
+        let mut ghost = superseded(&recut_entry(9, WIDE, (1, 2), (0, true), 0x99));
+        ghost.start_height = s3.start_height;
+        ghost.end_height = s3.end_height;
         let mut idle = before.clone();
-        let mut ghost = superseded(&recut_entry(9, NARROW, (1, 2), (0, true), 0x99));
-        ghost.start_height = before.shards[0].start_height;
-        ghost.end_height = before.shards[0].end_height;
         idle.recuts = vec![Recut {
             epoch: u32::MAX,
-            from_height: before.shards[0].start_height,
+            from_height: s3.start_height,
             superseded: vec![ghost],
         }];
         idle.check_shape().unwrap();
@@ -6007,6 +6040,40 @@ mod tests {
             .unwrap();
         assert_eq!(synced.state, BatchState::Ready);
         assert_eq!(filters.filters, 0);
+    }
+
+    #[test]
+    fn a_companion_that_read_the_re_cut_map_holds_older_maps_behind() {
+        let (before, after) = recut_pair();
+        let (watch, chain) = (watching(&after), accepting(&[&before, &after]));
+        // A companion recreated after the re-cut, or one born above it, holds
+        // nothing the re-cut superseded, only what the re-cut map publishes.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &after);
+        let first = recut_pass(&mut adapter, &watch, &after, &chain);
+        assert_eq!(first.state, BatchState::Ready);
+        assert_eq!(catalog::recut_epoch(&adapter.catalog).unwrap(), 1);
+        adapter.acknowledge_applied(&first).unwrap();
+        let held = (store_rows(&adapter), catalog_rows(&adapter));
+
+        // A replica still serving the map from before the re-cut would rewrite
+        // what the store read. The pass waits for it before the sync, and
+        // touches nothing.
+        let mut filters = CountingFilters::serving(serde_json::to_vec(&before).unwrap());
+        let mut shards = CountingShards::serving(SCHEMA);
+        let lagging = adapter
+            .recover(&watch, &chain, &mut filters, &mut shards)
+            .unwrap();
+        assert_eq!(lagging.state, BatchState::Pending);
+        assert_eq!(
+            lagging.progress,
+            Progress {
+                covered_through: 0,
+                outcome: Outcome::Behind,
+            }
+        );
+        assert_eq!((filters.maps, filters.filters, shards.calls()), (1, 0, 1));
+        assert_eq!((store_rows(&adapter), catalog_rows(&adapter)), held);
     }
 
     #[test]
