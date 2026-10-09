@@ -12,10 +12,13 @@ keywords = ["zcash", "privacy", "pir"]
 
 [features]
 default = []
+# Applying a batch to a SQLite wallet and acknowledging it in one call.
+sqlite = ["wallet", "dep:zcash_client_sqlite"]
 wallet = ["dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol", "dep:transparent", "dep:transparent-wallet", "dep:transparent-wallet-store", "dep:transparent-events", "dep:transparent-filter", "dep:transparent-txid-client", "dep:rusqlite", "dep:hex", "dep:serde_json"]
 
 [dependencies]
 zcash_client_backend = { workspace = true, optional = true, features = ["transparent-inputs"] }
+zcash_client_sqlite = { version = "0.1.0-rc7", path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", optional = true, features = ["transparent-inputs"] }
 zcash_primitives = { workspace = true, optional = true }
 zcash_protocol = { workspace = true, optional = true }
 transparent = { workspace = true, optional = true }
@@ -56,4 +59,4 @@ required-features = ["wallet"]
 
 [[test]]
 name = "private_recovery"
-required-features = ["wallet"]
+required-features = ["sqlite"]

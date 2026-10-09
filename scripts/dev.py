@@ -23,6 +23,7 @@ CONFIGS = {
     "enhance-wallet": (["-p", "zakura-pir-enhance"], ["wallet"]),
     "enhance": (["-p", "zakura-pir-enhance"], []),
     "transparent-pir": (["-p", "zakura-pir-transparent"], ["wallet"]),
+    "transparent-pir-sqlite": (["-p", "zakura-pir-transparent"], ["sqlite"]),
 }
 VERIFY = ("zakura-graph", "wallet-lib-modes", "vendor-ancestry")
 

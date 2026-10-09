@@ -68,8 +68,9 @@ pub enum BatchState {
     /// the wallet qualifies it, so `Ready` assumes the commits are applied
     /// through the trusted operation. The predecessors are the batch's
     /// [`RecoveryBatch::retired_revisions`](crate::RecoveryBatch::retired_revisions),
-    /// and such a batch is acknowledged only by
-    /// [`ReferenceRecovery::acknowledge_reconciled`](crate::ReferenceRecovery::acknowledge_reconciled).
+    /// and such a batch is acknowledged only by applying its commits through
+    /// the trusted operation with `ReferenceRecovery::apply_and_acknowledge`
+    /// (feature `sqlite`).
     Ready,
     /// The publication or this companion's retrieval is behind what the
     /// companion recorded: a lagging replica (one serving a shard unsealed below

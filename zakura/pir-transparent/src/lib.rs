@@ -1,4 +1,6 @@
 //! Bounded transparent PIR retrieval. Candidate evidence never grants financial authority.
+#[cfg(feature = "sqlite")]
+mod apply;
 #[cfg(feature = "wallet")]
 mod catalog;
 #[cfg(feature = "wallet")]
@@ -7,6 +9,8 @@ mod chain;
 mod display;
 #[cfg(feature = "wallet")]
 mod recovery;
+#[cfg(feature = "sqlite")]
+pub use apply::{Applied, ApplyError, ApplyFailure, ApplyStats, Trust};
 #[cfg(feature = "wallet")]
 pub use catalog::{BatchState, WithdrawnCause};
 #[cfg(feature = "wallet")]

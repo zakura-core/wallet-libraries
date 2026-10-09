@@ -253,19 +253,25 @@ adapter withdraws no wallet evidence. The caller resolves them by applying the
 batch's commits through the trusted operation, which qualifies each successor
 and supersedes the retired provisional evidence in the same wallet transaction.
 
-Both acknowledgments refuse a batch that is not `Ready` and a stale token, and
-otherwise clear the export mark on resolved rows and prune; a batch's commits
-were marked exported when it was returned. `acknowledge_applied` acknowledges
-only a batch with no retirements and refuses any batch with retirements; a
-`Ready` batch with retirements always carries their successor commits.
-`acknowledge_reconciled` acknowledges a batch with retirements. Calling it
-confirms that trusted reconciliation and every commit succeeded; the adapter
-cannot verify that separate wallet transaction. Either method acknowledges a
-`Ready` batch without retirements. Until acknowledgment the notifications stay
-durable, so after a failure or a crash the next pass reports them again, with
-any retirement found since. Only a publication change forgets them
-unacknowledged: those of sources the new map no longer names, which no
-successor can resolve; the wallet keeps their provisional evidence.
+Acknowledgment refuses a batch that is not `Ready` and a stale token, and
+otherwise clears the export mark on resolved rows and prunes; a batch's commits
+were marked exported when it was returned. The batch is opaque, so its commits
+cannot be edited or dropped before acknowledgment. `acknowledge_applied`
+acknowledges only a batch with no retirements. With feature `sqlite`,
+`apply_and_acknowledge` consumes the batch, applies every commit to a SQLite
+wallet with the caller's explicit trust, and acknowledges it only once every
+wallet transaction committed; only trusted commits, which qualify the
+successors, acknowledge a batch with retirements. It refuses a wallet
+connection inside a caller's SQL transaction, so that an integrity rejection's
+quarantine commits with its own transaction before it is reported. A stale,
+refused or failed commit, a policy change, a failed acknowledgment or a crash
+leaves the batch unacknowledged and reports the committed prefix; the wallet
+and companion databases are never treated as atomic. Until acknowledgment the
+notifications stay durable, so after a failure or a crash the next pass reports
+them again, with any retirement found since, and replaying the applied prefix
+changes nothing. Only a publication change forgets them unacknowledged: those
+of sources the new map no longer names, which no successor can resolve; the
+wallet keeps their provisional evidence.
 
 The trusted operation requires `PrivateRequired` and is used only for the
 trusted origin. Without it a batch with retirements is never acknowledged, and

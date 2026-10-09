@@ -24,15 +24,16 @@ use transparent_events::{ReceiveEvent, SpendEvent, TransparentEvent, Txid};
 use transparent_filter::{ScriptBytes, SealParameters, ShardMap};
 use transparent_wallet::http::{HttpFilterSource, HttpOptions, HttpShardTransport};
 use zakura_pir_transparent::{
-    BatchState, Outcome, RecoveryBatch, RecoveryConfig, RecoveryError, ReferenceRecovery,
-    WalletChain, WithdrawnCause,
+    ApplyError, BatchState, Outcome, Progress, RecoveryBatch, RecoveryConfig, RecoveryError,
+    ReferenceRecovery, Trust, WalletChain, WithdrawnCause,
 };
 use zcash_client_backend::data_api::{
     Account as _, CoinbaseFilter, InputSource as _, WalletRead as _,
     chain::ChainState,
     testing::{InitialChainState, TestBuilder, TestState},
     transparent_ledger::{
-        AccountLifecycle, RecoveryRevision, TransparentAuthority,
+        AccountLifecycle, CommitRejection, RecoveryRevision, StaleCommit, TransparentAuthority,
+        TransparentLedgerCommit,
         TransparentLedgerMode::{self, PrivateRequired, PrivateShadow},
         TransparentLedgerRead as _, TransparentLedgerWrite as _, TransparentWatchSet, WatchOrigin,
     },
@@ -179,10 +180,31 @@ fn tail(end: u64, revision: u32, events: Vec<(ScriptBytes, TransparentEvent)>) -
     }
 }
 
+/// What a pass's batch held, read before it was settled.
+struct Seen {
+    state: BatchState,
+    progress: Progress,
+    commits: Vec<TransparentLedgerCommit<AccountUuid>>,
+    retired: Vec<RecoveryRevision>,
+}
+
+impl Seen {
+    fn of(batch: &RecoveryBatch<AccountUuid>) -> Self {
+        Self {
+            state: batch.state(),
+            progress: batch.progress(),
+            commits: batch.commits().to_vec(),
+            retired: batch.retired_revisions().to_vec(),
+        }
+    }
+}
+
 /// A pass's batch, and whether applying its commits grew the account's window.
 struct Pass {
-    batch: RecoveryBatch<AccountUuid>,
+    batch: Seen,
     grew: bool,
+    /// The batch itself when the pass left it unsettled.
+    unsettled: Option<RecoveryBatch<AccountUuid>>,
 }
 
 /// A wallet with one account, the in-process service it recovers from, and the
@@ -198,7 +220,7 @@ struct Fixture {
     companion: Option<ReferenceRecovery>,
     /// The public key hash of every address any watch set named.
     watched: BTreeSet<[u8; 20]>,
-    /// Retired revisions acknowledged through `acknowledge_reconciled`.
+    /// Retired revisions acknowledged through trusted `apply_and_acknowledge`.
     reconciled: Vec<RecoveryRevision>,
 }
 
@@ -337,11 +359,9 @@ impl Fixture {
             .1
     }
 
-    /// One pass as a coordinator runs it: the current watch set, the wallet's
-    /// chain through its target, fresh HTTP transports aimed at the current
-    /// server, and, when the batch is ready, every commit applied (through the
-    /// trusted operation under `PrivateRequired`) before acknowledging it.
-    fn pass(&mut self) -> Result<Pass, RecoveryError> {
+    /// One pass, unsettled: the current watch set, the wallet's chain through
+    /// its target, and fresh HTTP transports aimed at the current server.
+    fn recover(&mut self) -> Result<RecoveryBatch<AccountUuid>, RecoveryError> {
         let watch = self.watch();
         self.watched.extend(
             watch
@@ -357,36 +377,71 @@ impl Fixture {
         let mut filters = HttpFilterSource::new(url, &options).unwrap();
         let mut transport = HttpShardTransport::new(url, &options).unwrap();
         let companion = self.companion.as_mut().expect("an open companion");
-        let batch = {
-            let chain = WalletChain::new(self.st.wallet().db(), watch.target.unwrap());
-            companion.recover(&watch, &chain, &mut filters, &mut transport)?
-        };
-        let mut grew = false;
-        if batch.state == BatchState::Ready {
-            let db = self.st.wallet_mut().db_mut();
-            let trusted = db.applied_transparent_policy().unwrap().mode == PrivateRequired;
-            for commit in &batch.commits {
-                let applied = if trusted {
-                    db.qualify_and_apply_transparent_ledger_commit(commit.clone())
-                } else {
-                    db.apply_transparent_ledger_commit(commit.clone())
-                };
-                grew |= applied
-                    .expect("the wallet applies every commit")
-                    .window_grew;
-            }
-            if batch.retired_revisions().is_empty() {
-                companion.acknowledge_applied(&batch).unwrap();
-            } else if trusted {
-                // Retirements are notifications: plain acknowledgement refuses
-                // them, and only the trusted operation above resolves them.
-                assert!(companion.acknowledge_applied(&batch).is_err());
-                self.reconciled
-                    .extend(batch.retired_revisions().iter().cloned());
-                companion.acknowledge_reconciled(&batch).unwrap();
-            }
+        let chain = WalletChain::new(self.st.wallet().db(), watch.target.unwrap());
+        companion.recover(&watch, &chain, &mut filters, &mut transport)
+    }
+
+    /// Applies `batch` to the wallet and acknowledges it with `trust`.
+    fn settle(
+        &mut self,
+        batch: RecoveryBatch<AccountUuid>,
+        trust: Trust,
+    ) -> Result<zakura_pir_transparent::Applied, zakura_pir_transparent::ApplyFailure> {
+        let companion = self.companion.as_mut().expect("an open companion");
+        companion.apply_and_acknowledge(batch, self.st.wallet_mut().db_mut(), trust)
+    }
+
+    /// The trust a coordinator states for this fixture's trusted origin: trusted
+    /// under `PrivateRequired`, observed otherwise.
+    fn trust(&self) -> Trust {
+        if self
+            .st
+            .wallet()
+            .db()
+            .applied_transparent_policy()
+            .unwrap()
+            .mode
+            == PrivateRequired
+        {
+            Trust::Trusted
+        } else {
+            Trust::Observed
         }
-        Ok(Pass { batch, grew })
+    }
+
+    /// One pass as a coordinator runs it: a ready batch is applied and
+    /// acknowledged through `apply_and_acknowledge`, trusted under
+    /// `PrivateRequired`. Under a weaker policy a batch with retirements is
+    /// left unsettled: only trusted reconciliation resolves them.
+    fn pass(&mut self) -> Result<Pass, RecoveryError> {
+        let batch = self.recover()?;
+        let seen = Seen::of(&batch);
+        if seen.state != BatchState::Ready {
+            return Ok(Pass {
+                batch: seen,
+                grew: false,
+                unsettled: Some(batch),
+            });
+        }
+        let trust = self.trust();
+        if trust == Trust::Observed && !seen.retired.is_empty() {
+            return Ok(Pass {
+                batch: seen,
+                grew: false,
+                unsettled: Some(batch),
+            });
+        }
+        let applied = self
+            .settle(batch, trust)
+            .expect("the wallet applies every commit");
+        assert_eq!(applied.stats.applied, seen.commits.len());
+        assert_eq!(applied.retired, seen.retired.len());
+        self.reconciled.extend(seen.retired.iter().cloned());
+        Ok(Pass {
+            grew: applied.stats.window_grew,
+            batch: seen,
+            unsettled: None,
+        })
     }
 
     /// Passes until the account's window stops growing and no budget stops a
@@ -664,7 +719,7 @@ fn lifecycle(owned: &Owned, tail_end: u64, tail_revision: u32, changed: bool) ->
 }
 
 /// The unsealed revision among a batch's commits.
-fn tail_revision(batch: &RecoveryBatch<AccountUuid>) -> RecoveryRevision {
+fn tail_revision(batch: &Seen) -> RecoveryRevision {
     let mut unsealed = batch
         .commits
         .iter()
@@ -895,7 +950,7 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
         f.companion
             .as_mut()
             .unwrap()
-            .acknowledge_applied(&changed.batch),
+            .acknowledge_applied(changed.unsettled.as_ref().unwrap()),
         Err(RecoveryError::Invalid(_))
     ));
     assert_eq!(f.dump(true), wallet);
@@ -1425,4 +1480,251 @@ fn private_details_end_to_end() {
     lookup_all(&mut f, &mut client, &mut transport, &work, at);
     assert_eq!(public_fetches.get(), 1);
     assert_eq!(transport.sent.len(), sent);
+}
+
+/// Installs a trigger on the wallet's own connection that runs `action` once,
+/// inside the transaction of the first commit that registers a new revision.
+fn once_after_new_revision(f: &Fixture, action: &str) {
+    f.st.wallet()
+        .conn()
+        .execute_batch(&format!(
+            "CREATE TEMP TABLE IF NOT EXISTS fired (x);
+             DELETE FROM temp.fired;
+             CREATE TEMP TRIGGER inject AFTER INSERT ON main.tpir_revisions
+             WHEN NOT EXISTS (SELECT 1 FROM temp.fired)
+             BEGIN
+                 INSERT INTO fired VALUES (1);
+                 {action};
+             END;"
+        ))
+        .unwrap();
+}
+
+fn remove_injection(f: &Fixture) {
+    f.st.wallet()
+        .conn()
+        .execute_batch("DROP TRIGGER IF EXISTS temp.inject")
+        .unwrap();
+}
+
+/// A wallet under `PrivateRequired` with the lifecycle's first publication
+/// served, and nothing recovered yet.
+fn private_fixture() -> (Fixture, Owned) {
+    let birthday = H0 + 250;
+    let mut f = Fixture::new(birthday, H0 + 649);
+    let owned = Owned {
+        a0: f.derived(TransparentKeyScope::EXTERNAL, 0),
+        a1: f.derived(TransparentKeyScope::EXTERNAL, 1),
+        last: f.last_external(),
+    };
+    f.publish(&lifecycle(&owned, H0 + 649, 0, false), SEAL);
+    f.set_policy(PrivateRequired);
+    (f, owned)
+}
+
+#[test]
+fn apply_and_acknowledge_keeps_the_committed_prefix_and_replays_idempotently() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, _) = private_fixture();
+
+    // Another connection changes the policy while the batch applies: the first
+    // commit's transaction stays committed, the next is refused, and nothing is
+    // acknowledged.
+    let batch = f.recover().unwrap();
+    let commits = batch.commits().len();
+    assert!(commits >= 3, "the publication has three shards: {commits}");
+    once_after_new_revision(
+        &f,
+        "UPDATE tpir_meta SET policy_generation = policy_generation + 1",
+    );
+    let failure = f.settle(batch, Trust::Trusted).unwrap_err();
+    remove_injection(&f);
+    assert!(
+        matches!(failure.error, ApplyError::PolicyChanged),
+        "{:?}",
+        failure.error
+    );
+    assert_eq!(failure.stats.applied, 1);
+    assert_eq!(failure.stats.qualified, 1);
+    assert!(f.st.wallet().db().is_autocommit());
+    assert_eq!(f.count("tpir_qualified_revisions"), 1);
+
+    // A crash before acknowledgment: the reopened companion exports the same
+    // revisions. A stale middle commit then stops the replay after the commit
+    // that registered the next revision.
+    f.open();
+    let batch = f.recover().unwrap();
+    assert_eq!(batch.state(), BatchState::Ready);
+    assert_eq!(batch.commits().len(), commits);
+    once_after_new_revision(
+        &f,
+        "INSERT INTO tpir_active_accounts (account_id) SELECT id FROM main.accounts",
+    );
+    let failure = f.settle(batch, Trust::Trusted).unwrap_err();
+    remove_injection(&f);
+    f.st.wallet()
+        .conn()
+        .execute("DELETE FROM tpir_active_accounts", [])
+        .unwrap();
+    assert!(
+        matches!(
+            failure.error,
+            ApplyError::Rejected {
+                index: 2,
+                rejection: CommitRejection::Stale(StaleCommit::LifecycleChanged),
+            }
+        ),
+        "{:?}",
+        failure.error
+    );
+    assert_eq!(failure.stats.applied, 2);
+    assert_eq!(f.count("tpir_qualified_revisions"), 2);
+
+    // A wallet transaction that fails to commit stops the batch at that commit.
+    let batch = f.recover().unwrap();
+    let commits_seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let seen = commits_seen.clone();
+        f.st.wallet().conn().commit_hook(Some(move || {
+            // Roll back the second commit's transaction.
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+        }));
+    }
+    let failure = f.settle(batch, Trust::Trusted).unwrap_err();
+    f.st.wallet().conn().commit_hook(None::<fn() -> bool>);
+    assert!(
+        matches!(failure.error, ApplyError::Wallet(_)),
+        "{:?}",
+        failure.error
+    );
+    assert_eq!(failure.stats.applied, 1);
+
+    // The next pass applies every commit and acknowledges; replaying it again
+    // changes nothing.
+    let batch = f.recover().unwrap();
+    let applied = f.settle(batch, Trust::Trusted).unwrap();
+    assert_eq!(applied.stats.applied, commits);
+    assert_eq!(applied.stats.qualified, commits);
+    assert_eq!(f.count("tpir_qualified_revisions"), 3);
+    let settled = f.dump(true);
+    let batch = f.recover().unwrap();
+    let replayed = f.settle(batch, Trust::Trusted).unwrap();
+    assert!(!replayed.stats.window_grew);
+    assert_eq!(f.dump(true), settled);
+    // Nothing above promoted the account or granted authority.
+    assert_eq!(f.watch().lifecycle, AccountLifecycle::Candidate);
+    assert_ne!(f.authority(), TransparentAuthority::Private);
+}
+
+#[test]
+fn retirements_are_acknowledged_only_after_trusted_reconciliation_commits() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, owned) = private_fixture();
+    let first = f.drive();
+    let first_tail = tail_revision(&first.batch);
+    f.scan_to(H0 + 669);
+    f.publish(&lifecycle(&owned, H0 + 669, 1, false), SEAL);
+
+    // Observed trust refuses the batch before applying anything.
+    let before = f.dump(true);
+    let batch = f.recover().unwrap();
+    assert_eq!(batch.retired_revisions(), &[first_tail.clone()][..]);
+    let failure = f.settle(batch, Trust::Observed).unwrap_err();
+    assert!(matches!(failure.error, ApplyError::Unreconciled));
+    assert_eq!(failure.stats, Default::default());
+    assert_eq!(f.dump(true), before);
+
+    // Every commit applies, but the companion cannot record the acknowledgment.
+    let batch = f.recover().unwrap();
+    assert_eq!(batch.retired_revisions(), &[first_tail.clone()][..]);
+    let commits = batch.commits().len();
+    let companion = Connection::open(f.companion_path()).unwrap();
+    companion
+        .execute_batch(
+            "CREATE TRIGGER refuse_ack BEFORE UPDATE OF exported ON pir_bridge_catalog
+             BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+        )
+        .unwrap();
+    let failure = f.settle(batch, Trust::Trusted).unwrap_err();
+    companion.execute_batch("DROP TRIGGER refuse_ack").unwrap();
+    assert!(
+        matches!(failure.error, ApplyError::Acknowledge(_)),
+        "{:?}",
+        failure.error
+    );
+    assert_eq!(failure.stats.applied, commits);
+    // The wallet's trusted operation withdrew the replaced tail's coverage.
+    assert_eq!(f.coverage_of(&first_tail), 0);
+    let reconciled = f.dump(true);
+
+    // Unacknowledged, the retirement is listed again; the replay changes
+    // nothing in the wallet and is acknowledged.
+    let batch = f.recover().unwrap();
+    assert_eq!(batch.retired_revisions(), &[first_tail.clone()][..]);
+    let applied = f.settle(batch, Trust::Trusted).unwrap();
+    assert_eq!(applied.retired, 1);
+    assert_eq!(f.dump(true), reconciled);
+    let batch = f.recover().unwrap();
+    assert!(batch.retired_revisions().is_empty());
+}
+
+#[test]
+fn an_integrity_rejection_quarantines_durably_without_acknowledgment() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let birthday = H0 + 250;
+    let mut f = Fixture::new(birthday, H0 + 649);
+    let owned = Owned {
+        a0: f.derived(TransparentKeyScope::EXTERNAL, 0),
+        a1: f.derived(TransparentKeyScope::EXTERNAL, 1),
+        last: f.last_external(),
+    };
+    f.publish(&lifecycle(&owned, H0 + 649, 0, false), SEAL);
+    // Shadow recovery observes the publication.
+    f.drive();
+    // The wallet's stored receives now disagree with what the source exports.
+    f.st.wallet()
+        .conn()
+        .execute(
+            "UPDATE tpir_receive_events SET value_zat = value_zat + 1",
+            [],
+        )
+        .unwrap();
+    let batch = f.recover().unwrap();
+    assert!(
+        batch
+            .commits()
+            .iter()
+            .any(|commit| !commit.receives.is_empty())
+    );
+    let failure = f.settle(batch, Trust::Observed).unwrap_err();
+    assert!(
+        matches!(
+            failure.error,
+            ApplyError::Rejected {
+                rejection: CommitRejection::Integrity(_),
+                ..
+            }
+        ),
+        "{:?}",
+        failure.error
+    );
+    // The quarantine committed with its commit's own transaction.
+    assert!(f.st.wallet().db().is_autocommit());
+    assert!(f.count("tpir_quarantined_sources") >= 1);
+    assert_eq!(f.count("tpir_quarantined_accounts"), 1);
+    // A later batch is refused by the durable quarantine.
+    let batch = f.recover().unwrap();
+    let failure = f.settle(batch, Trust::Observed).unwrap_err();
+    assert!(
+        matches!(
+            failure.error,
+            ApplyError::Rejected {
+                index: 0,
+                rejection: CommitRejection::Refused(_),
+            }
+        ),
+        "{:?}",
+        failure.error
+    );
+    assert_eq!(failure.stats.applied, 0);
 }
