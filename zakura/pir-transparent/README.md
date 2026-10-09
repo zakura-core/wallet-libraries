@@ -28,8 +28,8 @@ under caller-chosen account names. `open` prunes companions of other origins
 or schemas and of accounts the wallet no longer has, then holds an operating
 system lock on the companion until the returned `Companion` drops, so no
 other handle, in this process or another, opens or deletes it meanwhile.
-`remove` and `retain` delete an account's companions, and those of deleted
-accounts, only under their locks.
+`remove`, `clear` and `retain` delete an account's companions, every
+companion, and those of deleted accounts, only under their locks.
 
 The adapter makes no network requests of its own and has no HTTP client in its
 normal dependency graph. The caller's transports decide routing, timeouts,
