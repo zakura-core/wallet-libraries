@@ -43,8 +43,8 @@
   tag binds the origin and `SCHEMA`), prunes the account's companions for other origins and
   those of accounts the caller no longer has, and holds an operating system lock on the
   companion's lock file for the returned `Companion`'s life; `remove` deletes an account's
-  companions under their locks; `retain` sweeps those of deleted accounts, listing before it
-  reads the accounts.
+  companions under their locks; `clear` deletes every companion, failing on one still held;
+  `retain` sweeps those of deleted accounts, listing before it reads the accounts.
 - `Progress::retry` (`Retry::{Complete, More, After, Stalled}`, waiting `Retry::BEHIND` or
   `Retry::OVERLOADED`) and `Progress::behind`; `ApplyFailure::action` (`ApplyAction::{Refresh,
   Reconcile, Skip, NotEnabled, Fail}`), so callers act on the outcome contract without

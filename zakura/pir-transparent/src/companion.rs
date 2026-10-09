@@ -139,6 +139,20 @@ impl CompanionDir {
         Ok(())
     }
 
+    /// Deletes every companion, waiting at most `wait` in all for those other
+    /// handles hold, and fails with [`io::ErrorKind::WouldBlock`] on the first
+    /// still held, leaving it and those after it. A missing directory has
+    /// none.
+    pub fn clear(&self, wait: Duration) -> io::Result<()> {
+        let deadline = Instant::now() + wait;
+        for (_, base) in self.companions_or_none()? {
+            let _lock = lock(&base, &|| Instant::now() < deadline)?
+                .ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock, "companion in use"))?;
+            remove_files(&base)?;
+        }
+        Ok(())
+    }
+
     /// Deletes the companions of accounts that `accounts` does not return,
     /// skipping any another handle holds.
     ///
@@ -456,6 +470,26 @@ mod tests {
         let missing = CompanionDir::new(root.path().join("missing.tpir"));
         missing.remove(A, Duration::ZERO).unwrap();
         missing.retain(|| panic!("no companion to sweep")).unwrap();
+    }
+
+    #[test]
+    fn clearing_deletes_every_companion_once_none_is_held() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = CompanionDir::new(root.path().join("wallet.db.tpir"));
+        drop(open(&dir, A, ORIGIN, &[A, B]));
+        let held = open(&dir, B, OTHER, &[A, B]);
+        std::fs::write(dir.path().join("notes.txt"), b"kept").unwrap();
+        assert_eq!(
+            dir.clear(Duration::from_millis(20)).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(dir.companion_path(B, OTHER).exists());
+        drop(held);
+        dir.clear(Duration::ZERO).unwrap();
+        assert_eq!(files(&dir), ["notes.txt"]);
+        CompanionDir::new(root.path().join("missing.tpir"))
+            .clear(Duration::ZERO)
+            .unwrap();
     }
 
     #[test]
