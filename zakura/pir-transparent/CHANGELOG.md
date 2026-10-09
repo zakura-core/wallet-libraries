@@ -21,15 +21,17 @@
   wallet evidence, and stay recorded in the companion until acknowledged, or
   until `RecoveryError::PublicationChanged` drops their source, after which no
   successor can resolve them.
-- `ReferenceRecovery::acknowledge_reconciled`, the caller's confirmation that
-  it applied a `Ready` batch's commits through the wallet's trusted operation
-  (`qualify_and_apply_transparent_ledger_commit`), which resolves the batch's
-  retired revisions; the adapter cannot verify that wallet transaction.
-  `acknowledge_applied` refuses any batch with retirements. Both refuse a
-  `Pending` or `Withdrawn` batch and the receipt of an earlier pass. The
-  trusted operation requires `PrivateRequired`; without it, a batch with
-  retirements is never acknowledged, and each later pass that sees a new
-  revision of a retired source lists one more.
+- Optional `sqlite` integration: `ReferenceRecovery::apply_and_acknowledge`
+  consumes an opaque batch and an owned SQLite wallet handle with an explicit
+  `Trust` choice. It rejects an enclosing SQL transaction, applies commits
+  using the wallet's durable transaction and quarantine rules, and acknowledges
+  only after all commits reach wallet storage under the captured policy
+  generation. Retirements require trusted reconciliation under
+  `PrivateRequired`. `ApplyResult` and `ApplyStats` report progress and the
+  committed prefix; `ApplyError` and `ApplyFailure` report typed failures and
+  preserve replay. No network request or spending authorization occurs here.
+  `acknowledge_applied` remains available for batches without retirements and
+  rejects non-ready batches and receipts from earlier passes.
 - `Progress { covered_through, outcome }` and `Outcome { Complete, Behind,
   More, Overloaded, Stalled }`, the adapter's own report of a pass.
 - Re-exports of `ChainView`, `FilterSource`, `ShardTransport`, `ShardRequest`,
@@ -40,7 +42,7 @@
   target and is `Unknown` above it or where the wallet holds no block.
 - `BatchState { Ready, Pending, Withdrawn(WithdrawnCause) }`,
   `WithdrawnCause { Regression, Equivocation, ChangedSealed, Retired }` and
-  `RecoveryBatch::state`. Commits are returned, and a batch can be
+  `RecoveryBatch::state()`. Commits are returned, and a batch can be
   acknowledged, only when the state is `Ready`.
 - `RecoveryError::PublicationChanged`, raised only by a check before the sync,
   for a shard map whose set identity no longer continues the one the
@@ -72,7 +74,9 @@
   an identity label and is never dialed. The companion binding now covers the
   source, account binding, origin and `SCHEMA`, so companions created before
   this change are refused at open and must be recreated.
-- `RecoveryBatch::progress` replaces `report`. The companion classifies the
+- Recovery batches expose `commits()`, `state()` and `progress()` through
+  accessors instead of mutable public fields. `progress()` replaces `report`.
+  The companion classifies the
   exported revisions a map no longer publishes itself, and a batch lists only
   those its commits resolve; their export intents stay in the companion until
   trusted reconciliation is acknowledged or a publication change drops their
@@ -125,6 +129,8 @@
 
 ### Removed
 
+- Public `acknowledge_reconciled`: callers cannot assert trusted reconciliation
+  with a boolean or bypass the SQLite integration's apply/acknowledge ordering.
 - `transparent-shard-v10` support.
 - `RecoveryConfig::{schema, timeout, response_bytes}`, the `observer`
   argument of `recover`, and the adapter's fixed HTTP user agent.
