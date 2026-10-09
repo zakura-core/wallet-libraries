@@ -1149,6 +1149,9 @@ fn recovered_before_recut() -> (
 ) {
     let mut f = Fixture::new(H0 + 100, RECUT_TIP);
     f.set_policy(PrivateRequired);
+    // Its passes qualify their revisions, so the account can be promoted and a
+    // re-cut's retired tail is reconciled through the trusted operation.
+    f.trust_service();
     let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
     let map = f.publish(&before_recut(a0), SEAL);
     let first = f.drive();
@@ -1193,10 +1196,7 @@ fn a_declared_re_cut_keeps_the_wallets_history() {
     let new_tail = tail_revision(&recut_pass.batch);
     assert_eq!(new_tail.source, old_tail.source);
     assert_eq!(new_tail.lineage, old_tail.lineage + 1);
-    assert_eq!(
-        recut_pass.batch.retired,
-        vec![old_tail.clone()]
-    );
+    assert_eq!(recut_pass.batch.retired, vec![old_tail.clone()]);
     assert!(f.reconciled.contains(&old_tail));
     // Apart from the tail, the wallet is unchanged.
     assert_eq!(f.dump(false), history);
