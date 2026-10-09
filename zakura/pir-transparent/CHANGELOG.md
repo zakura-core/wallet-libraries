@@ -27,7 +27,7 @@
   using the wallet's durable transaction and quarantine rules, and acknowledges
   only after all commits reach wallet storage under the captured policy
   generation. Retirements require trusted reconciliation under
-  `PrivateRequired`. `ApplyResult` and `ApplyStats` report progress and the
+  `PrivateRequired`. `Applied` and `ApplyStats` report progress and the
   committed prefix; `ApplyError` and `ApplyFailure` report typed failures and
   preserve replay. No network request or spending authorization occurs here.
   `acknowledge_applied` remains available for batches without retirements and
