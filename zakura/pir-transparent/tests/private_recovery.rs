@@ -34,7 +34,7 @@ use zcash_client_backend::data_api::{
     transparent_ledger::{
         AccountLifecycle, CommitRejection, RecoveryRevision, StaleCommit, TransparentAuthority,
         TransparentLedgerCommit,
-        TransparentLedgerMode::{self, PrivateRequired, PrivateShadow},
+        TransparentLedgerMode::{self, PrivateRequired},
         TransparentLedgerRead as _, TransparentLedgerWrite as _, TransparentWatchSet, WatchOrigin,
     },
     wallet::{
@@ -222,11 +222,14 @@ struct Fixture {
     watched: BTreeSet<[u8; 20]>,
     /// Retired revisions acknowledged through trusted `apply_and_acknowledge`.
     reconciled: Vec<RecoveryRevision>,
+    /// Whether passes settle batches as trusted.
+    trusted: bool,
 }
 
 impl Fixture {
     /// A wallet whose only account was born at `birthday`, scanned through
-    /// `through`, under a durable `PrivateShadow` policy, and its companion.
+    /// `through`, under a durable `PrivateRequired` policy, and its companion.
+    /// Its passes do not trust the service until [`Fixture::trust_service`].
     fn new(birthday: u64, through: u64) -> Self {
         Self::with_factory(birthday, through, TestDbFactory::default())
     }
@@ -257,9 +260,10 @@ impl Fixture {
             companion: None,
             watched: BTreeSet::new(),
             reconciled: Vec::new(),
+            trusted: false,
         };
         fixture.scan_to(through);
-        fixture.set_policy(PrivateShadow);
+        fixture.set_policy(PrivateRequired);
         fixture.open();
         fixture
     }
@@ -395,18 +399,15 @@ impl Fixture {
         companion.apply_and_acknowledge(batch, self.st.wallet_mut().db_mut(), trust)
     }
 
-    /// The trust a coordinator states for this fixture's trusted origin: trusted
-    /// under `PrivateRequired`, observed otherwise.
+    /// Trusts the service from the next pass on: its commits qualify their
+    /// revisions.
+    fn trust_service(&mut self) {
+        self.trusted = true;
+    }
+
+    /// The trust a coordinator states for this fixture's origin.
     fn trust(&self) -> Trust {
-        if self
-            .st
-            .wallet()
-            .db()
-            .applied_transparent_policy()
-            .unwrap()
-            .mode
-            == PrivateRequired
-        {
+        if self.trusted {
             Trust::Trusted
         } else {
             Trust::Observed
@@ -414,9 +415,9 @@ impl Fixture {
     }
 
     /// One pass as a coordinator runs it: a ready batch is applied and
-    /// acknowledged through `apply_and_acknowledge`, trusted under
-    /// `PrivateRequired`. Under a weaker policy a batch with retirements is
-    /// left unsettled: only trusted reconciliation resolves them.
+    /// acknowledged through `apply_and_acknowledge`, trusted once the service is.
+    /// Until then a batch with retirements is left unsettled: only trusted
+    /// reconciliation resolves them.
     fn pass(&mut self) -> Result<Pass, RecoveryError> {
         let batch = self.recover()?;
         let seen = Seen::of(&batch);
@@ -751,14 +752,14 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
         outpoint(txid(5), 0),
     );
 
-    // Shadow: the commits are observed, never trusted, and the account stays an
-    // isolated candidate. Its last external address received, so its window
+    // Untrusted: the commits are observed, never trusted, and the account stays
+    // an isolated candidate. Its last external address received, so its window
     // grew and the new addresses were recovered too.
     f.publish(&lifecycle(&owned, t1, 0, false), SEAL);
-    let shadow = f.drive();
-    assert_eq!(shadow.batch.state, BatchState::Ready);
-    assert_eq!(shadow.batch.progress.outcome, Outcome::Complete);
-    assert_eq!(shadow.batch.progress.covered_through, t1);
+    let observed = f.drive();
+    assert_eq!(observed.batch.state, BatchState::Ready);
+    assert_eq!(observed.batch.progress.outcome, Outcome::Complete);
+    assert_eq!(observed.batch.progress.covered_through, t1);
     let candidate =
         f.st.wallet()
             .db()
@@ -796,9 +797,9 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     );
     assert!(catalog.iter().all(|row| row.2));
 
-    // PrivateRequired: the same publication, now trusted, qualifies every
-    // revision, and promotion grants private authority over exactly r2.
-    f.set_policy(PrivateRequired);
+    // Trusted: the same publication qualifies every revision, and promotion
+    // grants private authority over exactly r2.
+    f.trust_service();
     let trusted = f.drive();
     assert_eq!(trusted.batch.state, BatchState::Ready);
     let first_tail = tail_revision(&trusted.batch);
@@ -978,7 +979,7 @@ fn young_wallet_rolls_back_below_its_birthday() {
     let birthday = H0 + 610;
     let target = H0 + 640;
     let mut f = Fixture::new(birthday, target);
-    f.set_policy(PrivateRequired);
+    f.trust_service();
     let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
     let received = outpoint(txid(1), 0);
     let shards = |end: u64, revision: u32| {
@@ -1213,7 +1214,7 @@ fn private_details_end_to_end() {
     let birthday = H0 + 610;
     let target = H0 + 640;
     let mut f = Fixture::new(birthday, target);
-    f.set_policy(PrivateRequired);
+    f.trust_service();
     let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
     // r1 is published by the display service; r2 is mined above its recent shard.
     let (r1, r2) = (txid(1), txid(6));
@@ -1526,7 +1527,7 @@ fn private_fixture_with_factory(factory: TestDbFactory) -> (Fixture, Owned) {
         last: f.last_external(),
     };
     f.publish(&lifecycle(&owned, H0 + 649, 0, false), SEAL);
-    f.set_policy(PrivateRequired);
+    f.trust_service();
     (f, owned)
 }
 
@@ -1873,7 +1874,7 @@ fn an_integrity_rejection_quarantines_durably_without_acknowledgment() {
         last: f.last_external(),
     };
     f.publish(&lifecycle(&owned, H0 + 649, 0, false), SEAL);
-    // Shadow recovery observes the publication.
+    // Untrusted recovery observes the publication.
     f.drive();
     // The wallet's stored receives now disagree with what the source exports.
     f.st.wallet()

@@ -98,7 +98,7 @@ fn a_failed_trusted_replacement_rolls_back_qualification_and_all_accounts() {
 
 #[test]
 fn observed_higher_lineage_does_not_prevent_qualifying_an_older_observation() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let mut c = commit(&watch(&st, account));
     c.revision = revision(2, false);
     apply(&mut st, c).unwrap();
@@ -111,7 +111,7 @@ fn observed_higher_lineage_does_not_prevent_qualifying_an_older_observation() {
 
 #[test]
 fn supported_coverage_combines_across_sources_and_stays_account_scoped() {
-    let (mut st, accounts) = shadow_wallet_with(1);
+    let (mut st, accounts) = recovery_wallet_with(1);
     let ws = watch(&st, accounts[0]);
     let middle = ws.addresses[0].required_from + 3;
     let mut c = commit(&ws);

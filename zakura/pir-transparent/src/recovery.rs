@@ -202,9 +202,9 @@ impl<A> RecoveryBatch<A> {
     /// provisional evidence in the same wallet transaction. Only
     /// [`ReferenceRecovery::apply_and_acknowledge`] with trusted commits
     /// acknowledges such a batch; [`ReferenceRecovery::acknowledge_applied`]
-    /// refuses it. The trusted operation requires `PrivateRequired`, so a caller
-    /// that cannot use it, such as one under `PrivateShadow`, never acknowledges
-    /// a batch with retirements.
+    /// refuses it. The trusted operation qualifies whatever it is given, so a
+    /// caller that does not trust the batch's origin cannot use it and never
+    /// acknowledges a batch with retirements.
     ///
     /// Until the batch is acknowledged the companion keeps them: the next pass
     /// lists them again, with any retirement found since, or is
@@ -1900,7 +1900,7 @@ mod tests {
             chain::ChainState,
             testing::{InitialChainState, TestBuilder, TestRng},
             transparent_ledger::{
-                TransparentLedgerMode::PrivateShadow, TransparentLedgerRead as _,
+                TransparentLedgerMode::PrivateRequired, TransparentLedgerRead as _,
                 TransparentLedgerWrite as _,
             },
         };
@@ -1930,12 +1930,12 @@ mod tests {
         wallet
             .wallet_mut()
             .db_mut()
-            .apply_transparent_policy(PrivateShadow)
+            .apply_transparent_policy(PrivateRequired)
             .unwrap();
         wallet
             .wallet_mut()
             .db_mut()
-            .set_transparent_ledger_mode(PrivateShadow);
+            .set_transparent_ledger_mode(PrivateRequired);
         let watch = wallet.wallet().db().transparent_watch_set(account).unwrap();
         let target = watch.target.unwrap();
         publication.shards[0].end_height = u64::from(u32::from(target.height));
@@ -2141,7 +2141,7 @@ mod tests {
             SystemClock,
             TestRng::seed_from_u64(0),
         )
-        .with_transparent_ledger_mode(PrivateShadow);
+        .with_transparent_ledger_mode(PrivateRequired);
         assert_eq!(coverage_of(&retired), 0);
         assert!(coverage_of(&successor.revision) > 0);
         assert_eq!(

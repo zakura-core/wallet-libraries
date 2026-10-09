@@ -48,7 +48,7 @@ explains the arrangement before the detailed contracts later in the document.
 5. **Handles restart, reorganization, and migration.** The ledger preserves
    pending retrieval work, rejects contradictory records, invalidates evidence
    from replaced blocks, and preserves local transactions and reservations.
-   Isolated shadow recovery and guarded account promotion are part of this
+   Isolated candidate recovery and guarded account promotion are part of this
    lifecycle.
 
 For example, an output received 3 ZEC at height 120 and spent at height 160
@@ -90,7 +90,6 @@ constituting finalized migration DDL:
 | `tpir_coverage` | Per-script checked intervals, accepted terminal hashes, source revisions, and sealed/provisional status. |
 | `tpir_pending_pages` | Bounded resumable retrieval work with its source, revision, and operation context. |
 | `tpir_projection_origins` | Links projected LRZ records to ledger evidence, legacy observations, local construction, or independently authorized payloads. |
-| `tpir_shadow_runs` | Local comparison results and qualification summaries. |
 
 The relationships matter more than the table names:
 
@@ -111,8 +110,8 @@ spend, and transaction representation. The deliberate duplication lets the
 ledger retain its evidence while established wallet APIs continue to work.
 For an activated account, evidence, coverage, and projection commit in one
 transaction. A crash cannot leave new coverage committed while its corresponding
-spend is missing from the projection. Shadow commits remain isolated from the
-production projection.
+spend is missing from the projection. Candidate commits remain isolated from
+the production projection.
 
 ### What LRZ already enables
 
@@ -231,7 +230,7 @@ The central invariant is:
         |
  wallet-libraries ledger API and SQLite transaction
         |
-        +-- candidate ledger: shadow / initial private recovery
+        +-- candidate ledger: initial private recovery
         |
         +-- authoritative ledger + LRZ projection: activated account
 ```
@@ -611,21 +610,19 @@ The library makes source authorization explicit:
 ```rust
 pub enum TransparentLedgerMode {
     Public,
-    PrivateShadow,
     PrivateRequired,
 }
 ```
 
-`Public` retains current public discovery. `PrivateShadow` also retains public
-financial authority and is a qualification mode, not a privacy claim.
-`PrivateRequired` forbids public transparent discovery even while private
-recovery is unavailable or incomplete.
+`Public` retains current public discovery. `PrivateRequired` forbids public
+transparent discovery even while private recovery is unavailable or incomplete.
+Private recovery runs only under `PrivateRequired`; there is no mode that
+recovers privately while public discovery keeps financial authority.
 
 Vizor derives this authorization from the same install-scoped **private queries**
 preference used by Enhance and Status; there is no transparent-specific user
 toggle. The policy applies to the whole wallet database on the selected network,
-while each account has its own recovery state. Shadow selection is an internal
-qualification control.
+while each account has its own recovery state.
 
 Preparation preserves existing production behavior and makes no new
 transparent-privacy claim. In the first release that enables private transparent
@@ -682,10 +679,10 @@ certify private recovery.
 
 ### Isolated candidate recovery
 
-Shadow commits update candidate events, coverage, pending work, and candidate
+Candidate commits update candidate events, coverage, pending work, and candidate
 address-window progress only. They cannot change production LRZ balances,
 spend links, locks, address-use flags, or receive-address selection. Derivation
-logic can be shared, but shadow-only discoveries stay in the candidate watch
+logic can be shared, but candidate-only discoveries stay in the candidate watch
 set until activation.
 
 The candidate ledger never ingests the LRZ projection as discovery evidence.
@@ -701,7 +698,7 @@ selection and shielding are unavailable; independently eligible shielded-only
 operations continue. Keep the previous amount explicitly marked last-known,
 never current or spendable.
 
-Existing shadow state can be reused only after revalidating its production
+Existing candidate state can be reused only after revalidating its production
 source, chain anchors, publication lineage, script bounds, and current watch
 set. Test fixtures cannot qualify a production account.
 
@@ -837,7 +834,7 @@ advance coverage or become proof of absence.
 Ledger state lives under the `tpir_*` namespace in the existing physical SQLite
 wallet database. It stores policy/lifecycle metadata, scripts and generations,
 events and source observations, coverage, resumable pending work, projection
-origins, and local shadow-comparison summaries.
+origins.
 
 Candidate and authoritative writes use the same validation rules but different
 projection behavior. Candidate writes stop at isolated ledger state.
@@ -1017,8 +1014,8 @@ spend, UTXO, balance, and coverage results. Include:
   to the same visible history identity;
 - same-height and sealed/provisional reorgs, re-mining, actual rewind heights,
   and concurrent import/deletion/policy changes;
-- proof that shadow cannot alter public balances, selection, locks, address-use,
-  or receive-address choice;
+- proof that candidate recovery cannot alter balances, selection, locks,
+  address-use, or receive-address choice;
 - request capture across sync, import, preview, fee/payload recovery, startup,
   setting transitions, cancellation, and native/background entry points,
   including shielded-first mixed discovery, stale queued public work, and
@@ -1027,7 +1024,7 @@ spend, UTXO, balance, and coverage results. Include:
   measurements.
 
 Production gates are fixture-backed wallet integration, real protocol validation
-(including known-answer and malformed records), real-source shadow qualification,
+(including known-answer and malformed records), real-source candidate qualification,
 independent publication verification, a controlled private cohort, then general
 availability. Keep detailed comparisons local and export only redacted aggregate
 diagnostics. Record the exact library pin, protocol/publication version, and

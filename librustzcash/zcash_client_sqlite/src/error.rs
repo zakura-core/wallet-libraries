@@ -71,9 +71,8 @@ pub enum SqliteClientError {
         /// The generation currently stored on the wallet.
         applied: u64,
     },
-    /// Candidate recovery commits require a `PrivateShadow` or `PrivateRequired` policy, both
-    /// durably applied and configured on the handle. Trusted commits and promotion require
-    /// `PrivateRequired` in both places.
+    /// Recovery commits and promotion require a `PrivateRequired` policy, both durably applied
+    /// and configured on the handle.
     TransparentRecoveryNotEnabled,
     /// A candidate recovery commit was refused; none of its facts were applied.
     #[cfg(feature = "transparent-inputs")]
@@ -391,7 +390,7 @@ impl fmt::Display for SqliteClientError {
             ),
             SqliteClientError::TransparentRecoveryNotEnabled => write!(
                 f,
-                "Transparent recovery is not enabled for this operation: candidate commits need PrivateShadow or PrivateRequired, and trusted commits and promotion need PrivateRequired, both durably and on the handle"
+                "Transparent recovery is not enabled for this operation: recovery commits and promotion need PrivateRequired, both durably and on the handle"
             ),
             #[cfg(feature = "transparent-inputs")]
             SqliteClientError::TransparentLedgerCommitRejected(rejection) => {

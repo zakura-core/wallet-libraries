@@ -411,7 +411,7 @@ Not built: a verifier, attestation or trusted-source registry; revision
 withdrawal, quarantine clearing or trust epochs; persisted holds; a library
 coordinator or async API; reqwest in the adapter's normal graph; v10, txid
 display, unsupported ranges or the parent-filter experiment; a freshness
-tolerance; a new toggle, Shadow selection, remote kill switch, Dart-configurable
+tolerance; a new toggle, remote kill switch, Dart-configurable
 endpoint or release-build origin override; a progress FFI, cross-account filter
 cache, concurrent batches or transport retries; mempool or txid PIR; Android
 native changes; a PIR server in Vizor tests; a Ledger recovery bound; any
@@ -473,7 +473,7 @@ are ready; each PR is reviewable on its own and leaves `main` green.
 
 In the library, PR 7 runs the real protocol against an in-process
 `transparent-shard-server` that records every request.
-`private_mode_lifecycle_against_an_in_process_shard_service` goes from shadow
+`private_mode_lifecycle_against_an_in_process_shard_service` goes from untrusted
 recovery through trusted commits and promotion, a tail move, lag, reopen,
 companion loss and a sealed change, and asserts that requests match the service
 routes, carry no script bytes and never fetch a filter below the floor;

@@ -88,9 +88,9 @@ pub(crate) fn apply_transparent_policy(
                 conn.execute("DELETE FROM tpir_active_accounts", [])?;
             }
             // Keep still-required retrieval obligations on the new generation. Leaving the old
-            // stamp would hide them from public dispatch after a transition that still retains
-            // public authority (Public → PrivateShadow). Under PrivateRequired, matching
-            // generation does not restore public follow-on: authority is absent.
+            // stamp would hide them from public dispatch after a transition back to Public.
+            // Under PrivateRequired, matching generation does not restore public follow-on:
+            // authority is absent.
             let generation_i64 = i64::try_from(generation).map_err(|_| {
                 SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
             })?;

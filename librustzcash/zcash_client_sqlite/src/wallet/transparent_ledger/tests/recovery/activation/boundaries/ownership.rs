@@ -52,7 +52,7 @@ fn import(st: &mut State, owner: AccountUuid, key: secp256k1::PublicKey) {
 
 #[test]
 fn shared_activity_after_promotion_extends_discovery_across_reopen() {
-    let (mut st, accounts) = shadow_wallet_with(1);
+    let (mut st, accounts) = recovery_wallet_with(1);
     let (a, b) = (accounts[0], accounts[1]);
     let gap = st.wallet().db().gap_limits.external();
     let high = 5 * gap;
@@ -198,7 +198,7 @@ fn shared_activity_after_promotion_extends_discovery_across_reopen() {
 #[test]
 fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
     for b_first in [false, true] {
-        let (mut st, accounts) = shadow_wallet_with(1);
+        let (mut st, accounts) = recovery_wallet_with(1);
         let (a, b) = (accounts[0], accounts[1]);
         let (address, _, key, edge) = future_receiver(&st, a);
         import(&mut st, b, key);
@@ -245,7 +245,7 @@ fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
             crate::testing::db::test_rng(),
         )
         .unwrap()
-        .with_transparent_ledger_mode(PrivateShadow);
+        .with_transparent_ledger_mode(PrivateRequired);
         assert_eq!(reopened.transparent_watch_set(a).unwrap(), watch(&st, a));
         // B's activity extends A's effective window immediately, before A commits again.
         // Reads report the new gaps and remain observational, including across reopen.
@@ -313,7 +313,7 @@ fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
 
 #[test]
 fn import_after_candidate_recovery_discards_conflicting_work_without_quarantine() {
-    let (mut st, accounts) = shadow_wallet_with(1);
+    let (mut st, accounts) = recovery_wallet_with(1);
     let (a, b) = (accounts[0], accounts[1]);
     let (address, _, key, edge) = future_receiver(&st, a);
     grow(&mut st, a, edge);
@@ -366,7 +366,7 @@ fn imported_ownership_filters_all_derivable_scopes() {
     .into_iter()
     .enumerate()
     {
-        let (mut st, accounts) = shadow_wallet_with(1);
+        let (mut st, accounts) = recovery_wallet_with(1);
         let index = NonHardenedChildIndex::from_index(100).unwrap();
         let ufvk = st
             .test_account()
@@ -430,7 +430,7 @@ fn imported_ownership_filters_all_derivable_scopes() {
 
 #[test]
 fn ownership_cleanup_failure_rolls_back_the_import_and_evidence() {
-    let (mut st, accounts) = shadow_wallet_with(1);
+    let (mut st, accounts) = recovery_wallet_with(1);
     let (address, _, key, edge) = future_receiver(&st, accounts[0]);
     grow(&mut st, accounts[0], edge);
     let ws = watch(&st, accounts[0]);

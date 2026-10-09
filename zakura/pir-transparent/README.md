@@ -138,9 +138,8 @@ no successor can resolve.
 
 The trusted operation requires `PrivateRequired`, on the handle and durably, and
 qualifies whatever it is given, so call it only for commits from an origin the
-caller trusts. A caller that cannot, as under `PrivateShadow` or with another
-origin, can never acknowledge a batch with retirements: until a pass under
-`PrivateRequired` reconciles them, each later pass that sees a new revision of
+caller trusts. A caller that does not trust the origin can never acknowledge a
+batch with retirements: until a trusted pass reconciles them, each later pass that sees a new revision of
 their source adds one more to `retired_revisions()` and one row to the catalog.
 Such a caller should stop passing the account at its first batch with
 retirements instead of applying the same commits again.
@@ -231,7 +230,7 @@ Its fixture publishes real shards for a synthetic chain at mainnet heights,
 taking block hashes from the test wallet's own scan, and records every request
 the service receives. Each publication gets its own server, while every
 companion stays bound to the origin label `https://fixture.test`.
-`private_mode_lifecycle_against_an_in_process_shard_service` goes from shadow
+`private_mode_lifecycle_against_an_in_process_shard_service` goes from untrusted
 observation through trusted commits and promotion, a moving tail, publication
 lag, a reopened and then a lost companion, a publication change retried with
 the same companion, and a sealed shard changed under its revision number. It

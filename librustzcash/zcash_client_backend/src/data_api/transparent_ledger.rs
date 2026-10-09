@@ -46,9 +46,6 @@ pub struct ChainPoint {
 pub enum TransparentLedgerMode {
     /// Public transparent discovery remains authoritative.
     Public,
-    /// Public discovery remains authoritative while private recovery runs in isolation for
-    /// qualification. This is not a privacy claim.
-    PrivateShadow,
     /// Public transparent discovery is forbidden, including while private recovery is
     /// unavailable or incomplete. Transparent inputs require private authority.
     PrivateRequired,
@@ -58,7 +55,7 @@ impl TransparentLedgerMode {
     /// Returns whether public discovery retains transparent financial authority.
     pub fn retains_public_authority(self) -> bool {
         match self {
-            Self::Public | Self::PrivateShadow => true,
+            Self::Public => true,
             Self::PrivateRequired => false,
         }
     }
@@ -318,8 +315,8 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
     ///
     /// A mode change increments `policy_generation` by one in the same SQLite transaction.
     /// Re-applying the current mode does not increment it and does not revoke work. An explicit
-    /// later transition back to `Public` or `PrivateShadow` is allowed; reads still never weaken
-    /// a stored `PrivateRequired` policy via a weaker handle configuration.
+    /// later transition back to `Public` is allowed; reads still never weaken a stored
+    /// `PrivateRequired` policy via a weaker handle configuration.
     ///
     /// Before applying [`TransparentLedgerMode::PrivateRequired`], callers must cancel and join
     /// every outstanding public transparent-discovery operation. A generation check immediately
@@ -336,12 +333,12 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
 
     /// Atomically applies one recovery pass to the account's ledger.
     ///
-    /// The durable policy must still be at the captured generation and must permit private
-    /// recovery (`PrivateShadow` or `PrivateRequired`), as must the handle. The account must
-    /// exist with the captured lifecycle and without quarantine, the target and anchor must
-    /// still be local blocks, and every address the commit names must still be watched by the
-    /// account. Any failure applies none of the commit's facts; an integrity failure also
-    /// quarantines the source and the accounts holding its evidence.
+    /// The durable policy must still be at the captured generation and must be
+    /// `PrivateRequired`, as must the handle. The account must exist with the captured lifecycle
+    /// and without quarantine, the target and anchor must still be local blocks, and every
+    /// address the commit names must still be watched by the account. Any failure applies none
+    /// of the commit's facts; an integrity failure also quarantines the source and the accounts
+    /// holding its evidence.
     ///
     /// A candidate account's state is isolated: its commits never change balances, spend
     /// links, locks, address use, receiving-address selection, or transaction history. An
@@ -394,7 +391,6 @@ mod tests {
     #[test]
     fn only_private_required_drops_public_authority() {
         assert!(TransparentLedgerMode::Public.retains_public_authority());
-        assert!(TransparentLedgerMode::PrivateShadow.retains_public_authority());
         assert!(!TransparentLedgerMode::PrivateRequired.retains_public_authority());
     }
 }

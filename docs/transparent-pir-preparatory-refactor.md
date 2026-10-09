@@ -45,7 +45,7 @@ in the final qualification phase.
 | 0. Baseline (done) | Contract/call-site inventory and reference fixtures. | Consumer baseline and discovery/handle inventory. | Existing public behavior recorded. |
 | 1. Contract and migration (library merged) | Read contract, policy/provenance schema, configured handles. | Dependency upgrade and explicit handle configuration. | Schema upgrades; private transparent input use remains unavailable. |
 | 2. Privacy boundaries | Durable policy transitions and guarded follow-on work. | Shared policy, dispatch guards, native/preview coverage. | Required-private fixtures fail closed before any unsupported request. |
-| 3. Candidate recovery | Watched scripts, candidate events, coverage, resumable commits. | Disabled/fixture source and bounded coordinator. | Isolated shadow recovery; no production projection changes. |
+| 3. Candidate recovery | Watched scripts, candidate events, coverage, resumable commits. | Disabled/fixture source and bounded coordinator. | Isolated candidate recovery; no production projection changes. |
 | 4. Safe activation | Atomic projection, rewind, promotion, and all financial gates. | Balance/operation integration and activation fixtures. | Per-account private activation and spending exercised with fixtures. |
 | 5. History integration | Evidence-backed history reads and detail state. | Partial-history classification, FFI, and UI. | Mixed transactions and restored history represented accurately. |
 | 6. Qualification | Lifecycle/failure evidence and repair compatibility. | Cross-repository regression and request-capture results. | Preparatory refactor complete; real PIR integration still gated. |
@@ -106,8 +106,7 @@ planned in some places and stricter in others; see the deviations below.
 **What shipped in wallet-libraries**
 
 1. **Contract.** `backend/data_api/transparent_ledger.rs` provides
-   `ChainPoint`, `TransparentLedgerMode` (`Public`, `PrivateShadow`,
-   `PrivateRequired`), `TransparentLedgerSnapshot<AccountId>`, and
+   `ChainPoint`, `TransparentLedgerMode` (`Public`, `PrivateRequired`), `TransparentLedgerSnapshot<AccountId>`, and
    `TransparentLedgerRead` (`transparent_ledger_mode`,
    `transparent_ledger_snapshot`). The snapshot carries the authority, the
    authorized balance split into regular and coinbase, the last-known amount
@@ -287,8 +286,7 @@ receiving-address allocation, and history read.
    extend past the target.
 3. **Context checks.** A commit is refused, applying nothing, unless:
    - the policy is still at the captured generation;
-   - the policy permits private recovery (`PrivateShadow` or
-     `PrivateRequired`) both on the handle and durably;
+   - the policy is `PrivateRequired` both on the handle and durably;
    - the account still exists;
    - the target is still a contiguously scanned local block, and the anchor is
      still a local block;
@@ -385,16 +383,16 @@ receiving-address allocation, and history read.
    commit through the library. Repeat on window growth at the same target.
    Hold no write lock across network/source I/O.
 3. Schedule alongside shielded scanning while keeping separate checkpoints,
-   queues, retries, and completion. In shadow mode retain the public projection
-   and `.receive.redb` cache as before; neither becomes private evidence.
+   queues, retries, and completion. The public projection and `.receive.redb`
+   cache never become private evidence.
 4. Add local exact-set comparison against fixtures at a common chain point.
    Expose only development diagnostics at this stage, with candidate amounts
    explicitly unverified and potentially above or below the real balance.
 
 **Exit gate:** fixture receives/spends, empty ranges, partial pages, cancellation,
 window growth, and restart converge to expected candidate state. Reorg/import
-races reject stale commits. Shadow changes no production balances, selection,
-locks, address allocation, or history.
+races reject stale commits. Candidate recovery changes no production balances,
+selection, locks, address allocation, or history.
 
 ## Phase 4 — Activate safely and enforce every financial path
 
@@ -565,7 +563,7 @@ promote with zero funds; missing coverage subsequently withholds authority.
 3. Exercise private activation with fixtures: immediately stop public
    transparent discovery, leave incomplete accounts unavailable, promote ready
    accounts independently, and handle lag or outage without source fallback.
-   Reuse shadow state only after revalidating its full activation context.
+   Reuse candidate state only after revalidating its full activation context.
 
 **Exit gate:** commit/promotion/rewind failpoints and WAL restart leave a
 consistent projection and authority. Both discovery orders and payload replay
@@ -631,7 +629,7 @@ nothing to invalidate.
       an active, unquarantined account covered through its height, with no
       unresolved spend in that transaction;
   - `PublicDiscovery`: the transparent pool while public discovery holds
-    authority (`Public`, `PrivateShadow`) and no parent of the transaction's
+    authority (`Public`) and no parent of the transaction's
     unresolved inputs is queued for retrieval. Its completeness is not
     verified;
   - `Incomplete`: anything else. The known amounts are partial, not final.
@@ -734,7 +732,7 @@ one production fix they exposed, and no API or table.
    extends both derived windows several times and holds a coinbase output, a
    spend in its receive's block, a spend mixing owned and foreign inputs, and
    foreign-only activity. The candidate diagnostics, the projection, the
-   snapshot, and the selectors equal the oracle after shadow recovery,
+   snapshot, and the selectors equal the oracle after candidate recovery,
    promotion, active commits, and a rewind that re-mines transactions at the
    same and at other heights and orphans one payment. Legacy rows take part
    only through the promotion discrepancy check.
@@ -842,8 +840,8 @@ Production release remains blocked until the release process records:
 **Vizor steps**
 
 1. Run the fixture coordinator through the integrated Rust/Flutter interfaces:
-   public-to-shadow, initial private recovery, qualified shadow reuse, per-account
-   promotion, interrupted activation, lag, outage, and restart.
+   public-to-private, initial private recovery, qualified candidate reuse,
+   per-account promotion, interrupted activation, lag, outage, and restart.
 2. Capture requests across sync, import, preview, startup, fee/payload/status
    work, and native boundaries. Include setting races, shielded-first mixed
    discovery, stale queued public work, and server shape flags.
@@ -854,7 +852,7 @@ Production release remains blocked until the release process records:
    provenance, gate outcomes, and remaining unsupported details. Keep sensitive
    comparisons local and export only redacted aggregate diagnostics.
 
-**Exit gate:** no unexplained qualifying discrepancies, shadow financial side
+**Exit gate:** no unexplained qualifying discrepancies, candidate financial side
 effects, unauthorized public requests, duplicate accounting, or lost local
 history. Restart/repair behavior and the supported rollback release have direct
 evidence. This completes preparation, not remote-service or production-private
@@ -876,7 +874,7 @@ authorize or block inputs, reconstruct honest history, and rewind through the
 intended APIs while shared-policy transitions cover all disclosure paths.
 
 The next stage adds real filters, manifests, shards, PIR retrieval, publication
-verification, protocol known-answer/malformed-input tests, real-source shadow
+verification, protocol known-answer/malformed-input tests, real-source candidate
 qualification, a controlled private cohort, and measured mobile/network-route
 behavior. No phase here removes the public source or enables production private
 authority.
@@ -963,5 +961,4 @@ window exposes missing coverage immediately without an extra commit. Ownership
 filtering still excludes the other account's receiver. Promotion generates only
 unowned window receivers and rechecks coverage before activation; any ownership
 change during normal wallet gap generation withdraws authority until the newly
-scheduled recovery completes. Shadow financial reads remain public even when
-candidate provenance is unavailable.
+scheduled recovery completes.

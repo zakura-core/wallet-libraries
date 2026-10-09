@@ -783,9 +783,9 @@ CREATE INDEX idx_transparent_spend_map_transaction_id ON transparent_spend_map (
 ///
 /// ### Columns
 /// - `applied_mode`: the transparent ledger mode durably applied to this wallet: 0 public,
-///   1 private shadow, 2 private required. A handle configured with a weaker mode than a
-///   durably applied private-required policy is rejected; the stored policy is never weakened
-///   by a handle's configuration.
+///   2 private required. A handle configured with a weaker mode than a durably applied
+///   private-required policy is rejected; the stored policy is never weakened by a handle's
+///   configuration.
 /// - `policy_generation`: incremented by each policy transition, so that operations captured
 ///   under an earlier policy can be rejected.
 /// - `min_reader_version`: the lowest ledger reader version permitted to operate on this
@@ -793,7 +793,7 @@ CREATE INDEX idx_transparent_spend_map_transaction_id ON transparent_spend_map (
 pub(super) const TABLE_TPIR_META: &str = r#"
 CREATE TABLE tpir_meta (
     id INTEGER PRIMARY KEY CHECK (id = 0),
-    applied_mode INTEGER NOT NULL CHECK (applied_mode IN (0, 1, 2)),
+    applied_mode INTEGER NOT NULL CHECK (applied_mode IN (0, 2)),
     policy_generation INTEGER NOT NULL CHECK (policy_generation >= 0),
     min_reader_version INTEGER NOT NULL CHECK (min_reader_version >= 1)
 )"#;

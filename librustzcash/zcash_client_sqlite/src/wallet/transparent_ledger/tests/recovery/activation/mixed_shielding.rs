@@ -97,7 +97,7 @@ fn padded_shielding(
         import_account(&mut st, 0x77);
     }
     scan_new_blocks(&mut st, 10);
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, PrivateRequired);
     let account = st.test_account().unwrap().id();
     let fixture = revision(1, true);
     let ws = watch(&st, account);

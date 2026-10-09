@@ -1,4 +1,4 @@
-//! Headless real-HTTP recovery into a controlled SQLite shadow wallet.
+//! Headless real-HTTP recovery into a controlled SQLite wallet, as an unpromoted candidate.
 //!
 //! Public chain scripts are injected as fixture watches, without claiming their
 //! keys. Shielded scanning uses empty fixture blocks. Independently collected RPC
@@ -16,7 +16,7 @@ use zcash_client_backend::data_api::{
     chain::ChainState,
     testing::{InitialChainState, TestBuilder, TestRng},
     transparent_ledger::{
-        AccountLifecycle, TransactionMetadata, TransparentLedgerMode::PrivateShadow,
+        AccountLifecycle, TransactionMetadata, TransparentLedgerMode::PrivateRequired,
         TransparentLedgerRead as _, TransparentLedgerWrite as _, WholeTransactionFee,
     },
 };
@@ -163,8 +163,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             params![encoded,bytes,account.expose_uuid().as_bytes().as_slice()])?;
     }
     let db = state.wallet_mut().db_mut();
-    db.apply_transparent_policy(PrivateShadow)?;
-    db.set_transparent_ledger_mode(PrivateShadow);
+    db.apply_transparent_policy(PrivateRequired)?;
+    db.set_transparent_ledger_mode(PrivateRequired);
     let origin = &args[3];
     let config = RecoveryConfig {
         source: b"activity-v11-public-script-shadow-harness".to_vec(),
@@ -274,7 +274,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         SystemClock,
         TestRng::seed_from_u64(0),
     )
-    .with_transparent_ledger_mode(PrivateShadow);
+    .with_transparent_ledger_mode(PrivateRequired);
     let after = reopened.transparent_candidate_recovery(account)?;
     if before != after {
         return Err("library SQLite reopen changed candidate facts".into());
@@ -313,7 +313,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         serde_json::to_vec_pretty(&report)?,
     )?;
     println!(
-        "recovered {} receives and {} spends; SQLite reopen agrees; account remains a shadow candidate",
+        "recovered {} receives and {} spends; SQLite reopen agrees; account remains a candidate",
         after.receives.len(),
         after.spends.len()
     );

@@ -2,7 +2,7 @@
 use super::*;
 
 fn active_and_candidate() -> (State, AccountUuid, AccountUuid, ReceiveEvent) {
-    let (mut st, accounts) = shadow_wallet_with(1);
+    let (mut st, accounts) = recovery_wallet_with(1);
     let rev = revision(1, false);
     qualify(&mut st, &rev);
     let receive = recover_completely(&mut st, accounts[0], &rev, 51);

@@ -53,7 +53,7 @@ impl RusqliteMigration for Migration {
             r#"
             CREATE TABLE tpir_meta (
                 id INTEGER PRIMARY KEY CHECK (id = 0),
-                applied_mode INTEGER NOT NULL CHECK (applied_mode IN (0, 1, 2)),
+                applied_mode INTEGER NOT NULL CHECK (applied_mode IN (0, 2)),
                 policy_generation INTEGER NOT NULL CHECK (policy_generation >= 0),
                 min_reader_version INTEGER NOT NULL CHECK (min_reader_version >= 1)
             );

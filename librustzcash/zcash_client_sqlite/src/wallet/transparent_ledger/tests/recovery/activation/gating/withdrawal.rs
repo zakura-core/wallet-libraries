@@ -10,7 +10,7 @@ use super::*;
 
 /// A provisional receive and, optionally, a spend observed by an independent sealed source.
 fn provisional_wallet(with_spend: bool) -> (State, AccountUuid, ReceiveEvent, RecoveryRevision) {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     let ws = watch(&st, account);
     let received = receive(31, external(&ws), 40_000, below_target(&ws, 4));
@@ -90,7 +90,9 @@ fn withdrawing_a_receive_preserves_a_locally_constructed_spend() {
 #[test]
 fn trusted_withdrawal_fences_retained_rows_from_older_readers() {
     let (mut st, account, _, replacement) = provisional_wallet(false);
-    set_policy(&mut st, PrivateShadow);
+    // Demote the account so the replacement is recovered as a candidate.
+    set_policy(&mut st, Public);
+    set_policy(&mut st, PrivateRequired);
     // Simulate a wallet last activated by the previous Phase 4 reader.
     st.wallet().set_transparent_reader_version(4);
     cover(&mut st, account, &replacement, vec![]);
