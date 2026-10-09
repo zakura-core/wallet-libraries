@@ -50,7 +50,8 @@ use zcash_client_backend::data_api::transparent_ledger::{
 };
 #[cfg(feature = "transparent-inputs")]
 use zcash_client_backend::data_api::transparent_ledger::{
-    CandidateRecovery, CommitOutcome, TransparentLedgerCommit, TransparentWatchSet,
+    CandidateRecovery, CommitOutcome, ForgottenTransparentLedger, TransparentLedgerCommit,
+    TransparentWatchSet,
 };
 
 use std::{
@@ -2201,6 +2202,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
             self.transparent_ledger_mode,
             account,
         )
+    }
+    #[cfg(feature = "transparent-inputs")]
+    fn forget_transparent_ledger(&mut self) -> Result<ForgottenTransparentLedger, Self::Error> {
+        wallet::transparent_ledger::forget_ledger(self.conn.borrow(), self.transparent_ledger_mode)
     }
 }
 

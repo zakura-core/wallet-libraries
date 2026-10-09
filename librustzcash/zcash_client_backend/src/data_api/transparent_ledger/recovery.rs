@@ -241,6 +241,32 @@ pub struct TransparentLedgerCommit<AccountId> {
     pub completed_pages: Vec<Vec<u8>>,
 }
 
+/// What [`TransparentLedgerWrite::forget_transparent_ledger`] removed.
+///
+/// [`TransparentLedgerWrite::forget_transparent_ledger`]: super::TransparentLedgerWrite::forget_transparent_ledger
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ForgottenTransparentLedger {
+    /// Spend links and pending spends that only the ledger supported.
+    pub spends: usize,
+    /// Outputs that only the ledger supported.
+    pub outputs: usize,
+    /// Outputs that only the ledger supports, kept without value or authority because they are
+    /// locked or a spend from another origin refers to them. These stay and are counted by every
+    /// call.
+    pub retained_outputs: usize,
+    /// Transactions left without wallet evidence.
+    pub transactions: usize,
+    /// Recovered receive and spend events.
+    pub events: usize,
+}
+
+impl ForgottenTransparentLedger {
+    /// Whether nothing was removed. Retained outputs are reported again by each call.
+    pub fn removed_nothing(&self) -> bool {
+        self.spends == 0 && self.outputs == 0 && self.transactions == 0 && self.events == 0
+    }
+}
+
 /// The result of an applied commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommitOutcome {

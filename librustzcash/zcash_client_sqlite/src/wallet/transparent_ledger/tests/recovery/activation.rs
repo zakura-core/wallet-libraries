@@ -1461,6 +1461,7 @@ mod qualification;
 
 mod gating {
     mod coinbase;
+    mod forget;
     mod withdrawal;
 
     use std::convert::Infallible;
