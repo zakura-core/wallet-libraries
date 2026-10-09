@@ -20,7 +20,7 @@ const CLIENT_WAIT_STEP: Duration = Duration::from_millis(5);
 /// kept outside the client, so reading them never waits for a lookup, even
 /// one its caller abandoned.
 pub struct TxidDisplayService {
-    client: Mutex<TxidDisplayClient>,
+    client: Mutex<Client>,
     /// The digest of the map the client held after its last request.
     map: Mutex<Option<[u8; 32]>>,
     map_checked_at: Mutex<Option<SystemTime>>,
@@ -32,6 +32,12 @@ impl Default for TxidDisplayService {
     }
 }
 
+/// The client, and whether its last lookup found the display unsupported.
+struct Client {
+    client: TxidDisplayClient,
+    unsupported: bool,
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -39,7 +45,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 impl TxidDisplayService {
     pub fn new() -> Self {
         Self {
-            client: Mutex::new(TxidDisplayClient::new()),
+            client: Mutex::new(Client {
+                client: TxidDisplayClient::new(),
+                unsupported: false,
+            }),
             map: Mutex::new(None),
             map_checked_at: Mutex::new(None),
         }
@@ -50,9 +59,11 @@ impl TxidDisplayService {
     /// before every request and while another lookup holds the client.
     ///
     /// A service that publishes a display this client does not support is
-    /// asked again by the next lookup: after [`TxidLookup::Unsupported`] the
-    /// client keeps only its derived native profiles, so a service that comes
-    /// to support it is found once the wallet retries.
+    /// asked again by the next lookup, so one that comes to support it is
+    /// found once the wallet retries. The client keeps an unsupported init
+    /// until a map is accepted, so after [`TxidLookup::Unsupported`] the next
+    /// lookup first fetches the map, which drops that init and still refuses
+    /// a map of another chain than the client pinned.
     pub fn lookup(
         &self,
         exchange: &impl HttpExchange,
@@ -60,11 +71,14 @@ impl TxidDisplayService {
         mined_height: u64,
         cancel: &dyn Fn() -> bool,
     ) -> Result<TxidLookup, TxidError> {
-        self.with_client(cancel, |client| {
-            let found = client.lookup(&mut TxidHttp::new(exchange), txid, mined_height, cancel);
-            if matches!(found, Ok(TxidLookup::Unsupported)) {
-                *client = TxidDisplayClient::with_profiles(client.profiles());
+        self.with_client(cancel, |state| {
+            let mut http = TxidHttp::new(exchange);
+            if state.unsupported {
+                state.client.refresh_map(&mut http, cancel)?;
+                state.unsupported = false;
             }
+            let found = state.client.lookup(&mut http, txid, mined_height, cancel);
+            state.unsupported = matches!(found, Ok(TxidLookup::Unsupported));
             found
         })
     }
@@ -76,8 +90,13 @@ impl TxidDisplayService {
         exchange: &impl HttpExchange,
         cancel: &dyn Fn() -> bool,
     ) -> Result<[u8; 32], TxidError> {
-        self.with_client(cancel, |client| {
-            client.refresh_map(&mut TxidHttp::new(exchange), cancel)
+        self.with_client(cancel, |state| {
+            let refreshed = state
+                .client
+                .refresh_map(&mut TxidHttp::new(exchange), cancel);
+            // An accepted map drops an unsupported init.
+            state.unsupported &= refreshed.is_err();
+            refreshed
         })
     }
 
@@ -103,7 +122,7 @@ impl TxidDisplayService {
     fn with_client<T>(
         &self,
         cancel: &dyn Fn() -> bool,
-        call: impl FnOnce(&mut TxidDisplayClient) -> Result<T, TxidError>,
+        call: impl FnOnce(&mut Client) -> Result<T, TxidError>,
     ) -> Result<T, TxidError> {
         let mut client = loop {
             match self.client.try_lock() {
@@ -114,7 +133,7 @@ impl TxidDisplayService {
             }
         };
         let result = call(&mut client);
-        *lock(&self.map) = client.map_sha256().and_then(map_sha256);
+        *lock(&self.map) = client.client.map_sha256().and_then(map_sha256);
         result
     }
 }
@@ -145,40 +164,121 @@ mod tests {
         assert_send_sync::<TxidDisplayService>();
     }
 
-    /// An init this client does not support is not kept: the next lookup asks
-    /// for the init again.
-    #[test]
-    fn an_unsupported_service_is_asked_again() {
-        let init = serde_json::to_vec(&serde_json::json!({
+    /// Every request, by path, each answered by `answer`.
+    struct Recording<A> {
+        answer: A,
+        paths: Mutex<Vec<String>>,
+    }
+
+    impl<A: Fn(&HttpRequest) -> HttpReply + Sync> HttpExchange for Recording<A> {
+        fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
+            lock(&self.paths).push(request.path.clone());
+            Ok((self.answer)(request))
+        }
+    }
+
+    fn unsupported_init() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
             "schema": "transparent-txid-display-v0",
             "codec": "transparent-txid-display-v0",
             "bucket_domain": "",
             "native_schema": "",
             "geometries": [],
         }))
-        .unwrap();
-        let exchange = Counting {
+        .unwrap()
+    }
+
+    /// An init this client does not support is not kept: the next lookup
+    /// fetches the map first, which drops it.
+    #[test]
+    fn an_unsupported_service_is_asked_again() {
+        let init = unsupported_init();
+        let exchange = Recording {
             answer: move |_: &HttpRequest| HttpReply {
                 status: 200,
                 body: init.clone(),
                 ..HttpReply::default()
             },
-            sent: AtomicUsize::new(0),
+            paths: Mutex::default(),
         };
         let service = TxidDisplayService::new();
-        for sent in 1..=2 {
-            assert_eq!(
-                service.lookup(&exchange, [7; 32], 3_460_000, &|| false),
-                Ok(TxidLookup::Unsupported)
-            );
-            assert_eq!(exchange.sent.load(Ordering::SeqCst), sent);
-        }
+        assert_eq!(
+            service.lookup(&exchange, [7; 32], 3_460_000, &|| false),
+            Ok(TxidLookup::Unsupported)
+        );
+        assert_eq!(*lock(&exchange.paths), ["/v1/txid/init"]);
+        // This service answers the map with its init, which no map is.
+        assert!(
+            service
+                .lookup(&exchange, [7; 32], 3_460_000, &|| false)
+                .is_err()
+        );
+        assert_eq!(lock(&exchange.paths)[1], "/v1/txid/map");
+    }
+
+    /// Asking again keeps the chain the client pinned: after an unsupported
+    /// display, a map of another genesis is still refused, and the first
+    /// chain's publication is found once it is supported.
+    #[cfg(feature = "testing")]
+    #[test]
+    fn an_unsupported_reset_keeps_the_chain_pin() {
+        use crate::testing::TxidPublication;
+        use std::sync::atomic::AtomicU8;
+        use transparent_txid_client::ProtocolKind;
+
+        let publication = TxidPublication::new(3_000_000, 3_000_009);
+        let phase = AtomicU8::new(0);
+        let exchange = Recording {
+            answer: |request: &HttpRequest| {
+                let reply = publication.answer(request.method, &request.path, &request.body);
+                match (phase.load(Ordering::SeqCst), request.path.as_str()) {
+                    (0, "/v1/txid/init") => HttpReply {
+                        status: 200,
+                        body: unsupported_init(),
+                        ..HttpReply::default()
+                    },
+                    // The same map for another genesis block.
+                    (1, "/v1/txid/map") => {
+                        let body = String::from_utf8(reply.body)
+                            .unwrap()
+                            .replace(&"ee".repeat(32), &"ab".repeat(32))
+                            .into_bytes();
+                        HttpReply {
+                            map_sha256: Some(hex::encode(sha2::Sha256::digest(&body))),
+                            body,
+                            ..reply
+                        }
+                    }
+                    _ => reply,
+                }
+            },
+            paths: Mutex::default(),
+        };
+        use sha2::Digest as _;
+        let service = TxidDisplayService::new();
+        let never = || false;
+        // The first map pins the chain; the service's display is unsupported.
+        service.refresh_map(&exchange, &never).unwrap();
+        assert_eq!(
+            service.lookup(&exchange, [7; 32], 3_000_005, &never),
+            Ok(TxidLookup::Unsupported)
+        );
+        phase.store(1, Ordering::SeqCst);
+        assert_eq!(
+            service.lookup(&exchange, [7; 32], 3_000_005, &never),
+            Err(TxidError::Protocol(ProtocolKind::Map))
+        );
+        phase.store(2, Ordering::SeqCst);
+        assert_eq!(
+            service.lookup(&exchange, [7; 32], 3_000_005, &never),
+            Ok(TxidLookup::Absent)
+        );
     }
 
     #[test]
     fn a_waiting_lookup_stops_at_cancellation() {
         let service = Arc::new(TxidDisplayService::new());
-        let held = service.client.lock().unwrap();
+        let held = lock(&service.client);
         let cancelled = AtomicBool::new(false);
         let exchange = Counting {
             answer: |_: &HttpRequest| HttpReply::default(),

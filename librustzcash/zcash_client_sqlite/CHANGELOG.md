@@ -258,6 +258,12 @@ workspace.
   completion marker is stored.
 
 ### Changed
+- `TransparentDetailRead::transparent_display_view` returns `None` for an account that takes
+  no part in the transaction's transparent side: no transparent output or spend of its own,
+  scanned or recovered, and no shielded part (a received, spent or sent note) in a
+  transaction the wallet records as having one, by its raw bytes or, without them, by detail
+  work, stored display facts or the route-2 marker. It used to return a view whose outputs
+  the account did not own.
 - Unmined shielded history remains incomplete when scanning discovers a funding
   note whose spend was not linked at payload ingestion. A scanned chain tip and
   stored raw data certify completeness only once all known owned nullifiers

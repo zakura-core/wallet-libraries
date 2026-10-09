@@ -9,7 +9,7 @@
 //! or another, opens or deletes the companion meanwhile.
 
 use std::collections::BTreeSet;
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -233,28 +233,63 @@ fn lock_path(base: &Path) -> PathBuf {
 fn lock(base: &Path, keep_waiting: &dyn Fn() -> bool) -> io::Result<Option<File>> {
     let path = lock_path(base);
     loop {
-        let file = OpenOptions::new()
+        let opened = OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(&path)?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) if keep_waiting() => {
-                std::thread::sleep(WAIT_STEP);
-                continue;
-            }
-            Err(TryLockError::WouldBlock) => return Ok(None),
-            Err(TryLockError::Error(error)) => return Err(error),
-        }
-        match same_file::Handle::from_path(&path) {
-            Ok(current) if current == same_file::Handle::from_file(file.try_clone()?)? => {
-                return Ok(Some(file));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            .open(&path);
+        let held = match opened {
+            Ok(file) => try_lock(&file)?.then_some(file),
+            Err(error) if pending_deletion(&error) => None,
             Err(error) => return Err(error),
+        };
+        if let Some(file) = held {
+            match same_file::Handle::from_path(&path) {
+                Ok(current) if current == same_file::Handle::from_file(file.try_clone()?)? => {
+                    return Ok(Some(file));
+                }
+                // Unlinked, or replaced: lock the file now at the path.
+                Ok(_) => continue,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) if pending_deletion(&error) => continue,
+                Err(error) => return Err(error),
+            }
         }
+        if !keep_waiting() {
+            return Ok(None);
+        }
+        std::thread::sleep(WAIT_STEP);
+    }
+}
+
+/// Whether `error` is Windows refusing a lock file that a removal deleted
+/// while holding it: the name stays pending deletion, and refuses every open,
+/// until that handle closes. Another handle holds the companion meanwhile.
+fn pending_deletion(error: &io::Error) -> bool {
+    cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied
+}
+
+/// Takes `file`'s exclusive lock without waiting; `false` while another
+/// handle holds it.
+///
+/// On Unix this is `flock` itself, which the standard library's
+/// `File::try_lock` reports as unsupported on Android before Rust 1.98.
+#[cfg(unix)]
+fn try_lock(file: &File) -> io::Result<bool> {
+    use rustix::fs::{FlockOperation, flock};
+    match flock(file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn try_lock(file: &File) -> io::Result<bool> {
+    match file.try_lock() {
+        Ok(()) => Ok(true),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
     }
 }
 
@@ -458,6 +493,28 @@ mod tests {
             assert!(lock(&base, &|| false).unwrap().is_none());
             drop(second);
         });
+    }
+
+    /// The lock is the operating system's: a second handle on the same file
+    /// is refused until the first closes.
+    #[test]
+    fn a_lock_excludes_a_second_handle_until_it_closes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("lock");
+        let open = || {
+            OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .unwrap()
+        };
+        let first = open();
+        assert!(try_lock(&first).unwrap());
+        let second = open();
+        assert!(!try_lock(&second).unwrap());
+        drop(first);
+        assert!(try_lock(&second).unwrap());
     }
 
     #[test]

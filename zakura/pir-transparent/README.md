@@ -17,7 +17,9 @@ edge's 502 or 504), and any other status fails the request. Its `outage()`
 says a request failed because the service is unreachable or not serving: an
 unreachable origin or a timeout, a 429 or 5xx on the map, a filter or init
 (which the sync does not retry), or a 429 or non-capacity 5xx on a shard
-route. A caller stops visiting accounts after an outage. `TxidHttp` is the
+route. As in wallet-pir, a 429 is never capacity, even with `retry-after`: the
+service sends none, so one from an edge in front of it ends the caller's run.
+A caller stops visiting accounts after an outage. `TxidHttp` is the
 txid display client's transport over the same exchange, and
 `TxidDisplayService` the process-wide client of one origin.
 

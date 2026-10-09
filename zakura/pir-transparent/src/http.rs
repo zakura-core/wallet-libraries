@@ -15,6 +15,7 @@
 //! reuses its shard id with a new filter.
 
 use std::cell::Cell;
+use std::fmt;
 
 use transparent_txid_client::{
     Method as TxidMethod, Route as TxidRoute, TransportError, TxidReply, TxidRequest, TxidTransport,
@@ -47,7 +48,10 @@ impl HttpMethod {
 }
 
 /// One request to the origin an exchange is bound to.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Its `Debug` shows the template and sizes only: the path and body name shard
+/// ids, revisions and private query bytes.
+#[derive(Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     pub method: HttpMethod,
     /// Origin-relative, starting with `/v1/`. It names shard ids, revisions,
@@ -67,8 +71,8 @@ pub struct HttpRequest {
 }
 
 /// A reply as it arrived. The library, not the exchange, decides what its
-/// status means.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// status means. Its `Debug` shows the status, delay and body size only.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct HttpReply {
     pub status: u16,
     /// The raw `retry-after` header, when present.
@@ -77,6 +81,29 @@ pub struct HttpReply {
     pub map_sha256: Option<String>,
     /// A success's whole body, or at most `error_limit` bytes of an error's.
     pub body: Vec<u8>,
+}
+
+impl fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("template", &self.template)
+            .field("body_len", &self.body.len())
+            .field("limit", &self.limit)
+            .field("error_limit", &self.error_limit)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for HttpReply {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpReply")
+            .field("status", &self.status)
+            .field("retry_after", &self.retry_after)
+            .field("map_sha256", &self.map_sha256.is_some())
+            .field("body_len", &self.body.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Why an exchange delivered no reply. Carries no URL, identifier or body.
@@ -205,7 +232,7 @@ impl<E: HttpExchange> TransparentPirHttp<E> {
             // applies.
             None => Overloaded::from_http(reply.status, retry_after).map(Overloaded::boxed),
         };
-        let failing = reply.status == 429 || reply.status >= 500;
+        let failing = reply.status == 429 || (500..600).contains(&reply.status);
         if failing && (binding.is_none() || refused.is_none()) {
             self.outage.set(true);
         }
@@ -674,6 +701,34 @@ mod tests {
                 assert_eq!(error.downcast_ref::<HttpFailure>(), Some(&failure));
             }
             assert_eq!(http.outage(), outage, "{failure:?}");
+        }
+    }
+
+    #[test]
+    fn debug_output_names_no_identifier() {
+        let request = HttpRequest {
+            method: HttpMethod::Post,
+            path: format!("/v1/shards/{SHARD}/revisions/{REVISION}/query/pages"),
+            template: "/v1/shards/{id}/revisions/{rev}/query/pages".to_owned(),
+            body: QUERY.to_vec(),
+            limit: LIMIT,
+            error_limit: 0,
+        };
+        let reply = HttpReply {
+            status: 200,
+            retry_after: None,
+            map_sha256: Some("beef".to_owned()),
+            body: format!("{SHARD}{REVISION}").into_bytes(),
+        };
+        for shown in [format!("{request:?}"), format!("{reply:?}")] {
+            for secret in [
+                SHARD.to_string(),
+                REVISION.to_owned(),
+                "beef".to_owned(),
+                "c35a".to_owned(),
+            ] {
+                assert!(!shown.contains(&secret), "{shown} shows {secret}");
+            }
         }
     }
 

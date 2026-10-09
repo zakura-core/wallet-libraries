@@ -14,7 +14,7 @@ keywords = ["zcash", "privacy", "pir"]
 default = []
 # Applying a batch to a SQLite wallet and acknowledging it in one call.
 sqlite = ["wallet", "dep:zcash_client_sqlite"]
-wallet = ["dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol", "dep:transparent", "dep:transparent-wallet", "dep:transparent-wallet-store", "dep:transparent-events", "dep:transparent-filter", "dep:transparent-txid-client", "dep:rusqlite", "dep:hex", "dep:serde_json", "dep:same-file"]
+wallet = ["dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol", "dep:transparent", "dep:transparent-wallet", "dep:transparent-wallet-store", "dep:transparent-events", "dep:transparent-filter", "dep:transparent-txid-client", "dep:rusqlite", "dep:hex", "dep:serde_json", "dep:same-file", "dep:rustix"]
 # Test support for applications: batches no companion issued, their settlement, and a
 # fake txid display publication. Never enable it in a production build.
 testing = ["wallet", "dep:transparent-shard", "dep:transparent-native", "dep:base64"]
@@ -40,6 +40,10 @@ transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "
 transparent-txid-client = { git = "https://github.com/valargroup/wallet-pir", rev = "a317455e9feecdd2639d5348188c6a2341819a4d", optional = true }
 transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "a317455e9feecdd2639d5348188c6a2341819a4d", optional = true }
 transparent-native = { git = "https://github.com/valargroup/wallet-pir", rev = "a317455e9feecdd2639d5348188c6a2341819a4d", optional = true }
+
+# Companion locks: `flock` directly, which `std` supports on Android only from Rust 1.98.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", optional = true, default-features = false, features = ["std", "fs"] }
 
 [dev-dependencies]
 tempfile = "3"

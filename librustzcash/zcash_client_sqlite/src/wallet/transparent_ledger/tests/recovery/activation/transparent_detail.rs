@@ -2406,7 +2406,23 @@ fn view_sender_owned_by_address() {
     assert_eq!(sender_of(&details), Some((a, true)));
     // Another account takes no part in the transaction, so it has no view of it.
     let other = import_account(&mut st, 9);
-    assert_eq!(view(&st, other, txid_of(&unspent)), None);
+    let txid = txid_of(&unspent);
+    assert_eq!(view(&st, other, txid), None);
+    // Once it receives an output of the transaction, it sees the sender, which
+    // is not its own.
+    let inserted = conn(&st)
+        .execute(
+            "INSERT INTO transparent_received_outputs
+                 (transaction_id, output_index, account_id, address, script, value_zat, address_id)
+             SELECT ?1, 2, a.account_id, a.cached_transparent_receiver_address, x'00', 1000, a.id
+             FROM addresses a JOIN accounts acc ON acc.id = a.account_id
+             WHERE acc.uuid = ?2 AND a.cached_transparent_receiver_address IS NOT NULL
+             LIMIT 1",
+            rusqlite::params![tx_ref(&st, txid).0, other.expose_uuid().as_bytes().as_slice()],
+        )
+        .unwrap();
+    assert_eq!(inserted, 1);
+    assert_eq!(sender_of(&available(&st, other, txid)), Some((a, false)));
 }
 
 /// A DER-shaped signature with its sighash byte.

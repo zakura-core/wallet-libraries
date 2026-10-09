@@ -35,9 +35,11 @@ pub fn batch<A>(
     RecoveryBatch::unissued(commits, progress, state, retired)
 }
 
-/// Settles `batch` as `ReferenceRecovery::apply_and_acknowledge` does, with no companion
-/// to acknowledge: the same checks, the same commits each in its own wallet transaction,
-/// and the same failures.
+/// Applies `batch` through `ReferenceRecovery::apply_and_acknowledge`'s own commit loop,
+/// with no companion: the same checks before any commit (a ready batch, no outer SQL
+/// transaction, trust for retirements) and the same commits, each in its own wallet
+/// transaction, with the same failures. Without a companion there is no export receipt
+/// to check, no acknowledgment, and so no policy-generation recheck at acknowledgment.
 #[cfg(feature = "sqlite")]
 pub fn apply<P: zcash_protocol::consensus::Parameters, CL, R>(
     batch: RecoveryBatch<zcash_client_sqlite::AccountUuid>,
