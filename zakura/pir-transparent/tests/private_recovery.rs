@@ -69,6 +69,15 @@ const ROUTES: &str = r"^(GET /v1/(filters/shards(/[0-9]+/filter)?|shards/init|sh
 /// The shard a request's path names: its filter, manifest, tables or queries.
 const SHARD: &str = r"^/v1/(filters/)?shards/([0-9]+)/";
 
+/// What a pass over a map that rewrites sealed history the companion's store
+/// holds, without declaring a re-cut, returns: wallet-pir refuses it before
+/// reading anything.
+///
+/// TODO(wallet-pir#138): `Withdrawn(ChangedSealed)` once wallet-pir reports that
+/// rewrite with an error of its own; at this pin it is `MapDiverged`, which a
+/// pass reports as `Pending` and `Outcome::Behind`.
+const UNDECLARED_REWRITE: BatchState = BatchState::Pending;
+
 /// Each test runs a PIR service and wallet; one at a time keeps memory and CPU
 /// bounded.
 static HEAVY: Mutex<()> = Mutex::new(());
@@ -977,16 +986,13 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     assert_eq!(f.catalog().len(), before.len() + 3);
 
     // A sealed shard changes under its revision number, and the tail it parents
-    // is republished. The companion withdraws the publication, nothing reaches
-    // the wallet, and the batch cannot be acknowledged. Reopening does not
-    // forget it.
+    // is republished. The pass refuses the rewrite of history the companion
+    // holds, nothing reaches the wallet, and the batch cannot be acknowledged.
+    // Reopening does not change that.
     f.publish(&lifecycle(&owned, t3, 1, true), resealed);
     let wallet = f.dump(true);
     let changed = f.pass().unwrap();
-    assert_eq!(
-        changed.batch.state,
-        BatchState::Withdrawn(WithdrawnCause::Equivocation)
-    );
+    assert_eq!(changed.batch.state, UNDECLARED_REWRITE);
     assert!(changed.batch.commits.is_empty());
     assert!(matches!(
         f.companion
@@ -998,10 +1004,7 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     assert_eq!(f.dump(true), wallet);
     f.open();
     let reopened = f.pass().unwrap();
-    assert_eq!(
-        reopened.batch.state,
-        BatchState::Withdrawn(WithdrawnCause::Equivocation)
-    );
+    assert_eq!(reopened.batch.state, UNDECLARED_REWRITE);
     assert_eq!(f.dump(true), wallet);
 
     // Privacy, over every request of every pass: the service's routes only, no
@@ -1228,30 +1231,26 @@ fn a_declared_re_cut_keeps_the_wallets_history() {
 }
 
 #[test]
-fn an_undeclared_re_cut_is_withdrawn() {
+fn an_undeclared_re_cut_reaches_nothing_in_the_wallet() {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
     let (mut f, a0, _, _, received) = recovered_before_recut();
     let wallet = f.dump(true);
+    let seen = f.server.requests().len();
 
     // The same re-cut without a declaration rewrites sealed history the
-    // wallet holds: nothing reaches the wallet, before or after a reopen.
+    // wallet holds: the pass reads no shard, and nothing reaches the wallet,
+    // before or after a reopen.
     f.publish(&after_recut(a0), SEAL);
     for reopen in [false, true] {
         if reopen {
             f.open();
         }
         let undeclared = f.pass().expect("a pass");
-        assert!(
-            matches!(
-                undeclared.batch.state,
-                BatchState::Withdrawn(WithdrawnCause::ChangedSealed | WithdrawnCause::Retired)
-            ),
-            "{:?}",
-            undeclared.batch.state
-        );
+        assert_eq!(undeclared.batch.state, UNDECLARED_REWRITE);
         assert!(undeclared.batch.commits.is_empty());
         assert_eq!(f.dump(true), wallet);
     }
+    assert!(f.shards_requested(seen).is_empty());
     assert_eq!(f.spendable().unwrap(), received);
 }
 

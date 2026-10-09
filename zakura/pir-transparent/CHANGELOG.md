@@ -10,12 +10,18 @@
   their sources, and the renumbered tail is listed as resolving the old one. A
   pass checks the declarations against the map (`Equivocation`, `Regression`)
   and, on the first stored fact under a declared revision, against the catalog
-  (`Equivocation`). The companion records the highest re-cut epoch its store
-  followed, and a pass over a map with a lower epoch is `Pending` with
-  `Outcome::Behind` before any retrieval. The shard limit counts declared
-  entries. Wallet pages under a superseded sealed revision are completed once
-  the batch covers their range. An undeclared change of sealed content is still
-  `Withdrawn`.
+  (`Equivocation`). A ready pass over a map whose declarations name a revision
+  the store holds facts under records the map's re-cut epoch, and a pass over a
+  map with a lower epoch is `Pending` with `Outcome::Behind` before any
+  retrieval, so a re-cut only rolls forward. The shard limit counts declared
+  entries at or above the watch set's floor. Wallet pages under a superseded
+  sealed revision are completed once the batch covers their range, in the
+  revision's own commit when it has one. An undeclared change of sealed content
+  never reaches the wallet.
+- `pir_bridge_exports`, a never-pruned record of every revision a batch
+  exported. A published or declared revision that differs from one exported at
+  its source and lineage, or under its identity, is `Withdrawn(Equivocation)`,
+  so a pruned catalog row cannot let a colliding revision reach the wallet.
 
 - Txid display lookups: re-exports of wallet-pir's `transparent-txid-client`
   (`TxidDisplayClient`, `TxidTransport`, `TxidRequest`, `TxidReply`, `TxidLookup`, `TxidError`,
@@ -78,8 +84,12 @@
 
 ### Changed
 
-- wallet-pir is pinned to `e9f128b4`, whose shard map carries re-cut
-  declarations; every wallet-pir dependency moves together.
+- wallet-pir is pinned to `a288d570`, whose shard map carries re-cut
+  declarations and whose sync keeps a store's history across a declared
+  re-cut; every wallet-pir dependency moves together. Its sync refuses a map
+  that rewrites sealed history the store holds without declaring a re-cut as
+  `MapDiverged`, which a pass reports as `Pending`, and drops page work under
+  an unpublished revision instead of diverging.
 - Sources are `transparent-reference-source-v3`: the shard id is no longer
   bound, only the geometry, its seal parameters and the start height, so a
   renumbered shard or tail keeps its source.
@@ -140,8 +150,9 @@
   shard ending on a block the chain view does not hold, or an exported tail
   without a retrieved successor make the batch `Pending` instead of failing
   the pass. So does every `MapDiverged` from the reference client's sync (a
-  shard with pending pages withdrawn, or a mid-pass refresh that does not
-  continue the first map), with `Outcome::Behind` and no claimed coverage, and
+  mid-pass refresh that does not continue the first map, or an undeclared
+  rewrite of sealed history the store holds), with `Outcome::Behind` and no
+  claimed coverage, and
   a pass on a reset store that stops before binding it while the catalog still
   records exported revisions. A sealed regression, an equivocating revision, a
   changed sealed revision or a retired shard make it `Withdrawn`.

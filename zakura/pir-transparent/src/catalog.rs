@@ -66,6 +66,19 @@ const CATALOG: &str = "CREATE TABLE pir_bridge_catalog (
         current INTEGER NOT NULL DEFAULT 0 CHECK(current IN (0,1)),
         PRIMARY KEY(source,digest,sealed), UNIQUE(source,lineage), UNIQUE(source,revision));";
 
+/// Every revision a batch handed to the wallet, never pruned. The wallet keeps
+/// every revision it registered for good, so no later revision may reach it at
+/// the source and lineage of one it holds under another identity, even once
+/// the catalog pruned that row.
+const EXPORTS: &str = "CREATE TABLE IF NOT EXISTS pir_bridge_exports (
+        source BLOB NOT NULL CHECK(length(source)=32),
+        lineage INTEGER NOT NULL CHECK(lineage>0),
+        revision BLOB NOT NULL CHECK(length(revision)=32),
+        sealed INTEGER NOT NULL CHECK(sealed IN (0,1)),
+        height INTEGER NOT NULL CHECK(height>=0 AND height<=4294967295),
+        hash BLOB NOT NULL CHECK(length(hash)=32),
+        PRIMARY KEY(source,lineage), UNIQUE(source,revision));";
+
 /// Whether a pass's commits may reach the wallet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BatchState {
@@ -89,12 +102,13 @@ pub enum BatchState {
     /// publishes nor declares, a shard ending on a block the wallet's chain
     /// does not hold, or an exported tail whose successor is not retrieved yet,
     /// or a store a publication change reset that has not bound the new set
-    /// again. A publication that diverged from what the sync read (a shard with
-    /// pending pages withdrawn, or a map refreshed mid-pass that does not
-    /// continue the one the pass started from), a map under another set that
-    /// ends below the height the store synced to, and a map from before a
-    /// re-cut the store already followed (a lower re-cut epoch than this
-    /// companion recorded) are also `Pending`, with
+    /// again. A publication that diverged from what the sync read (a map
+    /// refreshed mid-pass that does not continue the one the pass started from,
+    /// or, at this wallet-pir pin, one rewriting sealed history the store holds
+    /// without declaring a re-cut), a map under another set that ends below the
+    /// height the store synced to, and a map from before a re-cut the store
+    /// already followed (a lower re-cut epoch than this companion recorded) are
+    /// also `Pending`, with
     /// [`Outcome::Behind`](crate::Outcome::Behind). The batch has no commits or
     /// retired revisions and cannot be acknowledged; a later pass can be
     /// `Ready`.
@@ -125,10 +139,12 @@ pub enum WithdrawnCause {
     Equivocation,
     /// A sealed revision a batch exported is neither published nor declared
     /// superseded by a re-cut, and its source is published at another revision
-    /// that is not merely an older unsealed one.
+    /// that is not merely an older unsealed one. A declared re-cut never
+    /// causes it.
     ChangedSealed,
     /// The heights of a revision a batch exported are published under another
-    /// source, as after a geometry change or an undeclared re-cut.
+    /// source, as after a geometry change or an undeclared re-cut. A declared
+    /// re-cut never causes it.
     Retired,
 }
 
@@ -149,6 +165,9 @@ fn length_prefixed(hash: &mut Sha256, value: &[u8]) {
 
 /// Creates this format's tables in a new companion, or checks that an existing
 /// one is bound to `binding` and brings a v2 companion to this format.
+///
+/// The catalog keeps, never pruned, every revision a batch exported
+/// (`pir_bridge_exports`): the wallet keeps every revision it registered.
 ///
 /// A v1 companion counted lineage per companion, which no recreated companion
 /// can reproduce, so it is refused rather than migrated. A v2 catalog derived
@@ -223,11 +242,23 @@ pub(crate) fn prepare(conn: &mut Connection, binding: &[u8; 32]) -> Result<(), R
         .map_err(failure)?;
         record_epoch(&tx, 0)?;
     }
+    if !has("pir_bridge_exports")? {
+        tx.execute_batch(EXPORTS).map_err(failure)?;
+        // A companion of this format from before the record began.
+        tx.execute(
+            "INSERT OR IGNORE INTO pir_bridge_exports (source, lineage, revision, sealed, height, hash)
+             SELECT source, lineage, revision, sealed, height, hash FROM pir_bridge_catalog
+             WHERE exported=1",
+            [],
+        )
+        .map_err(failure)?;
+    }
     tx.commit().map_err(failure)
 }
 
-/// The highest re-cut epoch of a map whose pass this companion's store
-/// followed, zero if none since the store last started.
+/// The highest re-cut epoch of a map whose ready pass found facts in this
+/// companion's store under a revision that map declares superseded, zero if
+/// none since the store last started.
 pub(crate) fn recut_epoch(conn: &Connection) -> Result<u32, RecoveryError> {
     let epoch: Option<i64> = conn
         .query_row(
@@ -535,6 +566,30 @@ impl<'c> Pass<'c> {
     /// recorded as current without the regression check, since its source's
     /// published successor is newer by construction.
     pub(crate) fn admit_declared(&mut self, entry: &Published) -> Result<bool, RecoveryError> {
+        // A manifest digest binds its geometry and start height, so a
+        // declaration naming one this companion recorded under another source
+        // misstates where it was published. Only a declared revision is
+        // checked so: stored facts under it outlive no set change, which
+        // resets the store, while a published one may follow a set change.
+        let elsewhere: bool = self
+            .tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pir_bridge_catalog
+                     WHERE digest=?1 AND sealed=?2 AND source<>?3)
+                 OR EXISTS(SELECT 1 FROM pir_bridge_exports WHERE revision=?4 AND source<>?3)",
+                params![
+                    entry.digest,
+                    entry.revision.sealed,
+                    entry.revision.source,
+                    entry.revision.revision
+                ],
+                |row| row.get(0),
+            )
+            .map_err(failure)?;
+        if elsewhere {
+            self.withdraw(WithdrawnCause::Equivocation);
+            return Ok(false);
+        }
         if let Some(same) = self.recorded(entry)? {
             return Ok(same);
         }
@@ -545,8 +600,35 @@ impl<'c> Pass<'c> {
     /// Whether the catalog records `entry` exactly (`Some(true)`), records
     /// something that contradicts it (`Some(false)`, withdrawing the batch as
     /// an `Equivocation`), or neither.
+    ///
+    /// A contradiction is a row of its source with its digest and sealing at
+    /// another lineage or endpoint, a row of its source at its lineage with
+    /// another digest or sealing, or a revision ever exported at its source
+    /// and lineage, or under its identity, that differs from it: the wallet
+    /// would refuse it as an integrity failure and quarantine the account.
     fn recorded(&mut self, entry: &Published) -> Result<Option<bool>, RecoveryError> {
         let revision = &entry.revision;
+        let contradicted: bool = self
+            .tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pir_bridge_exports
+                 WHERE source=?1 AND (lineage=?2 OR revision=?3)
+                 AND NOT (lineage=?2 AND revision=?3 AND sealed=?4 AND height=?5 AND hash=?6))",
+                params![
+                    revision.source,
+                    revision.lineage,
+                    revision.revision,
+                    revision.sealed,
+                    entry.height(),
+                    entry.hash()
+                ],
+                |row| row.get(0),
+            )
+            .map_err(failure)?;
+        if contradicted {
+            self.withdraw(WithdrawnCause::Equivocation);
+            return Ok(Some(false));
+        }
         let stored: Option<(u64, u32, Vec<u8>)> = self
             .tx
             .query_row(
@@ -747,17 +829,36 @@ impl<'c> Pass<'c> {
                     params![revision.source, revision.revision],
                 )
                 .map_err(failure)?;
+            self.tx
+                .execute(
+                    "INSERT OR IGNORE INTO pir_bridge_exports (source, lineage, revision, sealed, height, hash)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        revision.source,
+                        revision.lineage,
+                        revision.revision,
+                        revision.sealed,
+                        u32::from(revision.publication.height),
+                        revision.publication.hash.0.as_slice()
+                    ],
+                )
+                .map_err(failure)?;
         }
         Ok(())
     }
 
     /// Prunes the catalog, and the store's caches to the revisions `digests`
-    /// names, records that the store followed a map at re-cut `epoch`, then
-    /// commits the pass.
+    /// names, records that the store followed a map at re-cut `epoch`, if
+    /// given, then commits the pass.
     ///
     /// The recorded epoch only rises: a map below it is one the store moved
-    /// past, which the next pass waits out rather than syncs against.
-    pub(crate) fn finish(self, digests: &[&str], epoch: u32) -> Result<(), RecoveryError> {
+    /// past, which the next pass waits out rather than syncs against. A pass
+    /// gives one only when it is ready and the map's declarations named a
+    /// revision the store holds facts under, so a map whose declaration is
+    /// refused, or names nothing the store holds, cannot raise it. A re-cut
+    /// therefore only rolls forward: undoing one takes another re-cut at a
+    /// higher epoch.
+    pub(crate) fn finish(self, digests: &[&str], epoch: Option<u32>) -> Result<(), RecoveryError> {
         prune_catalog(&self.tx)?;
         let named = serde_json::to_string(digests).map_err(failure)?;
         for table in ["filter_cache", "setup_cache"] {
@@ -777,8 +878,10 @@ impl<'c> Pass<'c> {
                 [],
             )
             .map_err(failure)?;
-        let recorded = recut_epoch(&self.tx)?;
-        record_epoch(&self.tx, recorded.max(epoch))?;
+        if let Some(epoch) = epoch {
+            let recorded = recut_epoch(&self.tx)?;
+            record_epoch(&self.tx, recorded.max(epoch))?;
+        }
         self.tx.commit().map_err(failure)
     }
 }
@@ -875,7 +978,9 @@ pub(crate) fn reset(conn: &mut Connection, named: &[Published]) -> Result<(), Re
 }
 
 /// Forgets rows that are neither current nor exported. Each source's newest
-/// row stays, so a later regression or lagging replica is still recognized.
+/// row stays, so a later regression or lagging replica is still recognized,
+/// and `pir_bridge_exports` keeps every exported revision, so a pruned one
+/// still refuses a revision that would collide with it in the wallet.
 fn prune_catalog(tx: &Transaction<'_>) -> Result<(), RecoveryError> {
     tx.execute(
         "DELETE FROM pir_bridge_catalog WHERE current=0 AND exported=0

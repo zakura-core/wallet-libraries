@@ -242,7 +242,9 @@ pub struct ReferenceRecovery {
 ///
 /// A pass normalizes against that map, the one its sync finished with, and
 /// never fetches another: a second fetch can see a newer publication than the
-/// one whose facts the sync stored.
+/// one whose facts the sync stored. It caches no filter: prefetching, and
+/// dropping what an earlier prefetch left unused when the next one starts or
+/// the map is fetched, as [`FilterSource`] requires, stay with the inner source.
 struct Recorded<'a, F> {
     inner: &'a mut F,
     map: Vec<u8>,
@@ -360,6 +362,8 @@ struct Facts<'p, A> {
     /// Declared revisions already looked at this pass, and whether they have a
     /// commit.
     admitted: BTreeMap<&'p str, bool>,
+    /// Whether a stored fact names a revision the map declares superseded.
+    holds_declared: bool,
     context: TransparentRecoveryContext<A>,
 }
 
@@ -380,6 +384,7 @@ impl<'p, A: Copy> Facts<'p, A> {
                 .map(|entry| (entry.digest.as_str(), entry))
                 .collect(),
             admitted: BTreeMap::new(),
+            holds_declared: false,
             context,
         }
     }
@@ -432,6 +437,7 @@ impl<'p, A: Copy> Facts<'p, A> {
             return Ok(None);
         };
         let (digest, entry) = (*digest, *entry);
+        self.holds_declared = true;
         if entry.shard_id != shard_id || from < entry.start_height || through > entry.end_height {
             pass.defer();
             return Ok(None);
@@ -539,61 +545,74 @@ fn spans<'r>(
     false
 }
 
-/// Completion-only commits for the wallet's pages that no commit of their own
-/// revision will settle: pages under a source `published` does not name, as
-/// after a set or origin change or a re-cut, and pages under a sealed revision
-/// a re-cut declared superseded (in `declared`) whose source the map still
-/// names, as a renumbered shard.
+/// Completes the wallet's pages that no commit of their own revision covers by
+/// itself, and returns the completion-only commits that needs.
 ///
-/// No commit of such a page's revision follows, and every pending page blocks
-/// its account, so a page is completed under its own revision once `commits`
-/// cover each of its addresses over its whole range. The commit carries nothing
-/// else. Its anchor is the wallet's block at the lower of the revision's
-/// publication height and the target, which at the publication height must be
-/// the publication's own block; a page whose anchor the wallet's chain does
-/// not hold waits.
+/// Every pending page blocks its account. A page under a source `published`
+/// does not name, as after a set, origin or source-format change or a re-cut,
+/// has no commit of its revision to follow, nor has one under a sealed
+/// revision a re-cut declared superseded (in `declared`) whose source the map
+/// still names, as a renumbered shard. Such a page is completed under its own
+/// revision once `commits` cover each of its addresses over its whole range.
+/// The completion-only commit carries nothing else. Its anchor is the wallet's
+/// block at the lower of the revision's publication height and the target,
+/// which at the publication height must be the publication's own block; a page
+/// whose anchor the wallet's chain does not hold waits.
 ///
-/// A page whose revision has a commit in `commits` is left to that commit,
-/// which completes it when it covers the page and otherwise reopens or keeps
-/// it, so no page is completed twice. A named source's provisional revisions
-/// are left to their successor, whose qualification withdraws them.
+/// A declared revision can also have a commit of its own, from facts the store
+/// saved under it before the re-cut, while the rest of its range was read
+/// again under the shard that now covers it. Its pages are completed in that
+/// commit once all of `commits` cover them. Any other page whose revision has
+/// a commit is left to that commit, which completes it from its own coverage
+/// and otherwise reopens or keeps it, so no page is completed twice. A named
+/// source's provisional revisions are left to their successor, whose
+/// qualification withdraws them.
 fn complete_stranded<A: Copy>(
     watch: &TransparentWatchSet<A>,
     context: TransparentRecoveryContext<A>,
     published: &[Published],
     declared: &[Published],
-    commits: &[TransparentLedgerCommit<A>],
+    commits: &mut [TransparentLedgerCommit<A>],
     chain: &impl ChainView,
 ) -> Result<Vec<TransparentLedgerCommit<A>>, RecoveryError> {
     let named: BTreeSet<&[u8]> = published
         .iter()
         .map(|entry| entry.revision.source.as_slice())
         .collect();
-    let mut stranded: Vec<TransparentLedgerCommit<A>> = vec![];
-    for page in &watch.pending_pages {
-        if commits
-            .iter()
-            .any(|commit| commit.revision == page.revision)
-        {
-            continue;
-        }
-        // A named source's own revisions settle its pages, except a sealed
-        // revision a re-cut superseded, which no successor withdraws.
-        if named.contains(page.revision.source.as_slice())
-            && !declared.iter().any(|entry| entry.revision == page.revision)
-        {
-            continue;
-        }
-        let request = &page.request;
-        let covered = request.addresses.iter().all(|address| {
+    let covers = |commits: &[TransparentLedgerCommit<A>], request: &PageRequest| {
+        request.addresses.iter().all(|address| {
             spans(
                 commits.iter().flat_map(|commit| &commit.coverage),
                 *address,
                 request.from,
                 request.through,
             )
-        });
-        if !covered {
+        })
+    };
+    let mut stranded: Vec<TransparentLedgerCommit<A>> = vec![];
+    for page in &watch.pending_pages {
+        let superseded = declared.iter().any(|entry| entry.revision == page.revision);
+        if let Some(own) = commits
+            .iter()
+            .position(|commit| commit.revision == page.revision)
+        {
+            let done = commits[own].completed_pages.contains(&page.request.page)
+                || commits[own]
+                    .opened_pages
+                    .iter()
+                    .any(|opened| opened.page == page.request.page);
+            if superseded && !done && covers(commits, &page.request) {
+                commits[own].completed_pages.push(page.request.page.clone());
+            }
+            continue;
+        }
+        // A named source's own revisions settle its pages, except a sealed
+        // revision a re-cut superseded, which no successor withdraws.
+        if named.contains(page.revision.source.as_slice()) && !superseded {
+            continue;
+        }
+        let request = &page.request;
+        if !covers(commits, request) {
             continue;
         }
         if let Some(commit) = stranded
@@ -665,15 +684,19 @@ fn required_floor<A>(watch: &TransparentWatchSet<A>, target: u64) -> u64 {
         .map_or(0, |lowest| lowest.min(target))
 }
 
-/// The map entries a pass handles: every shard the map publishes, and every
-/// revision its re-cuts declare superseded.
-fn entries(map: &ShardMap) -> usize {
+/// The map entries a pass over a watch set with `floor` handles: every shard
+/// the map publishes, and every revision its re-cuts declare superseded that
+/// ends at or above the floor. Declarations are never dropped, so those wholly
+/// below every watched script's required height, which no stored fact can
+/// name, do not count against the limit.
+fn entries(map: &ShardMap, floor: u64) -> usize {
     map.shards.len()
         + map
             .recuts
             .iter()
-            .map(|recut| recut.superseded.len())
-            .sum::<usize>()
+            .flat_map(|recut| &recut.superseded)
+            .filter(|shard| shard.end_height >= floor)
+            .count()
 }
 
 /// The caller's chain, accepting every block below the watch set's floor. Passed
@@ -681,20 +704,22 @@ fn entries(map: &ShardMap) -> usize {
 ///
 /// A wallet holds no blocks below its birthday, while a publication may start far
 /// below it (the live map starts at genesis). Leniency there is sound because, at
-/// wallet-pir 648264bb, `sync_into` asks below the floor only for rollback
+/// wallet-pir a288d570, `sync_into` asks below the floor only for rollback
 /// anchors:
 ///
-/// - It plans only shards meeting `[required_from, target]` (`sync.rs:870-895`),
-///   so every coverage endpoint it checks (`sync.rs:1208-1223`, `:2032-2048`,
-///   `sync_ahead.rs:255-258`) and every stored coverage end its reorg scan asks
-///   about (`sync.rs:609-662`) is at or above the floor. Required heights only
-///   move earlier, so no script the companion retains starts below the floor.
+/// - It plans only shards meeting `[required_from, target]` (`sync.rs:919-940`),
+///   so every coverage endpoint it checks (`sync.rs:1331-1332`, `:2163-2164`,
+///   `sync_ahead.rs:255-258`), every stored coverage end its reorg scan asks
+///   about (`sync.rs:609-660`), and the end of a declared revision whose page
+///   work it drops (`:726-731`), opened when that revision met the floor, is at
+///   or above the floor. Required heights only move earlier, so no script the
+///   companion retains starts below the floor.
 /// - The block a rollback rewinds to may lie below it: the reorg fallback
-///   `map.start_height - 1` (`:648`), a replaced tail (`:734-741`) or a revision
-///   withdrawn mid-sync (`:1030-1035`), each just below a shard's start and each
-///   resolved by `accepted_at` (`:2370-2390`), which takes the hash from the map
-///   when the view has none. Only block 0 has no map entry, so [`Self::hash_at`]
-///   answers it with the map's genesis hash.
+///   `map.start_height - 1` (`:637`), a replaced revision (`:778-790`) or a
+///   revision withdrawn mid-sync (`:1087-1091`), each just below a shard's start
+///   and each resolved by `accepted_at` (`:2501-2520`), which takes the hash
+///   from the map when the view has none. Only block 0 has no map entry, so
+///   [`Self::hash_at`] answers it with the map's genesis hash.
 ///
 /// Nothing below the floor is exported or cataloged (see `normalize`), and the
 /// target and every shard anchor are checked against the caller's chain alone.
@@ -831,8 +856,9 @@ impl ReferenceRecovery {
     /// must be accepted by `chain`; the watch set and the companion's retained
     /// scripts must be within the script limit; `filters` must not use the parent
     /// filter experiment; the shard map, its shards and the revisions its re-cuts
-    /// declare superseded counted together, must be within the shard limit and
-    /// name Zcash mainnet's network and genesis block; and the service's init must name
+    /// declare superseded at or above the watch set's floor counted together,
+    /// must be within the shard limit and name Zcash mainnet's network and
+    /// genesis block; and the service's init must name
     /// [`SCHEMA`]. A failed check returns [`RecoveryError::Invalid`] without
     /// further requests. A watch set with no addresses needs nothing retrieved:
     /// once its target is accepted, the pass sends no request and returns a batch
@@ -858,17 +884,21 @@ impl ReferenceRecovery {
     /// keeps the store and waits for the map to catch up. So does a pass whose
     /// map declares fewer re-cuts (a lower epoch) than one this companion's store
     /// already followed, as a replica still serving the map from before a re-cut:
-    /// syncing against it would roll back what the store holds. That, and any
-    /// divergence the sync itself finds (a shard with pending pages withdrawn,
-    /// or a map refreshed mid-pass that does not continue the first), is a
-    /// [`BatchState::Pending`] batch with [`Outcome::Behind`] that claims no
-    /// coverage, keeping companion and catalog.
+    /// to the store, that map would rewrite history it holds. That, and any
+    /// divergence the sync itself finds (a map refreshed mid-pass that does not
+    /// continue the first, or one rewriting sealed history the store holds
+    /// without declaring a re-cut), is a [`BatchState::Pending`] batch with
+    /// [`Outcome::Behind`] that claims no coverage, keeping companion and
+    /// catalog.
     ///
     /// A re-cut the map declares keeps the wallet's history: facts the store
     /// read under a sealed revision the re-cut superseded are exported under
     /// that revision's own identity, which the wallet holds, and the renumbered
     /// shards and tail keep their sources. An undeclared change of sealed
-    /// content is still [`BatchState::Withdrawn`].
+    /// content never reaches the wallet: the sync refuses it, or the catalog
+    /// withdraws it. A ready pass over a map whose declarations name a revision
+    /// the store holds facts under records that map's re-cut epoch, so a
+    /// re-cut only rolls forward; undoing one takes another at a higher epoch.
     pub fn recover<A, C, F, T>(
         &mut self,
         watch: &TransparentWatchSet<A>,
@@ -929,8 +959,9 @@ impl ReferenceRecovery {
         )?;
         let (mut filters, map_bytes) = Recorded::fetch(filters).map_err(failure)?;
         let map: ShardMap = serde_json::from_slice(filters.map()).map_err(failure)?;
+        let floor = required_floor(watch, target.height);
         require(
-            entries(&map) <= self.config.shards,
+            entries(&map, floor) <= self.config.shards,
             "publication shard limit exceeded",
         )?;
         // The wallet's chain is mainnet's; another chain's map cannot cover it.
@@ -979,7 +1010,6 @@ impl ReferenceRecovery {
         if map.recut_epoch() < catalog::recut_epoch(&self.catalog)? {
             return Ok(behind_unread());
         }
-        let floor = required_floor(watch, target.height);
         let stored = self.store.anchor().map_err(failure)?;
         let retained = self
             .store
@@ -1024,10 +1054,17 @@ impl ReferenceRecovery {
             &sync_anchor,
         ) {
             Ok(report) => report,
-            // Not a set change, which was checked above: a lagging replica's map
-            // lacks a shard with pending pages, or a map refreshed mid-pass does
-            // not continue the first. A later pass starts from the publication it
-            // then finds.
+            // Not a set change, which was checked above: a map refreshed
+            // mid-pass does not continue the first (another re-cut epoch, or a
+            // resumed shard id moved to another start), or the map rewrites
+            // sealed history the store holds, below a block the wallet's chain
+            // accepts, without declaring a re-cut. A later pass starts from the
+            // publication it then finds.
+            //
+            // TODO(wallet-pir#138): wallet-pir reports the undeclared rewrite as
+            // `MapDiverged` too at this pin. Once it has an error of its own,
+            // map that error to `Withdrawn(ChangedSealed)` here, before this
+            // arm: no later pass repairs a rewrite of history the wallet holds.
             Err(SyncError::MapDiverged(_)) => return Ok(behind_unread()),
             Err(other) => return Err(failure(other)),
         };
@@ -1035,7 +1072,7 @@ impl ReferenceRecovery {
         // are the ones that map described.
         let map: ShardMap = serde_json::from_slice(filters.map()).map_err(failure)?;
         require(
-            entries(&map) <= self.config.shards,
+            entries(&map, floor) <= self.config.shards,
             "publication shard limit exceeded",
         )?;
         self.normalize(watch, map, progress(&report, clamped), chain)
@@ -1261,6 +1298,7 @@ impl ReferenceRecovery {
             });
             opened.insert(id);
         }
+        let holds_declared = facts.holds_declared;
         let mut commits = facts.commits;
         for page in &watch.pending_pages {
             for commit in commits.values_mut() {
@@ -1326,16 +1364,20 @@ impl ReferenceRecovery {
             .map(|entry| entry.manifest_digest.as_str())
             .collect();
         if state != BatchState::Ready {
-            pass.finish(&digests, map.recut_epoch())?;
+            pass.finish(&digests, None)?;
             return Ok(unready(state, progress));
         }
         // Completions of pages no commit of their own revision settles follow
         // the commits that cover them. They carry no evidence, so they are not
         // recorded as exported: no later map could succeed their revisions.
-        let stranded = complete_stranded(watch, context, &published, &declared, &commits, chain)?;
-        pass.export(commits.iter().map(|commit| &commit.revision))?;
-        pass.finish(&digests, map.recut_epoch())?;
         let mut commits = commits;
+        let stranded =
+            complete_stranded(watch, context, &published, &declared, &mut commits, chain)?;
+        pass.export(commits.iter().map(|commit| &commit.revision))?;
+        // Only a ready pass whose map re-cut something the store holds moves
+        // the epoch: a refused or irrelevant declaration cannot hold honest
+        // maps behind.
+        pass.finish(&digests, holds_declared.then(|| map.recut_epoch()))?;
         commits.extend(stranded);
         self.ready(commits, replaced, progress)
     }
@@ -4791,9 +4833,10 @@ mod tests {
         assert_eq!(cataloged(&adapter), 2);
 
         // A budget-limited pass left a pending page on the tail, and a lagging
-        // replica's map no longer has it. The pass clamps to that map's end and
-        // finds the page's shard withdrawn: the batch is pending, behind, and
-        // the companion keeps its page and catalog.
+        // replica's map no longer has it. The pass clamps to that map's end,
+        // and the sync drops the page work, which saved nothing, rather than
+        // diverging: a later map that publishes the tail reads it again. The
+        // batch covers what that map publishes and keeps the catalog.
         let dir = tempfile::tempdir().unwrap();
         let mut adapter = companion(&dir);
         let tail = &first.shards[1];
@@ -4829,10 +4872,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!((filters.maps, filters.filters, shards.calls()), (1, 0, 1));
-        assert_eq!(batch.state, BatchState::Pending);
-        assert_eq!(batch.progress, behind_by_divergence);
-        assert!(batch.commits.is_empty());
-        assert_eq!(adapter.store.pending().unwrap().len(), 1);
+        assert_eq!(batch.state, BatchState::Ready);
+        assert_eq!(
+            batch.progress,
+            Progress {
+                covered_through: first.shards[0].end_height,
+                outcome: Outcome::Behind,
+            }
+        );
+        assert_eq!(revisions(&batch).len(), 1);
+        assert!(batch.commits[0].opened_pages.is_empty());
+        assert!(adapter.store.pending().unwrap().is_empty());
         assert_eq!(
             adapter.store.set_identity().unwrap(),
             Some(SetIdentity::of_schema(&first, SCHEMA))
@@ -5723,5 +5773,338 @@ mod tests {
         assert_eq!(again.state, BatchState::Ready);
         assert_eq!(again.commits, first.commits);
         assert_eq!(exported(&adapter), vec![(ARCHIVE, 1), (TAIL, 1)]);
+    }
+
+    #[test]
+    fn a_page_under_a_declared_revision_with_saved_events_completes_once() {
+        let (before, after) = recut_pair();
+        let (watch, chain) = (watching(&after), accepting(&[&before, &after]));
+        let script = address_script(watch.addresses[0].address);
+        let s3 = &before.shards[3];
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = seeded(&dir, &script, before.start_height);
+        // A budget-limited pass saved a receive under S3 and left the rest of
+        // its pages, and the wallet holds both.
+        let saved = TransparentEvent::Receive(transparent_events::ReceiveEvent {
+            metadata: None,
+            height: (s3.start_height + 10) as u32,
+            txid: transparent_events::Txid([7; 32]),
+            transaction_index: 1,
+            output_index: 0,
+            value: 100,
+            coinbase: false,
+        });
+        for entry in &before.shards {
+            let end = (entry.end_height, entry.terminal_block_hash.as_str());
+            let mut commit = covered(entry, &entry.manifest_digest, end, &script, vec![]);
+            if entry.shard_id == s3.shard_id {
+                commit = covered(entry, &entry.manifest_digest, end, &script, vec![saved]);
+                commit.covered_scripts.clear();
+                commit.pending_upsert = vec![store_page(entry, &script, 3)];
+            }
+            adapter.store.commit_shard(commit).unwrap();
+        }
+        let first = recut_pass(&mut adapter, &watch, &before, &chain);
+        assert_eq!(first.state, BatchState::Ready);
+        adapter.acknowledge_applied(&first).unwrap();
+        let opening = first.commits[3].clone();
+        assert_eq!(opening.opened_pages.len(), 1);
+        assert_eq!(opening.receives.len(), 1);
+        let mut holding = watch.clone();
+        holding.pending_pages = vec![PendingPage {
+            request: opening.opened_pages[0].clone(),
+            revision: opening.revision.clone(),
+            target: opening.context.target,
+        }];
+
+        // Across the declared re-cut the sync drops the page work under S3,
+        // whose last block the wallet's chain accepts, and keeps what it saved;
+        // the tail is read again.
+        let pending = adapter.store.pending().unwrap();
+        adapter
+            .store
+            .commit_shard(transparent_wallet::ShardCommit {
+                pending_complete: vec![pending[0].id.unwrap()],
+                ..Default::default()
+            })
+            .unwrap();
+        withdraw_tail(&mut adapter, &before);
+        let read = |adapter: &mut ReferenceRecovery, entry: &ShardMapEntry| {
+            let end = (entry.end_height, entry.terminal_block_hash.as_str());
+            adapter
+                .store
+                .commit_shard(covered(entry, &entry.manifest_digest, end, &script, vec![]))
+                .unwrap();
+        };
+        read(&mut adapter, &after.shards[3]);
+        assert_eq!(adapter.store.events().unwrap().len(), 1);
+        assert!(adapter.store.pending().unwrap().is_empty());
+        let page = &opening.opened_pages[0].page;
+        let completing = |batch: &RecoveryBatch<u32>| -> Vec<TransparentLedgerCommit<u32>> {
+            batch
+                .commits
+                .iter()
+                .filter(|commit| commit.completed_pages.contains(page))
+                .cloned()
+                .collect()
+        };
+        // Until the script's gap is read again, the page stays open.
+        let batch = recut_pass(&mut adapter, &holding, &after, &chain);
+        assert_eq!(batch.state, BatchState::Ready);
+        assert!(completing(&batch).is_empty());
+        adapter.acknowledge_reconciled(&batch).unwrap();
+
+        // Once it is, under S3′, S3's own commit carries the saved receive and
+        // S3′ the coverage: the page is completed once, in S3's commit.
+        read(&mut adapter, &after.shards[2]);
+        let batch = recut_pass(&mut adapter, &holding, &after, &chain);
+        assert_eq!(batch.state, BatchState::Ready);
+        let completing = completing(&batch);
+        assert_eq!(completing.len(), 1);
+        assert_eq!(completing[0].revision, opening.revision);
+        assert_eq!(completing[0].receives, opening.receives);
+        assert_eq!(completing[0].completed_pages, vec![page.clone()]);
+        assert!(batch.commits.iter().any(|commit| {
+            commit.revision.source == opening.revision.source
+                && commit.revision.lineage == opening.revision.lineage + 1
+                && !commit.coverage.is_empty()
+        }));
+    }
+
+    #[test]
+    fn a_declared_revision_never_reuses_a_pruned_exported_lineage() {
+        let base = map();
+        let tail = base.shards[1].clone();
+        let script = address_script(watch().addresses[0].address);
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &base);
+        // The tail T, at lineage 1, is exported, then replaced and reconciled,
+        // so the catalog prunes its row while the wallet keeps T for good.
+        let first = pass(&mut adapter, &base);
+        adapter.acknowledge_applied(&first).unwrap();
+        let t = first.commits[1].revision.clone();
+        let next = republished(&base, 1, 1, "5a".repeat(32));
+        retrieve_tail(&mut adapter, &next);
+        let replaced = pass(&mut adapter, &next);
+        assert_eq!(replaced.retired_revisions(), std::slice::from_ref(&t));
+        adapter.acknowledge_reconciled(&replaced).unwrap();
+        assert_eq!(cataloged(&adapter), 2);
+        assert!(
+            catalog_rows(&adapter)
+                .iter()
+                .all(|row| row.1 != tail.start_height || row.2 != 1)
+        );
+
+        // A map declares a sealed revision at the tail's geometry and start, at
+        // revision 0, so at T's source and lineage, under a digest the store
+        // holds a fact under.
+        let planted = "77".repeat(32);
+        let end = tail.start_height + 50;
+        let terminal = "ab".repeat(32);
+        let mut forged = republished(&base, 1, 2, "5b".repeat(32));
+        forged.recuts = vec![Recut {
+            epoch: 1,
+            from_height: tail.start_height,
+            superseded: vec![SupersededShard {
+                shard_id: tail.shard_id,
+                geometry: tail.geometry.clone(),
+                start_height: tail.start_height,
+                end_height: end,
+                terminal_block_hash: terminal.clone(),
+                manifest_digest: planted.clone(),
+                revision: 0,
+                sealed: true,
+            }],
+        }];
+        forged.check_shape().unwrap();
+        retrieve_tail(&mut adapter, &forged);
+        let receive = TransparentEvent::Receive(transparent_events::ReceiveEvent {
+            metadata: None,
+            height: (tail.start_height + 10) as u32,
+            txid: transparent_events::Txid([9; 32]),
+            transaction_index: 1,
+            output_index: 0,
+            value: 100,
+            coinbase: false,
+        });
+        let mut planted_entry = tail.clone();
+        planted_entry.end_height = end;
+        planted_entry.sealed = true;
+        let mut facts = covered(
+            &planted_entry,
+            &planted,
+            (end, &terminal),
+            &script,
+            vec![receive],
+        );
+        facts.covered_scripts.clear();
+        adapter.store.commit_shard(facts).unwrap();
+        let mut chain = StaticChain::from_map(&forged);
+        chain.hashes.insert(end, terminal);
+        // The wallet would refuse it as an integrity failure and quarantine the
+        // account, so the companion refuses it first.
+        let batch = adapter
+            .normalize(&watch(), forged.clone(), MORE, &chain)
+            .unwrap();
+        assert_eq!(
+            batch.state,
+            BatchState::Withdrawn(WithdrawnCause::Equivocation)
+        );
+        assert!(batch.commits.is_empty());
+        // A published revision at that lineage is refused the same way.
+        let colliding = republished(&base, 1, 0, "c0".repeat(32));
+        retrieve_tail(&mut adapter, &colliding);
+        assert_eq!(
+            pass(&mut adapter, &colliding).state,
+            BatchState::Withdrawn(WithdrawnCause::Equivocation)
+        );
+    }
+
+    #[test]
+    fn a_refused_declaration_does_not_raise_the_epoch() {
+        let (before, after) = recut_pair();
+        let (watch, chain) = (watching(&after), accepting(&[&before, &after]));
+        let dir = tempfile::tempdir().unwrap();
+        let (mut adapter, _) =
+            recut_companion(&dir.path().join("companion.sqlite"), &before, &after);
+        // A map misstating a declared revision at the highest epoch is refused,
+        // and records no epoch.
+        let mut forged = after.clone();
+        forged.recuts[0].superseded[1].revision = 1;
+        forged.recuts[0].epoch = u32::MAX;
+        forged.check_shape().unwrap();
+        let batch = recut_pass(&mut adapter, &watch, &forged, &chain);
+        assert_eq!(
+            batch.state,
+            BatchState::Withdrawn(WithdrawnCause::Equivocation)
+        );
+        assert_eq!(catalog::recut_epoch(&adapter.catalog).unwrap(), 0);
+        // Nor does a ready map whose declarations name nothing the store holds.
+        let other = tempfile::tempdir().unwrap();
+        let mut plain = covering(&other.path().join("companion.sqlite"), &before);
+        let mut idle = before.clone();
+        let mut ghost = superseded(&recut_entry(9, NARROW, (1, 2), (0, true), 0x99));
+        ghost.start_height = before.shards[0].start_height;
+        ghost.end_height = before.shards[0].end_height;
+        idle.recuts = vec![Recut {
+            epoch: u32::MAX,
+            from_height: before.shards[0].start_height,
+            superseded: vec![ghost],
+        }];
+        idle.check_shape().unwrap();
+        let ready = recut_pass(&mut plain, &watch, &idle, &chain);
+        assert_eq!(ready.state, BatchState::Ready);
+        assert_eq!(catalog::recut_epoch(&plain.catalog).unwrap(), 0);
+        // The honest re-cut map is not held behind, and its ready pass, over
+        // revisions the store holds, records its epoch.
+        let honest = recut_pass(&mut adapter, &watch, &after, &chain);
+        assert_eq!(honest.state, BatchState::Ready);
+        assert_eq!(catalog::recut_epoch(&adapter.catalog).unwrap(), 1);
+        let mut filters = CountingFilters::serving(serde_json::to_vec(&after).unwrap());
+        let mut shards = CountingShards::serving(SCHEMA);
+        let synced = adapter
+            .recover(&watch, &chain, &mut filters, &mut shards)
+            .unwrap();
+        assert_eq!(synced.state, BatchState::Ready);
+        assert_eq!(filters.filters, 0);
+    }
+
+    #[test]
+    fn a_digest_declared_under_another_geometry_or_start_is_an_equivocation() {
+        let (before, after) = recut_pair();
+        let (watch, chain) = (watching(&after), accepting(&[&before, &after]));
+        // S2's digest declared under the wide geometry, which gives it another
+        // source; or S2 declared from a height after its start, with S1 ending
+        // there.
+        let mut moved = after.clone();
+        moved.recuts[0].superseded[1].geometry = WIDE.into();
+        let mut shifted = after.clone();
+        shifted.recuts[0].superseded[0].end_height += 1;
+        shifted.recuts[0].superseded[0].terminal_block_hash =
+            recut_hash(shifted.recuts[0].superseded[0].end_height);
+        shifted.recuts[0].superseded[1].start_height += 1;
+        let mut chain = chain;
+        let shifted_end = shifted.recuts[0].superseded[0].end_height;
+        chain.hashes.insert(shifted_end, recut_hash(shifted_end));
+        for map in [moved, shifted] {
+            map.check_shape().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let (mut adapter, _) =
+                recut_companion(&dir.path().join("companion.sqlite"), &before, &after);
+            let batch = recut_pass(&mut adapter, &watch, &map, &chain);
+            assert_eq!(
+                batch.state,
+                BatchState::Withdrawn(WithdrawnCause::Equivocation)
+            );
+            assert!(batch.commits.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_fact_under_a_declared_revision_must_fit_it() {
+        let (before, after) = recut_pair();
+        let watch = watching(&after);
+        let script = address_script(watch.addresses[0].address);
+        let (s1, s2) = (&before.shards[1], &before.shards[2]);
+        let chain = accepting(&[&before, &after]);
+        let fresh = |dir: &tempfile::TempDir| {
+            let (adapter, _) =
+                recut_companion(&dir.path().join("companion.sqlite"), &before, &after);
+            adapter
+        };
+        // The wallet's chain holds another block where S1 ended, which no
+        // published shard ends on: S1's facts rest on a branch the wallet
+        // left, so the batch waits.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = fresh(&dir);
+        let mut elsewhere = chain.clone();
+        elsewhere.hashes.insert(s1.end_height, "e1".repeat(32));
+        let batch = recut_pass(&mut adapter, &watch, &after, &elsewhere);
+        assert_eq!(batch.state, BatchState::Pending);
+        assert!(batch.commits.is_empty());
+
+        // A fact outside S2's declared range does not fit it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = fresh(&dir);
+        let outside = TransparentEvent::Receive(transparent_events::ReceiveEvent {
+            metadata: None,
+            height: (s2.end_height + 1) as u32,
+            txid: transparent_events::Txid([3; 32]),
+            transaction_index: 1,
+            output_index: 0,
+            value: 100,
+            coinbase: false,
+        });
+        let end = (s2.end_height, s2.terminal_block_hash.as_str());
+        let mut stray = covered(s2, &s2.manifest_digest, end, &script, vec![outside]);
+        stray.covered_scripts.clear();
+        adapter.store.commit_shard(stray).unwrap();
+        let batch = recut_pass(&mut adapter, &watch, &after, &chain);
+        assert_eq!(batch.state, BatchState::Pending);
+        assert!(batch.commits.is_empty());
+
+        // Nor does coverage under S2's digest that names another shard id.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = fresh(&dir);
+        let mut renamed = s2.clone();
+        renamed.shard_id = 7;
+        adapter
+            .store
+            .commit_shard(covered(&renamed, &s2.manifest_digest, end, &script, vec![]))
+            .unwrap();
+        let batch = recut_pass(&mut adapter, &watch, &after, &chain);
+        assert_eq!(batch.state, BatchState::Pending);
+        assert!(batch.commits.is_empty());
+    }
+
+    #[test]
+    fn only_declarations_at_or_above_the_floor_count_against_the_shard_limit() {
+        let (_, after) = recut_pair();
+        let declared = after.recuts[0].superseded.len();
+        assert_eq!(entries(&after, 0), after.shards.len() + declared);
+        // A floor above S1 and S2 leaves S3 and the tail.
+        let floor = after.recuts[0].superseded[2].start_height;
+        assert_eq!(entries(&after, floor), after.shards.len() + 2);
+        assert_eq!(entries(&after, u64::MAX), after.shards.len());
     }
 }

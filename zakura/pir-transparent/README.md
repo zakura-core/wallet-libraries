@@ -94,12 +94,15 @@ store holds under a superseded sealed revision keep being exported under the
 triple the wallet holds, that revision stays current and is never withdrawn,
 and the renumbered tail resolves the old one in their shared source. A pass
 checks the declarations against the map and, on the first stored fact under a
-declared revision, against the catalog. The companion records the highest
-re-cut epoch its store followed, and a pass over a map with a lower one, as
-from a replica still serving the map from before the re-cut, is `Pending`
-before any retrieval. Wallet pages under a superseded sealed revision are
-completed once the batch covers them. An undeclared change of sealed content is
-still `Withdrawn`.
+declared revision, against the catalog and every revision ever exported. A
+ready pass over a map whose declarations name a revision the store holds facts
+under records that map's re-cut epoch, and a later pass over a map with a lower
+one, as from a replica still serving the map from before the re-cut, is
+`Pending` before any retrieval; a re-cut therefore only rolls forward. Wallet
+pages under a superseded sealed revision are completed once the batch covers
+them. An undeclared change of sealed content never reaches the wallet: the
+reference client refuses a rewrite of history the store holds before reading
+anything (`Pending` at this wallet-pir pin), and the catalog withdraws the rest.
 
 `Ready` assumes the trusted operation. A successor withdraws its predecessor's
 provisional evidence from the wallet only when the wallet qualifies it and
@@ -187,10 +190,12 @@ cover that range, and refuses a page opened over its own coverage.
 A map under another set that ends below the store's anchor, while the chain
 view still accepts that anchor, is a replica that has not caught up, perhaps
 still serving the previous set; the pass keeps the store. That, and every other
-divergence the reference client finds, a lagging replica withdrawing a shard
-with pending pages or a map refreshed mid-pass that does not continue the
-first, makes the batch `Pending` with `Outcome::Behind`, keeping the companion
-and catalog; a later pass starts from the publication it then finds.
+divergence the reference client finds, a map refreshed mid-pass that does not
+continue the first or one rewriting sealed history the store holds without
+declaring a re-cut, makes the batch `Pending` with `Outcome::Behind`, keeping
+the companion and catalog; a later pass starts from the publication it then
+finds. Page work under a shard a lagging replica's map lacks is dropped, not a
+divergence, and read again once a map publishes it.
 
 Never recreate a companion, whether a batch is `Withdrawn` or after
 `PublicationChanged`. A publisher that re-cuts a set without declaring it and
@@ -207,7 +212,9 @@ Companions are format `transparent-reference-companion-v3`. Opening a v2
 companion, whose sources bound shard ids, rebuilds its catalog empty in place
 and keeps its store, so the next pass exports the stored facts again under v3
 sources without retrieving them. A v1 companion, whose lineage was a local
-counter, is refused with `companion format v1; recreate`. Each pass prunes catalog rows that are neither
+counter, is refused with `companion format v1; recreate`. The companion keeps
+every revision a batch exported, never pruned, since the wallet keeps every
+revision it registered. Each pass prunes catalog rows that are neither
 published nor exported, keeping each source's newest row; the store's filter
 and setup caches down to revisions the map names; and the store's commit log
 down to its last entry. Acknowledgment prunes the catalog again.
@@ -261,7 +268,8 @@ republications and a reorg that rolls the companion back below its birthday.
 `a_declared_re_cut_keeps_the_wallets_history` re-cuts two sealed shards into
 one wider shard: the next pass requests only the renumbered tail and changes
 nothing else in the wallet, and a companion recreated afterwards heals.
-`an_undeclared_re_cut_is_withdrawn` publishes the same re-cut undeclared.
+`an_undeclared_re_cut_reaches_nothing_in_the_wallet` publishes the same re-cut
+undeclared.
 
 ```sh
 python3 scripts/dev.py test --config transparent-pir
