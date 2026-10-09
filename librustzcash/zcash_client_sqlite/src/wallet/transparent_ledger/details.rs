@@ -1235,6 +1235,97 @@ fn omissions(
     omissions
 }
 
+/// What the wallet records of an account's part in a transaction's transparent side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Participation {
+    /// The account has no part in the transaction, or the wallet records no transparent
+    /// side of it.
+    None,
+    /// The account has a transparent output or spend in the transaction, or a shielded
+    /// part in a transaction the wallet records as mixed.
+    Recorded,
+    /// The account has a shielded part in a transaction whose raw bytes the wallet holds;
+    /// they show whether it has a transparent side.
+    IfRawShowsOne,
+}
+
+/// The account's part in transaction `tx`'s transparent side.
+///
+/// Its own transparent outputs and spends, recovered or scanned, count. So does a shielded
+/// part (a received, spent or sent note, a payment to a transparent recipient among them) in
+/// a transaction the wallet durably records as mixed: by detail work, stored display facts or
+/// the route-2 marker, which outlive the work they replace. Raw bytes replace work and
+/// display facts alike, so for a shielded part in a transaction with raw bytes, those bytes
+/// decide.
+fn participation(
+    conn: &Connection,
+    tx: i64,
+    account: i64,
+) -> Result<Participation, SqliteClientError> {
+    let (own, shielded, mixed, raw): (bool, bool, bool, bool) = conn.query_row(
+        "SELECT
+             EXISTS (
+                 SELECT 1 FROM transparent_received_outputs o
+                 WHERE o.transaction_id = t.id_tx AND o.account_id = :account
+                 UNION ALL
+                 SELECT 1 FROM transparent_received_output_spends s
+                 JOIN transparent_received_outputs o ON o.id = s.transparent_received_output_id
+                 WHERE s.transaction_id = t.id_tx AND o.account_id = :account
+                 UNION ALL
+                 SELECT 1 FROM tpir_receive_events r
+                 WHERE r.txid = t.txid AND r.account_id = :account
+                 UNION ALL
+                 SELECT 1 FROM tpir_spend_events s
+                 WHERE s.spending_txid = t.txid AND s.account_id = :account
+             ),
+             EXISTS (
+                 SELECT 1 FROM sapling_received_notes n
+                 WHERE n.transaction_id = t.id_tx AND n.account_id = :account
+                 UNION ALL
+                 SELECT 1 FROM orchard_received_notes n
+                 WHERE n.transaction_id = t.id_tx AND n.account_id = :account
+                 UNION ALL
+                 SELECT 1 FROM ironwood_received_notes n
+                 WHERE n.transaction_id = t.id_tx AND n.account_id = :account
+                 UNION ALL
+                 SELECT 1 FROM sapling_received_note_spends s
+                 JOIN sapling_received_notes n ON n.id = s.sapling_received_note_id
+                 WHERE s.transaction_id = t.id_tx AND n.account_id = :account
+                 UNION ALL
+                 SELECT 1 FROM orchard_received_note_spends s
+                 JOIN orchard_received_notes n ON n.id = s.orchard_received_note_id
+                 WHERE s.transaction_id = t.id_tx AND n.account_id = :account
+                 UNION ALL
+                 SELECT 1 FROM ironwood_received_note_spends s
+                 JOIN ironwood_received_notes n ON n.id = s.ironwood_received_note_id
+                 WHERE s.transaction_id = t.id_tx AND n.account_id = :account
+                 UNION ALL
+                 SELECT 1 FROM sent_notes n
+                 WHERE n.transaction_id = t.id_tx AND n.from_account_id = :account
+             ),
+             EXISTS (
+                 SELECT 1 FROM transparent_detail_work w WHERE w.transaction_id = t.id_tx
+                 UNION ALL
+                 SELECT 1 FROM transparent_tx_display d WHERE d.transaction_id = t.id_tx
+                 UNION ALL
+                 SELECT 1 FROM ironwood_enhance_routing r
+                 WHERE r.transaction_id = t.id_tx AND r.route = 2
+             ),
+             t.raw IS NOT NULL
+         FROM transactions t
+         WHERE t.id_tx = :tx",
+        named_params![":tx": tx, ":account": account],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    Ok(if own || (shielded && mixed) {
+        Participation::Recorded
+    } else if shielded && raw {
+        Participation::IfRawShowsOne
+    } else {
+        Participation::None
+    })
+}
+
 /// The detail view; see `TransparentDetailRead::transparent_display_view`.
 pub(crate) fn view<P: consensus::Parameters>(
     conn: &Connection,
@@ -1267,6 +1358,13 @@ pub(crate) fn view<P: consensus::Parameters>(
             |row| row.get(0),
         )
         .optional()?;
+    let part = match account_id {
+        Some(account_id) => participation(conn, tx, account_id)?,
+        None => Participation::None,
+    };
+    if part == Participation::None {
+        return Ok(None);
+    }
     let owned_outputs: Vec<u32> = conn
         .prepare_cached(&format!(
             "SELECT o.output_index FROM transparent_received_outputs o
@@ -1377,6 +1475,9 @@ pub(crate) fn view<P: consensus::Parameters>(
                 .count(),
         );
         let input_count = count(vin.len());
+        if part == Participation::IfRawShowsOne && outputs.is_empty() && input_count == 0 {
+            return Ok(None);
+        }
         let omissions = omissions(
             &sender,
             spent.windows(2).any(|w| w[0] != w[1]),

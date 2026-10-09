@@ -27,6 +27,7 @@ python3 scripts/dev.py verify
 | `enhance` | Enhance PIR; default features |
 | `transparent-pir` | Transparent PIR adapter; `wallet` |
 | `transparent-pir-sqlite` | Transparent PIR adapter; `sqlite` (`wallet` plus the SQLite apply-and-acknowledge integration and the in-process end-to-end tests) |
+| `transparent-pir-testing` | Transparent PIR adapter; `sqlite` and `testing` (the test support applications build their recovery and txid display tests on) |
 
 `default` builds the backend and SQLite crates without Orchard or transparent
 inputs, which `orchard` and `transparent` test, so items used only under those

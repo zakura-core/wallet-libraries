@@ -489,7 +489,13 @@ pub trait TransparentDetailRead: super::TransparentLedgerRead {
     ) -> Result<TransparentDetailParked, Self::Error>;
 
     /// Returns the transparent detail view of `txid` for `account`, or `None` when the
-    /// wallet does not hold the transaction.
+    /// wallet does not hold the transaction or `account` takes no part in its transparent
+    /// side.
+    ///
+    /// The account takes part through its own transparent outputs or spends, scanned or
+    /// recovered, or through a shielded part (a received, spent or sent note) in a
+    /// transaction the wallet records as having a transparent side: by its raw bytes, or,
+    /// without them, by detail work, stored display facts or a private-enhancement marker.
     fn transparent_display_view(
         &self,
         account: Self::AccountId,

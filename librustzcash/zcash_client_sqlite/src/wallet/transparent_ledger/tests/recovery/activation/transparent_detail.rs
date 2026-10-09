@@ -1297,7 +1297,8 @@ fn view_state_matrix() {
         .unwrap();
     let other = import_account(&mut st, 9);
     assert!(owned(&st, account));
-    assert!(!owned(&st, other));
+    // The other account takes no part in the transaction, so it has no view of it.
+    assert_eq!(view(&st, other, txid), None);
 
     // Without work: pending while public payload retrieval owns it, otherwise unavailable.
     let spent = TxId::from_bytes([2; 32]);
@@ -2403,12 +2404,28 @@ fn view_sender_owned_by_address() {
     assert_eq!(store(&mut st, facts), TransparentDisplayStore::Stored);
     let details = available(&st, account, txid_of(&unspent));
     assert_eq!(sender_of(&details), Some((a, true)));
-    // Another account does not own it.
+    // Another account takes no part in the transaction, so it has no view of it.
     let other = import_account(&mut st, 9);
-    assert_eq!(
-        sender_of(&available(&st, other, txid_of(&unspent))),
-        Some((a, false))
-    );
+    let txid = txid_of(&unspent);
+    assert_eq!(view(&st, other, txid), None);
+    // Once it receives an output of the transaction, it sees the sender, which
+    // is not its own.
+    let inserted = conn(&st)
+        .execute(
+            "INSERT INTO transparent_received_outputs
+                 (transaction_id, output_index, account_id, address, script, value_zat, address_id)
+             SELECT ?1, 2, a.account_id, a.cached_transparent_receiver_address, x'00', 1000, a.id
+             FROM addresses a JOIN accounts acc ON acc.id = a.account_id
+             WHERE acc.uuid = ?2 AND a.cached_transparent_receiver_address IS NOT NULL
+             LIMIT 1",
+            rusqlite::params![
+                tx_ref(&st, txid).0,
+                other.expose_uuid().as_bytes().as_slice()
+            ],
+        )
+        .unwrap();
+    assert_eq!(inserted, 1);
+    assert_eq!(sender_of(&available(&st, other, txid)), Some((a, false)));
 }
 
 /// A DER-shaped signature with its sighash byte.
@@ -2539,7 +2556,23 @@ fn raw_view_ownership_requires_an_actual_input() {
 fn raw_view_sender_from_unlocking_scripts() {
     use TransparentDisplayOmission as O;
     use transparent::util::hash160::hash;
-    let (mut st, account, taddr, txid, _) = local_payment_to_self();
+    let (mut st, account, taddr, txid, output_index) = local_payment_to_self();
+    // The account takes part in each copy: it spends the account's output, by a link no
+    // spend origin backs, so the account owns no input. A txid does not commit to unlocking
+    // scripts, so a copy that differs from an earlier one only in them replaces it, already
+    // linked.
+    let with_inputs = |st: &mut State, txid, script_sigs| {
+        let copy = with_inputs(st, txid, script_sigs);
+        conn(st)
+            .execute(
+                "INSERT OR IGNORE INTO transparent_received_output_spends
+                 SELECT id, ?1 FROM transparent_received_outputs
+                 WHERE transaction_id = ?2 AND output_index = ?3",
+                rusqlite::params![tx_ref(st, copy).0, tx_ref(st, txid).0, output_index],
+            )
+            .unwrap();
+        copy
+    };
     // The copies keep the original's Sapling spend, so the shielded pool also funds them.
     let key = [&[0x02][..], &[7; 32]].concat();
     let p2pk = push(&signature());
