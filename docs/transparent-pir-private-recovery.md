@@ -328,13 +328,14 @@ deleting an account removes its companion and sidecars.
 
 A pass runs in `spawn_blocking` over a read-only wallet database and
 `WalletChain`, exiting on cancellation or a 90-second deadline, and retries once
-on `PublicationChanged`, keeping the companion. The async side always joins it,
-and acknowledgment also runs in `spawn_blocking`. Per-pass limits are 10,000
-scripts, 1,024 shards, 500,000 events, 256 queries, 96 MiB of private bytes and
-8 MiB per response. The source answers
-`Ready { commits, retired, next, behind_by }`, `Pending { next }` or
-`Withdrawn(cause)`, or fails with `Unavailable`, `Failed` or `Cancelled`;
-`retired` is the batch's `retired_revisions()`. `More` continues with another
+on `PublicationChanged`, keeping the companion. The async side always joins it.
+Per-pass limits are 10,000 scripts, 1,024 shards, 500,000 events, 256 queries,
+96 MiB of private bytes and 8 MiB per response. The source answers
+`Ready { next, behind_by }`, keeping the opaque batch, `Pending { next }` or
+`Withdrawn(cause)`, or fails with `Unavailable` (the service is unreachable or
+not serving, which stops the run), `Failed` or `Cancelled`. A `Ready` batch is
+settled through the source, which hands it to `apply_and_acknowledge` under the
+wallet write lock with the run's explicit trust. `More` continues with another
 pass, `Overloaded` retries after 30 s, and `Behind`, clamped or not, retries
 after 10 s while the run's publication wait is under 90 s.
 
@@ -346,7 +347,7 @@ are skipped without PIR traffic. For the rest:
 
 | Result | Coordinator action |
 | --- | --- |
-| `Ready` | Apply each commit under the wallet write lock, through the trusted operation when the source is trusted and the policy is `PrivateRequired`. Once every commit applies, call `acknowledge_applied` if `retired` is empty, or `acknowledge_reconciled` if every commit went through the trusted operation. Otherwise acknowledge nothing and hold the account for 1 h: only a trusted pass resolves the retirements, and each pass until then adds any newer revision of their sources to them. |
+| `Ready` | Settle the batch with `apply_and_acknowledge`: `Trust::Trusted` when the source is trusted and the policy is `PrivateRequired` on the handle and durably, `Trust::Observed` otherwise. It acknowledges only once every commit's wallet transaction committed. An observed batch with retirements is refused before anything applies; hold the account for 1 h: only a trusted pass resolves the retirements, and each pass until then adds any newer revision of their sources to them. A failed acknowledgment skips the account; the next pass replays the batch. |
 | Stale rejection | Retry from a fresh watch set, up to 3 times, without acknowledgment. |
 | Integrity, quarantine, invalid or unqualified rejection | Skip the account. |
 | `NotEnabled` | Stop the run. |
