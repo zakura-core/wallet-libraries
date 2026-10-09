@@ -563,34 +563,34 @@ fn spans<'r>(
     false
 }
 
-/// Completes the wallet's pages that no commit of their own revision covers by
-/// itself, and returns the completion-only commits that needs.
+/// Completion-only commits for the wallet's pages that no commit of their own
+/// revision covers by itself.
 ///
 /// Every pending page blocks its account. A page under a source `published`
 /// does not name, as after a set, origin or source-format change or a re-cut,
 /// has no commit of its revision to follow, nor has one under a sealed
 /// revision a re-cut declared superseded (in `declared`) whose source the map
-/// still names, as a renumbered shard. Such a page is completed under its own
-/// revision once `commits` cover each of its addresses over its whole range.
-/// The completion-only commit carries nothing else. Its anchor is the wallet's
-/// block at the lower of the revision's publication height and the target,
-/// which at the publication height must be the publication's own block; a page
-/// whose anchor the wallet's chain does not hold waits.
+/// still names, as a renumbered shard. A declared revision may also have a
+/// commit of its own, from facts the store saved under it before the re-cut,
+/// while the rest of its range was read again under the shard that now covers
+/// it. Such a page is completed under its own revision once `commits` cover
+/// each of its addresses over its whole range, in a completion-only commit the
+/// caller places after `commits`, so the wallet applies the coverage first.
+/// Its anchor is the wallet's block at the lower of the revision's publication
+/// height and the target, which at the publication height must be the
+/// publication's own block; a page whose anchor the wallet's chain does not
+/// hold waits.
 ///
-/// A declared revision can also have a commit of its own, from facts the store
-/// saved under it before the re-cut, while the rest of its range was read
-/// again under the shard that now covers it. Its pages are completed in that
-/// commit once all of `commits` cover them. Any other page whose revision has
-/// a commit is left to that commit, which completes it from its own coverage
-/// and otherwise reopens or keeps it, so no page is completed twice. A named
-/// source's provisional revisions are left to their successor, whose
-/// qualification withdraws them.
+/// Any other page whose revision has a commit is left to that commit, which
+/// completes it from its own coverage and otherwise reopens or keeps it, so no
+/// page is completed twice. A named source's provisional revisions are left to
+/// their successor, whose qualification withdraws them.
 fn complete_stranded<A: Copy>(
     watch: &TransparentWatchSet<A>,
     context: TransparentRecoveryContext<A>,
     published: &[Published],
     declared: &[Published],
-    commits: &mut [TransparentLedgerCommit<A>],
+    commits: &[TransparentLedgerCommit<A>],
     chain: &impl ChainView,
 ) -> Result<Vec<TransparentLedgerCommit<A>>, RecoveryError> {
     let named: BTreeSet<&[u8]> = published
@@ -612,21 +612,21 @@ fn complete_stranded<A: Copy>(
         let superseded = declared.iter().any(|entry| entry.revision == page.revision);
         if let Some(own) = commits
             .iter()
-            .position(|commit| commit.revision == page.revision)
+            .find(|commit| commit.revision == page.revision)
         {
-            let done = commits[own].completed_pages.contains(&page.request.page)
-                || commits[own]
+            // Its own commit settles it, unless the re-cut superseded its
+            // revision and the coverage that completes it is under others.
+            let done = own.completed_pages.contains(&page.request.page)
+                || own
                     .opened_pages
                     .iter()
                     .any(|opened| opened.page == page.request.page);
-            if superseded && !done && covers(commits, &page.request) {
-                commits[own].completed_pages.push(page.request.page.clone());
+            if !superseded || done {
+                continue;
             }
-            continue;
-        }
-        // A named source's own revisions settle its pages, except a sealed
-        // revision a re-cut superseded, which no successor withdraws.
-        if named.contains(page.revision.source.as_slice()) && !superseded {
+        } else if named.contains(page.revision.source.as_slice()) && !superseded {
+            // A named source's own revisions settle its pages, except a sealed
+            // revision a re-cut superseded, which no successor withdraws.
             continue;
         }
         let request = &page.request;
@@ -908,10 +908,7 @@ impl ReferenceRecovery {
     /// catalog, and fails with [`RecoveryError::PublicationChanged`] before the
     /// sync; retry once with the same companion. If that map ends below the
     /// store's anchor while `chain` still accepts the anchor, the pass instead
-    /// keeps the store and waits for the map to catch up. So does a pass whose
-    /// map declares fewer re-cuts (a lower epoch) than one this companion's store
-    /// already followed, as a replica still serving the map from before a re-cut:
-    /// to the store, that map would rewrite history it holds. That, and any
+    /// keeps the store and waits for the map to catch up. That, and any
     /// divergence the sync itself finds (a map refreshed mid-pass that does not
     /// continue the first), is a [`BatchState::Pending`] batch with
     /// [`Outcome::Behind`] that claims no coverage, keeping companion and
@@ -919,19 +916,25 @@ impl ReferenceRecovery {
     /// declaring a re-cut, where `chain` accepts both the stored range's end
     /// block and the end block of the map's sealed shard now covering it, is
     /// refused by the sync before anything is read, after it rolled back any
-    /// reorg the chain alone shows, and the pass returns a
-    /// [`BatchState::Withdrawn`] batch with [`WithdrawnCause::ChangedSealed`],
-    /// claiming no coverage.
+    /// reorg the chain alone shows. The pass returns a [`BatchState::Withdrawn`]
+    /// batch with [`WithdrawnCause::ChangedSealed`], claiming no coverage,
+    /// unless the map declares fewer re-cuts (a lower epoch) than one this
+    /// companion recorded: such a map is taken for a replica still serving the
+    /// publication from before that re-cut, and the batch is `Pending` and
+    /// behind.
     ///
     /// A re-cut the map declares keeps the wallet's history: facts the store
     /// read under a sealed revision the re-cut superseded are exported under
     /// that revision's own identity, which the wallet holds, and the renumbered
     /// shards and tail keep their sources. An undeclared change of sealed
     /// content never reaches the wallet: the sync refuses it, or the catalog
-    /// withdraws it, either way as [`BatchState::Withdrawn`]. A ready pass over a re-cut map records its re-cut epoch
-    /// once the store holds a fact under a revision the re-cut superseded, or
-    /// under one the map publishes at or above the re-cut's first height, so a
-    /// re-cut only rolls forward; undoing one takes another at a higher epoch.
+    /// withdraws it, either way as [`BatchState::Withdrawn`]. A ready pass over
+    /// a re-cut map records its re-cut epoch once the store holds a fact under
+    /// a revision the re-cut superseded, or under one the map publishes at or
+    /// above the re-cut's first height. The epoch never stops a sync; it only
+    /// tells a lagging replica's refused map from a contradiction, so a forged
+    /// epoch can at most soften a real contradiction to `Pending`, and an
+    /// honest map that rewrites nothing the store holds is never held back.
     pub fn recover<A, C, F, T>(
         &mut self,
         watch: &TransparentWatchSet<A>,
@@ -1037,12 +1040,6 @@ impl ReferenceRecovery {
             catalog::reset(&mut self.catalog, &named)?;
             return Err(RecoveryError::PublicationChanged);
         }
-        // A replica still serving a map from before a re-cut this companion's
-        // store followed. Syncing against it would find the store's newer
-        // coverage unpublished and roll it back; wait for the replica instead.
-        if map.recut_epoch() < catalog::recut_epoch(&self.catalog)? {
-            return Ok(behind_unread());
-        }
         let stored = self.store.anchor().map_err(failure)?;
         let retained = self
             .store
@@ -1090,15 +1087,23 @@ impl ReferenceRecovery {
             // The map rewrites sealed history the store holds without declaring
             // a re-cut, and the wallet's chain accepts both the block the stored
             // range ends on and the block the map's sealed shard now covering
-            // its start ends on, at or below the target: a contradiction on the
-            // wallet's own chain, which no later pass repairs. The sync judges
-            // that only after rolling back any reorg the chain alone shows, and
-            // only for the ranges the rollback kept, and refuses it before
-            // reading anything; anything the chain cannot settle yet stops it as
-            // `ChainUnknown`. A replica still serving a map from before a re-cut
-            // the store followed looks the same to the sync, which keeps no
-            // epoch; the epoch guard above returned before syncing against one.
+            // its start ends on, at or below the target. The sync judges that
+            // only after rolling back any reorg the chain alone shows, and only
+            // for the ranges the rollback kept, and refuses it before reading
+            // anything; anything the chain cannot settle yet stops it as
+            // `ChainUnknown`.
+            //
+            // The sync keeps no re-cut epoch, so a replica still serving a map
+            // from before a re-cut the store followed looks the same to it. A
+            // map below the epoch this companion recorded is taken for one:
+            // `Pending`, behind, and a later pass syncs again. Otherwise the
+            // publisher contradicts the wallet's own chain, which no later pass
+            // over this history repairs: `Withdrawn(ChangedSealed)`. Either way
+            // nothing was read, so the store and catalog keep what they hold.
             Err(SyncError::SealedRewrite { .. }) => {
+                if map.recut_epoch() < catalog::recut_epoch(&self.catalog)? {
+                    return Ok(behind_unread());
+                }
                 return Ok(unready(
                     BatchState::Withdrawn(WithdrawnCause::ChangedSealed),
                     Progress {
@@ -1419,8 +1424,7 @@ impl ReferenceRecovery {
         // the commits that cover them. They carry no evidence, so they are not
         // recorded as exported: no later map could succeed their revisions.
         let mut commits = commits;
-        let stranded =
-            complete_stranded(watch, context, &published, &declared, &mut commits, chain)?;
+        let stranded = complete_stranded(watch, context, &published, &declared, &commits, chain)?;
         pass.export(commits.iter().map(|commit| &commit.revision))?;
         // Only a ready pass over a re-cut the store followed moves the epoch:
         // its facts name a revision the re-cut superseded or one only the
@@ -5602,10 +5606,21 @@ mod tests {
         let batch = recut_pass(&mut adapter, &watch, &after, &chain);
         adapter.acknowledge_reconciled(&batch).unwrap();
         assert_eq!(catalog::recut_epoch(&adapter.catalog).unwrap(), 1);
+        // The store has since read S3′ as well, as for a script added after
+        // the re-cut: it holds sealed history only the re-cut map publishes.
+        let script = address_script(watch.addresses[0].address);
+        let s3 = &after.shards[2];
+        let end = (s3.end_height, s3.terminal_block_hash.as_str());
+        adapter
+            .store
+            .commit_shard(covered(s3, &s3.manifest_digest, end, &script, vec![]))
+            .unwrap();
         let held = (store_rows(&adapter), catalog_rows(&adapter));
 
-        // A replica still serving the map from before the re-cut: the pass
-        // waits before any filter or private request, and touches nothing.
+        // A replica still serving the map from before the re-cut. The sync
+        // refuses it as a rewrite of that history before reading anything,
+        // and the pass, seeing an epoch below the one it recorded, takes it
+        // for a lagging replica: pending and behind, touching nothing.
         let mut filters = CountingFilters::serving(serde_json::to_vec(&before).unwrap());
         let mut shards = CountingShards::serving(SCHEMA);
         let lagging = adapter
@@ -5938,20 +5953,38 @@ mod tests {
         adapter.acknowledge_reconciled(&batch).unwrap();
 
         // Once it is, under S3′, S3's own commit carries the saved receive and
-        // S3′ the coverage: the page is completed once, in S3's commit.
+        // S3′ the coverage. The page is completed once, under S3's revision,
+        // in a completion-only commit after both, so the wallet applies the
+        // coverage that completes it first.
         read(&mut adapter, &after.shards[2]);
         let batch = recut_pass(&mut adapter, &holding, &after, &chain);
         assert_eq!(batch.state, BatchState::Ready);
         let completing = completing(&batch);
         assert_eq!(completing.len(), 1);
         assert_eq!(completing[0].revision, opening.revision);
-        assert_eq!(completing[0].receives, opening.receives);
         assert_eq!(completing[0].completed_pages, vec![page.clone()]);
-        assert!(batch.commits.iter().any(|commit| {
+        assert!(completing[0].receives.is_empty() && completing[0].coverage.is_empty());
+        assert_eq!(
+            completing[0].anchor,
+            ChainPoint {
+                height: block(s3.end_height).unwrap(),
+                hash: block_hash(&s3.terminal_block_hash).unwrap(),
+            }
+        );
+        let position = |found: &dyn Fn(&TransparentLedgerCommit<u32>) -> bool| {
+            batch.commits.iter().position(found).unwrap()
+        };
+        let saved_at = position(&|commit| {
+            commit.revision == opening.revision && commit.receives == opening.receives
+        });
+        let covered_at = position(&|commit| {
             commit.revision.source == opening.revision.source
                 && commit.revision.lineage == opening.revision.lineage + 1
                 && !commit.coverage.is_empty()
-        }));
+        });
+        let completed_at = position(&|commit| commit.completed_pages.contains(page));
+        assert!(batch.commits[saved_at].completed_pages.is_empty());
+        assert!(completed_at > saved_at && completed_at > covered_at);
     }
 
     #[test]
@@ -6135,6 +6168,78 @@ mod tests {
         );
         assert_eq!((filters.maps, filters.filters, shards.calls()), (1, 0, 1));
         assert_eq!((store_rows(&adapter), catalog_rows(&adapter)), held);
+    }
+
+    #[test]
+    fn a_forged_epoch_never_holds_an_honest_map_back() {
+        let base = map();
+        let tail = base.shards[1].clone();
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &base);
+        let first = pass(&mut adapter, &base);
+        assert_eq!(first.state, BatchState::Ready);
+        adapter.acknowledge_applied(&first).unwrap();
+        // The same shards, plus a re-cut at the tail's start at the highest
+        // epoch, superseding a revision nobody published. It passes every
+        // check, the store read the tail it starts at, and its epoch is
+        // recorded.
+        let mut forged = base.clone();
+        forged.recuts = vec![Recut {
+            epoch: u32::MAX,
+            from_height: tail.start_height,
+            superseded: vec![SupersededShard {
+                shard_id: tail.shard_id,
+                geometry: base.shards[0].geometry.clone(),
+                start_height: tail.start_height,
+                end_height: tail.end_height,
+                terminal_block_hash: tail.terminal_block_hash.clone(),
+                manifest_digest: "ee".repeat(32),
+                revision: 0,
+                sealed: false,
+            }],
+        }];
+        forged.check_shape().unwrap();
+        let batch = pass(&mut adapter, &forged);
+        assert_eq!(batch.state, BatchState::Ready);
+        adapter.acknowledge_applied(&batch).unwrap();
+        assert_eq!(catalog::recut_epoch(&adapter.catalog).unwrap(), u32::MAX);
+
+        // The honest map, served afterwards, rewrites nothing the store holds,
+        // so it syncs and is ready.
+        let recovered = |adapter: &mut ReferenceRecovery, map: &ShardMap| {
+            let mut filters = CountingFilters::serving(serde_json::to_vec(map).unwrap());
+            let mut shards = CountingShards::serving(SCHEMA);
+            let batch = adapter
+                .recover(
+                    &watch(),
+                    &StaticChain::from_map(map),
+                    &mut filters,
+                    &mut shards,
+                )
+                .unwrap();
+            assert_eq!(filters.filters, 0);
+            batch
+        };
+        let honest = recovered(&mut adapter, &base);
+        assert_eq!(honest.state, BatchState::Ready);
+        assert_eq!(honest.progress.outcome, Outcome::Complete);
+
+        // The forged epoch can only soften a real contradiction: a map that
+        // rewrites the sealed shard the store holds is taken for a lagging
+        // replica, pending instead of withdrawn.
+        let rewritten = republished(&base, 0, 0, "e0".repeat(32));
+        let softened = recovered(&mut adapter, &rewritten);
+        assert_eq!(softened.state, BatchState::Pending);
+        assert_eq!(softened.progress.outcome, Outcome::Behind);
+        // Without a recorded epoch the same map is withdrawn.
+        let fresh = tempfile::tempdir().unwrap();
+        let mut plain = covering(&fresh.path().join("companion.sqlite"), &base);
+        let first = pass(&mut plain, &base);
+        plain.acknowledge_applied(&first).unwrap();
+        assert_eq!(
+            recovered(&mut plain, &rewritten).state,
+            BatchState::Withdrawn(WithdrawnCause::ChangedSealed)
+        );
     }
 
     #[test]

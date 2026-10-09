@@ -105,8 +105,10 @@ pub enum BatchState {
     /// again. A publication that diverged from what the sync read (a map
     /// refreshed mid-pass that does not continue the one the pass started
     /// from), a map under another set that ends below the height the store
-    /// synced to, and a map from before a re-cut the store already followed (a
-    /// lower re-cut epoch than this companion recorded) are also `Pending`, with
+    /// synced to, and a map the sync refuses as a rewrite of history the store
+    /// holds but whose re-cut epoch is below the one this companion recorded,
+    /// taken for a replica still serving the publication from before that
+    /// re-cut, are also `Pending`, with
     /// [`Outcome::Behind`](crate::Outcome::Behind). The batch has no commits or
     /// retired revisions and cannot be acknowledged; a later pass can be
     /// `Ready`.
@@ -852,14 +854,15 @@ impl<'c> Pass<'c> {
     /// names, records that the store followed a map at re-cut `epoch`, if
     /// given, then commits the pass.
     ///
-    /// The recorded epoch only rises: a map below it is one the store moved
-    /// past, which the next pass waits out rather than syncs against. A pass
-    /// gives one only when it is ready and the store holds a fact under a
-    /// revision the map's newest re-cut superseded, or under one it publishes
-    /// at or above that re-cut's first height, so a map whose declaration is
-    /// refused, or whose re-cut the store did not follow, cannot raise it. A
-    /// re-cut therefore only rolls forward: undoing one takes another re-cut at
-    /// a higher epoch.
+    /// The recorded epoch only rises. It never stops a sync: it only tells a
+    /// map the sync refuses as a rewrite of history the store holds, but whose
+    /// epoch is lower, apart as a replica still serving the publication from
+    /// before a re-cut the store followed. A pass gives one only when it is
+    /// ready and the store holds a fact under a revision the map's newest
+    /// re-cut superseded, or under one it publishes at or above that re-cut's
+    /// first height, so a map whose declaration is refused, or whose re-cut the
+    /// store did not follow, cannot raise it. A forged epoch can at most turn
+    /// such a refusal from withdrawn into pending.
     pub(crate) fn finish(self, digests: &[&str], epoch: Option<u32>) -> Result<(), RecoveryError> {
         prune_catalog(&self.tx)?;
         let named = serde_json::to_string(digests).map_err(failure)?;

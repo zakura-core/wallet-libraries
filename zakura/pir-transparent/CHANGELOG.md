@@ -12,13 +12,18 @@
   and, on the first stored fact under a declared revision, against the catalog
   (`Equivocation`). A ready pass over a re-cut map records its re-cut epoch
   once the store holds a fact under a revision the re-cut superseded, or under
-  one the map publishes at or above the re-cut's first height, and a pass over
-  a map with a lower epoch is `Pending` with `Outcome::Behind` before any
-  retrieval, so a re-cut only rolls forward. The shard limit counts declared
+  one the map publishes at or above the re-cut's first height. The epoch never
+  stops a sync: a map the reference client refuses as a rewrite of history the
+  store holds is `Pending` with `Outcome::Behind` when its epoch is lower (a
+  replica still serving the map from before the re-cut) and
+  `Withdrawn(ChangedSealed)` otherwise. The shard limit counts declared
   entries at or above the watch set's floor. Wallet pages under a superseded
-  sealed revision are completed once the batch covers their range, in the
-  revision's own commit when it has one. An undeclared change of sealed content
-  never reaches the wallet.
+  sealed revision are completed once the batch covers their range, in a
+  completion-only commit after the commits carrying that coverage. An
+  undeclared change of sealed content never reaches the wallet.
+- A sealed shard changed under its revision number, which the catalog reported
+  as `Withdrawn(Equivocation)`, is now refused by the reference client before
+  anything is read and reported as `Withdrawn(ChangedSealed)`.
 - `pir_bridge_exports`, a never-pruned record of every revision a batch
   exported. A published or declared revision that differs from one exported at
   its source and lineage, or under its identity, is `Withdrawn(Equivocation)`,
