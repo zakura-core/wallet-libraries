@@ -2,9 +2,11 @@
 //!
 //! The client speaks the native two-mask protocol
 //! `status-pir-v3-native-two-mask-m29`: one uploaded `K_g` packing key and a
-//! 49-bit selection query per request, answered under two published 29-bit
-//! masks. The q48 profile (`status-pir-v2-q48`) is no longer supported; the
-//! row format, bucket hash and manifest identity are unchanged from v2.
+//! selection query dithered to 44 bits per request, answered under two
+//! published 29-bit masks. Servers also accept the protocol's original 49-bit
+//! selection and tell the two apart by length. The q48 profile
+//! (`status-pir-v2-q48`) is no longer supported; the row format, bucket hash
+//! and manifest identity are unchanged from v2.
 //!
 //! Observations are available only through [`transport::StatusPirClient`], so
 //! every query runs under a manifest bound to the wallet's accepted anchor. The
@@ -364,6 +366,12 @@ pub(crate) fn session_len() -> Result<usize, Error> {
 pub(crate) fn response_len() -> Result<usize, Error> {
     Ok(HEADER_BYTES + zakura_pir_native::response_len(COLS))
 }
+/// Exact length of a query body, including the header: one uploaded key and a
+/// selection dithered to [`zakura_pir_native::DITHERED_QUERY_BITS`].
+#[cfg(test)]
+pub(crate) fn request_len() -> usize {
+    HEADER_BYTES + zakura_pir_native::request_len_bits(ROWS, zakura_pir_native::DITHERED_QUERY_BITS)
+}
 /// `body` may be moved into the transport; decoding uses the retained header.
 pub(crate) struct Query {
     pub(crate) body: Vec<u8>,
@@ -456,7 +464,7 @@ impl Client {
         let (txid, mut body) = self.envelope(txid, coverage, now_ms)?;
         let row = bucket(&self.manifest.network, &self.manifest.salt, &txid);
         let (secret, payload) =
-            zakura_pir_native::prepare_with(&self.packing, &self.masks, ROWS, row)
+            zakura_pir_native::prepare_dithered(&self.packing, &self.masks, ROWS, row)
                 .map_err(|_| Error::Pir)?;
         body.extend(payload);
         Ok(Query {
@@ -533,8 +541,13 @@ mod tests {
         assert_eq!(session_len(), Ok(44_544));
         // Echoed header plus 6144 22-bit coefficients.
         assert_eq!(response_len(), Ok(HEADER_BYTES + 16_896));
-        // One uploaded key plus a 49-bit selection over 8192 rows.
+        // Header, one uploaded key and a 44-bit dithered selection over 8192
+        // rows; servers also accept the 49-bit selection, so the two lengths
+        // must differ.
         assert_eq!(zakura_pir_native::KEY_BYTES, 27_648);
+        assert_eq!(zakura_pir_native::DITHERED_QUERY_BITS, 44);
+        assert_eq!(request_len(), HEADER_BYTES + 27_648 + 45_056);
+        assert_eq!(request_len(), 72_756);
         assert_eq!(zakura_pir_native::request_len(ROWS), 27_648 + 50_176);
     }
     #[test]

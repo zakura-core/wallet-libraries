@@ -445,11 +445,14 @@ mod tests {
             "ironwood-enhance-pir-v9-native-two-mask-m29/unit/2e03e17451928e9498fa614db9077f27709feda2d5a45c40ef2c4f0643dc478a"
         );
         let session = zero_session(32768);
+        // The served profile, bound into `parameter_id`, keeps 49 bits ...
         assert_eq!(session.params.query_bits, 49);
         assert_eq!(session.params.q_prime_1, 1 << 22);
         assert_eq!(session_public_len(32768).unwrap(), public_len(COLS));
         assert_eq!(session_public_len(32768).unwrap(), 89_088);
         assert_eq!(KEY_BYTES, 27_648);
+        // ... while the upload is a 44-bit dithered selection, which the
+        // server tells apart from the 49-bit one by length.
         let query = session.prepare_row(7).unwrap();
         assert_eq!(
             query.body().len(),
@@ -457,7 +460,13 @@ mod tests {
         );
         assert_eq!(
             query.body().len(),
-            HEADER_BYTES + KEY_BYTES + (32768usize * 49).div_ceil(8)
+            HEADER_BYTES + KEY_BYTES + (32768usize * 44).div_ceil(8)
+        );
+        assert_eq!(query.body().len(), 207_988);
+        assert_eq!(
+            HEADER_BYTES + crate::native::request_len(32768),
+            228_468,
+            "49-bit request length"
         );
         println!("v9 request length (32768 rows) = {}", query.body().len());
         let response_len = crate::types::response_len(32768).unwrap();

@@ -500,6 +500,8 @@ pub fn parameters(logical_rows: u64) -> Result<ipir_sp::YpirSchemeParams, String
         ipir_sp::SimplePirProfile::P16Q48,
     )
     .map(|(_, mut p)| {
+        // The served profile's width, bound into `parameter_id`. Requests
+        // upload a narrower dithered selection; see `request_len`.
         p.query_bits = crate::native::QUERY_BITS;
         p.q_prime_1 = 1 << crate::native::RESPONSE_BITS;
         p
@@ -534,10 +536,13 @@ pub fn response_len(logical_rows: u64) -> Result<usize, String> {
 }
 
 /// Exact length of a query request for `logical_rows`, including the
-/// [`HEADER_BYTES`] binding: one uploaded `K_g` key and a 49-bit selection.
+/// [`HEADER_BYTES`] binding: one uploaded `K_g` key and a selection dithered to
+/// [`crate::native::DITHERED_QUERY_BITS`]. The server accepts this alongside
+/// the 49-bit selection of its profile and tells them apart by length.
 pub fn request_len(logical_rows: u64) -> Result<usize, String> {
     let params = parameters(logical_rows)?;
-    Ok(HEADER_BYTES + crate::native::request_len(params.db_rows))
+    Ok(HEADER_BYTES
+        + crate::native::request_len_bits(params.db_rows, crate::native::DITHERED_QUERY_BITS))
 }
 
 /// Native identity binds the q48 transport profile to every native packing

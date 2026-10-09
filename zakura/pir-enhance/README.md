@@ -54,12 +54,14 @@ crate in `wallet-pir`. Manifests advertising another revision fail validation.
 Routing, session identities, wallet acceptance, the 116-byte `EPQ7` binding and
 the per-shard public setup seed retain the established wire layout.
 
-`parameters()` reports `query_bits = 49` and
+`parameters()` reports the served profile, `query_bits = 49` and
 `q_prime_1 = 2^22`, and every shard's public session material is 89,088 bytes
 (12,288 columns, two masks each rounded to 29 bits). A request is the header,
-one uploaded 27,648-byte `K_g` packing key and a 49-bit selection per row
-(228,468 bytes for a 32,768-row shard); a response is the header plus 33,792
-bytes of 22-bit packed columns. The `native` module exposes the profile
+one uploaded 27,648-byte `K_g` packing key and a selection dithered to 44 bits
+per row (207,988 bytes for a 32,768-row shard); a response is the header plus
+33,792 bytes of 22-bit packed columns. The server also accepts the profile's
+49-bit selection (228,468 bytes) and tells the two apart by length; a server
+that predates 44-bit requests rejects them. The `native` module exposes the profile
 constants, the mask and length helpers, and `NativeSession`.
 
 This protocol is experimental. `ipir-sp`'s cryptographic gates for the native

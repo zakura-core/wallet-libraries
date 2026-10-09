@@ -5,7 +5,10 @@ client. It retrieves one encrypted row and returns only an observation.
 
 The client speaks `status-pir-v3-native-two-mask-m29` only. Each query body is
 the 52-byte header (magic `SPN1`, manifest id, 16-byte nonce) followed by one
-27,648-byte `K_g` packing key and a 49-bit selection over the 8,192 rows. The
+27,648-byte `K_g` packing key and a selection over the 8,192 rows dithered to
+44 bits, 72,756 bytes in all. The server also accepts the original 49-bit
+selection and tells the two apart by length; a server that predates 44-bit
+requests rejects them. The
 session material is 44,544 bytes (two 29-bit masks per coefficient column) and
 a response is the echoed header plus a 16,896-byte body. Setup derives from the
 `status-pir/v3/native-setup` and `status-pir/v3/native-packing` domains. The
