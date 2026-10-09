@@ -4935,7 +4935,6 @@ mod tests {
         assert_eq!(db.enhancement_mode, None);
         for transparent_ledger in [
             TransparentLedgerMode::Public,
-            TransparentLedgerMode::PrivateShadow,
             TransparentLedgerMode::PrivateRequired,
         ] {
             for status in [

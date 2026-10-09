@@ -55,7 +55,7 @@ pub(super) fn store_spend(
 }
 
 fn coinbase_wallet() -> (State, AccountUuid, ReceiveEvent, RecoveryRevision) {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     let fixture = revision(1, true);
     let ws = watch(&st, account);

@@ -288,8 +288,7 @@ impl PreLedgerWallet {
     }
 
     /// Upgrades without a seed, then recovers every account from its `events` under
-    /// `PrivateShadow`, qualifies the revision, and promotes every account under
-    /// `PrivateRequired`.
+    /// `PrivateRequired`, qualifies the revision, and promotes every account.
     fn upgrade_and_activate(
         mut self,
         events: BTreeMap<AccountUuid, (Vec<ReceiveEvent>, Vec<SpendEvent>)>,
@@ -335,8 +334,8 @@ impl PreLedgerWallet {
         );
 
         let db = &mut self.db;
-        db.set_transparent_ledger_mode(PrivateShadow);
-        db.apply_transparent_policy(PrivateShadow).unwrap();
+        db.set_transparent_ledger_mode(PrivateRequired);
+        db.apply_transparent_policy(PrivateRequired).unwrap();
         let fixture = revision(1, true);
         for account in self.keys.keys() {
             let (receives, spends) = events.get(account).cloned().unwrap_or_default();

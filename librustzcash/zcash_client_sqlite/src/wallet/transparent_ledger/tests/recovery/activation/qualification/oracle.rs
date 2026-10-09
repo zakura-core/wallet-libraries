@@ -580,18 +580,18 @@ pub(super) fn assert_authority_agrees(st: &State, account: AccountUuid, expected
     assert_eq!(selected, expected.unspent_outpoints(Some(false)));
 }
 
-/// A wallet scanned twenty blocks past the birthday, under `PrivateShadow`, with a fixture
+/// A wallet scanned twenty blocks past the birthday, under `PrivateRequired`, with a fixture
 /// chain that exercises window growth in both scopes, a coinbase output, spends in the block of
 /// their receive, a multi-input spend mixing foreign and owned inputs, and outputs to foreign
 /// scripts. One of its outputs was also found by public discovery.
-pub(super) fn shadow_oracle_wallet() -> (
+pub(super) fn recovery_oracle_wallet() -> (
     State,
     AccountUuid,
     Chain,
     BTreeSet<TransparentAddress>,
     ReceiveEvent,
 ) {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     scan_new_blocks(&mut st, 10);
     let b = st.test_account().unwrap().birthday().height();
@@ -648,14 +648,16 @@ pub(super) fn shadow_oracle_wallet() -> (
         None,
     )
     .unwrap();
-    st.wallet_mut()
-        .db_mut()
-        .put_received_transparent_utxo(&output)
-        .unwrap();
+    publicly(&mut st, |st| {
+        st.wallet_mut()
+            .db_mut()
+            .put_received_transparent_utxo(&output)
+            .unwrap()
+    });
     (st, account, chain, owned, legacy)
 }
 
-/// A [`shadow_oracle_wallet`] recovered, qualified, and promoted.
+/// A [`recovery_oracle_wallet`] recovered, qualified, and promoted.
 pub(super) fn promoted_oracle_wallet() -> (
     State,
     AccountUuid,
@@ -663,7 +665,7 @@ pub(super) fn promoted_oracle_wallet() -> (
     BTreeSet<TransparentAddress>,
     RecoveryRevision,
 ) {
-    let (mut st, account, chain, owned, _) = shadow_oracle_wallet();
+    let (mut st, account, chain, owned, _) = recovery_oracle_wallet();
     let fixture = revision(1, true);
     recover(&mut st, account, &chain, &fixture);
     qualify(&mut st, &fixture);
@@ -674,11 +676,11 @@ pub(super) fn promoted_oracle_wallet() -> (
 
 #[test]
 fn candidate_recovery_promotion_and_active_commits_match_the_oracle() {
-    let (mut st, account, mut chain, owned, legacy) = shadow_oracle_wallet();
+    let (mut st, account, mut chain, owned, legacy) = recovery_oracle_wallet();
     let b = st.test_account().unwrap().birthday().height();
     let fixture = revision(1, true);
 
-    // Shadow recovery reaches the oracle's exact view and leaves the wallet untouched.
+    // Candidate recovery reaches the oracle's exact view and leaves the wallet untouched.
     let before = production_dump(conn(&st));
     // Window growth takes several passes.
     assert!(recover(&mut st, account, &chain, &fixture) >= 3);

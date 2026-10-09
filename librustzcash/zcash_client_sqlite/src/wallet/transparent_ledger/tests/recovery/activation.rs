@@ -33,16 +33,16 @@ fn import_account(st: &mut State, seed: u8) -> AccountUuid {
         .id()
 }
 
-/// A file-backed wallet like [`shadow_wallet`] with `extra` imported accounts, returned after
+/// A file-backed wallet like [`recovery_wallet`] with `extra` imported accounts, returned after
 /// the test account.
-fn shadow_wallet_with(extra: u8) -> (State, Vec<AccountUuid>) {
+fn recovery_wallet_with(extra: u8) -> (State, Vec<AccountUuid>) {
     let mut st = wallet_state(TestDbFactory::file_backed());
     let mut accounts = vec![st.test_account().unwrap().id()];
     for seed in 0..extra {
         accounts.push(import_account(&mut st, 7 + seed));
     }
     scan_new_blocks(&mut st, 10);
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, PrivateRequired);
     (st, accounts)
 }
 
@@ -101,7 +101,7 @@ fn recover_one(
 
 #[test]
 fn integrity_failure_quarantines_the_source_and_every_affected_account() {
-    let (mut st, accounts) = shadow_wallet_with(2);
+    let (mut st, accounts) = recovery_wallet_with(2);
     let [first, second, third] = accounts[..] else {
         unreachable!()
     };
@@ -171,7 +171,7 @@ fn integrity_failure_quarantines_the_source_and_every_affected_account() {
 
 #[test]
 fn a_failed_quarantine_write_aborts_the_commit() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let received = recover_one(&mut st, account, revision(1, true), 1);
     conn(&st)
         .execute_batch(
@@ -243,27 +243,20 @@ fn chain_point(st: &State, height: BlockHeight) -> ChainPoint {
 
 #[test]
 fn private_snapshots_report_candidate_coverage_and_an_unverified_total() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let fixture = revision(1, true);
     recover_completely(&mut st, account, &fixture, 1);
     let target = watch(&st, account).target.unwrap();
 
-    // Shadow keeps public authority and reports the candidate ledger alongside it.
-    let s = snapshot(&st, account);
-    assert_eq!(s.authority, TransparentAuthority::Public);
-    assert_eq!(s.covered_through, Some(target));
-    assert_eq!(
-        s.recovered_unverified,
-        Some(Zatoshis::const_from_u64(40_000))
-    );
-    assert!(s.blockers.is_empty());
-
-    // Under PrivateRequired the complete but unpromoted candidate is still no authority.
-    set_policy(&mut st, PrivateRequired);
+    // The complete but unpromoted candidate is reported, but is still no authority.
     let s = snapshot(&st, account);
     assert_eq!(s.authority, TransparentAuthority::Unavailable);
     assert_eq!(s.authorized, None);
     assert_eq!(s.covered_through, Some(chain_point(&st, target.height)));
+    assert_eq!(
+        s.recovered_unverified,
+        Some(Zatoshis::const_from_u64(40_000))
+    );
     assert_eq!(
         s.blockers,
         vec![
@@ -285,7 +278,7 @@ fn private_snapshots_report_candidate_coverage_and_an_unverified_total() {
 
 #[test]
 fn a_legacy_output_the_candidate_lacks_is_a_discrepancy() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let fixture = revision(1, true);
     let ws = watch(&st, account);
     // Legacy public discovery recorded an output the private source never reports.
@@ -302,10 +295,12 @@ fn a_legacy_output_the_candidate_lacks_is_a_discrepancy() {
         None,
     )
     .unwrap();
-    st.wallet_mut()
-        .db_mut()
-        .put_received_transparent_utxo(&utxo)
-        .unwrap();
+    publicly(&mut st, |st| {
+        st.wallet_mut()
+            .db_mut()
+            .put_received_transparent_utxo(&utxo)
+            .unwrap()
+    });
     recover_completely(&mut st, account, &fixture, 1);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
@@ -328,7 +323,7 @@ fn a_legacy_output_the_candidate_lacks_is_a_discrepancy() {
 
 #[test]
 fn a_mined_local_output_the_candidate_lacks_is_a_discrepancy() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let fixture = revision(1, true);
     let ws = watch(&st, account);
     // The wallet recorded a mined output of its own construction, such as the change of a
@@ -346,10 +341,12 @@ fn a_mined_local_output_the_candidate_lacks_is_a_discrepancy() {
         None,
     )
     .unwrap();
-    st.wallet_mut()
-        .db_mut()
-        .put_received_transparent_utxo(&utxo)
-        .unwrap();
+    publicly(&mut st, |st| {
+        st.wallet_mut()
+            .db_mut()
+            .put_received_transparent_utxo(&utxo)
+            .unwrap()
+    });
     conn(&st)
         .execute(
             "UPDATE tpir_output_origins SET origin = 1 WHERE origin = 0",
@@ -373,7 +370,7 @@ fn a_mined_local_output_the_candidate_lacks_is_a_discrepancy() {
 
 #[test]
 fn commits_capture_the_account_lifecycle() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     assert_eq!(ws.lifecycle, AccountLifecycle::Candidate);
     let mut c = commit(&ws);
@@ -388,7 +385,7 @@ fn commits_capture_the_account_lifecycle() {
 
 #[test]
 fn qualification_binds_to_the_exact_revision() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let fixture = revision(1, true);
     recover_one(&mut st, account, fixture.clone(), 1);
     assert_eq!(reader_version(&st), 6);
@@ -495,11 +492,11 @@ fn spend_count(st: &State, outpoint: &OutPoint) -> i64 {
         .unwrap()
 }
 
-/// A shadow wallet whose account is completely recovered from a qualified fixture revision,
+/// A wallet whose account is completely recovered from a qualified fixture revision,
 /// with an unspent receive at the last external address and a spent one, under a durable
 /// `PrivateRequired` policy.
 fn ready_wallet() -> (State, AccountUuid, ReceiveEvent, ReceiveEvent) {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     let fixture = revision(1, true);
     let ws = watch(&st, account);
@@ -583,7 +580,7 @@ fn promotion_projects_the_ledger_and_grants_private_authority() {
 
 #[test]
 fn promotion_makes_a_legacy_receiver_without_an_address_row_the_wallets_own() {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     let (legacy, _) = crate::wallet::transparent::get_legacy_transparent_address(
         st.network(),
@@ -677,14 +674,15 @@ fn a_window_reaching_the_last_child_index_blocks_promotion() {
 
 #[test]
 fn promotion_is_blocked_until_every_condition_holds() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let unchanged = |st: &State, before: &Vec<(String, Vec<String>)>| {
         assert_eq!(&production_dump(conn(st)), before);
         assert_eq!(count(st, "tpir_active_accounts"), 0);
     };
     let before = production_dump(conn(&st));
 
-    // Shadow cannot promote.
+    // Public cannot promote.
+    set_policy(&mut st, Public);
     assert!(matches!(
         promote(&mut st, account),
         Err(SqliteClientError::TransparentRecoveryNotEnabled)
@@ -701,10 +699,8 @@ fn promotion_is_blocked_until_every_condition_holds() {
     unchanged(&st, &before);
 
     // Complete, but from an unqualified revision.
-    set_policy(&mut st, PrivateShadow);
     let fixture = revision(1, true);
     recover_completely(&mut st, account, &fixture, 1);
-    set_policy(&mut st, PrivateRequired);
     assert_eq!(
         blocked(promote(&mut st, account)),
         vec![RecoveryBlocker::UnqualifiedRevision]
@@ -751,7 +747,7 @@ fn promotion_is_blocked_until_every_condition_holds() {
 
     // A handle weaker than the durable policy cannot promote either.
     let handle = st.wallet_mut().db_mut();
-    handle.set_transparent_ledger_mode(PrivateShadow);
+    handle.set_transparent_ledger_mode(Public);
     assert!(promote(&mut st, account).is_err());
     st.wallet_mut()
         .db_mut()
@@ -877,10 +873,10 @@ fn pay_from_sapling(st: &mut State, to: TransparentAddress, value: u64) -> (TxId
     (txid, output_index)
 }
 
-/// A shadow wallet whose test account made a shielded-funded payment to its own transparent
+/// A wallet whose test account made a shielded-funded payment to its own transparent
 /// address, stored with its raw bytes. Returns the transaction and that output's index.
 fn local_payment_to_self() -> (State, AccountUuid, TransparentAddress, TxId, u32) {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     let taddr = external(&watch(&st, account));
     let (txid, output_index) = pay_from_sapling(&mut st, taddr, 50_000);
@@ -1008,7 +1004,7 @@ fn a_spend_the_stored_transaction_lacks_is_an_integrity_failure() {
 
 #[test]
 fn coinbase_receives_keep_their_maturity_rule() {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     let fixture = revision(1, true);
     let ws = watch(&st, account);
@@ -1040,7 +1036,7 @@ fn coinbase_receives_keep_their_maturity_rule() {
 
 #[test]
 fn unmined_legacy_outputs_do_not_enter_the_authorized_balance() {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     let fixture = revision(1, true);
     let ws = watch(&st, account);
@@ -1055,10 +1051,12 @@ fn unmined_legacy_outputs_do_not_enter_the_authorized_balance() {
         None,
     )
     .unwrap();
-    st.wallet_mut()
-        .db_mut()
-        .put_received_transparent_utxo(&mempool)
-        .unwrap();
+    publicly(&mut st, |st| {
+        st.wallet_mut()
+            .db_mut()
+            .put_received_transparent_utxo(&mempool)
+            .unwrap()
+    });
     let recovered = receive(1, taddr, 40_000, below_target(&ws, 3));
     cover(&mut st, account, &fixture, vec![recovered]);
     qualify(&mut st, &fixture);
@@ -1403,7 +1401,7 @@ fn rewinding_below_projected_events_pauses_authority_until_recovered() {
 
 #[test]
 fn leaving_private_required_demotes_every_account() {
-    let (mut st, accounts) = shadow_wallet_with(1);
+    let (mut st, accounts) = recovery_wallet_with(1);
     let fixture = revision(1, true);
     for (tag, account) in accounts.iter().enumerate() {
         let ws = watch(&st, *account);
@@ -1417,7 +1415,7 @@ fn leaving_private_required_demotes_every_account() {
     }
     assert_eq!(count(&st, "tpir_active_accounts"), 2);
 
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, Public);
     assert_eq!(count(&st, "tpir_active_accounts"), 0);
     for account in &accounts {
         assert_eq!(lifecycle(&st, *account), AccountLifecycle::Candidate);
@@ -1698,7 +1696,7 @@ mod gating {
 
     #[test]
     fn a_legacy_receiver_without_a_row_has_an_ineligible_owner() {
-        let (mut st, accounts) = shadow_wallet_with(0);
+        let (mut st, accounts) = recovery_wallet_with(0);
         let account = accounts[0];
         let (legacy, _) = crate::wallet::transparent::get_legacy_transparent_address(
             st.network(),
@@ -1749,7 +1747,7 @@ mod gating {
 
     #[test]
     fn address_selection_filters_ineligible_accounts() {
-        let (mut st, accounts) = shadow_wallet_with(1);
+        let (mut st, accounts) = recovery_wallet_with(1);
         let fixture = revision(1, true);
         let mut funded = vec![];
         for (tag, account) in accounts.iter().enumerate() {
@@ -1900,7 +1898,7 @@ mod gating {
 
     #[test]
     fn immature_coinbase_is_not_selectable() {
-        let (mut st, accounts) = shadow_wallet_with(0);
+        let (mut st, accounts) = recovery_wallet_with(0);
         let account = accounts[0];
         let fixture = revision(1, true);
         let ws = watch(&st, account);
@@ -1996,7 +1994,7 @@ mod gating {
 
 #[test]
 fn a_fixture_can_inject_and_clear_a_future_reader_requirement() {
-    let (st, account) = shadow_wallet();
+    let (st, account) = recovery_wallet();
     let current = reader_version(&st);
     let future = crate::wallet::transparent_ledger::TPIR_READER_VERSION + 1;
     st.wallet().set_transparent_reader_version(future);
@@ -2011,7 +2009,8 @@ fn a_fixture_can_inject_and_clear_a_future_reader_requirement() {
 
 #[test]
 fn transaction_fixture_commits_and_rolls_back_wallet_writes() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
+    set_policy(&mut st, Public);
     let ws = watch(&st, account);
     let outpoint = OutPoint::new([0x91; 32], 0);
     let utxo = zcash_client_backend::wallet::WalletTransparentOutput::from_parts(

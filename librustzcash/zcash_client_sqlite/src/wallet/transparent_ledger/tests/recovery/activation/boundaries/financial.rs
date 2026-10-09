@@ -60,7 +60,7 @@ fn wallet_summary_and_authority_share_a_snapshot_across_a_wal_writer() {
 
 #[test]
 fn per_account_balances_do_not_read_another_accounts_invalid_amounts() {
-    let (mut st, accounts) = shadow_wallet_with(1);
+    let (mut st, accounts) = recovery_wallet_with(1);
     let rev = revision(1, true);
     qualify(&mut st, &rev);
     for (i, account) in accounts.iter().enumerate() {
@@ -85,7 +85,7 @@ fn per_account_balances_do_not_read_another_accounts_invalid_amounts() {
 
 #[test]
 fn empty_interval_promotion_grants_no_funds_and_missing_coverage_revokes_authority() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let target = watch(&st, account).target.unwrap();
     conn(&st)
         .execute(

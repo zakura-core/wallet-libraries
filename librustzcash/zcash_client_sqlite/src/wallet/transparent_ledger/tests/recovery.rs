@@ -10,7 +10,7 @@ use zcash_client_backend::data_api::{
         AddressRange, CandidateBlocker, CandidateRecovery, CommitOutcome, CommitRejection,
         IntegrityFailure, InvalidCommit, PageRequest, PublicationAnchor, ReceiveEvent,
         RecoveryRevision, SpendEvent, StaleCommit, TransparentLedgerCommit,
-        TransparentLedgerMode::{self, PrivateRequired, PrivateShadow, Public},
+        TransparentLedgerMode::{self, PrivateRequired, Public},
         TransparentLedgerRead as _, TransparentLedgerWrite as _, TransparentWatchSet, WatchOrigin,
     },
 };
@@ -28,11 +28,11 @@ use crate::{
     wallet::transparent_ledger::forget_reattributed_script,
 };
 
-/// A wallet with one account and ten scanned blocks, under a durable `PrivateShadow` policy.
-fn shadow_wallet() -> (State, AccountUuid) {
+/// A wallet with one account and ten scanned blocks, under a durable `PrivateRequired` policy.
+fn recovery_wallet() -> (State, AccountUuid) {
     let mut st = wallet_state(TestDbFactory::default());
     scan_new_blocks(&mut st, 10);
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, PrivateRequired);
     let account = st.test_account().unwrap().id();
     (st, account)
 }
@@ -54,6 +54,15 @@ fn set_policy(st: &mut State, mode: TransparentLedgerMode) {
     let db = st.wallet_mut().db_mut();
     db.apply_transparent_policy(mode).unwrap();
     db.set_transparent_ledger_mode(mode);
+}
+
+/// Runs `write` as public discovery, which only `Public` permits, then applies
+/// `PrivateRequired` again. Leaving `PrivateRequired` demotes every active account.
+fn publicly<T>(st: &mut State, write: impl FnOnce(&mut State) -> T) -> T {
+    set_policy(st, Public);
+    let result = write(st);
+    set_policy(st, PrivateRequired);
+    result
 }
 
 fn watch(st: &State, account: AccountUuid) -> TransparentWatchSet<AccountUuid> {
@@ -227,7 +236,7 @@ fn production_dump(conn: &Connection) -> Vec<(String, Vec<String>)> {
 
 #[test]
 fn watch_set_lists_every_scope_from_the_birthday() {
-    let (st, account) = shadow_wallet();
+    let (st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let birthday = st.test_account().unwrap().birthday().height();
 
@@ -271,7 +280,7 @@ fn watch_set_lists_every_scope_from_the_birthday() {
 
 #[test]
 fn per_event_lookups_use_indexes() {
-    let (st, _) = shadow_wallet();
+    let (st, _) = recovery_wallet();
     for (query, index) in [
         (
             "SELECT 1 FROM tpir_spend_events WHERE prevout_txid = X'00' AND prevout_output_index = 0",
@@ -311,7 +320,7 @@ fn no_target_before_scanning() {
         .with_block_cache(BlockCache::new())
         .with_account_from_sapling_activation(BlockHash([0; 32]))
         .build();
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, PrivateRequired);
     let account = st.test_account().unwrap().id();
 
     let ws = watch(&st, account);
@@ -324,7 +333,7 @@ fn no_target_before_scanning() {
 
 #[test]
 fn commits_require_a_private_policy() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     set_policy(&mut st, Public);
     let ws_public = watch(&st, account);
@@ -341,7 +350,7 @@ fn commits_require_a_private_policy() {
     // A private handle alone is not enough: the durable policy must authorize recovery too.
     st.wallet_mut()
         .db_mut()
-        .set_transparent_ledger_mode(PrivateShadow);
+        .set_transparent_ledger_mode(PrivateRequired);
     let mut c = commit(&ws_public);
     c.coverage = full_coverage(&ws);
     assert!(matches!(
@@ -352,7 +361,7 @@ fn commits_require_a_private_policy() {
 
 #[test]
 fn receive_then_spend_is_idempotent_and_complete() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
     let received = receive(1, taddr, 50_000, below_target(&ws, 5));
@@ -401,7 +410,7 @@ fn receive_then_spend_is_idempotent_and_complete() {
 
 #[test]
 fn spend_before_receive_stays_unresolved_until_the_output_arrives() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let received = receive(1, external(&ws), 20_000, below_target(&ws, 5));
 
@@ -422,7 +431,7 @@ fn spend_before_receive_stays_unresolved_until_the_output_arrives() {
 
 #[test]
 fn recovered_total_above_max_money_stays_readable() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
     let max = MAX_MONEY;
@@ -446,7 +455,7 @@ fn recovered_total_above_max_money_stays_readable() {
 
 #[test]
 fn contradictions_are_refused_without_partial_writes() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
     let received = receive(1, taddr, 20_000, below_target(&ws, 5));
@@ -530,7 +539,7 @@ fn contradictions_are_refused_without_partial_writes() {
 
 #[test]
 fn malformed_commits_are_invalid() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
     let target = ws.target.unwrap().height;
@@ -570,7 +579,7 @@ fn malformed_commits_are_invalid() {
 
 #[test]
 fn stale_context_is_refused() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
 
     // An address the account does not watch.
@@ -609,6 +618,7 @@ fn stale_context_is_refused() {
     );
 
     // A policy transition after capture.
+    set_policy(&mut st, Public);
     set_policy(&mut st, PrivateRequired);
     let mut c = commit(&ws);
     c.coverage = full_coverage(&ws);
@@ -629,7 +639,7 @@ fn stale_context_is_refused() {
 
 #[test]
 fn provisional_revisions_are_superseded_and_sealed_ones_are_not() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
 
     let mut c = commit(&ws);
@@ -687,7 +697,7 @@ fn provisional_revisions_are_superseded_and_sealed_ones_are_not() {
 
 #[test]
 fn supersession_retracts_only_events_without_independent_observations() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let address = external(&ws);
     let shared = receive(1, address, 5_000, below_target(&ws, 2));
@@ -739,7 +749,7 @@ fn supersession_retracts_only_events_without_independent_observations() {
 
 #[test]
 fn pending_pages_block_their_addresses_and_resume() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
     let target = ws.target.unwrap().height;
@@ -812,13 +822,14 @@ fn pending_pages_block_their_addresses_and_resume() {
     c.opened_pages = vec![page];
     apply(&mut st, c).unwrap();
     assert_eq!(watch(&st, account).pending_pages.len(), 1);
+    set_policy(&mut st, Public);
     set_policy(&mut st, PrivateRequired);
     assert!(watch(&st, account).pending_pages.is_empty());
 }
 
 #[test]
 fn a_pending_page_retains_its_revision_and_target_when_the_tip_advances() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let original = ws.target.unwrap();
     let address = external(&ws);
@@ -882,7 +893,7 @@ fn a_pending_page_retains_its_revision_and_target_when_the_tip_advances() {
 
 #[test]
 fn unsupported_ranges_block_until_covered() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
     let target = ws.target.unwrap().height;
@@ -911,7 +922,7 @@ fn unsupported_ranges_block_until_covered() {
 
 #[test]
 fn spends_cannot_precede_their_outputs() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
 
@@ -951,7 +962,7 @@ fn spends_cannot_precede_their_outputs() {
 
 #[test]
 fn truncation_invalidates_candidate_state_above_the_rescan_floor() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
     let target = ws.target.unwrap().height;
@@ -988,7 +999,7 @@ fn truncation_invalidates_candidate_state_above_the_rescan_floor() {
 
 #[test]
 fn rewind_clips_coverage_and_clears_placements() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
     let target = ws.target.unwrap().height;
@@ -1053,7 +1064,7 @@ fn rewind_clips_coverage_and_clears_placements() {
 
 #[test]
 fn window_growth_stays_out_of_the_address_table() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let (edge, edge_index) = ws
         .addresses
@@ -1115,7 +1126,7 @@ fn window_growth_stays_out_of_the_address_table() {
 
 #[test]
 fn candidate_recovery_leaves_production_state_untouched() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let before = production_dump(conn(&st));
 
     let ws = watch(&st, account);
@@ -1149,7 +1160,7 @@ fn candidate_recovery_leaves_production_state_untouched() {
 
 #[test]
 fn account_deletion_removes_its_candidate_state() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let received = receive(1, external(&ws), 5_000, below_target(&ws, 2));
     let mut c = commit(&ws);
@@ -1174,7 +1185,7 @@ fn account_deletion_removes_its_candidate_state() {
 
 #[test]
 fn reattribution_forgets_the_previous_accounts_evidence() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
     let other = ws
@@ -1214,7 +1225,7 @@ fn reattribution_forgets_the_previous_accounts_evidence() {
 
 #[test]
 fn pages_and_coverage_of_one_revision_never_overlap() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
     let target = ws.target.unwrap().height;
@@ -1267,7 +1278,7 @@ fn pages_and_coverage_of_one_revision_never_overlap() {
 
 #[test]
 fn one_transaction_has_one_placement() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
     let first = receive(1, taddr, 1_000, below_target(&ws, 3));
@@ -1316,7 +1327,7 @@ fn one_transaction_has_one_placement() {
 
 #[test]
 fn anchors_stay_within_the_publication() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let anchor = ws.target.unwrap();
 
@@ -1351,7 +1362,7 @@ fn anchors_stay_within_the_publication() {
 
 #[test]
 fn unsupported_ranges_block_only_within_the_required_interval() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
     let required = ws.addresses[0].required_from;
@@ -1384,7 +1395,7 @@ fn unsupported_ranges_block_only_within_the_required_interval() {
 
 #[test]
 fn one_revision_cannot_both_check_and_not_check_a_range() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
     let target = ws.target.unwrap().height;
@@ -1421,7 +1432,7 @@ fn one_revision_cannot_both_check_and_not_check_a_range() {
 
 #[test]
 fn an_account_born_above_the_target_needs_no_coverage_yet() {
-    let (mut st, _) = shadow_wallet();
+    let (mut st, _) = recovery_wallet();
     let target = watch(&st, st.test_account().unwrap().id()).target.unwrap();
     let ufvk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
         st.network(),
@@ -1458,7 +1469,7 @@ fn an_account_born_above_the_target_needs_no_coverage_yet() {
 
 #[test]
 fn the_first_candidate_commit_requires_a_recovery_aware_reader() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let reader = |st: &State| -> i64 {
         conn(st)
             .query_row("SELECT min_reader_version FROM tpir_meta", [], |row| {
@@ -1484,7 +1495,7 @@ fn the_first_candidate_commit_requires_a_recovery_aware_reader() {
 
 #[test]
 fn coinbase_is_a_property_of_the_transaction() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let taddr = external(&ws);
     let at = below_target(&ws, 3);

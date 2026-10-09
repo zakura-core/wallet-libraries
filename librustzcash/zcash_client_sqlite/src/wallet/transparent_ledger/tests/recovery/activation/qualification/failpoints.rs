@@ -10,7 +10,7 @@ use std::{
 
 use super::oracle::{
     Chain, assert_authority_agrees, assert_diagnostics_agree, external_at, promoted_oracle_wallet,
-    recover, shadow_oracle_wallet, source,
+    recover, recovery_oracle_wallet, source,
 };
 use super::*;
 
@@ -34,7 +34,7 @@ fn whole_commit(
 
 #[test]
 fn a_full_disk_during_any_ledger_write_leaves_the_prior_state() {
-    let (mut st, account, mut chain, owned, _) = shadow_oracle_wallet();
+    let (mut st, account, mut chain, owned, _) = recovery_oracle_wallet();
     let fixture = revision(1, true);
     // Enough outputs that recording them cannot fit in the pages the wallet already has.
     let b = st.test_account().unwrap().birthday().height();
@@ -129,9 +129,7 @@ fn an_aborted_demotion_keeps_private_authority() {
         .unwrap();
     let before = full_dump(conn(&st));
     assert!(matches!(
-        st.wallet_mut()
-            .db_mut()
-            .apply_transparent_policy(PrivateShadow),
+        st.wallet_mut().db_mut().apply_transparent_policy(Public),
         Err(SqliteClientError::DbError(_))
     ));
     assert_eq!(full_dump(conn(&st)), before);
@@ -141,7 +139,7 @@ fn an_aborted_demotion_keeps_private_authority() {
     conn(&st)
         .execute_batch("DROP TRIGGER fail_demotion")
         .unwrap();
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, Public);
     assert_eq!(lifecycle(&st, account), AccountLifecycle::Candidate);
 }
 
@@ -161,7 +159,7 @@ fn crash_copy(path: &Path) -> (tempfile::TempDir, Connection) {
 
 #[test]
 fn a_crash_before_commit_leaves_the_prior_state() {
-    let (mut st, account, chain, owned, _) = shadow_oracle_wallet();
+    let (mut st, account, chain, owned, _) = recovery_oracle_wallet();
     let fixture = revision(1, true);
     recover(&mut st, account, &chain, &fixture);
     qualify(&mut st, &fixture);
@@ -235,13 +233,13 @@ fn rewind_and_demotion_recover_atomically_before_and_after_commit() {
         account,
         &super::oracle::oracle(&chain, &owned, st.wallet().chain_height().unwrap().unwrap()),
     );
-    assert_recovery_at_commit(&mut st, |st| set_policy(st, PrivateShadow));
+    assert_recovery_at_commit(&mut st, |st| set_policy(st, Public));
     assert_eq!(lifecycle(&st, account), AccountLifecycle::Candidate);
 }
 
 #[test]
 fn candidate_and_active_commits_recover_atomically_before_and_after_commit() {
-    let (mut st, account, chain, owned, _) = shadow_oracle_wallet();
+    let (mut st, account, chain, owned, _) = recovery_oracle_wallet();
     let fixture = revision(1, true);
     let c = whole_commit(&st, account, &chain, &fixture);
     assert_recovery_at_commit(&mut st, |st| {

@@ -129,7 +129,7 @@ workspace.
 - Initialization refuses unknown migration IDs before schema interpretation and restores foreign
   key enforcement on error. ZIP 318 removal names dependent application views/triggers.
 - Shared-receiver activity expands effective recovery windows on read, exposing work immediately.
-  Promotion materializes only unowned receivers; shadow reads do not inspect private provenance,
+  Promotion materializes only unowned receivers; public reads do not inspect private provenance,
   and per-account balance reads share one SQLite snapshot.
 - `WalletHandleModes`, `set_handle_modes`, and `with_handle_modes` configure every supported disclosure lane together without persisting policy.
 - Revision observations no longer supersede wallet-wide evidence. Only a trusted qualification transition (a trusted commit, or the test/development hook) withdraws older provisional evidence. New revision writes require reader version 6; version-5 binaries cannot safely operate those wallets.
@@ -152,8 +152,8 @@ workspace.
   account, and spends by prevout.
 - Candidate recovery: `WalletDb` implements `transparent_watch_set`,
   `apply_transparent_ledger_commit`, and `transparent_candidate_recovery`.
-  - A commit requires a `PrivateShadow` or `PrivateRequired` policy, both on the
-    handle and durably applied, at the captured generation. The account must
+  - A commit requires a `PrivateRequired` policy, both on the handle and durably
+    applied, at the captured generation. The account must
     still exist, the target and anchor must still be local blocks, and every
     named address must still be watched by the account.
   - Events are idempotent: contradictory content or placement is refused.

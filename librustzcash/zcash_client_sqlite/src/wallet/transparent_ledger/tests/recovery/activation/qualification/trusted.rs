@@ -127,8 +127,7 @@ fn trusted_commit(
 /// A wallet under `PrivateRequired` whose account was recovered from trusted commits of the
 /// provisional revision `revision(1, false)`, with one unspent receive, and promoted.
 fn trusted_wallet() -> (State, AccountUuid, ReceiveEvent) {
-    let (mut st, account) = shadow_wallet();
-    set_policy(&mut st, PrivateRequired);
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let received = receive(1, external(&ws), 40_000, below_target(&ws, 3));
     cover_trusted(
@@ -147,18 +146,12 @@ fn trusted_wallet() -> (State, AccountUuid, ReceiveEvent) {
 
 #[test]
 fn a_trusted_commit_needs_private_required_on_the_handle_and_durably() {
-    let (mut st, account) = shadow_wallet();
-    let weaker = [Public, PrivateShadow];
-    let cases = weaker
-        .iter()
-        .map(|&durable| (PrivateRequired, durable))
-        .chain(weaker.iter().map(|&handle| (handle, PrivateRequired)))
-        .chain(
-            weaker
-                .iter()
-                .flat_map(|&handle| weaker.iter().map(move |&durable| (handle, durable))),
-        );
-    for (handle, durable) in cases {
+    let (mut st, account) = recovery_wallet();
+    for (handle, durable) in [
+        (PrivateRequired, Public),
+        (Public, PrivateRequired),
+        (Public, Public),
+    ] {
         let db = st.wallet_mut().db_mut();
         db.apply_transparent_policy(durable).unwrap();
         // The commit is current for the applied policy, so only the mode checks can refuse it.
@@ -186,15 +179,15 @@ fn a_trusted_commit_needs_private_required_on_the_handle_and_durably() {
         assert_eq!(production_dump(conn(&st)), before);
     }
 
-    // Shadow recovery may observe the same commit; only PrivateRequired may trust it.
-    set_policy(&mut st, PrivateShadow);
+    // An ordinary commit observes the revision without trusting it; only a trusted commit
+    // qualifies it.
+    set_policy(&mut st, PrivateRequired);
     let fixture = revision(1, false);
     let ws = watch(&st, account);
     let received = receive(1, external(&ws), 40_000, below_target(&ws, 3));
     let c = trusted_commit(&st, account, &fixture, &received);
     apply(&mut st, c).unwrap();
     assert!(!is_qualified(&st, &fixture));
-    set_policy(&mut st, PrivateRequired);
     let c = trusted_commit(&st, account, &fixture, &received);
     trusted(&mut st, c).unwrap();
     assert!(is_qualified(&st, &fixture));
@@ -202,7 +195,7 @@ fn a_trusted_commit_needs_private_required_on_the_handle_and_durably() {
 
 #[test]
 fn a_trusted_commit_qualifies_and_promotes_without_the_test_hook() {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     let fixture = revision(1, false);
     let received = recover_one(&mut st, account, fixture.clone(), 1);
@@ -230,8 +223,7 @@ fn a_trusted_commit_qualifies_and_promotes_without_the_test_hook() {
 
 #[test]
 fn trusted_replacement_withdraws_the_predecessor_in_the_same_transaction() {
-    let (mut st, account) = shadow_wallet();
-    set_policy(&mut st, PrivateRequired);
+    let (mut st, account) = recovery_wallet();
     let (r1, r2) = (revision(1, false), revision(2, false));
     let ws = watch(&st, account);
     // R1 also asserts transaction metadata, so that its withdrawal is observable.
@@ -419,14 +411,13 @@ fn an_older_provisional_trusted_commit_is_stale() {
 
 #[test]
 fn a_trusted_commit_from_before_a_policy_round_trip_is_stale() {
-    let (mut st, account) = shadow_wallet();
-    set_policy(&mut st, PrivateRequired);
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let received = receive(1, external(&ws), 40_000, below_target(&ws, 3));
     let c = trusted_commit(&st, account, &revision(1, false), &received);
     let captured = c.context.policy_generation;
 
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, Public);
     set_policy(&mut st, PrivateRequired);
     let before = full_dump(conn(&st));
     assert!(matches!(

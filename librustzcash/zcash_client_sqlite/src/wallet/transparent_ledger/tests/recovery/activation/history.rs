@@ -313,7 +313,7 @@ fn conflicting_metadata_rejects_the_commit_and_preserves_existing_evidence() {
 
 #[test]
 fn candidate_metadata_survives_reopen_without_granting_authority() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let at = below_target(&ws, 0);
     let metadata = TransactionMetadata {
@@ -349,7 +349,7 @@ fn candidate_metadata_survives_reopen_without_granting_authority() {
         crate::util::SystemClock,
         zcash_client_backend::data_api::testing::TestRng::seed_from_u64(0),
     )
-    .with_transparent_ledger_mode(PrivateShadow);
+    .with_transparent_ledger_mode(PrivateRequired);
     assert_eq!(
         reopened.transparent_candidate_recovery(account).unwrap(),
         before
@@ -390,7 +390,8 @@ fn a_spend_of_an_unrecovered_output_is_incomplete() {
 
 #[test]
 fn public_rows_are_unverified_and_incomplete_once_private_authority_applies() {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
+    set_policy(&mut st, Public);
     let account = accounts[0];
     let address = external(&watch(&st, account));
     let outpoint = OutPoint::new([0x42; 32], 0);
@@ -425,7 +426,7 @@ fn public_rows_are_unverified_and_incomplete_once_private_authority_applies() {
 }
 
 fn check_local_intent_survives_discovery(with_metadata: bool) {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     // A shielded-funded payment to the account's own transparent address.
     let taddr = external(&watch(&st, account));
@@ -506,7 +507,7 @@ fn local_intent_and_fee_survive_mixed_transaction_metadata() {
 
 #[test]
 fn cross_account_transfers_report_each_side() {
-    let (mut st, accounts) = shadow_wallet_with(1);
+    let (mut st, accounts) = recovery_wallet_with(1);
     let (sender, recipient) = (accounts[0], accounts[1]);
     let to = external(&watch(&st, recipient));
     let (txid, _) = pay_from_sapling(&mut st, to, 30_000);
@@ -557,7 +558,8 @@ fn a_rewind_reopens_completeness_until_recovered_again() {
 
 #[test]
 fn shielded_effects_follow_the_contiguously_scanned_height() {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
+    set_policy(&mut st, Public);
     let account = st.test_account().cloned().unwrap();
     assert_eq!(account.id(), accounts[0]);
     let not_our_key = ExtendedSpendingKey::master(&[]).to_diversifiable_full_viewing_key();
@@ -639,7 +641,7 @@ fn pending_private_details_belong_to_their_transaction() {
     );
 
     // Public authority withholds nothing.
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, Public);
     assert_eq!(history(&st, account, txid).pending_private_details, vec![]);
 }
 
@@ -679,7 +681,8 @@ fn discovered_payment(st: &mut State) -> TxId {
 
 #[test]
 fn full_data_completes_details_only_when_every_spent_unit_is_accounted_for() {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
+    set_policy(&mut st, Public);
     let account = accounts[0];
     let txid = discovered_payment(&mut st);
 
@@ -764,7 +767,8 @@ fn record_sent_without_memo(
 
 #[test]
 fn a_sent_output_memo_is_known_only_from_the_same_owned_receipt() {
-    let (mut st, accounts) = shadow_wallet_with(1);
+    let (mut st, accounts) = recovery_wallet_with(1);
+    set_policy(&mut st, Public);
     let (account, other) = (accounts[0], accounts[1]);
     let (a, b) = (account_row(&st, account), account_row(&st, other));
     let not_our_key = ExtendedSpendingKey::master(&[]).to_diversifiable_full_viewing_key();
@@ -915,7 +919,8 @@ fn a_sent_output_memo_is_known_only_from_the_same_owned_receipt() {
 
 #[test]
 fn an_accounted_payment_takes_its_change_memo_from_the_owned_receipt() {
-    let (mut st, accounts) = shadow_wallet_with(1);
+    let (mut st, accounts) = recovery_wallet_with(1);
+    set_policy(&mut st, Public);
     let (account, other) = (accounts[0], accounts[1]);
     let txid = discovered_payment(&mut st);
     let tx = tx_row(&st, txid);
@@ -1005,7 +1010,7 @@ fn an_accounted_payment_takes_its_change_memo_from_the_owned_receipt() {
 
 #[test]
 fn unmined_shielded_spends_are_incomplete_until_the_scanned_chain_reaches_the_tip() {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     let txid = discovered_payment(&mut st);
     assert_eq!(
@@ -1040,7 +1045,7 @@ fn check_unlinked_unmined_spend(pool: zcash_protocol::ShieldedPool) {
         .with_account_from_sapling_activation(BlockHash([0; 32]))
         .build();
     scan_new_blocks(&mut st, 10);
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, Public);
     let test_account = st.test_account().cloned().unwrap();
     let account = test_account.id();
     let height = match pool {
@@ -1198,7 +1203,7 @@ fn scanning_a_funding_note_does_not_complete_an_unlinked_unmined_ironwood_spend(
 
 #[test]
 fn unmined_spend_inspection_accepts_zero_expiry_and_rejects_malformed_data() {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     let txid = discovered_payment(&mut st);
     let data = st
@@ -1248,7 +1253,8 @@ fn unmined_spend_inspection_accepts_zero_expiry_and_rejects_malformed_data() {
 
 #[test]
 fn creation_evidence_alone_does_not_certify_effects_or_details() {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
+    set_policy(&mut st, Public);
     let account = accounts[0];
     // An outbox records only that the wallet created the transaction; its signed bytes, inputs,
     // and recipients live outside the wallet database.
@@ -1300,7 +1306,7 @@ fn an_unresolved_spend_alone_makes_the_account_a_party() {
 
 #[test]
 fn a_candidate_ledger_spend_stays_out_of_history() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
     let missing = receive(7, external(&ws), 10_000, below_target(&ws, 1));
     let payment = spend(8, &missing, below_target(&ws, 0));
@@ -1318,7 +1324,7 @@ fn a_candidate_ledger_spend_stays_out_of_history() {
 
 #[test]
 fn a_constructed_payment_to_an_own_shielded_address_is_incomplete_until_scanned() {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
     let account = st.test_account().cloned().unwrap();
     assert_eq!(account.id(), accounts[0]);
     let own = account
@@ -1349,7 +1355,8 @@ fn a_constructed_payment_to_an_own_shielded_address_is_incomplete_until_scanned(
 
 #[test]
 fn an_account_without_a_full_viewing_key_never_completes_shielded_effects() {
-    let (mut st, accounts) = shadow_wallet_with(1);
+    let (mut st, accounts) = recovery_wallet_with(1);
+    set_policy(&mut st, Public);
     let viewer = accounts[1];
     // The imported account's Sapling key, from `import_account(st, 7)`.
     let dfvk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
@@ -1421,7 +1428,8 @@ fn queue_parent(st: &State, child: TxId, parent: [u8; 32], dependent: TxId) {
 
 #[test]
 fn a_queued_parent_keeps_public_transparent_effects_open() {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
+    set_policy(&mut st, Public);
     let account = accounts[0];
     let address = external(&watch(&st, account));
     let outpoint = OutPoint::new([0x42; 32], 0);
@@ -1471,7 +1479,7 @@ fn a_parent_shared_by_two_transactions_is_pending_for_both() {
 
 #[test]
 fn deleting_the_funding_account_removes_the_construction_evidence() {
-    let (mut st, accounts) = shadow_wallet_with(1);
+    let (mut st, accounts) = recovery_wallet_with(1);
     let (sender, recipient) = (accounts[0], accounts[1]);
     let to = external(&watch(&st, recipient));
     let (txid, _) = pay_from_sapling(&mut st, to, 30_000);

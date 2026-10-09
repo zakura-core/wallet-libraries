@@ -352,7 +352,7 @@ fn projection_promotion_enqueues() {
 
 #[test]
 fn candidate_commit_no_enqueue() {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    let (mut st, accounts) = recovery_wallet_with(0);
     recover_one(&mut st, accounts[0], revision(1, true), 1);
     assert_eq!(count(&st, "tpir_receive_events"), 1);
     assert_eq!(work_rows(&st), vec![]);
@@ -392,7 +392,7 @@ fn route2_and_transition_enqueue() {
     assert_eq!(reasons(&st, txid_of(&unspent)), Some(RECEIVE | MIXED));
 
     // A route-1 transaction becomes route 2 when PrivateRequired is applied.
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, Public);
     let mixed = TxId::from_bytes([0x55; 32]);
     let height = u32::from(unspent.mined_height);
     conn(&st)
@@ -1103,7 +1103,7 @@ fn stale_generation_rejected() {
         .transparent_detail_work(now(), 10, None)
         .unwrap();
     assert_eq!(listed.policy_generation, generation(&st));
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, Public);
     assert_ne!(generation(&st), listed.policy_generation);
     let result = st.wallet_mut().db_mut().store_transparent_display(
         facts_for(&unspent),
@@ -1460,7 +1460,7 @@ fn no_requeue_after_stored() {
     cover(&mut st, account, &revision(1, true), vec![unspent.clone()]);
     assert_eq!(reasons(&st, txid), None);
     // Leaving and re-entering PrivateRequired promotes, and so projects, the ledger again.
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, Public);
     set_policy(&mut st, PrivateRequired);
     promote(&mut st, account).unwrap();
     assert_eq!(reasons(&st, txid), None);
@@ -1805,7 +1805,7 @@ fn route2_unmined_at_transition_queued_when_mined() {
     use zcash_client_backend::data_api::{TransactionStatus, WalletWrite as _};
 
     let (mut st, _, unspent) = active_wallet();
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, Public);
     // A route-1 transaction, mined, then rewound before PrivateRequired is applied.
     let mixed = TxId::from_bytes([0x55; 32]);
     let height = u32::from(unspent.mined_height);

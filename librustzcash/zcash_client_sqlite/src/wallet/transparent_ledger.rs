@@ -68,7 +68,6 @@ pub(crate) use recovery::{clear_pending_pages, truncate as truncate_recovery};
 fn mode_from_code(code: i64) -> Result<TransparentLedgerMode, SqliteClientError> {
     match code {
         0 => Ok(TransparentLedgerMode::Public),
-        1 => Ok(TransparentLedgerMode::PrivateShadow),
         2 => Ok(TransparentLedgerMode::PrivateRequired),
         other => Err(SqliteClientError::CorruptedData(format!(
             "unknown transparent ledger mode code {other}"
@@ -79,7 +78,6 @@ fn mode_from_code(code: i64) -> Result<TransparentLedgerMode, SqliteClientError>
 pub(super) fn mode_code(mode: TransparentLedgerMode) -> i64 {
     match mode {
         TransparentLedgerMode::Public => 0,
-        TransparentLedgerMode::PrivateShadow => 1,
         TransparentLedgerMode::PrivateRequired => 2,
     }
 }
@@ -295,10 +293,10 @@ pub(crate) fn grants_private_authority(
 
 /// Checks that the handle may authorize consuming transparent inputs.
 ///
-/// Public authority is retained only by explicitly configured `Public` and `PrivateShadow`
-/// handles; financial authorization never defaults to public. Even then it requires the same
-/// conditions under which the snapshot reports public authority: a known chain tip, and a build
-/// that can read transparent state. `PrivateRequired` handles are rejected: private authority is
+/// Public authority is retained only by explicitly configured `Public` handles; financial
+/// authorization never defaults to public. Even then it requires the same conditions under which
+/// the snapshot reports public authority: a known chain tip, and a build that can read
+/// transparent state. `PrivateRequired` handles are rejected: private authority is
 /// per account, and [`input_authority`] resolves it where transparent support exists.
 pub(crate) fn check_transparent_authority(
     conn: &rusqlite::Connection,
@@ -308,7 +306,7 @@ pub(crate) fn check_transparent_authority(
         TransparentLedgerMode::PrivateRequired => {
             Err(SqliteClientError::TransparentAuthorityUnavailable)
         }
-        TransparentLedgerMode::Public | TransparentLedgerMode::PrivateShadow => {
+        TransparentLedgerMode::Public => {
             if cfg!(not(feature = "transparent-inputs")) || chain_tip_height(conn)?.is_none() {
                 Err(SqliteClientError::TransparentAuthorityUnavailable)
             } else {
@@ -518,11 +516,8 @@ struct PrivateView {
     recovered_unverified: Option<Zatoshis>,
 }
 
-/// Reads `account`'s private ledger for a snapshot targeting the block after `tip`.
-///
-/// Authority, last-known amounts and blockers are read only when `authoritative`, that is under
-/// `PrivateRequired`. A shadow snapshot reports public authority and only the recovery progress,
-/// so a diagnostic it would discard cannot fail the public amount.
+/// Reads `account`'s private ledger for a `PrivateRequired` snapshot targeting the block after
+/// `tip`.
 #[cfg(feature = "transparent-inputs")]
 fn private_view<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -531,7 +526,6 @@ fn private_view<P: consensus::Parameters>(
     account: AccountUuid,
     tip: BlockHeight,
     confirmations_policy: ConfirmationsPolicy,
-    authoritative: bool,
 ) -> Result<PrivateView, SqliteClientError> {
     let ledger = recovery::account_ledger(conn, params, gap_limits, account)?;
     let target = TargetHeight::from(tip + 1);
@@ -541,9 +535,7 @@ fn private_view<P: consensus::Parameters>(
         }
         None => None,
     };
-    let (authority, last_known, blockers) = if !authoritative {
-        (None, None, vec![])
-    } else if ledger.authorizes_after(tip) {
+    let (authority, last_known, blockers) = if ledger.authorizes_after(tip) {
         (
             transparent_balance(conn, account, target, confirmations_policy, true)?,
             None,
@@ -662,28 +654,6 @@ pub(crate) fn snapshot<P: consensus::Parameters>(
     };
     let target = TargetHeight::from(tip + 1);
 
-    let private = match mode {
-        TransparentLedgerMode::Public => None,
-        TransparentLedgerMode::PrivateShadow | TransparentLedgerMode::PrivateRequired => {
-            #[cfg(feature = "transparent-inputs")]
-            let view = private_view(
-                conn,
-                params,
-                gap_limits,
-                account,
-                tip,
-                confirmations_policy,
-                mode == TransparentLedgerMode::PrivateRequired,
-            )?;
-            #[cfg(not(feature = "transparent-inputs"))]
-            let view = private_view(conn, account, tip, confirmations_policy)?;
-            Some(view)
-        }
-    };
-    let (covered_through, recovered_unverified) = private.as_ref().map_or((None, None), |p| {
-        (p.covered_through, p.recovered_unverified)
-    });
-
     if mode.retains_public_authority() {
         // A build that cannot read transparent state never reports public authority.
         let Some(balance) =
@@ -701,12 +671,17 @@ pub(crate) fn snapshot<P: consensus::Parameters>(
             last_known: None,
             completion: RecoveryCompletion::NotApplicable,
             blockers: vec![],
-            covered_through,
-            recovered_unverified,
+            covered_through: None,
+            recovered_unverified: None,
         });
     }
 
-    let private = private.expect("PrivateRequired reads the private ledger");
+    #[cfg(feature = "transparent-inputs")]
+    let private = private_view(conn, params, gap_limits, account, tip, confirmations_policy)?;
+    #[cfg(not(feature = "transparent-inputs"))]
+    let private = private_view(conn, account, tip, confirmations_policy)?;
+    let (covered_through, recovered_unverified) =
+        (private.covered_through, private.recovered_unverified);
     Ok(match private.authority {
         Some(balance) => TransparentLedgerSnapshot {
             account,

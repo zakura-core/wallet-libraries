@@ -25,7 +25,7 @@ fn cover_part(
 
 #[test]
 fn a_reorg_clips_sealed_and_provisional_coverage_alike() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let sealed = source(b"sealed", 1);
     let provisional = |lineage| RecoveryRevision {
         sealed: false,
@@ -90,7 +90,7 @@ fn a_reorg_clips_sealed_and_provisional_coverage_alike() {
 
 #[test]
 fn deleting_an_active_account_keeps_the_other_accounts_ledger() {
-    let (mut st, accounts) = shadow_wallet_with(1);
+    let (mut st, accounts) = recovery_wallet_with(1);
     let [kept, deleted] = accounts[..] else {
         unreachable!()
     };
@@ -167,7 +167,7 @@ fn deleting_an_active_account_keeps_the_other_accounts_ledger() {
 
 #[test]
 fn lowering_an_active_accounts_birthday_pauses_authority_until_covered() {
-    let (mut st, account) = shadow_wallet();
+    let (mut st, account) = recovery_wallet();
     let birthday = st.test_account().unwrap().birthday().height();
     let set_birthday = |st: &State, height: BlockHeight| {
         conn(st)
@@ -223,7 +223,7 @@ fn a_commit_captured_before_a_policy_round_trip_is_stale() {
     let ws = watch(&st, account);
     assert_eq!(ws.lifecycle, AccountLifecycle::Active);
 
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, Public);
     set_policy(&mut st, PrivateRequired);
     let mut c = commit(&ws);
     c.coverage = full_coverage(&ws);

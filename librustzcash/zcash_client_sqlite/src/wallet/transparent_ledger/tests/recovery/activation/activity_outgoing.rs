@@ -303,7 +303,7 @@ fn privately_recovered(
     record_fee: Option<u64>,
 ) -> Restored {
     let tx = sent_transaction(destination);
-    let mut case = restore(tx, |st| set_policy(st, PrivateShadow));
+    let mut case = restore(tx, |st| set_policy(st, PrivateRequired));
     let receives = own_output_metadata
         .map(|metadata| vec![own_output(&case, metadata)])
         .unwrap_or_default();

@@ -443,7 +443,7 @@ mod handles {
         },
     };
 
-    use TransparentLedgerMode::{PrivateRequired, PrivateShadow, Public};
+    use TransparentLedgerMode::{PrivateRequired, Public};
 
     fn meta(st: &State) -> (i64, i64) {
         conn(st)
@@ -570,21 +570,19 @@ mod handles {
                 .unwrap()
         };
 
-        for mode in [Public, PrivateShadow] {
-            set_mode(&mut st, mode);
-            let s = snapshot(&st);
-            assert_eq!(s.mode, mode);
-            assert_eq!(s.authority, TransparentAuthority::Public);
-            let authorized = s.authorized.unwrap();
-            assert_eq!(
-                authorized.regular.spendable_value(),
-                Zatoshis::const_from_u64(100_000)
-            );
-            assert_eq!(authorized.coinbase.total(), Zatoshis::ZERO);
-            assert_eq!(s.last_known, None);
-            assert_eq!(s.completion, RecoveryCompletion::NotApplicable);
-            assert!(s.blockers.is_empty());
-        }
+        set_mode(&mut st, Public);
+        let s = snapshot(&st);
+        assert_eq!(s.mode, Public);
+        assert_eq!(s.authority, TransparentAuthority::Public);
+        let authorized = s.authorized.unwrap();
+        assert_eq!(
+            authorized.regular.spendable_value(),
+            Zatoshis::const_from_u64(100_000)
+        );
+        assert_eq!(authorized.coinbase.total(), Zatoshis::ZERO);
+        assert_eq!(s.last_known, None);
+        assert_eq!(s.completion, RecoveryCompletion::NotApplicable);
+        assert!(s.blockers.is_empty());
 
         // The account is not promoted, so private authority is unavailable: the public amount
         // is shown as last-known legacy evidence only, with no verified anchor, never as an
@@ -745,18 +743,6 @@ mod handles {
                 .transparent_ledger_snapshot(account.id(), ConfirmationsPolicy::MIN),
             Err(SqliteClientError::CorruptedData(_))
         ));
-
-        // A shadow snapshot keeps public authority and does not read the provenance of a
-        // last-known amount it would not report, so the same state cannot fail it.
-        set_mode(&mut st, PrivateShadow);
-        let snapshot = st
-            .wallet()
-            .db()
-            .transparent_ledger_snapshot(account.id(), ConfirmationsPolicy::MIN)
-            .unwrap();
-        assert_eq!(snapshot.authority, TransparentAuthority::Public);
-        assert!(snapshot.authorized.is_some());
-        assert!(snapshot.last_known.is_none());
     }
 
     #[test]
@@ -805,35 +791,31 @@ mod handles {
 
         // A weaker handle resolves to the durable policy and reads exactly what a matching
         // handle reads, without changing its own configuration.
-        for mode in [Public, PrivateShadow] {
-            set_mode(&mut st, mode);
-            let db = st.wallet().db();
-            assert_eq!(db.transparent_ledger_mode().unwrap(), PrivateRequired);
-            assert_eq!(db.transparent_ledger_mode, Some(mode));
-            assert_eq!(
-                format!(
-                    "{:?}",
-                    db.transparent_ledger_snapshot(account, ConfirmationsPolicy::MIN)
-                        .unwrap()
-                ),
-                required_snapshot
-            );
-            assert_eq!(
-                format!("{:?}", selector_errors(&st, &funded)),
-                required_selectors
-            );
-            assert!(matches!(
-                check_transparent_authority(conn(&st), Some(mode)),
-                Err(SqliteClientError::TransparentAuthorityUnavailable)
-            ));
-            assert!(
-                !crate::wallet::transparent_ledger::public_discovery_permitted(
-                    conn(&st),
-                    Some(mode)
-                )
+        let mode = Public;
+        set_mode(&mut st, mode);
+        let db = st.wallet().db();
+        assert_eq!(db.transparent_ledger_mode().unwrap(), PrivateRequired);
+        assert_eq!(db.transparent_ledger_mode, Some(mode));
+        assert_eq!(
+            format!(
+                "{:?}",
+                db.transparent_ledger_snapshot(account, ConfirmationsPolicy::MIN)
+                    .unwrap()
+            ),
+            required_snapshot
+        );
+        assert_eq!(
+            format!("{:?}", selector_errors(&st, &funded)),
+            required_selectors
+        );
+        assert!(matches!(
+            check_transparent_authority(conn(&st), Some(mode)),
+            Err(SqliteClientError::TransparentAuthorityUnavailable)
+        ));
+        assert!(
+            !crate::wallet::transparent_ledger::public_discovery_permitted(conn(&st), Some(mode))
                 .unwrap()
-            );
-        }
+        );
         // An unconfigured handle is blocked.
         assert!(matches!(
             check_transparent_authority(conn(&st), None),
@@ -1075,33 +1057,27 @@ mod handles {
         let first = st
             .wallet_mut()
             .db_mut()
-            .apply_transparent_policy(PrivateShadow)
+            .apply_transparent_policy(PrivateRequired)
             .unwrap();
         assert_eq!(
             first,
             zcash_client_backend::data_api::transparent_ledger::AppliedTransparentPolicy {
-                mode: PrivateShadow,
+                mode: PrivateRequired,
                 generation: 1,
             }
         );
         let same = st
             .wallet_mut()
             .db_mut()
-            .apply_transparent_policy(PrivateShadow)
-            .unwrap();
-        assert_eq!(same.generation, 1);
-        let private = st
-            .wallet_mut()
-            .db_mut()
             .apply_transparent_policy(PrivateRequired)
             .unwrap();
-        assert_eq!(private.generation, 2);
+        assert_eq!(same.generation, 1);
         let back = st
             .wallet_mut()
             .db_mut()
             .apply_transparent_policy(Public)
             .unwrap();
-        assert_eq!(back.generation, 3);
+        assert_eq!(back.generation, 2);
     }
 
     #[test]
@@ -1220,14 +1196,6 @@ mod handles {
             )
             .unwrap()
         );
-        reader.set_transparent_ledger_mode(PrivateShadow);
-        assert!(
-            !crate::wallet::transparent_ledger::grants_private_authority(
-                &reader.conn,
-                reader.transparent_ledger_mode
-            )
-            .unwrap()
-        );
         assert_eq!(changes(), before);
     }
 
@@ -1252,7 +1220,7 @@ mod handles {
                  PRAGMA ignore_check_constraints = OFF;",
             )
             .unwrap();
-        for mode in [Public, PrivateShadow, PrivateRequired] {
+        for mode in [Public, PrivateRequired] {
             db.set_transparent_ledger_mode(mode);
             assert!(
                 matches!(
@@ -1264,7 +1232,7 @@ mod handles {
         }
         // So does a missing policy row.
         db.conn.execute("DELETE FROM tpir_meta", []).unwrap();
-        for mode in [Public, PrivateShadow, PrivateRequired] {
+        for mode in [Public, PrivateRequired] {
             db.set_transparent_ledger_mode(mode);
             assert!(
                 matches!(
@@ -1361,7 +1329,7 @@ mod handles {
 
     #[cfg(feature = "orchard")]
     #[test]
-    fn stale_generation_is_restamped_after_public_to_private_shadow() {
+    fn stale_generation_is_restamped_after_returning_to_public() {
         use zcash_client_backend::data_api::{
             PublicTransactionEnhancementRequest,
             enhance_pir::{EnhancePirRead, TransactionEnhancementWork},
@@ -1372,11 +1340,14 @@ mod handles {
         let tx = conn(&st).unchecked_transaction().unwrap();
         crate::wallet::queue_tx_retrieval(&tx, std::iter::once(stale), None).unwrap();
         tx.commit().unwrap();
-        st.wallet_mut()
-            .db_mut()
-            .apply_transparent_policy(PrivateShadow)
-            .unwrap();
-        set_mode(&mut st, PrivateShadow);
+        // Public → PrivateRequired → Public: the queued row survives two generations.
+        for mode in [PrivateRequired, Public] {
+            st.wallet_mut()
+                .db_mut()
+                .apply_transparent_policy(mode)
+                .unwrap();
+        }
+        set_mode(&mut st, Public);
         let tx = conn(&st).unchecked_transaction().unwrap();
         crate::wallet::queue_tx_retrieval(&tx, std::iter::once(fresh), None).unwrap();
         tx.commit().unwrap();
@@ -1755,7 +1726,8 @@ mod handles {
                 .with_transparent_ledger_mode(Public);
         WalletMigrator::new().init_or_migrate(&mut writer).unwrap();
         let old_generation = writer.applied_transparent_policy().unwrap().generation;
-        writer.apply_transparent_policy(PrivateShadow).unwrap();
+        writer.apply_transparent_policy(PrivateRequired).unwrap();
+        writer.set_transparent_ledger_mode(PrivateRequired);
 
         // Simulate a commit path that captured the old generation before the transition.
         assert!(matches!(

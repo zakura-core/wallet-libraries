@@ -93,7 +93,7 @@ fn a_lost_projection_is_rebuilt_from_durable_evidence() {
 
     // Forward repair: demoting and promoting again rebuilds the projection from the ledger's
     // durable evidence, exactly.
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, Public);
     set_policy(&mut st, PrivateRequired);
     promote(&mut st, account).unwrap();
     assert_eq!(projection_state(conn(&st)), intact);
@@ -114,7 +114,7 @@ fn a_policy_alone_needs_no_newer_reader_and_nothing_lowers_the_requirement() {
 
     // Activation state requires an activation-aware reader, and demotion does not release it:
     // the qualification and the ledger's projection remain.
-    set_policy(&mut st, PrivateShadow);
+    set_policy(&mut st, PrivateRequired);
     let account = st.test_account().unwrap().id();
     let fixture = revision(1, true);
     cover(&mut st, account, &fixture, vec![]);
