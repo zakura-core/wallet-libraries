@@ -14,8 +14,9 @@ use reinspiring::native::NativeSetup;
 
 pub use reinspiring::native::NativeSecret;
 pub use zakura_pir_native::{
-    D, KEY_BYTES, KEY_WORDS, MASK_BITS, Q, Q_BITS, QUERY_BITS, RESPONSE_BITS, decode_cols, params,
-    prepare_with, public_len, public_query_masks, request_len, response_len,
+    D, DITHERED_QUERY_BITS, KEY_BYTES, KEY_WORDS, MASK_BITS, Q, Q_BITS, QUERY_BITS, RESPONSE_BITS,
+    decode_cols, params, prepare_dithered, prepare_with, public_len, public_query_masks,
+    request_len, request_len_bits, response_len,
 };
 
 pub const COLS: usize = 12288;
@@ -72,8 +73,10 @@ impl NativeSession {
     pub fn public(&self) -> &[u8] {
         &self.public
     }
+    /// A request selection dithered to [`DITHERED_QUERY_BITS`]; see
+    /// [`prepare_dithered`].
     pub fn prepare(&self, target: usize) -> Result<(NativeSecret, Vec<u8>), String> {
-        prepare_with(&self.setup, &self.masks, self.rows, target)
+        prepare_dithered(&self.setup, &self.masks, self.rows, target)
     }
     pub fn decode(&self, secret: &NativeSecret, body: &[u8]) -> Result<Vec<u8>, String> {
         decode(secret, &self.public, body)
@@ -99,7 +102,7 @@ mod tests {
         let session = NativeSession::new(0, D, vec![0; public_len(COLS)]).unwrap();
         assert!(session.prepare(D).is_err());
         let (secret, body) = session.prepare(D - 1).unwrap();
-        assert_eq!(body.len(), request_len(D));
+        assert_eq!(body.len(), request_len_bits(D, DITHERED_QUERY_BITS));
         assert!(session.decode(&secret, &[0; 1]).is_err());
         assert_eq!(
             session

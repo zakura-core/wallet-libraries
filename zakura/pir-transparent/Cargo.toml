@@ -33,13 +33,13 @@ same-file = { version = "1.0.6", optional = true }
 base64 = { workspace = true, optional = true }
 thiserror = "2"
 url = "2"
-transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "a317455e9feecdd2639d5348188c6a2341819a4d", optional = true }
-transparent-wallet-store = { git = "https://github.com/valargroup/wallet-pir", rev = "a317455e9feecdd2639d5348188c6a2341819a4d", optional = true }
-transparent-events = { git = "https://github.com/valargroup/wallet-pir", rev = "a317455e9feecdd2639d5348188c6a2341819a4d", optional = true }
-transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "a317455e9feecdd2639d5348188c6a2341819a4d", optional = true }
-transparent-txid-client = { git = "https://github.com/valargroup/wallet-pir", rev = "a317455e9feecdd2639d5348188c6a2341819a4d", optional = true }
-transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "a317455e9feecdd2639d5348188c6a2341819a4d", optional = true }
-transparent-native = { git = "https://github.com/valargroup/wallet-pir", rev = "a317455e9feecdd2639d5348188c6a2341819a4d", optional = true }
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "06a972db469f302d8c561416d4674e937fdde0cb", optional = true }
+transparent-wallet-store = { git = "https://github.com/valargroup/wallet-pir", rev = "06a972db469f302d8c561416d4674e937fdde0cb", optional = true }
+transparent-events = { git = "https://github.com/valargroup/wallet-pir", rev = "06a972db469f302d8c561416d4674e937fdde0cb", optional = true }
+transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "06a972db469f302d8c561416d4674e937fdde0cb", optional = true }
+transparent-txid-client = { git = "https://github.com/valargroup/wallet-pir", rev = "06a972db469f302d8c561416d4674e937fdde0cb", optional = true }
+transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "06a972db469f302d8c561416d4674e937fdde0cb", optional = true }
+transparent-native = { git = "https://github.com/valargroup/wallet-pir", rev = "06a972db469f302d8c561416d4674e937fdde0cb", optional = true }
 
 # Companion locks: `flock` directly, which `std` supports on Android only from Rust 1.98.
 [target.'cfg(unix)'.dependencies]
@@ -53,11 +53,11 @@ zcash_client_backend = { workspace = true, features = ["orchard", "test-dependen
 zcash_keys = { workspace = true, features = ["transparent-inputs"] }
 # The example and the end-to-end test build the reference HTTP adapters; the
 # library takes caller transports.
-transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "a317455e9feecdd2639d5348188c6a2341819a4d", features = ["reqwest"] }
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "06a972db469f302d8c561416d4674e937fdde0cb", features = ["reqwest"] }
 # The end-to-end test publishes shards and serves them in process; it requires
 # `wallet`, which brings the event and filter crates.
-transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "a317455e9feecdd2639d5348188c6a2341819a4d" }
-transparent-shard-server = { git = "https://github.com/valargroup/wallet-pir", rev = "a317455e9feecdd2639d5348188c6a2341819a4d" }
+transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "06a972db469f302d8c561416d4674e937fdde0cb" }
+transparent-shard-server = { git = "https://github.com/valargroup/wallet-pir", rev = "06a972db469f302d8c561416d4674e937fdde0cb" }
 axum = "0.7"
 tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
 regex = { workspace = true, features = ["std"] }

@@ -25,7 +25,7 @@ use transparent_filter::{Recut, ScriptBytes, SealParameters, ShardMap};
 use transparent_wallet::http::{HttpFilterSource, HttpOptions, HttpShardTransport};
 use zakura_pir_transparent::{
     ApplyError, BatchState, Outcome, Progress, RecoveryBatch, RecoveryConfig, RecoveryError,
-    ReferenceRecovery, Trust, WalletChain, WithdrawnCause,
+    ReferenceRecovery, ShardTransport, Trust, WalletChain, WithdrawnCause,
 };
 use zcash_client_backend::data_api::{
     Account as _, CoinbaseFilter, InputSource as _, WalletRead as _,
@@ -659,9 +659,34 @@ impl Fixture {
             .unwrap()
     }
 
+    /// The query body lengths the current service accepts, as (44-bit
+    /// dithered, 49-bit): the 8-byte binding, then each table scheme's upload.
+    fn query_lengths(&self) -> (HashSet<usize>, HashSet<usize>) {
+        let url = self.url.as_deref().expect("a served publication");
+        let mut transport = HttpShardTransport::new(url, &HttpOptions::default()).unwrap();
+        let (init, _) = transport.init().unwrap();
+        let service = transparent_wallet::parse_init(&init).unwrap();
+        let (mut dithered, mut nearest) = (HashSet::new(), HashSet::new());
+        for geometry in &service.geometries {
+            for (scheme, dq44) in [
+                (&geometry.directory_scheme, &geometry.directory_scheme_dq44),
+                (&geometry.pages_scheme, &geometry.pages_scheme_dq44),
+            ] {
+                let dq44 = dq44
+                    .as_ref()
+                    .expect("the service advertises 44-bit queries");
+                assert_eq!((scheme.query_bits, dq44.query_bits), (49, 44));
+                nearest.insert(8 + scheme.request_bytes);
+                dithered.insert(8 + dq44.request_bytes);
+            }
+        }
+        (dithered, nearest)
+    }
+
     /// Asserts that every request the service received used one of its routes
     /// with that route's method, carried none of the account's scripts in its
-    /// path, query, headers or body, and named no shard in `below_floor`.
+    /// path, query, headers or body, and named no shard in `below_floor`; and
+    /// that every query went at 44 dithered bits.
     fn assert_private(&self, below_floor: &[u64]) {
         let requests = self.server.requests();
         assert!(!requests.is_empty());
@@ -698,6 +723,17 @@ impl Fixture {
                 requests
                     .iter()
                     .any(|request| request.path.ends_with(kind) && shard(&request.path).is_some())
+            );
+        }
+        // The service advertises the dithered schemes, so every query uses one.
+        let (dithered, nearest) = self.query_lengths();
+        assert!(dithered.is_disjoint(&nearest));
+        for request in requests.iter().filter(|request| request.method == "POST") {
+            assert!(
+                dithered.contains(&request.body.len()),
+                "a {}-byte query to {}",
+                request.body.len(),
+                request.path
             );
         }
         let probe = self.watched.first().expect("a watched address");

@@ -375,10 +375,7 @@ mod tests {
                 assert!(url.ends_with("/v1/status/query"));
                 assert_eq!(&body[..4], QUERY_MAGIC);
                 assert_eq!(body[4..36], self.manifest.id());
-                assert_eq!(
-                    body.len(),
-                    HEADER_BYTES + zakura_pir_native::request_len(ROWS)
-                );
+                assert_eq!(body.len(), crate::request_len());
                 let mut response = body[..HEADER_BYTES].to_vec();
                 if *self.tamper_header.lock().unwrap() {
                     response[40] ^= 1;
