@@ -138,8 +138,9 @@ pub enum WithdrawnCause {
     /// A sealed revision a batch exported is neither published nor declared
     /// superseded by a re-cut, and its source is published at another revision
     /// that is not merely an older unsealed one; or the map rewrites sealed
-    /// history the companion's store holds, over a block the wallet's chain
-    /// still accepts, without declaring a re-cut, which the sync refuses before
+    /// history the companion's store holds without declaring a re-cut, and the
+    /// wallet's chain accepts both the stored range's end block and the end
+    /// block of the sealed shard replacing it, which the sync refuses before
     /// reading anything. A declared re-cut never causes it.
     ChangedSealed,
     /// The heights of a revision a batch exported are published under another

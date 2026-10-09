@@ -722,22 +722,30 @@ fn entries(map: &ShardMap, floor: u64) -> usize {
 ///
 /// A wallet holds no blocks below its birthday, while a publication may start far
 /// below it (the live map starts at genesis). Leniency there is sound because, at
-/// wallet-pir c4068c10, `sync_into` asks below the floor only for rollback
-/// anchors:
+/// wallet-pir cebef2a8, `sync_into` asks below the floor only for rollback
+/// anchors and, in one case below, the end of a replacement shard:
 ///
-/// - It plans only shards meeting `[required_from, target]` (`sync.rs:925-948`),
-///   so every coverage endpoint it checks (`sync.rs:1384-1385`, `:2236-2237`,
-///   `sync_ahead.rs:255-258`), every stored coverage end its reorg and
-///   sealed-rewrite scan asks about (`sync.rs:634-696`), and the earlier target
-///   unfinished page work was read for (`:1250-1252`) is at or above the floor.
-///   Required heights only move earlier and targets only rise, so no script the
-///   companion retains starts below the floor.
+/// - It plans only shards meeting `[required_from, target]` (`sync.rs:934-957`),
+///   so every coverage endpoint it checks (`sync.rs:1453-1454`, `:2305-2306`,
+///   `sync_ahead.rs:255-258`), every stored coverage end its reorg scan and
+///   sealed-rewrite judgment ask about (`sync.rs:642-704`, `:1269`), and the
+///   earlier target unfinished page work was read for (`:1319-1321`) is at or
+///   above the floor. Required heights only move earlier and targets only
+///   rise, so no script the companion retains starts below the floor.
 /// - The block a rollback rewinds to may lie below it: the reorg fallback
-///   `map.start_height - 1` (`:680`), a replaced revision (`:784-797`) or a
-///   revision withdrawn mid-sync (`:1086-1090`), each just below a shard's start
-///   and each resolved by `accepted_at` (`:2574-2593`), which takes the hash
+///   `map.start_height - 1` (`:689`), a replaced revision (`:793-806`) or a
+///   revision withdrawn mid-sync (`:1095-1099`), each just below a shard's start
+///   and each resolved by `accepted_at` (`:2643-2662`), which takes the hash
 ///   from the map when the view has none. Only block 0 has no map entry, so
 ///   [`Self::hash_at`] answers it with the map's genesis hash.
+/// - Judging an undeclared rewrite of a stored sealed range whose own end the
+///   chain accepts, it asks about the end of the map's sealed shard now
+///   covering that range's start (`:1272-1277`), which can lie below the floor
+///   when the range starts below it. There the view accepts it, so such a
+///   rewrite is refused as a contradiction (`SealedRewrite`, a withdrawn batch)
+///   rather than left unsettled (`ChainUnknown`, a stalled pass). Either way
+///   nothing is read, rolled back or exported, and a reorg the publisher
+///   followed ahead of the wallet lies near the tip, far above any floor.
 ///
 /// Nothing below the floor is exported or cataloged (see `normalize`), and the
 /// target and every shard anchor are checked against the caller's chain alone.
@@ -906,11 +914,12 @@ impl ReferenceRecovery {
     /// divergence the sync itself finds (a map refreshed mid-pass that does not
     /// continue the first), is a [`BatchState::Pending`] batch with
     /// [`Outcome::Behind`] that claims no coverage, keeping companion and
-    /// catalog. A map that rewrites sealed history the store holds, over a
-    /// block `chain` still accepts, without declaring a re-cut, is refused by
-    /// the sync before anything is read or rolled back, and the pass returns a
-    /// [`BatchState::Withdrawn`] batch with [`WithdrawnCause::ChangedSealed`],
-    /// claiming no coverage.
+    /// catalog. A map that rewrites sealed history the store holds without
+    /// declaring a re-cut, where `chain` accepts both the stored range's end
+    /// block and the end block of the map's sealed shard now covering it, is
+    /// refused by the sync before anything is read or rolled back, and the
+    /// pass returns a [`BatchState::Withdrawn`] batch with
+    /// [`WithdrawnCause::ChangedSealed`], claiming no coverage.
     ///
     /// A re-cut the map declares keeps the wallet's history: facts the store
     /// read under a sealed revision the re-cut superseded are exported under
@@ -1076,10 +1085,14 @@ impl ReferenceRecovery {
             &sync_anchor,
         ) {
             Ok(report) => report,
-            // The map rewrites sealed history the store holds, over a block the
-            // wallet's chain still accepts, without declaring a re-cut. No later
-            // pass repairs that: the publisher changed history the wallet holds.
-            // A replica still serving a map from before a re-cut the store
+            // The map rewrites sealed history the store holds without declaring
+            // a re-cut, and the wallet's chain accepts both the block the stored
+            // range ends on and the block the map's sealed shard now covering
+            // its start ends on, at or below the target: a contradiction on the
+            // wallet's own chain, which no later pass repairs. A stored block the
+            // chain rejects is a reorg the sync rolls back, and anything the
+            // chain cannot settle yet stops the sync as `ChainUnknown`. A
+            // replica still serving a map from before a re-cut the store
             // followed looks the same to the sync, which keeps no epoch; the
             // epoch guard above returned before syncing against one.
             Err(SyncError::SealedRewrite { .. }) => {

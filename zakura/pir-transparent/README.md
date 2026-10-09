@@ -102,9 +102,11 @@ epoch, as from a replica still serving the map from before the re-cut, is
 `Pending` before any retrieval; a re-cut therefore only rolls forward. Wallet
 pages under a superseded sealed revision are completed once the batch covers
 them. An undeclared change of sealed content never reaches the wallet: the
-reference client refuses a rewrite of history the store holds before reading
-anything, which a pass returns as `Withdrawn(ChangedSealed)`, and the catalog
-withdraws the rest.
+reference client refuses a rewrite of history the store holds that contradicts
+the wallet's own chain (it accepts both the stored and the replacing shard's
+end blocks) before reading anything, which a pass returns as
+`Withdrawn(ChangedSealed)`; one the chain cannot settle yet stalls the pass;
+and the catalog withdraws the rest.
 
 `Ready` assumes the trusted operation. A successor withdraws its predecessor's
 provisional evidence from the wallet only when the wallet qualifies it and
