@@ -1781,6 +1781,87 @@ fn retirements_are_acknowledged_only_after_trusted_reconciliation_commits() {
     assert!(batch.retired_revisions().is_empty());
 }
 
+/// A trusted successor can retire old evidence in the committed prefix, but
+/// a stale middle commit still leaves the whole batch's catalog unacknowledged.
+#[test]
+fn stale_middle_retirement_batch_preserves_reconciliation_across_reopen() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, owned) = private_fixture();
+    let first = f.drive();
+    let retired = tail_revision(&first.batch);
+    let target = H0 + 1049;
+    f.scan_to(target);
+    let mut shards = lifecycle(&owned, H0 + 799, 1, false);
+    // The old unsealed source has a sealed successor, followed by two more
+    // sources. The next refusal is in the middle, with a later commit unreached.
+    let successor = shards.last_mut().unwrap();
+    successor.sealed = true;
+    successor.revision = 1;
+    shards.push(sealed(H0 + 800, H0 + 999, noise(H0 + 800, H0 + 999, 4)));
+    shards.push(ShardSpec {
+        start: H0 + 1000,
+        end: target,
+        sealed: false,
+        revision: 0,
+        events: noise(H0 + 1000, target, 5),
+    });
+    f.publish(&shards, SEAL);
+    let batch = f.recover().unwrap();
+    assert_eq!(batch.state(), BatchState::Ready);
+    assert_eq!(batch.retired_revisions(), &[retired.clone()][..]);
+    let commits = batch.commits().len();
+    assert_eq!(commits, 5);
+    once_after_new_revision(
+        &f,
+        "INSERT INTO tpir_active_accounts (account_id) SELECT id FROM main.accounts",
+    );
+    let failure = f.settle(batch, Trust::Trusted).unwrap_err();
+    remove_injection(&f);
+    f.st.wallet()
+        .conn()
+        .execute("DELETE FROM tpir_active_accounts", [])
+        .unwrap();
+    assert!(
+        matches!(
+            failure.error,
+            ApplyError::Rejected {
+                index: 3,
+                rejection: CommitRejection::Stale(StaleCommit::LifecycleChanged),
+            }
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(failure.stats.applied, 3);
+    assert_eq!(failure.stats.qualified, 3);
+    assert_eq!(
+        f.coverage_of(&retired),
+        0,
+        "the prefix reconciled its successor"
+    );
+    assert!(f.st.wallet().db().is_autocommit());
+    assert_eq!(f.watch().lifecycle, AccountLifecycle::Candidate);
+
+    // Simulate interruption before acknowledgement, then reopen both the
+    // catalog and reference state. The retirement remains listed until the
+    // complete replay reaches durable wallet storage and acknowledges it.
+    f.open();
+    let replay = f.recover().unwrap();
+    assert_eq!(replay.state(), BatchState::Ready);
+    assert_eq!(replay.retired_revisions(), &[retired.clone()][..]);
+    assert_eq!(replay.commits().len(), commits);
+    let applied = f.settle(replay, Trust::Trusted).unwrap();
+    assert_eq!(applied.stats.applied, commits);
+    assert_eq!(applied.retired, 1);
+    assert_eq!(f.coverage_of(&retired), 0);
+    let settled = f.dump(true);
+    let again = f.recover().unwrap();
+    assert!(again.retired_revisions().is_empty());
+    f.settle(again, Trust::Trusted).unwrap();
+    assert_eq!(f.dump(true), settled);
+    assert_eq!(f.watch().lifecycle, AccountLifecycle::Candidate);
+    assert_ne!(f.authority(), TransparentAuthority::Private);
+}
+
 #[test]
 fn an_integrity_rejection_quarantines_durably_without_acknowledgment() {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
