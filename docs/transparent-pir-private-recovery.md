@@ -122,8 +122,8 @@ from a `reqwest` dev-dependency.
 
 Before any shard retrieval, a pass checks that the chain view accepts the
 target, that the script limits hold, that the filter source does not use parent
-filters, that the shard map is within the shard limit and for mainnet, and that
-the service's schema equals `SCHEMA`.
+filters, that the shard map is within the shard and declaration limits and for
+mainnet, and that the service's schema equals `SCHEMA`.
 
 Progress is adapter-owned, `Progress { covered_through, outcome }`, and the
 wallet-pir report types are not re-exported:
@@ -303,11 +303,11 @@ wallet already holds; they are never withdrawn or retired.
   recorded as current without the regression check, since its source's
   published successor is newer by construction.
 - The companion records a map's re-cut epoch only after a `Ready` pass over it
-  that found the store followed its newest re-cut: a stored fact under a
-  revision the re-cut superseded, or under one the map publishes at or above
-  the re-cut's first height, which only the re-cut map publishes, as for a
-  companion recreated after the re-cut or an account born above it. It keeps
-  the highest; a publication change clears it with the store. A map whose
+  that found the store followed its re-cuts: a stored fact under a revision
+  any of them superseded, or under one the map publishes at or above the
+  newest re-cut's first height, which only a map at that re-cut publishes, as
+  for a companion recreated after the re-cut or an account born above it. It
+  keeps the highest; a publication change clears it with the store. A map whose
   declaration is refused, or whose re-cut the store did not follow, cannot
   raise it. The epoch never stops a sync: a map at a lower epoch that rewrites
   nothing the store has finished reading, such as a lagging replica when the
@@ -317,15 +317,21 @@ wallet already holds; they are never withdrawn or retired.
   classified by the epoch:
   one whose epoch is below the recorded one, as a replica still serving the map
   from before a re-cut, is `Pending` with `Outcome::Behind`, and any other is
-  `Withdrawn(ChangedSealed)`. The sync refuses before reading anything, so the
-  store and catalog are untouched either way. A forged epoch can therefore at
-  most turn a real contradiction into `Pending`; it never holds back an honest
-  map, which rewrites nothing the store holds. Undoing a re-cut takes another
-  re-cut at a higher epoch.
+  `Withdrawn(ChangedSealed)`. The sync refuses before reading anything, so
+  either way the catalog is untouched and the store keeps what it held, less
+  any reorg the chain shows, which the sync rolls back before judging the
+  rewrite. A forged epoch can therefore at most turn a real contradiction into
+  `Pending`; it never holds back an honest map, which rewrites nothing the
+  store holds. Undoing a re-cut takes another re-cut at a higher epoch.
 - The shard limit counts the published entries and the declared ones that end
   at or above the watch set's floor. Declarations are never dropped, and those
   wholly below every watched script's required height cannot name a stored
-  fact.
+  fact. They are still checked against the map and each other, and marked
+  current where the catalog holds them, since the wallet may hold one from a
+  pass whose floor was lower, so every declaration, at any height, counts
+  toward a separate limit of `MAX_SUPERSEDED` (65,536), the most the map's own
+  shape check accepts. The declaration check indexes them by source and
+  lineage, so a pass at that limit stays linearithmic.
 - A wallet page under a sealed declared revision completes once the batch's
   commits cover its range, whether or not the map still names the revision's
   source (see [Publication change](#publication-change)). When that revision

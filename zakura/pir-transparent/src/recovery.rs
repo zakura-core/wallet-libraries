@@ -7,7 +7,7 @@ use std::{
 };
 use transparent::{address::TransparentAddress, bundle::OutPoint};
 use transparent_events::{FeeState, TransparentEvent};
-use transparent_filter::{MAINNET_GENESIS_DISPLAY, NETWORK, ShardMap};
+use transparent_filter::{MAINNET_GENESIS_DISPLAY, NETWORK, ShardMap, wire::MAX_SUPERSEDED};
 use transparent_wallet::transport::{BoxError, FilterSource, ShardTransport};
 use transparent_wallet::{
     Acceptance, Anchor, ChainView, Completion, IncompleteReason, ScriptEntry, ScriptOrigin,
@@ -364,10 +364,10 @@ struct Facts<'p, A> {
     admitted: BTreeMap<&'p str, bool>,
     /// The first height the map's newest re-cut changed, if it declares one.
     recut_from: Option<u64>,
-    /// Whether a stored fact shows the store followed the map's newest re-cut:
-    /// one under a revision the map declares superseded, or under a revision it
-    /// publishes that starts at or above the re-cut's first height, which only
-    /// the re-cut map publishes.
+    /// Whether a stored fact shows the store followed the map's re-cuts: one
+    /// under a revision any of them declares superseded, or under a revision
+    /// the map publishes that starts at or above the newest one's first
+    /// height, which only a map at that re-cut publishes.
     follows_recut: bool,
     context: TransparentRecoveryContext<A>,
 }
@@ -706,7 +706,7 @@ fn required_floor<A>(watch: &TransparentWatchSet<A>, target: u64) -> u64 {
 /// the map publishes, and every revision its re-cuts declare superseded that
 /// ends at or above the floor. Declarations are never dropped, so those wholly
 /// below every watched script's required height, which no stored fact can
-/// name, do not count against the limit.
+/// name, do not count against the limit; [`declarations`] bounds them.
 fn entries(map: &ShardMap, floor: u64) -> usize {
     map.shards.len()
         + map
@@ -715,6 +715,18 @@ fn entries(map: &ShardMap, floor: u64) -> usize {
             .flat_map(|recut| &recut.superseded)
             .filter(|shard| shard.end_height >= floor)
             .count()
+}
+
+/// Every revision `map`'s re-cuts declare superseded, at any height.
+///
+/// A pass checks each declaration against the map and the others, and marks
+/// those the catalog holds current, whatever the floor: the floor is the
+/// current watch set's, and the wallet may hold a declared revision from an
+/// earlier pass whose floor was lower. So the floor does not bound this work;
+/// the total is held to [`MAX_SUPERSEDED`], the most the map's own shape check
+/// accepts, before anything is retrieved.
+fn declarations(map: &ShardMap) -> usize {
+    map.recuts.iter().map(|recut| recut.superseded.len()).sum()
 }
 
 /// The caller's chain, accepting every block below the watch set's floor. Passed
@@ -884,7 +896,8 @@ impl ReferenceRecovery {
     /// scripts must be within the script limit; `filters` must not use the parent
     /// filter experiment; the shard map, its shards and the revisions its re-cuts
     /// declare superseded at or above the watch set's floor counted together,
-    /// must be within the shard limit and name Zcash mainnet's network and
+    /// must be within the shard limit, its declarations at any height within
+    /// [`MAX_SUPERSEDED`], and it must name Zcash mainnet's network and
     /// genesis block; and the service's init must name
     /// [`SCHEMA`]. A failed check returns [`RecoveryError::Invalid`] without
     /// further requests. A watch set with no addresses needs nothing retrieved:
@@ -930,13 +943,14 @@ impl ReferenceRecovery {
     /// content never reaches the wallet: the sync refuses it, or the catalog
     /// withdraws it, either way as [`BatchState::Withdrawn`]. A ready pass over
     /// a re-cut map records its re-cut epoch once the store holds a fact under
-    /// a revision the re-cut superseded, or under one the map publishes at or
-    /// above the re-cut's first height. The epoch never stops a sync: a map at a
-    /// lower epoch that rewrites nothing the store has finished reading is
-    /// synced normally, and only a refused `SealedRewrite` is classified by the
-    /// epoch. It tells a lagging replica's refused map from a contradiction, so
-    /// a forged epoch can at most soften a real contradiction to `Pending`, and
-    /// an honest map that rewrites nothing the store holds is never held back.
+    /// a revision any of its re-cuts superseded, or under one the map publishes
+    /// at or above its newest re-cut's first height. The epoch never stops a
+    /// sync: a map at a lower epoch that rewrites nothing the store has
+    /// finished reading is synced normally, and only a refused `SealedRewrite`
+    /// is classified by the epoch. It tells a lagging replica's refused map
+    /// from a contradiction, so a forged epoch can at most soften a real
+    /// contradiction to `Pending`, and an honest map that rewrites nothing the
+    /// store holds is never held back.
     pub fn recover<A, C, F, T>(
         &mut self,
         watch: &TransparentWatchSet<A>,
@@ -998,10 +1012,7 @@ impl ReferenceRecovery {
         let (mut filters, map_bytes) = Recorded::fetch(filters).map_err(failure)?;
         let map: ShardMap = serde_json::from_slice(filters.map()).map_err(failure)?;
         let floor = required_floor(watch, target.height);
-        require(
-            entries(&map, floor) <= self.config.shards,
-            "publication shard limit exceeded",
-        )?;
+        self.check_limits(&map, floor)?;
         // The wallet's chain is mainnet's; another chain's map cannot cover it.
         require(
             map.network == NETWORK && map.genesis_hash == MAINNET_GENESIS_DISPLAY,
@@ -1101,7 +1112,8 @@ impl ReferenceRecovery {
             // `Pending`, behind, and a later pass syncs again. Otherwise the
             // publisher contradicts the wallet's own chain, which no later pass
             // over this history repairs: `Withdrawn(ChangedSealed)`. Either way
-            // nothing was read, so the store and catalog keep what they hold.
+            // nothing was read: the store keeps what it held, less any reorg the
+            // sync rolled back first, and the catalog is unchanged.
             Err(SyncError::SealedRewrite { .. }) => {
                 if map.recut_epoch() < catalog::recut_epoch(&self.catalog)? {
                     return Ok(behind_unread());
@@ -1124,11 +1136,22 @@ impl ReferenceRecovery {
         // A stale revision may have refreshed the map mid-sync. The stored facts
         // are the ones that map described.
         let map: ShardMap = serde_json::from_slice(filters.map()).map_err(failure)?;
+        self.check_limits(&map, floor)?;
+        self.normalize(watch, map, progress(&report, clamped), chain)
+    }
+
+    /// Refuses a map with more shards and declarations at or above `floor`
+    /// than the shard limit, or more declarations in all than
+    /// [`MAX_SUPERSEDED`].
+    fn check_limits(&self, map: &ShardMap, floor: u64) -> Result<(), RecoveryError> {
         require(
-            entries(&map, floor) <= self.config.shards,
+            entries(map, floor) <= self.config.shards,
             "publication shard limit exceeded",
         )?;
-        self.normalize(watch, map, progress(&report, clamped), chain)
+        require(
+            declarations(map) <= MAX_SUPERSEDED,
+            "publication declaration limit exceeded",
+        )
     }
 
     /// Every revision `map`, under `set`, publishes, and every one its re-cuts
@@ -1429,9 +1452,9 @@ impl ReferenceRecovery {
         let stranded = complete_stranded(watch, context, &published, &declared, &commits, chain)?;
         pass.export(commits.iter().map(|commit| &commit.revision))?;
         // Only a ready pass over a re-cut the store followed moves the epoch:
-        // its facts name a revision the re-cut superseded or one only the
-        // re-cut map publishes. A refused declaration, or one naming nothing
-        // the store read, cannot hold other maps behind.
+        // its facts name a revision one of the map's re-cuts superseded, or one
+        // only a map at its newest re-cut publishes. A refused declaration, or
+        // one naming nothing the store read, cannot hold other maps behind.
         pass.finish(&digests, follows_recut.then(|| map.recut_epoch()))?;
         commits.extend(stranded);
         self.ready(commits, replaced, progress)
@@ -1530,10 +1553,10 @@ mod tests {
     use transparent_filter::{Recut, SealParameters, ShardMapEntry, SupersededShard};
     use transparent_wallet::client::Table;
     use transparent_wallet::{Ledger, PendingPages, SetupBlob, SetupKey, StaticChain, StoredEvent};
-    use zcash_client_backend::data_api::transparent_ledger::RecoveryRevision;
     use zcash_client_backend::data_api::transparent_ledger::{
         AccountLifecycle, PendingPage, WatchOrigin, WatchedAddress,
     };
+    use zcash_client_backend::data_api::transparent_ledger::{PublicationAnchor, RecoveryRevision};
 
     const MORE: Progress = Progress {
         covered_through: 0,
@@ -6341,5 +6364,194 @@ mod tests {
         let floor = after.recuts[0].superseded[2].start_height;
         assert_eq!(entries(&after, floor), after.shards.len() + 2);
         assert_eq!(entries(&after, u64::MAX), after.shards.len());
+    }
+
+    /// The pairwise scan the indexed declaration check replaced, kept as its
+    /// oracle.
+    fn pairwise_conflict(
+        published: &[Published],
+        declarations: &[Published],
+    ) -> Option<WithdrawnCause> {
+        for (index, declared) in declarations.iter().enumerate() {
+            let ours = &declared.revision;
+            for entry in published {
+                let theirs = &entry.revision;
+                if theirs.source != ours.source {
+                    continue;
+                }
+                if theirs.lineage == ours.lineage {
+                    return Some(WithdrawnCause::Equivocation);
+                } else if theirs.lineage < ours.lineage {
+                    return Some(WithdrawnCause::Regression);
+                }
+            }
+            if declarations[index + 1..].iter().any(|other| {
+                other.revision.source == ours.source
+                    && other.revision.lineage == ours.lineage
+                    && other.revision != *ours
+            }) {
+                return Some(WithdrawnCause::Equivocation);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn the_declaration_check_finds_what_a_pairwise_scan_finds() {
+        // A fixed xorshift sequence over few sources, lineages and contents,
+        // so revisions collide often, published ones included.
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let mut revision = || Published {
+            shard_id: 0,
+            start_height: 0,
+            end_height: 0,
+            digest: String::new(),
+            terminal: String::new(),
+            revision: RecoveryRevision {
+                source: vec![next(4) as u8],
+                revision: vec![next(3) as u8],
+                lineage: 1 + next(4),
+                sealed: next(2) == 0,
+                publication: PublicationAnchor {
+                    height: BlockHeight::from(0),
+                    hash: BlockHash([0; 32]),
+                },
+            },
+        };
+        let mut seen = [0usize; 3];
+        for case in 0..20_000 {
+            let published: Vec<_> = (0..case % 4).map(|_| revision()).collect();
+            let declarations: Vec<_> = (0..case % 9).map(|_| revision()).collect();
+            let cause = catalog::declaration_conflict(&published, &declarations);
+            assert_eq!(
+                cause,
+                pairwise_conflict(&published, &declarations),
+                "case {case}"
+            );
+            seen[match cause {
+                None => 0,
+                Some(WithdrawnCause::Equivocation) => 1,
+                _ => 2,
+            }] += 1;
+        }
+        assert!(seen.iter().all(|count| *count > 1_000), "{seen:?}");
+    }
+
+    /// The re-cut fixture's `after`, with a forged re-cut before its own that
+    /// declares sealed one-block revisions from height 0, far below the
+    /// fixture map and any floor, bringing the map's declarations to `total`.
+    fn forged(total: usize) -> ShardMap {
+        let (_, mut after) = recut_pair();
+        let mut own = after.recuts.pop().unwrap();
+        own.epoch = 2;
+        let count = (total - own.superseded.len()) as u64;
+        let forged = Recut {
+            epoch: 1,
+            from_height: 0,
+            superseded: (0..count)
+                .map(|height| SupersededShard {
+                    shard_id: height,
+                    geometry: NARROW.into(),
+                    start_height: height,
+                    end_height: height,
+                    terminal_block_hash: format!("{height:064x}"),
+                    manifest_digest: format!("{:064x}", (1u64 << 40) + height),
+                    revision: 0,
+                    sealed: true,
+                })
+                .collect(),
+        };
+        after.recuts = vec![forged, own];
+        after
+    }
+
+    #[test]
+    fn a_full_declaration_set_is_checked_quickly() {
+        let map = forged(MAX_SUPERSEDED);
+        map.check_shape().unwrap();
+        let (binding, set) = ([7; 32], SetIdentity::of_schema(&map, SCHEMA));
+        let published: Vec<_> = map
+            .shards
+            .iter()
+            .map(|entry| Published::of(&binding, &set, entry).unwrap())
+            .collect();
+        let declarations: Vec<_> = map
+            .recuts
+            .iter()
+            .flat_map(|recut| &recut.superseded)
+            .map(|shard| Published::declared(&binding, &set, shard).unwrap())
+            .collect();
+        assert_eq!(declarations.len(), MAX_SUPERSEDED);
+        // A pairwise scan of this many takes seconds; the indexed check, a few
+        // milliseconds. Each contradiction involves the last declaration, so
+        // nothing short of indexing every one finds it.
+        let check = |declarations: &[Published]| {
+            let started = std::time::Instant::now();
+            let cause = catalog::declaration_conflict(&published, declarations);
+            let elapsed = started.elapsed();
+            assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+            cause
+        };
+        assert_eq!(check(&declarations), None);
+        let last = declarations.len() - 1;
+        // The superseded tail T at T′'s lineage, then above it.
+        let tail = published.last().unwrap().revision.lineage;
+        let mut level = declarations.clone();
+        level[last].revision.lineage = tail;
+        assert_eq!(check(&level), Some(WithdrawnCause::Equivocation));
+        let mut above = declarations.clone();
+        above[last].revision.lineage = tail + 1;
+        assert_eq!(check(&above), Some(WithdrawnCause::Regression));
+        // The first forged revision declared again, last, with other content.
+        let mut again = declarations.clone();
+        again[last] = declarations[0].clone();
+        again[last].revision.revision = vec![0xee; 32];
+        assert_eq!(check(&again), Some(WithdrawnCause::Equivocation));
+    }
+
+    #[test]
+    fn declarations_below_the_floor_count_against_a_separate_limit() {
+        let (before, after) = recut_pair();
+        let (watch, chain) = (watching(&after), accepting(&[&before, &after]));
+        let floor = required_floor(&watch, u64::MAX);
+        let at_limit = forged(MAX_SUPERSEDED);
+        at_limit.check_shape().unwrap();
+        let over = forged(MAX_SUPERSEDED + 1);
+        // None of the forged declarations reaches the floor, so the shard
+        // limit alone would admit any number of them.
+        assert_eq!(entries(&over, floor), entries(&after, floor));
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter =
+            ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+        adapter.check_limits(&at_limit, floor).unwrap();
+        let mut filters = CountingFilters::serving(serde_json::to_vec(&over).unwrap());
+        let mut shards = CountingShards::serving(SCHEMA);
+        assert!(matches!(
+            adapter.recover(&watch, &chain, &mut filters, &mut shards),
+            Err(RecoveryError::Invalid(message))
+                if message == "publication declaration limit exceeded"
+        ));
+        assert_eq!((filters.maps, filters.filters, shards.calls()), (1, 0, 0));
+        assert!(adapter.store.set_identity().unwrap().is_none());
+
+        // At the limit, a pass exports what it would without the forged
+        // re-cut, and quickly.
+        let (mut plain, _) = recut_companion(&dir.path().join("plain.sqlite"), &before, &after);
+        let expected = recut_pass(&mut plain, &watch, &after, &chain);
+        let (mut adapter, _) =
+            recut_companion(&dir.path().join("forged.sqlite"), &before, &at_limit);
+        let started = std::time::Instant::now();
+        let batch = recut_pass(&mut adapter, &watch, &at_limit, &chain);
+        let elapsed = started.elapsed();
+        assert_eq!(batch.state, BatchState::Ready);
+        assert_eq!(batch.commits, expected.commits);
+        assert_eq!(batch.replaced, expected.replaced);
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
     }
 }
