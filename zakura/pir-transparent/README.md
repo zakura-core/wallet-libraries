@@ -4,8 +4,30 @@ The `wallet` feature bridges the reference transparent PIR client and a durable
 companion SQLite store into normalized wallet-libraries recovery commits.
 Applications supply a stable account binding, an origin label, a current watch
 set, an independently accepted chain view, and, for every pass, their own
-`FilterSource` and `ShardTransport`. No address, txid, parent or outpoint lookup
-fallback exists.
+`FilterSource` and `ShardTransport`, usually `TransparentPirHttp` over their
+`HttpExchange`. No address, txid, parent or outpoint lookup fallback exists.
+
+An `HttpExchange` sends one request to the origin it is bound to and returns
+the reply as it arrived: it owns HTTPS, routing, timeouts, cancellation and
+reading at most the request's body limits, never retries, and logs at most
+the request's route template. `TransparentPirHttp` owns the service's routes,
+templates and what every status means: a shard-bound 409 is `StaleRevision`,
+capacity is wallet-pir's `Overloaded::from_http` (a 503 naming a delay, or the
+edge's 502 or 504), and any other status fails the request. Its `outage()`
+says a request failed because the service is unreachable or not serving: an
+unreachable origin or a timeout, a 429 or 5xx on the map, a filter or init
+(which the sync does not retry), or a 429 or non-capacity 5xx on a shard
+route. A caller stops visiting accounts after an outage. `TxidHttp` is the
+txid display client's transport over the same exchange, and
+`TxidDisplayService` the process-wide client of one origin.
+
+`CompanionDir` keeps one wallet's companions, one per account and origin,
+under caller-chosen account names. `open` prunes companions of other origins
+or schemas and of accounts the wallet no longer has, then holds an operating
+system lock on the companion until the returned `Companion` drops, so no
+other handle, in this process or another, opens or deletes it meanwhile.
+`remove` and `retain` delete an account's companions, and those of deleted
+accounts, only under their locks.
 
 The adapter makes no network requests of its own and has no HTTP client in its
 normal dependency graph. The caller's transports decide routing, timeouts,
@@ -136,6 +158,14 @@ batch only after every commit applied:
 - Without it, apply the commits yourself and call `acknowledge_applied`, which
   refuses a batch listing retirements and changes nothing. Such a batch can only
   be settled through `apply_and_acknowledge` with trusted commits.
+
+A batch that was not acknowledged says what to do next
+(`ApplyFailure::action`): `Refresh` after a stale commit or a policy change,
+`Reconcile` for retirements an observed settlement cannot resolve, `Skip` for
+a refused commit, a failed acknowledgment or an unsettleable batch,
+`NotEnabled`, or `Fail` for a wallet failure. `Progress::retry` says when to
+pass the account again: at once after `More`, after `Retry::BEHIND` or
+`Retry::OVERLOADED`, or only for new work after `Complete` or `Stalled`.
 
 `apply_and_acknowledge` refuses a wallet connection inside an explicit SQL
 transaction (`ApplyError::OuterTransaction`): each commit must commit on its
@@ -283,6 +313,11 @@ serves the pre-re-cut map again after the wallet followed the re-cut.
 ```sh
 python3 scripts/dev.py test --config transparent-pir
 ```
+
+Feature `testing` is for applications' own tests: `testing::batch` and
+`testing::apply` build and settle real batches without a companion, and
+`testing::TxidPublication` answers txid display requests as an empty
+publication would. Never enable it in a production build.
 
 The service, with axum 0.7 and tower-http 0.5, is in the test graph only. The
 `default` lane excludes this crate: the `transparent-pir` lane runs its tests,

@@ -28,6 +28,30 @@
   exported. A published or declared revision that differs from one exported at
   its source and lineage, or under its identity, is `Withdrawn(Equivocation)`,
   so a pruned catalog row cannot let a colliding revision reach the wallet.
+- One raw HTTP exchange for both services: an application implements `HttpExchange`
+  (`send(&HttpRequest) -> Result<HttpReply, HttpFailure>`), owning the origin, routing,
+  timeouts, cancellation and body limits. `TransparentPirHttp` gives a pass its `FilterSource`
+  and `ShardTransport` over it and owns the routes, their log templates and refusal mapping,
+  with wallet-pir's own `refusal` and `Overloaded::from_http`; `outage()` reports a failure that
+  says the service is unreachable or not serving. `TxidHttp` is the txid display client's
+  transport over it, with per-route body limits.
+- `TxidDisplayService`, the `Send + Sync` txid display client of one origin for a whole
+  process: lookups take turns on the client, a waiting lookup stops at cancellation, the map
+  digest and the last map check time are read without waiting, and a lookup that finds the
+  display unsupported leaves only the derived native profiles, so the next lookup asks again.
+- `CompanionDir`, one wallet's companions: `open` names each `{account}-{tag}.sqlite` (the
+  tag binds the origin and `SCHEMA`), prunes the account's companions for other origins and
+  those of accounts the caller no longer has, and holds an operating system lock on the
+  companion's lock file for the returned `Companion`'s life; `remove` deletes an account's
+  companions under their locks; `retain` sweeps those of deleted accounts, listing before it
+  reads the accounts.
+- `Progress::retry` (`Retry::{Complete, More, After, Stalled}`, waiting `Retry::BEHIND` or
+  `Retry::OVERLOADED`) and `Progress::behind`; `ApplyFailure::action` (`ApplyAction::{Refresh,
+  Reconcile, Skip, NotEnabled, Fail}`), so callers act on the outcome contract without
+  re-encoding it. `ApplyError::Rejected`'s message names the rejection's kind.
+- Feature `testing`: `testing::batch` builds a batch no companion issued, `testing::apply`
+  settles it as `apply_and_acknowledge` does without a companion, and `TxidPublication` and
+  `unsupported_txid_init` answer txid display requests as a fake service.
 
 - Txid display lookups: re-exports of wallet-pir's `transparent-txid-client`
   (`TxidDisplayClient`, `TxidTransport`, `TxidRequest`, `TxidReply`, `TxidLookup`, `TxidError`,

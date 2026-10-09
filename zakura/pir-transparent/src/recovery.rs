@@ -82,6 +82,46 @@ pub struct Progress {
     pub outcome: Outcome,
 }
 
+/// When to pass an account again, from how its last pass stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Retry {
+    /// Every watched script is covered through the target. Pass again only
+    /// for new work: a changed watch set or a grown window.
+    Complete,
+    /// A budget stopped the pass. Pass again at once; the companion resumes.
+    More,
+    /// The publication ends below the target, or the service refused for
+    /// capacity. Pass again after the wait.
+    After(Duration),
+    /// Progress needs more than a retry. Pass again only for new work.
+    Stalled,
+}
+
+impl Retry {
+    /// The wait after a pass whose publication ends below the target.
+    pub const BEHIND: Duration = Duration::from_secs(10);
+    /// The wait after a pass the service refused for capacity.
+    pub const OVERLOADED: Duration = Duration::from_secs(30);
+}
+
+impl Progress {
+    /// When to pass the account again.
+    pub fn retry(&self) -> Retry {
+        match self.outcome {
+            Outcome::Complete => Retry::Complete,
+            Outcome::More => Retry::More,
+            Outcome::Behind => Retry::After(Retry::BEHIND),
+            Outcome::Overloaded => Retry::After(Retry::OVERLOADED),
+            Outcome::Stalled => Retry::Stalled,
+        }
+    }
+
+    /// Blocks between `target` and the height the pass covered through.
+    pub fn behind(&self, target: u64) -> u64 {
+        target.saturating_sub(self.covered_through)
+    }
+}
+
 /// Maps the reference client's report onto the adapter's narrower contract.
 ///
 /// A `clamped` pass synced to the publication's end below the wallet's target,
@@ -221,6 +261,23 @@ impl<A> RecoveryBatch<A> {
     #[cfg(feature = "sqlite")]
     pub(crate) fn into_parts(self) -> (Vec<TransparentLedgerCommit<A>>, Vec<RecoveryRevision>) {
         (self.commits, self.replaced)
+    }
+
+    /// A batch no companion issued, for [`crate::testing`].
+    #[cfg(feature = "testing")]
+    pub(crate) fn unissued(
+        commits: Vec<TransparentLedgerCommit<A>>,
+        progress: Progress,
+        state: BatchState,
+        replaced: Vec<RecoveryRevision>,
+    ) -> Self {
+        Self {
+            commits,
+            progress,
+            state,
+            replaced,
+            token: [0; 32],
+        }
     }
 }
 
@@ -1526,6 +1583,32 @@ impl ReferenceRecovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_says_when_to_pass_again() {
+        for (outcome, retry) in [
+            (Outcome::Complete, Retry::Complete),
+            (Outcome::More, Retry::More),
+            (Outcome::Behind, Retry::After(Duration::from_secs(10))),
+            (Outcome::Overloaded, Retry::After(Duration::from_secs(30))),
+            (Outcome::Stalled, Retry::Stalled),
+        ] {
+            let progress = Progress {
+                covered_through: 7,
+                outcome,
+            };
+            assert_eq!(progress.retry(), retry, "{outcome:?}");
+        }
+        let progress = |covered_through| Progress {
+            covered_through,
+            outcome: Outcome::Behind,
+        };
+        assert_eq!(progress(100).behind(100), 0);
+        assert_eq!(progress(93).behind(100), 7);
+        // Coverage past the target never wraps.
+        assert_eq!(progress(103).behind(100), 0);
+        assert_eq!(progress(0).behind(u64::MAX), u64::MAX);
+    }
     use std::cell::Cell;
     use transparent_filter::{Recut, SealParameters, ShardMapEntry, SupersededShard};
     use transparent_wallet::client::Table;

@@ -27,8 +27,12 @@ workspace.
   view (`TransparentDisplayDetails`) shows the sender (`TransparentDisplayViewSender`), outputs
   with encoded addresses (`TransparentDisplayAddress`), what it omits
   (`TransparentDisplayOmission`, including shared funding, which only the wallet can see), and
-  where it came from (`TransparentDisplaySource`). Display facts never change balances,
-  history classification or `details_complete`; see `docs/transparent-txid-enhancement.md`.
+  where it came from (`TransparentDisplaySource`). The view is `None` for an account that
+  takes no part in the transaction's transparent side: no transparent output or spend of its
+  own, and no shielded part in a transaction the wallet records as having one (by its raw
+  bytes or, without them, by detail work, stored facts or a private-enhancement marker).
+  Display facts never change balances, history classification or `details_complete`; see
+  `docs/transparent-txid-enhancement.md`.
 - `IronwoodEnhancementData::has_transparent_outputs` preserves the service's separate
   output-presence assertion for display reconstruction; note decryption authenticates the memo,
   not that assertion.

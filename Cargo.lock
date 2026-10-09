@@ -8176,9 +8176,11 @@ name = "zakura-pir-transparent"
 version = "0.0.1-rc0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "hex",
  "regex",
  "rusqlite",
+ "same-file",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -8187,6 +8189,7 @@ dependencies = [
  "tower",
  "transparent-events",
  "transparent-filter",
+ "transparent-native",
  "transparent-shard",
  "transparent-shard-server",
  "transparent-txid-client",

@@ -9,7 +9,7 @@
 
 use rusqlite::Connection;
 use zcash_client_backend::data_api::transparent_ledger::{
-    CommitRejection, TransparentLedgerRead as _, TransparentLedgerWrite as _,
+    CommitRejection, RecoveryRevision, TransparentLedgerRead as _, TransparentLedgerWrite as _,
 };
 use zcash_client_sqlite::{AccountUuid, WalletDb, error::SqliteClientError};
 use zcash_protocol::consensus;
@@ -79,7 +79,7 @@ pub enum ApplyError {
     Unreconciled,
     /// The wallet refused the commit at `index`. Commits before it stay applied. An
     /// integrity rejection's quarantine is durable.
-    #[error("transparent PIR apply: the wallet refused a commit")]
+    #[error("transparent PIR apply: the wallet refused a commit ({})", rejection_name(.rejection))]
     Rejected {
         index: usize,
         rejection: CommitRejection,
@@ -109,6 +109,56 @@ pub struct ApplyFailure {
     pub stats: ApplyStats,
     /// The batch's pass progress.
     pub progress: Progress,
+}
+
+/// What a caller does about a batch that was not acknowledged. Every outcome leaves the
+/// committed prefix applied, and the account's next pass replays the batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplyAction {
+    /// A commit was stale, or the policy generation changed: pass again from a fresh
+    /// watch set.
+    Refresh,
+    /// The batch resolves retired revisions and its commits were only observed: stop
+    /// passing the account until a trusted pass can reconcile them.
+    Reconcile,
+    /// The account cannot progress now: the wallet refused a commit as contradicting
+    /// stored evidence (which quarantines it), malformed or refused, the acknowledgment
+    /// failed, or the batch was not this companion's latest ready pass.
+    Skip,
+    /// The handle or the durable policy does not permit this recovery: stop recovering.
+    NotEnabled,
+    /// The wallet failed, or its connection was inside a transaction: report it.
+    Fail,
+}
+
+impl ApplyFailure {
+    /// What the caller does next.
+    pub fn action(&self) -> ApplyAction {
+        match &self.error {
+            ApplyError::Rejected {
+                rejection: CommitRejection::Stale(_),
+                ..
+            }
+            | ApplyError::PolicyChanged => ApplyAction::Refresh,
+            ApplyError::Unreconciled => ApplyAction::Reconcile,
+            ApplyError::Rejected { .. }
+            | ApplyError::Acknowledge(_)
+            | ApplyError::NotReady(_)
+            | ApplyError::StaleReceipt => ApplyAction::Skip,
+            ApplyError::NotEnabled => ApplyAction::NotEnabled,
+            ApplyError::OuterTransaction | ApplyError::Wallet(_) => ApplyAction::Fail,
+        }
+    }
+}
+
+/// The kind of a rejection, which names no address or outpoint.
+fn rejection_name(rejection: &CommitRejection) -> &'static str {
+    match rejection {
+        CommitRejection::Stale(_) => "stale",
+        CommitRejection::Integrity(_) => "integrity",
+        CommitRejection::Invalid(_) => "malformed",
+        CommitRejection::Refused(_) => "refused",
+    }
 }
 
 impl ApplyError {
@@ -167,46 +217,18 @@ impl ReferenceRecovery {
         trust: Trust,
     ) -> Result<Applied, ApplyFailure> {
         let progress = batch.progress();
-        let mut stats = ApplyStats::default();
         let failure = |error, stats| ApplyFailure {
             error,
             stats,
             progress,
         };
-        if batch.state() != BatchState::Ready {
-            return Err(failure(ApplyError::NotReady(batch.state()), stats));
+        if batch.state() == BatchState::Ready && !self.is_pending_export(&batch) {
+            return Err(failure(ApplyError::StaleReceipt, ApplyStats::default()));
         }
-        if !self.is_pending_export(&batch) {
-            return Err(failure(ApplyError::StaleReceipt, stats));
-        }
-        if !wallet.is_autocommit() {
-            return Err(failure(ApplyError::OuterTransaction, stats));
-        }
-        let (commits, replaced) = batch.into_parts();
-        let expected_generation = commits
-            .first()
-            .map(|commit| commit.context.policy_generation);
-        if trust == Trust::Observed && !replaced.is_empty() {
-            return Err(failure(ApplyError::Unreconciled, stats));
-        }
-        // From here on the receipt is spent: a failed batch is replayed by a new pass.
-        self.clear_pending_export();
-        for (index, commit) in commits.into_iter().enumerate() {
-            let applied = match trust {
-                Trust::Observed => wallet.apply_transparent_ledger_commit(commit),
-                Trust::Trusted => wallet.qualify_and_apply_transparent_ledger_commit(commit),
-            };
-            match applied {
-                Ok(outcome) => {
-                    stats.applied += 1;
-                    stats.qualified += usize::from(trust == Trust::Trusted);
-                    stats.window_grew |= outcome.window_grew;
-                }
-                Err(error) => {
-                    return Err(failure(ApplyError::from_wallet(index, error), stats));
-                }
-            }
-        }
+        // Once the commits start, the receipt is spent: a failed batch is replayed by a
+        // new pass.
+        let (stats, replaced, expected_generation) =
+            apply_commits(batch, wallet, trust, || self.clear_pending_export())?;
         let acknowledgment = catalog::acknowledgment_transaction(&mut self.catalog)
             .map_err(|error| failure(ApplyError::Acknowledge(error), stats))?;
         wallet
@@ -228,5 +250,133 @@ impl ReferenceRecovery {
             progress,
             retired: replaced.len(),
         })
+    }
+}
+
+/// Applies a ready batch's commits to `wallet` in order, each in its own wallet
+/// transaction, after the checks [`ReferenceRecovery::apply_and_acknowledge`] makes of
+/// any batch; `start` runs once they pass, before the first commit. Returns what applied,
+/// the batch's retirements and the policy generation its commits were built under.
+pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(
+    batch: RecoveryBatch<AccountUuid>,
+    wallet: &mut WalletDb<Connection, P, CL, R>,
+    trust: Trust,
+    start: impl FnOnce(),
+) -> Result<(ApplyStats, Vec<RecoveryRevision>, Option<u64>), ApplyFailure> {
+    let progress = batch.progress();
+    let mut stats = ApplyStats::default();
+    let failure = |error, stats| ApplyFailure {
+        error,
+        stats,
+        progress,
+    };
+    if batch.state() != BatchState::Ready {
+        return Err(failure(ApplyError::NotReady(batch.state()), stats));
+    }
+    if !wallet.is_autocommit() {
+        return Err(failure(ApplyError::OuterTransaction, stats));
+    }
+    let (commits, replaced) = batch.into_parts();
+    let expected_generation = commits
+        .first()
+        .map(|commit| commit.context.policy_generation);
+    if trust == Trust::Observed && !replaced.is_empty() {
+        return Err(failure(ApplyError::Unreconciled, stats));
+    }
+    start();
+    for (index, commit) in commits.into_iter().enumerate() {
+        let applied = match trust {
+            Trust::Observed => wallet.apply_transparent_ledger_commit(commit),
+            Trust::Trusted => wallet.qualify_and_apply_transparent_ledger_commit(commit),
+        };
+        match applied {
+            Ok(outcome) => {
+                stats.applied += 1;
+                stats.qualified += usize::from(trust == Trust::Trusted);
+                stats.window_grew |= outcome.window_grew;
+            }
+            Err(error) => {
+                return Err(failure(ApplyError::from_wallet(index, error), stats));
+            }
+        }
+    }
+    Ok((stats, replaced, expected_generation))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zcash_client_backend::data_api::transparent_ledger::{
+        IntegrityFailure, InvalidCommit, RefusedCommit, StaleCommit,
+    };
+
+    fn action(error: ApplyError) -> ApplyAction {
+        ApplyFailure {
+            error,
+            stats: ApplyStats::default(),
+            progress: Progress {
+                covered_through: 0,
+                outcome: crate::Outcome::Complete,
+            },
+        }
+        .action()
+    }
+
+    fn rejected(rejection: CommitRejection) -> ApplyError {
+        ApplyError::Rejected {
+            index: 0,
+            rejection,
+        }
+    }
+
+    /// The outcome contract: what a caller does about each failure.
+    #[test]
+    fn every_failure_says_what_to_do_next() {
+        use ApplyAction as A;
+        for (error, expected) in [
+            (
+                rejected(CommitRejection::Stale(StaleCommit::LifecycleChanged)),
+                A::Refresh,
+            ),
+            (ApplyError::PolicyChanged, A::Refresh),
+            (ApplyError::Unreconciled, A::Reconcile),
+            (
+                rejected(CommitRejection::Integrity(
+                    IntegrityFailure::RevisionMismatch,
+                )),
+                A::Skip,
+            ),
+            (
+                rejected(CommitRejection::Invalid(InvalidCommit::Identifier)),
+                A::Skip,
+            ),
+            (
+                rejected(CommitRejection::Refused(RefusedCommit::AccountQuarantined)),
+                A::Skip,
+            ),
+            (ApplyError::NotReady(BatchState::Pending), A::Skip),
+            (ApplyError::StaleReceipt, A::Skip),
+            (
+                ApplyError::Acknowledge(crate::recovery::failure("companion")),
+                A::Skip,
+            ),
+            (ApplyError::NotEnabled, A::NotEnabled),
+            (ApplyError::OuterTransaction, A::Fail),
+            (
+                ApplyError::Wallet(SqliteClientError::AccountUnknown),
+                A::Fail,
+            ),
+        ] {
+            let name = error.to_string();
+            assert_eq!(action(error), expected, "{name}");
+        }
+        // A rejection's message names its kind and nothing it carries.
+        assert_eq!(
+            rejected(CommitRejection::Integrity(
+                IntegrityFailure::RevisionMismatch
+            ))
+            .to_string(),
+            "transparent PIR apply: the wallet refused a commit (integrity)"
+        );
     }
 }
