@@ -9,7 +9,7 @@
 
 use rusqlite::Connection;
 use zcash_client_backend::data_api::transparent_ledger::{
-    CommitRejection, TransparentLedgerWrite as _,
+    CommitRejection, TransparentLedgerRead as _, TransparentLedgerWrite as _,
 };
 use zcash_client_sqlite::{AccountUuid, WalletDb, error::SqliteClientError};
 use zcash_protocol::consensus;
@@ -124,6 +124,12 @@ impl ApplyError {
     }
 }
 
+impl From<rusqlite::Error> for ApplyError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Wallet(error.into())
+    }
+}
+
 impl ReferenceRecovery {
     /// Applies a ready batch's commits to `wallet` in order, then acknowledges the batch.
     ///
@@ -139,6 +145,10 @@ impl ReferenceRecovery {
     /// pass recorded. An unacknowledged batch's revisions stay exported, so the next pass,
     /// also after a crash or a reopened companion, lists them and its retirements again, and
     /// replaying commits the wallet already applied changes nothing.
+    /// The policy generation is checked again after acquiring the companion's write
+    /// transaction. A short immediate wallet read transaction excludes policy writers
+    /// until acknowledgment commits; it is rolled back, since all wallet facts are
+    /// already durable. Companion lock waits do not hold a wallet SQL reservation.
     ///
     /// No network request is made here; run it under the wallet's write serialization if the
     /// application has one. It never promotes an account or authorizes spending.
@@ -165,6 +175,9 @@ impl ReferenceRecovery {
             return Err(failure(ApplyError::OuterTransaction, stats));
         }
         let (commits, replaced) = batch.into_parts();
+        let expected_generation = commits
+            .first()
+            .map(|commit| commit.context.policy_generation);
         if trust == Trust::Observed && !replaced.is_empty() {
             return Err(failure(ApplyError::Unreconciled, stats));
         }
@@ -186,8 +199,22 @@ impl ReferenceRecovery {
                 }
             }
         }
-        catalog::acknowledge(&mut self.catalog, &replaced)
+        let acknowledgment = catalog::acknowledgment_transaction(&mut self.catalog)
             .map_err(|error| failure(ApplyError::Acknowledge(error), stats))?;
+        wallet
+            .with_immediate_read_transaction(|snapshot| {
+                if let Some(expected) = expected_generation {
+                    snapshot
+                        .check_transparent_policy_generation(expected)
+                        .map_err(|error| ApplyError::from_wallet(stats.applied, error))?;
+                }
+                catalog::acknowledge_in_transaction(&acknowledgment, &replaced)
+                    .map_err(ApplyError::Acknowledge)?;
+                acknowledgment
+                    .commit()
+                    .map_err(|error| ApplyError::Acknowledge(crate::recovery::failure(error)))
+            })
+            .map_err(|error| failure(error, stats))?;
         Ok(Applied {
             stats,
             progress,

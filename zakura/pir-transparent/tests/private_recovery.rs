@@ -228,8 +228,12 @@ impl Fixture {
     /// A wallet whose only account was born at `birthday`, scanned through
     /// `through`, under a durable `PrivateShadow` policy, and its companion.
     fn new(birthday: u64, through: u64) -> Self {
+        Self::with_factory(birthday, through, TestDbFactory::default())
+    }
+
+    fn with_factory(birthday: u64, through: u64, factory: TestDbFactory) -> Self {
         let st = TestBuilder::new()
-            .with_data_store_factory(TestDbFactory::default())
+            .with_data_store_factory(factory)
             .with_block_cache(BlockCache::new())
             .with_initial_chain_state(|_, _| InitialChainState {
                 chain_state: ChainState::empty(
@@ -1510,8 +1514,12 @@ fn remove_injection(f: &Fixture) {
 /// A wallet under `PrivateRequired` with the lifecycle's first publication
 /// served, and nothing recovered yet.
 fn private_fixture() -> (Fixture, Owned) {
+    private_fixture_with_factory(TestDbFactory::default())
+}
+
+fn private_fixture_with_factory(factory: TestDbFactory) -> (Fixture, Owned) {
     let birthday = H0 + 250;
-    let mut f = Fixture::new(birthday, H0 + 649);
+    let mut f = Fixture::with_factory(birthday, H0 + 649, factory);
     let owned = Owned {
         a0: f.derived(TransparentKeyScope::EXTERNAL, 0),
         a1: f.derived(TransparentKeyScope::EXTERNAL, 1),
@@ -1520,6 +1528,111 @@ fn private_fixture() -> (Fixture, Owned) {
     f.publish(&lifecycle(&owned, H0 + 649, 0, false), SEAL);
     f.set_policy(PrivateRequired);
     (f, owned)
+}
+
+#[test]
+fn a_policy_change_while_acknowledgment_waits_keeps_the_batch_unacknowledged() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, _) = private_fixture_with_factory(TestDbFactory::file_backed());
+    let batch = f.recover().unwrap();
+    assert_eq!(batch.state(), BatchState::Ready);
+    let commits = batch.commits().len();
+    assert!(commits > 0);
+    let wallet_path = f.st.wallet().conn().path().unwrap().to_owned();
+    assert!(
+        !wallet_path.is_empty(),
+        "this race requires a shared database file"
+    );
+    // Allow all wallet commits but pause the companion acknowledgment. This
+    // places a real second-connection generation change after the final wallet
+    // commit and before the companion can commit its receipt.
+    let companion = Connection::open(f.companion_path()).unwrap();
+    companion.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let second = Connection::open(wallet_path).unwrap();
+    let run = std::thread::spawn(move || {
+        let result = f.settle(batch, Trust::Trusted);
+        (f, result)
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let qualified: usize = second
+            .query_row("SELECT COUNT(*) FROM tpir_qualified_revisions", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        if qualified == commits {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "wallet commits did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    second
+        .execute(
+            "UPDATE tpir_meta SET policy_generation = policy_generation + 1",
+            [],
+        )
+        .unwrap();
+    companion.execute_batch("ROLLBACK").unwrap();
+    let (mut f, result) = run.join().unwrap();
+    let failure = result.expect_err("the policy changed before acknowledgment committed");
+    assert_eq!(failure.stats.applied, commits);
+    assert!(
+        matches!(failure.error, ApplyError::PolicyChanged),
+        "{failure:?}"
+    );
+    assert_eq!(failure.stats.qualified, commits);
+    assert!(f.st.wallet().db().is_autocommit());
+    let facts = f.dump(true);
+    f.open();
+    let replay = f.recover().unwrap();
+    assert_eq!(replay.state(), BatchState::Ready);
+    assert_eq!(replay.commits().len(), commits);
+    let applied = f.settle(replay, Trust::Trusted).unwrap();
+    assert_eq!(applied.stats.applied, commits);
+    assert_eq!(
+        f.count("tpir_qualified_revisions"),
+        i64::try_from(commits).unwrap()
+    );
+    // The first pass grew the address window. A fresh watch set may extend
+    // coverage on replay, but it must keep every committed row and must not
+    // change the financial facts or their qualification.
+    for ((table, before), (after_table, after)) in facts.into_iter().zip(f.dump(true)) {
+        assert_eq!(table, after_table);
+        if table == "tpir_coverage" {
+            assert!(
+                before.iter().all(|row| after.contains(row)),
+                "coverage shrank"
+            );
+        } else {
+            assert!(before == after, "{table} changed during replay");
+        }
+    }
+}
+
+#[test]
+fn acknowledgment_does_not_add_a_wallet_commit_after_the_facts_are_durable() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, _) = private_fixture_with_factory(TestDbFactory::file_backed());
+    let batch = f.recover().unwrap();
+    assert_eq!(batch.state(), BatchState::Ready);
+    let commits = batch.commits().len();
+    let wallet_commits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = wallet_commits.clone();
+    f.st.wallet().conn().commit_hook(Some(move || {
+        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        false
+    }));
+    let applied = f.settle(batch, Trust::Trusted).unwrap();
+    f.st.wallet().conn().commit_hook(None::<fn() -> bool>);
+    assert_eq!(applied.stats.applied, commits);
+    assert_eq!(
+        wallet_commits.load(std::sync::atomic::Ordering::SeqCst),
+        commits
+    );
+    assert!(f.st.wallet().db().is_autocommit());
 }
 
 #[test]

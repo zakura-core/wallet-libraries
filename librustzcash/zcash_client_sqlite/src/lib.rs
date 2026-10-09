@@ -742,6 +742,48 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
+    /// Reads one wallet snapshot while excluding concurrent SQLite writers.
+    ///
+    /// The callback receives only a shared wallet handle. The immediate transaction is
+    /// rolled back on exit; it does not add a wallet commit after the callback's effects
+    /// in another store. This is useful when acknowledging facts that earlier wallet
+    /// transactions already committed, while keeping their policy generation current.
+    /// Acquire any other store's write transaction before calling this method, so a busy
+    /// companion does not hold a wallet write reservation. Do not perform network work
+    /// in the callback. An enclosing SQL transaction is rejected by SQLite.
+    pub fn with_immediate_read_transaction<F, A, E: From<rusqlite::Error>>(
+        &mut self,
+        f: F,
+    ) -> Result<A, E>
+    where
+        F: FnOnce(&WalletDb<SqlTransaction<'_>, &P, &CL, &mut R>) -> Result<A, E>,
+    {
+        let tx = self
+            .conn
+            .borrow_mut()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let result = {
+            let wdb = WalletDb {
+                conn: SqlTransaction(&tx),
+                params: &self.params,
+                clock: &self.clock,
+                rng: &mut self.rng,
+                anchor_retention_interval: self.anchor_retention_interval,
+                status_mode: self.status_mode,
+                transparent_ledger_mode: self.transparent_ledger_mode,
+                #[cfg(feature = "orchard")]
+                enhancement_mode: self.enhancement_mode,
+                #[cfg(feature = "transparent-inputs")]
+                gap_limits: self.gap_limits,
+            };
+            f(&wdb)
+        };
+        // No wallet writes were available to the callback. Drop rolls back the read
+        // transaction without running a wallet commit hook after acknowledgment.
+        drop(tx);
+        result
+    }
+
     /// Performs several wallet database operations atomically.
     ///
     /// Wallet summaries and transparent authority snapshots reuse this transaction, so
@@ -4846,6 +4888,33 @@ extern crate assert_matches;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn immediate_read_transaction_excludes_writers_and_releases_on_callback_error() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let connection = rusqlite::Connection::open(file.path()).unwrap();
+        connection
+            .execute_batch("CREATE TABLE marker(value); INSERT INTO marker VALUES (0)")
+            .unwrap();
+        let second = rusqlite::Connection::open(file.path()).unwrap();
+        second.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let mut wallet = super::WalletDb::from_connection(connection, (), (), ());
+        let result: Result<(), rusqlite::Error> = wallet.with_immediate_read_transaction(|_| {
+            let write = second.execute("UPDATE marker SET value = 1", []);
+            assert_matches!(write, Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::DatabaseBusy);
+            Err(rusqlite::Error::InvalidQuery)
+        });
+        assert_matches!(result, Err(rusqlite::Error::InvalidQuery));
+        assert!(wallet.is_autocommit());
+        second.execute("UPDATE marker SET value = 2", []).unwrap();
+        assert_eq!(
+            second
+                .query_row("SELECT value FROM marker", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+
     #[test]
     fn combined_handle_modes_configure_every_supported_lane_and_transaction_handle() {
         use super::{WalletDb, WalletHandleModes};
