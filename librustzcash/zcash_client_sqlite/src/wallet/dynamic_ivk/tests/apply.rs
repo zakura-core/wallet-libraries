@@ -6,7 +6,13 @@ use zcash_primitives::transaction::TxId;
 /// then watches the key from the next block and queues the payment. Also returns the
 /// tip and the payment's path there.
 pub(super) fn fixture() -> (State, DynamicKey, PendingPayment, ChainPoint, MerklePath) {
-    let mut st = ironwood_wallet();
+    fixture_in(ironwood_wallet())
+}
+
+/// [`fixture`] in `st`, an [`ironwood_wallet`] with no blocks.
+pub(super) fn fixture_in(
+    mut st: State,
+) -> (State, DynamicKey, PendingPayment, ChainPoint, MerklePath) {
     let account = st.test_account().unwrap().id();
     let id = KeyId::new(Purpose::Receive, 8);
     let candidate = pay_candidate(&mut st, id);
@@ -77,12 +83,13 @@ fn directory_payment_applies_unscanned_key_note_atomically_and_reopens() {
     assert_eq!(notes[0].dynamic_key_id(), Some(key.key_id()));
     assert!(pending(st.wallet().db(), account, key.key_id()).is_empty());
     assert!(crate::wallet::enhance_pir::is_protected(st.wallet().conn(), candidate.txid).unwrap());
-    let stored_memo: Vec<u8> = st
+    // Nothing binds the directory's memo to the chain, so it is not stored.
+    let stored_memo: Option<Vec<u8>> = st
         .wallet()
         .conn()
         .query_row("SELECT memo FROM ironwood_received_notes", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(stored_memo, vec![4; 512]);
+    assert_eq!(stored_memo, None);
     // A duplicate directory answer does not double credit the note.
     queue_payment(st.wallet_mut().db_mut(), account, key.key_id(), &candidate).unwrap();
     assert_eq!(
@@ -122,6 +129,101 @@ fn directory_payment_applies_unscanned_key_note_atomically_and_reopens() {
     );
 }
 
+/// The path of the chain's first Ironwood leaf at the cached tip.
+fn first_leaf_witness(st: &State) -> MerklePath {
+    witness_at(st, 0)
+}
+
+/// The path of the chain's Ironwood leaf at `position` at the cached tip.
+fn witness_at(st: &State, position: u32) -> MerklePath {
+    let mut tree =
+        incrementalmerkletree::frontier::CommitmentTree::<MerkleHashOrchard, 32>::empty();
+    let mut witness = None;
+    let mut leaves = 0;
+    let mut stmt = st
+        .cache()
+        .0
+        .prepare("SELECT data FROM compactblocks ORDER BY height")
+        .unwrap();
+    for block in stmt.query_map([], |r| r.get::<_, Vec<u8>>(0)).unwrap() {
+        let block = CompactBlock::decode(block.unwrap().as_slice()).unwrap();
+        for tx in block.vtx {
+            for action in tx.ironwood_actions {
+                let cmx = MerkleHashOrchard::from_cmx(&action.cmx().unwrap());
+                match &mut witness {
+                    None => {
+                        tree.append(cmx).unwrap();
+                        if leaves == position {
+                            witness = incrementalmerkletree::witness::IncrementalWitness::from_tree(
+                                tree.clone(),
+                            );
+                        }
+                    }
+                    Some(witness) => witness.append(cmx).unwrap(),
+                }
+                leaves += 1;
+            }
+        }
+    }
+    witness.unwrap().path().unwrap().into()
+}
+
+/// Nothing binds a directory's note data past its compact prefix to the chain: anyone who
+/// recovers the note through the public zero OVK can re-encrypt it with another memo. The
+/// sweep credits the note without a memo, and the full transaction supplies the real one.
+#[test]
+fn a_substituted_directory_memo_is_never_stored() {
+    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction_with_dynamic_ivks;
+    use zcash_protocol::memo::MemoBytes;
+    let mut st = ironwood_wallet();
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    let id = KeyId::new(Purpose::Receive, 8);
+    let fvk = id
+        .derive(&FullViewingKey::from(
+            st.test_account().unwrap().usk().orchard(),
+        ))
+        .unwrap();
+    let memo = MemoBytes::from_bytes(b"the payment's memo").unwrap();
+    let tx = external_payment(fvk.address_at(0u32, Scope::External), &memo);
+    let (height, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    // The candidate carries a substituted memo under the chain's compact prefix.
+    let candidate = candidate_at(&st, height, &fvk);
+    let through = tip(&st);
+    let path = witness_at(&st, candidate.position);
+    let db = st.wallet_mut().db_mut();
+    watch(db, account, 8, height + 1);
+    queue_payment(db, account, id, &candidate).unwrap();
+    assert_eq!(
+        apply_payment(db, account, id, &candidate, through, (through, &path)).unwrap(),
+        PaymentApplication::Applied
+    );
+    let stored = |st: &State| -> (Option<Vec<u8>>, u64, bool) {
+        st.wallet()
+            .conn()
+            .query_row(
+                "SELECT n.memo, n.value, EXISTS(SELECT 1 FROM ironwood_memo_retrieval_queue)
+                 FROM ironwood_received_notes n",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(stored(&st), (None, 50_000, false));
+    assert_eq!(unspent_keys(&st, through.height), vec![Some(id)]);
+    // Private memo retrieval skips the note even where it would recover other memos.
+    st.wallet()
+        .conn()
+        .execute("UPDATE ironwood_enhance_routing SET route = 2", [])
+        .unwrap();
+    crate::wallet::enhance_pir::queue_unsupported_memos(st.wallet().conn(), None).unwrap();
+    assert_eq!(stored(&st), (None, 50_000, false));
+    decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &tx, Some(height))
+        .unwrap();
+    assert_eq!(stored(&st), (Some(memo.as_slice().to_vec()), 50_000, false));
+}
+
 #[test]
 fn directory_payment_imports_an_already_spent_note_without_crediting_it() {
     use zcash_keys::address::{Address, UnifiedAddress};
@@ -146,33 +248,7 @@ fn directory_payment_imports_an_already_spent_note_without_crediting_it() {
         );
         st.scan_cached_blocks_with_dynamic_ivks(height, 1);
         let through = tip(&st);
-        let mut tree =
-            incrementalmerkletree::frontier::CommitmentTree::<MerkleHashOrchard, 32>::empty();
-        let mut witness = None;
-        let mut stmt = st
-            .cache()
-            .0
-            .prepare("SELECT data FROM compactblocks ORDER BY height")
-            .unwrap();
-        for block in stmt.query_map([], |r| r.get::<_, Vec<u8>>(0)).unwrap() {
-            let block = CompactBlock::decode(block.unwrap().as_slice()).unwrap();
-            for tx in block.vtx {
-                for action in tx.ironwood_actions {
-                    let cmx = MerkleHashOrchard::from_cmx(&action.cmx().unwrap());
-                    match &mut witness {
-                        None => {
-                            tree.append(cmx).unwrap();
-                            witness = incrementalmerkletree::witness::IncrementalWitness::from_tree(
-                                tree.clone(),
-                            );
-                        }
-                        Some(witness) => witness.append(cmx).unwrap(),
-                    }
-                }
-            }
-        }
-        drop(stmt);
-        let proof: MerklePath = witness.unwrap().path().unwrap().into();
+        let proof = first_leaf_witness(&st);
         if pruned {
             retain(st.wallet_mut().db_mut(), account);
             st.wallet()
@@ -238,6 +314,175 @@ fn directory_payment_imports_an_already_spent_note_without_crediting_it() {
                 .all(|n| n.note().nullifier(key.full_viewing_key()) != *recovered.nullifier())
         );
     }
+}
+
+/// A spending transaction stored unmined, with no output compact scanning finds, gets
+/// its canonical height and index from the nullifier map when the note is imported, so
+/// the spend does not expire with the unmined row.
+#[test]
+fn directory_payment_reconciles_an_unmined_spending_transaction() {
+    use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
+    use zcash_keys::address::{Address, UnifiedAddress};
+    let (mut st, key, candidate, _, _) = fixture();
+    let account = st.test_account().unwrap().id();
+    let recovered = candidate
+        .encrypted_note
+        .decrypt(
+            &FullViewingKey::from(st.test_account().unwrap().usk().orchard()),
+            key.key_id(),
+        )
+        .unwrap();
+    let external =
+        FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap())
+            .address_at(0u32, Scope::External);
+    let (height, _) = st.generate_next_block_spending(
+        &IronwoodFvk(key.full_viewing_key().clone()),
+        (*recovered.nullifier(), Zatoshis::const_from_u64(100_000)),
+        Address::Unified(UnifiedAddress::from_receivers(Some(external), None, None).unwrap()),
+        Zatoshis::const_from_u64(20_000),
+    );
+    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    let through = tip(&st);
+    let proof = first_leaf_witness(&st);
+    let data: Vec<u8> = st
+        .cache()
+        .0
+        .query_row(
+            "SELECT data FROM compactblocks WHERE height = ?1",
+            [u32::from(height)],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let spend = &CompactBlock::decode(data.as_slice()).unwrap().vtx[0];
+    let spend_txid = spend.txid();
+    assert!(!has_transaction(&st, spend_txid));
+    // Observed unmined, expiring at the next block.
+    let row: i64 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "INSERT INTO transactions
+                (txid, min_observed_height, expiry_height, confirmed_unmined_at_height)
+             VALUES (?1, ?2, ?3, ?2) RETURNING id_tx",
+            rusqlite::params![
+                spend_txid.as_ref(),
+                u32::from(candidate.height),
+                u32::from(height + 1)
+            ],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        apply_payment(
+            st.wallet_mut().db_mut(),
+            account,
+            key.key_id(),
+            &candidate,
+            through,
+            (through, &proof)
+        )
+        .unwrap(),
+        PaymentApplication::Applied
+    );
+    let stored: (i64, Option<u32>, Option<u32>, Option<u32>) = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT id_tx, mined_height, tx_index, confirmed_unmined_at_height
+             FROM transactions WHERE txid = ?1",
+            [spend_txid.as_ref()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        stored,
+        (
+            row,
+            Some(u32::from(height)),
+            Some(u32::try_from(spend.index).unwrap()),
+            None
+        )
+    );
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(3);
+    let summary = st.get_wallet_summary(ConfirmationsPolicy::MIN).unwrap();
+    let balance = summary.account_balances().get(&account).unwrap();
+    assert_eq!(balance.ironwood_balance().total(), Zatoshis::ZERO);
+}
+
+/// Scanning removes a known note's spend from the nullifier map, so an answer for a
+/// scanned and spent note links the stored spending transaction instead.
+#[test]
+fn directory_payment_keeps_a_scanned_spend_without_a_map_entry() {
+    use zcash_keys::address::{Address, UnifiedAddress};
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let birthday = st.sapling_activation_height();
+    let key = reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, birthday);
+    let candidate = pay_candidate(&mut st, key.key_id());
+    let nf = candidate
+        .encrypted_note
+        .decrypt(
+            &FullViewingKey::from(st.test_account().unwrap().usk().orchard()),
+            key.key_id(),
+        )
+        .unwrap()
+        .nullifier()
+        .to_bytes();
+    let external =
+        FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap())
+            .address_at(0u32, Scope::External);
+    let (height, _) = st.generate_next_block_spending(
+        &IronwoodFvk(key.full_viewing_key().clone()),
+        (
+            orchard::note::Nullifier::from_bytes(&nf).unwrap(),
+            Zatoshis::const_from_u64(100_000),
+        ),
+        Address::Unified(UnifiedAddress::from_receivers(Some(external), None, None).unwrap()),
+        Zatoshis::const_from_u64(20_000),
+    );
+    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    let mapped: u64 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM nullifier_map WHERE nf = ?1",
+            [nf],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(mapped, 0);
+    let through = tip(&st);
+    let proof = first_leaf_witness(&st);
+    let db = st.wallet_mut().db_mut();
+    queue_payment(db, account, key.key_id(), &candidate).unwrap();
+    assert_eq!(
+        apply_payment(
+            db,
+            account,
+            key.key_id(),
+            &candidate,
+            through,
+            (through, &proof)
+        )
+        .unwrap(),
+        PaymentApplication::Applied
+    );
+    let spent_at: Vec<u32> = {
+        let mut stmt = st
+            .wallet()
+            .conn()
+            .prepare(
+                "SELECT t.mined_height FROM ironwood_received_note_spends s
+                 JOIN ironwood_received_notes n ON n.id = s.ironwood_received_note_id
+                 JOIN transactions t ON t.id_tx = s.transaction_id WHERE n.nf = ?1",
+            )
+            .unwrap();
+        stmt.query_map([nf], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(spent_at, [u32::from(height)]);
 }
 
 #[test]
@@ -651,7 +896,31 @@ fn a_corrected_answer_replaces_a_partially_queued_candidate() {
             .unwrap()
             .unwrap()
     );
-    assert_eq!(pending(db, account, key).len(), 1);
+    let queued = pending(db, account, key);
+    assert_eq!(queued.len(), 1);
+    let sweep = |db: &Db| -> (Option<u32>, Option<Vec<u8>>, Option<u32>) {
+        db.conn
+            .query_row(
+                "SELECT lookup_height, lookup_hash, done_height FROM ironwood_dynamic_sweeps
+                 WHERE receiving_key_id = ?1",
+                [key_ref(&db.conn, account, key).unwrap()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    };
+    let before = sweep(db);
+    // An answer at an anchor off the wallet's chain defers without touching the queue.
+    let reorged = ChainPoint {
+        hash: BlockHash([99; 32]),
+        ..through
+    };
+    assert_eq!(
+        db.queue_directory_lookup(account, key, reorged, std::slice::from_ref(&right), &data)
+            .unwrap(),
+        Err(SweepDeferral::UnknownAnchor)
+    );
+    assert!(pending(db, account, key) == queued);
+    assert_eq!(sweep(db), before);
     assert_eq!(
         db.directory_note_data_needed(account, key, std::slice::from_ref(&right))
             .unwrap(),

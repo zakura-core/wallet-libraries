@@ -11,6 +11,6 @@
   keys) and `COMPLETION_LIMIT_SECS` (30 days), and direction-aware NEAR
   status normalization, `lifecycle::near_observation`, including refunded amounts
   and exact-output leftovers. Durable scheduling and receipt accounting live in
-  SQLite.
+  the wallet's store, such as `zakura-client-sqlite` with `orchard`.
 - Add transport-independent incoming-note authentication and commitment-path
   validation for privately discovered payments.

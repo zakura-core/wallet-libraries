@@ -110,9 +110,9 @@ pub(super) fn close_finished<P: Parameters>(
 }
 
 /// Records `observation`, requested at `now`, on operation `id` unless a newer one is
-/// stored (see `WalletDb::record_operation_status`). `expectation` stores the status:
-/// 0 active, 1 final with no receipt, 2 final with a receipt, 3 final but
-/// inconclusive, 4 awaiting a deposit.
+/// stored, and merges `funded` in either case (see `WalletDb::record_operation_status`).
+/// `expectation` stores the status: 0 active, 1 final with no receipt, 2 final with a
+/// receipt, 3 final but inconclusive, 4 awaiting a deposit.
 pub(super) fn record(
     conn: &Connection,
     id: i64,
@@ -135,11 +135,15 @@ pub(super) fn record(
         .map(|v| v.ok_or_else(|| invalid("expected receipt must be positive")))
         .transpose()?;
     conn.execute(
+        "UPDATE ironwood_dynamic_operations SET funded = MAX(funded, ?2) WHERE id = ?1",
+        params![id, funded],
+    )?;
+    conn.execute(
         "UPDATE ironwood_dynamic_operations SET
             observed_at = ?2, expectation = ?3, expected_value = ?4,
-            deadline = COALESCE(deadline, ?5), funded = MAX(funded, ?6)
+            deadline = COALESCE(deadline, ?5)
          WHERE id = ?1 AND observed_at <= ?2",
-        params![id, now, expectation, amount, observation.deadline, funded],
+        params![id, now, expectation, amount, observation.deadline],
     )?;
     Ok(())
 }

@@ -360,6 +360,39 @@ fn a_started_reservation_needs_a_fresh_conclusive_status() {
     assert!(!reserved(&st, &r));
 }
 
+/// Deposit evidence from a status arriving late still sticks, so a later fresh
+/// unfunded status cannot reclaim the address.
+#[test]
+fn late_funded_status_prevents_reclamation() {
+    let mut st = fixture();
+    let r = prepare(&mut st, NOW);
+    quote(&mut st, &r, "late", true);
+    let funded = |st: &State| -> bool {
+        st.wallet()
+            .conn()
+            .query_row(
+                "SELECT funded FROM ironwood_dynamic_operations WHERE request = 'late'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    observe(&mut st, "late", "PENDING_DEPOSIT", false, NOW + 2);
+    observe(&mut st, "late", "PROCESSING", true, NOW + 1);
+    assert_eq!(
+        operation(&st, "late"),
+        Some((NOW + 2, 4, None, Some(NOW + 60)))
+    );
+    assert!(funded(&st));
+    let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
+    observe(&mut st, "late", "PENDING_DEPOSIT", false, now);
+    assert!(funded(&st));
+    assert!(reap(&mut st, now).is_empty());
+    assert!(reserved(&st, &r));
+    assert!(active_from(&st, r.key_id()).is_some());
+    assert_ne!(prepare(&mut st, now).key_id(), r.key_id());
+}
+
 #[test]
 fn restart_and_rejected_quote_reuse_the_same_draft() {
     let mut st = fixture();

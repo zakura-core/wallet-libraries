@@ -131,8 +131,9 @@ workspace.
   ordinary change. With `NoteSelection::PreferConsolidation`, dynamic-key notes fill spare
   input slots first, so ordinary sends move their value into ordinary internal change
   without changing the fee or transaction shape. Full-transaction and Enhance PIR
-  retrieval authenticate these notes with their registered key. While a dynamic key is
-  open, blocks and transactions processed without the dynamic keys are refused
+  retrieval authenticate these notes with their registered key, but only a full
+  transaction stores their memo, which nothing else binds to the chain. While a dynamic
+  key is open, blocks and transactions processed without the dynamic keys are refused
   (`SqliteClientError::DynamicIvksNotUsed`). Invalid input to these calls is
   `SqliteClientError::InvalidDynamicIvkInput`, and a call that must wait returns its
   `ReservationPolicy` or `SweepDeferral` as an `Ok` value.
@@ -168,8 +169,8 @@ workspace.
   keys again on request, and a rewind reopens a closed key whose receipt it un-mines.
 - Recovery: `maintain_dynamic_ivks`, called at each sync start and tip, recovers funding
   memos and keeps an incoming lookahead. Each recovered key is swept once through a
-  receiver directory. `zakura_pir_receiver::sweep` drives the trait steps
-  `prepare_dynamic_sweeps`, `begin_dynamic_sweep_attempt`, `directory_publication_anchor`,
+  receiver directory with the trait steps `prepare_dynamic_sweeps`,
+  `begin_dynamic_sweep_attempt`, `directory_publication_anchor`,
   `directory_note_data_needed`, `queue_directory_lookup` and `apply_dynamic_sweep`, which
   credit a note only after verifying its inclusion and spend state locally, and then
   `finish_dynamic_nullifier_recovery`, which releases the Ironwood spend history the

@@ -15,7 +15,6 @@ use zcash_note_encryption::ShieldedOutput as _;
 use zcash_protocol::{
     ShieldedPool,
     consensus::{BlockHeight, Parameters},
-    memo::MemoBytes,
 };
 
 use super::{
@@ -74,7 +73,8 @@ fn merkle_path(position: u32, siblings: [[u8; 32]; 32]) -> Option<MerklePath> {
 }
 
 /// Applies queued `candidate` with its inclusion path at an anchor on the wallet's chain,
-/// which authenticates the note and position but not its transaction ID.
+/// which authenticates the note and position but not its transaction ID or memo, which is
+/// not stored (see `wallet::dynamic_ivk`).
 pub(super) fn apply_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -267,20 +267,18 @@ pub(super) fn apply_payment<P: Parameters>(
     );
     let tx_ref = wallet::put_tx_meta(conn, &tx, candidate.height)?;
     let spent_in = if let SpendStatus::Spent(txid) = spent {
-        let existing: Option<i64> = conn
-            .query_row(
-                "SELECT id_tx FROM transactions WHERE txid = ?1",
-                [txid.as_ref()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let spending = match existing {
-            Some(id) => Some(crate::TxRef(id)),
-            None => wallet::query_nullifier_map(
-                conn,
-                ShieldedPool::Ironwood,
-                &recovered.nullifier().to_bytes(),
-            )?,
+        // The map also records the spend's canonical height and index on a stored row,
+        // which may be unmined. A linked spend has no map entry (see `spend_status`).
+        let nf = recovered.nullifier().to_bytes();
+        let spending = match wallet::query_nullifier_map(conn, ShieldedPool::Ironwood, &nf)? {
+            Some(id) => Some(id),
+            None => conn
+                .query_row(
+                    "SELECT id_tx FROM transactions WHERE txid = ?1",
+                    [txid.as_ref()],
+                    |r| r.get(0).map(crate::TxRef),
+                )
+                .optional()?,
         };
         Some(spending.ok_or_else(|| corrupt("verified dynamic-key spend lost its transaction"))?)
     } else {
@@ -308,17 +306,7 @@ pub(super) fn apply_payment<P: Parameters>(
         Some(candidate.height),
         spent_in,
     )?;
-    let memo = MemoBytes::from_bytes(recovered.memo()).expect("a full-length memo");
-    conn.execute(
-        "UPDATE ironwood_received_notes SET memo = ?1
-         WHERE transaction_id = ?2 AND action_index = ?3",
-        params![
-            wallet::memo_repr(Some(&memo)),
-            tx_ref.0,
-            candidate.action_index
-        ],
-    )?;
-    wallet::enhance_pir::finish_private_receipt(conn, tx_ref, candidate.action_index)?;
+    wallet::enhance_pir::finish_private_receipt(conn, tx_ref)?;
     dequeue()?;
     Ok(Ok(PaymentApplication::Applied))
 }

@@ -144,6 +144,61 @@ fn dynamic_ivk_full_transaction_before_compact_scan() {
     full_transaction_roundtrip(true);
 }
 
+/// A closed key still decrypts the transactions its stored notes came from, so fetching
+/// an externally funded payment after closure stores it instead of discarding the
+/// retrieval as irrelevant. This guards the store's `get_dynamic_transaction_keys`.
+#[test]
+fn closed_key_decrypts_its_externally_funded_transaction_after_reopen() {
+    use zakura_dynamic_ivk::lifecycle::COMPLETION_LIMIT_SECS;
+    let mut st = scanned_wallet();
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    let from = st.wallet().chain_height().unwrap().unwrap() + 1;
+    let key = reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, from);
+    let memo = MemoBytes::from_bytes(b"refund").unwrap();
+    let tx = external_payment(key.receiver(), &memo);
+    let (height, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(9);
+    let queued = |st: &State| -> u64 {
+        st.wallet()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM tx_retrieval_queue WHERE txid = ?1",
+                [tx.txid().as_ref()],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(queued(&st), 1);
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let now = clock_now() + COMPLETION_LIMIT_SECS;
+    assert_eq!(close_at(st.wallet_mut().db_mut(), account, now, tip), 1);
+    assert!(!scanning_keys(&st).contains(&key.key_id()));
+    let reopened = WalletDb::for_path(
+        st.wallet().data_file_path(),
+        network,
+        test_clock(),
+        test_rng(),
+    )
+    .unwrap();
+    *st.wallet_mut().db_mut() = reopened;
+    decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &tx, Some(height))
+        .unwrap();
+    let stored: (bool, Option<Vec<u8>>) = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT t.raw IS NOT NULL, rn.memo FROM ironwood_received_notes rn
+             JOIN transactions t ON t.id_tx = rn.transaction_id WHERE t.txid = ?1",
+            [tx.txid().as_ref()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, (true, Some(memo.as_slice().to_vec())));
+    assert!(!scanning_keys(&st).contains(&key.key_id()));
+}
+
 /// Builds a wallet whose test account holds one confirmed 1,000,000 zatoshi
 /// Ironwood note, returning the height of the block that paid it.
 fn ironwood_funded_wallet() -> (State, BlockHeight) {
