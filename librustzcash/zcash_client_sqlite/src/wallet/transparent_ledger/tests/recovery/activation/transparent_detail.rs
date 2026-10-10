@@ -113,9 +113,10 @@ fn mined_height(st: &State, txid: TxId) -> BlockHeight {
 
 fn defer(st: &mut State, txid: TxId, outcome: TransparentDetailOutcome, at: SystemTime) {
     let height = mined_height(st, txid);
+    let generation = generation(st);
     st.wallet_mut()
         .db_mut()
-        .defer_transparent_detail(txid, height, outcome, Some(MAP_A), at)
+        .defer_transparent_detail(txid, height, outcome, Some(MAP_A), generation, at)
         .unwrap()
 }
 
@@ -547,6 +548,7 @@ fn stale_detail_failure_after_remine_preserves_immediate_retry() {
     assert!(listing(&st).contains(&txid));
 
     // The lookup started at the original height and finished after re-mining.
+    let generation = generation(&st);
     st.wallet_mut()
         .db_mut()
         .defer_transparent_detail(
@@ -554,6 +556,7 @@ fn stale_detail_failure_after_remine_preserves_immediate_retry() {
             unspent.mined_height,
             TransparentDetailOutcome::NotCovered,
             Some(MAP_A),
+            generation,
             now(),
         )
         .unwrap();
@@ -590,6 +593,7 @@ fn stale_detail_failure_while_unmined_changes_nothing() {
     defer(&mut st, txid, unavailable(), now());
     st.truncate_to_height(unspent.mined_height - 2);
     let before = production_dump(conn(&st));
+    let generation = generation(&st);
     st.wallet_mut()
         .db_mut()
         .defer_transparent_detail(
@@ -597,6 +601,7 @@ fn stale_detail_failure_while_unmined_changes_nothing() {
             unspent.mined_height,
             TransparentDetailOutcome::NotCovered,
             Some(MAP_A),
+            generation,
             now(),
         )
         .unwrap();
@@ -786,6 +791,7 @@ fn held_work_due_at_ordinary_retry_under_public_authority() {
         now(),
     );
     let unsupported_height = mined_height(&st, unsupported);
+    let generation = generation(&st);
     st.wallet_mut()
         .db_mut()
         .defer_transparent_detail(
@@ -793,6 +799,7 @@ fn held_work_due_at_ordinary_retry_under_public_authority() {
             unsupported_height,
             TransparentDetailOutcome::Unsupported,
             None,
+            generation,
             now(),
         )
         .unwrap();
@@ -1153,6 +1160,22 @@ fn stale_generation_rejected() {
     ));
     assert_eq!(display_rows(&st), (0, 0));
     assert_eq!(reasons(&st, txid_of(&unspent)), Some(RECEIVE));
+
+    // A failed lookup made under the old policy schedules nothing under the new one.
+    let before = production_dump(conn(&st));
+    let result = st.wallet_mut().db_mut().defer_transparent_detail(
+        txid_of(&unspent),
+        unspent.mined_height,
+        TransparentDetailOutcome::NotCovered,
+        Some(MAP_A),
+        listed.policy_generation,
+        now(),
+    );
+    assert!(matches!(
+        result,
+        Err(SqliteClientError::StaleTransparentPolicy { .. })
+    ));
+    assert_eq!(production_dump(conn(&st)), before);
 }
 
 #[test]
@@ -1396,6 +1419,7 @@ fn unsupported_parked_until_any_map() {
     let (mut st, _, unspent) = active_wallet();
     let txid = txid_of(&unspent);
     // The service had no display map to offer.
+    let generation = generation(&st);
     st.wallet_mut()
         .db_mut()
         .defer_transparent_detail(
@@ -1403,6 +1427,7 @@ fn unsupported_parked_until_any_map() {
             unspent.mined_height,
             TransparentDetailOutcome::Unsupported,
             None,
+            generation,
             now(),
         )
         .unwrap();

@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::time::SystemTime;
 
-use transparent_txid_client::{TxidError, TxidLookup};
+use transparent_txid_client::TxidLookup;
 use zcash_client_backend::data_api::transparent_ledger::{
     TransparentDetailOutcome, TransparentDetailRead, TransparentDetailRequest,
     TransparentDetailWrite, TransparentDisplayFacts, TransparentDisplayStore,
@@ -29,8 +29,10 @@ use crate::http::HttpExchange;
 /// Every other step is a [`DetailStep::Lookup`], preferred transactions first.
 ///
 /// The run's mode and policy generation come from its listing's snapshot, and stay fixed: a
-/// relisting under another policy lists nothing, so the caller's check after `plan` holds for
-/// the whole run.
+/// relisting under another policy lists nothing, and every store and deferral carries the
+/// generation, so the first write after a policy change fails with the wallet's stale-policy
+/// error and changes nothing. A caller that ends the run on that error makes at most the one
+/// lookup in flight under the old policy.
 ///
 /// ```no_run
 /// use std::time::{Instant, SystemTime};
@@ -74,14 +76,15 @@ use crate::http::HttpExchange;
 ///                     &cancel,
 ///                 );
 ///                 let answer = match found.found {
+///                     // Exiting says nothing about the lookup: nothing is written.
 ///                     Err(TxidError::Cancelled) if exiting() => DetailAnswer::Cancelled,
-///                     // The run's budget, not the service: an attempt, deferred.
-///                     Err(TxidError::Cancelled) => DetailAnswer::TimedOut,
+///                     // Anything else, including the run's budget cutting the lookup off,
+///                     // is an attempt.
 ///                     _ => DetailAnswer::Display(Box::new(found)),
 ///                 };
 ///                 // `()`: this caller never fetches publicly.
 ///                 if let Some(write) = run.record::<()>(&request, answer) {
-///                     // Under the caller's write lock.
+///                     // Under the caller's write lock. A stale policy ends the run.
 ///                     write.apply(wallet, SystemTime::now())?;
 ///                 }
 ///             }
@@ -165,6 +168,12 @@ impl MapChecked {
 #[derive(Debug)]
 pub enum DetailAnswer<R> {
     /// What [`TxidDisplayService::lookup`] returned for the request, with the map it used.
+    ///
+    /// A lookup that failed with [`TxidError::Cancelled`](crate::TxidError::Cancelled) is an
+    /// attempt, deferred like [`DetailAnswer::TimedOut`]: the service cannot say why it was
+    /// cancelled, and a run budget that always cuts a lookup off must not leave it due and
+    /// listed first in every run. A caller that cancelled because it is exiting hands
+    /// [`DetailAnswer::Cancelled`] instead.
     Display(Box<DisplayLookup>),
     /// What a public lookup returned: the transaction, or the outcome to defer it with
     /// (`Absent` for a transaction the server does not have, `Unavailable` for an outage,
@@ -181,10 +190,9 @@ pub enum DetailAnswer<R> {
     /// The caller stopped the lookup because it is exiting: shutting down, cancelled or
     /// leaving the run for a reason that says nothing about the lookup, by any route,
     /// including a transport failure its own cancellation caused. Not an attempt: nothing is
-    /// written, and the lookup stays due for the next run.
-    ///
-    /// A [`DisplayLookup`] that failed with [`TxidError::Cancelled`] records the same; a caller
-    /// whose cancellation was its run budget hands [`DetailAnswer::TimedOut`] instead.
+    /// written, and the lookup stays due for the next run. Only this answer writes nothing: a
+    /// [`DisplayLookup`] that failed with
+    /// [`TxidError::Cancelled`](crate::TxidError::Cancelled) is an attempt.
     Cancelled,
 }
 
@@ -209,6 +217,8 @@ pub enum DetailWrite<R> {
         outcome: TransparentDetailOutcome,
         /// The display map the lookup used, when it used one.
         map_sha256: Option<[u8; 32]>,
+        /// The generation the work was listed under.
+        expected_generation: u64,
     },
     /// A public transaction under a snapshot that retains public authority. The caller stores
     /// it through ordinary transaction ingestion, re-checking its policy in the same wallet
@@ -238,8 +248,8 @@ impl<R> DetailWrite<R> {
     /// Writes a [`DetailWrite::Store`] or [`DetailWrite::Defer`] to `wallet` at `now`, each in
     /// its own short wallet transaction; hands a [`DetailWrite::Raw`] back unwritten.
     ///
-    /// A store under a policy generation that is no longer current fails with the wallet's
-    /// stale-policy error and changes nothing: the run should end.
+    /// A store or deferral under a policy generation that is no longer current fails with the
+    /// wallet's stale-policy error and changes nothing: the run should end.
     pub fn apply<W: TransparentDetailWrite>(
         self,
         wallet: &mut W,
@@ -257,8 +267,16 @@ impl<R> DetailWrite<R> {
                 looked_up_height,
                 outcome,
                 map_sha256,
+                expected_generation,
             } => wallet
-                .defer_transparent_detail(txid, looked_up_height, outcome, map_sha256, now)
+                .defer_transparent_detail(
+                    txid,
+                    looked_up_height,
+                    outcome,
+                    map_sha256,
+                    expected_generation,
+                    now,
+                )
                 .map(|()| DetailApplied::Deferred(outcome)),
             DetailWrite::Raw { transaction, .. } => Ok(DetailApplied::Raw(transaction)),
         }
@@ -342,12 +360,13 @@ impl<'a> DetailRun<'a> {
         Ok(())
     }
 
-    /// What `answer`, the result of looking up `request`, writes; `None` for a cancelled
-    /// lookup, which writes nothing. A timed-out lookup is deferred as
+    /// What `answer`, the result of looking up `request`, writes; `None` only for
+    /// [`DetailAnswer::Cancelled`], which writes nothing. A timed-out lookup is deferred as
     /// [`Unavailable`](TransparentDetailOutcome::Unavailable) without a map.
     ///
-    /// Found display facts are translated ([`display_facts`]) and stored under the run's
-    /// policy generation; facts that cannot be translated, and every other display result, are
+    /// Found display facts are translated ([`display_facts`]) and stored, and failures
+    /// deferred, under the run's policy generation; facts that cannot be translated, and every
+    /// other display result (a cancelled one included), are
     /// deferred ([`deferral`]) with the map the lookup used, never one a later lookup or map
     /// check left the shared service holding. A public transaction is handed
     /// back only under a snapshot allowing public transport, and deferred as `Protocol`
@@ -362,13 +381,13 @@ impl<'a> DetailRun<'a> {
             looked_up_height: request.mined_height,
             outcome,
             map_sha256,
+            expected_generation: self.policy_generation,
         };
         match answer {
             DetailAnswer::Cancelled => None,
             DetailAnswer::Display(lookup) => {
                 let DisplayLookup { found, map_sha256 } = *lookup;
                 match found {
-                    Err(TxidError::Cancelled) => None,
                     Ok(TxidLookup::Found { entry, provenance }) => Some(
                         match display_facts(request.txid, &entry, &provenance, request.mined_height)
                         {

@@ -14,7 +14,9 @@ use zcash_protocol::consensus::BlockHeight;
 
 use crate::{error::SqliteClientError, wallet::TxQueryType};
 
-use super::super::{durable_policy, resolve_mode, with_read_snapshot};
+use super::super::{
+    check_transparent_policy_generation, durable_policy, resolve_mode, with_read_snapshot,
+};
 use super::codes::{
     ABSENT, CONTRADICTION, NOT_COVERED, NOT_YET_PUBLISHED, PROTOCOL, UNAVAILABLE, UNSUPPORTED,
 };
@@ -311,10 +313,12 @@ pub(crate) fn defer(
     looked_up_height: BlockHeight,
     outcome: TransparentDetailOutcome,
     map_sha256: Option<[u8; 32]>,
+    expected_generation: u64,
     now: SystemTime,
 ) -> Result<(), SqliteClientError> {
     resolve_mode(conn, configured)?;
     with_read_snapshot(conn, |conn| {
+        check_transparent_policy_generation(conn, expected_generation)?;
         record_outcome(conn, &txid, looked_up_height, outcome, map_sha256, now)
     })
 }

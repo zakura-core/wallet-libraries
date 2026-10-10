@@ -2405,6 +2405,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
         looked_up_height: BlockHeight,
         outcome: TransparentDetailOutcome,
         map_sha256: Option<[u8; 32]>,
+        expected_generation: u64,
         now: std::time::SystemTime,
     ) -> Result<(), Self::Error> {
         wallet::transparent_ledger::details::defer(
@@ -2414,6 +2415,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
             looked_up_height,
             outcome,
             map_sha256,
+            expected_generation,
             now,
         )
     }

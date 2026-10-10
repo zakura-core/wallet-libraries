@@ -399,12 +399,16 @@ keeps only transport, scheduling, cancellation, and its write lock:
 3. Each `Lookup` runs with no wallet lock held. `record` turns its result into
    one write: display facts to validate and store, a deferral naming the map
    the lookup used, or, under public transport only, the raw transaction. A
-   lookup the run's time budget cut off counts as an unavailable attempt and
-   backs off, so one slow lookup cannot take every run; a lookup cancelled
-   because the application is exiting is not an attempt and writes nothing.
+   lookup cancelled for any reason the application does not name, its time
+   budget included, counts as an unavailable attempt and backs off, so one slow
+   lookup cannot take every run; only a lookup the application reports as
+   cancelled because it is exiting is not an attempt and writes nothing.
 4. `DetailWrite::apply` stores or defers under the caller's write lock and hands
    a raw transaction back: the application stores it through ordinary
    transaction ingestion, re-checking its policy in the same wallet transaction.
+   Stores and deferrals both carry the listing's policy generation, so the first
+   write after a policy change fails as stale and changes nothing; ending the run
+   there leaves at most the one lookup in flight made under the old policy.
 
 ## 6. How transactions work, case by case
 

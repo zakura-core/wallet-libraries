@@ -466,6 +466,19 @@ impl Fixture {
         Ok(batch.unwrap_or_else(|| panic!("a ready pass, not {:?}", report.state)))
     }
 
+    /// The library's pass alone over the current watch set, through `exchange` and with
+    /// `should_stop`, settling nothing.
+    fn bare_pass(
+        &mut self,
+        exchange: &Loopback,
+        should_stop: &dyn Fn() -> bool,
+    ) -> Result<PassReport, PassError> {
+        let watch = self.watch();
+        let companion = self.companion.as_mut().expect("an open companion");
+        let chain = WalletChain::new(self.st.wallet().db(), watch.target.unwrap());
+        companion.pass(&watch, &chain, exchange, RESPONSE_LIMIT, should_stop)
+    }
+
     /// Applies `batch` to the wallet and acknowledges it with `trust`.
     fn settle(
         &mut self,
@@ -1190,6 +1203,56 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     f.assert_private(&[0]);
 }
 
+/// Through a real pass: a caller that is stopping is not retried after a publication change,
+/// and a service that cannot be reached is an outage, before anything is retrieved.
+#[test]
+fn a_stopping_pass_is_not_retried_and_an_unreachable_service_is_an_outage() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let t1 = H0 + 649;
+    let mut f = Fixture::new(H0 + 250, t1);
+    let owned = Owned {
+        a0: f.derived(TransparentKeyScope::EXTERNAL, 0),
+        a1: f.derived(TransparentKeyScope::EXTERNAL, 1),
+        last: f.last_external(),
+    };
+    f.publish(&lifecycle(&owned, t1, 0, false), SEAL);
+    assert_eq!(f.drive().batch.state, BatchState::Ready);
+
+    // Another seal: the first attempt resets the store, and a stopping caller gets the change
+    // back instead of a retry.
+    let resealed = SealParameters {
+        max_scripts: SEAL.max_scripts * 2,
+        ..SEAL
+    };
+    f.publish(&lifecycle(&owned, t1, 0, false), resealed);
+    let seen = f.server.requests().len();
+    let exchange = f.exchange();
+    assert!(matches!(
+        f.bare_pass(&exchange, &|| true),
+        Err(PassError::PublicationChanged)
+    ));
+    let maps = f.server.requests()[seen..]
+        .iter()
+        .filter(|request| request.method == "GET" && request.path == "/v1/filters/shards")
+        .count();
+    assert_eq!(maps, 1);
+    let companion = f.companion.as_mut().unwrap();
+    assert!(companion.take_latest::<AccountUuid>().is_none());
+    // The reset store is bound to no set: the next pass binds the new one.
+    let next = f.bare_pass(&exchange, &|| false).unwrap();
+    assert!(!next.publication_changed);
+    assert_eq!(next.state, BatchState::Ready);
+
+    // Nothing listens on the discard port: the map request fails and the pass is an outage.
+    let seen = f.server.requests().len();
+    let unreachable = Loopback::new("http://127.0.0.1:9");
+    assert!(matches!(
+        f.bare_pass(&unreachable, &|| false),
+        Err(PassError::Outage)
+    ));
+    assert_eq!(f.server.requests().len(), seen);
+}
+
 #[test]
 fn young_wallet_rolls_back_below_its_birthday() {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1846,6 +1909,7 @@ fn private_details_end_to_end() {
                         BlockHeight::from(*height as u32),
                         outcome,
                         map,
+                        current,
                         at,
                     )
                     .unwrap(),

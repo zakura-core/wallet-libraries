@@ -39,8 +39,9 @@ workspace.
   caller's map as `TransparentDetailParked`, with a refresh time bounded by
   `TRANSPARENT_DISPLAY_MAP_RECHECK`), validated
   `TransparentDisplayFacts` (`store_transparent_display`, returning `TransparentDisplayStore`),
-  library-computed backoff (`defer_transparent_detail` with the request's mined height and
-  `TransparentDetailOutcome`, ignoring results for a changed placement), and the
+  library-computed backoff (`defer_transparent_detail` with the request's mined height,
+  `TransparentDetailOutcome` and the listing's policy generation, ignoring results for a
+  changed placement and failing as stale under a changed policy), and the
   detail view (`transparent_display_view`, returning `TransparentDisplayView`). Display facts
   are one fixed-size display entry: the first address-shaped sender
   (`TransparentDisplaySender`), at most two outputs (`TRANSPARENT_DISPLAY_OUTPUT_SLOTS`), and

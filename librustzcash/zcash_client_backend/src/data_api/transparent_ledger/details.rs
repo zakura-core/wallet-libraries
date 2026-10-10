@@ -632,12 +632,17 @@ pub trait TransparentDetailWrite: TransparentDetailRead {
     /// `map_sha256` is the display map the lookup used, when one was fetched. Unknown
     /// transactions, transactions without work, and results whose mined height has changed
     /// (including transactions that are now unmined) are ignored without changing retry state.
+    ///
+    /// Fails with a stale-policy error, changing nothing, when the durable policy generation
+    /// is no longer `expected_generation`: a lookup made under another policy schedules
+    /// nothing under this one.
     fn defer_transparent_detail(
         &mut self,
         txid: TxId,
         looked_up_height: BlockHeight,
         outcome: TransparentDetailOutcome,
         map_sha256: Option<[u8; 32]>,
+        expected_generation: u64,
         now: SystemTime,
     ) -> Result<(), Self::Error>;
 }

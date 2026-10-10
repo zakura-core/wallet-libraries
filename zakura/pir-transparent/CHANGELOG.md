@@ -21,6 +21,17 @@
   to an hour) instead of staying first in every listing and taking every run.
   `DetailAnswer::Cancelled` stays for a caller that is exiting and writes
   nothing.
+- A display lookup that failed with `TxidError::Cancelled` is an attempt,
+  deferred as `Unavailable` like `DetailAnswer::TimedOut` (`deferral` returns
+  it too), instead of writing nothing: the lookup cannot say why it was
+  cancelled, and a caller forwarding a budget cancellation unchanged would
+  otherwise leave the lookup due and first in every run. Only an explicit
+  `DetailAnswer::Cancelled` writes nothing.
+- `DetailWrite::Defer` carries the listing's `expected_generation`, and
+  applying it fails with the wallet's stale-policy error after a policy
+  change, as a store does. A run that started under private queries therefore
+  ends at its first write after they are turned off, instead of deferring
+  every remaining lookup.
 
 - Rename the account recovery module to `transparent_history_recovery`,
   `ReferenceRecovery` to `TransparentHistoryRecovery`, and `RecoveryConfig` to

@@ -99,11 +99,15 @@ pub fn display_facts(
     Ok(facts)
 }
 
-/// How to defer a lookup that did not find the entry, or `None` when it found it or was
-/// cancelled before completing (which is not an attempt).
+/// How to defer a lookup that did not find the entry, or `None` when it found it.
+///
+/// A cancelled lookup is an attempt, deferred as
+/// [`Unavailable`](TransparentDetailOutcome::Unavailable): the lookup cannot say whether its
+/// caller is exiting or ran out of time, and a lookup that always outlasts a run budget would
+/// otherwise stay due and take every run. A caller that is exiting writes nothing instead.
 pub fn deferral(lookup: &Result<TxidLookup, TxidError>) -> Option<TransparentDetailOutcome> {
     match lookup {
-        Ok(TxidLookup::Found { .. }) | Err(TxidError::Cancelled) => None,
+        Ok(TxidLookup::Found { .. }) => None,
         Ok(TxidLookup::Absent) => Some(TransparentDetailOutcome::Absent),
         // Above the newest shard is transient: the publication has not caught up yet.
         Ok(TxidLookup::PlacementUnknown(Placement::Above)) => {
@@ -118,7 +122,7 @@ pub fn deferral(lookup: &Result<TxidLookup, TxidError>) -> Option<TransparentDet
                 retry_after: *retry_after,
             })
         }
-        Err(TxidError::Stale | TxidError::Transport(_)) => {
+        Err(TxidError::Stale | TxidError::Transport(_) | TxidError::Cancelled) => {
             Some(TransparentDetailOutcome::Unavailable { retry_after: None })
         }
         Err(TxidError::Refused(_) | TxidError::Protocol(_)) => {
@@ -311,7 +315,10 @@ mod tests {
                 Err(TxidError::Protocol(ProtocolKind::Decode)),
                 Some(O::Protocol),
             ),
-            (Err(TxidError::Cancelled), None),
+            (
+                Err(TxidError::Cancelled),
+                Some(O::Unavailable { retry_after: None }),
+            ),
         ] {
             assert_eq!(deferral(&lookup), expected, "{lookup:?}");
         }

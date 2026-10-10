@@ -554,9 +554,11 @@ fn a_deferral_names_the_map_its_lookup_used() {
     assert!(matches!(next.next(), Some(DetailStep::Lookup(r)) if r.txid == txid));
 }
 
-/// A cancelled lookup is not an attempt: nothing is written and the work stays due.
+/// Only a caller that is exiting writes nothing: the work stays due. A lookup the service
+/// reports cancelled is an attempt, because the service cannot say whether the caller is
+/// exiting or out of time, and forwarding it unchanged must not starve later runs.
 #[test]
-fn cancelled_lookup_writes_nothing() {
+fn only_an_exiting_caller_writes_nothing() {
     let mut f = wallet();
     let txid = f.receipt(0x46, f.height);
     let exchange = not_covering_then_covering(f.height);
@@ -566,17 +568,6 @@ fn cancelled_lookup_writes_nothing() {
     let Some(DetailStep::Lookup(request)) = run.next() else {
         panic!("a lookup");
     };
-    let found = service.lookup(
-        &exchange,
-        *request.txid.as_ref(),
-        u32::from(request.mined_height).into(),
-        &|| true,
-    );
-    assert_eq!(found.found, Err(TxidError::Cancelled));
-    assert!(
-        run.record::<()>(&request, DetailAnswer::Display(Box::new(found)))
-            .is_none()
-    );
     assert!(
         run.record::<()>(&request, DetailAnswer::Cancelled)
             .is_none()
@@ -585,6 +576,60 @@ fn cancelled_lookup_writes_nothing() {
     assert_eq!(f.view(txid), Some(TransparentDisplayView::Pending));
     let mut again = f.plan(&service, t0(), 8, &[]);
     assert!(matches!(again.next(), Some(DetailStep::Lookup(r)) if r.txid == txid));
+
+    let found = service.lookup(
+        &exchange,
+        *request.txid.as_ref(),
+        u32::from(request.mined_height).into(),
+        &|| true,
+    );
+    assert_eq!(found.found, Err(TxidError::Cancelled));
+    let write = run
+        .record::<()>(&request, DetailAnswer::Display(Box::new(found)))
+        .expect("an attempt");
+    assert!(matches!(
+        write,
+        DetailWrite::Defer {
+            outcome: TransparentDetailOutcome::Unavailable { retry_after: None },
+            ..
+        }
+    ));
+    write.apply(f.st.wallet_mut().db_mut(), t0()).unwrap();
+    assert_eq!(f.work_row(txid).map(|(attempts, ..)| attempts), Some(1));
+    let mut later = f.plan(&service, t0(), 8, &[]);
+    assert!(later.next().is_none());
+}
+
+/// A lookup that finishes after a policy change writes nothing under the new policy: its
+/// deferral fails as stale, and the caller ends the run.
+#[test]
+fn a_deferral_after_a_policy_change_is_stale() {
+    let mut f = wallet();
+    let txid = f.receipt(0x4d, f.height);
+    let exchange = not_covering_then_covering(f.height);
+    let service = TxidDisplayService::new();
+    let mut run = f.plan(&service, t0(), 8, &[]);
+    let Some(DetailStep::Lookup(request)) = run.next() else {
+        panic!("a lookup");
+    };
+    let found = service.lookup(
+        &exchange,
+        *request.txid.as_ref(),
+        u32::from(request.mined_height).into(),
+        &|| false,
+    );
+    // The user turns private queries off while the lookup is in flight.
+    f.set_policy(TransparentLedgerMode::Public);
+    let before = f.work_row(txid);
+    let write = run
+        .record::<()>(&request, DetailAnswer::Display(Box::new(found)))
+        .expect("a deferral");
+    assert!(matches!(write, DetailWrite::Defer { .. }));
+    assert!(matches!(
+        write.apply(f.st.wallet_mut().db_mut(), t0()),
+        Err(zcash_client_sqlite::error::SqliteClientError::StaleTransparentPolicy { .. })
+    ));
+    assert_eq!(f.work_row(txid), before);
 }
 
 /// A lookup the run's budget stopped is an attempt: it is deferred as `Unavailable`, so it
