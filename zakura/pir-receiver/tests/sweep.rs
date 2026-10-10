@@ -106,7 +106,17 @@ fn tip(st: &State) -> ChainPoint {
 /// `position`, which is the number of earlier Ironwood outputs.
 fn pay_restored_key(st: &mut State, index: u64, position: u64) -> (Record, [u8; 528]) {
     let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
-    let fvk = KeyId::new(Purpose::Receive, index).derive(&parent).unwrap();
+    pay_restored_key_of(st, &parent, index, position)
+}
+
+/// [`pay_restored_key`] for the account whose Orchard viewing key is `parent`.
+fn pay_restored_key_of(
+    st: &mut State,
+    parent: &FullViewingKey,
+    index: u64,
+    position: u64,
+) -> (Record, [u8; 528]) {
+    let fvk = KeyId::new(Purpose::Receive, index).derive(parent).unwrap();
     let (height, _, _) = st.generate_next_block(
         &IronwoodFvk(fvk.clone()),
         AddressType::DefaultExternal,
@@ -626,7 +636,7 @@ async fn a_seen_hit_outlives_a_rejected_payment_and_a_later_miss() {
     assert!(
         matches!(
             &swept.deferred[..],
-            [(deferred, Error::Queued(PaymentApplication::Rejected))] if *deferred == key
+            [(_, deferred, Error::Queued(PaymentApplication::Rejected))] if *deferred == key
         ),
         "{:?}",
         swept.deferred
@@ -1068,7 +1078,7 @@ async fn run(
     notes: &mut Notes,
     now: i64,
 ) -> Result<
-    zakura_pir_receiver::Swept<zcash_client_sqlite::error::SqliteClientError>,
+    zakura_pir_receiver::Swept<AccountUuid, zcash_client_sqlite::error::SqliteClientError>,
     Error<zcash_client_sqlite::error::SqliteClientError>,
 > {
     let network = *st.network();
@@ -1174,7 +1184,7 @@ async fn a_deferred_candidate_takes_each_publications_current_answer() {
         assert!(
             matches!(
                 &swept.deferred[..],
-                [(k, Error::Queued(d))] if *k == key && *d == deferral
+                [(_, k, Error::Queued(d))] if *k == key && *d == deferral
             ),
             "{deferral:?}: {:?}",
             swept.deferred
@@ -1243,7 +1253,11 @@ async fn an_unchanged_answer_reuses_queued_note_data() {
     assert!(
         matches!(
             &swept.deferred[..],
-            [(_, Error::Queued(PaymentApplication::AwaitingSpendHistory))]
+            [(
+                _,
+                _,
+                Error::Queued(PaymentApplication::AwaitingSpendHistory)
+            )]
         ),
         "{:?}",
         swept.deferred
@@ -1262,7 +1276,7 @@ async fn an_unchanged_answer_reuses_queued_note_data() {
     assert!(
         matches!(
             &swept.deferred[..],
-            [(_, Error::Queued(PaymentApplication::AwaitingScan))]
+            [(_, _, Error::Queued(PaymentApplication::AwaitingScan))]
         ),
         "{:?}",
         swept.deferred
@@ -1330,5 +1344,62 @@ async fn each_run_sweeps_one_batch_and_later_runs_progress() {
     assert_eq!(
         st.get_total_balance(account),
         Zatoshis::const_from_u64(VALUE)
+    );
+}
+
+/// Accounts share key identities, so each deferred key names its account.
+#[tokio::test]
+async fn each_deferred_key_names_its_account() {
+    let mut st = ironwood_wallet();
+    let first = st.test_account().unwrap().id();
+    let (second, usk) = st.create_account_from_test_seed("second");
+    let key = KeyId::new(Purpose::Receive, 0);
+    let (paid_first, first_data) = pay_restored_key(&mut st, key.index(), 0);
+    let second_fvk = FullViewingKey::from(usk.orchard());
+    let (paid_second, second_data) = pay_restored_key_of(&mut st, &second_fvk, 0, 1);
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    restore(&mut st, first);
+    restore(&mut st, second);
+    let through = tip(&st);
+    // The first payment waits for spend history, and the replay that queues makes the
+    // second wait for scanning.
+    st.wallet()
+        .conn()
+        .execute_batch("DELETE FROM nullifier_map; DELETE FROM ironwood_nullifier_scan_blocks;")
+        .unwrap();
+    let directory = Directory::new(publish(
+        &[paid_first.clone(), paid_second.clone()],
+        &[paid_first.payment.cmx, paid_second.payment.cmx],
+        through,
+        &provider(&[]),
+    ));
+    let mut notes = Notes {
+        data: BTreeMap::from([(0, first_data), (1, second_data)]),
+        requested: Vec::new(),
+    };
+    let swept = run(
+        &mut st,
+        &[first, second],
+        through,
+        &directory,
+        &mut notes,
+        NOW,
+    )
+    .await
+    .unwrap();
+    let deferred: Vec<_> = swept
+        .deferred
+        .iter()
+        .map(|(account, key, e)| match e {
+            Error::Queued(application) => (*account, *key, *application),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        deferred,
+        [
+            (first, key, PaymentApplication::AwaitingSpendHistory),
+            (second, key, PaymentApplication::AwaitingScan),
+        ]
     );
 }

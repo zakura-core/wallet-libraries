@@ -157,13 +157,14 @@ where
     }
 }
 
-/// What one [`sweep`] run did. `E` is the wallet's error type.
+/// What one [`sweep`] run did. `A` is the wallet's account identifier and `E` its error
+/// type.
 #[derive(Debug)]
-pub struct Swept<E> {
+pub struct Swept<A, E> {
     /// Keys whose sweep finished.
     pub finished: usize,
-    /// Keys left for a later run, each already backed off, with why.
-    pub deferred: Vec<(KeyId, Error<E>)>,
+    /// Keys left for a later run, each with its account, already backed off, with why.
+    pub deferred: Vec<(A, KeyId, Error<E>)>,
     /// Whether any of the accounts still has unfinished sweeps or queued payments.
     pub pending: bool,
 }
@@ -207,7 +208,7 @@ pub async fn sweep<W, P, T, N, L>(
     notes: &mut N,
     lock: &L,
     now: i64,
-) -> Result<Swept<AccountError<W>>, Error<AccountError<W>>>
+) -> Result<Swept<AccountId<W>, AccountError<W>>, Error<AccountError<W>>>
 where
     W: DynamicIvkWrite,
     P: Parameters,
@@ -273,7 +274,7 @@ where
                                 DirectoryError::Revision | DirectoryError::Transport(_)
                             )
                         );
-                        swept.deferred.push((item.key, e));
+                        swept.deferred.push((account, item.key, e));
                         if unavailable {
                             break;
                         }
