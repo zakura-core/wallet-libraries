@@ -61,7 +61,8 @@ pub(crate) use recovery::forget_other_candidates;
 pub(crate) use recovery::qualify_revision;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use recovery::{
-    CommitTrust, apply_commit, candidate_recovery, forget_reattributed_script, promote, watch_set,
+    CommitTrust, apply_commit, candidate_recovery, forget as forget_ledger,
+    forget_reattributed_script, promote, watch_set,
 };
 pub(crate) use recovery::{clear_pending_pages, truncate as truncate_recovery};
 

@@ -11,6 +11,11 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- `TransparentLedgerWrite::forget_transparent_ledger`, behind `transparent-inputs`, and its
+  result `ForgottenTransparentLedger`: under `Public`, atomically removes what private recovery
+  alone contributed, so a publication's facts do not outlive the policy that admitted them.
+  This is a new required trait method: external implementors of `TransparentLedgerWrite` must
+  add it.
 - `transparent_ledger::{TransparentDetailRead, TransparentDetailWrite}` (prototype): durable
   transparent txid enhancement work (`transparent_detail_work`, returning the requests with the
   mode and policy generation of the same snapshot as `TransparentDetailWork`;
