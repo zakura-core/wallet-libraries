@@ -275,63 +275,13 @@ fn finished_incoming_sweeps_watch_paid_and_unpaid_keys() {
         .unwrap(),
         PaymentApplication::Applied
     );
-    db.apply_dynamic_sweep(account, paid, through, through, WATCHED, |_, _| None)
+    db.apply_dynamic_sweep(account, paid, through, through, false, |_, _| None)
         .unwrap()
         .unwrap();
     finish_sweep(db, account, unpaid, through);
     // A paid key also scans on, so a payment after the lookup is not missed.
     assert_eq!(scanning_keys(&st), [unpaid, paid]);
     assert!(st.wallet().suggest_scan_ranges().unwrap().is_empty());
-}
-
-#[test]
-fn an_unwatched_sweep_closes_only_a_key_that_was_not_scanning() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    // Leave room above the birthday for the rewind below.
-    let through = advance(&mut st, 2);
-    let db = st.wallet_mut().db_mut();
-    let idle = watch(db, account, 0, through.height).key_id();
-    let watched = watch(db, account, 1, through.height).key_id();
-    queue_lookup(db, account, idle, through, &[]).unwrap();
-    assert_eq!(
-        db.apply_dynamic_sweep(
-            account,
-            idle,
-            through,
-            through,
-            ProviderView::default(),
-            |_, _| None
-        )
-        .unwrap()
-        .unwrap(),
-        PaymentApplication::Applied
-    );
-    finish_sweep(db, account, watched, through);
-    // No swap reached the idle key in the last day, so nothing more can arrive.
-    assert_eq!(scanning_keys(&st), [watched]);
-    // A rewind below the lookup runs the watched key's sweep again. Unwatched now,
-    // the key keeps scanning, since something else may still need it.
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
-    st.truncate_to_height_retaining_cache(through.height - 1);
-    st.scan_cached_blocks_with_dynamic_ivks(through.height, 2);
-    let tip = tip(&st);
-    let db = st.wallet_mut().db_mut();
-    queue_lookup(db, account, watched, tip, &[]).unwrap();
-    assert_eq!(
-        db.apply_dynamic_sweep(
-            account,
-            watched,
-            tip,
-            tip,
-            ProviderView::default(),
-            |_, _| None
-        )
-        .unwrap()
-        .unwrap(),
-        PaymentApplication::Applied
-    );
-    assert_eq!(scanning_keys(&st), [watched]);
 }
 
 #[test]
@@ -362,6 +312,72 @@ fn watched_key_finds_a_payout_after_its_sweep() {
     );
     st.scan_cached_blocks_with_dynamic_ivks(paid, 1);
     assert_eq!(unspent_keys(&st, paid), [Some(key)]);
+}
+
+/// Pays `fvk`'s default address in a new scanned block.
+fn pay(st: &mut State, fvk: &FullViewingKey) {
+    let (height, _, _) = st.generate_next_block(
+        &IronwoodFvk(fvk.clone()),
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(50_000),
+    );
+    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+}
+
+/// A sweep finished at a publication behind the wallet's tip, whose provider sets hold
+/// none of its receivers, still watches each key: rescanning from the block after the
+/// lookup finds payments up to the tip before any key can close, and scanning finds
+/// later ones. So does a key the seen set holds.
+#[test]
+fn a_lagging_sweep_watches_its_keys_whatever_the_provider_sets_say() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let anchor = tip(&st);
+    let db = st.wallet_mut().db_mut();
+    let keys = [
+        watch(db, account, 0, anchor.height),
+        recover(db, account, KeyId::new(Purpose::Refund, 0), anchor.height),
+        watch(db, account, 1, anchor.height),
+    ]
+    .map(|k| (k.key_id(), k.full_viewing_key().clone()));
+    let seen = keys[2].0;
+    for (_, fvk) in &keys {
+        pay(&mut st, fvk);
+    }
+    let through = advance(&mut st, 1);
+    assert!(unspent_keys(&st, through.height).is_empty());
+    let db = st.wallet_mut().db_mut();
+    for &(key, _) in &keys {
+        queue_lookup(db, account, key, anchor, &[]).unwrap();
+        let applied =
+            db.apply_dynamic_sweep(account, key, through, anchor, key == seen, |_, _| None);
+        assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
+    }
+    let ids = keys.each_ref().map(|(key, _)| *key);
+    let scanning: HashSet<_> = scanning_keys(&st).into_iter().collect();
+    assert_eq!(scanning, HashSet::from(ids));
+    // However late the clock, no key closes before the rescan.
+    let db = st.wallet_mut().db_mut();
+    let late = clock_now() + 2 * RESTORE_WATCH_SECS;
+    assert_eq!(close_at(db, account, late, through.height), 0);
+    let replay = anchor.height + 1;
+    assert_eq!(
+        st.wallet().suggest_scan_ranges().unwrap(),
+        [ScanRange::from_parts(
+            replay..through.height + 1,
+            ScanPriority::Historic
+        )]
+    );
+    st.scan_cached_blocks_with_dynamic_ivks(replay, keys.len() + 1);
+    let notes = |st: &State, key| {
+        let keys = unspent_keys(st, tip(st).height);
+        keys.iter().filter(|k| **k == Some(key)).count()
+    };
+    assert!(ids.iter().all(|&key| notes(&st, key) == 1));
+    for (_, fvk) in &keys {
+        pay(&mut st, fvk);
+    }
+    assert!(ids.iter().all(|&key| notes(&st, key) == 2));
 }
 
 #[test]
@@ -414,43 +430,6 @@ fn issuing_a_key_after_its_watch_needs_no_rescan() {
     assert!(st.wallet().suggest_scan_ranges().unwrap().is_empty());
     // History after the watch is swept again only on request.
     assert!(due(&mut st, through, NOW).is_empty());
-}
-
-/// A lookahead address no one was given starts at issuance, however long after its
-/// sweep, without rescanning the blocks in between.
-#[test]
-fn issuing_an_unquoted_swept_key_starts_at_issuance() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let anchor = tip(&st);
-    let key = KeyId::new(Purpose::Receive, 0);
-    let db = st.wallet_mut().db_mut();
-    watch(db, account, 0, anchor.height);
-    queue_lookup(db, account, key, anchor, &[]).unwrap();
-    let unseen = ProviderView {
-        recent: false,
-        seen: false,
-    };
-    assert_eq!(
-        db.apply_dynamic_sweep(account, key, anchor, anchor, unseen, |_, _| None)
-            .unwrap()
-            .unwrap(),
-        PaymentApplication::Applied
-    );
-    assert!(scanning_keys(&st).is_empty());
-    let through = advance(&mut st, 20);
-    let reservation = prepare_from(
-        st.wallet_mut().db_mut(),
-        account,
-        NOW,
-        through.height + 1,
-        None,
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(reservation.key_id(), key);
-    assert_eq!(scanning_keys(&st), [key]);
-    assert!(st.wallet().suggest_scan_ranges().unwrap().is_empty());
 }
 
 #[test]
@@ -576,7 +555,7 @@ fn rewind_reruns_only_sweeps_above_the_retained_chain() {
     assert!(db.dynamic_history_pending(account, kept.height).unwrap());
     // The rewound sweep needs a new lookup before it can finish.
     assert!(matches!(
-        db.apply_dynamic_sweep(account, late, kept, kept, WATCHED, |_, _| None),
+        db.apply_dynamic_sweep(account, late, kept, kept, false, |_, _| None),
         Ok(Err(SweepDeferral::UnknownAnchor))
     ));
     assert_eq!(due(&mut st, kept, NOW), [late]);
@@ -750,7 +729,7 @@ fn recheck_sweeps_closed_keys_and_finds_a_later_refund() {
         .unwrap(),
         PaymentApplication::Applied
     );
-    db.apply_dynamic_sweep(account, key, through, through, WATCHED, |_, _| None)
+    db.apply_dynamic_sweep(account, key, through, through, false, |_, _| None)
         .unwrap()
         .unwrap();
     assert_eq!(unspent_keys(&st, through.height), [Some(key)]);

@@ -6,7 +6,7 @@ use orchard::tree::{MerkleHashOrchard, MerklePath};
 use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::{
     data_api::{
-        dynamic_ivk::{PaymentApplication, ProviderView, SweepDeferral},
+        dynamic_ivk::{PaymentApplication, SweepDeferral},
         transparent_ledger::ChainPoint,
     },
     wallet::{WalletOrchardOutput, WalletTx},
@@ -33,7 +33,7 @@ pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL, R>(
     key: KeyId,
     through: ChainPoint,
     publication: ChainPoint,
-    provider: ProviderView,
+    seen: bool,
     mut witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
 ) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
     for candidate in pending_payments(db.conn.borrow(), account, key)? {
@@ -59,7 +59,7 @@ pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL, R>(
         }
     }
     Ok(db
-        .transactionally(|db| sweep::finish(db.conn.0, account, key, provider))?
+        .transactionally(|db| sweep::finish(db.conn.0, account, key, seen))?
         .map(|()| PaymentApplication::Applied))
 }
 

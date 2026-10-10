@@ -712,7 +712,7 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
     );
 
     assert_eq!(
-        db.apply_dynamic_sweep(account, key, through, anchor, WATCHED, |_, _| None)
+        db.apply_dynamic_sweep(account, key, through, anchor, false, |_, _| None)
             .unwrap()
             .unwrap(),
         PaymentApplication::AwaitingWitness
@@ -722,13 +722,13 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
     let mut invalid = siblings;
     invalid[3] = [0xff; 32];
     assert_eq!(
-        db.apply_dynamic_sweep(account, key, through, anchor, WATCHED, |_, _| Some(invalid))
+        db.apply_dynamic_sweep(account, key, through, anchor, false, |_, _| Some(invalid))
             .unwrap()
             .unwrap(),
         PaymentApplication::AwaitingWitness
     );
     assert_eq!(
-        db.apply_dynamic_sweep(account, key, through, anchor, WATCHED, |position, cmx| {
+        db.apply_dynamic_sweep(account, key, through, anchor, false, |position, cmx| {
             (position == candidate.position && cmx == candidate.encrypted_note.commitment())
                 .then_some(siblings)
         })
@@ -962,18 +962,16 @@ fn a_payment_before_the_birthday_marks_its_index_used_and_finishes_the_sweep() {
     let mut wrong = siblings;
     wrong[0] = MerkleHashOrchard::empty_root(1.into()).to_bytes();
     assert_eq!(
-        db.apply_dynamic_sweep(account, id, through, through, WATCHED, |_, _| Some(wrong))
+        db.apply_dynamic_sweep(account, id, through, through, false, |_, _| Some(wrong))
             .unwrap()
             .unwrap(),
         PaymentApplication::Rejected
     );
     queue_lookup(db, account, id, through, std::slice::from_ref(&candidate)).unwrap();
     assert_eq!(
-        db.apply_dynamic_sweep(account, id, through, through, WATCHED, |_, _| Some(
-            siblings
-        ))
-        .unwrap()
-        .unwrap(),
+        db.apply_dynamic_sweep(account, id, through, through, false, |_, _| Some(siblings))
+            .unwrap()
+            .unwrap(),
         PaymentApplication::Applied
     );
     assert!(!db.dynamic_history_pending(account, through.height).unwrap());
@@ -1020,11 +1018,9 @@ fn a_later_payment_claimed_before_the_birthday_is_rejected() {
     let db = st.wallet_mut().db_mut();
     queue_lookup(db, account, id, through, std::slice::from_ref(&forged)).unwrap();
     assert_eq!(
-        db.apply_dynamic_sweep(account, id, through, through, WATCHED, |_, _| Some(
-            siblings
-        ))
-        .unwrap()
-        .unwrap(),
+        db.apply_dynamic_sweep(account, id, through, through, false, |_, _| Some(siblings))
+            .unwrap()
+            .unwrap(),
         PaymentApplication::Rejected
     );
     let paid: bool = st

@@ -2,8 +2,8 @@
 //!
 //! Issued keys scan from issuance, refund keys from their stored funding transaction,
 //! until they close. Keys recovered from the seed are swept once through a receiver
-//! directory, then scanned only while a swap may still pay them. A closed key keeps its
-//! notes. A dynamic-key note's memo is stored only from its full transaction, never from
+//! directory, then scanned from the block after the sweep's lookup for a restore watch
+//! (see [`WalletDb::close_finished_dynamic_keys`]). A closed key keeps its notes. A dynamic-key note's memo is stored only from its full transaction, never from
 //! a directory or private Enhance retrieval: dynamic-key payments use the public zero
 //! OVK, so anyone can re-encrypt the note with another memo under the same compact
 //! fields. A wallet drives dynamic IVKs with these calls:
@@ -289,6 +289,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// strand one. Nothing closes unless the stored tip and the scanned height equal
     /// `tip`, which the caller just confirmed, and closing uses the earlier of `now` and
     /// `tip`'s block time.
+    ///
+    /// That watch bounds restore discovery: a payment to a restored key after it closes
+    /// is found only by [`Self::recheck_dynamic_key_history`], and an incoming index
+    /// beyond the restored lookahead is never swept.
     pub fn close_finished_dynamic_keys(
         &mut self,
         account: AccountUuid,
@@ -680,43 +684,24 @@ fn register<P: Parameters>(
 
 /// Starts or extends trial decryption of key `id` from `from`, reopening a closed key and
 /// requeuing blocks scanned without it, or returns false while its restore sweep is
-/// pending. A swept key whose address someone was given starts no later than the block
-/// after the sweep's coverage; any other cannot have been paid since.
+/// pending.
 fn activate(
     conn: &rusqlite::Transaction<'_>,
     id: i64,
     from: BlockHeight,
 ) -> Result<bool, SqliteClientError> {
-    let (active_from, closed, quoted, swept, sweep_done): (
-        Option<u32>,
-        bool,
-        bool,
-        bool,
-        Option<u32>,
-    ) = conn.query_row(
+    let (active_from, closed, pending): (Option<u32>, bool, bool) = conn.query_row(
         "SELECT k.active_from, k.closed_at IS NOT NULL,
-                k.provider_seen = 1 OR EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
-                    WHERE o.receiving_key_id = k.id AND o.request IS NOT NULL),
-                s.receiving_key_id IS NOT NULL, s.done_height
+                s.receiving_key_id IS NOT NULL AND s.done_height IS NULL
          FROM ironwood_receiving_keys k
          LEFT JOIN ironwood_dynamic_sweeps s ON s.receiving_key_id = k.id
          WHERE k.id = ?1",
         [id],
-        |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
-        },
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
-    let from = match (active_from, swept, sweep_done) {
-        (None, true, Some(done)) if quoted => from.min(BlockHeight::from(done.saturating_add(1))),
-        (None, true, None) => return Ok(false),
-        _ => from,
-    };
+    if active_from.is_none() && pending {
+        return Ok(false);
+    }
     let scanned_end = conn
         .query_row("SELECT MAX(height) FROM blocks", [], |row| {
             row.get::<_, Option<u32>>(0)
