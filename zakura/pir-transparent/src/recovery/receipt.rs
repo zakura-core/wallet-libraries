@@ -39,7 +39,7 @@ fn receipt_token<A>(
 
 impl ReferenceRecovery {
     /// A ready batch, whose receipt the next acknowledgment must present.
-    pub(crate) fn issue_ready_batch<A>(
+    pub(super) fn issue_ready_batch<A>(
         &mut self,
         commits: Vec<TransparentLedgerCommit<A>>,
         retired_revisions: Vec<RecoveryRevision>,
@@ -82,7 +82,7 @@ impl ReferenceRecovery {
 
     /// Acknowledges a batch whose retirements a test reconciled by hand.
     #[cfg(test)]
-    pub(crate) fn acknowledge_reconciled<A>(
+    pub(super) fn acknowledge_reconciled<A>(
         &mut self,
         batch: &RecoveryBatch<A>,
     ) -> Result<(), RecoveryError> {
