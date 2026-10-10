@@ -1340,15 +1340,44 @@ macro_rules! unplaced_ledger_receive {
     };
 }
 
+/// A SQL condition that `u`, created by transaction `t`, exists only through a ledger receive
+/// that a rewind left unplaced: no public discovery or local construction also evidences it.
+macro_rules! rewound_ledger_only_receive {
+    () => {
+        concat!(
+            unplaced_ledger_receive!(),
+            " AND EXISTS (
+                 SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = u.id AND oo.origin = 2
+             ) AND NOT EXISTS (
+                 SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = u.id AND oo.origin != 2
+             )"
+        )
+    };
+}
+
 /// The conditions besides authority under which a wallet output `u`, created by transaction
 /// `t`, may fund a transaction targeting `:target_height`, each with the refusal it reports
 /// when it fails, in the order a refusal names them. A condition that evaluates to NULL fails,
 /// as it does in a WHERE clause. A spend by the `:retry_txid` transaction, when that is not
 /// null, does not count.
+///
+/// An output only a ledger receive evidences, which a rewind left unplaced, was mined, so its
+/// transaction's expiry says nothing about it: the expiry condition passes, and the observation
+/// condition decides, which waits for the account's recovery to place the receive again. An
+/// output public discovery or local construction also evidences keeps the expiry rule: under
+/// public authority nothing else would keep a dead output out.
 fn input_conditions() -> [(RefusalReason, String); 5] {
     [
-        // the transaction that created the output is mined or is definitely unexpired
-        (RefusalReason::Expired, tx_unexpired_condition("t")),
+        // the transaction that created the output is mined, is definitely unexpired, or is a
+        // recovered receive awaiting placement that nothing else evidences
+        (
+            RefusalReason::Expired,
+            format!(
+                "({}) OR ({})",
+                tx_unexpired_condition("t"),
+                rewound_ledger_only_receive!()
+            ),
+        ),
         // the output is unspent
         (
             RefusalReason::Spent,

@@ -5,7 +5,9 @@ use transparent::{
     address::Script,
     bundle::{Bundle, TxIn, TxOut},
 };
-use zcash_primitives::transaction::{Authorized, Transaction, TransactionData, TxVersion};
+use zcash_primitives::transaction::{
+    Authorized, Transaction, TransactionData, TxVersion, builder::DEFAULT_TX_EXPIRY_DELTA,
+};
 use zcash_protocol::consensus::BranchId;
 
 use crate::error::{AuthorityRefusal, RefusalReason};
@@ -512,5 +514,165 @@ fn a_rewound_receive_withdrawn_before_recovery_places_it_is_refused() {
     assert_eq!(
         check(&st, &input, next_target(&st)),
         refused(RefusalReason::Withdrawn)
+    );
+}
+
+/// Re-places `received` on the replacement chain at `floor + 3` and covers it.
+fn place_again(st: &mut State, account: AccountUuid, received: &ReceiveEvent, floor: BlockHeight) {
+    let remined = ReceiveEvent {
+        mined_height: floor + 3,
+        ..received.clone()
+    };
+    cover(st, account, &revision(1, true), vec![remined]);
+}
+
+#[test]
+fn a_rewound_receive_waits_past_the_default_expiry() {
+    let (mut st, account, _, unspent) = eligible_wallet();
+    let input = [&unspent.outpoint];
+    // The receive's transaction is known only from recovery, so its expiry is unknown. After a
+    // rewind clears its placement, the replacement chain outgrows the default expiry guess
+    // before recovery covers it.
+    let floor = unspent.mined_height - 2;
+    st.truncate_to_height(floor);
+    scan_new_blocks(&mut st, 45);
+    let target = next_target(&st);
+    assert!(BlockHeight::from(target) > unspent.mined_height + DEFAULT_TX_EXPIRY_DELTA);
+    assert_eq!(check(&st, &input, target), pending(account));
+    let lookup = st
+        .wallet()
+        .db()
+        .get_unspent_transparent_output(&unspent.outpoint, target);
+    assert!(
+        matches!(
+            &lookup,
+            Err(SqliteClientError::TransparentAuthorityUnavailable(
+                AuthorityRefusal::Pending { accounts }
+            )) if accounts == &vec![account]
+        ),
+        "{lookup:?}"
+    );
+
+    place_again(&mut st, account, &unspent, floor);
+    assert_eq!(check(&st, &input, target), Ok(()));
+}
+
+#[test]
+fn a_rewound_receive_waits_past_its_known_expiry() {
+    let (mut st, account, _, unspent) = eligible_wallet();
+    let input = [&unspent.outpoint];
+    // Enhancement recorded the receive's transaction expiry, which the replacement chain passes
+    // before recovery places the receive again.
+    let expiry = unspent.mined_height + 5;
+    conn(&st)
+        .execute(
+            "UPDATE transactions SET expiry_height = ?1 WHERE txid = ?2",
+            rusqlite::params![u32::from(expiry), unspent.outpoint.hash()],
+        )
+        .unwrap();
+    let floor = unspent.mined_height - 2;
+    st.truncate_to_height(floor);
+    scan_new_blocks(&mut st, 10);
+    let target = next_target(&st);
+    assert!(BlockHeight::from(target) > expiry);
+    assert_eq!(check(&st, &input, target), pending(account));
+
+    place_again(&mut st, account, &unspent, floor);
+    assert_eq!(check(&st, &input, target), Ok(()));
+}
+
+#[test]
+fn a_rewound_receive_public_history_also_holds_keeps_its_expiry() {
+    let (mut st, account, _, unspent) = eligible_wallet();
+    // Public discovery also found the output, whose transaction's expiry enhancement recorded.
+    let expiry = unspent.mined_height + 5;
+    conn(&st)
+        .execute(
+            "INSERT INTO tpir_output_origins (output_id, origin)
+             SELECT u.id, 0 FROM transparent_received_outputs u
+             JOIN transactions t ON t.id_tx = u.transaction_id
+             WHERE t.txid = ?1 AND u.output_index = ?2",
+            rusqlite::params![unspent.outpoint.hash(), unspent.outpoint.n()],
+        )
+        .unwrap();
+    conn(&st)
+        .execute(
+            "UPDATE transactions SET expiry_height = ?1 WHERE txid = ?2",
+            rusqlite::params![u32::from(expiry), unspent.outpoint.hash()],
+        )
+        .unwrap();
+    // A rewind leaves the receive unplaced; the user then turns private queries off, which
+    // keeps the ledger's events. The replacement chain passes the expiry.
+    st.truncate_to_height(unspent.mined_height - 2);
+    set_policy(&mut st, TransparentLedgerMode::Public);
+    scan_new_blocks(&mut st, 10);
+    let target = next_target(&st);
+    assert!(BlockHeight::from(target) > expiry);
+    // Public history is no evidence the transaction was mined: it expired, and is not spendable.
+    assert_eq!(
+        check(&st, &[&unspent.outpoint], target),
+        refused(RefusalReason::Expired)
+    );
+    assert!(
+        st.wallet()
+            .db()
+            .get_unspent_transparent_output(&unspent.outpoint, target)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Covers every watched address of `account` through the target from `revision`, adding
+/// `spends`, and repeats while the window grows.
+fn cover_spends(
+    st: &mut State,
+    account: AccountUuid,
+    revision: &RecoveryRevision,
+    spends: Vec<SpendEvent>,
+) {
+    let mut spends = Some(spends);
+    loop {
+        let ws = watch(st, account);
+        let mut c = commit(&ws);
+        c.revision = revision.clone();
+        c.spends = spends.take().unwrap_or_default();
+        c.coverage = full_coverage(&ws);
+        if !apply(st, c).unwrap().window_grew {
+            break;
+        }
+    }
+}
+
+#[test]
+fn a_rewound_spend_keeps_its_output_out_until_recovery_settles_it() {
+    let (mut st, account, _, spent) = ready_wallet();
+    activate_recovered_ledger(&mut st, account).unwrap();
+    // `ready_wallet` spends the output two blocks after receiving it. A rewind between the two
+    // keeps the receive and clears the spend's placement.
+    let floor = spent.mined_height + 1;
+    st.truncate_to_height(floor);
+    let input = [&spent.outpoint];
+
+    // While the spender may still be mined again, it competes with any new spend.
+    scan_new_blocks(&mut st, 4);
+    assert_eq!(
+        check(&st, &input, next_target(&st)),
+        refused(RefusalReason::CompetingSpend)
+    );
+    // Past the default expiry guess the spender no longer counts, but recovery has yet to cover
+    // the replacement chain: the output waits rather than becoming spendable.
+    scan_new_blocks(&mut st, DEFAULT_TX_EXPIRY_DELTA as usize);
+    assert_eq!(check(&st, &input, next_target(&st)), pending(account));
+
+    // Recovery places the spend again on the replacement chain.
+    cover_spends(
+        &mut st,
+        account,
+        &revision(1, true),
+        vec![spend(3, &spent, floor + 2)],
+    );
+    assert_eq!(
+        check(&st, &input, next_target(&st)),
+        refused(RefusalReason::CompetingSpend)
     );
 }

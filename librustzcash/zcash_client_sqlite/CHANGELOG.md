@@ -13,7 +13,10 @@ workspace.
 - An input known only from a recovered receive that a chain rewind left unplaced is no longer
   refused as `Withdrawn` while its account's recovery catches up. The input check, direct
   lookup and final storage report `AuthorityRefusal::Pending` for that account, and admit the
-  input once a later pass places the receive again. A receive withdrawn by a replacement
+  input once a later pass places the receive again. This holds however far the replacement
+  chain grows past the receive's height or its transaction's expiry: an output only such a
+  receive evidences is never `Expired`. An output public discovery or local construction also
+  evidences keeps the expiry rule, so under public authority a dead output is not spendable. A receive withdrawn by a replacement
   revision is still `Refused(Withdrawn)`, as is an unplaced one once recovery covers the tip
   without placing it. A suspended or otherwise unadmitted account is `NotAdmitted`.
 

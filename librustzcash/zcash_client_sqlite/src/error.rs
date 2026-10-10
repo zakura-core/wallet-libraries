@@ -356,7 +356,9 @@ pub enum RefusalReason {
     ChainedOutputMissing,
     /// The output is spent, or is a wallet-internal ephemeral output that is likely spent.
     Spent,
-    /// The transaction that created the output expired unmined.
+    /// The transaction that created the output expired unmined. Never an output only a
+    /// recovered receive evidences, which a rewind left unplaced: it was mined, and waits as
+    /// [`Withdrawn`](Self::Withdrawn) says.
     Expired,
     /// The output is coinbase that is immature at the target.
     ImmatureCoinbase,
