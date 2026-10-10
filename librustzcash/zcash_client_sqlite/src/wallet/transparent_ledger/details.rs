@@ -3,7 +3,8 @@
 //! Work rows (`transparent_detail_work`) are written where the wallet records a transaction of
 //! ours without its raw bytes: ledger projection and the Enhance PIR route-2 marker. Storing raw
 //! bytes deletes them. Display facts (`transparent_tx_display*`) are display only: no balance,
-//! spendability or history query reads them. See `docs/transparent-txid-enhancement.md`.
+//! spendability or history query reads them. See
+//! `docs/transparent-pir-wallet-integration.md#transparent-receipt-enhancement`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

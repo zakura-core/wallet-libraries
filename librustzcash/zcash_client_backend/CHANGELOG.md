@@ -37,7 +37,7 @@ workspace.
   own, and no shielded part in a transaction the wallet records as having one (by its raw
   bytes or, without them, by detail work, stored facts or a private-enhancement marker).
   Display facts never change balances, history classification or `details_complete`; see
-  `docs/transparent-txid-enhancement.md`.
+  [the transparent receipt enhancement guide](../../docs/transparent-pir-wallet-integration.md#transparent-receipt-enhancement).
 - `IronwoodEnhancementData::has_transparent_outputs` preserves the service's separate
   output-presence assertion for display reconstruction; note decryption authenticates the memo,
   not that assertion.

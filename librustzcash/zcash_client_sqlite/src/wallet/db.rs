@@ -777,7 +777,7 @@ CREATE INDEX idx_transparent_spend_map_transaction_id ON transparent_spend_map (
     spending_transaction_id ASC
 )"#;
 
-// Transparent ledger (`tpir_*`) tables. See `docs/transparent-pir-ledger-architecture.md`.
+// Transparent ledger (`tpir_*`) tables. See `docs/transparent-pir-wallet-integration.md`.
 
 /// The durable transparent ledger policy, as a single row.
 ///
@@ -1979,7 +1979,7 @@ CREATE TABLE tpir_transaction_metadata (
 
 /// Durable transparent txid enhancement work: one row per transaction whose transparent details
 /// the wallet wants and has no raw bytes for. Display only; see
-/// `docs/transparent-txid-enhancement.md`.
+/// `docs/transparent-pir-wallet-integration.md#transparent-receipt-enhancement`.
 ///
 /// ### Columns
 /// - `reasons`: bit set; 1 receive, 2 spend, 4 mixed.

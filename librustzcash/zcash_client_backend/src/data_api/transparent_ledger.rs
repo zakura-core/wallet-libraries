@@ -2,8 +2,8 @@
 //!
 //! This is the preparatory surface of the private transparent ledger: explicit handle modes,
 //! durable policy transitions, an honest balance-and-authority snapshot, candidate recovery,
-//! per-account activation, and history completeness; see `docs/transparent-pir-ledger-architecture.md` and
-//! `docs/transparent-pir-ledger-design-notes.md`.
+//! per-account activation, and history completeness; see
+//! `docs/transparent-pir-wallet-integration.md`.
 
 #[cfg(feature = "test-dependencies")]
 use ambassador::delegatable_trait;

@@ -2,7 +2,8 @@
 //! txid, validated display facts, and their read view.
 //!
 //! These facts are display only. They never change balances, spendability, history
-//! classification, or `details_complete`; see `docs/transparent-txid-enhancement.md`.
+//! classification, or `details_complete`; see
+//! `docs/transparent-pir-wallet-integration.md#transparent-receipt-enhancement`.
 
 use std::time::{Duration, SystemTime};
 
