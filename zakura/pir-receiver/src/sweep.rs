@@ -267,13 +267,16 @@ where
                 match swept_key.await {
                     Ok(()) => swept.finished += 1,
                     Err(e) => {
-                        // Every later key would fail the same way and back off.
-                        let unavailable = matches!(
-                            e,
-                            Error::Directory(
-                                DirectoryError::Revision | DirectoryError::Transport(_)
-                            )
-                        );
+                        // Every later key would fail the same way and back off. A session
+                        // that failed to open took the transport without replacing it.
+                        let unavailable = directory.transport.is_none()
+                            && directory.session.is_none()
+                            || matches!(
+                                e,
+                                Error::Directory(
+                                    DirectoryError::Revision | DirectoryError::Transport(_)
+                                )
+                            );
                         swept.deferred.push((account, item.key, e));
                         if unavailable {
                             break;

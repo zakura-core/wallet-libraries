@@ -5,6 +5,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
+    num::NonZeroU32,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -877,6 +878,78 @@ async fn a_revoked_session_stops_the_run_before_leasing_more_keys() {
         .filter(|r| r.starts_with("POST"))
         .count();
     assert_eq!(posts, 1);
+}
+
+/// A directory whose witness snapshot is malformed, so no session opens.
+struct MalformedWitnesses(Directory);
+
+impl Transport for MalformedWitnesses {
+    async fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>, DirectoryError> {
+        if url.contains("/v1/receiver/witness/") {
+            self.0.requests.lock().unwrap().push(format!("GET {url}"));
+            return Ok(vec![0]);
+        }
+        self.0.get(url, limit).await
+    }
+
+    async fn post(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        limit: usize,
+    ) -> Result<Vec<u8>, DirectoryError> {
+        self.0.post(url, body, limit).await
+    }
+}
+
+/// A session that fails to open stops the run, so later paid keys are neither leased
+/// nor backed off.
+#[tokio::test]
+async fn a_failed_session_open_stops_the_run_before_leasing_more_keys() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    // The batch's first two keys are paid, so each needs the session.
+    let records: Vec<_> = (0..2)
+        .map(|index| pay_restored_key(&mut st, index, index).0)
+        .collect();
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let cmxs: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
+    let directory = MalformedWitnesses(Directory::new(publish(
+        &records,
+        &cmxs,
+        through,
+        &provider(&[]),
+    )));
+    let mut notes = Notes {
+        data: BTreeMap::new(),
+        requested: Vec::new(),
+    };
+    let swept = run(&mut st, &[account], through, &directory, &mut notes, NOW)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            &swept.deferred[..],
+            [(_, key, Error::Directory(_))] if *key == KeyId::new(Purpose::Receive, 0)
+        ),
+        "{:?}",
+        swept.deferred
+    );
+    assert_eq!(swept.finished, 0);
+    let due = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_dynamic_sweeps(account, through, NOW, NonZeroU32::new(64).unwrap())
+        .unwrap()
+        .unwrap();
+    let due = |index| {
+        due.iter()
+            .any(|item| item.key == KeyId::new(Purpose::Receive, index))
+    };
+    assert!(!due(0));
+    assert!(due(1));
 }
 
 #[tokio::test]
