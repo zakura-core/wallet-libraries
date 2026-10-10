@@ -560,7 +560,7 @@ async fn seen_addresses_keep_scanning_and_are_never_issued_again() {
     assert_eq!(scanning as u64, RECEIVE_GAP_LIMIT + 3);
     // Issuance reads the same seen set, skips both, and takes the lowest address the
     // provider never had.
-    let seen = fetch_seen(ORIGIN, &directory).await.unwrap();
+    let seen = fetch_seen(ORIGIN, &directory, GENESIS).await.unwrap();
     assert_eq!(
         (seen.since(), seen.until()),
         (NOW - 2 * RESTORE_WATCH_SECS, NOW - 60)
@@ -663,7 +663,7 @@ async fn a_seen_hit_outlives_a_rejected_payment_and_a_later_miss() {
     assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
     assert!(!swept.pending);
     assert!(seen(&st));
-    let fetched = fetch_seen(ORIGIN, &b).await.unwrap();
+    let fetched = fetch_seen(ORIGIN, &b, GENESIS).await.unwrap();
     let contains = |receivers: &[[u8; 43]]| fetched.contains(receivers);
     let view = ProviderSeen {
         since: fetched.since(),
@@ -754,6 +754,27 @@ async fn a_failed_attempt_write_stops_the_run() {
     assert!(notes.requested.is_empty());
 }
 
+/// Another network's seen sets say nothing about this network's quotes, so a
+/// publication committing to another genesis is refused as a sweep refuses it.
+#[tokio::test]
+async fn seen_sets_of_another_network_are_refused() {
+    let mut st = ironwood_wallet();
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    let directory = Directory::new(publish(&[], &[], tip(&st), &provider(&[])));
+    let refused = fetch_seen(ORIGIN, &directory, [8; 32]).await;
+    assert!(
+        matches!(
+            refused,
+            Err(DirectoryError::Directory(
+                receiver_directory::Error::Coverage
+            ))
+        ),
+        "{:?}",
+        refused.err()
+    );
+    assert!(fetch_seen(ORIGIN, &directory, GENESIS).await.is_ok());
+}
+
 /// A provider with a recent set but no seen set may have had any receiver, so issuance
 /// and sweeps both refuse the publication until every provider has a dated seen set.
 /// The sets then cover the quote times they all cover, and hold what any of them holds.
@@ -782,7 +803,7 @@ async fn every_provider_with_sets_needs_a_seen_set() {
         sets
     };
     let directory = Directory::new(publish(&[], &[], through, &sets(false)));
-    let refused = fetch_seen(ORIGIN, &directory).await;
+    let refused = fetch_seen(ORIGIN, &directory, GENESIS).await;
     assert!(matches!(refused, Err(DirectoryError::Malformed)));
     let mut notes = Notes {
         data: BTreeMap::new(),
@@ -807,11 +828,11 @@ async fn every_provider_with_sets_needs_a_seen_set() {
     );
     // A publication without provider sets is refused too.
     let directory = Directory::new(publish(&[], &[], through, &[]));
-    let refused = fetch_seen(ORIGIN, &directory).await;
+    let refused = fetch_seen(ORIGIN, &directory, GENESIS).await;
     assert!(matches!(refused, Err(DirectoryError::Malformed)));
 
     let directory = Directory::new(publish(&[], &[], through, &sets(true)));
-    let seen = fetch_seen(ORIGIN, &directory).await.unwrap();
+    let seen = fetch_seen(ORIGIN, &directory, GENESIS).await.unwrap();
     assert_eq!(
         (seen.since(), seen.until()),
         (NOW - RESTORE_WATCH_SECS, NOW - 60)
