@@ -454,7 +454,7 @@ fn view_from_raw<P: consensus::Parameters>(
         spent_addresses.windows(2).any(|w| w[0] != w[1]),
         owned,
         input_count,
-        !vin.is_empty() && shielded_contribution(&transaction).is_some_and(|c| c > 0),
+        !vin.is_empty() && shielded_contribution(transaction).is_some_and(|c| c > 0),
         &outputs,
         false,
     );
