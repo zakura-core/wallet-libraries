@@ -63,8 +63,8 @@ impl KeyId {
         let mut suffix = [0; 9];
         suffix[0] = self.purpose.code();
         suffix[1..].copy_from_slice(&self.index.to_le_bytes());
-        let rivk = expand_rivk(&bytes, RIVK_DOMAIN, &suffix);
-        bytes[64..].copy_from_slice(&rivk);
+        let rivk = Zeroizing::new(expand_rivk(&bytes, RIVK_DOMAIN, &suffix));
+        bytes[64..].copy_from_slice(&*rivk);
         // Parsing checks both external and derived internal IVKs.
         FullViewingKey::from_bytes(&bytes).ok_or(DerivationError)
     }
