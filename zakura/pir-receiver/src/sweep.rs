@@ -89,7 +89,9 @@ pub trait NoteSource<W: DynamicIvkRead> {
 
 /// Note data over Enhance PIR. Its session opens on first use, accepted against the
 /// wallet's scanned chain, so a run whose lookups find nothing makes no Enhance
-/// request.
+/// request. A later batch first accepts fresh routing if Enhance says a refresh is
+/// due: thirty seconds on, or after a 409 or 410. A failed batch is not retried; the
+/// next call refreshes.
 pub struct EnhanceNotes<'a, T, P> {
     origin: &'a str,
     transport: &'a T,
@@ -125,7 +127,7 @@ where
         if positions.is_empty() {
             return Ok(note_data);
         }
-        if self.session.is_none() {
+        if self.session.as_ref().is_none_or(Client::refresh_due) {
             let pending = PendingClient::fetch(self.transport, self.origin).await?;
             let limits = ClientResourceLimits::with_cache(32768, 2);
             let accepted = acceptance(wallet, pending.manifest(), self.params, limits)
@@ -143,7 +145,10 @@ where
                     ));
                 }
             };
-            self.session = Some(pending.accept(&accepted)?);
+            match &mut self.session {
+                Some(session) => session.accept_routing(pending, &accepted)?,
+                None => self.session = Some(pending.accept(&accepted)?),
+            }
         }
         let session = self.session.as_mut().expect("opened above");
         // Enhance groups these positions into shared row requests itself.

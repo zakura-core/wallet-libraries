@@ -27,9 +27,13 @@ receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "0d6ad4
 
 [dev-dependencies]
 axum = "0.7"
+base64.workspace = true
+hex.workspace = true
 orchard.workspace = true
 receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "0d6ad4aa94abbb2838d4182c869f06e1881e6c35", features = ["server"] }
 receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", rev = "0d6ad4aa94abbb2838d4182c869f06e1881e6c35" }
+serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower = { workspace = true, features = ["util"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }

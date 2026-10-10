@@ -8262,10 +8262,14 @@ name = "zakura-pir-receiver"
 version = "0.0.1-rc0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "futures-util",
+ "hex",
  "receiver-directory",
  "receiver-pir",
  "receiver-pir-server",
+ "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
  "tower",

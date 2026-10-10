@@ -38,3 +38,5 @@ lookahead past it, repeats no finished sweep, imports every payment of a key pai
 twice, makes no lookup when nothing was paid, keeps scanning only recently quoted
 addresses, keeps every address scanning when a recent set cannot vouch for the
 whole watch or a provider has none, and refuses a publication that is not on its chain before any lookup.
+Against a fake Enhance service, `EnhanceNotes` accepts fresh routing after a refused
+query.

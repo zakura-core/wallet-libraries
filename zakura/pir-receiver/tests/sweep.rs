@@ -2,9 +2,10 @@
 //! directory served in process, over the service's own routes and real PIR, and
 //! imports what it finds only after checking it against its own chain.
 
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{cell::Cell, collections::BTreeMap, sync::Mutex};
 
 use axum::{Router, body::Body, http::Request};
+use base64::Engine as _;
 use orchard::{
     keys::{FullViewingKey, Scope},
     note_encryption::{CompactAction, IronwoodDomain, IronwoodNoteEncryption},
@@ -16,11 +17,13 @@ use receiver_directory::{
 };
 use receiver_pir::{MIN_ROWS, server::Server};
 use receiver_pir_server::{Publication, Publications, router_with_publications};
+use sha2::{Digest as _, Sha256};
 use tower::ServiceExt as _;
 use zakura_dynamic_ivk::lifecycle::RESTORE_WATCH_SECS;
 use zakura_pir_enhance::{
-    ClientError,
+    ClientError, QueryBinding, ShardSession,
     transport::{Request as EnhanceRequest, ResponseBody, Transport as EnhanceTransport},
+    types,
 };
 use zakura_pir_receiver::{
     DirectoryError, EnhanceNotes, Error, NoteSource, Transport, WriteLock, fetch_seen, sweep,
@@ -42,7 +45,14 @@ use zcash_client_sqlite::{
 };
 use zcash_note_encryption::{Domain as _, try_compact_note_decryption};
 use zcash_primitives::block::BlockHash;
-use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork, value::Zatoshis};
+use zcash_protocol::{
+    consensus::{BlockHeight, NetworkType, NetworkUpgrade, Parameters},
+    local_consensus::LocalNetwork,
+    value::Zatoshis,
+};
+
+#[path = "../../pir-enhance/src/test_support.rs"]
+mod test_support;
 
 type State = TestState<BlockCache, TestDb, LocalNetwork>;
 
@@ -845,4 +855,113 @@ async fn enhance_notes_open_no_session_until_a_payment_needs_note_data() {
     let mut notes = EnhanceNotes::new("https://enhance.test", &NoEnhance, st.network());
     let data = notes.note_data(st.wallet().db(), Vec::new()).await.unwrap();
     assert!(data.is_empty());
+}
+
+/// The test network's upgrades under mainnet's network type, the only one Enhance PIR
+/// accepts.
+#[derive(Clone)]
+struct EnhanceNetwork(LocalNetwork);
+
+impl Parameters for EnhanceNetwork {
+    fn network_type(&self) -> NetworkType {
+        NetworkType::Main
+    }
+
+    fn activation_height(&self, nu: NetworkUpgrade) -> Option<BlockHeight> {
+        self.0.activation_height(nu)
+    }
+}
+
+/// An Enhance service over an all-zero database whose first query is refused with
+/// `status`. It counts manifest fetches and queries.
+struct RefusingEnhance {
+    manifest: Vec<u8>,
+    session: Vec<u8>,
+    rows: u64,
+    status: Cell<Option<u16>>,
+    inits: Cell<usize>,
+    queries: Cell<usize>,
+}
+
+impl RefusingEnhance {
+    /// A service whose manifest ends at `anchor`, covering `records` Ironwood outputs.
+    fn new(anchor: ChainPoint, records: u64, status: u16) -> Self {
+        let public = |rows| vec![0; types::session_public_len(rows).unwrap()];
+        let mut manifest = test_support::synthetic_manifest(
+            records,
+            |shard| hex::encode(Sha256::digest(public(shard.logical_rows))),
+            &"00".repeat(32),
+        );
+        let rows = manifest.coverage.shards[0].logical_rows;
+        manifest.anchor_height = u32::from(anchor.height).into();
+        manifest.anchor_block_hash = anchor.hash.to_string();
+        let session = ShardSession {
+            session_id: hex::encode(manifest.session_id(0).unwrap()),
+            generation: manifest.generation,
+            shard_id: 0,
+            params: types::parameters(rows).unwrap(),
+            public_params_base64: base64::engine::general_purpose::STANDARD.encode(public(rows)),
+        };
+        Self {
+            manifest: serde_json::to_vec(&manifest).unwrap(),
+            session: serde_json::to_vec(&session).unwrap(),
+            rows,
+            status: Cell::new(Some(status)),
+            inits: Cell::new(0),
+            queries: Cell::new(0),
+        }
+    }
+}
+
+impl EnhanceTransport for RefusingEnhance {
+    async fn execute(&self, request: EnhanceRequest) -> Result<ResponseBody, ClientError> {
+        let bytes = if request.url.ends_with("/v1/enhance/init") {
+            self.inits.set(self.inits.get() + 1);
+            self.manifest.clone()
+        } else if request.url.contains("/v1/enhance/session/") {
+            self.session.clone()
+        } else if request.url.ends_with("/v1/enhance/query") {
+            self.queries.set(self.queries.get() + 1);
+            if let Some(status) = self.status.take() {
+                return Err(ClientError::HttpStatus(status));
+            }
+            // Zero public material and a zero response decode to an all-zero row.
+            let mut response = QueryBinding::decode(&request.body).unwrap().encode();
+            response.resize(types::response_len(self.rows).unwrap(), 0);
+            response
+        } else {
+            panic!("unexpected endpoint: {}", request.url);
+        };
+        let mut body = request.response_body();
+        body.extend(&bytes)?;
+        Ok(body.finish())
+    }
+}
+
+#[tokio::test]
+async fn enhance_notes_accept_fresh_routing_after_a_refused_query() {
+    for status in [409, 410] {
+        let mut st = ironwood_wallet();
+        pay_restored_key(&mut st, 0, 0);
+        let anchor = tip(&st);
+        let records = st
+            .wallet()
+            .block_metadata(anchor.height)
+            .unwrap()
+            .unwrap()
+            .ironwood_tree_size()
+            .unwrap();
+        let enhance = RefusingEnhance::new(anchor, records.into(), status);
+        let network = EnhanceNetwork(*st.network());
+        let mut notes = EnhanceNotes::new("https://enhance.test", &enhance, &network);
+        let refused = notes.note_data(st.wallet().db(), vec![0]).await;
+        assert!(
+            matches!(refused, Err(Error::NoteData(ClientError::HttpStatus(s))) if s == status),
+            "{refused:?}"
+        );
+        // The same notes fetch and accept the routing again before the next batch.
+        let data = notes.note_data(st.wallet().db(), vec![0]).await.unwrap();
+        assert_eq!(data, BTreeMap::from([(0, [0; 528])]));
+        assert_eq!((enhance.inits.get(), enhance.queries.get()), (2, 2));
+    }
 }
