@@ -206,7 +206,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
                 Ok(from) => from,
                 Err(policy) => return Ok(Err(policy)),
             };
-            reservations::prepare(conn, params, account, now, scan_from, seen)
+            let issued = reservations::prepare(conn, params, account, now, scan_from, seen)?;
+            // In a restored account, issuance moves the lookahead (see
+            // `recovery::maintain_receive_lookahead`), so its sweep can run before the next.
+            recovery::extend_receive_lookahead(conn, params, account, registered_at)?;
+            Ok(issued)
         })
     }
 
