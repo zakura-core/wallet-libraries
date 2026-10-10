@@ -63,10 +63,14 @@ impl EncryptedNote {
             && self.0[96..148] == prefix
     }
 
-    /// Derives the expected key and authenticates the full note, including its memo.
-    /// Returns `None` if derivation, decoding or authentication fails, or the note is
-    /// not a v3 note to the key's address; that never shows the receiver is unused.
-    /// This deliberately does not use the public zero OVK to establish ownership.
+    /// Derives the expected key and authenticates the note. Returns `None` if
+    /// derivation, decoding or authentication fails, or the note is not a v3 note to
+    /// the key's address; that never shows the receiver is unused. This deliberately
+    /// does not use the public zero OVK to establish ownership.
+    ///
+    /// The memo is discarded because nothing binds it to the chain: anyone who can
+    /// recover the note, for example through the public zero OVK, can re-encrypt it
+    /// with another memo that still decrypts and matches every compact field.
     pub fn decrypt(&self, account: &FullViewingKey, key_id: KeyId) -> Option<RecoveredNote> {
         let key = key_id.derive(account).ok()?;
         let nf =
@@ -80,7 +84,7 @@ impl EncryptedNote {
             self.ephemeral_key(),
             self.0[96..148].try_into().unwrap(),
         );
-        let (note, recipient, memo) = try_note_decryption(
+        let (note, recipient, _) = try_note_decryption(
             &IronwoodDomain::for_compact_action(&compact),
             &key.to_ivk(Scope::External).prepare(),
             self,
@@ -91,7 +95,6 @@ impl EncryptedNote {
         Some(RecoveredNote {
             nullifier: note.nullifier(&key),
             note,
-            memo,
         })
     }
 }
@@ -111,17 +114,12 @@ impl ShieldedOutput<IronwoodDomain, 580> for EncryptedNote {
 /// Viewing material and plaintext deliberately have no Debug implementation.
 pub struct RecoveredNote {
     note: Note,
-    memo: [u8; 512],
     nullifier: Nullifier,
 }
 impl RecoveredNote {
     /// Authenticated note plaintext.
     pub fn note(&self) -> &Note {
         &self.note
-    }
-    /// Authenticated memo plaintext.
-    pub fn memo(&self) -> &[u8; 512] {
-        &self.memo
     }
     /// This received note's spend nullifier, computed locally from its derived FVK.
     pub fn nullifier(&self) -> &Nullifier {
