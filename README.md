@@ -54,6 +54,11 @@ or `zakura/` and are listed in `layout.extra_members` in
 `manifests/sources.toml`. Checked-in protobuf bindings have an explicit
 regeneration command, separate from ordinary builds.
 
+The unpublished [dynamic IVK](zakura/dynamic-ivk/README.md) crate provides shared
+derivation of receiving keys that keep an account's spending authority with their
+own incoming viewing keys, and refund memo helpers, with an Ironwood proof test for
+mixed ordinary, refund, and incoming inputs.
+
 ## How the rewiring works
 
 Nothing is patched at the source level. `manifests/sources.toml` holds a
