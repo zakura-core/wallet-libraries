@@ -306,7 +306,7 @@ impl Transport for Directory {
     }
 }
 
-/// Note data from a fixed map, recording each request that needs some.
+/// Note data from a fixed map, recording each request.
 struct Notes {
     data: BTreeMap<u64, [u8; 528]>,
     requested: Vec<Vec<u64>>,
@@ -318,9 +318,7 @@ impl<W: DynamicIvkRead> NoteSource<W> for Notes {
         _: &W,
         positions: Vec<u64>,
     ) -> Result<BTreeMap<u64, [u8; 528]>, Error<W::Error>> {
-        if !positions.is_empty() {
-            self.requested.push(positions.clone());
-        }
+        self.requested.push(positions.clone());
         Ok(positions
             .into_iter()
             .filter_map(|position| Some((position, *self.data.get(&position)?)))
@@ -479,8 +477,7 @@ async fn a_long_history_takes_its_note_data_in_batches() {
     );
 }
 
-/// Note data keyed by the position after each requested one, counting the requests
-/// that need some.
+/// Note data keyed by the position after each requested one, counting the requests.
 struct Mislabeled {
     data: [u8; 528],
     calls: usize,
@@ -492,9 +489,6 @@ impl<W: DynamicIvkRead> NoteSource<W> for Mislabeled {
         _: &W,
         positions: Vec<u64>,
     ) -> Result<BTreeMap<u64, [u8; 528]>, Error<W::Error>> {
-        if positions.is_empty() {
-            return Ok(BTreeMap::new());
-        }
         self.calls += 1;
         assert!(self.calls <= 3, "the sweep keeps asking for {positions:?}");
         Ok(positions.into_iter().map(|p| (p + 1, self.data)).collect())
@@ -548,6 +542,19 @@ async fn note_data_for_other_positions_is_missing_data() {
     assert_eq!(st.get_total_balance(account), Zatoshis::ZERO);
 }
 
+/// A note source that fails every call.
+struct NoNotes;
+
+impl<W: DynamicIvkRead> NoteSource<W> for NoNotes {
+    async fn note_data(
+        &mut self,
+        _: &W,
+        _: Vec<u64>,
+    ) -> Result<BTreeMap<u64, [u8; 528]>, Error<W::Error>> {
+        Err(Error::Unavailable("no note data"))
+    }
+}
+
 #[tokio::test]
 async fn a_wallet_without_payments_downloads_only_the_filters() {
     let mut st = ironwood_wallet();
@@ -557,10 +564,6 @@ async fn a_wallet_without_payments_downloads_only_the_filters() {
     restore(&mut st, account);
     let through = tip(&st);
     let directory = Directory::new(publish(&[], &[], through, &provider(&[])));
-    let mut notes = Notes {
-        data: BTreeMap::new(),
-        requested: Vec::new(),
-    };
     let swept = sweep(
         st.wallet_mut().db_mut(),
         &network,
@@ -569,7 +572,7 @@ async fn a_wallet_without_payments_downloads_only_the_filters() {
         GENESIS,
         ORIGIN,
         &directory,
-        &mut notes,
+        &mut NoNotes,
         &NoLock,
         NOW,
     )
@@ -582,7 +585,6 @@ async fn a_wallet_without_payments_downloads_only_the_filters() {
     let requests = directory.requests();
     assert_eq!(requests.len(), 2, "{requests:?}");
     assert!(requests[1].starts_with("GET /v1/receiver/filters/"));
-    assert!(notes.requested.is_empty());
     // Every swept key keeps scanning, so a payment after the publication is found.
     let scanning = st.wallet().get_dynamic_scanning_keys().unwrap().len();
     assert_eq!(scanning as u64, RECEIVE_GAP_LIMIT);

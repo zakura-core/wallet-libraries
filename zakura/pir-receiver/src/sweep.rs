@@ -76,6 +76,7 @@ pub trait WriteLock {
 pub trait NoteSource<W: DynamicIvkRead> {
     /// The 528 ciphertext bytes after the directory's prefix for each of `positions`,
     /// keyed by commitment tree position. `wallet` is the wallet being swept.
+    /// `positions` is never empty when a sweep calls this.
     async fn note_data(
         &mut self,
         wallet: &W,
@@ -495,7 +496,11 @@ where
             .into_iter()
             .take(NOTE_BATCH)
             .collect();
-        let note_data = notes.note_data(wallet, batch.clone()).await?;
+        let note_data = if batch.is_empty() {
+            BTreeMap::new()
+        } else {
+            notes.note_data(wallet, batch.clone()).await?
+        };
         let done = lock
             .write("dynamic_sweep.queue", || {
                 wallet.queue_directory_lookup(account, key, anchor, &payments, &note_data)
