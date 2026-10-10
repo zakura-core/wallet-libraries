@@ -411,6 +411,61 @@ fn incoming_key_closes_only_once_paid_and_released() {
     assert!(scanning_keys(&st).is_empty());
 }
 
+/// A released paid reservation keeps following its funded operation: a newer status that
+/// raises the payout reopens its closed key, which then finds the remainder. An older
+/// status leaves it closed.
+#[test]
+fn a_corrected_payout_reopens_a_released_incoming_key() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let from = next_height(&st);
+    let now = registered_at();
+    let deadline = now + HOUR;
+    let db = st.wallet_mut().db_mut();
+    let key = prepare_from(db, account, now, from, None).unwrap().unwrap();
+    let index = key.key_id().index();
+    tx(db, |c, _| {
+        store::reservations::begin(c, account, index, "swap", deadline, now)
+    })
+    .unwrap()
+    .unwrap();
+    db.finish_receive_operation(account, "swap", &accepted("swap", None, deadline))
+        .unwrap();
+    db.start_receive_operation(account, "swap")
+        .unwrap()
+        .unwrap();
+    pay(&mut st, &key, 50_000);
+    confirm(&mut st);
+    let success = |st: &mut State, amount_out: u64, at: i64| {
+        let status = NearStatus {
+            status: "SUCCESS",
+            amount_out: Some(Zatoshis::const_from_u64(amount_out)),
+            deadline: Some(deadline),
+            ..Default::default()
+        };
+        let observation = near_observation(Purpose::Receive, &status);
+        st.wallet_mut()
+            .db_mut()
+            .record_operation_status(account, "swap", None, observation, true, at)
+            .unwrap();
+    };
+    let first = now + 2 * HOUR;
+    success(&mut st, 50_000, first);
+    assert_eq!(close(&mut st, first), 1);
+    let remainder = pay(&mut st, &key, 50_000);
+    success(&mut st, 100_000, first - 1);
+    assert!(scanning_keys(&st).is_empty());
+    success(&mut st, 100_000, first + HOUR);
+    assert_eq!(scanning_keys(&st), [key.key_id()]);
+    // The reopened key rescans from its start.
+    let rescanned = usize::try_from(u32::from(remainder) - u32::from(from) + 1).unwrap();
+    st.scan_cached_blocks_with_dynamic_ivks(from, rescanned);
+    assert_eq!(unspent_keys(&st, remainder), [Some(key.key_id()); 2]);
+    assert_eq!(close(&mut st, first + HOUR), 0);
+    confirm(&mut st);
+    assert_eq!(close(&mut st, first + HOUR), 1);
+}
+
 #[test]
 fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
     let mut st = scanned_wallet();

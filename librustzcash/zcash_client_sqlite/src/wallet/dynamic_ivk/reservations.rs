@@ -171,6 +171,23 @@ fn release(conn: &Connection, key: i64, now: i64) -> Result<(), SqliteClientErro
     Ok(())
 }
 
+/// Whether key `key`'s operations expect nothing its mined notes lack: the settlement
+/// `lifecycle::close_finished` closes a key on, before confirmations.
+fn settled(conn: &Connection, key: i64) -> Result<bool, SqliteClientError> {
+    Ok(conn.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM ironwood_dynamic_operations
+                WHERE receiving_key_id = ?1 AND expectation IN (0, 3, 4))
+            AND (SELECT COALESCE(SUM(COALESCE(expected_value, 1)), 0)
+                FROM ironwood_dynamic_operations
+                WHERE receiving_key_id = ?1 AND expectation = 2)
+             <= (SELECT COALESCE(SUM(n.value), 0) FROM ironwood_received_notes n
+                JOIN transactions t ON t.id_tx = n.transaction_id
+                WHERE n.receiving_key_id = ?1 AND t.mined_height IS NOT NULL)",
+        [key],
+        |r| r.get(0),
+    )?)
+}
+
 /// Releases key `key`'s reservation and stops scanning it.
 fn abandon(conn: &Connection, key: i64, now: i64) -> Result<(), SqliteClientError> {
     release(conn, key, now)?;
@@ -397,8 +414,8 @@ pub(super) fn start(
     Ok(Ok(deposit))
 }
 
-/// See `WalletDb::record_operation_status`. An incoming operation is updated only while
-/// its reservation is open.
+/// See `WalletDb::record_operation_status`. An incoming operation is updated while its
+/// reservation is open, and after release if its key was paid and it was funded.
 pub(super) fn record_status<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -412,27 +429,31 @@ pub(super) fn record_status<P: Parameters>(
         return Err(invalid("empty deposit address"));
     }
     // A refund key starts on a refund owed if it never started, or reopens if it closed
-    // while this operation expected no refund.
+    // while this operation expected no refund. A closed incoming key reopens if this
+    // observation unsettles it.
     let operations = conn
         .prepare(&format!(
             "SELECT o.id, k.id,
                 k.purpose = 0 AND (k.active_from IS NULL
                     OR (k.closed_at IS NOT NULL AND o.expectation NOT IN (2, 3))),
-                COALESCE(k.active_from, k.scan_from)
+                COALESCE(k.active_from, k.scan_from),
+                k.purpose = 1 AND k.closed_at IS NOT NULL
              FROM ironwood_dynamic_operations o
              JOIN ironwood_receiving_keys k ON k.id = o.receiving_key_id
              JOIN accounts a ON a.id = k.account_id
              WHERE a.uuid = ?1 AND o.reference = ?2 AND o.memo IS ?3
-               AND (k.purpose = 0 OR {RESERVED})"
+               AND (k.purpose = 0 OR {RESERVED} OR (k.used = 1 AND (o.funded = 1 OR ?4)))"
         ))?
-        .query_map(params![account.0, deposit, memo], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        .query_map(params![account.0, deposit, memo, funded], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?
-        .collect::<Result<Vec<(i64, i64, bool, u32)>, _>>()?;
+        .collect::<Result<Vec<(i64, i64, bool, u32, bool)>, _>>()?;
     let refund_owed = matches!(observation.status, Terminal(Positive(_) | Unknown));
-    for &(id, key, startable, scan_from) in &operations {
+    for &(id, key, startable, scan_from, closed_incoming) in &operations {
+        let was_settled = closed_incoming && settled(conn, key)?;
         let current = record(conn, id, observation, funded, now)?;
-        if current && startable && refund_owed {
+        let unsettled = was_settled && current && !settled(conn, key)?;
+        if (current && startable && refund_owed) || unsettled {
             // A refund key whose restore sweep is pending starts when the sweep finishes.
             activate(conn, key, BlockHeight::from(scan_from))?;
         }
