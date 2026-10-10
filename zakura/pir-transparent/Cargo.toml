@@ -71,3 +71,7 @@ required-features = ["wallet"]
 [[test]]
 name = "private_recovery"
 required-features = ["sqlite"]
+
+[[test]]
+name = "private_discovery"
+required-features = ["wallet"]

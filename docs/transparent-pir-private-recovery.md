@@ -557,7 +557,11 @@ Under `PrivateRequired`:
 The service still sees shard ids, which reveal activity ranges; the filter range
 from the floor to the tip; request counts, sizes and timing; and the network
 origin when Tor is off. Broadcasting a shield or spend publishes its transparent
-outpoints through `SendTransaction`. Turning the setting off re-stamps
+outpoints through `SendTransaction`. An import's account discovery adds one
+more walk of the filters from the birthday's shard, and private queries on the
+shards where any candidate's filter matched, false positives included; the
+recovery passes for the accounts it imports follow at once, so the two can be
+linked. Turning the setting off re-stamps
 `tx_retrieval_queue` and queues the transactions routed to lightwalletd for
 public retrieval, so txids learned privately are disclosed publicly at once,
 and the next sync looks up every transparent address of every account. Vizor
@@ -582,9 +586,9 @@ These hold under the development flag; PR 2 mirrors them in the design notes.
 | Re-cut epoch | Once a ready pass shows the store followed a re-cut, a map at a lower epoch that the sync refuses as a rewrite is `Pending` rather than `Withdrawn` for that companion. A map that served a forged high epoch the store followed can thus soften a later real contradiction to `Pending`, retried every pass instead of held; it never holds back a map that rewrites nothing the store holds. | Undo a re-cut with another at a higher epoch. |
 | Origin change | A debug override creates new sources; the previous origin's provisional tail evidence is never withdrawn. | Debug builds only. |
 | Withdrawn | Every cause holds the account for 1 h, then it retries; holds are in memory, so a restart retries once. | A lagging replica is `Pending`, not `Withdrawn`. No new durable state. |
-| Pauses | Hard caps pause recovery, passes fail during a rescan, and a restore under private mode does not find transparent-only accounts. | Fails closed. |
+| Pauses | Hard caps pause recovery, and passes fail during a rescan. | Fails closed. |
 | Service edges | A tail ahead of the wallet is not hash-bound, a server rollback stalls, and rc7 is not a supported rollback target. | — |
-| Cost | Filters are downloaded per account, about 0.8–28 MB. About 91 commits are re-applied per account per pass, and about one `tpir_revisions` row is added per block per account. A re-cut does not shrink the commit count: facts stored under superseded revisions keep being exported under them, beside commits for the re-cut shards that later scripts retrieve. Up to 180 s of post-completion work delays the next sync. | No cross-account filter cache, and `tpir_revisions` is not pruned. |
+| Cost | Filters are downloaded per account, about 0.8–28 MB, and once more by an import's account discovery. About 91 commits are re-applied per account per pass, and about one `tpir_revisions` row is added per block per account. A re-cut does not shrink the commit count: facts stored under superseded revisions keep being exported under them, beside commits for the re-cut shards that later scripts retrieve. Up to 180 s of post-completion work delays the next sync. | No cross-account filter cache, and `tpir_revisions` is not pruned. |
 | Test builds | `valar-spiral-rs` runs without overflow checks in every wallet-libraries test build, including Enhance PIR tests. | Mirrors wallet-pir's exemption. |
 
 Not built: a verifier, attestation or trusted-source registry; revision
