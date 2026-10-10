@@ -265,7 +265,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// sticks. A deadline only fills a missing one, so a status can neither
     /// close a key early nor hold it open. A refund key this wallet never funded starts
     /// at its issuance point on a refund owed or an inconclusive end, in case the deposit
-    /// was paid from elsewhere.
+    /// was paid from elsewhere. A closed refund key reopens, rescanning from its start,
+    /// when a status newly reports either.
     pub fn record_operation_status(
         &mut self,
         account: AccountUuid,
