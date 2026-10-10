@@ -609,7 +609,74 @@ fn undone_incoming_sweep_blocks_new_reservations() {
     );
     finish_sweep(st.wallet_mut().db_mut(), account, swept, through);
     // Issuance resumes at the lowest address never quoted.
-    assert_eq!(prepare(&mut st, NOW).key_id().index(), 0);
+    let issued = try_prepare(&mut st, NOW, Some(&covering_seen()));
+    assert_eq!(issued.unwrap().unwrap().key_id().index(), 0);
+}
+
+/// A restored address without local quotes is issued only once a seen set covers
+/// every time it can have been quoted, from [`EARLIEST_RECEIVE_QUOTE`] to its
+/// registration here, and lacks it. Without that evidence issuance waits rather than
+/// skipping ahead.
+#[test]
+fn restored_addresses_need_seen_evidence_covering_their_quotes() {
+    let fixture = || {
+        let mut st = fixture();
+        let account = st.test_account().unwrap().id();
+        let swept_at = tip(&st);
+        let db = st.wallet_mut().db_mut();
+        let key = watch(db, account, 0, swept_at.height);
+        finish_sweep(db, account, key.key_id(), swept_at);
+        let receiver = key.receiver().to_raw_address_bytes();
+        (st, receiver)
+    };
+    let registered = clock_now();
+    let covered = registered + SEEN_SLACK_SECONDS;
+    let issue = |st: &mut State, since, until, held: &[[u8; 43]]| {
+        let contains =
+            |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
+        let seen = ProviderSeen {
+            since,
+            until,
+            contains: &contains,
+        };
+        try_prepare(st, registered, Some(&seen)).unwrap()
+    };
+    let (mut st, receiver) = fixture();
+    let gap = Err(ReservationPolicy::Gap);
+    // The feed started too late, or its read ends before the key was recovered here.
+    assert_eq!(
+        issue(&mut st, EARLIEST_RECEIVE_QUOTE + 1, covered, &[]).map(|k| k.key_id()),
+        gap
+    );
+    assert_eq!(
+        issue(&mut st, EARLIEST_RECEIVE_QUOTE, covered - 1, &[]).map(|k| k.key_id()),
+        gap
+    );
+    assert_eq!(
+        try_prepare(&mut st, registered, None)
+            .unwrap()
+            .map(|k| k.key_id()),
+        gap
+    );
+    let issued = issue(&mut st, EARLIEST_RECEIVE_QUOTE, covered, &[]).unwrap();
+    assert_eq!(issued.key_id().index(), 0);
+
+    // A covering set that holds it marks it seen, and issuance moves past it.
+    let (mut st, receiver_0) = fixture();
+    assert_eq!(receiver_0, receiver);
+    let issued = issue(&mut st, EARLIEST_RECEIVE_QUOTE, covered, &[receiver]).unwrap();
+    assert_eq!(issued.key_id().index(), 1);
+    let seen: bool = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT provider_seen FROM ironwood_receiving_keys
+             WHERE purpose = 1 AND key_index = ?1",
+            [0u64.to_be_bytes()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(seen);
 }
 
 #[test]
@@ -629,11 +696,16 @@ fn issuance_skips_restored_addresses_the_provider_saw() {
             .unwrap()
             .unwrap();
     }
-    assert_eq!(prepare(&mut st, NOW).key_id().index(), 3);
+    let covered = |st: &mut State| {
+        try_prepare(st, NOW, Some(&covering_seen()))
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(covered(&mut st).key_id().index(), 3);
     // Seen addresses move the gap and are never reused, even once every other address
     // in the window was quoted and abandoned, nor is one accepted here.
     abandon_indices(&mut st, 4..RECEIVE_GAP_LIMIT + 3);
-    let draft = prepare(&mut st, NOW);
+    let draft = covered(&mut st);
     assert_eq!(draft.key_id().index(), 3);
     quote(&mut st, &draft, "after-restore", true);
     let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
@@ -715,7 +787,7 @@ fn issuance_starts_after_the_scanned_tip_once_the_restore_lookahead_is_swept() {
         finish_sweep(db, account, key.key_id(), through);
     }
     let r = db
-        .prepare_receive_reservation(account, NOW, near, None)
+        .prepare_receive_reservation(account, NOW, near, Some(&covering_seen()))
         .unwrap()
         .unwrap();
     // Issuance takes the lowest address never quoted.

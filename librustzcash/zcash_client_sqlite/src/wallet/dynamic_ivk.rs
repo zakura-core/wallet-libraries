@@ -47,8 +47,8 @@ pub(crate) use planner::{begin_sweep_attempt, history_pending, prepare_sweeps};
 pub(crate) use recovery::maintain;
 pub(crate) use reservations::RECEIVE_LOOKAHEAD;
 pub use reservations::{
-    OperationOutcome, ProviderSeen, RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, ReceiveDeposit,
-    SEEN_SLACK_SECONDS,
+    EARLIEST_RECEIVE_QUOTE, OperationOutcome, ProviderSeen, RECEIVE_GAP_LIMIT,
+    RECEIVE_RECLAIM_SECONDS, ReceiveDeposit, SEEN_SLACK_SECONDS,
 };
 pub(crate) use retention::finish_nullifier_recovery;
 pub(crate) use sweep::{note_data_needed, publication_anchor, queue_directory_lookup};
@@ -83,7 +83,8 @@ use crate::{AccountUuid, WalletDb, error::SqliteClientError, util::Clock};
 /// Why issuance or an incoming operation must wait. The app owns its wording.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReservationPolicy {
-    /// Recovery has not established the next safe index.
+    /// Recovery has not established the next safe index, for example because no seen set
+    /// covers a restored address's possible quotes (see [`ProviderSeen`]).
     Gap,
     /// Swaps in progress hold every incoming index the recovery gap allows.
     Limit,

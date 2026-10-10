@@ -146,6 +146,9 @@ workspace.
   one with an accepted quote, or one with a quote the set's read does not yet cover (or
   any quote, without a set) is never issued, and a draft whose address was seen is
   abandoned. Seen addresses move the gap like paid ones, since a restore walks past them.
+  A registered address without local quotes, such as a restored one, is issued only when
+  the set lacks it and covers its quotes from `EARLIEST_RECEIVE_QUOTE` until this wallet
+  registered it; otherwise issuance returns `ReservationPolicy::Gap`.
 - Operations: each quote is one provider operation. An incoming one is
   `begin_receive_operation`, `finish_receive_operation` (`OperationOutcome`) and
   `start_receive_operation`, which returns the `ReceiveDeposit` to show; an accepted
