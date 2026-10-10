@@ -26,8 +26,9 @@ owns reservation, persistence, coverage, lifecycle, and note selection. There is
 no alternate balance store in this crate.
 
 The SQLite backend implements this contract with its `orchard` feature: durable
-key registration, scanning, completion, and restore sweeps. Its rustdoc, starting
-at `zcash_client_sqlite::wallet::dynamic_ivk`, documents the calls a wallet makes.
+key registration, scanning, completion, and the restore sweeps that
+`zakura-pir-receiver` runs. Its rustdoc, starting at
+`zcash_client_sqlite::wallet::dynamic_ivk`, documents the calls a wallet makes.
 
 Software PCZT signing of dynamic-key notes works through the same builder.
 Hardware signers need firmware qualification before dynamic keys are enabled for
