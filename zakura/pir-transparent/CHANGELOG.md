@@ -24,6 +24,14 @@
   A 44-bit query is 27,648 bytes plus `rows × 44 / 8` after the binding, where
   the 49-bit one needs `rows × 49 / 8`; the end-to-end tests check that every
   query they send is the 44-bit length.
+- A pages query to a growing tail selects over only the page rows its
+  revision's manifest says it holds, rounded up to whole 2,048-row blocks,
+  instead of the whole segment (wallet-pir `9d2cbda0`). The count comes only
+  from digest-bound manifest fields every wallet shares, never from the row a
+  query selects. A `recent-8k` tail's pages query shrinks from 72,712 bytes to
+  as little as 38,920. Sealed shards, multi-segment shards and directory
+  queries keep the full length, and the service must accept prefix
+  selections (wallet-pir `0f89fbe0` or later).
 - Declared re-cuts. A sealed revision the shard map declares a re-cut
   superseded stays current, and facts stored under it are exported under the
   revision triple the wallet already holds; the renumbered shards and tail

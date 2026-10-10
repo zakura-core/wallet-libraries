@@ -70,6 +70,9 @@ const ROUTES: &str = r"^(GET /v1/(filters/shards(/[0-9]+/filter)?|shards/init|sh
 /// The shard a request's path names: its filter, manifest, tables or queries.
 const SHARD: &str = r"^/v1/(filters/)?shards/([0-9]+)/";
 
+/// A pages query's shard and revision.
+const PAGES_QUERY: &str = r"^/v1/shards/([0-9]+)/revisions/([0-9a-f]{64})/query/pages$";
+
 /// What a pass over a map that rewrites sealed history the companion's store
 /// holds, without declaring a re-cut, returns: wallet-pir refuses it before
 /// reading anything, and no later pass repairs it.
@@ -695,11 +698,24 @@ impl Fixture {
         (dithered, nearest)
     }
 
+    /// The body length of a 44-bit pages query to one shard revision: the
+    /// 8-byte binding, then a selection over the rows its manifest fixes.
+    fn pages_query_len(&self, shard_id: u64, revision: &str) -> usize {
+        let url = self.url.as_deref().expect("a served publication");
+        let mut transport = HttpShardTransport::new(url, &HttpOptions::default()).unwrap();
+        let (raw, _) = transport.manifest(shard_id, revision).unwrap();
+        let manifest: transparent_shard::manifest::ShardManifest =
+            serde_json::from_slice(&raw).unwrap();
+        8 + transparent_native::request_len_bits(manifest.pages_query_rows() as usize, 44)
+    }
+
     /// Asserts that every request the service received used one of its routes
     /// with that route's method, carried none of the account's scripts in its
     /// path, query, headers or body, and named no shard in `below_floor`; and
-    /// that every query went at 44 dithered bits.
-    fn assert_private(&self, below_floor: &[u64]) {
+    /// that every query went at 44 dithered bits, a pages query selecting over
+    /// exactly the rows its revision's manifest fixes. Returns how many pages
+    /// queries selected over fewer rows than a whole segment.
+    fn assert_private(&self, below_floor: &[u64]) -> usize {
         let requests = self.server.requests();
         assert!(!requests.is_empty());
         let routes = Regex::new(ROUTES).unwrap();
@@ -738,15 +754,30 @@ impl Fixture {
             );
         }
         // The service advertises the dithered schemes, so every query uses one.
+        // A directory query selects over the whole table; a pages query over
+        // the rows its manifest fixes, fewer than a segment for a growing tail.
         let (dithered, nearest) = self.query_lengths();
         assert!(dithered.is_disjoint(&nearest));
+        let pages = Regex::new(PAGES_QUERY).unwrap();
+        let mut prefixes = 0;
         for request in requests.iter().filter(|request| request.method == "POST") {
-            assert!(
-                dithered.contains(&request.body.len()),
-                "a {}-byte query to {}",
-                request.body.len(),
-                request.path
-            );
+            match pages.captures(&request.path) {
+                Some(captures) => {
+                    assert_eq!(
+                        request.body.len(),
+                        self.pages_query_len(captures[1].parse().unwrap(), &captures[2]),
+                        "a pages query to {}",
+                        request.path
+                    );
+                    prefixes += usize::from(!dithered.contains(&request.body.len()));
+                }
+                None => assert!(
+                    dithered.contains(&request.body.len()),
+                    "a {}-byte query to {}",
+                    request.body.len(),
+                    request.path
+                ),
+            }
         }
         let probe = self.watched.first().expect("a watched address");
         assert!(carries(
@@ -770,6 +801,7 @@ impl Fixture {
                 "a below-floor shard: {line}"
             );
         }
+        prefixes
     }
 }
 
@@ -1124,6 +1156,43 @@ fn young_wallet_rolls_back_below_its_birthday() {
 
     // No pass read a shard ending below the birthday.
     f.assert_private(&[0, 1, 2]);
+}
+
+/// An address with more events than its directory entry holds inline has them
+/// read from pages. The tail is unsealed and in one segment, so its pages
+/// queries select over only the page rows it holds, and recovery still finds
+/// every receive.
+#[test]
+fn growing_tail_pages_queries_select_only_its_rows() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let birthday = H0 + 610;
+    let target = H0 + 640;
+    let mut f = Fixture::new(birthday, target);
+    f.trust_service();
+    let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
+    let receives = transparent_shard::INLINE_EVENTS as u64 + 2;
+    let mut events = noise(H0 + 600, target, 3);
+    for n in 1..=receives {
+        events.push((script(a0), receive(H0 + 610 + n, txid(n), 0, 10_000 * n)));
+    }
+    f.publish(
+        &[
+            sealed(H0, H0 + 199, noise(H0, H0 + 199, 0)),
+            sealed(H0 + 200, H0 + 399, noise(H0 + 200, H0 + 399, 1)),
+            sealed(H0 + 400, H0 + 599, noise(H0 + 400, H0 + 599, 2)),
+            tail(target, 0, events),
+        ],
+        SEAL,
+    );
+    let pass = f.drive();
+    assert_eq!(pass.batch.state, BatchState::Ready);
+    assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
+    f.promote();
+    let spendable: BTreeSet<OutPoint> = f.spendable().unwrap().into_iter().collect();
+    let expected: BTreeSet<OutPoint> = (1..=receives).map(|n| outpoint(txid(n), 0)).collect();
+    assert_eq!(spendable, expected);
+
+    assert!(f.assert_private(&[0, 1, 2]) > 0);
 }
 
 /// The last height the re-cut tests publish, and the wallet's tip.

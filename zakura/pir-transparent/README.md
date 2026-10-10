@@ -333,7 +333,12 @@ lag, a reopened and then a lost companion, a publication change retried with
 the same companion, and a sealed shard changed under its revision number. It
 then checks that every request used a service route with its method, carried no
 watched script in bytes or hex in its path, query, headers or body, and named no
-shard wholly below the birthday. `young_wallet_rolls_back_below_its_birthday`
+shard wholly below the birthday, and that every query had the 44-bit length,
+a pages query's selecting over exactly the rows its revision's manifest fixes.
+`growing_tail_pages_queries_select_only_its_rows` gives one address more events
+than its directory entry holds inline, so they are read from the tail's pages,
+and checks that those queries selected over fewer rows than a whole segment.
+`young_wallet_rolls_back_below_its_birthday`
 follows a wallet born inside the tail through a clamped pass, two
 republications and a reorg that rolls the companion back below its birthday.
 `a_declared_re_cut_keeps_the_wallets_history` re-cuts two sealed shards into
