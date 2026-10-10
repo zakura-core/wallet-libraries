@@ -186,7 +186,7 @@ pub(crate) fn forget(
         return Ok(ForgottenTransparentLedger::default());
     }
 
-    super::commit::atomically(conn, |conn| {
+    atomically(conn, |conn| {
         public(conn)?;
 
         // Every transaction a ledger fact names, collected before those facts are removed.

@@ -1,34 +1,5 @@
 use super::*;
 
-/// Runs `f` atomically: in a new immediate transaction, or under a savepoint inside the
-/// caller's transaction. Nothing `f` wrote survives its failure, including a failure to
-/// commit or release.
-#[cfg(feature = "transparent-inputs")]
-pub(super) fn atomically<T>(
-    conn: &rusqlite::Connection,
-    f: impl FnOnce(&rusqlite::Connection) -> Result<T, SqliteClientError>,
-) -> Result<T, SqliteClientError> {
-    if conn.is_autocommit() {
-        // The guard rolls back when dropped, including after a failed commit.
-        let tx =
-            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-        let value = f(&tx)?;
-        tx.commit()?;
-        return Ok(value);
-    }
-    conn.execute_batch("SAVEPOINT tpir_commit")?;
-    let result = f(conn).and_then(|value| {
-        conn.execute_batch("RELEASE tpir_commit")?;
-        Ok(value)
-    });
-    if result.is_err() {
-        // Undo everything since the savepoint and remove it, even when releasing it failed. If
-        // this cleanup fails too, the error still aborts the caller's enclosing transaction.
-        let _ = conn.execute_batch("ROLLBACK TO tpir_commit; RELEASE tpir_commit");
-    }
-    result
-}
-
 /// Checks everything about a commit that needs no stored state.
 #[cfg(feature = "transparent-inputs")]
 fn check_well_formed(commit: &TransparentLedgerCommit<AccountUuid>) -> Result<(), InvalidCommit> {

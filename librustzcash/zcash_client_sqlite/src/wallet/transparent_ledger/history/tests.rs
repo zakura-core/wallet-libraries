@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "orchard")]
+use zcash_protocol::consensus::BlockHeight;
 
 mod activity_outgoing;
 

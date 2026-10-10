@@ -3,15 +3,135 @@
 //! The stored policy is what dispatch trusts. A mode change increments
 //! `policy_generation` in the same SQLite transaction; same-mode reapplication does not.
 
-use rusqlite::named_params;
+use rusqlite::{OptionalExtension as _, named_params};
 use zcash_client_backend::data_api::transparent_ledger::{
     AppliedTransparentPolicy, PrivateTransparentDetail, TransparentLedgerMode,
 };
 use zcash_primitives::transaction::TxId;
 
-use crate::error::SqliteClientError;
+use crate::{error::SqliteClientError, wallet::init::migrations::TRANSPARENT_LEDGER_SCHEMA_ID};
 
-use super::{durable_policy, mode_code, resolve_mode};
+use super::reader_version::TPIR_READER_VERSION;
+
+fn mode_from_code(code: i64) -> Result<TransparentLedgerMode, SqliteClientError> {
+    match code {
+        0 => Ok(TransparentLedgerMode::Public),
+        2 => Ok(TransparentLedgerMode::PrivateRequired),
+        other => Err(SqliteClientError::CorruptedData(format!(
+            "unknown transparent ledger mode code {other}"
+        ))),
+    }
+}
+
+fn mode_code(mode: TransparentLedgerMode) -> i64 {
+    match mode {
+        TransparentLedgerMode::Public => 0,
+        TransparentLedgerMode::PrivateRequired => 2,
+    }
+}
+
+/// The policy durably applied to the wallet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DurablePolicy {
+    pub(crate) mode: TransparentLedgerMode,
+    pub(crate) generation: u64,
+}
+
+impl From<DurablePolicy> for AppliedTransparentPolicy {
+    fn from(policy: DurablePolicy) -> Self {
+        AppliedTransparentPolicy {
+            mode: policy.mode,
+            generation: policy.generation,
+        }
+    }
+}
+
+/// Reads the durable policy. A wallet that predates the ledger schema has none, and so cannot
+/// hold a stricter policy than any handle.
+pub(crate) fn durable_policy(
+    conn: &rusqlite::Connection,
+) -> Result<Option<DurablePolicy>, SqliteClientError> {
+    let has_meta: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tpir_meta')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_meta {
+        // Only a wallet that never ran the ledger migration may lack the policy table. Once
+        // the migration is recorded, a missing table is damage and must not read as public.
+        let migrated: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM schemer_migrations WHERE id = ?1)",
+            [TRANSPARENT_LEDGER_SCHEMA_ID.as_bytes().to_vec()],
+            |row| row.get(0),
+        )?;
+        return if migrated {
+            Err(SqliteClientError::CorruptedData(
+                "tpir_meta is missing after the transparent ledger migration".into(),
+            ))
+        } else {
+            Ok(None)
+        };
+    }
+    let (mode, generation, min_reader_version) = conn
+        .query_row(
+            "SELECT applied_mode, policy_generation, min_reader_version FROM tpir_meta WHERE id = 0",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        // Once the table exists, a missing singleton is damage, not the absence of a policy.
+        .ok_or_else(|| {
+            SqliteClientError::CorruptedData("tpir_meta policy row is missing".into())
+        })?;
+    if min_reader_version > TPIR_READER_VERSION {
+        return Err(SqliteClientError::TransparentLedgerIncompatible {
+            required: min_reader_version,
+        });
+    }
+    Ok(Some(DurablePolicy {
+        mode: mode_from_code(mode)?,
+        generation: u64::try_from(generation).map_err(|_| {
+            SqliteClientError::CorruptedData("negative policy_generation in tpir_meta".into())
+        })?,
+    }))
+}
+
+/// The mode a configured handle operates under, given the durable policy: a durably applied
+/// `PrivateRequired` is never weakened by the handle's configuration.
+fn effective_mode(
+    configured: TransparentLedgerMode,
+    durable: Option<DurablePolicy>,
+) -> TransparentLedgerMode {
+    match durable {
+        Some(DurablePolicy {
+            mode: TransparentLedgerMode::PrivateRequired,
+            ..
+        }) => TransparentLedgerMode::PrivateRequired,
+        _ => configured,
+    }
+}
+
+/// Resolves the mode a handle operates under for transparent ledger APIs, which require
+/// explicit configuration even for an empty wallet.
+///
+/// The durable policy is read on every call, so a `PrivateRequired` policy another connection
+/// applied after this handle was configured takes effect at the handle's next read. The
+/// resolution neither changes the stored policy nor the handle's configuration: once the
+/// policy is explicitly lowered, the handle again operates under its configured mode. A
+/// missing, corrupt, or newer-than-this-build policy fails closed.
+pub(crate) fn resolve_mode(
+    conn: &rusqlite::Connection,
+    configured: Option<TransparentLedgerMode>,
+) -> Result<TransparentLedgerMode, SqliteClientError> {
+    let mode = configured.ok_or(SqliteClientError::TransparentLedgerModeNotConfigured)?;
+    Ok(effective_mode(mode, durable_policy(conn)?))
+}
 
 /// Reads the durable policy, including its generation. The handle must already be configured,
 /// and a stored `PrivateRequired` policy is never weakened by a weaker handle.

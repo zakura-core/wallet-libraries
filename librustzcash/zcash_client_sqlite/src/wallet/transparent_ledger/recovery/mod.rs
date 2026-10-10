@@ -58,6 +58,8 @@ use {
 };
 
 #[cfg(feature = "transparent-inputs")]
+mod account_ledger;
+#[cfg(feature = "transparent-inputs")]
 mod commit;
 #[cfg(feature = "transparent-inputs")]
 mod coverage;
@@ -77,6 +79,10 @@ mod revisions;
 #[cfg(feature = "transparent-inputs")]
 mod watch;
 
+#[cfg(feature = "transparent-inputs")]
+use account_ledger::AccountLedger;
+#[cfg(feature = "transparent-inputs")]
+pub(crate) use account_ledger::{account_ledger, ledger_blockers};
 #[cfg(all(
     feature = "transparent-inputs",
     any(test, feature = "test-dependencies")
@@ -87,9 +93,7 @@ pub(crate) use commit::{CommitTrust, apply_commit};
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use diagnostics::candidate_recovery;
 #[cfg(feature = "transparent-inputs")]
-use diagnostics::{AccountLedger, placed_receives, placed_spends, recovery_status};
-#[cfg(feature = "transparent-inputs")]
-pub(crate) use diagnostics::{account_ledger, ledger_blockers};
+use diagnostics::{placed_receives, placed_spends, recovery_status};
 pub(crate) use lifecycle::{clear_pending_pages, truncate};
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use lifecycle::{forget, forget_reattributed_script};
@@ -101,7 +105,9 @@ pub(crate) use promotion::promote;
 pub(crate) use watch::watch_set;
 
 #[cfg(feature = "transparent-inputs")]
-use commit::{account_quarantined, atomically, lifecycle};
+use super::atomically;
+#[cfg(feature = "transparent-inputs")]
+use commit::{account_quarantined, lifecycle};
 #[cfg(feature = "transparent-inputs")]
 use events::{apply_receive, apply_spend, open_page, record_range};
 #[cfg(feature = "transparent-inputs")]
@@ -185,8 +191,7 @@ mod tests {
     };
     use zcash_client_backend::data_api::transparent_ledger::WatchOrigin;
 
-    use super::{commit::atomically, watch::note_origin};
-    use crate::error::SqliteClientError;
+    use super::watch::note_origin;
 
     #[test]
     fn derivation_outranks_a_standalone_import() {
@@ -205,33 +210,5 @@ mod tests {
             }
             assert_eq!(addresses[&address], derived);
         }
-    }
-
-    #[test]
-    fn failed_commit_rolls_back() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        // A deferred foreign key violation makes COMMIT itself fail.
-        conn.execute_batch(
-            "PRAGMA foreign_keys = ON;
-             CREATE TABLE written (x INTEGER);
-             CREATE TABLE parent (id INTEGER PRIMARY KEY);
-             CREATE TABLE child (
-                 parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED
-             );",
-        )
-        .unwrap();
-        let result = atomically(&conn, |conn| {
-            conn.execute_batch("INSERT INTO written VALUES (1); INSERT INTO child VALUES (42);")?;
-            Ok(())
-        });
-        assert!(matches!(result, Err(SqliteClientError::DbError(_))));
-        assert!(
-            conn.is_autocommit(),
-            "the failed transaction must not stay open"
-        );
-        let written: i64 = conn
-            .query_row("SELECT COUNT(*) FROM written", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(written, 0);
     }
 }
