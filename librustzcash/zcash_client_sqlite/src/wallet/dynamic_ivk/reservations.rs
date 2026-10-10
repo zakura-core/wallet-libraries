@@ -27,6 +27,10 @@ const STATUS_FRESH_SECONDS: i64 = 120;
 /// Margin for clock differences between this device and a provider's feed when deciding
 /// whether a [`ProviderSeen`] read covers a quote.
 pub const SEEN_SLACK_SECONDS: i64 = 60 * 60;
+/// The earliest time, in Unix seconds, that any incoming dynamic address can have been
+/// quoted: 2026-09-29 00:00 UTC. No dynamic address existed before it, so a seen set read
+/// from then on covers every earlier quote of a restored address.
+pub const EARLIEST_RECEIVE_QUOTE: i64 = 1_790_640_000;
 
 /// A swap provider's seen set, as a receiver directory publishes it: every receiver the
 /// provider was given between `since` and `until`.
@@ -38,6 +42,11 @@ pub const SEEN_SLACK_SECONDS: i64 = 60 * 60;
 /// seen address moves the recovery gap like a paid one, since a restore walks past the
 /// addresses the set holds. The set's answers are kept, so a later set that lacks an
 /// address cannot make it issuable again.
+///
+/// A registered address without local quotes, such as a restored one, may have been
+/// quoted by another device. It is issued only if a set lacks it and covers every quote
+/// from [`EARLIEST_RECEIVE_QUOTE`] until this wallet registered it, widened by
+/// [`SEEN_SLACK_SECONDS`]; otherwise issuance waits with [`ReservationPolicy::Gap`].
 pub struct ProviderSeen<'a> {
     /// When the provider's feed started, in Unix seconds. Receivers the provider was
     /// given earlier are missing.
@@ -477,14 +486,17 @@ pub(super) fn prepare<P: Parameters>(
     let mut abandoned = None;
     let mut fresh = None;
     for index in 0..end {
-        let (blocked, quoted): (bool, bool) = conn
+        let (blocked, quoted, uncovered): (bool, bool, bool) = conn
             .query_row(
                 &format!(
                     "SELECT k.used = 1 OR {SEEN} OR {RESERVED}
                           OR EXISTS(SELECT 1 FROM ironwood_dynamic_payment_recovery p
                             WHERE p.receiving_key_id = k.id),
                         EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
-                            WHERE o.receiving_key_id = k.id AND o.request IS NOT NULL)
+                            WHERE o.receiving_key_id = k.id AND o.request IS NOT NULL),
+                        NOT EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
+                            WHERE o.receiving_key_id = k.id)
+                          AND NOT (:since <= :earliest AND k.registered_at <= :covered)
                      FROM ironwood_receiving_keys k
                      WHERE k.account_id = :account AND k.purpose = 1 AND k.key_index = :index"
                 ),
@@ -493,13 +505,18 @@ pub(super) fn prepare<P: Parameters>(
                     ":index": index.to_be_bytes(),
                     ":since": coverage.0,
                     ":covered": coverage.1,
+                    ":earliest": EARLIEST_RECEIVE_QUOTE,
                 ],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?
             .unwrap_or_default();
         if blocked {
             continue;
+        }
+        // Skipping it could hand out a higher index the old device also quoted.
+        if uncovered {
+            return Ok(Err(ReservationPolicy::Gap));
         }
         if !quoted {
             fresh = Some(index);
@@ -527,7 +544,8 @@ pub(super) fn prepare<P: Parameters>(
     Ok(Ok(registered))
 }
 
-/// Records which of `account`'s quoted incoming keys `seen` holds.
+/// Records which of `account`'s unseen incoming keys, quoted here or restored, `seen`
+/// holds.
 fn record_seen(
     conn: &Connection,
     account: i64,
@@ -535,9 +553,7 @@ fn record_seen(
 ) -> Result<(), SqliteClientError> {
     let mut stmt = conn.prepare(
         "SELECT k.id, k.receiver FROM ironwood_receiving_keys k
-         WHERE k.account_id = ?1 AND k.purpose = 1 AND k.provider_seen = 0
-           AND EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
-               WHERE o.receiving_key_id = k.id AND o.request IS NOT NULL)",
+         WHERE k.account_id = ?1 AND k.purpose = 1 AND k.provider_seen = 0",
     )?;
     let keys = stmt
         .query_map([account], |r| {
