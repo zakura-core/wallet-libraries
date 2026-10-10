@@ -18,6 +18,20 @@
   still held fails with `ForgetError::CompanionBusy` and forgets nothing; a
   wallet not public fails with `ForgetError::NotPublic` before anything is
   deleted, and also when the policy is raised after the companions went.
+- One recovery pass driver, so wallets stop writing their own loop.
+  `TransparentHistoryRecovery::pass` runs `recover` over a fresh `TransparentPirHttp` on
+  the caller's `HttpExchange`, retries once after
+  `RecoveryError::PublicationChanged` unless the caller is stopping, maps any
+  failure during an outage to `PassError::Outage`, and returns a `PassReport`
+  while holding a `Ready` batch inside the companion (`latest`, `take_latest`).
+  With feature `sqlite`, `settle_latest` settles the held batch through
+  `apply_and_acknowledge_gated`, and `PassPlan` is the pure decision table that
+  turns a pass, its settlement and the re-read watch set into the next `Step`:
+  pass, refresh, wait, hold (`HoldCause::Withdrawn`, `Unreconciled`), skip,
+  stop (`StopCause::NotEnabled`, `Interrupted`), fail, or done with the last
+  retry, within `PassLimits` (8 passes, 3 stale refreshes by default).
+  `recover-activity` now requires feature `sqlite` and runs on the driver, and
+  the end-to-end tests drive every pass through it.
 - `discover_active_addresses`, `Discovery` and `DiscoveryLimits`: import-time
   discovery of which candidate addresses hold transparent history from a floor
   on, before any wallet exists. It downloads every filter from the floor's

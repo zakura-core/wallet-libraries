@@ -20,6 +20,10 @@ mod forget;
 #[cfg(feature = "wallet")]
 mod http;
 #[cfg(feature = "wallet")]
+mod pass;
+#[cfg(feature = "sqlite")]
+mod plan;
+#[cfg(feature = "wallet")]
 mod progress;
 #[cfg(all(test, feature = "wallet"))]
 mod test_support;
@@ -52,6 +56,10 @@ pub use http::{
     HttpExchange, HttpFailure, HttpMethod, HttpReply, HttpRequest, HttpStatus, PirFilters,
     PirShards, TransparentPirHttp, TxidHttp,
 };
+#[cfg(feature = "wallet")]
+pub use pass::{PassError, PassReport};
+#[cfg(feature = "sqlite")]
+pub use plan::{HoldCause, PassLimits, PassPlan, Step, StopCause};
 #[cfg(feature = "wallet")]
 pub use progress::{Outcome, Progress, Retry};
 #[cfg(feature = "wallet")]

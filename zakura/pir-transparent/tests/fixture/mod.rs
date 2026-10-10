@@ -1,6 +1,7 @@
 //! An in-process transparent shard service: a publisher that writes real shards
 //! for a synthetic chain, and a loopback server per publication whose requests
-//! one recorder captures as the service received them.
+//! one recorder captures as the service received them, and the exchange a wallet
+//! reaches it over.
 //!
 //! Adapted from wallet-pir's shard-server test fixtures at 648264bb
 //! (`transparent-shard-server/tests/common/{mod,prepared}.rs`), through the
@@ -10,6 +11,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use axum::{body::Body, extract::Request, middleware::Next, response::Response};
 use sha2::{Digest, Sha256};
@@ -26,6 +28,7 @@ use transparent_shard::manifest::{
 };
 use transparent_shard_server::service::{ServiceConfig, ServiceState, router};
 use transparent_shard_server::shardset::{DEFAULT_RETAIN_REVISIONS, ShardSet};
+use zakura_pir_transparent::{HttpExchange, HttpFailure, HttpMethod, HttpReply, HttpRequest};
 
 /// A shard's usual geometry: the smallest one a build publishes, which keeps the
 /// tables a pass sets up and queries small.
@@ -311,4 +314,69 @@ async fn record(requests: Arc<Mutex<Vec<Recorded>>>, request: Request, next: Nex
             body: body.to_vec(),
         });
     next.run(Request::from_parts(parts, Body::from(body))).await
+}
+
+/// A wallet's [`HttpExchange`] over loopback HTTP to one served publication: one
+/// blocking request at a time, never retried, with a 60 s deadline.
+pub struct Loopback {
+    client: reqwest::blocking::Client,
+    url: String,
+}
+
+impl Loopback {
+    /// The exchange bound to the publication served at `url`.
+    pub fn new(url: &str) -> Self {
+        Self {
+            client: reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .expect("an HTTP client"),
+            url: url.to_owned(),
+        }
+    }
+}
+
+impl HttpExchange for Loopback {
+    fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
+        let url = format!("{}{}", self.url, request.path);
+        let sending = match request.method {
+            HttpMethod::Get => self.client.get(url),
+            HttpMethod::Post => self
+                .client
+                .post(url)
+                .header("content-type", "application/octet-stream")
+                .body(request.body.clone()),
+        };
+        let failure = |error: reqwest::Error| {
+            if error.is_timeout() {
+                HttpFailure::Timeout
+            } else {
+                HttpFailure::Unreachable
+            }
+        };
+        let response = sending.send().map_err(failure)?;
+        let status = response.status().as_u16();
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let (retry_after, map_sha256) = (header("retry-after"), header("x-txid-map-sha256"));
+        let mut body = response.bytes().map_err(failure)?.to_vec();
+        if (200..300).contains(&status) {
+            if body.len() > request.limit {
+                return Err(HttpFailure::TooLarge);
+            }
+        } else {
+            body.truncate(request.error_limit);
+        }
+        Ok(HttpReply {
+            status,
+            retry_after,
+            map_sha256,
+            body,
+        })
+    }
 }

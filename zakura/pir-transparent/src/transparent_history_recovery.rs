@@ -16,7 +16,7 @@ mod sync_inputs;
 mod tests;
 
 use rusqlite::Connection;
-use std::{path::Path, time::Duration};
+use std::{any::Any, path::Path, time::Duration};
 use transparent_filter::ShardMap;
 use transparent_wallet::transport::{FilterSource, ShardTransport};
 use transparent_wallet::{ChainView, SetIdentity, SyncError, WorkLimits};
@@ -88,6 +88,9 @@ pub struct TransparentHistoryRecovery {
     /// The receipt of the latest ready batch, until it is acknowledged or applied or
     /// a new pass starts. Only the batch carrying it can be acknowledged.
     outstanding_receipt: Option<[u8; 32]>,
+    /// The ready batch [`Self::pass`] returned last, a `RecoveryBatch<A>` for the
+    /// pass's account type, until it is taken or a new pass starts.
+    pub(crate) latest: Option<Box<dyn Any + Send>>,
 }
 
 impl TransparentHistoryRecovery {
@@ -146,11 +149,18 @@ impl TransparentHistoryRecovery {
             store,
             catalog,
             outstanding_receipt: None,
+            latest: None,
         })
     }
 
     /// Recover a finite pass through the caller's transports and independently
-    /// accepted chain.
+    /// accepted chain, returning its batch to the caller.
+    ///
+    /// Wallets drive passes with [`Self::pass`], which builds the transports,
+    /// retries a publication change, and holds the batch for its settlement;
+    /// this is the single attempt it makes, for callers that bring their own
+    /// [`FilterSource`] and [`ShardTransport`]. Either way, a new pass makes the
+    /// batch of every earlier one unacknowledgeable.
     ///
     /// `filters` and `transport` must reach the origin bound into this companion.
     /// Before any filter or private retrieval, in order: the watch set's target
@@ -181,9 +191,10 @@ impl TransparentHistoryRecovery {
     /// When the first map's set identity no longer continues the one the
     /// companion's store is bound to, the pass resets the store, keeps the
     /// catalog, and fails with [`RecoveryError::PublicationChanged`] before the
-    /// sync; retry once with the same companion. If that map ends below the
-    /// store's anchor while `chain` still accepts the anchor, the pass instead
-    /// keeps the store and waits for the map to catch up. That, and any
+    /// sync; retry once with the same companion, as [`Self::pass`] does. If that
+    /// map ends below the store's anchor while `chain` still accepts the anchor,
+    /// the pass instead keeps the store and waits for the map to catch up. That,
+    /// and any
     /// divergence the sync itself finds (a map refreshed mid-pass that does not
     /// continue the first), is a [`BatchState::Pending`] batch with
     /// [`Outcome::Behind`] that claims no coverage, keeping companion and
@@ -227,6 +238,7 @@ impl TransparentHistoryRecovery {
         T: ShardTransport,
     {
         self.outstanding_receipt = None;
+        self.latest = None;
         let target = accepted_target(watch, chain)?;
         if watch.addresses.is_empty() {
             // Every watched script is covered, vacuously. A sync would need the

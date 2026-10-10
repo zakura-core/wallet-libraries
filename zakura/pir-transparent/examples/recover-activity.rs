@@ -25,10 +25,11 @@ use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, error::Error, fs, path::PathBuf, time::Duration};
 use transparent::address::TransparentAddress;
-use transparent_wallet::http::{HttpFilterSource, HttpOptions, HttpShardTransport};
 use transparent_wallet::{ChainView, StaticChain};
 use zakura_pir_transparent::{
-    BatchState, TransparentHistoryRecovery, TransparentHistoryRecoveryConfig,
+    BatchState, HoldCause, HttpExchange, HttpFailure, HttpMethod, HttpReply, HttpRequest,
+    PassLimits, PassPlan, Retry, Step, TransparentHistoryRecovery,
+    TransparentHistoryRecoveryConfig, Trust, Ungated,
 };
 use zcash_client_backend::data_api::{
     Account as _,
@@ -40,7 +41,7 @@ use zcash_client_backend::data_api::{
     },
 };
 use zcash_client_sqlite::{
-    WalletDb,
+    AccountUuid, WalletDb,
     testing::{BlockCache, db::TestDbFactory},
     util::SystemClock,
 };
@@ -50,6 +51,58 @@ use zcash_protocol::consensus::BlockHeight;
 
 /// Bound on each decoded HTTP response body.
 const RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
+
+/// The harness's exchange with the origin: one blocking request at a time, a 30 s
+/// deadline, and no retries, as an `HttpExchange` must.
+struct Exchange {
+    client: reqwest::blocking::Client,
+    origin: String,
+}
+
+impl HttpExchange for Exchange {
+    fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
+        let url = format!("{}{}", self.origin.trim_end_matches('/'), request.path);
+        let sending = match request.method {
+            HttpMethod::Get => self.client.get(url),
+            HttpMethod::Post => self
+                .client
+                .post(url)
+                .header("content-type", "application/octet-stream")
+                .body(request.body.clone()),
+        };
+        let failure = |error: reqwest::Error| {
+            if error.is_timeout() {
+                HttpFailure::Timeout
+            } else {
+                HttpFailure::Unreachable
+            }
+        };
+        let response = sending.send().map_err(failure)?;
+        let status = response.status().as_u16();
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let (retry_after, map_sha256) = (header("retry-after"), header("x-txid-map-sha256"));
+        let mut body = response.bytes().map_err(failure)?.to_vec();
+        if (200..300).contains(&status) {
+            if body.len() > request.limit {
+                return Err(HttpFailure::TooLarge);
+            }
+        } else {
+            body.truncate(request.error_limit);
+        }
+        Ok(HttpReply {
+            status,
+            retry_after,
+            map_sha256,
+            body,
+        })
+    }
+}
 
 /// Converts a 32-byte RPC display-order hex hash to the wallet's internal order.
 /// Rejects malformed hex or a hash of any other length.
@@ -233,31 +286,46 @@ fn main() -> Result<(), Box<dyn Error>> {
     let companion_path = directory.join("reference.sqlite");
     let mut reference = TransparentHistoryRecovery::open(&companion_path, config.clone())?;
 
-    // 4. Supply the network boundary. The adapter receives transports rather
-    // than choosing a route. This example uses the reference HTTP clients from
-    // development dependencies, with bounded bodies, timeouts, and retries.
-    // Use a controlled capture proxy as the origin to inspect the actual traffic.
-    let options = HttpOptions {
-        timeout: Duration::from_secs(30),
-        ..HttpOptions::default()
+    // 4. Supply the network boundary. The adapter receives an exchange rather
+    // than choosing a route. This one sends one request at a time, with a
+    // bounded body and timeout, and never retries. Use a controlled capture
+    // proxy as the origin to inspect the actual traffic.
+    let exchange = Exchange {
+        client: reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()?,
+        origin: origin.clone(),
     };
-    let mut filters = HttpFilterSource::new(origin, &options)
-        .map_err(|error| error as Box<dyn Error>)?
-        .with_response_limit(RESPONSE_LIMIT)
-        .with_prefetch_concurrency(1)
-        .with_transient_retry_attempts(3);
-    let mut transport = HttpShardTransport::new(origin, &options)
-        .map_err(|error| error as Box<dyn Error>)?
-        .with_response_limit(RESPONSE_LIMIT)
-        .with_concurrency(1)
-        .with_transient_retry_attempts(3);
-    let mut passes = vec![];
-    let mut finished = false;
 
-    // 5. Retrieve, validate, save, and acknowledge in that order. A fresh watch
-    // set on each pass includes any address-window growth from earlier commits.
-    for pass in 0..8 {
-        let watch = state.wallet().db().transparent_watch_set(account)?;
+    // 5. Retrieve, validate, save, and acknowledge in that order, as the
+    // library's pass plan says. The plan reads a fresh watch set after each
+    // settlement, so it includes any address-window growth from earlier
+    // commits. Commits are only observed: this harness never qualifies, so a
+    // batch listing retired revisions, which only trusted reconciliation
+    // resolves, holds the account and fails the run.
+    let mut plan = PassPlan::new(
+        state.wallet().db().transparent_watch_set(account)?,
+        PassLimits::default(),
+    );
+    let mut step = plan.first();
+    let mut passes = vec![];
+    let mut last = None;
+    loop {
+        match step {
+            Step::Pass | Step::Refresh => {}
+            Step::Wait(wait) => std::thread::sleep(wait),
+            Step::Done(_) => break,
+            Step::Hold(HoldCause::Withdrawn(cause)) => {
+                return Err(format!("publication withdrawn: {cause:?}").into());
+            }
+            Step::Hold(HoldCause::Unreconciled) => {
+                return Err(
+                    "frozen fixture unexpectedly requires trusted revision reconciliation".into(),
+                );
+            }
+            other => return Err(format!("recovery stopped: {other:?}").into()),
+        }
+        let watch = plan.watch();
         if watch.target.unwrap().height != BlockHeight::from(through)
             || chain.is_accepted(u64::from(through), &watch.target.unwrap().hash.to_string())
                 != transparent_wallet::Acceptance::Accepted
@@ -265,25 +333,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err("wallet target differs from independent chain".into());
         }
         // Retrieval updates the companion, not wallet balances. The catalog
-        // permits commits only when publication continuity is Ready.
-        let batch = reference.recover(&watch, &chain, &mut filters, &mut transport)?;
-        if let BatchState::Withdrawn(cause) = batch.state() {
-            return Err(format!("publication withdrawn: {cause:?}").into());
-        }
-        // Only the wallet's trusted operation resolves retired revisions, and only
-        // `apply_and_acknowledge` with trusted commits (feature `sqlite`)
-        // acknowledges a batch listing them. This harness
-        // never qualifies, so it stops before applying such a batch and leaves
-        // the notifications in the companion.
-        if !batch.retired_revisions().is_empty() {
-            return Err(
-                "frozen fixture unexpectedly requires trusted revision reconciliation".into(),
-            );
-        }
-        let mut grew = false;
+        // permits commits only when publication continuity is Ready, and the
+        // pass holds only a Ready batch.
+        let report = reference.pass(watch, &chain, &exchange, RESPONSE_LIMIT, &|| false)?;
         let mut receives = 0;
         let mut spends = 0;
-        for commit in batch.commits() {
+        for commit in reference
+            .latest::<AccountUuid>()
+            .map_or(&[][..], |batch| batch.commits())
+        {
             receives += commit.receives.len();
             spends += commit.spends.len();
             if commit.receives.iter().any(|e| e.metadata.is_none())
@@ -291,42 +349,44 @@ fn main() -> Result<(), Box<dyn Error>> {
             {
                 return Err("v11 event missing metadata".into());
             }
-            // The ordinary writer rechecks the captured account, policy, and
-            // chain context. It stores candidate evidence without qualifying
-            // the publisher or projecting these events into usable funds.
-            grew |= state
-                .wallet_mut()
-                .db_mut()
-                .apply_transparent_ledger_commit(commit.clone())?
-                .window_grew;
         }
-        // A `Pending` batch has no commits and is not acknowledged. A `Ready` one
-        // without retirements is acknowledged once every commit applied.
-        if batch.state() == BatchState::Ready {
-            reference.acknowledge_applied(&batch)?;
-        }
+        // The ordinary writer rechecks the captured account, policy, and chain
+        // context for every commit. Observed commits are stored as candidate
+        // evidence without qualifying the publisher or projecting these events
+        // into usable funds; the batch is acknowledged once every one applied.
+        let settled =
+            reference.settle_latest(state.wallet_mut().db_mut(), Trust::Observed, &mut Ungated);
+        let grew = matches!(&settled, Ok(Some(applied)) if applied.stats.window_grew);
         passes.push(json!({
-            "pass": pass,
-            "state": format!("{:?}", batch.state()),
+            "pass": passes.len(),
+            "state": format!("{:?}", report.state),
             "receives": receives,
             "spends": spends,
-            "covered_through": batch.progress().covered_through,
-            "outcome": format!("{:?}", batch.progress().outcome),
-            "window_grew": grew
+            "covered_through": report.progress.covered_through,
+            "outcome": format!("{:?}", report.progress.outcome),
+            "window_grew": grew,
+            "publication_changed": report.publication_changed
         }));
+        step = plan.next(
+            &report,
+            &settled,
+            state.wallet().db().transparent_watch_set(account)?,
+        );
+        if step == Step::Fail {
+            return Err(settled.unwrap_err().into());
+        }
+        last = Some(report);
         // Reopening the companion tests saved continuation and catalog history.
         // It is not recreated: recreating would discard continuity evidence.
         drop(reference);
         reference = TransparentHistoryRecovery::open(&companion_path, config.clone())?;
-        if batch.state() == BatchState::Ready
-            && !grew
-            && batch.progress().covered_through >= u64::from(through)
-        {
-            finished = true;
-            break;
-        }
     }
-    if !finished {
+    if step != Step::Done(Some(Retry::Complete))
+        || last.is_none_or(|report| {
+            report.state != BatchState::Ready
+                || report.progress.covered_through < u64::from(through)
+        })
+    {
         return Err("recovery did not complete within eight bounded passes".into());
     }
 

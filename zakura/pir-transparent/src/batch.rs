@@ -134,10 +134,7 @@ impl<A> RecoveryBatch<A> {
     /// companion and pass again for new work. Otherwise this is
     /// [`Progress::retry`].
     pub fn retry(&self) -> Retry {
-        match self.state {
-            BatchState::Withdrawn(_) => Retry::Stalled,
-            BatchState::Ready | BatchState::Pending => self.progress.retry(),
-        }
+        retry(self.state, self.progress)
     }
 
     /// Exactly the retired provisional revisions this batch resolves: each was
@@ -188,6 +185,15 @@ impl<A> RecoveryBatch<A> {
             retired_revisions,
             receipt: [0; 32],
         }
+    }
+}
+
+/// When to pass an account again after a pass in `state` with `progress`: never on a
+/// timer for a [`BatchState::Withdrawn`] one, otherwise as its progress says.
+pub(crate) fn retry(state: BatchState, progress: Progress) -> Retry {
+    match state {
+        BatchState::Withdrawn(_) => Retry::Stalled,
+        BatchState::Ready | BatchState::Pending => progress.retry(),
     }
 }
 

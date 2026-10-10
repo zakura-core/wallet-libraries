@@ -51,9 +51,12 @@ serde_json.workspace = true
 zcash_client_sqlite = { path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "transparent-inputs", "test-dependencies", "unstable"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 zcash_keys = { workspace = true, features = ["transparent-inputs"] }
-# The example and the end-to-end test build the reference HTTP adapters; the
-# library takes caller transports.
+# The end-to-end tests read the service's init and manifests, and run discovery,
+# through the reference HTTP adapters; the library takes caller transports.
 transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "9d2cbda0b4336258cfce76ca8ee77b095daa7fd7", features = ["reqwest"] }
+# The example's and the end-to-end tests' `HttpExchange`: one blocking request at a
+# time, the client the reference HTTP adapters above already build.
+reqwest = { version = "0.12", default-features = false, features = ["blocking"] }
 # The end-to-end test publishes shards and serves them in process; it requires
 # `wallet`, which brings the event and filter crates.
 transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "9d2cbda0b4336258cfce76ca8ee77b095daa7fd7" }
@@ -68,7 +71,7 @@ tower = { version = "0.5", features = ["util"] }
 
 [[example]]
 name = "recover-activity"
-required-features = ["wallet"]
+required-features = ["sqlite"]
 
 [[test]]
 name = "private_recovery"

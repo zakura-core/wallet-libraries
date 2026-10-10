@@ -67,7 +67,7 @@ private queries are encoded and retrieved.
 | Boundary | Responsibility | Principal interface |
 | --- | --- | --- |
 | Protocol client → recovery adapter | Retrieve script histories and publication information within finite bounds | wallet-pir's `FilterSource` and `ShardTransport` |
-| Vizor → recovery adapter | Supply account identity, origin, watched addresses, locally accepted chain, and routed transport | `TransparentHistoryRecoveryConfig`, `WalletChain`, `HttpExchange`, `recover` |
+| Vizor → recovery adapter | Supply account identity, origin, watched addresses, locally accepted chain, and routed transport; settle each pass and follow the plan's next step | `TransparentHistoryRecoveryConfig`, `WalletChain`, `HttpExchange`, `TransparentHistoryRecovery::pass`, `settle_latest`, `PassPlan` |
 | Adapter → wallet store | Apply normalized events, coverage, source revisions, and continuation work | `TransparentLedgerCommit`, `TransparentLedgerWrite` |
 | Wallet store → application | Read balance together with authority, coverage, and blockers; read account-specific history | `TransparentLedgerSnapshot`, `transaction_history_details` |
 | Receipt scheduler → wallet store | List due work, validate returned display facts, record failures, and read cached details | `TransparentDetailRead`, `TransparentDetailWrite` |
@@ -211,6 +211,17 @@ The recovery pass proceeds as follows:
 The publisher's private script profile supports scripts up to 40 bytes.
 Unsupported scripts or ranges cannot be treated as checked absence. Exact
 coverage is relative to the supported watched set and its recovery bounds.
+
+The library runs this loop for each account. Its pass driver makes one
+pass over Vizor's routed exchange, retrying once with the same cache when the
+publication set changed, and reports an unreachable service as an outage. It
+then saves a ready batch through Vizor's write gate, and a pass plan decides
+what follows from the pass, its settlement and the re-read watch set: pass
+again to continue a budget, cover a grown window or changed addresses; wait for
+a lagging or busy service; hold an account whose publication contradicts the
+cache or whose replaced revisions need trusted reconciliation; skip it for this
+run; or stop. Vizor keeps the time budgets, how long a hold lasts, which
+accounts to visit, the trust decision, cancellation and activation.
 
 Private recovery follows foreground sync, then refreshes balances and Activity.
 Vizor visits the selected account first and rotates others. Retrieval has time

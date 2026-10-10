@@ -8179,6 +8179,7 @@ dependencies = [
  "base64 0.22.1",
  "hex",
  "regex",
+ "reqwest",
  "rusqlite",
  "rustix",
  "same-file",

@@ -22,6 +22,8 @@ private; callers use the types and traits re-exported by the crate.
 | --- | --- | --- |
 | [`catalog`](src/catalog.rs) | Publication identity and the durable history of revisions seen or exported | Determines whether publication evidence can be handed to the wallet consistently |
 | [`transparent_history_recovery`](src/transparent_history_recovery.rs) | One account's bounded retrieval and conversion into wallet evidence | `TransparentHistoryRecovery::recover` returns an opaque `RecoveryBatch` |
+| [`pass`](src/pass.rs) | One pass as a wallet runs it: fresh transports, a publication-change retry, and the ready batch held for settlement | `TransparentHistoryRecovery::pass` returns a `PassReport` or a `PassError` |
+| [`plan`](src/plan.rs) | Settling the held batch, and what an account does after each pass | `settle_latest`, and `PassPlan::next` returning a `Step` |
 | [`txid`](src/txid.rs) | Private display lookup for an already known transaction | `TxidDisplayService` returns lookup results; `display_facts` converts found entries to wallet display facts |
 | [`apply`](src/apply.rs) | Ordered SQLite wallet writes followed by companion acknowledgment | Explicit `Trust`, optional `WriteGate`, and a result describing the committed work |
 | [`companion`](src/companion.rs) | Account cache files and their exclusive ownership | `CompanionDir` opens, retains, and removes companions under operating-system locks |
@@ -214,9 +216,10 @@ can be pending rather than contradictory.
 | `Overloaded` | Capacity refusals exhausted the retry budget; retry after a delay |
 | `Stalled` | Unknown chain blocks, unresolved spends, or bounded discovery prevent progress; new information is needed |
 
-Prefer `RecoveryBatch::retry()` to `Progress::retry()`: it also treats any
-withdrawn batch as stalled, even when retrieval reports complete. Read a fresh
-watch set when applying commits grows an address window.
+Prefer `RecoveryBatch::retry()` (or `PassReport::retry()`) to
+`Progress::retry()`: it also treats any withdrawn batch as stalled, even when
+retrieval reports complete. Read a fresh watch set when applying commits grows
+an address window. `PassPlan::next` turns both into the next step.
 
 ## Execution modes
 
@@ -227,7 +230,7 @@ independent inputs.
 | Operation | Inputs and state | Output and authority |
 | --- | --- | --- |
 | Import discovery | Candidate addresses, floor, transports, and `DiscoveryLimits`; fresh in-memory store | `Discovery`; activity hints for deciding which accounts to import |
-| Account recovery | Watch set, accepted chain, transports, and durable companion | `RecoveryBatch`; source-bound evidence waiting for wallet validation |
+| Account recovery | Watch set, accepted chain, the caller's exchange, and durable companion | `PassReport`, with a ready `RecoveryBatch` held for settlement; source-bound evidence waiting for wallet validation |
 | Observed settlement | Latest ready batch and SQLite wallet, with `Trust::Observed` | Candidate evidence only; a batch with retirements is refused before any write |
 | Trusted settlement | Latest ready batch and SQLite wallet, with explicit `Trust::Trusted` | Qualified evidence and reconciled provisional predecessors; requires `PrivateRequired` on the handle and durably |
 | Receipt lookup | Known txid, mined height, cancellation, and shared txid service | Display result/facts; wallet validates and stores them separately |
@@ -239,23 +242,72 @@ previous-output lookup fallback.
 
 ### Account recovery and settlement sequence
 
-1. Read a fresh wallet watch set. Supply `WalletChain` or another independent
-   `ChainView` through its target; the required history floor is the account
-   birthday. Open the account's companion and create caller-routed transports.
-2. Call `recover`. Preflight checks target acceptance, script limits, refusal of
-   selective parent filters, publication bounds, mainnet identity, and schema.
-   An accepted empty watch set completes without network requests.
+A wallet drives an account with three calls per pass and no loop logic of its
+own:
+
+```rust,ignore
+let mut plan = PassPlan::new(wallet.transparent_watch_set(account)?, PassLimits::default());
+let mut step = plan.first();
+while let Step::Pass | Step::Refresh | Step::Wait(_) = step {
+    if let Step::Wait(wait) = step { sleep(wait) } // within the caller's budget
+    let chain = WalletChain::new(&*wallet, plan.watch().target.unwrap());
+    let report = companion.pass(plan.watch(), &chain, &exchange, limit, &should_stop)?;
+    let settled = companion.settle_latest(wallet, trust, &mut gate);
+    step = plan.next(&report, &settled, wallet.transparent_watch_set(account)?);
+}
+```
+
+1. `PassPlan::new` takes a fresh wallet watch set and owns the one each pass
+   uses. Build `WalletChain` or another independent `ChainView` through its
+   target; the required history floor is the account birthday. Open the
+   account's companion once.
+2. `pass` runs `recover` over a fresh `TransparentPirHttp` on the caller's
+   exchange, so an outage never carries over. Preflight checks target
+   acceptance, script limits, refusal of selective parent filters, publication
+   bounds, mainnet identity, and schema. An accepted empty watch set completes
+   without network requests.
 3. The reference client downloads applicable filters and privately retrieves
    matching histories into the companion. Ranges wholly below the floor are
    excluded. A publication behind the target can supply partial accepted
    coverage, but cannot claim to reach the target.
 4. Recovery normalizes facts under their publication identities; the catalog
    decides whether to return commits and records export intent before return.
-5. Inspect batch state. For a ready batch, choose observed or trusted settlement
-   explicitly. With `sqlite`, use `apply_and_acknowledge`, or
-   `apply_and_acknowledge_gated` when the application serializes wallet writes.
-6. Schedule from the apply result and batch progress. A changed context needs a
-   fresh watch set; a grown window needs another pass at the same target.
+   After `RecoveryError::PublicationChanged` the pass retries once with the same
+   companion unless `should_stop` returns true. It returns a `PassReport`
+   (state, progress, `retry()`, commit and retirement counts, whether the
+   publication changed), which names nothing from the wallet's history, and
+   holds a ready batch inside the companion: `latest` reads it, and
+   `take_latest` takes it for a caller that settles without `sqlite`. A
+   `PassError` names only its variant: `Outage` for any failure while the
+   transports saw one, otherwise `Invalid`, `Failure` or, when the change was
+   found again or while stopping, `PublicationChanged`.
+5. Choose observed or trusted settlement explicitly. With `sqlite`,
+   `settle_latest` takes the held batch and settles it through
+   `apply_and_acknowledge_gated`, returning `Ok(None)` when the pass held
+   nothing. `Trust::Observed` with retired revisions is refused before the gate
+   runs or the wallet is written, so a caller settles every pass.
+6. `PassPlan::next` decides the next step from the report, the settlement, and
+   the watch set re-read after settling. It makes no request and reads no clock.
+
+| Pass and settlement | `Step` |
+| --- | --- |
+| The watch set has no target | `Done(None)` |
+| `Withdrawn(cause)` | `Hold(HoldCause::Withdrawn(cause))`: a timer would read the same contradiction |
+| `ApplyAction::Refresh` | `Refresh`, uncounted, with the fresh watch set; `Skip` after `stale_refreshes` (3) |
+| `ApplyAction::Reconcile` | `Hold(HoldCause::Unreconciled)`: only trusted settlement resolves the retirements |
+| `ApplyAction::Skip`, or a ready batch nobody settled | `Skip` |
+| `ApplyAction::NotEnabled`, `Interrupted` | `Stop(StopCause::NotEnabled)`, `Stop(StopCause::Interrupted)` |
+| `ApplyAction::Fail` | `Fail`: report the `ApplyFailure` |
+| `passes` (8) counted passes | `Done(Some(retry))` |
+| `Retry::More` | `Pass`: the companion resumes |
+| `Retry::After(wait)` | `Wait(wait)` |
+| `Retry::Complete` or `Stalled` | `Pass` for new work (a grown window or changed addresses), else `Done(Some(retry))` |
+
+The caller keeps what is policy: its time budgets and the cap on waits, how
+long a hold lasts, the trust it states, its write gate and threads, cancellation
+of requests in flight, and activation after `Done`. `recover`,
+`apply_and_acknowledge` and `acknowledge_applied` remain for callers that bring
+their own transports or wallet writer.
 
 Settlement writes each commit in its own wallet transaction. An outer SQL
 transaction is refused, so an integrity rejection's recovery suspension cannot be
@@ -274,8 +326,9 @@ Only the latest issued ready batch's receipt can be acknowledged.
 A custom wallet writer can apply `batch.commits()` and then call
 `acknowledge_applied` when there are no retirements. A batch with retirements
 requires the trusted SQLite settlement helper; manual acknowledgment refuses it.
-An untrusted caller should stop at the first such batch instead of repeatedly
-accumulating successors it cannot reconcile.
+`PassPlan` holds an untrusted caller's account (`HoldCause::Unreconciled`) at
+the first such batch instead of repeatedly accumulating successors it cannot
+reconcile.
 
 `forget_private_recovery` turns private recovery off once the wallet's
 transparent policy is `Public` on the handle and durably: it deletes every
@@ -329,15 +382,16 @@ the library's normal dependency graph.
 `TransparentPirHttp::split` supplies the filter and shard interfaces for a pass.
 A shard-bound 409 is a stale revision; supported capacity responses become
 `Overloaded`. A 429 is never capacity, even with `retry-after`. `outage()` tells
-the caller that the origin is unreachable or not serving; the application can
-stop visiting further accounts rather than repeat an outage for each one.
+the caller that the origin is unreachable or not serving, which `pass` reports
+as `PassError::Outage`; the application stops visiting further accounts rather
+than repeat an outage for each one.
 `TxidHttp` supplies the display client's transport over the same exchange.
 
 `ApplyFailure::action()` distinguishes refreshing stale context, reconciling
 retirements, skipping a refused/unacknowledgeable batch, stopping disabled
 recovery, reporting a wallet failure, and handling a gate interruption.
 `RecoveryError::PublicationChanged` resets retrieval state while retaining the
-catalog; retry once with the same companion. Pending or withdrawn results do
+catalog; `pass` retries once with the same companion. Pending or withdrawn results do
 not justify recreating the companion to bypass continuity checks.
 
 Log at most HTTP route templates and error variants. Recovery errors can quote
@@ -365,12 +419,15 @@ python3 scripts/dev.py test --config transparent-pir-testing
 
 The [in-process recovery tests](tests/private_recovery.rs) use real PIR and
 record requests while exercising recovery, settlement, activation, reorgs,
-publication changes, and re-cuts. [Discovery tests](tests/private_discovery.rs)
+publication changes, and re-cuts, driving every pass through `pass`,
+`settle_latest` and `PassPlan` over a loopback `HttpExchange`.
+[Discovery tests](tests/private_discovery.rs)
 exercise temporary import probing. The child-module tests cover normalization,
 catalog continuity, replay, and lookup translation.
 
-The [recover-activity example](examples/recover-activity.rs) is a bounded real-HTTP
-harness for candidate evidence and durable reopening. Its snapshot uses
+The [recover-activity example](examples/recover-activity.rs) (feature `sqlite`)
+is a bounded real-HTTP harness for candidate evidence and durable reopening,
+running the same driver with observed settlement over its own exchange. Its snapshot uses
 independently collected chain headers and controlled public script fixtures;
 it refuses qualification and activation. It establishes retrieval and
 persistence, not ownership of those fixture funds or full wallet presentation.
