@@ -623,11 +623,7 @@ fn issuance_skips_restored_addresses_the_provider_saw() {
     for index in 0..RECEIVE_GAP_LIMIT {
         let key = KeyId::new(Purpose::Receive, index);
         queue_lookup(db, account, key, swept_at, &[]).unwrap();
-        let provider = ProviderView {
-            recent: false,
-            seen: index < 3,
-        };
-        db.apply_dynamic_sweep(account, key, swept_at, swept_at, provider, |_, _| None)
+        db.apply_dynamic_sweep(account, key, swept_at, swept_at, index < 3, |_, _| None)
             .unwrap()
             .unwrap();
     }

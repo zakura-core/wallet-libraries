@@ -125,7 +125,7 @@ use {
         data_api::{
             dynamic_ivk::{
                 DirectoryPayment, DiscoveryWork, DynamicIvkRead, DynamicIvkWrite,
-                PaymentApplication, ProviderView, SweepDeferral,
+                PaymentApplication, SweepDeferral,
             },
             transparent_ledger::ChainPoint,
         },
@@ -2561,18 +2561,10 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         key: KeyId,
         through: ChainPoint,
         publication: ChainPoint,
-        provider: ProviderView,
+        seen: bool,
         witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
     ) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
-        wallet::dynamic_ivk::apply_sweep(
-            self,
-            account,
-            key,
-            through,
-            publication,
-            provider,
-            witness,
-        )
+        wallet::dynamic_ivk::apply_sweep(self, account, key, through, publication, seen, witness)
     }
 
     fn finish_dynamic_nullifier_recovery(
