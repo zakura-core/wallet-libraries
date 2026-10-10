@@ -66,7 +66,7 @@ use {
         data_api::{
             dynamic_ivk::{
                 DirectoryPayment, DiscoveryWork, DynamicIvkRead, DynamicIvkWrite,
-                PaymentApplication, ProviderView, SweepDeferral, ambassador_impl_DynamicIvkRead,
+                PaymentApplication, SweepDeferral, ambassador_impl_DynamicIvkRead,
                 ambassador_impl_DynamicIvkWrite,
             },
             transparent_ledger::ChainPoint,

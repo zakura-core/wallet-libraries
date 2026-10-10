@@ -174,9 +174,9 @@ workspace.
   `finish_dynamic_nullifier_recovery`, which releases the Ironwood spend history the
   sweeps needed. Note data is queued in batches, so a long history keeps its progress,
   and a directory claim that fails a local check (`PaymentApplication::Rejected`) is
-  looked up again. `apply_dynamic_sweep` takes a `ProviderView` of the key's receiver: a
-  recent one keeps scanning after its sweep, any other that was not already scanning
-  closes at its lookup, and a seen one is never issued. A payment before the account's
+  looked up again. `apply_dynamic_sweep` takes whether a provider seen set holds the key's
+  receiver, so a seen key is never issued, and every finished key scans from the block
+  after its lookup until its restore watch closes it. A payment before the account's
   birthday is checked for inclusion ahead of the birthday block and then raises the
   recovery bound without being tracked. Scanning that later finds the same note moves it
   to the transaction it is found in. `dynamic_history_pending` reports unfinished sweeps.

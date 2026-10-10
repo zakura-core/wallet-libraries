@@ -17,7 +17,7 @@ use zcash_client_backend::{
         WalletRead, WalletWrite,
         dynamic_ivk::{
             DirectoryPayment, DiscoveryWork, DynamicIvkRead as _, DynamicIvkWrite as _,
-            MAX_PUBLICATION_LAG, PaymentApplication, ProviderView, SweepDeferral,
+            MAX_PUBLICATION_LAG, PaymentApplication, SweepDeferral,
         },
         testing::{AddressType, IronwoodFvk, TestBuilder, TestRng, TestState},
         transparent_ledger::ChainPoint,
@@ -253,10 +253,10 @@ fn apply_payment(
     .map(|applied| applied.expect("the payment's blocks are on the wallet's chain"))
 }
 
-/// Finishes `key`'s sweep after an empty lookup at `anchor`, keeping the key scanning.
+/// Finishes `key`'s sweep after an empty lookup at `anchor`, for an unseen receiver.
 fn finish_sweep(db: &mut Db, account: AccountUuid, key: KeyId, anchor: ChainPoint) {
     queue_lookup(db, account, key, anchor, &[]).unwrap();
-    let applied = db.apply_dynamic_sweep(account, key, anchor, anchor, WATCHED, |_, _| None);
+    let applied = db.apply_dynamic_sweep(account, key, anchor, anchor, false, |_, _| None);
     assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
 }
 
@@ -380,12 +380,6 @@ fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>> {
         .map(|n| n.dynamic_key_id())
         .collect()
 }
-
-/// A sweep's view of a receiver a swap reached recently, so its key keeps scanning.
-const WATCHED: ProviderView = ProviderView {
-    recent: true,
-    seen: false,
-};
 
 /// Keys the scanner trial-decrypts with.
 fn scanning_keys(st: &State) -> Vec<KeyId> {

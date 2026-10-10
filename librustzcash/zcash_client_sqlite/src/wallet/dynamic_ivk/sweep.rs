@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use rusqlite::{Connection, OptionalExtension, params};
 use zakura_dynamic_ivk::recovery::EncryptedNote;
 use zcash_client_backend::data_api::{
-    dynamic_ivk::{DirectoryPayment, MAX_PUBLICATION_LAG, ProviderView, SweepDeferral},
+    dynamic_ivk::{DirectoryPayment, MAX_PUBLICATION_LAG, SweepDeferral},
     transparent_ledger::ChainPoint,
 };
 use zcash_primitives::{block::BlockHash, transaction::TxId};
@@ -162,13 +162,13 @@ pub(crate) fn queue_directory_lookup<P: Parameters>(
     Ok(queue_lookup(conn, params, account, key, anchor, &fresh, done)?.map(|()| done))
 }
 
-/// Finishes `key`'s sweep at its lookup's anchor once its candidates are applied (see
-/// `DynamicIvkWrite::apply_dynamic_sweep`).
+/// Finishes `key`'s sweep at its lookup's anchor once its candidates are applied, and
+/// scans the key from the next block (see `DynamicIvkWrite::apply_dynamic_sweep`).
 pub(super) fn finish(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
     key: KeyId,
-    provider: ProviderView,
+    seen: bool,
 ) -> Result<Result<(), SweepDeferral>, SqliteClientError> {
     let id = key_ref(conn, account, key)?;
     let (pending, lookup): (bool, Option<ChainPoint>) = conn.query_row(
@@ -189,30 +189,15 @@ pub(super) fn finish(
         "UPDATE ironwood_dynamic_sweeps SET done_height = ?2 WHERE receiving_key_id = ?1",
         params![id, u32::from(lookup.height)],
     )?;
-    let scanning: bool = conn.query_row(
-        "SELECT active_from IS NOT NULL AND closed_at IS NULL
-         FROM ironwood_receiving_keys WHERE id = ?1",
-        [id],
-        |r| r.get(0),
-    )?;
     // Never issued again, so like a paid key it extends the restore walk and the gap
     // (see `recovery_end`).
-    if provider.seen {
+    if seen {
         conn.execute(
             "UPDATE ironwood_receiving_keys
              SET provider_seen = 1, advances_allocation = 1 WHERE id = ?1",
             [id],
         )?;
     }
-    if provider.recent || scanning {
-        activate(conn, id, lookup.height + 1)?;
-    } else {
-        conn.execute(
-            "UPDATE ironwood_receiving_keys SET closed_at = COALESCE(closed_at,
-                (SELECT time FROM blocks WHERE height = ?2))
-             WHERE id = ?1",
-            params![id, u32::from(lookup.height)],
-        )?;
-    }
+    activate(conn, id, lookup.height + 1)?;
     Ok(Ok(()))
 }
