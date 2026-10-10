@@ -2534,9 +2534,10 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         account: AccountUuid,
         key: KeyId,
         now: i64,
+        seen: bool,
     ) -> Result<(), SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::dynamic_ivk::begin_sweep_attempt(wdb.conn.0, account, key, now)
+            wallet::dynamic_ivk::begin_sweep_attempt(wdb.conn.0, account, key, now, seen)
         })
     }
 
@@ -2561,10 +2562,9 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         key: KeyId,
         through: ChainPoint,
         publication: ChainPoint,
-        seen: bool,
         witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
     ) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
-        wallet::dynamic_ivk::apply_sweep(self, account, key, through, publication, seen, witness)
+        wallet::dynamic_ivk::apply_sweep(self, account, key, through, publication, witness)
     }
 
     fn finish_dynamic_nullifier_recovery(
