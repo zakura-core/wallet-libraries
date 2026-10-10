@@ -805,7 +805,7 @@ fn declarations(map: &ShardMap) -> usize {
 ///
 /// A wallet holds no blocks below its birthday, while a publication may start far
 /// below it (the live map starts at genesis). Leniency there is sound because, at
-/// wallet-pir 06a972db, `sync_into` asks below the floor only for rollback
+/// wallet-pir 0d6ad4aa, `sync_into` asks below the floor only for rollback
 /// anchors and, in one case below, the end of a replacement shard:
 ///
 /// - It plans only shards meeting `[required_from, target]` (`sync.rs:949-972`),

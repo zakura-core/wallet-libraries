@@ -146,6 +146,9 @@
   this one uses are the dithered query (wallet-pir's `pir-native` and the
   transparent client and server); the `BelowFloor` call sites were re-checked
   there.
+- wallet-pir then moves to `0d6ad4aa94abbb2838d4182c869f06e1881e6c35`, the
+  revision `zakura-pir-receiver` pins, so the two share one copy of each
+  wallet-pir crate. Its transparent crates are unchanged from `06a972db`.
 - Sources are `transparent-reference-source-v3`: the shard id is no longer
   bound, only the geometry, its seal parameters and the start height, so a
   renumbered shard or tail keeps its source.
