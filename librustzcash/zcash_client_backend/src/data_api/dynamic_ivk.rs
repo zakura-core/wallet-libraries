@@ -66,17 +66,6 @@ pub struct DirectoryPayment {
     pub ciphertext_prefix: [u8; 52],
 }
 
-/// What a publication's swap provider filters say about a swept key's receiver.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ProviderView {
-    /// A swap may still pay the receiver: the provider was given it within the wallet's
-    /// restore watch, or the publication cannot rule that out.
-    pub recent: bool,
-    /// The provider was ever given the receiver as a payout address, so issuing it
-    /// again would link two swaps.
-    pub seen: bool,
-}
-
 /// Why a restore sweep step must wait for more scanning or a newer publication. The
 /// step changed nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -250,18 +239,18 @@ pub trait DynamicIvkWrite: WalletWrite + DynamicIvkRead {
     /// wait or was rejected; payments applied before it stay applied. A lookup a reorg
     /// removed defers the sweep to run again.
     ///
-    /// `provider` is what the publication's provider filters say about the key's
-    /// receiver. A recent key then scans from the block after the lookup until it closes,
-    /// so a payment between the lookup and the tip is not missed. Any other key that was
-    /// not already scanning closes at the lookup: no swap can still reach it, so nothing
-    /// arrives in the publication's lag. A seen key is not issued again.
+    /// `seen` is whether a swap provider seen set in the publication holds the key's
+    /// receiver: the provider was given it as a payout address, so the key is never
+    /// issued again. Whatever the filters say, the finished key then scans from the block
+    /// after the lookup, rescanning blocks scanned without it, until the store's restore
+    /// watch closes it, so a payment after the lookup is found by scanning.
     fn apply_dynamic_sweep(
         &mut self,
         account: <Self as WalletRead>::AccountId,
         key: KeyId,
         through: ChainPoint,
         publication: ChainPoint,
-        provider: ProviderView,
+        seen: bool,
         witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
     ) -> Result<Result<PaymentApplication, SweepDeferral>, <Self as WalletRead>::Error>;
 
