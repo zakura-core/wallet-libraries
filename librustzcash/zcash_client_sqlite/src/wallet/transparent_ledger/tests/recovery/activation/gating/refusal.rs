@@ -401,3 +401,116 @@ fn address_selection_is_pending_when_any_owner_is() {
         ))
     ));
 }
+
+/// Asserts that `refusal` names none of `received`'s outpoint, txid or address.
+fn names_nothing_of(st: &State, refusal: &Result<(), AuthorityRefusal>, received: &ReceiveEvent) {
+    let message = refusal.as_ref().unwrap_err().to_string();
+    let txid = received.outpoint.txid();
+    for identifier in [
+        txid.to_string(),
+        hex::encode(txid.as_ref()),
+        format!("{:?}", received.outpoint),
+        Address::from(received.address).encode(st.network()),
+    ] {
+        assert!(!message.contains(&identifier), "{message}");
+    }
+}
+
+#[test]
+fn a_rewound_receive_waits_for_recovery_to_place_it_again() {
+    let (mut st, account, _, unspent) = eligible_wallet();
+    let input = [&unspent.outpoint];
+    assert_eq!(check(&st, &input, next_target(&st)), Ok(()));
+
+    // A rewind below the receive clears its placement. The replacement chain reaches past it,
+    // and the account's recovery has yet to cover that chain.
+    let floor = unspent.mined_height - 2;
+    st.truncate_to_height(floor);
+    scan_new_blocks(&mut st, 4);
+    assert_eq!(
+        snapshot(&st, account).blockers,
+        vec![RecoveryBlocker::Recovery(
+            CandidateBlocker::IncompleteCoverage
+        )]
+    );
+    let target = next_target(&st);
+    let waiting = check(&st, &input, target);
+    assert_eq!(waiting, pending(account));
+    names_nothing_of(&st, &waiting, &unspent);
+    // Direct lookup classifies the same way.
+    let lookup = st
+        .wallet()
+        .db()
+        .get_unspent_transparent_output(&unspent.outpoint, target);
+    assert!(
+        matches!(
+            &lookup,
+            Err(SqliteClientError::TransparentAuthorityUnavailable(
+                AuthorityRefusal::Pending { accounts }
+            )) if accounts == &vec![account]
+        ),
+        "{lookup:?}"
+    );
+
+    // A pass that places the receive again on the new chain admits it.
+    let remined = ReceiveEvent {
+        mined_height: floor + 3,
+        ..unspent.clone()
+    };
+    cover(&mut st, account, &revision(1, true), vec![remined]);
+    assert_eq!(check(&st, &input, target), Ok(()));
+}
+
+#[test]
+fn a_rewound_receive_covered_without_placement_is_withdrawn() {
+    let (mut st, account, _, unspent) = eligible_wallet();
+    st.truncate_to_height(unspent.mined_height - 2);
+    scan_new_blocks(&mut st, 4);
+    // Recovery covers the replacement chain, which does not mine the receive.
+    cover(&mut st, account, &revision(1, true), vec![]);
+    let refusal = check(&st, &[&unspent.outpoint], next_target(&st));
+    assert_eq!(refusal, refused(RefusalReason::Withdrawn));
+    names_nothing_of(&st, &refusal, &unspent);
+}
+
+#[test]
+fn a_withdrawn_receive_is_refused_while_recovery_catches_up() {
+    let (mut st, account, received, replacement) = super::withdrawal::provisional_wallet(false);
+    let input = [&received.outpoint];
+    assert_eq!(check(&st, &input, next_target(&st)), Ok(()));
+
+    // The replacement revision drops the receive. Waiting cannot restore it, even while the
+    // account's recovery has yet to cover the replacement.
+    qualify(&mut st, &replacement);
+    assert!(
+        snapshot(&st, account)
+            .blockers
+            .contains(&RecoveryBlocker::Recovery(
+                CandidateBlocker::IncompleteCoverage
+            ))
+    );
+    let refusal = check(&st, &input, next_target(&st));
+    assert_eq!(refusal, refused(RefusalReason::Withdrawn));
+    names_nothing_of(&st, &refusal, &received);
+
+    cover(&mut st, account, &replacement, vec![]);
+    assert_eq!(
+        check(&st, &input, next_target(&st)),
+        refused(RefusalReason::Withdrawn)
+    );
+}
+
+#[test]
+fn a_rewound_receive_withdrawn_before_recovery_places_it_is_refused() {
+    let (mut st, account, received, replacement) = super::withdrawal::provisional_wallet(false);
+    st.truncate_to_height(received.mined_height - 2);
+    scan_new_blocks(&mut st, 4);
+    let input = [&received.outpoint];
+    assert_eq!(check(&st, &input, next_target(&st)), pending(account));
+    // Withdrawal removes the unplaced receive, so nothing remains to wait for.
+    qualify(&mut st, &replacement);
+    assert_eq!(
+        check(&st, &input, next_target(&st)),
+        refused(RefusalReason::Withdrawn)
+    );
+}

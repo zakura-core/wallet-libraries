@@ -1327,6 +1327,19 @@ macro_rules! placed_ledger_receive {
     };
 }
 
+/// A SQL condition that `u`, created by transaction `t`, has a ledger receive that a rewind
+/// left unplaced. Only a rewind clears a stored placement, and a later commit can place the
+/// receive again; withdrawing a receive deletes its event instead.
+macro_rules! unplaced_ledger_receive {
+    () => {
+        "EXISTS (
+             SELECT 1 FROM tpir_receive_events re
+             WHERE re.txid = t.txid AND re.output_index = u.output_index
+             AND re.account_id = u.account_id AND re.mined_height IS NULL
+         )"
+    };
+}
+
 /// The conditions besides authority under which a wallet output `u`, created by transaction
 /// `t`, may fund a transaction targeting `:target_height`, each with the refusal it reports
 /// when it fails, in the order a refusal names them. A condition that evaluates to NULL fails,
@@ -1470,6 +1483,15 @@ pub(crate) enum InputStanding {
     Unknown,
     /// The output cannot fund the transaction under any authority.
     Excluded(RefusalReason),
+    /// The output passes every other condition but exists only through a ledger receive that
+    /// a rewind left unplaced. It cannot fund the transaction now, but the owning account's
+    /// recovery may place the receive again.
+    Unplaced {
+        /// The owning account.
+        account: AccountUuid,
+        /// The owning account's row.
+        account_ref: AccountRef,
+    },
     /// The output can fund the transaction if the transparent authority admits it.
     Eligible {
         /// The owning account.
@@ -1501,6 +1523,7 @@ pub(crate) fn transparent_input_standing(
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT accounts.uuid, u.account_id,
                 ({}) AS placed,
+                ({}) AS unplaced,
                 {columns}
          FROM transparent_received_outputs u
          JOIN transactions t ON t.id_tx = u.transaction_id
@@ -1508,7 +1531,8 @@ pub(crate) fn transparent_input_standing(
          JOIN addresses ON addresses.id = u.address_id
          WHERE t.txid = :txid
          AND u.output_index = :output_index",
-        placed_ledger_receive!()
+        placed_ledger_receive!(),
+        unplaced_ledger_receive!()
     ))?;
     let retry_txid_bytes = retry_txid.map(|id| *id.as_ref());
     let standing = stmt
@@ -1523,7 +1547,15 @@ pub(crate) fn transparent_input_standing(
                 for (i, (reason, _)) in conditions.iter().enumerate() {
                     // A condition can be NULL, as the expiry of an unmined transaction with
                     // unknown expiry is; as in a WHERE clause, only true admits the output.
-                    if row.get::<_, Option<bool>>(3 + i)? != Some(true) {
+                    if row.get::<_, Option<bool>>(4 + i)? != Some(true) {
+                        // The observation condition fails for a ledger-only output with no
+                        // placed receive; one whose receive survives unplaced is not withdrawn.
+                        if *reason == RefusalReason::Withdrawn && row.get(3)? {
+                            return Ok(InputStanding::Unplaced {
+                                account: AccountUuid(row.get(0)?),
+                                account_ref: AccountRef(row.get(1)?),
+                            });
+                        }
                         return Ok(InputStanding::Excluded(*reason));
                     }
                 }

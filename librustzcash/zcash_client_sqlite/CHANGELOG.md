@@ -10,6 +10,13 @@ workspace.
 
 ## [Unreleased]
 
+- An input known only from a recovered receive that a chain rewind left unplaced is no longer
+  refused as `Withdrawn` while its account's recovery catches up. The input check, direct
+  lookup and final storage report `AuthorityRefusal::Pending` for that account, and admit the
+  input once a later pass places the receive again. A receive withdrawn by a replacement
+  revision is still `Refused(Withdrawn)`, as is an unplaced one once recovery covers the tip
+  without placing it. A suspended or otherwise unadmitted account is `NotAdmitted`.
+
 - Name the durable stop after contradictory recovery evidence "recovery suspension".
   Move its checks and writes into `recovery_suspension`. Stored SQLite table names
   and suspension behavior are unchanged.
@@ -20,7 +27,7 @@ workspace.
 
 - `SqliteClientError::TransparentAuthorityUnavailable` carries an `AuthorityRefusal`:
   `Pending { accounts }` when every refused input is a held, unspent, unexpired, mature and
-  unwithdrawn output of an active account not suspended from recovery whose only blockers are
+  unwithdrawn (possibly rewound and unplaced) output of an active account not suspended from recovery whose only blockers are
   `Recovery(IncompleteCoverage)` and `ChainBehindTip` (with none needed when the target is
   ahead of the chain), and `Refused(RefusalReason)` otherwise. Any other blocker, such as open
   pages or unresolved spends, is `NotAdmitted`. Other reasons include `UnknownOutput`,

@@ -219,6 +219,44 @@ pub(crate) fn refuse_unadmitted_input<P: consensus::Parameters>(
     if authority.admits(account_ref) {
         return Err(refused(RefusalReason::NotInLedger));
     }
+    exclude_or_defer(conn, params, gap_limits, account, target, pending)
+}
+
+/// The refusal of an input projected only from a ledger receive that a rewind left unplaced,
+/// owned by `account` (`account_ref`): [`RefusalReason::Withdrawn`] when `authority` admits
+/// the account, whose recovery then covers the tip without placing the receive again, and
+/// otherwise its [`private_exclusion`], recording a pending account in `pending` once. An
+/// account catching up may place the receive again; a withdrawn receive has no event left, so
+/// it never reaches this check.
+#[cfg(feature = "transparent-inputs")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn refuse_unplaced_input<P: consensus::Parameters>(
+    conn: &rusqlite::Connection,
+    params: &P,
+    gap_limits: &GapLimits,
+    authority: &InputAuthority,
+    account: AccountUuid,
+    account_ref: AccountRef,
+    target: TargetHeight,
+    pending: &mut Vec<AccountUuid>,
+) -> Result<(), SqliteClientError> {
+    if authority.admits(account_ref) {
+        return Err(refused(RefusalReason::Withdrawn));
+    }
+    exclude_or_defer(conn, params, gap_limits, account, target, pending)
+}
+
+/// Refuses an input of `account` for its [`private_exclusion`], or records the account in
+/// `pending` once when only private recovery catching up keeps the input out.
+#[cfg(feature = "transparent-inputs")]
+fn exclude_or_defer<P: consensus::Parameters>(
+    conn: &rusqlite::Connection,
+    params: &P,
+    gap_limits: &GapLimits,
+    account: AccountUuid,
+    target: TargetHeight,
+    pending: &mut Vec<AccountUuid>,
+) -> Result<(), SqliteClientError> {
     match private_exclusion(conn, params, gap_limits, account, target)? {
         Some(reason) => Err(refused(reason)),
         None => {

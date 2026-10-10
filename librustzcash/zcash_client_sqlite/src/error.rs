@@ -360,7 +360,9 @@ pub enum RefusalReason {
     Expired,
     /// The output is coinbase that is immature at the target.
     ImmatureCoinbase,
-    /// The output exists only through a recovered receive that was withdrawn or never placed.
+    /// The output exists only through a recovered receive that was withdrawn, or that a rewind
+    /// left unplaced and the owning account's recovery, covering the tip, did not place again.
+    /// While that recovery catches up, an unplaced receive is [`AuthorityRefusal::Pending`].
     Withdrawn,
     /// The owning account holds private authority, but the output is not one of its ledger's
     /// placed outputs: legacy public and local-only outputs never fund a private spend.

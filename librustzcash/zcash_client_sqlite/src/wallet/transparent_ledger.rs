@@ -27,6 +27,7 @@ pub(crate) use authority::check_transparent_authority;
 pub(crate) use authority::{
     InputAuthority, check_address_owners, check_public_discovery, grants_private_authority,
     input_authority, pending_result, public_discovery_permitted, refuse_unadmitted_input,
+    refuse_unplaced_input,
 };
 pub(crate) use authority::{
     has_transparent_inputs, refused, transparent_funds_current, transparent_funds_refusal,

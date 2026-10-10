@@ -9,7 +9,9 @@ use zcash_protocol::PoolType;
 use super::*;
 
 /// A provisional receive and, optionally, a spend observed by an independent sealed source.
-fn provisional_wallet(with_spend: bool) -> (State, AccountUuid, ReceiveEvent, RecoveryRevision) {
+pub(super) fn provisional_wallet(
+    with_spend: bool,
+) -> (State, AccountUuid, ReceiveEvent, RecoveryRevision) {
     let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     let ws = watch(&st, account);

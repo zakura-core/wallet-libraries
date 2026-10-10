@@ -2037,6 +2037,19 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
                 target,
                 pending,
             ),
+            InputStanding::Unplaced {
+                account,
+                account_ref,
+            } => wallet::transparent_ledger::refuse_unplaced_input(
+                conn,
+                &self.params,
+                &self.gap_limits,
+                authority,
+                account,
+                account_ref,
+                target,
+                pending,
+            ),
         }
     }
 
@@ -2082,26 +2095,43 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
         authority: &wallet::transparent_ledger::InputAuthority,
     ) -> Result<Option<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
         use wallet::transparent::InputStanding;
-        if let InputStanding::Eligible {
-            account,
-            account_ref,
-            placed,
-        } = wallet::transparent::transparent_input_standing(conn, outpoint, target, None)?
-            && !authority.admits_output(account_ref, placed)
-        {
-            let mut pending = vec![];
-            wallet::transparent_ledger::refuse_unadmitted_input(
-                conn,
-                &self.params,
-                &self.gap_limits,
-                authority,
+        let mut pending = vec![];
+        match wallet::transparent::transparent_input_standing(conn, outpoint, target, None)? {
+            InputStanding::Eligible {
                 account,
                 account_ref,
-                target,
-                &mut pending,
-            )?;
-            wallet::transparent_ledger::pending_result(pending)?;
+                placed,
+            } if !authority.admits_output(account_ref, placed) => {
+                wallet::transparent_ledger::refuse_unadmitted_input(
+                    conn,
+                    &self.params,
+                    &self.gap_limits,
+                    authority,
+                    account,
+                    account_ref,
+                    target,
+                    &mut pending,
+                )?
+            }
+            // An unplaced output of an admitted account is absent, as an excluded one is.
+            InputStanding::Unplaced {
+                account,
+                account_ref,
+            } if !authority.admits(account_ref) => {
+                wallet::transparent_ledger::refuse_unplaced_input(
+                    conn,
+                    &self.params,
+                    &self.gap_limits,
+                    authority,
+                    account,
+                    account_ref,
+                    target,
+                    &mut pending,
+                )?
+            }
+            _ => {}
         }
+        wallet::transparent_ledger::pending_result(pending)?;
         wallet::transparent::get_wallet_transparent_output(conn, outpoint, Some(target), authority)
     }
 }
