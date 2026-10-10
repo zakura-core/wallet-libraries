@@ -22,7 +22,7 @@
 //!   [`WalletDb::begin_receive_operation`], [`WalletDb::finish_receive_operation`] and
 //!   [`WalletDb::start_receive_operation`].
 //! - [`WalletDb::record_operation_status`] for each provider status of either.
-//! - `zakura_pir_receiver::sweep` for restore sweeps, and
+//! - The [`DynamicIvkWrite`] sweep steps for restore sweeps, and
 //!   [`WalletDb::recheck_dynamic_key_history`] when the user asks to recheck swaps.
 //!
 //! [`DynamicIvkRead`]: zcash_client_backend::data_api::dynamic_ivk::DynamicIvkRead
