@@ -8,8 +8,8 @@
 //! and [`decrypt_and_store_transaction_with_dynamic_ivks`], which try its open keys
 //! alongside the account keys. A restored wallet cannot rescan public history for
 //! every key its seed may have used, so it looks each recovered key up once in a
-//! receiver directory instead: a restore sweep, which `zakura-pir-receiver` runs with
-//! the sweep steps of these traits.
+//! receiver directory instead: a restore sweep, run with the sweep steps of these
+//! traits.
 //!
 //! [`decrypt_and_store_transaction_with_dynamic_ivks`]: super::wallet::decrypt_and_store_transaction_with_dynamic_ivks
 
