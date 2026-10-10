@@ -122,15 +122,13 @@ pub trait DynamicIvkRead: WalletRead {
     /// Selects keys for full transaction decryption, retaining known-note ownership
     /// even after a key stops scanning. `receivers` come from ordinary authenticated
     /// decryption and preserve self-payments before compact scanning.
-    /// Stores without a transaction index can conservatively return all keys.
+    /// Stores without a transaction index can conservatively return every registered key.
     fn get_dynamic_transaction_keys(
         &self,
-        _txid: TxId,
-        _height: Option<BlockHeight>,
-        _receivers: &[orchard::Address],
-    ) -> Result<Vec<DynamicScanningKey<Self::AccountId>>, Self::Error> {
-        self.get_dynamic_scanning_keys()
-    }
+        txid: TxId,
+        height: Option<BlockHeight>,
+        receivers: &[orchard::Address],
+    ) -> Result<Vec<DynamicScanningKey<Self::AccountId>>, Self::Error>;
 
     /// The anchor of a directory publication covering blocks through `height`, as the
     /// wallet's own chain records it. `through` is the wallet's fully scanned tip. Defers
