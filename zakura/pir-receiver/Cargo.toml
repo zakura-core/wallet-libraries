@@ -21,15 +21,15 @@ zakura-pir-enhance = { version = "=0.0.1-rc1", path = "../pir-enhance", features
 zakura-dynamic-ivk = { version = "0.0.0", path = "../dynamic-ivk", optional = true }
 zcash_client_backend = { workspace = true, features = ["orchard"], optional = true }
 zcash_protocol = { workspace = true, optional = true }
-# The receiver crates come from wallet-pir's open receiver stack until they land on its `main`.
-receiver-directory = { git = "https://github.com/valargroup/wallet-pir", rev = "502d930eaa8acdd3ed43c9ed73b9310168de893c" }
-receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "502d930eaa8acdd3ed43c9ed73b9310168de893c" }
+# The receiver crates come from wallet-pir's `main`.
+receiver-directory = { git = "https://github.com/valargroup/wallet-pir", rev = "0d6ad4aa94abbb2838d4182c869f06e1881e6c35" }
+receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "0d6ad4aa94abbb2838d4182c869f06e1881e6c35" }
 
 [dev-dependencies]
 axum = "0.7"
 orchard.workspace = true
-receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "502d930eaa8acdd3ed43c9ed73b9310168de893c", features = ["server"] }
-receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", rev = "502d930eaa8acdd3ed43c9ed73b9310168de893c" }
+receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "0d6ad4aa94abbb2838d4182c869f06e1881e6c35", features = ["server"] }
+receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", rev = "0d6ad4aa94abbb2838d4182c869f06e1881e6c35" }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower = { workspace = true, features = ["util"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }

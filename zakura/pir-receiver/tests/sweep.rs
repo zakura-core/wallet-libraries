@@ -126,7 +126,8 @@ fn pay_restored_key(st: &mut State, index: u64, position: u64) -> (Record, [u8; 
             height: u32::from(height),
             block_hash: block.hash().0,
             txid: *tx.txid().as_ref(),
-            tx_index: tx.index.try_into().unwrap(),
+            // The mock block has no coinbase; the directory refuses index 0 as one.
+            tx_index: u32::try_from(tx.index).unwrap() + 1,
             action_index: 0,
             position,
             action_nullifier: compact.nullifier.as_slice().try_into().unwrap(),

@@ -3726,7 +3726,7 @@ dependencies = [
 [[package]]
 name = "pir-control"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/wallet-pir?rev=502d930eaa8acdd3ed43c9ed73b9310168de893c#502d930eaa8acdd3ed43c9ed73b9310168de893c"
+source = "git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35#0d6ad4aa94abbb2838d4182c869f06e1881e6c35"
 dependencies = [
  "axum",
  "hex",
@@ -3751,7 +3751,7 @@ dependencies = [
 [[package]]
 name = "pir-native"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/wallet-pir?rev=502d930eaa8acdd3ed43c9ed73b9310168de893c#502d930eaa8acdd3ed43c9ed73b9310168de893c"
+source = "git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35#0d6ad4aa94abbb2838d4182c869f06e1881e6c35"
 dependencies = [
  "ipir-sp 0.1.0-rc.6 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6)",
  "rand 0.8.8",
@@ -3773,7 +3773,7 @@ dependencies = [
 [[package]]
 name = "pir-observability"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/wallet-pir?rev=502d930eaa8acdd3ed43c9ed73b9310168de893c#502d930eaa8acdd3ed43c9ed73b9310168de893c"
+source = "git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35#0d6ad4aa94abbb2838d4182c869f06e1881e6c35"
 dependencies = [
  "axum",
  "http-body",
@@ -4300,7 +4300,7 @@ dependencies = [
 [[package]]
 name = "receiver-directory"
 version = "0.0.1"
-source = "git+https://github.com/valargroup/wallet-pir?rev=502d930eaa8acdd3ed43c9ed73b9310168de893c#502d930eaa8acdd3ed43c9ed73b9310168de893c"
+source = "git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35#0d6ad4aa94abbb2838d4182c869f06e1881e6c35"
 dependencies = [
  "bitcoin",
  "incrementalmerkletree",
@@ -4315,11 +4315,11 @@ dependencies = [
 [[package]]
 name = "receiver-pir"
 version = "0.0.1"
-source = "git+https://github.com/valargroup/wallet-pir?rev=502d930eaa8acdd3ed43c9ed73b9310168de893c#502d930eaa8acdd3ed43c9ed73b9310168de893c"
+source = "git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35#0d6ad4aa94abbb2838d4182c869f06e1881e6c35"
 dependencies = [
  "hex",
  "ipir-sp 0.1.0-rc.6 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6)",
- "pir-native 0.1.0 (git+https://github.com/valargroup/wallet-pir?rev=502d930eaa8acdd3ed43c9ed73b9310168de893c)",
+ "pir-native 0.1.0 (git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35)",
  "rand 0.8.8",
  "receiver-directory",
  "serde",
@@ -4331,12 +4331,12 @@ dependencies = [
 [[package]]
 name = "receiver-pir-server"
 version = "0.0.1"
-source = "git+https://github.com/valargroup/wallet-pir?rev=502d930eaa8acdd3ed43c9ed73b9310168de893c#502d930eaa8acdd3ed43c9ed73b9310168de893c"
+source = "git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35#0d6ad4aa94abbb2838d4182c869f06e1881e6c35"
 dependencies = [
  "axum",
  "hex",
- "pir-control 0.1.0 (git+https://github.com/valargroup/wallet-pir?rev=502d930eaa8acdd3ed43c9ed73b9310168de893c)",
- "pir-observability 0.1.0 (git+https://github.com/valargroup/wallet-pir?rev=502d930eaa8acdd3ed43c9ed73b9310168de893c)",
+ "pir-control 0.1.0 (git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35)",
+ "pir-observability 0.1.0 (git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35)",
  "receiver-directory",
  "receiver-pir",
  "serde_json",
