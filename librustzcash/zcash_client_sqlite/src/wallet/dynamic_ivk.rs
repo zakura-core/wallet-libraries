@@ -163,7 +163,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     }
 
     /// Binds a refund quote's deposit address to the refund key reserved at `index`,
-    /// before the quote is shown; funding requires it. A refund only follows a deposit,
+    /// before the quote is shown; funding requires it. Repeating the binding is a no-op,
+    /// and a key already bound to another deposit is refused. A refund only follows a deposit,
     /// so the key starts scanning when this wallet stores a transaction funding
     /// `deposit`, from the block above the scanned chain.
     pub fn record_refund_operation(
