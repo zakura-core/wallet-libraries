@@ -2624,7 +2624,10 @@ fn a_policy_raised_after_the_companions_are_deleted_forgets_nothing() {
     let mut gate = RaisePolicy {
         wallet: Connection::open(wallet_path).unwrap(),
     };
-    assert!(matches!(f.forget(&mut gate), Err(ForgetError::NotPublic)));
+    assert!(matches!(
+        f.forget(&mut gate),
+        Err(ForgetError::PolicyChanged)
+    ));
     assert!(!f.companion_path().exists());
     assert_eq!(f.ledger_facts(), facts);
     assert_eq!(
@@ -2635,4 +2638,75 @@ fn a_policy_raised_after_the_companions_are_deleted_forgets_nothing() {
             .mode,
         PrivateRequired
     );
+    // A retry finds the policy private before deleting anything.
+    assert!(matches!(
+        f.forget(&mut Ungated),
+        Err(ForgetError::NotPublic)
+    ));
+    assert_eq!(f.ledger_facts(), facts);
+}
+
+/// A [`WriteGate`] that, before running the write, takes the wallet's durable policy to
+/// `PrivateRequired` through another connection, creates the account's companion as a
+/// private pass would, and returns the policy to `Public`.
+struct PolicyRoundTrip {
+    wallet: Connection,
+    companions: CompanionDir,
+    account: AccountUuid,
+}
+
+impl WriteGate for PolicyRoundTrip {
+    fn write<T>(&mut self, write: impl FnOnce() -> T) -> Result<T, Interrupted> {
+        let set_mode = |mode: i64| {
+            self.wallet
+                .execute(
+                    "UPDATE tpir_meta SET applied_mode = ?1,
+                     policy_generation = policy_generation + 1",
+                    [mode],
+                )
+                .unwrap();
+        };
+        set_mode(2);
+        let account = self.account.expose_uuid().to_string();
+        self.companions
+            .open(
+                &account,
+                config(self.account),
+                || Ok(BTreeSet::from([account.clone()])),
+                &|| false,
+            )
+            .unwrap();
+        set_mode(0);
+        Ok(write())
+    }
+}
+
+#[test]
+fn a_policy_round_trip_after_the_companions_are_deleted_forgets_nothing() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, _) = private_fixture_with_factory(TestDbFactory::file_backed());
+    f.drive();
+    let facts = f.ledger_facts();
+    assert!(facts > 0);
+    f.companion = None;
+    f.set_policy(TransparentLedgerMode::Public);
+    let wallet_path = f.st.wallet().conn().path().unwrap().to_owned();
+    let mut gate = PolicyRoundTrip {
+        wallet: Connection::open(wallet_path).unwrap(),
+        companions: f.companions(),
+        account: f.account,
+    };
+    // The policy is public again at the write, but a companion created while it was
+    // private survives, so the facts stay with it.
+    assert!(matches!(
+        f.forget(&mut gate),
+        Err(ForgetError::PolicyChanged)
+    ));
+    assert!(f.companion_path().exists());
+    assert_eq!(f.ledger_facts(), facts);
+
+    // A retry deletes that companion before forgetting.
+    assert!(!f.forget(&mut Ungated).unwrap().removed_nothing());
+    assert!(!f.companion_path().exists());
+    assert_eq!(f.ledger_facts(), 0);
 }

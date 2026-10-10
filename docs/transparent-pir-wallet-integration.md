@@ -544,8 +544,11 @@ to the wallet.
 every companion and only then runs `forget_transparent_ledger` through the
 application's `WriteGate`. A companion records which revisions the wallet
 holds; one that outlived the facts would make a later private run skip them, so
-a companion still in use (`ForgetError::CompanionBusy`), a declined gate, or a
-policy raised back to private before the forget leaves the facts in place. It
+a companion still in use (`ForgetError::CompanionBusy`) or a declined gate
+leaves the facts in place. So does any policy change after the companions were
+deleted (`ForgetError::PolicyChanged`), even private and back to public: the
+forget's wallet transaction checks the policy generation read before the
+deletion, because a private pass in between could have created a companion. It
 refuses a wallet not public on the handle and durably before deleting anything.
 The forget removes private-only spends, outputs, events, coverage, and
 source-bound facts. Public discovery rebuilds from its own observations.

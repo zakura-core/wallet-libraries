@@ -17,7 +17,11 @@
   `forget_transparent_ledger` through the caller's `WriteGate`. A companion
   still held fails with `ForgetError::CompanionBusy` and forgets nothing; a
   wallet not public fails with `ForgetError::NotPublic` before anything is
-  deleted, and also when the policy is raised after the companions went.
+  deleted. The forget runs in one wallet transaction with a check of the
+  policy generation read before the companions went, so any policy change
+  since, even private and back to public, fails with
+  `ForgetError::PolicyChanged` and forgets nothing: a companion created
+  meanwhile would otherwise outlive the facts it records.
 - One recovery pass driver, so wallets stop writing their own loop.
   `TransparentHistoryRecovery::pass` runs `recover` over a fresh `TransparentPirHttp` on
   the caller's `HttpExchange`, retries once after

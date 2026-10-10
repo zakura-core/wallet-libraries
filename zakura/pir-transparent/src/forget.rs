@@ -21,10 +21,14 @@ use crate::companion::CompanionDir;
 /// the nested errors are for matching, never for logs.
 #[derive(Debug, thiserror::Error)]
 pub enum ForgetError {
-    /// The handle or the durable policy is not `Public`. Checked before anything is deleted,
-    /// and again by the forget itself, which refuses a policy raised meanwhile.
+    /// The handle or the durable policy is not `Public`. Checked before anything is deleted.
     #[error("transparent PIR forget: the transparent policy is not public")]
     NotPublic,
+    /// The durable policy changed after the forget began, so a companion may have been
+    /// created since the companions were deleted. Companions before the change are deleted;
+    /// nothing was forgotten.
+    #[error("transparent PIR forget: the transparent policy changed")]
+    PolicyChanged,
     /// Another handle held a companion until the wait ran out. Companions before it are
     /// deleted; nothing was forgotten.
     #[error("transparent PIR forget: a companion is in use")]
@@ -45,6 +49,7 @@ impl From<SqliteClientError> for ForgetError {
     fn from(error: SqliteClientError) -> Self {
         match error {
             SqliteClientError::PublicTransparentDiscoveryForbidden => Self::NotPublic,
+            SqliteClientError::StaleTransparentPolicy { .. } => Self::PolicyChanged,
             error => Self::Wallet(error),
         }
     }
@@ -60,16 +65,20 @@ impl From<SqliteClientError> for ForgetError {
 /// `TransparentLedgerWrite::forget_transparent_ledger` through `gate`, under the
 /// application's wallet write serialization. That removes, in one wallet transaction, the
 /// outputs, spends and transactions only private recovery reported and the recovery state that
-/// would project them again; public discovery then rebuilds the transparent view.
+/// would project them again; public discovery then rebuilds the transparent view. The same
+/// transaction first confirms that the durable policy generation is still the one read before
+/// the companions were deleted.
 ///
 /// The order matters. A companion records which revisions the wallet already holds, and a
 /// later private pass exports only what it does not. A companion that outlived the forgotten
 /// facts would make that pass skip them, leaving the wallet without them for good. A wallet
 /// whose companions are gone but whose facts remain is safe: a fresh companion exports every
 /// revision again, and replaying them changes nothing the wallet holds. So a held companion
-/// fails with [`ForgetError::CompanionBusy`] and forgets nothing, and so does a declined gate
-/// or a policy raised back to `PrivateRequired` after the companions were deleted, which the
-/// forget refuses in its own transaction. Every failure can be retried.
+/// fails with [`ForgetError::CompanionBusy`] and forgets nothing, and so does a declined gate.
+/// So does any policy change after the forget began ([`ForgetError::PolicyChanged`]): a policy
+/// that went private, even one public again by the time of the write, may have let a private
+/// pass create a companion recording revisions whose facts the forget would remove. Every
+/// failure can be retried.
 ///
 /// Forgetting a wallet without private ledger facts changes nothing, which
 /// [`ForgottenTransparentLedger::removed_nothing`] reports.
@@ -79,6 +88,8 @@ pub fn forget_private_recovery<P: consensus::Parameters, CL, R>(
     gate: &mut impl WriteGate,
     wait: Duration,
 ) -> Result<ForgottenTransparentLedger, ForgetError> {
+    // Read first, so any policy change from here on fails the forget below.
+    let generation = wallet.applied_transparent_policy()?.generation;
     // The handle's mode resolves under the durable policy: `Public` means both are.
     if wallet.transparent_ledger_mode()? != TransparentLedgerMode::Public {
         return Err(ForgetError::NotPublic);
@@ -88,6 +99,11 @@ pub fn forget_private_recovery<P: consensus::Parameters, CL, R>(
         _ => ForgetError::Io(error),
     })?;
     Ok(gate
-        .write(|| wallet.forget_transparent_ledger())
+        .write(|| {
+            wallet.transactionally(|wallet| {
+                wallet.check_transparent_policy_generation(generation)?;
+                wallet.forget_transparent_ledger()
+            })
+        })
         .map_err(|Interrupted| ForgetError::Interrupted)??)
 }

@@ -334,8 +334,10 @@ reconcile.
 transparent policy is `Public` on the handle and durably: it deletes every
 companion, then runs the wallet's `forget_transparent_ledger` through a
 `WriteGate`. Companions go first because one that outlived the facts would make
-a later private pass skip them; a companion in use, a declined gate or a policy
-raised meanwhile forgets nothing.
+a later private pass skip them; a companion in use or a declined gate forgets
+nothing. So does any policy change after the forget began, even private and back
+to public, which could have created a companion meanwhile:
+`ForgetError::PolicyChanged`, checked in the forget's own wallet transaction.
 
 ### Import discovery
 
