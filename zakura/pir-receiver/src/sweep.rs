@@ -192,7 +192,8 @@ pub struct Swept<E> {
 /// incoming lookahead moves past paid indices and its new keys are swept too. A key
 /// that fails is backed off and listed in [`Swept::deferred`], and the others go on,
 /// unless the directory's session or connection failed: then the run stops before
-/// leasing more keys. `now` is the caller's clock in seconds, for retry backoff.
+/// leasing more keys. A lease the wallet fails to store stops the run with its error.
+/// `now` is the caller's clock in seconds, for retry backoff.
 #[allow(clippy::too_many_arguments)]
 pub async fn sweep<W, P, T, N, L>(
     wallet: &mut W,
@@ -250,17 +251,21 @@ where
                     session.client.use_file_for_work(lookups).await?;
                 }
                 for ((account, item), check) in work.into_iter().zip(checks) {
+                    // A key whose lease is not stored would be due again at once.
+                    lock.write("dynamic_sweep.attempt", || {
+                        wallet.begin_dynamic_sweep_attempt(account, item.key, now, check.seen)
+                    })
+                    .map_err(Error::Wallet)?;
                     let swept_key = sweep_key(
                         wallet,
                         &mut directory,
                         account,
                         &item,
-                        check,
+                        check.paid,
                         lookups,
                         through,
                         notes,
                         lock,
-                        now,
                     );
                     match swept_key.await {
                         Ok(()) => swept.finished += 1,
@@ -449,22 +454,21 @@ fn due<W: DynamicIvkWrite, L: WriteLock>(
     Ok(work)
 }
 
-/// Sweeps one key: leases an attempt, looks up its receiver if the paid set holds it
-/// and no earlier lookup is queued, queues the new payments with their note data in
-/// batches, and applies them with the publication's witnesses. `lookups` is the
-/// batch's lookup count, which sizes a session that this key opens.
+/// Sweeps one key whose attempt is leased: looks up its receiver if `paid`, the paid
+/// set holds it, and no earlier lookup is queued, queues the new payments with their
+/// note data in batches, and applies them with the publication's witnesses. `lookups`
+/// is the batch's lookup count, which sizes a session that this key opens.
 #[allow(clippy::too_many_arguments)]
 async fn sweep_key<W, T, N, L>(
     wallet: &mut W,
     directory: &mut Directory<'_, T>,
     account: AccountId<W>,
     item: &DiscoveryWork,
-    check: Check,
+    paid: bool,
     lookups: usize,
     through: ChainPoint,
     notes: &mut N,
     lock: &L,
-    now: i64,
 ) -> Result<(), Error<AccountError<W>>>
 where
     W: DynamicIvkWrite,
@@ -474,12 +478,8 @@ where
 {
     let key = item.key;
     let anchor = directory.anchor;
-    lock.write("dynamic_sweep.attempt", || {
-        wallet.begin_dynamic_sweep_attempt(account, key, now, check.seen)
-    })
-    .map_err(Error::Wallet)?;
     if item.lookup.is_none() {
-        let payments: Vec<_> = if check.paid {
+        let payments: Vec<_> = if paid {
             let receiver = Receiver::from_bytes(item.receiver).map_err(DirectoryError::from)?;
             let accepted = directory.accepted;
             let session = directory.session(lookups).await?;
@@ -518,7 +518,7 @@ where
             }
         }
     }
-    let witnesses = if check.paid || item.lookup.is_some() {
+    let witnesses = if paid || item.lookup.is_some() {
         Some(&directory.session(lookups).await?.witnesses)
     } else {
         None

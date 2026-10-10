@@ -2,7 +2,14 @@
 //! directory served in process, over the service's own routes and real PIR, and
 //! imports what it finds only after checking it against its own chain.
 
-use std::{cell::Cell, collections::BTreeMap, sync::Mutex};
+use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use axum::{Router, body::Body, http::Request};
 use base64::Engine as _;
@@ -720,6 +727,81 @@ async fn a_seen_hit_outlives_a_rejected_payment_and_a_later_miss() {
         .unwrap()
         .unwrap();
     assert_eq!(issued.key_id(), KeyId::new(Purpose::Receive, 1));
+}
+
+/// Records each write's label, and arms `fail` for the first attempt's write, which
+/// the wallet's commit hook then fails.
+struct FailFirstAttempt {
+    fail: Arc<AtomicBool>,
+    labels: RefCell<Vec<&'static str>>,
+}
+
+impl WriteLock for FailFirstAttempt {
+    fn write<T>(&self, label: &'static str, write: impl FnOnce() -> T) -> T {
+        let mut labels = self.labels.borrow_mut();
+        if label == "dynamic_sweep.attempt" && !labels.contains(&label) {
+            self.fail.store(true, Ordering::SeqCst);
+        }
+        labels.push(label);
+        drop(labels);
+        write()
+    }
+}
+
+/// A failure to lease an attempt stops the run with the wallet's error, before that
+/// key's lookup and without retrying it.
+#[tokio::test]
+async fn a_failed_attempt_write_stops_the_run() {
+    let mut st = ironwood_wallet();
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    let (record, note_data) = pay_restored_key(&mut st, 0, 0);
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let directory = Directory::new(publish(
+        std::slice::from_ref(&record),
+        &[record.payment.cmx],
+        through,
+        &provider(&[]),
+    ));
+    let mut notes = Notes {
+        data: BTreeMap::from([(record.payment.position, note_data)]),
+        requested: Vec::new(),
+    };
+    let lock = FailFirstAttempt {
+        fail: Arc::new(AtomicBool::new(false)),
+        labels: RefCell::new(Vec::new()),
+    };
+    let fail = lock.fail.clone();
+    // Returning true turns the commit into a rollback, which fails the write.
+    st.wallet()
+        .conn()
+        .commit_hook(Some(move || fail.swap(false, Ordering::SeqCst)));
+    let result = sweep(
+        st.wallet_mut().db_mut(),
+        &network,
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &directory,
+        &mut notes,
+        &lock,
+        NOW,
+    )
+    .await;
+    assert!(matches!(result, Err(Error::Wallet(_))), "{result:?}");
+    assert_eq!(
+        *lock.labels.borrow(),
+        ["dynamic_sweep.due", "dynamic_sweep.attempt"]
+    );
+    assert!(
+        directory.requests().iter().all(|r| !r.starts_with("POST")),
+        "{:?}",
+        directory.requests()
+    );
+    assert!(notes.requested.is_empty());
 }
 
 /// A provider with a recent set but no seen set may have had any receiver, so issuance
