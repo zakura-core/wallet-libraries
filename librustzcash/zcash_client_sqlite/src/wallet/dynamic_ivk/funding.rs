@@ -58,13 +58,7 @@ pub(super) fn funding_memo<P: Parameters>(
 ) -> Result<MemoBytes, SqliteClientError> {
     check_deposit(params, deposit)?;
     let key = refund_key(conn, params, account, index)?;
-    let recorded: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_dynamic_operations
-         WHERE receiving_key_id = ?1 AND reference = ?2)",
-        params![key, deposit],
-        |r| r.get(0),
-    )?;
-    if !recorded {
+    if !operation_recorded(conn, key, deposit)? {
         return Err(invalid("refund operation was not recorded for this key"));
     }
     Ok(MemoBytes::from_bytes(&RefundMemo::new(index).encode()).expect("a full-length memo"))
@@ -106,6 +100,20 @@ pub(super) fn record_operation<P: Parameters>(
         )?;
     }
     Ok(())
+}
+
+/// Whether refund key `key` has an operation for `deposit`.
+fn operation_recorded(
+    conn: &Connection,
+    key: i64,
+    deposit: &str,
+) -> Result<bool, SqliteClientError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_dynamic_operations
+         WHERE receiving_key_id = ?1 AND reference = ?2)",
+        params![key, deposit],
+        |r| r.get(0),
+    )?)
 }
 
 /// Checks that `proposal` funds `deposit` in one transaction that carries `memo` on
@@ -178,7 +186,9 @@ fn refund_key<P: Parameters>(
 }
 
 /// Starts the refund keys that `tx`, which this wallet just stored to send, funds, above
-/// the scanned blocks since those predate `tx`, and marks their operations active.
+/// the scanned blocks since those predate `tx`, and marks their operations active. A
+/// reserved key's memo funding a deposit not recorded for that key is an error, so the
+/// send is not stored.
 pub(crate) fn start_funded_refund_keys<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -224,6 +234,11 @@ pub(crate) fn start_funded_refund_keys<P: Parameters>(
         else {
             continue;
         };
+        if !operation_recorded(conn, id, &deposit)? {
+            return Err(invalid(
+                "refund memo funds a deposit not recorded for its key",
+            ));
+        }
         activate(conn, id, above_scanned.unwrap_or(scan_from).into())?;
         let funded = Observation {
             status: OperationStatus::Active,

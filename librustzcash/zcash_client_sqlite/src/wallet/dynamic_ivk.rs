@@ -225,7 +225,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     }
 
     /// Records how `request` ended. An accepted deadline only shortens the requested one,
-    /// and a rejection releases the request's hold on the address.
+    /// and a repeat must keep the accepted deposit address and memo. A rejection releases
+    /// the request's hold on the address.
     pub fn finish_receive_operation(
         &mut self,
         account: AccountUuid,
@@ -762,16 +763,6 @@ pub(crate) fn rescan_missed_keys(
         queue_rescan(conn, start..range.end)?;
     }
     Ok(())
-}
-
-/// Whether a dynamic key is open, so that blocks scanned without it must not be stored.
-pub(crate) fn key_open(conn: &Connection) -> Result<bool, SqliteClientError> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys
-         WHERE active_from IS NOT NULL AND closed_at IS NULL)",
-        [],
-        |row| row.get(0),
-    )?)
 }
 
 /// Seconds since the Unix epoch on the wallet clock, or 0 before it.

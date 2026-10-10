@@ -182,8 +182,9 @@ pub struct Swept<E> {
 ///
 /// Each key's receiver is first tested against the publication's filters, which every
 /// wallet downloads alike: only a receiver in the paid set is looked up over PIR, and
-/// one in a swap provider's seen set is never issued again. Whatever the provider sets
-/// say, every swept key then keeps scanning for the wallet's restore watch (see
+/// one in a swap provider's seen set is never issued again (see
+/// [`DynamicIvkWrite::begin_dynamic_sweep_attempt`]). Whatever the provider sets say,
+/// every swept key then keeps scanning for the wallet's restore watch (see
 /// [`DynamicIvkWrite::apply_dynamic_sweep`]).
 ///
 /// A run that looks nothing up opens no PIR session and fetches no witnesses. New
@@ -231,7 +232,7 @@ where
                     // the same directory again.
                     for (account, item) in &work {
                         lock.write("dynamic_sweep.attempt", || {
-                            wallet.begin_dynamic_sweep_attempt(*account, item.key, now)
+                            wallet.begin_dynamic_sweep_attempt(*account, item.key, now, false)
                         })
                         .map_err(Error::Wallet)?;
                     }
@@ -474,7 +475,7 @@ where
     let key = item.key;
     let anchor = directory.anchor;
     lock.write("dynamic_sweep.attempt", || {
-        wallet.begin_dynamic_sweep_attempt(account, key, now)
+        wallet.begin_dynamic_sweep_attempt(account, key, now, check.seen)
     })
     .map_err(Error::Wallet)?;
     if item.lookup.is_none() {
@@ -524,14 +525,9 @@ where
     };
     let applied = lock
         .write("dynamic_sweep.apply", || {
-            wallet.apply_dynamic_sweep(
-                account,
-                key,
-                through,
-                anchor,
-                check.seen,
-                |position, cmx| witnesses.and_then(|w| w.path(position, cmx).ok()),
-            )
+            wallet.apply_dynamic_sweep(account, key, through, anchor, |position, cmx| {
+                witnesses.and_then(|w| w.path(position, cmx).ok())
+            })
         })
         .map_err(Error::Wallet)?
         .map_err(Error::Deferred)?;

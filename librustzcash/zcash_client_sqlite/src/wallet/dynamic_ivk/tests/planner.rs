@@ -81,7 +81,8 @@ fn bounded_batches_do_not_derive_ten_thousand_restored_keys() {
     assert!(batch.iter().all(|w| w.receiver == [0; 43]));
     // Only the started record is leased, so a stopped batch cannot starve its tail.
     let first = batch[0].key;
-    db.begin_dynamic_sweep_attempt(account, first, NOW).unwrap();
+    db.begin_dynamic_sweep_attempt(account, first, NOW, false)
+        .unwrap();
     let batch = db
         .prepare_dynamic_sweeps(account, through, NOW, limit)
         .unwrap()
@@ -159,7 +160,7 @@ fn attempts_back_off_from_one_minute_to_twelve_hours() {
     ] {
         st.wallet_mut()
             .db_mut()
-            .begin_dynamic_sweep_attempt(account, key, now)
+            .begin_dynamic_sweep_attempt(account, key, now, false)
             .unwrap();
         assert!(due(&mut st, through, now + delay - 1).is_empty());
         assert_eq!(due(&mut st, through, now + delay), [key]);
@@ -275,7 +276,7 @@ fn finished_incoming_sweeps_watch_paid_and_unpaid_keys() {
         .unwrap(),
         PaymentApplication::Applied
     );
-    db.apply_dynamic_sweep(account, paid, through, through, false, |_, _| None)
+    db.apply_dynamic_sweep(account, paid, through, through, |_, _| None)
         .unwrap()
         .unwrap();
     finish_sweep(db, account, unpaid, through);
@@ -348,9 +349,10 @@ fn a_lagging_sweep_watches_its_keys_whatever_the_provider_sets_say() {
     assert!(unspent_keys(&st, through.height).is_empty());
     let db = st.wallet_mut().db_mut();
     for &(key, _) in &keys {
+        db.begin_dynamic_sweep_attempt(account, key, NOW, key == seen)
+            .unwrap();
         queue_lookup(db, account, key, anchor, &[]).unwrap();
-        let applied =
-            db.apply_dynamic_sweep(account, key, through, anchor, key == seen, |_, _| None);
+        let applied = db.apply_dynamic_sweep(account, key, through, anchor, |_, _| None);
         assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
     }
     let ids = keys.each_ref().map(|(key, _)| *key);
@@ -499,7 +501,8 @@ fn history_is_pending_until_sweeps_finish_and_candidates_apply() {
     let db = st.wallet_mut().db_mut();
     assert!(db.dynamic_history_pending(account, through.height).unwrap());
     // Retry backoff never makes an unfinished restore appear complete.
-    db.begin_dynamic_sweep_attempt(account, key, NOW).unwrap();
+    db.begin_dynamic_sweep_attempt(account, key, NOW, false)
+        .unwrap();
     assert!(db.dynamic_history_pending(account, through.height).unwrap());
     finish_sweep(db, account, key, through);
     assert!(!db.dynamic_history_pending(account, through.height).unwrap());
@@ -555,7 +558,7 @@ fn rewind_reruns_only_sweeps_above_the_retained_chain() {
     assert!(db.dynamic_history_pending(account, kept.height).unwrap());
     // The rewound sweep needs a new lookup before it can finish.
     assert!(matches!(
-        db.apply_dynamic_sweep(account, late, kept, kept, false, |_, _| None),
+        db.apply_dynamic_sweep(account, late, kept, kept, |_, _| None),
         Ok(Err(SweepDeferral::UnknownAnchor))
     ));
     assert_eq!(due(&mut st, kept, NOW), [late]);
@@ -569,7 +572,8 @@ fn rewound_sweep_does_not_wait_out_its_last_attempt_lease() {
     let key = watch(st.wallet_mut().db_mut(), account, 0, kept.height).key_id();
     let removed = advance(&mut st, 1);
     let db = st.wallet_mut().db_mut();
-    db.begin_dynamic_sweep_attempt(account, key, NOW).unwrap();
+    db.begin_dynamic_sweep_attempt(account, key, NOW, false)
+        .unwrap();
     finish_sweep(db, account, key, removed);
     st.truncate_to_height(kept.height);
     assert_eq!(due(&mut st, kept, NOW), [key]);
@@ -729,7 +733,7 @@ fn recheck_sweeps_closed_keys_and_finds_a_later_refund() {
         .unwrap(),
         PaymentApplication::Applied
     );
-    db.apply_dynamic_sweep(account, key, through, through, false, |_, _| None)
+    db.apply_dynamic_sweep(account, key, through, through, |_, _| None)
         .unwrap()
         .unwrap();
     assert_eq!(unspent_keys(&st, through.height), [Some(key)]);

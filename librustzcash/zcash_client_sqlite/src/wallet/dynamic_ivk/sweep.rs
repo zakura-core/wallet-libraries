@@ -168,7 +168,6 @@ pub(super) fn finish(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
     key: KeyId,
-    seen: bool,
 ) -> Result<Result<(), SweepDeferral>, SqliteClientError> {
     let id = key_ref(conn, account, key)?;
     let (pending, lookup): (bool, Option<ChainPoint>) = conn.query_row(
@@ -189,15 +188,6 @@ pub(super) fn finish(
         "UPDATE ironwood_dynamic_sweeps SET done_height = ?2 WHERE receiving_key_id = ?1",
         params![id, u32::from(lookup.height)],
     )?;
-    // Never issued again, so like a paid key it extends the restore walk and the gap
-    // (see `recovery_end`).
-    if seen {
-        conn.execute(
-            "UPDATE ironwood_receiving_keys
-             SET provider_seen = 1, advances_allocation = 1 WHERE id = ?1",
-            [id],
-        )?;
-    }
     activate(conn, id, lookup.height + 1)?;
     Ok(Ok(()))
 }

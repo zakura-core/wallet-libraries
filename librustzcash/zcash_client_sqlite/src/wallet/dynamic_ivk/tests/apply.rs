@@ -650,7 +650,7 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
         [0]
     );
     let note_data = BTreeMap::from([(payment.position, suffix)]);
-    db.begin_dynamic_sweep_attempt(account, key, 1_700_000_000)
+    db.begin_dynamic_sweep_attempt(account, key, 1_700_000_000, false)
         .unwrap();
     let backoff = |conn: &rusqlite::Connection| -> (u32, i64) {
         conn.query_row(
@@ -712,7 +712,7 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
     );
 
     assert_eq!(
-        db.apply_dynamic_sweep(account, key, through, anchor, false, |_, _| None)
+        db.apply_dynamic_sweep(account, key, through, anchor, |_, _| None)
             .unwrap()
             .unwrap(),
         PaymentApplication::AwaitingWitness
@@ -722,13 +722,13 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
     let mut invalid = siblings;
     invalid[3] = [0xff; 32];
     assert_eq!(
-        db.apply_dynamic_sweep(account, key, through, anchor, false, |_, _| Some(invalid))
+        db.apply_dynamic_sweep(account, key, through, anchor, |_, _| Some(invalid))
             .unwrap()
             .unwrap(),
         PaymentApplication::AwaitingWitness
     );
     assert_eq!(
-        db.apply_dynamic_sweep(account, key, through, anchor, false, |position, cmx| {
+        db.apply_dynamic_sweep(account, key, through, anchor, |position, cmx| {
             (position == candidate.position && cmx == candidate.encrypted_note.commitment())
                 .then_some(siblings)
         })
@@ -854,6 +854,95 @@ fn a_mislabeled_answer_for_a_scanned_note_is_dropped() {
     assert!(!has_transaction(&st, forged.txid));
 }
 
+/// A seen hit is stored with the attempt that observed it, before any payment work, so
+/// it survives that work deferring, a reopen, and a later publication's seen sets
+/// missing the receiver while its corrected lookup drops the candidate.
+#[test]
+fn a_seen_hit_outlives_deferred_payment_work_and_a_corrected_lookup() {
+    use PaymentApplication::{AwaitingSpendHistory, AwaitingWitness, Rejected};
+    for deferral in [AwaitingWitness, AwaitingSpendHistory, Rejected] {
+        let (mut st, key, _, through, path) = fixture();
+        let account = st.test_account().unwrap().id();
+        let key = key.key_id();
+        let seen = |st: &State| -> (bool, bool) {
+            st.wallet()
+                .conn()
+                .query_row(
+                    "SELECT provider_seen, advances_allocation FROM ironwood_receiving_keys
+                     WHERE purpose = 1 AND key_index = ?1",
+                    [key.index().to_be_bytes()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        let mut siblings = path.auth_path().map(|hash| hash.to_bytes());
+        match deferral {
+            AwaitingSpendHistory => {
+                retain(st.wallet_mut().db_mut(), account);
+                st.wallet()
+                    .conn()
+                    .execute_batch(
+                        "DELETE FROM nullifier_map; DELETE FROM ironwood_nullifier_scan_blocks;",
+                    )
+                    .unwrap();
+            }
+            Rejected => siblings[0] = MerkleHashOrchard::empty_root(1.into()).to_bytes(),
+            _ => {}
+        }
+        // Publication A's seen set holds the receiver, and its payment work defers.
+        let db = st.wallet_mut().db_mut();
+        db.begin_dynamic_sweep_attempt(account, key, 1_700_000_000, true)
+            .unwrap();
+        assert_eq!(seen(&st), (true, true));
+        let witness = |_, _| (deferral != AwaitingWitness).then_some(siblings);
+        let db = st.wallet_mut().db_mut();
+        assert_eq!(
+            db.apply_dynamic_sweep(account, key, through, through, witness)
+                .unwrap(),
+            Ok(deferral)
+        );
+        let reopened = WalletDb::for_path(
+            st.wallet().data_file_path(),
+            *st.network(),
+            test_clock(),
+            test_rng(),
+        )
+        .unwrap();
+        *st.wallet_mut().db_mut() = reopened;
+        // Publication B's sets miss the receiver and its lookup drops the candidate.
+        let db = st.wallet_mut().db_mut();
+        db.begin_dynamic_sweep_attempt(account, key, 1_700_000_000, false)
+            .unwrap();
+        assert!(
+            db.queue_directory_lookup(account, key, through, &[], &BTreeMap::new())
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(
+            db.apply_dynamic_sweep(account, key, through, through, |_, _| None)
+                .unwrap(),
+            Ok(PaymentApplication::Applied)
+        );
+        assert_eq!(seen(&st), (true, true));
+        // Issuance skips it once every lower address was quoted too.
+        let db = st.wallet_mut().db_mut();
+        for index in 0..key.index() {
+            let lower = watch(db, account, index, through.height + 1).key_id();
+            db.begin_dynamic_sweep_attempt(account, lower, 1_700_000_000, true)
+                .unwrap();
+            finish_sweep(db, account, lower, through);
+        }
+        let issued = prepare_from(
+            st.wallet_mut().db_mut(),
+            account,
+            1_700_000_000,
+            through.height + 1,
+            None,
+        );
+        assert_eq!(issued.unwrap().unwrap().key_id().index(), key.index() + 1);
+    }
+}
+
 /// A corrected directory answer replaces a candidate that an unfinished lookup queued,
 /// instead of conflicting with it on every attempt.
 #[test]
@@ -962,14 +1051,14 @@ fn a_payment_before_the_birthday_marks_its_index_used_and_finishes_the_sweep() {
     let mut wrong = siblings;
     wrong[0] = MerkleHashOrchard::empty_root(1.into()).to_bytes();
     assert_eq!(
-        db.apply_dynamic_sweep(account, id, through, through, false, |_, _| Some(wrong))
+        db.apply_dynamic_sweep(account, id, through, through, |_, _| Some(wrong))
             .unwrap()
             .unwrap(),
         PaymentApplication::Rejected
     );
     queue_lookup(db, account, id, through, std::slice::from_ref(&candidate)).unwrap();
     assert_eq!(
-        db.apply_dynamic_sweep(account, id, through, through, false, |_, _| Some(siblings))
+        db.apply_dynamic_sweep(account, id, through, through, |_, _| Some(siblings))
             .unwrap()
             .unwrap(),
         PaymentApplication::Applied
@@ -1018,7 +1107,7 @@ fn a_later_payment_claimed_before_the_birthday_is_rejected() {
     let db = st.wallet_mut().db_mut();
     queue_lookup(db, account, id, through, std::slice::from_ref(&forged)).unwrap();
     assert_eq!(
-        db.apply_dynamic_sweep(account, id, through, through, false, |_, _| Some(siblings))
+        db.apply_dynamic_sweep(account, id, through, through, |_, _| Some(siblings))
             .unwrap()
             .unwrap(),
         PaymentApplication::Rejected
