@@ -224,6 +224,128 @@ fn a_substituted_directory_memo_is_never_stored() {
     assert_eq!(stored(&st), (Some(memo.as_slice().to_vec()), 50_000, false));
 }
 
+/// Stores `raw` as mined at `height`, index 1, as enhancement does.
+fn store_mined(db: &mut Db, raw: &zcash_primitives::transaction::Transaction, height: BlockHeight) {
+    let meta = zcash_client_backend::wallet::WalletTx::new(
+        raw.txid(),
+        1u16.into(),
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+    );
+    tx(db, |c, _| {
+        crate::wallet::put_tx_meta(c, &meta, height)?;
+        crate::wallet::put_tx_data(c, raw, None, None, None, height)
+    })
+    .unwrap();
+}
+
+/// The inclusion path does not authenticate a claimed transaction ID or action index,
+/// so a stored raw transaction must hold the claimed action; without one the claim is
+/// accepted.
+#[test]
+fn a_claim_contradicting_a_stored_raw_transaction_is_rejected() {
+    use zcash_primitives::transaction::{Authorized, TransactionData};
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Raw {
+        Absent,
+        Matching,
+        OtherAction,
+        OutOfRange,
+        NoIronwood,
+    }
+    for raw in [
+        Raw::Absent,
+        Raw::Matching,
+        Raw::OtherAction,
+        Raw::OutOfRange,
+        Raw::NoIronwood,
+    ] {
+        let mut st = ironwood_wallet();
+        let account = st.test_account().unwrap().id();
+        let id = KeyId::new(Purpose::Receive, 8);
+        let fvk = id
+            .derive(&FullViewingKey::from(
+                st.test_account().unwrap().usk().orchard(),
+            ))
+            .unwrap();
+        let memo = zcash_protocol::memo::MemoBytes::empty();
+        let paid = external_payment(fvk.address_at(0u32, Scope::External), &memo);
+        let (height, _) = st.generate_next_block_from_tx(1, &paid);
+        st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+        let genuine = candidate_at(&st, height, &fvk);
+        let through = tip(&st);
+        let path = witness_at(&st, genuine.position);
+        let actions = paid.ironwood_bundle().unwrap().actions().len() as u32;
+        let empty = TransactionData::<Authorized>::from_parts_v6(
+            paid.consensus_branch_id(),
+            0,
+            paid.expiry_height(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        let (stored, candidate) = match raw {
+            Raw::Absent => (None, genuine),
+            Raw::Matching => (Some(&paid), genuine),
+            Raw::OtherAction => (
+                Some(&paid),
+                PendingPayment {
+                    action_index: (genuine.action_index + 1) % actions,
+                    ..genuine
+                },
+            ),
+            Raw::OutOfRange => (
+                Some(&paid),
+                PendingPayment {
+                    action_index: actions,
+                    ..genuine
+                },
+            ),
+            Raw::NoIronwood => (
+                Some(&empty),
+                PendingPayment {
+                    txid: empty.txid(),
+                    ..genuine
+                },
+            ),
+        };
+        let db = st.wallet_mut().db_mut();
+        if let Some(stored) = stored {
+            store_mined(db, stored, height);
+        }
+        watch(db, account, 8, height + 1);
+        queue_payment(db, account, id, &candidate).unwrap();
+        let applied = apply_payment(db, account, id, &candidate, through, (through, &path));
+        if matches!(raw, Raw::Absent | Raw::Matching) {
+            assert_eq!(applied.unwrap(), PaymentApplication::Applied, "{raw:?}");
+            assert_eq!(note_txids(&st), [paid.txid()], "{raw:?}");
+        } else {
+            assert_eq!(applied.unwrap(), PaymentApplication::Rejected, "{raw:?}");
+            assert!(note_txids(&st).is_empty(), "{raw:?}");
+            assert!(pending(st.wallet().db(), account, id).is_empty(), "{raw:?}");
+            // The stored transaction keeps its location.
+            let location: (u32, u32) = st
+                .wallet()
+                .conn()
+                .query_row(
+                    "SELECT mined_height, tx_index FROM transactions WHERE txid = ?1",
+                    [candidate.txid.as_ref()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(location, (u32::from(height), 1), "{raw:?}");
+        }
+    }
+}
+
 #[test]
 fn directory_payment_imports_an_already_spent_note_without_crediting_it() {
     use zcash_keys::address::{Address, UnifiedAddress};
