@@ -549,14 +549,15 @@ mod tests {
         testing::pool::scan_cached_blocks_detects_spends_out_of_order::<OrchardPoolTester>()
     }
 
-    /// Blocks scanned without the wallet's open dynamic keys are refused.
+    /// Blocks scanned without the wallet's open dynamic keys are refused in every build,
+    /// leaving the scanned chain unchanged. Inactive and closed keys do not block them.
     #[test]
-    #[cfg(feature = "orchard")]
     fn scanning_without_dynamic_ivks_refuses_open_dynamic_keys() {
-        use crate::error::SqliteClientError;
+        use crate::{error::SqliteClientError, testing::db::TestDb};
         use zcash_client_backend::data_api::{
+            WalletRead,
             chain::error::Error,
-            testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+            testing::{AddressType, TestBuilder, TestState, pool::ShieldedPoolTester},
         };
         use zcash_primitives::block::BlockHash;
         use zcash_protocol::value::Zatoshis;
@@ -586,14 +587,38 @@ mod tests {
             AddressType::DefaultExternal,
             Zatoshis::const_from_u64(5),
         );
+        let scanned = |st: &TestState<_, TestDb, _>| {
+            let blocks: i64 = st
+                .wallet()
+                .conn()
+                .query_row("SELECT COUNT(*) FROM blocks", [], |r| r.get(0))
+                .unwrap();
+            let fully_scanned = st.wallet().block_fully_scanned().unwrap();
+            (
+                blocks,
+                fully_scanned.map(|b| (b.block_height(), b.block_hash())),
+            )
+        };
+        let before = scanned(&st);
         assert!(matches!(
             st.try_scan_cached_blocks(h2, 1),
             Err(Error::Wallet(SqliteClientError::DynamicIvksNotUsed))
         ));
+        assert_eq!(scanned(&st), before);
         st.wallet()
             .conn()
-            .execute_batch("UPDATE ironwood_receiving_keys SET closed_at = 1")
+            .execute_batch("UPDATE ironwood_receiving_keys SET active_from = NULL")
             .unwrap();
         st.scan_cached_blocks(h2, 1);
+        st.wallet()
+            .conn()
+            .execute_batch("UPDATE ironwood_receiving_keys SET active_from = 0, closed_at = 1")
+            .unwrap();
+        let (h3, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(5),
+        );
+        st.scan_cached_blocks(h3, 1);
     }
 }

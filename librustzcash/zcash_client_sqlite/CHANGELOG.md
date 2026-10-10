@@ -134,7 +134,8 @@ workspace.
   retrieval authenticate these notes with their registered key, but only a full
   transaction stores their memo, which nothing else binds to the chain. While a dynamic
   key is open, blocks and transactions processed without the dynamic keys are refused
-  (`SqliteClientError::DynamicIvksNotUsed`). Invalid input to these calls is
+  (`SqliteClientError::DynamicIvksNotUsed`, which builds without `orchard` also return for
+  blocks). Invalid input to these calls is
   `SqliteClientError::InvalidDynamicIvkInput`, and a call that must wait returns its
   `ReservationPolicy` or `SweepDeferral` as an `Ok` value.
 - Issuance: `WalletDb::reserve_refund_key` and `prepare_receive_reservation`, which require
@@ -148,7 +149,8 @@ workspace.
 - Operations: each quote is one provider operation. An incoming one is
   `begin_receive_operation`, `finish_receive_operation` (`OperationOutcome`) and
   `start_receive_operation`, which returns the `ReceiveDeposit` to show; an accepted
-  deadline cannot exceed the requested one. `record_operation_status` takes a provider
+  deadline cannot exceed the requested one, and a repeated acceptance cannot change the
+  deposit address or memo. `record_operation_status` takes a provider
   status the app normalized with `zakura_dynamic_ivk::lifecycle::near_observation` for
   either kind of operation, by deposit address and memo, and reclaims what it made
   reclaimable: an unstarted reservation after its latest deadline and
@@ -158,7 +160,7 @@ workspace.
   `verify_refund_funding_proposal`. The refund index travels in a memo on the funding
   transaction's internal Ironwood change, whose only transparent output is the deposit. A
   refund key starts scanning when `store_transactions_to_be_sent` stores its funding
-  transaction, or when the provider reports a refund owed for a deposit paid from
+  transaction, which fails if the deposit is not recorded for that key, or when the provider reports a refund owed for a deposit paid from
   elsewhere.
 - Lifecycle: `close_finished_dynamic_keys`. A key closes once its final provider status
   and expected receipts are in, or 30 days after the quote deadline (a provider status can
@@ -176,9 +178,10 @@ workspace.
   `finish_dynamic_nullifier_recovery`, which releases the Ironwood spend history the
   sweeps needed. Note data is queued in batches, so a long history keeps its progress,
   and a directory claim that fails a local check (`PaymentApplication::Rejected`) is
-  looked up again. `apply_dynamic_sweep` takes whether a provider seen set holds the key's
-  receiver, so a seen key is never issued, and every finished key scans from the block
-  after its lookup until its restore watch closes it. A payment before the account's
+  looked up again. `begin_dynamic_sweep_attempt` takes whether a provider seen set holds
+  the key's receiver and stores a hit before any lookup, so a seen key is never issued,
+  and every finished key scans from the block after its lookup until its restore watch
+  closes it. A payment before the account's
   birthday is checked for inclusion ahead of the birthday block and then raises the
   recovery bound without being tracked. Scanning that later finds the same note moves it
   to the transaction it is found in. `dynamic_history_pending` reports unfinished sweeps.

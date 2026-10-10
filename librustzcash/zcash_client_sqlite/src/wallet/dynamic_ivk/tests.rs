@@ -253,10 +253,10 @@ fn apply_payment(
     .map(|applied| applied.expect("the payment's blocks are on the wallet's chain"))
 }
 
-/// Finishes `key`'s sweep after an empty lookup at `anchor`, for an unseen receiver.
+/// Finishes `key`'s sweep after an empty lookup at `anchor`.
 fn finish_sweep(db: &mut Db, account: AccountUuid, key: KeyId, anchor: ChainPoint) {
     queue_lookup(db, account, key, anchor, &[]).unwrap();
-    let applied = db.apply_dynamic_sweep(account, key, anchor, anchor, false, |_, _| None);
+    let applied = db.apply_dynamic_sweep(account, key, anchor, anchor, |_, _| None);
     assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
 }
 

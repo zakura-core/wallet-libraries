@@ -9,7 +9,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
     KeyId, PendingPayment, account_key, corrupt, invalid, key_ref, payments::queue_payment,
-    stored_key_id,
+    reservations::record_provider_seen, stored_key_id,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -106,8 +106,12 @@ pub(crate) fn begin_sweep_attempt(
     account: AccountUuid,
     key: KeyId,
     now: i64,
+    seen: bool,
 ) -> Result<(), SqliteClientError> {
     let id = key_ref(conn, account, key)?;
+    if seen {
+        record_provider_seen(conn, id)?;
+    }
     let attempt: u32 = conn.query_row(
         "SELECT attempts FROM ironwood_dynamic_sweeps WHERE receiving_key_id = ?1",
         [id],

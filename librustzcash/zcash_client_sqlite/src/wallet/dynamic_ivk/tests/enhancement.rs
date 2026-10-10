@@ -228,6 +228,20 @@ fn create_with_change_memo(
     zcash_client_backend::proposal::Proposal<StandardFeeRule, crate::ReceivedNoteId>,
     TxId,
 ) {
+    let (proposal, created) = try_create_with_change_memo(st, payments, memo);
+    (proposal, created.unwrap())
+}
+
+/// [`create_with_change_memo`], returning the store's error if storing the
+/// transaction fails.
+fn try_create_with_change_memo(
+    st: &mut State,
+    payments: Vec<Payment>,
+    memo: &MemoBytes,
+) -> (
+    zcash_client_backend::proposal::Proposal<StandardFeeRule, crate::ReceivedNoteId>,
+    Result<TxId, SqliteClientError>,
+) {
     let account = st.test_account().cloned().unwrap();
     let strategy = standard::SingleOutputChangeStrategy::<TestDb>::new(
         StandardFeeRule::Zip317,
@@ -250,8 +264,12 @@ fn create_with_change_memo(
             OvkPolicy::Sender,
             &proposal,
         )
-        .unwrap();
-    (proposal, created[0])
+        .map(|created| created[0])
+        .map_err(|e| match e {
+            zcash_client_backend::data_api::error::Error::DataSource(e) => e,
+            _ => panic!("transaction creation failed outside the store"),
+        });
+    (proposal, created)
 }
 
 /// [`create_with_change_memo`], then mines and scans the transaction. Returns its
@@ -600,6 +618,78 @@ fn a_refund_key_starts_scanning_when_its_funding_transaction_is_stored() {
     // The swap is over; the stale quote does not hold the key open.
     assert_eq!(close_at(db, account, finished, mined), 1);
     assert_eq!(active_from(&db.conn, unfunded), None);
+}
+
+/// A funding memo for one refund key paying another key's deposit fails to store, so
+/// neither key starts and no operation pairs the memo's key with that deposit.
+#[test]
+fn a_funding_memo_must_match_its_recorded_deposit() {
+    let (mut st, _) = ironwood_funded_wallet();
+    let account = st.test_account().unwrap().id();
+    let network = *st.network();
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let now = unix_now(&test_clock());
+    let deposits =
+        [7, 8].map(|byte| Address::Transparent(TransparentAddress::PublicKeyHash([byte; 20])));
+    let encoded = deposits.each_ref().map(|d| d.encode(&network));
+    let db = st.wallet_mut().db_mut();
+    let keys = [0, 1].map(|_| {
+        db.reserve_refund_key(account, tip)
+            .unwrap()
+            .unwrap()
+            .key_id()
+    });
+    for (key, deposit) in keys.iter().zip(&encoded) {
+        db.record_refund_operation(account, key.index(), deposit, now + 3_600, now)
+            .unwrap();
+    }
+    let memos = keys.map(|key| {
+        db.refund_funding_memo(account, key.index(), &encoded[key.index() as usize])
+            .unwrap()
+    });
+    let pay = |i: usize| {
+        vec![Payment::without_memo(
+            deposits[i].to_zcash_address(&network),
+            Zatoshis::const_from_u64(100_000),
+        )]
+    };
+    let state = |conn: &Connection| -> (Vec<Option<u32>>, Vec<(Vec<u8>, String)>, i64) {
+        let active = conn
+            .prepare("SELECT active_from FROM ironwood_receiving_keys WHERE purpose = 0 ORDER BY key_index")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let operations = conn
+            .prepare(
+                "SELECT k.key_index, o.reference FROM ironwood_dynamic_operations o
+                 JOIN ironwood_receiving_keys k ON k.id = o.receiving_key_id
+                 ORDER BY k.key_index, o.reference",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let sent = conn
+            .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
+            .unwrap();
+        (active, operations, sent)
+    };
+    let before = state(st.wallet().conn());
+
+    let (_, created) = try_create_with_change_memo(&mut st, pay(1), &memos[0]);
+    assert!(matches!(
+        created,
+        Err(SqliteClientError::InvalidDynamicIvkInput(_))
+    ));
+    assert_eq!(state(st.wallet().conn()), before);
+
+    create_with_change_memo(&mut st, pay(1), &memos[1]);
+    let (active, operations, _) = state(st.wallet().conn());
+    assert_eq!(active, [None, Some(u32::from(tip) + 1)]);
+    assert_eq!(operations, before.1);
 }
 
 #[test]

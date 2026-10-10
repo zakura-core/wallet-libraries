@@ -2534,9 +2534,10 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         account: AccountUuid,
         key: KeyId,
         now: i64,
+        seen: bool,
     ) -> Result<(), SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::dynamic_ivk::begin_sweep_attempt(wdb.conn.0, account, key, now)
+            wallet::dynamic_ivk::begin_sweep_attempt(wdb.conn.0, account, key, now, seen)
         })
     }
 
@@ -2561,10 +2562,9 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         key: KeyId,
         through: ChainPoint,
         publication: ChainPoint,
-        seen: bool,
         witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
     ) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
-        wallet::dynamic_ivk::apply_sweep(self, account, key, through, publication, seen, witness)
+        wallet::dynamic_ivk::apply_sweep(self, account, key, through, publication, witness)
     }
 
     fn finish_dynamic_nullifier_recovery(
@@ -3145,8 +3145,10 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
         blocks: Vec<ScannedBlock<AccountUuid>>,
         #[cfg(feature = "orchard")] dynamic_keys: Option<&[(AccountUuid, KeyId)]>,
     ) -> Result<(), SqliteClientError> {
-        #[cfg(feature = "orchard")]
-        if dynamic_keys.is_none() && wallet::dynamic_ivk::key_open(self.conn.0)? {
+        // Without `orchard`, no block is scanned with dynamic keys.
+        #[cfg(not(feature = "orchard"))]
+        let dynamic_keys = None::<()>;
+        if dynamic_keys.is_none() && wallet::dynamic_key_open(self.conn.0)? {
             return Err(SqliteClientError::DynamicIvksNotUsed);
         }
         // Once the NU6.3 (Ironwood) activation height is reached, checkpoints on the anchor
@@ -3486,7 +3488,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         // As with scanned blocks, a transaction decrypted without the open dynamic keys
         // would store their payments as someone else's.
         #[cfg(feature = "orchard")]
-        if !d_tx.dynamic_ivks_applied() && wallet::dynamic_ivk::key_open(self.conn.0)? {
+        if !d_tx.dynamic_ivks_applied() && wallet::dynamic_key_open(self.conn.0)? {
             return Err(SqliteClientError::DynamicIvksNotUsed);
         }
         let chain_tip = wallet::chain_tip_height(self.conn.borrow())?

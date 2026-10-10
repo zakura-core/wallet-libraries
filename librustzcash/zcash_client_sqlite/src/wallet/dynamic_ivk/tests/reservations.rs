@@ -622,8 +622,10 @@ fn issuance_skips_restored_addresses_the_provider_saw() {
     // The old device quoted the first three addresses.
     for index in 0..RECEIVE_GAP_LIMIT {
         let key = KeyId::new(Purpose::Receive, index);
+        db.begin_dynamic_sweep_attempt(account, key, NOW, index < 3)
+            .unwrap();
         queue_lookup(db, account, key, swept_at, &[]).unwrap();
-        db.apply_dynamic_sweep(account, key, swept_at, swept_at, index < 3, |_, _| None)
+        db.apply_dynamic_sweep(account, key, swept_at, swept_at, |_, _| None)
             .unwrap()
             .unwrap();
     }
@@ -778,6 +780,73 @@ fn starting_a_quote_returns_its_deposit_and_starts_only_its_reservation() {
         db.start_receive_operation(account, "unknown"),
         Err(SqliteClientError::InvalidDynamicIvkInput(_))
     ));
+}
+
+/// A repeated acceptance can lower the deadline but not change the deposit address or
+/// memo, so the instructions already shown keep matching provider statuses.
+#[test]
+fn accepted_deposit_instructions_cannot_change() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let mut shown = None;
+    for (request, memo) in [("memo", Some("memo-1")), ("plain", None)] {
+        let key = prepare(&mut st, NOW);
+        begin(&mut st, &key, request).unwrap().unwrap();
+        let db = st.wallet_mut().db_mut();
+        db.finish_receive_operation(account, request, &accepted("shared", memo, NOW + 60))
+            .unwrap();
+        shown.get_or_insert(
+            db.start_receive_operation(account, request)
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let shown = shown.unwrap();
+    let db = st.wallet_mut().db_mut();
+    for (request, memo) in [
+        ("memo", Some("memo-2")),
+        ("memo", None),
+        ("plain", Some("memo-1")),
+    ] {
+        assert!(matches!(
+            db.finish_receive_operation(account, request, &accepted("shared", memo, NOW + 60)),
+            Err(SqliteClientError::InvalidDynamicIvkInput(_))
+        ));
+    }
+    // An identical repeat succeeds and can only lower the deadline.
+    db.finish_receive_operation(
+        account,
+        "memo",
+        &accepted("shared", Some("memo-1"), NOW + 30),
+    )
+    .unwrap();
+    assert_eq!(
+        db.start_receive_operation(account, "memo")
+            .unwrap()
+            .unwrap(),
+        ReceiveDeposit {
+            deadline: NOW + 30,
+            ..shown
+        }
+    );
+    let observation = near_observation(
+        Purpose::Receive,
+        &NearStatus {
+            status: "PENDING_DEPOSIT",
+            ..Default::default()
+        },
+    );
+    db.record_operation_status(
+        account,
+        "shared",
+        Some("memo-1"),
+        observation,
+        false,
+        NOW + 1,
+    )
+    .unwrap();
+    assert_eq!(operation(&st, "memo").unwrap().0, NOW + 1);
+    assert_eq!(operation(&st, "plain").unwrap().0, NOW);
 }
 
 #[test]
