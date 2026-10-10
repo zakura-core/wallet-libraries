@@ -901,6 +901,66 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
     }
 }
 
+/// A record this version cannot read blocks refund issuance once scanning passes its
+/// block, even when the funding inputs predate the birthday so no own-send evidence
+/// survives.
+#[test]
+fn an_unreadable_refund_memo_without_spend_evidence_blocks_issuance() {
+    use zakura_dynamic_ivk::RefundMemo;
+    use zcash_client_backend::data_api::AccountBirthday;
+    let (mut st, _) = ironwood_funded_wallet();
+    let network = *st.network();
+    let deposit =
+        Address::Transparent(TransparentAddress::PublicKeyHash([7; 20])).to_zcash_address(&network);
+    let mut record = RefundMemo::new(7).encode();
+    record[5] = 2;
+    let memo = MemoBytes::from_bytes(&record).unwrap();
+    // The restore's birthday is the funding block, after the note that funds it.
+    let prior = st.latest_cached_block().unwrap().chain_state().clone();
+    let (_, txid, mined) = send_with_change_memo(
+        &mut st,
+        vec![Payment::without_memo(
+            deposit,
+            Zatoshis::const_from_u64(985_000),
+        )],
+        &memo,
+    );
+    let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
+    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+    let _old_wallet = st.reset();
+    let (restored, _) = st
+        .wallet_mut()
+        .create_account(
+            "restored",
+            &seed,
+            &AccountBirthday::from_parts(prior, None),
+            None,
+        )
+        .unwrap();
+    st.wallet_mut().update_chain_tip(mined).unwrap();
+    st.scan_cached_blocks_with_dynamic_ivks(mined, 1);
+    decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &tx, Some(mined))
+        .unwrap();
+    let (stored, spends): (bool, u32) = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT
+                EXISTS(SELECT 1 FROM ironwood_received_notes
+                    WHERE recipient_key_scope = 1 AND memo = ?1),
+                (SELECT COUNT(*) FROM v_received_output_spends)",
+            [memo.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((stored, spends), (true, 0));
+    assert!(!store::recovery::refund_memos_pending(st.wallet().conn(), restored).unwrap());
+    assert!(matches!(
+        st.wallet_mut().db_mut().reserve_refund_key(restored, mined),
+        Ok(Err(ReservationPolicy::Unreadable))
+    ));
+}
+
 #[test]
 fn missing_funding_memos_block_refund_issuance() {
     let (mut st, _) = ironwood_funded_wallet();

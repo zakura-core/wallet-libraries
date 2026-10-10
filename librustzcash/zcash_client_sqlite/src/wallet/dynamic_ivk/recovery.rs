@@ -67,7 +67,8 @@ pub(super) fn refund_memos_pending(
 /// Registers, for a restore sweep, the refund key of each confirmed internal funding
 /// memo, spent and zero-value ones included, whose own-send evidence (an input of the
 /// same account) authenticates it, unless a key already covers its block. Returns how
-/// many such records this version cannot read.
+/// many selected records this version cannot read, with or without that evidence, as
+/// `RefundMemo::decode` requires.
 ///
 /// A marker still lacking that evidence once scanning passed its block was funded before
 /// the birthday or is not this wallet's: its key is swept without advancing allocation,
@@ -105,7 +106,7 @@ pub(super) fn recover_refund_memos<P: Parameters>(
             .ok()
             .and_then(|bytes| RefundMemo::decode(bytes.as_array()));
         let register_as = match memo {
-            None if authenticated => {
+            None => {
                 unreadable += 1;
                 continue;
             }
