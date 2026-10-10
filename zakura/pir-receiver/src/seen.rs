@@ -1,7 +1,10 @@
 //! Swap provider seen sets, which wallets read before issuing a swap address.
+use std::collections::BTreeMap;
+
 use receiver_directory::{
     Receiver,
-    filter::{Filter, SEEN},
+    filter::{Filter, RECENT, SEEN},
+    snapshot::FilterSet,
 };
 use receiver_pir::transport::DirectoryClient;
 
@@ -53,7 +56,8 @@ impl Seen {
 }
 
 /// Downloads the seen sets of the publication `origin` serves. Fails if it declares
-/// none, or a seen set without its feed's read times.
+/// none, or if any provider with a set lacks a seen set with its feed's read times (see
+/// [`seen_sets`]).
 pub async fn fetch_seen<T: Transport>(origin: &str, transport: &T) -> Result<Seen, DirectoryError> {
     let manifest = DirectoryClient::fetch_manifest(origin, transport).await?;
     let filters = DirectoryClient::fetch_filters(origin, transport, &manifest).await?;
@@ -63,25 +67,40 @@ pub async fn fetch_seen<T: Transport>(origin: &str, transport: &T) -> Result<See
         since: i64::MIN,
         until: i64::MAX,
     };
-    for set in &manifest.directory.filters {
-        if set.label.split_once('/').map(|(_, kind)| kind) != Some(SEEN) {
-            continue;
-        }
-        let (Some(since), Some(until)) = (set.since_unix, set.until_unix) else {
-            return Err(DirectoryError::Malformed);
-        };
+    for (label, since, until) in seen_sets(&manifest.directory.filters)? {
         seen.since = seen.since.max(since);
         seen.until = seen.until.min(until);
         // Fetching the filters checked them against the manifest's sets.
-        seen.sets.push(
-            filters
-                .get(&set.label)
-                .ok_or(DirectoryError::Malformed)?
-                .clone(),
-        );
+        seen.sets
+            .push(filters.get(label).ok_or(DirectoryError::Malformed)?.clone());
     }
     if seen.sets.is_empty() {
         return Err(DirectoryError::Malformed);
     }
     Ok(seen)
+}
+
+/// The labels and feed read times of the seen sets among a publication's filter `sets`.
+/// Fails unless every provider with a recent or seen set has a dated seen set, since
+/// receivers a provider without one had would look unseen.
+pub(crate) fn seen_sets(sets: &[FilterSet]) -> Result<Vec<(&str, i64, i64)>, DirectoryError> {
+    let mut providers = BTreeMap::<&str, Option<(&str, i64, i64)>>::new();
+    for set in sets {
+        match set.label.split_once('/') {
+            Some((provider, RECENT)) => {
+                providers.entry(provider).or_default();
+            }
+            Some((provider, SEEN)) => {
+                let (Some(since), Some(until)) = (set.since_unix, set.until_unix) else {
+                    return Err(DirectoryError::Malformed);
+                };
+                providers.insert(provider, Some((&set.label, since, until)));
+            }
+            _ => {}
+        }
+    }
+    providers
+        .into_values()
+        .map(|seen| seen.ok_or(DirectoryError::Malformed))
+        .collect()
 }

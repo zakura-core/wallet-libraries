@@ -628,6 +628,72 @@ async fn seen_addresses_keep_scanning_and_are_never_issued_again() {
     assert_eq!(issued.key_id(), KeyId::new(Purpose::Receive, 1));
 }
 
+/// A provider with a recent set but no seen set may have had any receiver, so issuance
+/// and sweeps both refuse the publication until every provider has a dated seen set.
+/// The sets then cover the quote times they all cover, and hold what any of them holds.
+#[tokio::test]
+async fn every_provider_with_sets_needs_a_seen_set() {
+    let mut st = ironwood_wallet();
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
+    let receiver = |index| {
+        let fvk = KeyId::new(Purpose::Receive, index).derive(&parent).unwrap();
+        Receiver::from_bytes(fvk.address_at(0u32, Scope::External).to_raw_address_bytes()).unwrap()
+    };
+    // Provider `a` has its seen set only if `a_seen`. `b` has only a seen set, from a
+    // later feed start and a later read.
+    let sets = |a_seen: bool| {
+        let mut sets = provider_named("a", &[receiver(0)]);
+        sets.truncate(1 + usize::from(a_seen));
+        let mut b = provider_named("b", &[receiver(1)]).pop().unwrap();
+        b.since_unix = NOW - RESTORE_WATCH_SECS;
+        b.until_unix = NOW - 30;
+        sets.push(b);
+        sets
+    };
+    let directory = Directory::new(publish(&[], &[], through, &sets(false)));
+    let refused = fetch_seen(ORIGIN, &directory).await;
+    assert!(matches!(refused, Err(DirectoryError::Malformed)));
+    let mut notes = Notes {
+        data: BTreeMap::new(),
+        requested: Vec::new(),
+    };
+    let result = sweep(
+        st.wallet_mut().db_mut(),
+        &network,
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &directory,
+        &mut notes,
+        &NoLock,
+        NOW,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(Error::Directory(DirectoryError::Malformed))),
+        "{result:?}"
+    );
+    // A publication without provider sets is refused too.
+    let directory = Directory::new(publish(&[], &[], through, &[]));
+    let refused = fetch_seen(ORIGIN, &directory).await;
+    assert!(matches!(refused, Err(DirectoryError::Malformed)));
+
+    let directory = Directory::new(publish(&[], &[], through, &sets(true)));
+    let seen = fetch_seen(ORIGIN, &directory).await.unwrap();
+    assert_eq!(
+        (seen.since(), seen.until()),
+        (NOW - RESTORE_WATCH_SECS, NOW - 60)
+    );
+    let held = [0, 1, 2].map(|index| *receiver(index).as_bytes());
+    assert_eq!(seen.contains(&held), [true, true, false]);
+}
+
 /// A directory whose queries fail after it accepted the session.
 struct FailingQueries(Directory);
 

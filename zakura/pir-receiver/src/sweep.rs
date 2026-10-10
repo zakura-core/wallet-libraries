@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, num::NonZeroU32};
 use futures_util::StreamExt;
 use receiver_directory::{
     Receiver,
-    filter::{Filters, PAID, SEEN},
+    filter::{Filters, PAID},
     witness::WitnessSnapshot,
 };
 use receiver_pir::{AcceptedCoverage, transport::DirectoryClient};
@@ -26,7 +26,7 @@ use zcash_client_backend::data_api::{
 };
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
-use crate::{DirectoryError, Transport};
+use crate::{DirectoryError, Transport, seen::seen_sets};
 
 /// A wallet's account identifier.
 type AccountId<W> = <W as WalletRead>::AccountId;
@@ -176,7 +176,9 @@ pub struct Swept<E> {
 /// the stored chain tip. When none is due, the run makes no request. Otherwise the
 /// publication must commit to `genesis` ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS)
 /// on mainnet), cover history from Ironwood activation on `params`' network, and end at
-/// a block the wallet accepts (see [`DynamicIvkRead::directory_publication_anchor`]).
+/// a block the wallet accepts (see [`DynamicIvkRead::directory_publication_anchor`]),
+/// and every swap provider with a set must have a dated seen set, as for
+/// [`fetch_seen`](crate::fetch_seen).
 ///
 /// Each key's receiver is first tested against the publication's filters, which every
 /// wallet downloads alike: only a receiver in the paid set is looked up over PIR, and
@@ -321,6 +323,8 @@ struct Directory<'a, T> {
     accepted: AcceptedCoverage,
     anchor: ChainPoint,
     filters: Filters,
+    /// The labels of the provider seen sets.
+    seen: Vec<String>,
     session: Option<Session<T>>,
 }
 
@@ -358,6 +362,10 @@ impl<'a, T: Transport> Directory<'a, T> {
             hash: anchor.hash.0,
         };
         accepted.check(&manifest.directory)?;
+        let seen = seen_sets(&manifest.directory.filters)?
+            .into_iter()
+            .map(|(label, _, _)| label.to_owned())
+            .collect();
         let filters = DirectoryClient::fetch_filters(origin, &transport, &manifest).await?;
         Ok(Self {
             origin,
@@ -366,6 +374,7 @@ impl<'a, T: Transport> Directory<'a, T> {
             accepted,
             anchor,
             filters,
+            seen,
             session: None,
         })
     }
@@ -388,11 +397,9 @@ impl<'a, T: Transport> Directory<'a, T> {
             .into_iter()
             .map(|paid| Check { paid, seen: false })
             .collect();
-        for set in &self.manifest.directory.filters {
-            if set.label.split_once('/').map(|(_, kind)| kind) == Some(SEEN) {
-                for (check, hit) in checks.iter_mut().zip(matches(&set.label)) {
-                    check.seen |= hit;
-                }
+        for label in &self.seen {
+            for (check, hit) in checks.iter_mut().zip(matches(label)) {
+                check.seen |= hit;
             }
         }
         Ok(checks)

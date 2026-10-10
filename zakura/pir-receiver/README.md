@@ -35,7 +35,7 @@ until they land on its `main`.
 routes and checks that a restored wallet finds and imports a payout, extends its
 lookahead past it, repeats no finished sweep, imports every payment of a key paid
 twice, makes no lookup when nothing was paid, keeps every swept address scanning and
-issues no seen one, and refuses a publication that is not on its chain before any
-lookup.
+issues no seen one, refuses a publication that is not on its chain before any lookup,
+and refuses one in which a provider lacks a seen set.
 Against a fake Enhance service, `EnhanceNotes` accepts fresh routing after a refused
 query.
