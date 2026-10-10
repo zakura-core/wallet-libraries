@@ -182,8 +182,9 @@ workspace.
   `finish_dynamic_nullifier_recovery`, which releases the Ironwood spend history the
   sweeps needed. Every attempt looks the key up in the current publication, whose answer
   replaces queued candidates it no longer repeats and reopens the sweep until it is
-  applied, and note data is queued in batches, so a long history keeps its progress. `begin_dynamic_sweep_attempt` takes whether a provider seen set holds
-  the key's receiver and stores a hit before any lookup, so a seen key is never issued,
+  applied, and note data is queued in batches, so a long history keeps its progress.
+  `begin_dynamic_sweep_attempt` takes whether a provider seen set holds the key's
+  receiver and stores a hit before any lookup, so a seen key is never issued,
   and every finished key scans from the block after its lookup until its restore watch
   closes it. A payment before the account's
   birthday is checked for inclusion ahead of the birthday block and then raises the
