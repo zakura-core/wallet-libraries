@@ -411,9 +411,14 @@ pub(super) fn record_status<P: Parameters>(
     if deposit.is_empty() {
         return Err(invalid("empty deposit address"));
     }
+    // A refund key starts on a refund owed if it never started, or reopens if it closed
+    // while this operation expected no refund.
     let operations = conn
         .prepare(&format!(
-            "SELECT o.id, k.id, k.purpose = 0 AND k.active_from IS NULL, k.scan_from
+            "SELECT o.id, k.id,
+                k.purpose = 0 AND (k.active_from IS NULL
+                    OR (k.closed_at IS NOT NULL AND o.expectation NOT IN (2, 3))),
+                COALESCE(k.active_from, k.scan_from)
              FROM ironwood_dynamic_operations o
              JOIN ironwood_receiving_keys k ON k.id = o.receiving_key_id
              JOIN accounts a ON a.id = k.account_id
@@ -425,9 +430,9 @@ pub(super) fn record_status<P: Parameters>(
         })?
         .collect::<Result<Vec<(i64, i64, bool, u32)>, _>>()?;
     let refund_owed = matches!(observation.status, Terminal(Positive(_) | Unknown));
-    for &(id, key, unstarted_refund, scan_from) in &operations {
+    for &(id, key, startable, scan_from) in &operations {
         let current = record(conn, id, observation, funded, now)?;
-        if current && unstarted_refund && refund_owed {
+        if current && startable && refund_owed {
             // A refund key whose restore sweep is pending starts when the sweep finishes.
             activate(conn, key, BlockHeight::from(scan_from))?;
         }

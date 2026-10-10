@@ -79,16 +79,21 @@ pub(super) fn record_operation<P: Parameters>(
         return Err(invalid("invalid refund operation deadline"));
     }
     let key = refund_key(conn, params, account, index)?;
-    let (elsewhere, recorded): (bool, bool) = conn.query_row(
+    let (elsewhere, recorded, rebound): (bool, bool, bool) = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_dynamic_operations
                 WHERE reference = ?2 AND receiving_key_id <> ?1),
             EXISTS(SELECT 1 FROM ironwood_dynamic_operations
-                WHERE reference = ?2 AND receiving_key_id = ?1)",
+                WHERE reference = ?2 AND receiving_key_id = ?1),
+            EXISTS(SELECT 1 FROM ironwood_dynamic_operations
+                WHERE reference <> ?2 AND receiving_key_id = ?1)",
         params![key, deposit],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     if elsewhere {
         return Err(invalid("deposit address is recorded for another key"));
+    }
+    if rebound {
+        return Err(invalid("refund key is bound to another deposit"));
     }
     // Until its funding transaction is stored, the operation expects no receipt.
     if !recorded {

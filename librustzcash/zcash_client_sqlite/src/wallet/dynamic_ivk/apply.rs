@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::{
     data_api::{
         dynamic_ivk::{PaymentApplication, SweepDeferral},
-        transparent_ledger::ChainPoint,
+        transparent_ledger::{ChainPoint, TransparentLedgerMode},
     },
     wallet::{WalletOrchardOutput, WalletTx},
 };
@@ -41,10 +41,12 @@ pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL, R>(
         let Some(path) = path else {
             return Ok(Ok(PaymentApplication::AwaitingWitness));
         };
+        let configured = db.transparent_ledger_mode;
         let applied = db.transactionally(|db| {
             apply_payment(
                 db.conn.0,
                 db.params,
+                configured,
                 account,
                 key,
                 &candidate,
@@ -73,10 +75,13 @@ fn merkle_path(position: u32, siblings: [[u8; 32]; 32]) -> Option<MerklePath> {
 
 /// Applies queued `candidate` with its inclusion path at an anchor on the wallet's chain,
 /// which authenticates the note and position but not its transaction ID or memo, which is
-/// not stored (see `wallet::dynamic_ivk`).
+/// not stored (see `wallet::dynamic_ivk`). `configured` is the handle's transparent ledger
+/// mode, for routing the transaction's enhancement.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
+    configured: Option<TransparentLedgerMode>,
     account: AccountUuid,
     key: KeyId,
     candidate: &PendingPayment,
@@ -321,7 +326,7 @@ pub(super) fn apply_payment<P: Parameters>(
         Some(candidate.height),
         spent_in,
     )?;
-    wallet::enhance_pir::finish_private_receipt(conn, tx_ref)?;
+    wallet::enhance_pir::finish_private_receipt(conn, configured, tx_ref, candidate.txid)?;
     dequeue()?;
     Ok(Ok(PaymentApplication::Applied))
 }
