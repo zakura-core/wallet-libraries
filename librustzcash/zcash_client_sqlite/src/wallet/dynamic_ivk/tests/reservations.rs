@@ -727,55 +727,82 @@ fn restored_accounts_issue_unquoted_addresses_only_with_covering_seen_evidence()
     );
 }
 
+/// A restored account at the tip with its restore lookahead swept, and the end of the
+/// read a covering seen set needs.
+fn restored_and_swept() -> (State, i64) {
+    let mut st = fixture();
+    let through = tip(&st);
+    let restored_at = restore_through(&st, through.height).unwrap();
+    assert_eq!(issue(&mut st, None), Err(ReservationPolicy::Gap));
+    sweep_pending(&mut st);
+    (st, restored_at + SEEN_SLACK_SECONDS)
+}
+
+/// Issues through `prepare_receive_reservation` at the tip, with a seen set read from
+/// `since` to `until` that holds the incoming addresses at `held`, if any.
+fn issue(st: &mut State, seen: Option<(i64, i64, &[u64])>) -> Result<u64, ReservationPolicy> {
+    let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
+    let held: Vec<[u8; 43]> = seen
+        .map_or(&[][..], |(_, _, held)| held)
+        .iter()
+        .map(|&index| {
+            let fvk = KeyId::new(Purpose::Receive, index).derive(&parent).unwrap();
+            fvk.address_at(0u32, Scope::External).to_raw_address_bytes()
+        })
+        .collect();
+    let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
+    let seen = seen.map(|(since, until, _)| ProviderSeen {
+        since,
+        until,
+        contains: &contains,
+    });
+    let account = st.test_account().unwrap().id();
+    let through = tip(st).height;
+    let db = st.wallet_mut().db_mut();
+    let issued = db.prepare_receive_reservation(account, NOW, through, seen.as_ref());
+    issued.unwrap().map(|k| k.key_id().index())
+}
+
+/// Finishes the test account's pending incoming sweeps after empty lookups at the tip,
+/// as a receiver directory that saw nothing would. Returns how many it finished.
+fn sweep_pending(st: &mut State) -> usize {
+    let account = st.test_account().unwrap().id();
+    let through = tip(st);
+    let pending: Vec<Vec<u8>> = st
+        .wallet()
+        .conn()
+        .prepare(
+            "SELECT k.key_index FROM ironwood_dynamic_sweeps s
+             JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
+             WHERE k.purpose = 1 AND s.done_height IS NULL",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let db = st.wallet_mut().db_mut();
+    for index in &pending {
+        let index = u64::from_be_bytes(index.as_slice().try_into().unwrap());
+        finish_sweep(db, account, KeyId::new(Purpose::Receive, index), through);
+    }
+    pending.len()
+}
+
 /// Through the public path, seen hits that widen a restored account's window first
 /// register and sweep the newly exposed addresses, so issuance waits rather than
 /// issuing one unchecked, and a newly exposed address the set holds is skipped once
 /// checked.
 #[test]
 fn seen_hits_extend_a_restored_lookahead_before_issuance() {
-    let restored = || {
-        let mut st = fixture();
-        let through = tip(&st);
-        let restored_at = restore_through(&st, through.height).unwrap();
-        let account = st.test_account().unwrap().id();
-        let db = st.wallet_mut().db_mut();
-        assert_eq!(
-            refusal(db.prepare_receive_reservation(account, NOW, through.height, None)),
-            Some(ReservationPolicy::Gap)
-        );
-        sweep_from(&mut st, 0);
-        (st, restored_at + SEEN_SLACK_SECONDS)
-    };
-    let issue = |st: &mut State, since, until, held: u64| {
-        let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
-        let held: Vec<[u8; 43]> = (0..held)
-            .map(|index| {
-                let fvk = KeyId::new(Purpose::Receive, index).derive(&parent).unwrap();
-                fvk.address_at(0u32, Scope::External).to_raw_address_bytes()
-            })
-            .collect();
-        let contains =
-            |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
-        let seen = ProviderSeen {
-            since,
-            until,
-            contains: &contains,
-        };
-        let account = st.test_account().unwrap().id();
-        let through = tip(st).height;
-        let db = st.wallet_mut().db_mut();
-        let issued = db.prepare_receive_reservation(account, NOW, through, Some(&seen));
-        issued.unwrap().map(|k| k.key_id().index())
-    };
     let window = RECEIVE_GAP_LIMIT;
+    let held: Vec<u64> = (0..=window).collect();
     let gap = Err(ReservationPolicy::Gap);
 
     // The set holds the whole swept window but its feed started too late.
-    let (mut st, until) = restored();
-    assert_eq!(
-        issue(&mut st, EARLIEST_RECEIVE_QUOTE + 1, until, window),
-        gap
-    );
+    let (mut st, until) = restored_and_swept();
+    let late = Some((EARLIEST_RECEIVE_QUOTE + 1, until, &held[..window as usize]));
+    assert_eq!(issue(&mut st, late), gap);
     let account = st.test_account().unwrap().id();
     assert_eq!(
         all_keys(st.wallet().db(), account).unwrap().len() as u64,
@@ -789,35 +816,75 @@ fn seen_hits_extend_a_restored_lookahead_before_issuance() {
     );
 
     // A covering set also holds the next address, which is checked before any issuance.
-    let (mut st, until) = restored();
-    assert_eq!(
-        issue(&mut st, EARLIEST_RECEIVE_QUOTE, until, window + 1),
-        gap
-    );
-    sweep_from(&mut st, window);
-    assert_eq!(
-        issue(&mut st, EARLIEST_RECEIVE_QUOTE, until, window + 1),
-        gap
-    );
-    sweep_from(&mut st, 2 * window);
-    assert_eq!(
-        issue(&mut st, EARLIEST_RECEIVE_QUOTE, until, window + 1),
-        Ok(window + 1)
-    );
+    let (mut st, until) = restored_and_swept();
+    let covering = Some((EARLIEST_RECEIVE_QUOTE, until, &held[..]));
+    assert_eq!(issue(&mut st, covering), gap);
+    sweep_pending(&mut st);
+    assert_eq!(issue(&mut st, covering), gap);
+    sweep_pending(&mut st);
+    assert_eq!(issue(&mut st, covering), Ok(window + 1));
 }
 
-/// Finishes the sweeps of the test account's incoming keys from `from` up, after empty
-/// lookups at the tip, as a receiver directory that saw nothing would.
-fn sweep_from(st: &mut State, from: u64) {
-    let account = st.test_account().unwrap().id();
-    let through = tip(st);
-    let db = st.wallet_mut().db_mut();
-    for key in all_keys(db, account).unwrap() {
-        let id = key.key_id();
-        if id.purpose() == Purpose::Receive && id.index() >= from {
-            finish_sweep(db, account, id, through);
+/// A restored account's lookahead stays a full window past the addresses this wallet
+/// issues, since the old device may have quoted beyond them. Each issuance waits for
+/// the newly exposed address's sweep, and one the seen set holds is never issued.
+#[test]
+fn restored_lookahead_keeps_ahead_of_issued_addresses() {
+    let window = RECEIVE_GAP_LIMIT;
+    let (mut st, until) = restored_and_swept();
+    // The old device's requests for the first window never reached the provider, but
+    // the one for the next address did.
+    let held = [window];
+    let covering = Some((EARLIEST_RECEIVE_QUOTE, until, &held[..]));
+    let mut issued = Vec::new();
+    while issued.len() <= window as usize {
+        match issue(&mut st, covering) {
+            Ok(index) => {
+                let key = all_keys(st.wallet().db(), st.test_account().unwrap().id())
+                    .unwrap()
+                    .into_iter()
+                    .find(|k| k.key_id() == KeyId::new(Purpose::Receive, index))
+                    .unwrap();
+                quote(&mut st, &key, &format!("quote-{index}"), true);
+                issued.push(index);
+            }
+            Err(ReservationPolicy::Gap) => assert!(sweep_pending(&mut st) > 0),
+            Err(other) => panic!("unexpected {other:?}"),
         }
     }
+    let expected: Vec<u64> = (0..window).chain([window + 1]).collect();
+    assert_eq!(issued, expected);
+}
+
+/// After its first issuance, a restored account's next address waits only for the
+/// sweep of the key that issuance exposed; a new account's does not wait.
+#[test]
+fn issuance_past_the_restore_lookahead_stays_live() {
+    let (mut st, until) = restored_and_swept();
+    let covering = Some((EARLIEST_RECEIVE_QUOTE, until, &[][..]));
+    let first = issue(&mut st, covering).unwrap();
+    let key = all_keys(st.wallet().db(), st.test_account().unwrap().id())
+        .unwrap()
+        .into_iter()
+        .find(|k| k.key_id() == KeyId::new(Purpose::Receive, first))
+        .unwrap();
+    quote(&mut st, &key, "first", true);
+    assert_eq!(issue(&mut st, covering), Err(ReservationPolicy::Gap));
+    assert_eq!(sweep_pending(&mut st), 1);
+    assert_eq!(issue(&mut st, covering), Ok(first + 1));
+
+    let mut st = fixture();
+    assert_eq!(issue(&mut st, None), Err(ReservationPolicy::Gap));
+    sweep_pending(&mut st);
+    let first = issue(&mut st, None).unwrap();
+    let key = all_keys(st.wallet().db(), st.test_account().unwrap().id())
+        .unwrap()
+        .into_iter()
+        .find(|k| k.key_id() == KeyId::new(Purpose::Receive, first))
+        .unwrap();
+    quote(&mut st, &key, "first", true);
+    assert_eq!(issue(&mut st, None), Ok(first + 1));
+    assert_eq!(sweep_pending(&mut st), 0);
 }
 
 /// An account created here rather than restored was never quoted elsewhere, so its

@@ -10,8 +10,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
     DynamicKey, KeyId, Purpose, RESERVED, ReservationPolicy, account_key, activate, corrupt,
-    decode_index, invalid, key_by_id, lifecycle::record, next_index, recovery::allocated_top,
-    register,
+    decode_index, invalid, key_by_id, lifecycle::record, next_index, register,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -500,10 +499,6 @@ pub(super) fn prepare<P: Parameters>(
     let unquoted_wait = restore.is_some_and(|restored_at| {
         coverage.0 > EARLIEST_RECEIVE_QUOTE || restored_at.is_none_or(|t| t > coverage.1)
     });
-    // In a restored account, an index without a key is unknown history until the
-    // lookahead registers and sweeps it, unless it lies above a key this wallet issued.
-    let unregistered_wait =
-        restore.is_some() && allocated_top(conn, a.0)?.is_none_or(|(_, restored)| restored);
     // An address the provider was given without seeing it, such as a request that never
     // reached it, is reissued only when the gap rule leaves no fresh one.
     let mut abandoned = None;
@@ -531,8 +526,10 @@ pub(super) fn prepare<P: Parameters>(
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
+        // In a restored account, an index without a key is unknown history until the
+        // lookahead registers and sweeps it.
         let Some((blocked, quoted, unquoted)) =
-            row.or_else(|| (!unregistered_wait).then_some((false, false, false)))
+            row.or_else(|| restore.is_none().then_some((false, false, false)))
         else {
             return Ok(Err(ReservationPolicy::Gap));
         };
