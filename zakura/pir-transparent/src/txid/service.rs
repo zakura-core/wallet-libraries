@@ -38,11 +38,13 @@ struct Client {
     unsupported: bool,
 }
 
+/// Locks `mutex`, recovering the guard when an earlier holder panicked.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl TxidDisplayService {
+    /// A service holding a new client and no map digest.
     pub fn new() -> Self {
         Self {
             client: Mutex::new(Client {

@@ -87,6 +87,7 @@ pub struct TxidPublication {
 }
 
 impl TxidPublication {
+    /// A publication of one recent shard over `start..=end` holding no record.
     pub fn new(start: u64, end: u64) -> Self {
         let directory = TableProfile::new(
             transparent_shard::SCHEMA,

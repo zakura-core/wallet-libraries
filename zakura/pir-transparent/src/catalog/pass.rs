@@ -29,8 +29,11 @@ enum RecordedRevision {
 /// One pass's catalog transaction. Dropping it without [`CatalogPass::finish`] changes
 /// nothing.
 pub(crate) struct CatalogPass<'c> {
+    /// The pass's immediate transaction on the catalog connection.
     tx: Transaction<'c>,
+    /// The first contradiction found, which withdraws the batch.
     withdrawn: Option<WithdrawnCause>,
+    /// Whether anything deferred the batch.
     pending: bool,
 }
 
@@ -77,6 +80,7 @@ impl<'c> CatalogPass<'c> {
         })
     }
 
+    /// Withdraws the batch for `cause`, unless an earlier cause already did.
     fn withdraw(&mut self, cause: WithdrawnCause) {
         self.withdrawn.get_or_insert(cause);
     }
@@ -236,6 +240,7 @@ impl<'c> CatalogPass<'c> {
         Ok(RecordedRevision::Unrecorded)
     }
 
+    /// Records `entry` as a new current row, not exported.
     fn insert(&self, entry: &Published) -> Result<(), RecoveryError> {
         let revision = &entry.revision;
         self.tx

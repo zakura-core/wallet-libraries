@@ -93,12 +93,18 @@ pub enum WithdrawnCause {
 /// batch listing retirements. Neither the batch nor a server withdrawal is
 /// authority to change local facts or promote an account.
 pub struct RecoveryBatch<AccountId> {
+    /// The commits in the order they apply; empty unless `state` is ready.
     pub(crate) commits: Vec<TransparentLedgerCommit<AccountId>>,
+    /// How far the pass covered its watch set, and why it stopped.
     pub(crate) progress: Progress,
+    /// Whether the commits may reach the wallet.
     pub(crate) state: BatchState,
     /// The retired revisions this batch's commits resolve, as its pass recorded
     /// them. Acknowledging the batch forgets them.
     pub(crate) retired_revisions: Vec<RecoveryRevision>,
+    /// What acknowledging the batch must present: the companion's
+    /// outstanding receipt when the batch was issued. All zero for a batch that
+    /// cannot be acknowledged.
     pub(crate) receipt: [u8; 32],
 }
 

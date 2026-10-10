@@ -69,11 +69,17 @@ pub struct RecoveryConfig {
 /// separate from wallet financial state, whose writer independently validates each
 /// normalized commit. No method here changes qualification, activation or spending.
 pub struct ReferenceRecovery {
+    /// The identity and bounds every pass of this companion uses.
     config: RecoveryConfig,
     /// The companion binding every derived source includes.
     binding: [u8; 32],
+    /// The reference client's store: scripts, coverage, events, page work and
+    /// caches, in the companion file.
     store: SqliteStore,
+    /// A second connection to the companion file, for the catalog's own tables.
     pub(crate) catalog: Connection,
+    /// The receipt of the latest ready batch, until it is acknowledged or applied or
+    /// a new pass starts. Only the batch carrying it can be acknowledged.
     outstanding_receipt: Option<[u8; 32]>,
 }
 

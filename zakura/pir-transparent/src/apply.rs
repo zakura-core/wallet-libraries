@@ -58,6 +58,7 @@ pub struct ApplyStats {
 /// A batch the wallet applied whole and the companion acknowledged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Applied {
+    /// What the wallet applied: every commit of the batch.
     pub stats: ApplyStats,
     /// The batch's pass progress.
     pub progress: Progress,
@@ -116,7 +117,9 @@ pub enum ApplyError {
     /// integrity rejection's quarantine is durable.
     #[error("transparent PIR apply: the wallet refused a commit ({})", rejection_name(.rejection))]
     Rejected {
+        /// The refused commit's position in the batch.
         index: usize,
+        /// Why the wallet refused it.
         rejection: CommitRejection,
     },
     /// The wallet's policy generation changed after the pass read its watch set.
@@ -205,6 +208,8 @@ fn rejection_name(rejection: &CommitRejection) -> &'static str {
 }
 
 impl ApplyError {
+    /// The failure of the wallet operation on the commit at `index`: a commit
+    /// rejection, a changed policy, a disabled recovery, or any other wallet error.
     pub(crate) fn from_wallet(index: usize, error: SqliteClientError) -> Self {
         match error {
             SqliteClientError::TransparentLedgerCommitRejected(rejection) => {

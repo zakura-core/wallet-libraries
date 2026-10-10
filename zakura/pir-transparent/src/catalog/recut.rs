@@ -25,6 +25,7 @@ pub(crate) fn recut_epoch(conn: &Connection) -> Result<u32, RecoveryError> {
     u32::try_from(epoch.unwrap_or(0)).map_err(failure)
 }
 
+/// Records `epoch` as the re-cut epoch the store followed, replacing any recorded.
 pub(super) fn record_epoch(tx: &Transaction<'_>, epoch: u32) -> Result<(), RecoveryError> {
     tx.execute(
         "INSERT OR REPLACE INTO pir_bridge_binding (key, value) VALUES ('recut-epoch', ?1)",

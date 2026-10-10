@@ -34,10 +34,14 @@ pub enum RecoveryError {
     PublicationChanged,
 }
 
+/// A [`RecoveryError::Failure`] quoting `error`: a retrieval or companion
+/// persistence failure the caller retries later.
 pub(crate) fn failure(error: impl std::fmt::Display) -> RecoveryError {
     RecoveryError::Failure(error.to_string())
 }
 
+/// Fails with [`RecoveryError::Invalid`] quoting `message` unless `ok`: a
+/// configuration, accepted-chain, context or source-content check.
 pub(crate) fn ensure_valid(ok: bool, message: &str) -> Result<(), RecoveryError> {
     if ok {
         Ok(())

@@ -18,6 +18,9 @@ pub(crate) fn acknowledge(
     tx.commit().map_err(failure)
 }
 
+/// The immediate catalog transaction an acknowledgment runs in. Applying takes it
+/// before the wallet's read transaction, so waiting for the companion's lock holds
+/// no wallet reservation.
 pub(crate) fn acknowledgment_transaction(
     conn: &mut Connection,
 ) -> Result<Transaction<'_>, RecoveryError> {
@@ -25,6 +28,7 @@ pub(crate) fn acknowledgment_transaction(
         .map_err(failure)
 }
 
+/// [`acknowledge`] within `tx`, which the caller commits.
 pub(crate) fn acknowledge_in_transaction(
     tx: &Transaction<'_>,
     replaced: &[RecoveryRevision],

@@ -1,5 +1,11 @@
 //! Stable identities: the companion's binding, a source, and a shard revision, and the
 //! map entries they identify.
+//!
+//! "Revision" names four things here: the publisher's revision number of a shard
+//! (`Shape::revision`), offset by one as the wallet's lineage; the derived
+//! revision identity, a hash of the manifest digest and sealing
+//! ([`revision_identity`]); the wallet's whole `RecoveryRevision`; and the
+//! [`Published`] entry that carries it.
 
 use sha2::{Digest, Sha256};
 use transparent_filter::{ShardMapEntry, SupersededShard};
@@ -19,6 +25,7 @@ pub(crate) fn companion_binding(parts: [&[u8]; 4]) -> [u8; 32] {
     hash.finalize().into()
 }
 
+/// Hashes `value` after its length, so that concatenated fields stay apart.
 fn length_prefixed(hash: &mut Sha256, value: &[u8]) {
     hash.update((value.len() as u64).to_le_bytes());
     hash.update(value);
@@ -31,11 +38,15 @@ pub(crate) struct Published {
     /// The shard id it is published, or was published, under. Manifests bind
     /// the id, so a stored fact under this revision must name it.
     pub(crate) shard_id: u64,
+    /// The first height the revision covers.
     pub(crate) start_height: u64,
+    /// The last height the revision covers.
     pub(crate) end_height: u64,
+    /// The revision's manifest digest, which stored facts name.
     pub(crate) digest: String,
     /// The block the revision ends on, display hex.
     pub(crate) terminal: String,
+    /// The revision as the wallet identifies it.
     pub(crate) revision: RecoveryRevision,
 }
 
@@ -87,6 +98,8 @@ impl Published {
         )
     }
 
+    /// The entry with the fields `shape` gives, under the identities a companion
+    /// bound to `binding` derives for a publication whose set identity is `set`.
     fn new(binding: &[u8; 32], set: &SetIdentity, shape: Shape<'_>) -> Result<Self, RecoveryError> {
         Ok(Self {
             shard_id: shape.shard_id,
@@ -115,10 +128,12 @@ impl Published {
         (self.start_height, self.digest.clone())
     }
 
+    /// The publication anchor's height, as the catalog stores it.
     pub(super) fn height(&self) -> u32 {
         u32::from(self.revision.publication.height)
     }
 
+    /// The publication anchor's hash bytes, as the catalog stores them.
     pub(super) fn hash(&self) -> &[u8] {
         self.revision.publication.hash.0.as_slice()
     }

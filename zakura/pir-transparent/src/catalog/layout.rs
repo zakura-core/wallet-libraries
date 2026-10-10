@@ -12,9 +12,17 @@ const FORMAT: &str = "transparent-reference-companion-v3";
 /// The previous layout, whose catalog [`prepare`] rebuilds in place.
 const FORMAT_V2: &str = "transparent-reference-companion-v2";
 
+/// The companion's key-value settings: its `format`, its `account-source`
+/// binding, and the `recut-epoch` its store last followed.
 const BINDING: &str =
     "CREATE TABLE pir_bridge_binding (key TEXT PRIMARY KEY, value BLOB NOT NULL);";
 
+/// One row per shard revision this companion has seen, by source and manifest
+/// digest. `lineage` is the publisher's revision number plus one, `revision` the
+/// derived revision identity, and `height`/`hash` the publication anchor. `current`
+/// marks rows the latest pass's map publishes, or declares superseded while sealed;
+/// `exported` marks rows a batch may have handed to the wallet whose export intent
+/// no acknowledgment or reset has cleared.
 const CATALOG: &str = "CREATE TABLE pir_bridge_catalog (
         source BLOB NOT NULL CHECK(length(source)=32),
         start_height INTEGER NOT NULL CHECK(start_height>=0),
