@@ -50,7 +50,7 @@ pub fn apply<P: zcash_protocol::consensus::Parameters, CL, R>(
 
     let progress = batch.progress();
     let (stats, retired, expected_generation) =
-        crate::apply::apply_commits(batch, wallet, trust, || {})?;
+        crate::apply::apply_commits(batch, wallet, trust, &mut crate::Ungated, || {})?;
     if let Some(expected) = expected_generation {
         wallet
             .with_immediate_read_transaction(|snapshot| {
