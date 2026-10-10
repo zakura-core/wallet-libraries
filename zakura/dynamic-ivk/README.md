@@ -1,6 +1,6 @@
 # Dynamic IVKs
 
-Unpublished implementation of the draft v1 dynamic IVK and refund-memo
+Implementation of the draft v1 dynamic IVK and refund-memo
 conventions. A dynamic key keeps the account's spending authority (`ak` and `nk`)
 with its own `rivk`, so each has its own incoming viewing key and address, and a
 wallet trial-decrypts with a changing set of them. Wallets use them for swap refund
