@@ -328,6 +328,7 @@ pub(crate) fn finish_private_receipt(
         named_params![":tx": tx_ref.0],
         |row| row.get(0),
     )?;
+    // A routed transaction already has its retrieval request; route 0 keeps its memo private.
     if !has_raw && route(conn, tx_ref)?.is_none() {
         super::queue_tx_retrieval(conn, std::iter::once(txid), None)?;
         return queue_transaction(
