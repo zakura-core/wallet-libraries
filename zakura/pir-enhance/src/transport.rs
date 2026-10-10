@@ -312,6 +312,22 @@ impl Client {
             .into_iter()
             .map(|(id, rows)| (id, rows.into_iter().collect()))
             .collect();
+        // Every wanted row lies inside its domain's selected rows before any
+        // query of a round is sent, so a round never stops partway through.
+        for (&id, wanted) in &rows {
+            let limit = self
+                .manifest
+                .coverage
+                .shards
+                .iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| ClientError::Generation("unknown domain".into()))?
+                .query_rows(self.manifest.geometry)
+                .map_err(ClientError::Generation)?;
+            if let Some((row, _)) = wanted.iter().find(|(row, _)| *row as u64 >= limit) {
+                return Err(ClientError::OutsideCoverage(*row as u64));
+            }
+        }
         let rounds = rows.values().map(Vec::len).max().unwrap_or(0);
         let mut result: Vec<_> = (0..positions.len()).map(|_| None).collect();
         for round in 0..rounds {
