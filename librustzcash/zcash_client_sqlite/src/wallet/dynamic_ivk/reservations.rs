@@ -426,11 +426,11 @@ pub(super) fn record_status<P: Parameters>(
         .collect::<Result<Vec<(i64, i64, bool, u32)>, _>>()?;
     let refund_owed = matches!(observation.status, Terminal(Positive(_) | Unknown));
     for &(id, key, unstarted_refund, scan_from) in &operations {
-        if unstarted_refund && refund_owed {
+        let current = record(conn, id, observation, funded, now)?;
+        if current && unstarted_refund && refund_owed {
             // A refund key whose restore sweep is pending starts when the sweep finishes.
             activate(conn, key, BlockHeight::from(scan_from))?;
         }
-        record(conn, id, observation, funded, now)?;
     }
     reap(conn, params, account, now)?;
     Ok(!operations.is_empty())

@@ -115,43 +115,55 @@ fn observations_are_monotonic_and_only_fill_a_missing_deadline() {
 }
 
 /// A refund key whose deposit this wallet did not fund starts once the provider reports
-/// a refund owed.
+/// a refund owed, unless a newer status, answered first, reports none.
 #[test]
 fn a_refund_owed_starts_an_unfunded_refund_key() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let from = next_height(&st);
-    // Reserved as issuance does: it starts only when its funding transaction is stored.
-    let db = st.wallet_mut().db_mut();
-    let key = tx(db, |c, p| {
-        reserve_next(
-            c,
-            p,
-            account,
-            Purpose::Refund,
-            from,
-            Discovery::Funding,
-            clock_now(),
-        )
-    })
-    .unwrap()
-    .unwrap()
-    .key_id();
-    observe(db, account, key, "deposit", Active, 100).unwrap();
-    let record = |db: &mut Db, status: &str, at| {
-        let status = NearStatus {
+    for settled_first in [false, true] {
+        let mut st = scanned_wallet();
+        let account = st.test_account().unwrap().id();
+        let from = next_height(&st);
+        // Reserved as issuance does: it starts only when its funding transaction is stored.
+        let db = st.wallet_mut().db_mut();
+        let key = tx(db, |c, p| {
+            reserve_next(
+                c,
+                p,
+                account,
+                Purpose::Refund,
+                from,
+                Discovery::Funding,
+                clock_now(),
+            )
+        })
+        .unwrap()
+        .unwrap()
+        .key_id();
+        observe(db, account, key, "deposit", Active, 100).unwrap();
+        let record = |db: &mut Db, status: NearStatus<'_>, at| {
+            let observation = near_observation(Purpose::Refund, &status);
+            db.record_operation_status(account, "deposit", None, observation, false, at)
+                .unwrap()
+        };
+        let status = |status| NearStatus {
             status,
             ..Default::default()
         };
-        let observation = near_observation(Purpose::Refund, &status);
-        db.record_operation_status(account, "deposit", None, observation, false, at)
-            .unwrap()
-    };
-    assert!(record(db, "PROCESSING", 100));
-    assert!(scanning_keys(&st).is_empty());
-    let db = st.wallet_mut().db_mut();
-    assert!(record(db, "REFUNDED", 200));
-    assert_eq!(scanning_keys(&st), [key]);
+        assert!(record(db, status("PROCESSING"), 100));
+        assert!(scanning_keys(&st).is_empty());
+        let db = st.wallet_mut().db_mut();
+        if settled_first {
+            let settled = NearStatus {
+                status: "SUCCESS",
+                swap_type: Some("EXACT_INPUT"),
+                refunded_amount: Some(Zatoshis::ZERO),
+                ..Default::default()
+            };
+            assert!(record(db, settled, 300));
+        }
+        assert!(record(db, status("REFUNDED"), 200));
+        let expected = if settled_first { vec![] } else { vec![key] };
+        assert_eq!(scanning_keys(&st), expected, "{settled_first}");
+    }
 }
 
 /// A final status with no receipt closes a key at once; an inconclusive one holds it
