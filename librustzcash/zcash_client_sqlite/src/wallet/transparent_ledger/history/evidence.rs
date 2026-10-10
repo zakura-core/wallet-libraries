@@ -71,7 +71,7 @@ pub(super) fn metadata_evidence(
     Ok(evidence)
 }
 
-pub(super) fn published_owned_inputs(
+pub(super) fn qualified_owned_spend_inputs(
     conn: &rusqlite::Connection,
     account: i64,
     txid: &TxId,

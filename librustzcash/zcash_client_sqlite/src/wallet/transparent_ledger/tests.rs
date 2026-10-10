@@ -1741,9 +1741,12 @@ mod handles {
             })
             .unwrap();
         let tx = writer.conn.unchecked_transaction().unwrap();
-        // Direct insert attempt after a concurrent transition: ensure_policy_generation fails.
+        // Direct insert attempt after a concurrent transition: check_transparent_policy_generation fails.
         let result = (|| {
-            crate::wallet::transparent_ledger::ensure_policy_generation(&tx, old_generation)?;
+            crate::wallet::transparent_ledger::check_transparent_policy_generation(
+                &tx,
+                old_generation,
+            )?;
             crate::wallet::queue_tx_retrieval(
                 &tx,
                 std::iter::once(zcash_primitives::transaction::TxId::from_bytes([9; 32])),

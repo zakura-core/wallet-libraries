@@ -32,7 +32,7 @@ fn integrity(failure: IntegrityFailure) -> SqliteClientError {
 /// Refuses placing `txid` at `mined` when the wallet holds it at another height, or disagrees on
 /// whether it is a coinbase transaction. `coinbase` is `None` for a spending transaction, which
 /// cannot be a coinbase.
-fn check_transaction(
+fn check_against_wallet_transaction(
     conn: &rusqlite::Connection,
     txid: &TxId,
     mined: BlockHeight,
@@ -69,7 +69,7 @@ pub(super) fn project_receive<P: consensus::Parameters>(
 ) -> Result<(), SqliteClientError> {
     let outpoint = &receive.outpoint;
     let txid = *outpoint.txid();
-    check_transaction(conn, &txid, receive.mined_height, Some(receive.coinbase))?;
+    check_against_wallet_transaction(conn, &txid, receive.mined_height, Some(receive.coinbase))?;
 
     let script = transparent::address::Script::from(receive.address.script());
     let value = i64::try_from(u64::from(receive.value)).expect("Zatoshis fit in i64");
@@ -148,7 +148,7 @@ pub(super) fn project_spend<P: consensus::Parameters>(
     gap_limits: &GapLimits,
     spend: &SpendEvent,
 ) -> Result<(), SqliteClientError> {
-    check_transaction(conn, &spend.spending_txid, spend.mined_height, None)?;
+    check_against_wallet_transaction(conn, &spend.spending_txid, spend.mined_height, None)?;
     // Stored bytes of the spending transaction must spend the prevout at the reported input.
     if let Some((_, tx)) = crate::wallet::get_transaction(conn, params, spend.spending_txid)? {
         let spent = tx

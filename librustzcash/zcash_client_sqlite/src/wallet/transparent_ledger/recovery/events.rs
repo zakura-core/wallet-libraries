@@ -6,7 +6,7 @@ use rusqlite::OptionalExtension as _;
 /// transaction, and a coinbase transaction spends no outputs. `coinbase` is the event's
 /// classification for a receive, and `None` for a spend by the transaction.
 #[cfg(feature = "transparent-inputs")]
-fn check_transaction(
+fn check_against_ledger_events(
     conn: &rusqlite::Connection,
     txid: &[u8; 32],
     mined: u32,
@@ -126,7 +126,7 @@ pub(super) fn apply_receive(
             id
         }
     };
-    check_transaction(conn, outpoint.hash(), mined, Some(receive.coinbase))?;
+    check_against_ledger_events(conn, outpoint.hash(), mined, Some(receive.coinbase))?;
     let spend_names_other_script: bool = conn.query_row(
         "SELECT EXISTS (
              SELECT 1 FROM tpir_spend_events
@@ -263,7 +263,7 @@ pub(super) fn apply_spend(
             id
         }
     };
-    check_transaction(conn, spend.spending_txid.as_ref(), mined, None)?;
+    check_against_ledger_events(conn, spend.spending_txid.as_ref(), mined, None)?;
     let receive_names_other_script: bool = conn.query_row(
         "SELECT EXISTS (
              SELECT 1 FROM tpir_receive_events

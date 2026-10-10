@@ -17,7 +17,7 @@ use super::super::{durable_policy, resolve_mode, with_read_snapshot};
 use super::codes::{
     ABSENT, CONTRADICTION, NOT_COVERED, NOT_YET_PUBLISHED, PROTOCOL, UNAVAILABLE, UNSUPPORTED,
 };
-use super::sql::{REARMED, eligible, parked};
+use super::sql::{REARMED, eligible_work_sql, parked_work_sql};
 
 pub(super) const MINUTE: u64 = 60;
 pub(super) const HOUR: u64 = 60 * MINUTE;
@@ -55,8 +55,8 @@ pub(crate) fn work(
            AND ({REARMED} OR (w.next_attempt_at <= :now AND NOT ({parked})))
          ORDER BY (w.attempts = 0 OR {REARMED}) DESC, t.mined_height DESC, t.txid
          LIMIT :limit",
-        eligible = eligible(),
-        parked = parked(),
+        eligible = eligible_work_sql(),
+        parked = parked_work_sql(),
     ))?;
     let rows = stmt.query_map(
         named_params![
@@ -108,8 +108,8 @@ pub(crate) fn parked_work(
                    AND w.next_attempt_at <= :now AND {parked}
                  ORDER BY w.attempted_at, w.transaction_id
                  LIMIT 1",
-                eligible = eligible(),
-                parked = parked(),
+                eligible = eligible_work_sql(),
+                parked = parked_work_sql(),
             ),
             named_params![
                 ":now": unix(now),
@@ -155,7 +155,7 @@ pub(super) fn jitter(txid: &TxId, attempts: u32) -> f64 {
 }
 
 /// Exponential backoff from `base`, doubling per attempt, plus up to 25% jitter, capped at `cap`.
-pub(super) fn exponential(base: u64, cap: u64, attempts: u32, txid: &TxId) -> u64 {
+pub(super) fn exponential_backoff(base: u64, cap: u64, attempts: u32, txid: &TxId) -> u64 {
     let doubled = base.saturating_mul(1u64 << attempts.saturating_sub(1).min(32));
     let delay = doubled.min(cap);
     (delay + (delay as f64 * 0.25 * jitter(txid, attempts)) as u64).min(cap)
@@ -167,13 +167,13 @@ pub(crate) fn backoff(outcome: TransparentDetailOutcome, attempts: u32, txid: &T
         TransparentDetailOutcome::Unavailable { retry_after } => {
             // Honour the server's advice beyond the cap, up to a day.
             let advised = retry_after.map_or(0, |d| d.as_secs()).min(DAY);
-            exponential(30, HOUR, attempts, txid).max(advised)
+            exponential_backoff(30, HOUR, attempts, txid).max(advised)
         }
-        TransparentDetailOutcome::Protocol => exponential(30, HOUR, attempts, txid),
+        TransparentDetailOutcome::Protocol => exponential_backoff(30, HOUR, attempts, txid),
         TransparentDetailOutcome::NotYetPublished => {
-            exponential(MINUTE, 5 * MINUTE, attempts, txid)
+            exponential_backoff(MINUTE, 5 * MINUTE, attempts, txid)
         }
-        TransparentDetailOutcome::Absent => exponential(HOUR, DAY, attempts, txid),
+        TransparentDetailOutcome::Absent => exponential_backoff(HOUR, DAY, attempts, txid),
         TransparentDetailOutcome::NotCovered
         | TransparentDetailOutcome::Unsupported
         | TransparentDetailOutcome::Contradiction => {

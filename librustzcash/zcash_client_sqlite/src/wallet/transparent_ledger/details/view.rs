@@ -21,7 +21,7 @@ use crate::{AccountUuid, error::SqliteClientError, wallet::TxQueryType};
 use super::super::{output_observation_condition, resolve_mode};
 use super::codes::{NOT_COVERED, NOT_YET_PUBLISHED};
 use super::script::spent_address;
-use super::sql::listable;
+use super::sql::listable_work_sql;
 use super::store::stored_facts;
 
 pub(super) type OwnedInputScripts = BTreeMap<([u8; 32], u32), Vec<u8>>;
@@ -32,7 +32,7 @@ pub(super) type OwnedInputScripts = BTreeMap<([u8; 32], u32), Vec<u8>>;
 /// ledger projection alone cannot bypass the private evidence checks.
 pub(super) fn owned_inputs(
     conn: &Connection,
-    tx: i64,
+    id_tx: i64,
     txid: &[u8],
     account: Option<i64>,
 ) -> Result<OwnedInputScripts, SqliteClientError> {
@@ -68,7 +68,7 @@ pub(super) fn owned_inputs(
     ))?;
     Ok(stmt
         .query_map(
-            named_params![":tx": tx, ":txid": txid, ":account": account],
+            named_params![":tx": id_tx, ":txid": txid, ":account": account],
             |row| Ok(((row.get(0)?, row.get(1)?), row.get(2)?)),
         )?
         .collect::<Result<_, _>>()?)
@@ -153,7 +153,7 @@ pub(super) enum Participation {
     IfRawShowsOne,
 }
 
-/// The account's part in transaction `tx`'s transparent side.
+/// The account's part in transaction `id_tx`'s transparent side.
 ///
 /// Its own transparent outputs and spends, recovered or scanned, count. So does a shielded
 /// part (a received, spent or sent note, a payment to a transparent recipient among them) in
@@ -163,7 +163,7 @@ pub(super) enum Participation {
 /// decide.
 pub(super) fn participation(
     conn: &Connection,
-    tx: i64,
+    id_tx: i64,
     account: i64,
 ) -> Result<Participation, SqliteClientError> {
     let (own, shielded, mixed, raw): (bool, bool, bool, bool) = conn.query_row(
@@ -218,7 +218,7 @@ pub(super) fn participation(
              t.raw IS NOT NULL
          FROM transactions t
          WHERE t.id_tx = :tx",
-        named_params![":tx": tx, ":account": account],
+        named_params![":tx": id_tx, ":account": account],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
     Ok(if own || (shielded && mixed) {
@@ -252,7 +252,7 @@ pub(crate) fn view<P: consensus::Parameters>(
             },
         )
         .optional()?;
-    let Some((tx, has_raw, stored_fee)) = row else {
+    let Some((id_tx, has_raw, stored_fee)) = row else {
         return Ok(None);
     };
     let account_id: Option<i64> = conn
@@ -262,11 +262,11 @@ pub(crate) fn view<P: consensus::Parameters>(
             |row| row.get(0),
         )
         .optional()?;
-    let part = match account_id {
-        Some(account_id) => participation(conn, tx, account_id)?,
+    let account_part = match account_id {
+        Some(account_id) => participation(conn, id_tx, account_id)?,
         None => Participation::None,
     };
-    if part == Participation::None {
+    if account_part == Participation::None {
         return Ok(None);
     }
     let owned_outputs: Vec<u32> = conn
@@ -275,7 +275,7 @@ pub(crate) fn view<P: consensus::Parameters>(
              WHERE o.transaction_id = :tx AND o.account_id IS :account AND ({})",
             output_observation_condition("o"),
         ))?
-        .query_map(named_params![":tx": tx, ":account": account_id], |row| {
+        .query_map(named_params![":tx": id_tx, ":account": account_id], |row| {
             row.get(0)
         })?
         .collect::<Result<_, _>>()?;
@@ -287,7 +287,7 @@ pub(crate) fn view<P: consensus::Parameters>(
     } else {
         None
     };
-    let mut owned_inputs = owned_inputs(conn, tx, txid.as_ref(), account_id)?;
+    let mut owned_inputs = owned_inputs(conn, id_tx, txid.as_ref(), account_id)?;
     // A recorded link cannot attribute a raw sender unless the transaction actually spends
     // that outpoint. Unlocking scripts can reveal a previously used public key on their own.
     if let Some(transaction) = &transaction {
@@ -300,7 +300,7 @@ pub(crate) fn view<P: consensus::Parameters>(
             })
         });
     }
-    let address = |address: TransparentAddress| TransparentDisplayAddress {
+    let display_address = |address: TransparentAddress| TransparentDisplayAddress {
         address,
         encoded: zcash_keys::encoding::encode_transparent_address_p(params, &address),
     };
@@ -309,7 +309,7 @@ pub(crate) fn view<P: consensus::Parameters>(
     // the account's addresses. An unlocking script alone can show any public key that has ever
     // signed, so in a raw transaction only a known spend makes the sender the account's.
     let sender_of = |found: TransparentAddress, asserted: bool| -> Result<_, SqliteClientError> {
-        let found = address(found);
+        let found = display_address(found);
         let owned = owned_inputs
             .values()
             .any(|script| transparent_display_address(script) == Some(found.address))
@@ -330,7 +330,7 @@ pub(crate) fn view<P: consensus::Parameters>(
         TransparentDisplayViewOutput {
             index,
             value,
-            address: found.map(address),
+            address: found.map(display_address),
             owned: owned_outputs.contains(&index),
         }
     };
@@ -344,7 +344,7 @@ pub(crate) fn view<P: consensus::Parameters>(
             _ => &[],
         };
         // The address each input spends, as far as its unlocking script shows it.
-        let spent: Vec<Option<TransparentAddress>> = vin
+        let spent_addresses: Vec<Option<TransparentAddress>> = vin
             .iter()
             .map(|i| spent_address(&i.script_sig().0.0))
             .collect();
@@ -353,7 +353,7 @@ pub(crate) fn view<P: consensus::Parameters>(
         } else if vin.is_empty() {
             TransparentDisplayViewSender::Shielded
         } else {
-            match spent.iter().flatten().next() {
+            match spent_addresses.iter().flatten().next() {
                 Some(found) => sender_of(*found, false)?,
                 None => TransparentDisplayViewSender::NonStandard,
             }
@@ -379,12 +379,12 @@ pub(crate) fn view<P: consensus::Parameters>(
                 .count(),
         );
         let input_count = count(vin.len());
-        if part == Participation::IfRawShowsOne && outputs.is_empty() && input_count == 0 {
+        if account_part == Participation::IfRawShowsOne && outputs.is_empty() && input_count == 0 {
             return Ok(None);
         }
         let omissions = omissions(
             &sender,
-            spent.windows(2).any(|w| w[0] != w[1]),
+            spent_addresses.windows(2).any(|w| w[0] != w[1]),
             owned,
             input_count,
             !vin.is_empty() && shielded_contribution(&transaction).is_some_and(|c| c > 0),
@@ -416,7 +416,7 @@ pub(crate) fn view<P: consensus::Parameters>(
         )));
     }
 
-    if let Some(facts) = stored_facts(conn, tx)? {
+    if let Some(facts) = stored_facts(conn, id_tx)? {
         let sender = match facts.sender {
             TransparentDisplaySender::Absent if facts.coinbase => {
                 TransparentDisplayViewSender::Coinbase
@@ -463,10 +463,10 @@ pub(crate) fn view<P: consensus::Parameters>(
                 "SELECT w.last_outcome FROM transparent_detail_work w
                  JOIN transactions t ON t.id_tx = w.transaction_id
                  WHERE w.transaction_id = :tx AND {}",
-                listable()
+                listable_work_sql()
             ),
             named_params![
-                ":tx": tx,
+                ":tx": id_tx,
                 ":public": mode.retains_public_authority(),
                 ":enhancement": TxQueryType::Enhancement.code(),
             ],

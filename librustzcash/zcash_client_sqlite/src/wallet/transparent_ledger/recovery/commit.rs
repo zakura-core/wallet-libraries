@@ -111,7 +111,7 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
         if !grants_private_authority(conn, configured)? {
             return Err(SqliteClientError::TransparentRecoveryNotEnabled);
         }
-        ensure_policy_generation(conn, commit.context.policy_generation)?;
+        check_transparent_policy_generation(conn, commit.context.policy_generation)?;
 
         let stale = |reason| reject(CommitRejection::Stale(reason));
         let watch = Watch::load(conn, params, gap_limits, commit.context.account)?
@@ -127,7 +127,7 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
                 RefusedCommit::AccountQuarantined,
             )));
         }
-        if lifecycle(conn, account_ref)? != commit.context.lifecycle {
+        if account_lifecycle(conn, account_ref)? != commit.context.lifecycle {
             return Err(stale(StaleCommit::LifecycleChanged));
         }
 
@@ -310,7 +310,7 @@ fn is_qualified(conn: &rusqlite::Connection, revision_id: i64) -> Result<bool, S
 
 /// Returns `account_ref`'s lifecycle.
 #[cfg(feature = "transparent-inputs")]
-pub(super) fn lifecycle(
+pub(super) fn account_lifecycle(
     conn: &rusqlite::Connection,
     account_ref: AccountRef,
 ) -> Result<AccountLifecycle, SqliteClientError> {

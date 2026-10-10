@@ -17,7 +17,7 @@ use crate::error::SqliteClientError;
 #[cfg(feature = "transparent-inputs")]
 use {
     super::{
-        capture_policy_generation, durable_policy, ensure_policy_generation,
+        capture_policy_generation, check_transparent_policy_generation, durable_policy,
         grants_private_authority, projection, resolve_mode,
     },
     crate::{
@@ -94,9 +94,9 @@ pub(crate) use commit::{CommitTrust, apply_commit};
 pub(crate) use diagnostics::candidate_recovery;
 #[cfg(feature = "transparent-inputs")]
 use diagnostics::{placed_receives, placed_spends, recovery_status};
-pub(crate) use lifecycle::{clear_pending_pages, truncate};
+pub(crate) use lifecycle::{clear_pending_pages, truncate_recovery};
 #[cfg(feature = "transparent-inputs")]
-pub(crate) use lifecycle::{forget, forget_reattributed_script};
+pub(crate) use lifecycle::{forget_ledger, forget_reattributed_script};
 #[cfg(all(feature = "transparent-inputs", feature = "transparent-key-import"))]
 pub(crate) use ownership::forget_other_candidates;
 #[cfg(feature = "transparent-inputs")]
@@ -107,7 +107,7 @@ pub(crate) use watch::watch_set;
 #[cfg(feature = "transparent-inputs")]
 use super::atomically;
 #[cfg(feature = "transparent-inputs")]
-use commit::{account_quarantined, lifecycle};
+use commit::{account_lifecycle, account_quarantined};
 #[cfg(feature = "transparent-inputs")]
 use events::{apply_receive, apply_spend, open_page, record_range};
 #[cfg(feature = "transparent-inputs")]

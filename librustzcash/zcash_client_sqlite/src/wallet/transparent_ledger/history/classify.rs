@@ -172,7 +172,7 @@ pub(super) fn inferred_outgoing(
 /// attributed to the account; `FeeState` stays unknown, and the whole-transaction fee remains
 /// available from the metadata.
 pub(super) fn is_private_shielding(
-    tx: &TransactionFacts,
+    tx_facts: &TransactionFacts,
     effects: &[PoolEffect],
     metadata: Option<&TransactionMetadataEvidence>,
     owned_inputs: u32,
@@ -186,7 +186,7 @@ pub(super) fn is_private_shielding(
     };
     // TPIR fee evidence is qualified on every read; do not copy it into transactions.fee.
     // If an independent canonical fee exists, it must agree.
-    let fees_agree = tx.fee.is_none_or(|known| known == fee);
+    let fees_agree = tx_facts.fee.is_none_or(|known| known == fee);
     let spent: u64 = effects.iter().map(|e| e.spent.into_u64()).sum();
     let received: u64 = effects.iter().map(|e| e.received.into_u64()).sum();
     let balanced = Some(spent) == received.checked_add(fee.into_u64());
@@ -204,7 +204,7 @@ pub(super) fn is_private_shielding(
         && owned_inputs == metadata.transparent_input_count
         && fees_agree
         && balanced
-        && tx.has_transparent_outputs == Some(false)
+        && tx_facts.has_transparent_outputs == Some(false)
         && shape
         && sent_elsewhere == 0
 }

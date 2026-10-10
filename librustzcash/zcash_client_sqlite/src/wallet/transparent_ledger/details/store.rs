@@ -17,10 +17,12 @@ use crate::{TxRef, error::SqliteClientError};
 use super::super::{check_transparent_policy_generation, resolve_mode, with_read_snapshot};
 use super::codes::{KIND_ABSENT, KIND_NON_STANDARD, KIND_P2PKH, KIND_P2SH};
 use super::schedule::{record_outcome, unix};
-use super::sql::related;
+use super::sql::related_transaction_sql;
 use super::validate::validate;
 
-pub(super) fn address_columns(address: Option<TransparentAddress>) -> (i64, Option<[u8; 20]>) {
+pub(super) fn encode_address_columns(
+    address: Option<TransparentAddress>,
+) -> (i64, Option<[u8; 20]>) {
     match address {
         Some(TransparentAddress::PublicKeyHash(hash)) => (KIND_P2PKH, Some(hash)),
         Some(TransparentAddress::ScriptHash(hash)) => (KIND_P2SH, Some(hash)),
@@ -28,15 +30,15 @@ pub(super) fn address_columns(address: Option<TransparentAddress>) -> (i64, Opti
     }
 }
 
-pub(super) fn sender_columns(sender: TransparentDisplaySender) -> (i64, Option<[u8; 20]>) {
+pub(super) fn encode_sender_columns(sender: TransparentDisplaySender) -> (i64, Option<[u8; 20]>) {
     match sender {
         TransparentDisplaySender::Absent => (KIND_ABSENT, None),
-        TransparentDisplaySender::Address(address) => address_columns(Some(address)),
-        TransparentDisplaySender::NonStandard => address_columns(None),
+        TransparentDisplaySender::Address(address) => encode_address_columns(Some(address)),
+        TransparentDisplaySender::NonStandard => encode_address_columns(None),
     }
 }
 
-pub(super) fn sender_from_columns(
+pub(super) fn decode_address_columns(
     kind: i64,
     hash: Option<[u8; 20]>,
 ) -> Result<TransparentDisplaySender, SqliteClientError> {
@@ -70,14 +72,14 @@ pub(super) fn revalidate(
         ))?
         .query_map(params, |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<Result<_, _>>()?;
-    for (tx, tx_index, fee) in stored {
-        let Some(facts) = stored_facts(conn, tx)? else {
+    for (id_tx, tx_index, fee) in stored {
+        let Some(facts) = stored_facts(conn, id_tx)? else {
             continue;
         };
-        if validate(conn, tx, tx_index, fee, &facts)?.is_some() {
+        if validate(conn, id_tx, tx_index, fee, &facts)?.is_some() {
             conn.execute(
                 "DELETE FROM transparent_tx_display WHERE transaction_id = :tx",
-                named_params![":tx": tx],
+                named_params![":tx": id_tx],
             )?;
         }
     }
@@ -118,11 +120,11 @@ pub(crate) fn store(
                 },
             )
             .optional()?;
-        let Some((tx, has_raw, tx_index, fee)) = row else {
+        let Some((id_tx, has_raw, tx_index, fee)) = row else {
             return Ok(TransparentDisplayStore::Superseded);
         };
         if has_raw {
-            clear(conn, TxRef(tx))?;
+            clear(conn, TxRef(id_tx))?;
             return Ok(TransparentDisplayStore::Superseded);
         }
         // Only a transaction the wallet wants details of, or still relates to, takes facts.
@@ -130,15 +132,15 @@ pub(crate) fn store(
             &format!(
                 "SELECT EXISTS (SELECT 1 FROM transparent_detail_work WHERE transaction_id = :tx)
                      OR EXISTS (SELECT 1 FROM transactions t WHERE t.id_tx = :tx AND {})",
-                related()
+                related_transaction_sql()
             ),
-            named_params![":tx": tx],
+            named_params![":tx": id_tx],
             |row| row.get(0),
         )?;
         if !wanted {
             return Ok(TransparentDisplayStore::Superseded);
         }
-        if let Some(kind) = validate(conn, tx, tx_index, fee, &facts)? {
+        if let Some(kind) = validate(conn, id_tx, tx_index, fee, &facts)? {
             record_outcome(
                 conn,
                 &facts.txid,
@@ -150,11 +152,11 @@ pub(crate) fn store(
             return Ok(TransparentDisplayStore::Contradiction(kind));
         }
 
-        let p = &facts.provenance;
-        let (sender_kind, sender_hash) = sender_columns(facts.sender);
+        let provenance = &facts.provenance;
+        let (sender_kind, sender_hash) = encode_sender_columns(facts.sender);
         conn.execute(
             "DELETE FROM transparent_tx_display WHERE transaction_id = :tx",
-            named_params![":tx": tx],
+            named_params![":tx": id_tx],
         )?;
         conn.execute(
             "INSERT INTO transparent_tx_display
@@ -165,7 +167,7 @@ pub(crate) fn store(
              VALUES (:tx, :coinbase, :fee, :inputs, :outputs, :shielded, :sender_kind,
                      :sender_hash, :multiple, :mixed, :shard, :revision, :map, :height, :now)",
             named_params![
-                ":tx": tx,
+                ":tx": id_tx,
                 ":coinbase": facts.coinbase,
                 ":fee": facts.fee.into_u64() as i64,
                 ":inputs": facts.input_count,
@@ -175,12 +177,12 @@ pub(crate) fn store(
                 ":sender_hash": sender_hash.as_ref().map(|h| &h[..]),
                 ":multiple": facts.multiple_source_scripts,
                 ":mixed": facts.shielded_and_transparent_funding,
-                ":shard": i64::try_from(p.shard_id).map_err(|_| {
+                ":shard": i64::try_from(provenance.shard_id).map_err(|_| {
                     SqliteClientError::CorruptedData("display shard id does not fit i64".into())
                 })?,
-                ":revision": p.revision,
-                ":map": &p.map_sha256[..],
-                ":height": u32::from(p.looked_up_height),
+                ":revision": provenance.revision,
+                ":map": &provenance.map_sha256[..],
+                ":height": u32::from(provenance.looked_up_height),
                 ":now": unix(now),
             ],
         )?;
@@ -190,9 +192,9 @@ pub(crate) fn store(
              VALUES (:tx, :index, :value, :kind, :hash)",
         )?;
         for (output, index) in facts.outputs.iter().zip(0u32..) {
-            let (kind, hash) = address_columns(output.address);
+            let (kind, hash) = encode_address_columns(output.address);
             insert.execute(named_params![
-                ":tx": tx,
+                ":tx": id_tx,
                 ":index": index,
                 ":value": output.value.into_u64() as i64,
                 ":kind": kind,
@@ -201,16 +203,16 @@ pub(crate) fn store(
         }
         conn.execute(
             "DELETE FROM transparent_detail_work WHERE transaction_id = :tx",
-            named_params![":tx": tx],
+            named_params![":tx": id_tx],
         )?;
         Ok(TransparentDisplayStore::Stored)
     })
 }
 
-/// The display facts stored for transaction `tx`, if any.
+/// The display facts stored for transaction `id_tx`, if any.
 pub(super) fn stored_facts(
     conn: &Connection,
-    tx: i64,
+    id_tx: i64,
 ) -> Result<Option<TransparentDisplayFacts>, SqliteClientError> {
     let corrupt = |what: &str| SqliteClientError::CorruptedData(format!("display {what}"));
     let display = conn
@@ -221,7 +223,7 @@ pub(super) fn stored_facts(
                     d.looked_up_height
              FROM transparent_tx_display d JOIN transactions t ON t.id_tx = d.transaction_id
              WHERE d.transaction_id = :tx",
-            named_params![":tx": tx],
+            named_params![":tx": id_tx],
             |row| {
                 Ok((
                     (
@@ -262,7 +264,7 @@ pub(super) fn stored_facts(
              FROM transparent_tx_display_outputs
              WHERE transaction_id = :tx ORDER BY output_index",
         )?
-        .query_map(named_params![":tx": tx], |row| {
+        .query_map(named_params![":tx": id_tx], |row| {
             Ok((
                 row.get::<_, u32>(0)?,
                 row.get::<_, u64>(1)?,
@@ -276,7 +278,7 @@ pub(super) fn stored_facts(
             if index != expected {
                 return Err(corrupt("outputs are not contiguous"));
             }
-            let address = match sender_from_columns(kind, hash)? {
+            let address = match decode_address_columns(kind, hash)? {
                 TransparentDisplaySender::Address(address) => Some(address),
                 TransparentDisplaySender::NonStandard => None,
                 TransparentDisplaySender::Absent => return Err(corrupt("output without a kind")),
@@ -293,7 +295,7 @@ pub(super) fn stored_facts(
         input_count,
         output_count,
         shielded_components: shielded,
-        sender: sender_from_columns(sender_kind, sender_hash)?,
+        sender: decode_address_columns(sender_kind, sender_hash)?,
         outputs,
         multiple_source_scripts,
         shielded_and_transparent_funding: mixed,

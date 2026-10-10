@@ -373,15 +373,6 @@ pub(crate) fn capture_policy_generation(
         .generation)
 }
 
-/// Like [`check_transparent_policy_generation`], for internal commit paths that do not need a
-/// configured handle beyond the generation already captured.
-pub(crate) fn ensure_policy_generation(
-    conn: &rusqlite::Connection,
-    expected: u64,
-) -> Result<(), SqliteClientError> {
-    check_transparent_policy_generation(conn, expected)
-}
-
 /// Returns whether the resolved mode retains public transparent authority.
 ///
 /// When `configured` is present, the handle mode is resolved against the durable policy.

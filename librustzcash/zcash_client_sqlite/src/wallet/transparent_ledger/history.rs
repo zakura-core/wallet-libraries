@@ -38,7 +38,8 @@ use completeness::{
     has_unlinked_shielded_spend, has_unrecorded_sent_output, has_unretrieved_memo, supported_pools,
 };
 use evidence::{
-    known_amounts, metadata_evidence, published_owned_inputs, sent_elsewhere, transaction_facts,
+    known_amounts, metadata_evidence, qualified_owned_spend_inputs, sent_elsewhere,
+    transaction_facts,
 };
 
 #[cfg(feature = "transparent-inputs")]
@@ -74,34 +75,35 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
     let fully_scanned = fully_scanned_height(conn)?;
     let tip = chain_tip_height(conn)?;
     #[cfg(feature = "transparent-inputs")]
-    let transparent = transparent_discovery(conn, params, gap_limits, mode, account)?;
+    let discovery = transparent_discovery(conn, params, gap_limits, mode, account)?;
 
     let mut entries = vec![];
     for txid in txids {
-        let Some(tx) = transaction_facts(conn, txid)? else {
+        let Some(tx_facts) = transaction_facts(conn, txid)? else {
             continue;
         };
-        let known = known_amounts(conn, account_id, tx.id)?;
+        let recorded_amounts = known_amounts(conn, account_id, tx_facts.id)?;
         #[cfg(feature = "transparent-inputs")]
-        let involved = !known.is_empty() || has_active_ledger_spend(conn, account_id, txid)?;
+        let involved =
+            !recorded_amounts.is_empty() || has_active_ledger_spend(conn, account_id, txid)?;
         #[cfg(not(feature = "transparent-inputs"))]
-        let involved = !known.is_empty();
+        let involved = !recorded_amounts.is_empty();
         if !involved {
             continue;
         }
 
-        let scanned = tx
+        let scanned = tx_facts
             .mined_height
             .is_some_and(|mined| fully_scanned.is_some_and(|scanned| mined <= scanned));
-        let unmined_data = if !tx.constructed
-            && tx.mined_height.is_none()
-            && tx.has_full_data
+        let unmined_data = if !tx_facts.constructed
+            && tx_facts.mined_height.is_none()
+            && tx_facts.has_full_data
             && detects_shielded_spends
             && fully_scanned.is_some_and(|scanned| Some(scanned) >= tip)
         {
             let raw: Vec<u8> = conn.query_row(
                 "SELECT raw FROM transactions WHERE id_tx = ?1",
-                [tx.id],
+                [tx_facts.id],
                 |row| row.get(0),
             )?;
             // Only inspect nullifiers. The pre-v5 branch ID affects the decoded transaction's
@@ -111,14 +113,14 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             None
         };
         let completeness = |pool: PoolType| -> Result<EffectCompleteness, SqliteClientError> {
-            if tx.constructed {
+            if tx_facts.constructed {
                 // The wallet built and stored it, recording every input it spent and every
                 // output to its own transparent or internal addresses. A shielded payment to one
                 // of its external addresses is recorded only once scanning or enhancement finds
                 // it.
                 return Ok(match pool {
                     PoolType::Shielded(_)
-                        if !scanned && has_unrecorded_sent_output(conn, tx.id, pool)? =>
+                        if !scanned && has_unrecorded_sent_output(conn, tx_facts.id, pool)? =>
                     {
                         EffectCompleteness::Incomplete
                     }
@@ -128,15 +130,15 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             Ok(match pool {
                 PoolType::Transparent => {
                     #[cfg(feature = "transparent-inputs")]
-                    match &transparent {
+                    match &discovery {
                         // Public discovery is authoritative only once its own pending input
                         // work is done.
-                        TransparentDiscovery::Public if has_pending_parent(conn, tx.id)? => {
+                        TransparentDiscovery::Public if has_pending_parent(conn, tx_facts.id)? => {
                             EffectCompleteness::Incomplete
                         }
                         TransparentDiscovery::Public => EffectCompleteness::PublicDiscovery,
                         TransparentDiscovery::Private { covered_through } => {
-                            match (tx.mined_height, *covered_through) {
+                            match (tx_facts.mined_height, *covered_through) {
                                 (Some(mined), Some(covered))
                                     if mined <= covered
                                         && !has_unresolved_spend(conn, account_id, txid)? =>
@@ -157,10 +159,16 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
                 // unmined transaction's full data reveals its owned outputs, but its spends are
                 // linked only to notes already found. Once scanning reaches the tip, verify that
                 // notes discovered after payload ingestion have their spend links too.
-                PoolType::Shielded(pool) => match (tx.mined_height, unmined_data.as_ref()) {
+                PoolType::Shielded(pool) => match (tx_facts.mined_height, unmined_data.as_ref()) {
                     (Some(_), _) if scanned => EffectCompleteness::Complete,
                     (None, Some(data))
-                        if !has_unlinked_shielded_spend(conn, account_id, tx.id, data, pool)? =>
+                        if !has_unlinked_shielded_spend(
+                            conn,
+                            account_id,
+                            tx_facts.id,
+                            data,
+                            pool,
+                        )? =>
                     {
                         EffectCompleteness::Complete
                     }
@@ -171,7 +179,7 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
 
         let mut effects = vec![];
         for pool in supported_pools() {
-            let (received, spent) = known
+            let (received, spent) = recorded_amounts
                 .iter()
                 .find(|(p, _, _)| *p == pool)
                 .map_or((Zatoshis::ZERO, Zatoshis::ZERO), |(_, r, s)| (*r, *s));
@@ -184,8 +192,11 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         }
         let transaction_metadata = metadata_evidence(conn, account_id, txid)?;
         let settled = effects.iter().all(|e| e.completeness.is_settled());
-        let spent: u64 = known.iter().map(|(_, _, spent)| spent.into_u64()).sum();
-        let received: u64 = known
+        let spent: u64 = recorded_amounts
+            .iter()
+            .map(|(_, _, spent)| spent.into_u64())
+            .sum();
+        let received: u64 = recorded_amounts
             .iter()
             .map(|(_, received, _)| received.into_u64())
             .sum();
@@ -193,13 +204,14 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         // The account provably only received: every effect is settled and none is a spend. Creation
         // evidence without the stored construction details means the wallet likely funded the
         // transaction through spends it has not recorded.
-        let received_only = settled && spent == 0 && !(tx.created_locally && !tx.constructed);
+        let received_only =
+            settled && spent == 0 && !(tx_facts.created_locally && !tx_facts.constructed);
         // Every unit the account spent is accounted for by what it received back, the recorded
         // outputs it sent elsewhere, and the fee, so no unknown payment of its funds remains.
         // Full data alone proves nothing: outputs that cannot be decrypted are not recorded.
-        let payments_accounted = match tx.fee {
+        let payments_accounted = match tx_facts.fee {
             Some(fee) if settled && spent > 0 => {
-                let sent = sent_elsewhere(conn, account_id, tx.id)?;
+                let sent = sent_elsewhere(conn, account_id, tx_facts.id)?;
                 Some(spent)
                     == received
                         .checked_add(sent)
@@ -207,24 +219,24 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             }
             _ => false,
         };
-        let owned_inputs = published_owned_inputs(conn, account_id, txid)?;
+        let owned_inputs = qualified_owned_spend_inputs(conn, account_id, txid)?;
         // Without the full data of a mixed transaction, the balance above does not show that the
         // account was its only funder: a foreign transparent input could have paid the fee while
         // the account's funds paid someone else the same amount. It stands only for the one shape
         // the recovered evidence pins down, and then only as a net movement; see
         // `is_private_shielding`.
-        let net_shielding = tx.mixed_without_full_data
+        let net_shielding = tx_facts.mixed_without_full_data
             && is_private_shielding(
-                &tx,
+                &tx_facts,
                 &effects,
                 transaction_metadata.as_ref(),
                 owned_inputs,
-                sent_elsewhere(conn, account_id, tx.id)?,
+                sent_elsewhere(conn, account_id, tx_facts.id)?,
             );
-        let payments_accounted = payments_accounted && !tx.mixed_without_full_data;
-        let payment_details = if tx.constructed
+        let payments_accounted = payments_accounted && !tx_facts.mixed_without_full_data;
+        let payment_details = if tx_facts.constructed
             || ((received_only || payments_accounted || net_shielding)
-                && !has_unretrieved_memo(conn, account_id, tx.id)?)
+                && !has_unretrieved_memo(conn, account_id, tx_facts.id)?)
         {
             DetailCompleteness::Complete
         } else {
@@ -251,8 +263,8 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
                 .checked_sub(fee.into_u64())
                 .and_then(|v| Zatoshis::from_u64(v).ok())
         });
-        let recorded_sent = sent_elsewhere(conn, account_id, tx.id)?;
-        let aggregate_payment = if tx.constructed {
+        let recorded_sent = sent_elsewhere(conn, account_id, tx_facts.id)?;
+        let aggregate_payment = if tx_facts.constructed {
             AggregatePayment::Exact(
                 Zatoshis::from_u64(recorded_sent)
                     .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?,
@@ -270,11 +282,11 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         // Local construction records the fee independently of recovered metadata.
         // Mixed-pool metadata cannot erase that richer local-send fact. Without full data, a
         // mixed transaction's stored fee is the whole transaction's, and never the account's.
-        let fee = match tx.fee {
+        let fee = match tx_facts.fee {
             Some(fee)
                 if spent > 0
-                    && (tx.constructed
-                        || (!tx.mixed_without_full_data
+                    && (tx_facts.constructed
+                        || (!tx_facts.mixed_without_full_data
                             && (transaction_metadata.is_none() || sole_transparent_funding))) =>
             {
                 FeeState::Known(fee)
@@ -288,25 +300,25 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             _ if received_only => FeeState::NotApplicable,
             _ => FeeState::Unknown,
         };
-        let whole_fee = whole_fee(tx.fee, transaction_metadata.as_ref());
+        let whole_transaction_fee = whole_fee(tx_facts.fee, transaction_metadata.as_ref());
         // A database may retain owned amounts from a pool disabled in this build. The effects
         // above omit that pool, so their completeness cannot justify dropping its known amounts.
-        let effects_cover_known = known.iter().all(|(pool, received, spent)| {
+        let effects_cover_known = recorded_amounts.iter().all(|(pool, received, spent)| {
             (*received == Zatoshis::ZERO && *spent == Zatoshis::ZERO)
                 || effects.iter().any(|effect| effect.pool == *pool)
         });
-        let inferred_outgoing = match whole_fee {
+        let inferred_outgoing_value = match whole_transaction_fee {
             Some(fee)
-                if tx.mixed_without_full_data
-                    && tx.has_transparent_outputs == Some(true)
-                    && !tx.created_locally
-                    && tx.mined_height.is_some()
+                if tx_facts.mixed_without_full_data
+                    && tx_facts.has_transparent_outputs == Some(true)
+                    && !tx_facts.created_locally
+                    && tx_facts.mined_height.is_some()
                     && effects_cover_known =>
             {
                 inferred_outgoing(
                     conn,
                     account_id,
-                    tx.id,
+                    tx_facts.id,
                     txid,
                     &effects,
                     fee,
@@ -317,7 +329,7 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         };
         // A missing memo does not change what the transaction did; missing effects or payments
         // can.
-        let classification = if tx.created_locally {
+        let classification = if tx_facts.created_locally {
             HistoryClassification::LocalIntent
         } else if received_only || payments_accounted || inferred_payment.is_some() {
             HistoryClassification::Reconstructed
@@ -328,11 +340,11 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         };
 
         entries.push(TransactionHistoryDetails {
-            has_transparent_outputs: tx.has_transparent_outputs,
+            has_transparent_outputs: tx_facts.has_transparent_outputs,
             transaction_metadata,
-            whole_fee,
+            whole_fee: whole_transaction_fee,
             aggregate_payment,
-            inferred_outgoing,
+            inferred_outgoing: inferred_outgoing_value,
             account_movement: AccountMovement {
                 received,
                 spent,
@@ -341,12 +353,12 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
                     .all(|e| e.completeness == EffectCompleteness::Complete),
             },
             txid: *txid,
-            mined_height: tx.mined_height,
+            mined_height: tx_facts.mined_height,
             effects,
             payment_details,
             fee,
             classification,
-            pending_private_details: pending_details(conn, mode, Some(tx.id))?,
+            pending_private_details: pending_details(conn, mode, Some(tx_facts.id))?,
         });
     }
     Ok(entries)

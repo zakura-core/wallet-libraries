@@ -12,17 +12,17 @@ use {
 /// but cannot contribute value or authorize an input under either public or private policy.
 /// Independent origins retain their existing semantics. Rows missing provenance are left in
 /// the counted set so the balance provenance check still reports them as corrupted data.
-pub(crate) fn output_observation_condition(output: &str) -> String {
+pub(crate) fn output_observation_condition(output_alias: &str) -> String {
     format!(
         "NOT EXISTS (
-             SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = {output}.id AND oo.origin = 2
+             SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = {output_alias}.id AND oo.origin = 2
          ) OR EXISTS (
-             SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = {output}.id AND oo.origin != 2
+             SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = {output_alias}.id AND oo.origin != 2
          ) OR EXISTS (
              SELECT 1 FROM tpir_receive_events re
              JOIN transactions rt ON rt.txid = re.txid
-             WHERE rt.id_tx = {output}.transaction_id AND re.output_index = {output}.output_index
-             AND re.account_id = {output}.account_id AND re.mined_height IS NOT NULL
+             WHERE rt.id_tx = {output_alias}.transaction_id AND re.output_index = {output_alias}.output_index
+             AND re.account_id = {output_alias}.account_id AND re.mined_height IS NOT NULL
          )"
     )
 }

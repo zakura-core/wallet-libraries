@@ -6,7 +6,7 @@ use super::codes::{CONTRADICTION, NOT_COVERED, UNSUPPORTED};
 /// Whether the wallet still records an effect of transaction `t`: an owned output or a spend
 /// of one that financial queries count (a withdrawn ledger-only receive does not), a spend link,
 /// or a route-2 marker.
-pub(super) fn related() -> String {
+pub(super) fn related_transaction_sql() -> String {
     format!(
         "(
             EXISTS (SELECT 1 FROM transparent_received_outputs o
@@ -31,7 +31,7 @@ pub(super) fn related() -> String {
 /// Under public authority (`:public`), payload retrieval already fetches transactions queued
 /// in `tx_retrieval_queue`, and a privately protected Ironwood transaction (route 0) must not
 /// be fetched publicly.
-pub(super) fn listable() -> String {
+pub(super) fn listable_work_sql() -> String {
     format!(
         "t.raw IS NULL AND {}
          AND NOT (:public AND (
@@ -40,13 +40,13 @@ pub(super) fn listable() -> String {
              OR EXISTS (SELECT 1 FROM ironwood_enhance_routing p
                         WHERE p.transaction_id = t.id_tx AND p.route = 0)
          ))",
-        related()
+        related_transaction_sql()
     )
 }
 
-/// Rows the listing may return now, before timing: [`listable`] and mined.
-pub(super) fn eligible() -> String {
-    format!("t.mined_height IS NOT NULL AND {}", listable())
+/// Rows the listing may return now, before timing: [`listable_work_sql`] and mined.
+pub(super) fn eligible_work_sql() -> String {
+    format!("t.mined_height IS NOT NULL AND {}", listable_work_sql())
 }
 
 /// The mined height changed since the last attempt: due at once, with a fresh backoff.
@@ -59,7 +59,7 @@ pub(super) const REARMED: &str =
 /// Only without public authority (`:public`): a map is the private source's, and a public
 /// lookup answers with the raw transaction whatever the publication covers, so under public
 /// authority these rows are due at their ordinary retry.
-pub(super) fn parked() -> String {
+pub(super) fn parked_work_sql() -> String {
     format!(
         "NOT :public
          AND ((w.last_outcome IN ({NOT_COVERED}, {CONTRADICTION})

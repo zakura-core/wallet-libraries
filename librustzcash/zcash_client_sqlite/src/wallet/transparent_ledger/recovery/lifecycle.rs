@@ -10,7 +10,7 @@ use rusqlite::OptionalExtension as _;
 /// its anchor, and that chain equals the surviving one through `floor`. Without a local hash
 /// for the floor block the coverage is deleted rather than given an invented anchor. Candidate
 /// windows never shrink.
-pub(crate) fn truncate(
+pub(crate) fn truncate_recovery(
     conn: &rusqlite::Connection,
     floor: BlockHeight,
 ) -> Result<(), SqliteClientError> {
@@ -147,7 +147,7 @@ pub(crate) fn forget_reattributed_script(
 /// they constrain what a later return to `PrivateRequired` may accept, and none of them is a
 /// wallet fact.
 #[cfg(feature = "transparent-inputs")]
-pub(crate) fn forget(
+pub(crate) fn forget_ledger(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,
 ) -> Result<

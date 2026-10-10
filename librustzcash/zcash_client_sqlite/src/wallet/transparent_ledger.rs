@@ -37,8 +37,8 @@ pub(crate) use origins::{
 };
 pub(crate) use policy::{
     applied_transparent_policy, apply_transparent_policy, capture_policy_generation,
-    check_transparent_policy_generation, durable_policy, ensure_policy_generation,
-    pending_private_transparent_details, resolve_mode, retains_public_authority,
+    check_transparent_policy_generation, durable_policy, pending_private_transparent_details,
+    resolve_mode, retains_public_authority,
 };
 #[cfg(all(test, feature = "transparent-inputs"))]
 pub(crate) use reader_version::TPIR_READER_VERSION;
@@ -56,11 +56,11 @@ pub(crate) use recovery::forget_other_candidates;
 pub(crate) use recovery::qualify_revision;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use recovery::{
-    CommitTrust, apply_commit, candidate_recovery, forget as forget_ledger,
-    forget_reattributed_script, promote, watch_set,
+    CommitTrust, apply_commit, candidate_recovery, forget_ledger, forget_reattributed_script,
+    promote, watch_set,
 };
-pub(crate) use recovery::{clear_pending_pages, truncate as truncate_recovery};
-pub(crate) use snapshot::snapshot;
+pub(crate) use recovery::{clear_pending_pages, truncate_recovery};
+pub(crate) use snapshot::ledger_snapshot;
 #[cfg(feature = "transparent-inputs")]
 use transactions::atomically;
 pub(crate) use transactions::with_read_snapshot;

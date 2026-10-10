@@ -62,7 +62,7 @@ fn transparent_balance(
 }
 
 /// The private ledger's part of a snapshot.
-struct PrivateView {
+struct PrivateLedgerView {
     authority: Option<TransparentLedgerBalance>,
     last_known: Option<LastKnownBalance>,
     blockers: Vec<RecoveryBlocker>,
@@ -73,14 +73,14 @@ struct PrivateView {
 /// Reads `account`'s private ledger for a `PrivateRequired` snapshot targeting the block after
 /// `tip`.
 #[cfg(feature = "transparent-inputs")]
-fn private_view<P: consensus::Parameters>(
+fn private_ledger_view<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
     gap_limits: &GapLimits,
     account: AccountUuid,
     tip: BlockHeight,
     confirmations_policy: ConfirmationsPolicy,
-) -> Result<PrivateView, SqliteClientError> {
+) -> Result<PrivateLedgerView, SqliteClientError> {
     let ledger = recovery::account_ledger(conn, params, gap_limits, account)?;
     let target = TargetHeight::from(tip + 1);
     let covered_through = match ledger.status.covered_through {
@@ -120,7 +120,7 @@ fn private_view<P: consensus::Parameters>(
             recovery::ledger_blockers(conn, &ledger, Some(tip))?,
         )
     };
-    Ok(PrivateView {
+    Ok(PrivateLedgerView {
         authority,
         last_known,
         blockers,
@@ -131,13 +131,13 @@ fn private_view<P: consensus::Parameters>(
 
 /// Without transparent support there is no private ledger to read.
 #[cfg(not(feature = "transparent-inputs"))]
-fn private_view(
+fn private_ledger_view(
     conn: &rusqlite::Connection,
     account: AccountUuid,
     tip: BlockHeight,
     confirmations_policy: ConfirmationsPolicy,
-) -> Result<PrivateView, SqliteClientError> {
-    Ok(PrivateView {
+) -> Result<PrivateLedgerView, SqliteClientError> {
+    Ok(PrivateLedgerView {
         authority: None,
         last_known: legacy_last_known(
             conn,
@@ -174,7 +174,7 @@ fn legacy_last_known(
 
 /// Builds the snapshot for `account` from the connection's current state. The caller provides
 /// the read transaction.
-pub(crate) fn snapshot<P: consensus::Parameters>(
+pub(crate) fn ledger_snapshot<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     #[cfg_attr(not(feature = "transparent-inputs"), allow(unused_variables))] params: &P,
     #[cfg(feature = "transparent-inputs")] gap_limits: &GapLimits,
@@ -182,16 +182,16 @@ pub(crate) fn snapshot<P: consensus::Parameters>(
     mode: TransparentLedgerMode,
     confirmations_policy: ConfirmationsPolicy,
 ) -> Result<TransparentLedgerSnapshot<AccountUuid>, SqliteClientError> {
-    let exists: bool = conn.query_row(
+    let account_exists: bool = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM accounts WHERE uuid = ?1)",
         [account.0],
         |row| row.get(0),
     )?;
-    if !exists {
+    if !account_exists {
         return Err(SqliteClientError::AccountUnknown);
     }
 
-    let blocked = |blockers| TransparentLedgerSnapshot {
+    let blocked_snapshot = |blockers| TransparentLedgerSnapshot {
         account,
         mode,
         authority: TransparentAuthority::Unavailable,
@@ -204,7 +204,7 @@ pub(crate) fn snapshot<P: consensus::Parameters>(
     };
     // Authority cannot be established before the chain is known.
     let Some(tip) = chain_tip_height(conn)? else {
-        return Ok(blocked(vec![RecoveryBlocker::ChainUnknown]));
+        return Ok(blocked_snapshot(vec![RecoveryBlocker::ChainUnknown]));
     };
     let target = TargetHeight::from(tip + 1);
 
@@ -213,7 +213,7 @@ pub(crate) fn snapshot<P: consensus::Parameters>(
         let Some(balance) =
             transparent_balance(conn, account, target, confirmations_policy, false)?
         else {
-            return Ok(blocked(vec![
+            return Ok(blocked_snapshot(vec![
                 RecoveryBlocker::TransparentSupportUnavailable,
             ]));
         };
@@ -231,12 +231,15 @@ pub(crate) fn snapshot<P: consensus::Parameters>(
     }
 
     #[cfg(feature = "transparent-inputs")]
-    let private = private_view(conn, params, gap_limits, account, tip, confirmations_policy)?;
+    let private_ledger =
+        private_ledger_view(conn, params, gap_limits, account, tip, confirmations_policy)?;
     #[cfg(not(feature = "transparent-inputs"))]
-    let private = private_view(conn, account, tip, confirmations_policy)?;
-    let (covered_through, recovered_unverified) =
-        (private.covered_through, private.recovered_unverified);
-    Ok(match private.authority {
+    let private_ledger = private_ledger_view(conn, account, tip, confirmations_policy)?;
+    let (covered_through, recovered_unverified) = (
+        private_ledger.covered_through,
+        private_ledger.recovered_unverified,
+    );
+    Ok(match private_ledger.authority {
         Some(balance) => TransparentLedgerSnapshot {
             account,
             mode,
@@ -253,9 +256,9 @@ pub(crate) fn snapshot<P: consensus::Parameters>(
             mode,
             authority: TransparentAuthority::Unavailable,
             authorized: None,
-            last_known: private.last_known,
+            last_known: private_ledger.last_known,
             completion: RecoveryCompletion::Blocked,
-            blockers: private.blockers,
+            blockers: private_ledger.blockers,
             covered_through,
             recovered_unverified,
         },

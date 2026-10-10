@@ -25,14 +25,14 @@ pub(super) struct KnownInput {
     value: Option<u64>,
 }
 
-/// Every distinct outpoint the wallet knows transaction `tx` (`txid`) spends, by outpoint:
+/// Every distinct outpoint the wallet knows transaction `id_tx` (`txid`) spends, by outpoint:
 /// recovered spends (with input index and script, and value once the output is recovered),
 /// spend links to owned outputs (script and value only while financial queries count
 /// the output), and public spend links from the spend map (the outpoint only).
 /// These records can reject a contradiction even when they no longer establish ownership.
 pub(super) fn known_inputs(
     conn: &Connection,
-    tx: i64,
+    id_tx: i64,
     txid: &[u8],
 ) -> Result<BTreeMap<([u8; 32], u32), KnownInput>, SqliteClientError> {
     let counted = output_observation_condition("o");
@@ -56,7 +56,7 @@ pub(super) fn known_inputs(
          FROM transparent_spend_map m
          WHERE m.spending_transaction_id = :tx"
     ))?;
-    let mut rows = stmt.query(named_params![":tx": tx, ":txid": txid])?;
+    let mut rows = stmt.query(named_params![":tx": id_tx, ":txid": txid])?;
     while let Some(row) = rows.next()? {
         let outpoint = (row.get::<_, [u8; 32]>(0)?, row.get::<_, u32>(1)?);
         let known = inputs.entry(outpoint).or_default();
@@ -171,17 +171,17 @@ pub(super) fn funding_contradiction(
     contradicted.then_some(TransparentDisplayContradiction::Funding)
 }
 
-/// Checks `facts` against everything the wallet holds about transaction `tx`.
+/// Checks `facts` against everything the wallet holds about transaction `id_tx`.
 pub(super) fn validate(
     conn: &Connection,
-    tx: i64,
+    id_tx: i64,
     tx_index: Option<u32>,
     stored_fee: Option<u64>,
     facts: &TransparentDisplayFacts,
 ) -> Result<Option<TransparentDisplayContradiction>, SqliteClientError> {
     use TransparentDisplayContradiction as C;
     let txid = facts.txid.as_ref();
-    let inputs = known_inputs(conn, tx, txid)?;
+    let inputs = known_inputs(conn, id_tx, txid)?;
     let known_spends = u32::try_from(inputs.len()).unwrap_or(u32::MAX);
 
     // Coinbase: the flag must agree with the known position and with recovered receive events.
@@ -213,7 +213,7 @@ pub(super) fn validate(
              ORDER BY 1",
             output_observation_condition("o"),
         ))?
-        .query_map(named_params![":tx": tx, ":txid": txid], |row| {
+        .query_map(named_params![":tx": id_tx, ":txid": txid], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?
         .collect::<Result<_, _>>()?;
@@ -267,7 +267,7 @@ pub(super) fn validate(
                  OR EXISTS (SELECT 1 FROM sent_notes WHERE transaction_id = :tx AND output_pool != 0)
                  OR EXISTS (SELECT 1 FROM ironwood_enhance_routing
                             WHERE transaction_id = :tx AND route = 2)",
-            named_params![":tx": tx],
+            named_params![":tx": id_tx],
             |row| row.get(0),
         )?;
         if shielded {

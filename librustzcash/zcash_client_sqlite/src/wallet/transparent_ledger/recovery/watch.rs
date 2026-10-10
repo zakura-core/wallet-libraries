@@ -365,7 +365,7 @@ pub(crate) fn watch_set<P: consensus::Parameters>(
         Watch::load(conn, params, gap_limits, account)?.ok_or(SqliteClientError::AccountUnknown)?;
     Ok(TransparentWatchSet {
         account,
-        lifecycle: lifecycle(conn, watch.account.internal_id())?,
+        lifecycle: account_lifecycle(conn, watch.account.internal_id())?,
         policy_generation: capture_policy_generation(conn)?,
         target: local_target(conn)?,
         addresses: watch.watched_addresses(),

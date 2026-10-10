@@ -2077,7 +2077,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
         let read = |conn: &rusqlite::Connection| {
             let mode =
                 wallet::transparent_ledger::resolve_mode(conn, self.transparent_ledger_mode)?;
-            wallet::transparent_ledger::snapshot(
+            wallet::transparent_ledger::ledger_snapshot(
                 conn,
                 &self.params,
                 #[cfg(feature = "transparent-inputs")]
