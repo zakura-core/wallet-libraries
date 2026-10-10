@@ -195,6 +195,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
         let registered_at = unix_now(&self.clock);
         self.transactionally(|db| {
             let (conn, params) = (db.conn.0, db.params);
+            // Hits advance allocation, so the lookahead then covers the window they widen.
+            if let Some(seen) = seen {
+                let (account_ref, _) = account_key(conn, params, account)?;
+                reservations::record_seen(conn, account_ref.0, seen)?;
+            }
             recovery::extend_receive_lookahead(conn, params, account, registered_at)?;
             reservations::reap(conn, params, account, now)?;
             let scan_from = match issuance_start(conn, tip)? {
