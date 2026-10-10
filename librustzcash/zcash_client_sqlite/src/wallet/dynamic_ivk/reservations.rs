@@ -358,6 +358,18 @@ pub(super) fn finish(
             if deposit.address.is_empty() {
                 return Err(invalid("empty deposit address"));
             }
+            // Statuses find operations by address and memo alone.
+            let bound: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
+                     JOIN ironwood_receiving_keys k ON k.id = o.receiving_key_id
+                     JOIN accounts a ON a.id = k.account_id
+                     WHERE a.uuid = ?1 AND o.id != ?2 AND o.reference = ?3 AND o.memo IS ?4)",
+                params![account.0, id, deposit.address, deposit.memo],
+                |r| r.get(0),
+            )?;
+            if bound {
+                return Err(invalid("deposit instructions belong to another operation"));
+            }
             let changed = conn.execute(
                 "UPDATE ironwood_dynamic_operations
                  SET reference = ?2, memo = ?3, deadline = MIN(deadline, ?4)

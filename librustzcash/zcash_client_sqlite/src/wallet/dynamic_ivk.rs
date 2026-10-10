@@ -236,8 +236,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     }
 
     /// Records how `request` ended. An accepted deadline only shortens the requested one,
-    /// and a repeat must keep the accepted deposit address and memo. A rejection releases
-    /// the request's hold on the address.
+    /// and a repeat must keep the accepted deposit address and memo, which no other
+    /// operation in the account may hold. A rejection releases the request's hold on the
+    /// address.
     pub fn finish_receive_operation(
         &mut self,
         account: AccountUuid,
