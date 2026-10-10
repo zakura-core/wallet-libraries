@@ -4,7 +4,14 @@
 
 use transparent_filter::ShardMap;
 use transparent_wallet::transport::{BoxError, FilterSource};
-use transparent_wallet::{Acceptance, Anchor, ChainView, WalletStore};
+use transparent_wallet::{
+    Acceptance, Anchor, ChainView, ScriptEntry, ScriptOrigin, StaticScripts, WalletStore,
+};
+use zcash_client_backend::data_api::transparent_ledger::TransparentWatchSet;
+
+use super::ReferenceRecovery;
+use crate::convert::{address_script, height_u64};
+use crate::error::{RecoveryError, failure};
 
 /// A filter source that keeps the bytes of the last shard map it served.
 ///
@@ -134,6 +141,16 @@ impl<C: ChainView> ChainView for FloorAcceptingChain<'_, C> {
     }
 }
 
+/// The anchor a pass syncs to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SyncTarget {
+    /// The wallet's target, or the publication's end below it.
+    pub(super) anchor: Anchor,
+    /// Whether `anchor` is the publication's end below the wallet's target, so that
+    /// even a complete sync is behind.
+    pub(super) clamped: bool,
+}
+
 /// The anchor a pass syncs to, and whether it was clamped below `target`.
 ///
 /// When the publication ends at `t` below the wallet's target, a pass to the
@@ -151,9 +168,13 @@ pub(super) fn sync_target(
     stored: Option<&Anchor>,
     retained: u64,
     chain: &impl ChainView,
-) -> (Anchor, bool) {
+) -> SyncTarget {
+    let unclamped = || SyncTarget {
+        anchor: target.clone(),
+        clamped: false,
+    };
     let Some(last) = map.shards.last() else {
-        return (target.clone(), false);
+        return unclamped();
     };
     let t = last.end_height;
     if t < target.height
@@ -162,12 +183,60 @@ pub(super) fn sync_target(
         && t >= retained
         && chain.is_accepted(t, &last.terminal_block_hash) == Acceptance::Accepted
     {
-        let clamped = Anchor {
-            height: t,
-            hash: last.terminal_block_hash.clone(),
-        };
-        (clamped, true)
+        SyncTarget {
+            anchor: Anchor {
+                height: t,
+                hash: last.terminal_block_hash.clone(),
+            },
+            clamped: true,
+        }
     } else {
-        (target.clone(), false)
+        unclamped()
+    }
+}
+
+/// The watch set's scripts as the reference client plans them, each from its
+/// address's required height.
+pub(super) fn watched_scripts<A>(watch: &TransparentWatchSet<A>) -> StaticScripts {
+    StaticScripts(
+        watch
+            .addresses
+            .iter()
+            .map(|entry| ScriptEntry {
+                script: address_script(entry.address),
+                origin: ScriptOrigin::Derived,
+                required_from: height_u64(entry.required_from),
+            })
+            .collect(),
+    )
+}
+
+impl ReferenceRecovery {
+    /// The anchor this pass syncs to, given the anchor the companion's store holds and
+    /// the highest height of an event it retains. See [`sync_target`].
+    pub(super) fn store_sync_target(
+        &self,
+        map: &ShardMap,
+        target: &Anchor,
+        floor: u64,
+        chain: &impl ChainView,
+    ) -> Result<SyncTarget, RecoveryError> {
+        let stored = self.store.anchor().map_err(failure)?;
+        let retained = self
+            .store
+            .events()
+            .map_err(failure)?
+            .iter()
+            .map(|held| u64::from(held.event.height()))
+            .max()
+            .unwrap_or(0);
+        Ok(sync_target(
+            map,
+            target,
+            floor,
+            stored.as_ref(),
+            retained,
+            chain,
+        ))
     }
 }

@@ -1,12 +1,84 @@
 //! Checks a pass makes before any filter or private retrieval.
 
-use transparent_filter::{ShardMap, wire::MAX_SUPERSEDED};
-use transparent_wallet::ServiceGeometry;
-use transparent_wallet::transport::ShardTransport;
+use std::collections::BTreeMap;
+
+use transparent_filter::{MAINNET_GENESIS_DISPLAY, NETWORK, ShardMap, wire::MAX_SUPERSEDED};
+use transparent_wallet::transport::{FilterSource, ShardTransport};
+use transparent_wallet::{Acceptance, Anchor, ChainView, ServiceGeometry, WalletStore};
 use zcash_client_backend::data_api::transparent_ledger::TransparentWatchSet;
 
-use super::SCHEMA;
+use super::{ReferenceRecovery, SCHEMA};
+use crate::convert::{address_script, height_u64};
 use crate::error::{RecoveryError, ensure_valid, failure};
+
+/// The watch set's target as the reference client names it, refusing a watch set
+/// without one or a target `chain` does not accept.
+pub(super) fn accepted_target<A: Copy>(
+    watch: &TransparentWatchSet<A>,
+    chain: &impl ChainView,
+) -> Result<Anchor, RecoveryError> {
+    let context = watch
+        .context()
+        .ok_or_else(|| RecoveryError::Invalid("no locally accepted recovery target".into()))?;
+    let target = Anchor {
+        height: height_u64(context.target.height),
+        hash: context.target.hash.to_string(),
+    };
+    ensure_valid(
+        chain.is_accepted(target.height, &target.hash) == Acceptance::Accepted,
+        "target is not independently accepted",
+    )?;
+    Ok(target)
+}
+
+/// Refuses a filter source using the parent filter experiment, whose selective child
+/// requests leak coarse activity.
+pub(crate) fn refuse_parent_filters(filters: &impl FilterSource) -> Result<(), RecoveryError> {
+    ensure_valid(
+        !filters.uses_parents(),
+        "parent filter sources are not supported",
+    )
+}
+
+/// Refuses a map for another network or genesis block: the wallet's chain is
+/// mainnet's, and another chain's map cannot cover it.
+pub(crate) fn ensure_mainnet_publication(map: &ShardMap) -> Result<(), RecoveryError> {
+    ensure_valid(
+        map.network == NETWORK && map.genesis_hash == MAINNET_GENESIS_DISPLAY,
+        "publication is not for Zcash mainnet",
+    )
+}
+
+impl ReferenceRecovery {
+    /// Refuses a watch set with more addresses than the script limit, a companion
+    /// retaining more scripts than it, or a watch set naming an address twice.
+    pub(super) fn check_watch_set<A>(
+        &self,
+        watch: &TransparentWatchSet<A>,
+    ) -> Result<(), RecoveryError> {
+        ensure_valid(
+            watch.addresses.len() <= self.config.scripts
+                && self.store.scripts().map_err(failure)?.len() <= self.config.scripts,
+            "script limit exceeded",
+        )?;
+        let addresses: BTreeMap<Vec<u8>, _> = watch
+            .addresses
+            .iter()
+            .map(|entry| (address_script(entry.address), entry))
+            .collect();
+        ensure_valid(
+            addresses.len() == watch.addresses.len(),
+            "duplicate watch address",
+        )
+    }
+
+    /// Refuses a map with more shards and declarations at or above `floor`
+    /// than the shard limit, or more declarations in all than
+    /// [`MAX_SUPERSEDED`].
+    pub(super) fn check_limits(&self, map: &ShardMap, floor: u64) -> Result<(), RecoveryError> {
+        check_publication_limits(map, floor, self.config.shards)
+    }
+}
 
 /// The lowest height a pass needs the wallet's chain for: the lowest required
 /// height in `watch`, capped at `target`, or 0 when nothing is watched.
@@ -14,7 +86,7 @@ pub(super) fn watch_floor<A>(watch: &TransparentWatchSet<A>, target: u64) -> u64
     watch
         .addresses
         .iter()
-        .map(|entry| u64::from(u32::from(entry.required_from)))
+        .map(|entry| height_u64(entry.required_from))
         .min()
         .map_or(0, |lowest| lowest.min(target))
 }

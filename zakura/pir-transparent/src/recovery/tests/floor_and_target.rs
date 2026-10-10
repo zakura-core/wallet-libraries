@@ -170,17 +170,26 @@ fn sync_target_clamps_only_to_an_accepted_end_at_or_above_the_floor_and_anchor()
         height: t + 10,
         hash: "99".repeat(32),
     };
-    let unclamped = (target.clone(), false);
+    let unclamped = SyncTarget {
+        anchor: target.clone(),
+        clamped: false,
+    };
 
     // Behind, with every condition met: sync to the map's accepted end.
     assert_eq!(
         sync_target(&map, &target, floor, None, 0, &accepted),
-        (end.clone(), true)
+        SyncTarget {
+            anchor: end.clone(),
+            clamped: true
+        }
     );
     // A floor, companion anchor or retained event exactly at the end allows it.
     assert_eq!(
         sync_target(&map, &target, t, Some(&end), t, &accepted),
-        (end.clone(), true)
+        SyncTarget {
+            anchor: end.clone(),
+            clamped: true
+        }
     );
     // Ahead or level: the publication reaches the target.
     for reached in [t - 1, t] {
@@ -190,7 +199,10 @@ fn sync_target_clamps_only_to_an_accepted_end_at_or_above_the_floor_and_anchor()
         };
         assert_eq!(
             sync_target(&map, &target, floor, None, 0, &accepted),
-            (target, false)
+            SyncTarget {
+                anchor: target,
+                clamped: false
+            }
         );
     }
     // Below the floor: nothing the watch set requires is published yet.

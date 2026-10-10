@@ -6,31 +6,32 @@ mod commit_builder;
 mod normalize;
 mod page_completion;
 mod preflight;
+mod publication_gate;
 mod receipt;
 mod sync_inputs;
 #[cfg(test)]
 mod tests;
 
 use rusqlite::Connection;
-use std::{collections::BTreeMap, path::Path, time::Duration};
-use transparent_filter::{MAINNET_GENESIS_DISPLAY, NETWORK, ShardMap};
+use std::{path::Path, time::Duration};
+use transparent_filter::ShardMap;
 use transparent_wallet::transport::{FilterSource, ShardTransport};
-use transparent_wallet::{
-    Acceptance, Anchor, ChainView, ScriptEntry, ScriptOrigin, SetIdentity, StaticScripts,
-    SyncError, WalletStore, WorkLimits,
-};
+use transparent_wallet::{ChainView, SetIdentity, SyncError, WorkLimits};
 use transparent_wallet_store::SqliteStore;
 use zcash_client_backend::data_api::transparent_ledger::TransparentWatchSet;
 
-pub(crate) use preflight::{check_publication_limits, service_geometry};
+pub(crate) use preflight::{
+    check_publication_limits, ensure_mainnet_publication, refuse_parent_filters, service_geometry,
+};
 
-use crate::batch::{BatchState, RecoveryBatch, WithdrawnCause, behind_unread_batch, unready_batch};
+#[cfg(doc)]
+use crate::batch::{BatchState, WithdrawnCause};
+use crate::batch::{RecoveryBatch, behind_unread_batch};
 use crate::catalog::{self, Published};
-use crate::convert::address_script;
 use crate::error::{RecoveryError, ensure_valid, failure};
 use crate::progress::{Outcome, Progress};
-use preflight::watch_floor;
-use sync_inputs::{FloorAcceptingChain, RecordingFilterSource, sync_target};
+use preflight::{accepted_target, watch_floor};
+use sync_inputs::{FloorAcceptingChain, RecordingFilterSource, watched_scripts};
 
 /// The only shard schema this adapter reads.
 ///
@@ -210,17 +211,7 @@ impl ReferenceRecovery {
         T: ShardTransport,
     {
         self.outstanding_receipt = None;
-        let context = watch
-            .context()
-            .ok_or_else(|| RecoveryError::Invalid("no locally accepted recovery target".into()))?;
-        let target = Anchor {
-            height: u64::from(u32::from(context.target.height)),
-            hash: context.target.hash.to_string(),
-        };
-        ensure_valid(
-            chain.is_accepted(target.height, &target.hash) == Acceptance::Accepted,
-            "target is not independently accepted",
-        )?;
+        let target = accepted_target(watch, chain)?;
         if watch.addresses.is_empty() {
             // Every watched script is covered, vacuously. A sync would need the
             // wallet's hash for every shard from the map's start, since nothing
@@ -235,91 +226,29 @@ impl ReferenceRecovery {
                 },
             );
         }
-        ensure_valid(
-            watch.addresses.len() <= self.config.scripts
-                && self.store.scripts().map_err(failure)?.len() <= self.config.scripts,
-            "script limit exceeded",
-        )?;
-        let addresses: BTreeMap<Vec<u8>, _> = watch
-            .addresses
-            .iter()
-            .map(|entry| (address_script(entry.address), entry))
-            .collect();
-        ensure_valid(
-            addresses.len() == watch.addresses.len(),
-            "duplicate watch address",
-        )?;
-        // The parent experiment's selective child requests leak coarse activity.
-        ensure_valid(
-            !filters.uses_parents(),
-            "parent filter sources are not supported",
-        )?;
-        let (mut filters, map_bytes) = RecordingFilterSource::fetch(filters).map_err(failure)?;
+
+        // Refusals before any filter or private retrieval, in the documented order.
+        self.check_watch_set(watch)?;
+        refuse_parent_filters(filters)?;
+        let (mut filters, map_fetch_bytes) =
+            RecordingFilterSource::fetch(filters).map_err(failure)?;
         let map: ShardMap = serde_json::from_slice(filters.map()).map_err(failure)?;
         let floor = watch_floor(watch, target.height);
         self.check_limits(&map, floor)?;
-        // The wallet's chain is mainnet's; another chain's map cannot cover it.
-        ensure_valid(
-            map.network == NETWORK && map.genesis_hash == MAINNET_GENESIS_DISPLAY,
-            "publication is not for Zcash mainnet",
-        )?;
+        ensure_mainnet_publication(&map)?;
         let geometry = service_geometry(transport)?;
-        // The set check the sync would make when binding, made here so that a
-        // changed publication restarts the store rather than stopping the sync.
-        let set = SetIdentity::of_schema(&map, SCHEMA);
-        if self
-            .store
-            .set_identity()
-            .map_err(failure)?
-            .is_some_and(|bound| !bound.continues(&set))
-        {
-            map.check_shape().map_err(failure)?;
-            // As the reference client refuses a map ending below the anchor the
-            // wallet's chain still accepts, a map under another set ending there
-            // is a replica that has not caught up, perhaps still serving the
-            // previous set. Wait for it: a reset would empty the store again
-            // each time such replicas alternate.
-            if let Some(anchor) = self.store.anchor().map_err(failure)?
-                && map
-                    .shards
-                    .last()
-                    .is_none_or(|last| last.end_height < anchor.height)
-                && chain.is_accepted(anchor.height, &anchor.hash) == Acceptance::Accepted
-            {
-                return Ok(behind_unread_batch());
-            }
-            let (published, declarations) = self.map_revisions(&map, &set)?;
-            let named: Vec<_> = published.into_iter().chain(declarations).collect();
-            catalog::reset_store_keep_catalog(&mut self.catalog, &named)?;
-            return Err(RecoveryError::PublicationChanged);
+        if let Some(lagging_replica) = self.gate_publication_set(&map, chain)? {
+            return Ok(lagging_replica);
         }
-        let stored = self.store.anchor().map_err(failure)?;
-        let retained = self
-            .store
-            .events()
-            .map_err(failure)?
-            .iter()
-            .map(|held| u64::from(held.event.height()))
-            .max()
-            .unwrap_or(0);
-        let (sync_anchor, clamped) =
-            sync_target(&map, &target, floor, stored.as_ref(), retained, chain);
+
+        // The sync into the companion's store.
+        let sync_target = self.store_sync_target(&map, &target, floor, chain)?;
         let floor_accepting_chain = FloorAcceptingChain {
             chain,
             floor,
             genesis_hash: &map.genesis_hash,
         };
-        let mut scripts = StaticScripts(
-            watch
-                .addresses
-                .iter()
-                .map(|entry| ScriptEntry {
-                    script: address_script(entry.address),
-                    origin: ScriptOrigin::Derived,
-                    required_from: u64::from(u32::from(entry.required_from)),
-                })
-                .collect(),
-        );
+        let mut scripts = watched_scripts(watch);
         let limits = WorkLimits {
             max_queries: Some(self.config.queries),
             max_private_bytes: Some(self.config.private_bytes),
@@ -327,45 +256,17 @@ impl ReferenceRecovery {
         let report = match transparent_wallet::sync_into(
             &mut self.store,
             &map,
-            map_bytes,
+            map_fetch_bytes,
             &geometry,
             &floor_accepting_chain,
             &mut scripts,
             &mut filters,
             transport,
             &limits,
-            &sync_anchor,
+            &sync_target.anchor,
         ) {
             Ok(report) => report,
-            // The map rewrites sealed history the store holds without declaring
-            // a re-cut, and the wallet's chain accepts both the block the stored
-            // range ends on and the block the map's sealed shard now covering
-            // its start ends on, at or below the target. The sync judges that
-            // only after rolling back any reorg the chain alone shows, and only
-            // for the ranges the rollback kept, and refuses it before reading
-            // anything; anything the chain cannot settle yet stops it as
-            // `ChainUnknown`.
-            //
-            // The sync keeps no re-cut epoch, so a replica still serving a map
-            // from before a re-cut the store followed looks the same to it. A
-            // map below the epoch this companion recorded is taken for one:
-            // `Pending`, behind, and a later pass syncs again. Otherwise the
-            // publisher contradicts the wallet's own chain, which no later pass
-            // over this history repairs: `Withdrawn(ChangedSealed)`. Either way
-            // nothing was read: the store keeps what it held, less any reorg the
-            // sync rolled back first, and the catalog is unchanged.
-            Err(SyncError::SealedRewrite { .. }) => {
-                if map.recut_epoch() < catalog::recut_epoch(&self.catalog)? {
-                    return Ok(behind_unread_batch());
-                }
-                return Ok(unready_batch(
-                    BatchState::Withdrawn(WithdrawnCause::ChangedSealed),
-                    Progress {
-                        covered_through: 0,
-                        outcome: Outcome::Behind,
-                    },
-                ));
-            }
+            Err(SyncError::SealedRewrite { .. }) => return self.refused_rewrite_batch(&map),
             // Not a set change, which was checked above: a map refreshed
             // mid-pass does not continue the first (another re-cut epoch, or a
             // resumed shard id moved to another start). A later pass starts
@@ -373,23 +274,17 @@ impl ReferenceRecovery {
             Err(SyncError::MapDiverged(_)) => return Ok(behind_unread_batch()),
             Err(other) => return Err(failure(other)),
         };
+
         // A stale revision may have refreshed the map mid-sync. The stored facts
         // are the ones that map described.
-        let map: ShardMap = serde_json::from_slice(filters.map()).map_err(failure)?;
-        self.check_limits(&map, floor)?;
+        let synced_map: ShardMap = serde_json::from_slice(filters.map()).map_err(failure)?;
+        self.check_limits(&synced_map, floor)?;
         self.normalize(
             watch,
-            map,
-            Progress::from_sync_report(&report, clamped),
+            synced_map,
+            Progress::from_sync_report(&report, sync_target.clamped),
             chain,
         )
-    }
-
-    /// Refuses a map with more shards and declarations at or above `floor`
-    /// than the shard limit, or more declarations in all than
-    /// [`MAX_SUPERSEDED`].
-    fn check_limits(&self, map: &ShardMap, floor: u64) -> Result<(), RecoveryError> {
-        check_publication_limits(map, floor, self.config.shards)
     }
 
     /// Every revision `map`, under `set`, publishes, and every one its re-cuts

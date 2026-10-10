@@ -3,9 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::{
-    Connection, OptionalExtension, Transaction, TransactionBehavior, named_params, params,
-};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use zcash_client_backend::data_api::transparent_ledger::{PublicationAnchor, RecoveryRevision};
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::BlockHeight;
@@ -13,8 +11,20 @@ use zcash_protocol::consensus::BlockHeight;
 use super::exports::prune_catalog;
 use super::identity::Published;
 use super::recut::{declaration_conflict, record_epoch, recut_epoch};
+use super::store_tables::prune_store_caches;
 use crate::batch::{BatchState, WithdrawnCause};
 use crate::error::{RecoveryError, failure};
+
+/// What the catalog records of a revision a pass may export.
+enum RecordedRevision {
+    /// The catalog records it exactly.
+    Matches,
+    /// The catalog records something that contradicts it; the batch is withdrawn as
+    /// an `Equivocation`.
+    Contradicts,
+    /// The catalog records neither.
+    Unrecorded,
+}
 
 /// One pass's catalog transaction. Dropping it without [`CatalogPass::finish`] changes
 /// nothing.
@@ -90,8 +100,10 @@ impl<'c> CatalogPass<'c> {
     /// that withdraws it.
     pub(crate) fn classify(&mut self, entry: &Published) -> Result<bool, RecoveryError> {
         let revision = &entry.revision;
-        if let Some(same) = self.recorded(entry)? {
-            return Ok(same);
+        match self.recorded(entry)? {
+            RecordedRevision::Matches => return Ok(true),
+            RecordedRevision::Contradicts => return Ok(false),
+            RecordedRevision::Unrecorded => {}
         }
         let newest: Option<u64> = self
             .tx
@@ -148,23 +160,24 @@ impl<'c> CatalogPass<'c> {
             self.withdraw(WithdrawnCause::Equivocation);
             return Ok(false);
         }
-        if let Some(same) = self.recorded(entry)? {
-            return Ok(same);
+        match self.recorded(entry)? {
+            RecordedRevision::Matches => return Ok(true),
+            RecordedRevision::Contradicts => return Ok(false),
+            RecordedRevision::Unrecorded => {}
         }
         self.insert(entry)?;
         Ok(true)
     }
 
-    /// Whether the catalog records `entry` exactly (`Some(true)`), records
-    /// something that contradicts it (`Some(false)`, withdrawing the batch as
-    /// an `Equivocation`), or neither.
+    /// Whether the catalog records `entry` exactly, records something that
+    /// contradicts it (withdrawing the batch as an `Equivocation`), or neither.
     ///
     /// A contradiction is a row of its source with its digest and sealing at
     /// another lineage or endpoint, a row of its source at its lineage with
     /// another digest or sealing, or a revision ever exported at its source
     /// and lineage, or under its identity, that differs from it: the wallet
     /// would refuse it as an integrity failure and quarantine the account.
-    fn recorded(&mut self, entry: &Published) -> Result<Option<bool>, RecoveryError> {
+    fn recorded(&mut self, entry: &Published) -> Result<RecordedRevision, RecoveryError> {
         let revision = &entry.revision;
         let contradicted: bool = self
             .tx
@@ -185,7 +198,7 @@ impl<'c> CatalogPass<'c> {
             .map_err(failure)?;
         if contradicted {
             self.withdraw(WithdrawnCause::Equivocation);
-            return Ok(Some(false));
+            return Ok(RecordedRevision::Contradicts);
         }
         let stored: Option<(u64, u32, Vec<u8>)> = self
             .tx
@@ -204,8 +217,9 @@ impl<'c> CatalogPass<'c> {
                 && hash.as_slice() == entry.hash();
             if !same {
                 self.withdraw(WithdrawnCause::Equivocation);
+                return Ok(RecordedRevision::Contradicts);
             }
-            return Ok(Some(same));
+            return Ok(RecordedRevision::Matches);
         }
         let collides: bool = self
             .tx
@@ -217,9 +231,9 @@ impl<'c> CatalogPass<'c> {
             .map_err(failure)?;
         if collides {
             self.withdraw(WithdrawnCause::Equivocation);
-            return Ok(Some(false));
+            return Ok(RecordedRevision::Contradicts);
         }
-        Ok(None)
+        Ok(RecordedRevision::Unrecorded)
     }
 
     fn insert(&self, entry: &Published) -> Result<(), RecoveryError> {
@@ -420,24 +434,7 @@ impl<'c> CatalogPass<'c> {
     /// most turn such a refusal from withdrawn into pending.
     pub(crate) fn finish(self, digests: &[&str], epoch: Option<u32>) -> Result<(), RecoveryError> {
         prune_catalog(&self.tx)?;
-        let named = serde_json::to_string(digests).map_err(failure)?;
-        for table in ["filter_cache", "setup_cache"] {
-            self.tx
-                .execute(
-                    &format!(
-                        "DELETE FROM {table} WHERE revision_digest NOT IN (SELECT value FROM json_each(:named))"
-                    ),
-                    named_params![":named": named],
-                )
-                .map_err(failure)?;
-        }
-        // The store reads only the last commit id.
-        self.tx
-            .execute(
-                "DELETE FROM commits WHERE id < (SELECT MAX(id) FROM commits)",
-                [],
-            )
-            .map_err(failure)?;
+        prune_store_caches(&self.tx, digests)?;
         if let Some(epoch) = epoch {
             let recorded = recut_epoch(&self.tx)?;
             record_epoch(&self.tx, recorded.max(epoch))?;

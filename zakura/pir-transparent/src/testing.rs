@@ -46,17 +46,13 @@ pub fn apply<P: zcash_protocol::consensus::Parameters, CL, R>(
     wallet: &mut zcash_client_sqlite::WalletDb<rusqlite::Connection, P, CL, R>,
     trust: crate::Trust,
 ) -> Result<crate::Applied, crate::ApplyFailure> {
-    use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerRead as _;
-
     let progress = batch.progress();
     let (stats, retired, expected_generation) =
         crate::apply::apply_commits(batch, wallet, trust, &mut crate::Ungated, || {})?;
-    if let Some(expected) = expected_generation {
+    if expected_generation.is_some() {
         wallet
             .with_immediate_read_transaction(|snapshot| {
-                snapshot
-                    .check_transparent_policy_generation(expected)
-                    .map_err(|error| crate::ApplyError::from_wallet(stats.applied, error))
+                crate::apply::check_policy_generation(snapshot, expected_generation, stats.applied)
             })
             .map_err(|error| crate::ApplyFailure {
                 error,

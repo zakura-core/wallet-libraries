@@ -14,7 +14,7 @@
 
 use rusqlite::Connection;
 use zcash_client_backend::data_api::transparent_ledger::{
-    CommitRejection, RecoveryRevision, TransparentLedgerRead as _, TransparentLedgerWrite as _,
+    CommitRejection, RecoveryRevision, TransparentLedgerRead, TransparentLedgerWrite as _,
 };
 use zcash_client_sqlite::{AccountUuid, WalletDb, error::SqliteClientError};
 use zcash_protocol::consensus;
@@ -298,11 +298,7 @@ impl ReferenceRecovery {
             .map_err(|error| apply_failure(ApplyError::Acknowledge(error), stats))?;
         gate.write(|| {
             wallet.with_immediate_read_transaction(|snapshot| {
-                if let Some(expected) = expected_generation {
-                    snapshot
-                        .check_transparent_policy_generation(expected)
-                        .map_err(|error| ApplyError::from_wallet(stats.applied, error))?;
-                }
+                check_policy_generation(snapshot, expected_generation, stats.applied)?;
                 catalog::acknowledge_in_transaction(&acknowledgment, &replaced)
                     .map_err(ApplyError::Acknowledge)?;
                 acknowledgment
@@ -318,6 +314,22 @@ impl ReferenceRecovery {
             retired: replaced.len(),
         })
     }
+}
+
+/// Refuses a wallet whose transparent policy generation is no longer
+/// `expected_generation`, the one a batch's commits were built under, after `applied`
+/// of them applied. A batch without commits has no generation to check.
+pub(crate) fn check_policy_generation(
+    snapshot: &impl TransparentLedgerRead<Error = SqliteClientError>,
+    expected_generation: Option<u64>,
+    applied: usize,
+) -> Result<(), ApplyError> {
+    if let Some(expected) = expected_generation {
+        snapshot
+            .check_transparent_policy_generation(expected)
+            .map_err(|error| ApplyError::from_wallet(applied, error))?;
+    }
+    Ok(())
 }
 
 /// Applies a ready batch's commits to `wallet` in order, each in its own wallet

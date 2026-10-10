@@ -1,18 +1,23 @@
 use super::commit_builder::CommitBuilder;
 use super::page_completion::{page_continuation_id, ranges_cover};
 use super::preflight::{limited_map_entries, watch_floor};
-use super::sync_inputs::{FloorAcceptingChain, sync_target};
+use super::sync_inputs::{FloorAcceptingChain, SyncTarget, sync_target};
 use super::*;
+use crate::batch::{BatchState, WithdrawnCause};
+use crate::convert::address_script;
 use crate::convert::{block_hash_from_display, block_height, ledger_metadata};
 use crate::progress::Retry;
 use crate::test_support::{CountingFilters, CountingShards, MAP};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use transparent::address::TransparentAddress;
 use transparent_events::{FeeState, TransparentEvent};
+use transparent_filter::MAINNET_GENESIS_DISPLAY;
 use transparent_filter::wire::MAX_SUPERSEDED;
 use transparent_filter::{Recut, SealParameters, ShardMapEntry, SupersededShard};
 use transparent_wallet::client::Table;
 use transparent_wallet::transport::BoxError;
+use transparent_wallet::{Acceptance, Anchor, ScriptEntry, ScriptOrigin};
 use transparent_wallet::{Completion, IncompleteReason, SyncReport, WalletStore};
 use transparent_wallet::{Ledger, PendingPages, SetupBlob, SetupKey, StaticChain, StoredEvent};
 use zcash_client_backend::data_api::transparent_ledger::{

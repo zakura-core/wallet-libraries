@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, Transaction, TransactionBehavior, named_params};
 
 use super::identity::Published;
 use super::recut::record_epoch;
@@ -76,4 +76,29 @@ pub(crate) fn reset_store_keep_catalog(
         }
     }
     tx.commit().map_err(failure)
+}
+
+/// Prunes the store's filter and setup caches to the revisions `digests` names, and
+/// its commit log to the last commit, within a pass's transaction `tx`. The store
+/// reads only the last commit id.
+pub(super) fn prune_store_caches(
+    tx: &Transaction<'_>,
+    digests: &[&str],
+) -> Result<(), RecoveryError> {
+    let named = serde_json::to_string(digests).map_err(failure)?;
+    for table in ["filter_cache", "setup_cache"] {
+        tx.execute(
+            &format!(
+                "DELETE FROM {table} WHERE revision_digest NOT IN (SELECT value FROM json_each(:named))"
+            ),
+            named_params![":named": named],
+        )
+        .map_err(failure)?;
+    }
+    tx.execute(
+        "DELETE FROM commits WHERE id < (SELECT MAX(id) FROM commits)",
+        [],
+    )
+    .map_err(failure)?;
+    Ok(())
 }

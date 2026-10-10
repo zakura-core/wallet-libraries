@@ -4,12 +4,51 @@ use std::collections::BTreeMap;
 
 use transparent_wallet::{Acceptance, ChainView};
 use zcash_client_backend::data_api::transparent_ledger::{
-    ChainPoint, TransparentLedgerCommit, TransparentRecoveryContext,
+    ChainPoint, RecoveryRevision, TransparentLedgerCommit, TransparentRecoveryContext,
 };
 
 use crate::catalog::{self, Published};
-use crate::convert::{block_hash_from_display, block_height};
+use crate::convert::{block_hash_from_display, block_height, height_u64};
 use crate::error::{RecoveryError, ensure_valid};
+
+/// A pass's commits, keyed by [`Published::key`]: the revision's start height and
+/// manifest digest.
+pub(super) type RevisionCommits<A> = BTreeMap<(u64, String), TransparentLedgerCommit<A>>;
+
+/// The display hash of the wallet's block at `height`, where a shard's commit is
+/// anchored. Fails when `chain` holds no block there, or does not accept it.
+pub(super) fn accepted_shard_anchor(
+    chain: &impl ChainView,
+    height: u64,
+) -> Result<String, RecoveryError> {
+    let hash = chain
+        .hash_at(height)
+        .ok_or_else(|| RecoveryError::Invalid("missing independent shard anchor".into()))?;
+    ensure_valid(
+        chain.is_accepted(height, &hash) == Acceptance::Accepted,
+        "shard anchor is not independently accepted",
+    )?;
+    Ok(hash)
+}
+
+/// A commit of `revision` anchored at `anchor` that carries nothing yet.
+pub(super) fn empty_commit<A>(
+    context: TransparentRecoveryContext<A>,
+    revision: RecoveryRevision,
+    anchor: ChainPoint,
+) -> TransparentLedgerCommit<A> {
+    TransparentLedgerCommit {
+        context,
+        revision,
+        anchor,
+        receives: vec![],
+        spends: vec![],
+        coverage: vec![],
+        unsupported: vec![],
+        opened_pages: vec![],
+        completed_pages: vec![],
+    }
+}
 
 /// The commits of one pass, and the revisions its stored facts may name.
 ///
@@ -19,7 +58,7 @@ use crate::error::{RecoveryError, ensure_valid};
 /// identity, which the wallet already holds; it is admitted on its first fact.
 /// Any other digest defers the batch.
 pub(super) struct CommitBuilder<'p, A> {
-    pub(super) commits: BTreeMap<(u64, String), TransparentLedgerCommit<A>>,
+    pub(super) commits: RevisionCommits<A>,
     pub(super) published: BTreeMap<&'p str, &'p Published>,
     declared: BTreeMap<&'p str, &'p Published>,
     /// Declared revisions already looked at this pass, and whether they have a
@@ -63,17 +102,7 @@ impl<'p, A: Copy> CommitBuilder<'p, A> {
     pub(super) fn open_commit(&mut self, entry: &Published, anchor: ChainPoint) {
         self.commits.insert(
             entry.key(),
-            TransparentLedgerCommit {
-                context: self.context,
-                revision: entry.revision.clone(),
-                anchor,
-                receives: vec![],
-                spends: vec![],
-                coverage: vec![],
-                unsupported: vec![],
-                opened_pages: vec![],
-                completed_pages: vec![],
-            },
+            empty_commit(self.context, entry.revision.clone(), anchor),
         );
     }
 
@@ -147,15 +176,9 @@ impl<'p, A: Copy> CommitBuilder<'p, A> {
         chain: &impl ChainView,
         entry: &Published,
     ) -> Result<bool, RecoveryError> {
-        let target = u64::from(u32::from(self.context.target.height));
+        let target = height_u64(self.context.target.height);
         let height = entry.end_height.min(target);
-        let hash = chain
-            .hash_at(height)
-            .ok_or_else(|| RecoveryError::Invalid("missing independent shard anchor".into()))?;
-        ensure_valid(
-            chain.is_accepted(height, &hash) == Acceptance::Accepted,
-            "shard anchor is not independently accepted",
-        )?;
+        let hash = accepted_shard_anchor(chain, height)?;
         if height == entry.end_height && hash != entry.terminal {
             // Facts resting on a block the wallet's chain no longer holds.
             pass.defer();

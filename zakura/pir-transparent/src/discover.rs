@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 
 use transparent::address::TransparentAddress;
-use transparent_filter::{MAINNET_GENESIS_DISPLAY, NETWORK, ShardMap};
+use transparent_filter::ShardMap;
 use transparent_wallet::transport::{FilterSource, ShardTransport};
 use transparent_wallet::{
     Acceptance, Anchor, ChainView, Completion, IncompleteReason, MemoryStore, ScriptEntry,
@@ -25,7 +25,9 @@ use transparent_wallet::{
 use crate::convert::address_script;
 use crate::error::{RecoveryError, ensure_valid, failure};
 use crate::progress::{Outcome, Progress};
-use crate::recovery::{check_publication_limits, service_geometry};
+use crate::recovery::{
+    check_publication_limits, ensure_mainnet_publication, refuse_parent_filters, service_geometry,
+};
 
 /// Finite bounds for one discovery.
 #[derive(Clone, Copy, Debug)]
@@ -108,19 +110,12 @@ pub fn discover_active_addresses<F: FilterSource, T: ShardTransport>(
         limits.shards > 0 && limits.queries > 0 && limits.private_bytes > 0,
         "discovery bounds must be positive",
     )?;
-    // The parent experiment's selective child requests leak coarse activity.
-    ensure_valid(
-        !filters.uses_parents(),
-        "parent filter sources are not supported",
-    )?;
+    refuse_parent_filters(filters)?;
     let (raw_map, map_bytes) = filters.shard_map().map_err(failure)?;
     let map: ShardMap = serde_json::from_slice(&raw_map).map_err(failure)?;
     map.check_shape().map_err(failure)?;
     check_publication_limits(&map, floor, limits.shards)?;
-    ensure_valid(
-        map.network == NETWORK && map.genesis_hash == MAINNET_GENESIS_DISPLAY,
-        "publication is not for Zcash mainnet",
-    )?;
+    ensure_mainnet_publication(&map)?;
     // The sync plans each script from the map's start when that is above its
     // required height, which would skip history between the two unseen.
     ensure_valid(

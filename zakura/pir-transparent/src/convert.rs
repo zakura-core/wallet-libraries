@@ -21,6 +21,11 @@ pub(crate) fn address_script(address: TransparentAddress) -> Vec<u8> {
     }
 }
 
+/// A wallet height as the reference client counts heights.
+pub(crate) fn height_u64(height: BlockHeight) -> u64 {
+    u64::from(u32::from(height))
+}
+
 pub(crate) fn block_height(height: u64) -> Result<BlockHeight, RecoveryError> {
     Ok(BlockHeight::from(u32::try_from(height).map_err(failure)?))
 }

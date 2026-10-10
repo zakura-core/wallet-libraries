@@ -12,8 +12,9 @@ use zcash_client_backend::data_api::transparent_ledger::{
 };
 use zcash_protocol::consensus::BlockHeight;
 
+use super::commit_builder::empty_commit;
 use crate::catalog::Published;
-use crate::convert::block_hash_from_display;
+use crate::convert::{block_hash_from_display, height_u64};
 use crate::error::RecoveryError;
 
 pub(super) fn page_continuation_id(shard: u64, digest: &str, script: &[u8], first: u32) -> Vec<u8> {
@@ -54,6 +55,17 @@ pub(super) fn ranges_cover<'r>(
     false
 }
 
+/// Whether `ranges` cover each of `request`'s addresses over its whole range.
+pub(super) fn page_covered<'r, I>(ranges: I, request: &PageRequest) -> bool
+where
+    I: IntoIterator<Item = &'r AddressRange> + Clone,
+{
+    request
+        .addresses
+        .iter()
+        .all(|address| ranges_cover(ranges.clone(), *address, request.from, request.through))
+}
+
 /// Completion-only commits for the wallet's pages that no commit of their own
 /// revision covers by itself.
 ///
@@ -88,16 +100,6 @@ pub(super) fn stranded_page_completions<A: Copy>(
         .iter()
         .map(|entry| entry.revision.source.as_slice())
         .collect();
-    let covers = |commits: &[TransparentLedgerCommit<A>], request: &PageRequest| {
-        request.addresses.iter().all(|address| {
-            ranges_cover(
-                commits.iter().flat_map(|commit| &commit.coverage),
-                *address,
-                request.from,
-                request.through,
-            )
-        })
-    };
     let mut stranded: Vec<TransparentLedgerCommit<A>> = vec![];
     for page in &watch.pending_pages {
         let superseded = declared.iter().any(|entry| entry.revision == page.revision);
@@ -121,7 +123,7 @@ pub(super) fn stranded_page_completions<A: Copy>(
             continue;
         }
         let request = &page.request;
-        if !covers(commits, request) {
+        if !page_covered(commits.iter().flat_map(|commit| &commit.coverage), request) {
             continue;
         }
         if let Some(commit) = stranded
@@ -133,27 +135,20 @@ pub(super) fn stranded_page_completions<A: Copy>(
         }
         let publication = page.revision.publication;
         let height = publication.height.min(context.target.height);
-        let Some(hash) = chain.hash_at(u64::from(u32::from(height))) else {
+        let Some(hash) = chain.hash_at(height_u64(height)) else {
             continue;
         };
-        if chain.is_accepted(u64::from(u32::from(height)), &hash) != Acceptance::Accepted {
+        if chain.is_accepted(height_u64(height), &hash) != Acceptance::Accepted {
             continue;
         }
         let hash = block_hash_from_display(&hash)?;
         if height == publication.height && hash != publication.hash {
             continue;
         }
-        stranded.push(TransparentLedgerCommit {
-            context,
-            revision: page.revision.clone(),
-            anchor: ChainPoint { height, hash },
-            receives: vec![],
-            spends: vec![],
-            coverage: vec![],
-            unsupported: vec![],
-            opened_pages: vec![],
-            completed_pages: vec![request.page.clone()],
-        });
+        let mut completion =
+            empty_commit(context, page.revision.clone(), ChainPoint { height, hash });
+        completion.completed_pages.push(request.page.clone());
+        stranded.push(completion);
     }
     Ok(stranded)
 }
