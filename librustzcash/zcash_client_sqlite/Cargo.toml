@@ -70,6 +70,7 @@ static_assertions.workspace = true
 # - Shielded protocols
 orchard = { workspace = true, optional = true }
 sapling.workspace = true
+zakura-dynamic-ivk = { version = "0.0.0", path = "../../zakura/dynamic-ivk", optional = true }
 
 # - Transparent protocol
 secp256k1 = { workspace = true, optional = true }
@@ -94,6 +95,7 @@ pczt.workspace = true
 rand_core.workspace = true
 rand_distr.workspace = true
 rand.workspace = true
+zcash_note_encryption = { workspace = true, optional = true }
 
 ambassador = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
@@ -130,13 +132,15 @@ default = ["multicore"]
 multicore = ["maybe-rayon/threads", "zcash_primitives/multicore"]
 
 ## Enables support for storing data related to the sending and receiving of
-## Orchard funds.
+## Orchard funds, and dynamic IVKs (see `wallet::dynamic_ivk`).
 ##
 ## This crate's storage-trait impls are gated on this feature while the backend traits grow
 ## their Orchard and Ironwood methods under theirs, so the two must turn on together or the impls
 ## stop satisfying the traits.
 orchard = [
     "dep:orchard",
+    "dep:zakura-dynamic-ivk",
+    "dep:zcash_note_encryption",
     "zcash_client_backend/orchard",
     "zcash_keys/orchard",
     # The `orchard_ironwood_migration_unsatisfiability` schema migration reads stored PCZTs.

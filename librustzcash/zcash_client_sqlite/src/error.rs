@@ -82,6 +82,22 @@ pub enum SqliteClientError {
     #[cfg(feature = "transparent-inputs")]
     TransparentPromotionBlocked(Vec<RecoveryBlocker>),
 
+    /// Blocks or a transaction were processed without the wallet's open dynamic IVKs.
+    /// Scan with `scan_cached_blocks_with_dynamic_ivks` and decrypt with
+    /// `decrypt_and_store_transaction_with_dynamic_ivks`.
+    #[cfg(feature = "orchard")]
+    DynamicIvksNotUsed,
+
+    /// A dynamic IVK call's input was invalid, such as a passed deadline, a deposit address
+    /// for another network, a key, reservation or operation the account does not have, or
+    /// directory data that contradicts the wallet's own.
+    #[cfg(feature = "orchard")]
+    InvalidDynamicIvkInput(&'static str),
+
+    /// A dynamic key purpose's index space is exhausted.
+    #[cfg(feature = "orchard")]
+    DynamicIvkIndexExhausted,
+
     /// Decoding of a stored value from its serialized form has failed.
     CorruptedData(String),
 
@@ -368,6 +384,19 @@ impl fmt::Display for SqliteClientError {
                 f,
                 "Enhancement mode is not configured; call set_enhancement_mode before enumerating enhancement work"
             ),
+            #[cfg(feature = "orchard")]
+            SqliteClientError::DynamicIvksNotUsed => write!(
+                f,
+                "This wallet has open dynamic IVKs; scan and decrypt with the dynamic IVK entry points"
+            ),
+            #[cfg(feature = "orchard")]
+            SqliteClientError::InvalidDynamicIvkInput(reason) => {
+                write!(f, "Invalid dynamic IVK input: {reason}")
+            }
+            #[cfg(feature = "orchard")]
+            SqliteClientError::DynamicIvkIndexExhausted => {
+                write!(f, "The dynamic key index space is exhausted")
+            }
             SqliteClientError::TransparentLedgerModeNotConfigured => write!(
                 f,
                 "Transparent ledger mode is not configured; call set_transparent_ledger_mode first"
@@ -616,6 +645,15 @@ impl From<zcash_protocol::memo::Error> for SqliteClientError {
 impl From<ShardTreeError<commitment_tree::Error>> for SqliteClientError {
     fn from(e: ShardTreeError<commitment_tree::Error>) -> Self {
         SqliteClientError::CommitmentTree(e)
+    }
+}
+
+/// An index whose derived `rivk` gives no valid viewing key, which happens with negligible
+/// probability, is a failure to derive the account's keys.
+#[cfg(feature = "orchard")]
+impl From<zakura_dynamic_ivk::DerivationError> for SqliteClientError {
+    fn from(e: zakura_dynamic_ivk::DerivationError) -> Self {
+        SqliteClientError::BadAccountData(e.to_string())
     }
 }
 

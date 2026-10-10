@@ -57,6 +57,24 @@ use crate::{
     wallet::init::WalletMigrator,
 };
 
+// The delegated dynamic IVK traits' signatures name these.
+#[cfg(feature = "orchard")]
+use {
+    std::collections::BTreeMap,
+    zakura_dynamic_ivk::KeyId,
+    zcash_client_backend::{
+        data_api::{
+            dynamic_ivk::{
+                DirectoryPayment, DiscoveryWork, DynamicIvkRead, DynamicIvkWrite,
+                PaymentApplication, SweepDeferral, ambassador_impl_DynamicIvkRead,
+                ambassador_impl_DynamicIvkWrite,
+            },
+            transparent_ledger::ChainPoint,
+        },
+        scanning::dynamic_ivk::DynamicScanningKey,
+    },
+};
+
 #[cfg(feature = "transparent-inputs")]
 use {
     crate::TransparentAddressMetadata,
@@ -89,6 +107,11 @@ pub(crate) fn test_rng() -> TestRng {
 #[delegate(WalletCommitmentTrees, target = "wallet_db")]
 #[delegate(EnhancePirRead, target = "wallet_db")]
 #[delegate(TransactionStatusRead, target = "wallet_db")]
+#[cfg_attr(
+    feature = "orchard",
+    delegate(DynamicIvkRead, target = "wallet_db"),
+    delegate(DynamicIvkWrite, target = "wallet_db")
+)]
 pub struct TestDb {
     wallet_db: WalletDb<Connection, LocalNetwork, FixedClock, TestRng>,
     data_file: Option<NamedTempFile>,
