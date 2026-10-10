@@ -82,7 +82,6 @@ fn directory_payment_applies_unscanned_key_note_atomically_and_reopens() {
     assert_eq!(notes[0].note().value().inner(), 100_000);
     assert_eq!(notes[0].dynamic_key_id(), Some(key.key_id()));
     assert!(pending(st.wallet().db(), account, key.key_id()).is_empty());
-    assert!(crate::wallet::enhance_pir::is_protected(st.wallet().conn(), candidate.txid).unwrap());
     // Nothing binds the directory's memo to the chain, so it is not stored.
     let stored_memo: Option<Vec<u8>> = st
         .wallet()
@@ -343,6 +342,63 @@ fn a_claim_contradicting_a_stored_raw_transaction_is_rejected() {
                 .unwrap();
             assert_eq!(location, (u32::from(height), 1), "{raw:?}");
         }
+    }
+}
+
+/// A directory payment proves its note but not whether its transaction has transparent
+/// parts, so without the raw transaction it keeps the transaction's enhancement rather
+/// than marking it privately complete.
+#[test]
+fn a_directory_payment_leaves_an_unknown_transaction_to_enhancement() {
+    use transparent::address::TransparentAddress;
+    use zcash_keys::address::Address;
+    for stored in [false, true] {
+        let mut st = ironwood_wallet();
+        let account = st.test_account().unwrap().id();
+        let network = *st.network();
+        let id = KeyId::new(Purpose::Receive, 8);
+        let fvk = id
+            .derive(&FullViewingKey::from(
+                st.test_account().unwrap().usk().orchard(),
+            ))
+            .unwrap();
+        let deposit = Address::Transparent(TransparentAddress::PublicKeyHash([7; 20]));
+        let mixed = zip321::Payment::without_memo(
+            deposit.to_zcash_address(&network),
+            Zatoshis::const_from_u64(20_000),
+        );
+        let memo = zcash_protocol::memo::MemoBytes::empty();
+        let paid = external_payment_with(fvk.address_at(0u32, Scope::External), &memo, vec![mixed]);
+        assert!(paid.transparent_bundle().is_some());
+        let (height, _) = st.generate_next_block_from_tx(1, &paid);
+        st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+        let candidate = candidate_at(&st, height, &fvk);
+        let through = tip(&st);
+        let path = witness_at(&st, candidate.position);
+        let db = st.wallet_mut().db_mut();
+        if stored {
+            store_mined(db, &paid, height);
+        }
+        watch(db, account, 8, height + 1);
+        queue_payment(db, account, id, &candidate).unwrap();
+        assert_eq!(
+            apply_payment(db, account, id, &candidate, through, (through, &path)).unwrap(),
+            PaymentApplication::Applied
+        );
+        let conn = st.wallet().conn();
+        let requested: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue
+                 WHERE txid = ?1 AND query_type = ?2)",
+                rusqlite::params![
+                    paid.txid().as_ref(),
+                    crate::wallet::TxQueryType::Enhancement.code()
+                ],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let protected = crate::wallet::enhance_pir::is_protected(conn, paid.txid()).unwrap();
+        assert_eq!((requested, protected), (!stored, stored), "stored={stored}");
     }
 }
 

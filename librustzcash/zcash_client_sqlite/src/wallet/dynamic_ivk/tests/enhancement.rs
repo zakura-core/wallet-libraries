@@ -516,7 +516,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
 
 /// A refund key starts scanning when its funding transaction is stored, above the
 /// scanned chain, and the funded quote then waits for the swap's outcome. An unfunded
-/// quote never starts its key or holds a started one open.
+/// quote never starts its key.
 #[test]
 fn a_refund_key_starts_scanning_when_its_funding_transaction_is_stored() {
     use zakura_dynamic_ivk::{
@@ -559,10 +559,12 @@ fn a_refund_key_starts_scanning_when_its_funding_transaction_is_stored() {
         db.refund_funding_memo(account, key.index(), &funded)
             .is_err()
     );
-    for deposit in [&stale, &funded] {
-        db.record_refund_operation(account, key.index(), deposit, now + 3_600, now)
-            .unwrap();
-    }
+    db.record_refund_operation(account, key.index(), &funded, now + 3_600, now)
+        .unwrap();
+    assert!(
+        db.record_refund_operation(account, key.index(), &stale, now + 3_600, now)
+            .is_err()
+    );
     assert_eq!(active_from(&db.conn, unfunded), None);
     assert_eq!(active_from(&db.conn, key), None);
     let memo = db
@@ -596,7 +598,6 @@ fn a_refund_key_starts_scanning_when_its_funding_transaction_is_stored() {
     assert_eq!(active_from(conn, key), Some(u32::from(tip) + 1));
     assert_eq!(active_from(conn, unfunded), None);
     assert_eq!(row(conn, &funded), (0, 0));
-    assert_eq!(row(conn, &stale), (0, 1));
 
     let (mined, _) = st.generate_next_block_including(txid);
     st.scan_cached_blocks_with_dynamic_ivks(mined, 1);
@@ -615,7 +616,7 @@ fn a_refund_key_starts_scanning_when_its_funding_transaction_is_stored() {
         finished,
     )
     .unwrap();
-    // The swap is over; the stale quote does not hold the key open.
+    // The swap is over.
     assert_eq!(close_at(db, account, finished, mined), 1);
     assert_eq!(active_from(&db.conn, unfunded), None);
 }
@@ -967,8 +968,9 @@ fn missing_funding_memos_block_refund_issuance() {
     );
 }
 
-/// A quote binds to a refund key reserved here that is still open; the key need not
-/// scan yet, since only its funding transaction starts it.
+/// A quote binds to a refund key reserved here that is still open, and the key to that
+/// quote's deposit alone; the key need not scan yet, since only its funding transaction
+/// starts it.
 #[test]
 fn refund_quote_needs_an_open_reserved_refund_key_and_a_canonical_transparent_deposit() {
     let (mut st, _) = ironwood_funded_wallet();
@@ -1013,6 +1015,13 @@ fn refund_quote_needs_an_open_reserved_refund_key_and_a_canonical_transparent_de
         db.record_refund_operation(account, 1, &p2pkh, now + 60, now)
             .is_err()
     );
+    // The key is bound to its deposit, so another swap cannot share its refunds.
+    let other = Address::Transparent(TransparentAddress::PublicKeyHash([8; 20])).encode(&network);
+    assert!(matches!(
+        db.record_refund_operation(account, 0, &other, now + 60, now),
+        Err(SqliteClientError::InvalidDynamicIvkInput(_))
+    ));
+    assert!(db.refund_funding_memo(account, 0, &other).is_err());
     assert!(db.refund_funding_memo(account, 0, &p2pkh).is_ok());
     // A closed key would miss the refund.
     db.conn

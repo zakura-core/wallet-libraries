@@ -313,12 +313,30 @@ fn require_lwd(
 }
 
 /// Settles enhancement for `tx_ref`, which holds a note a dynamic IVK restore sweep
-/// retrieved privately: keeps the transaction on private routing unless it already has a
-/// route, and retires its enhancement if nothing is left.
+/// retrieved privately. A stored or routed transaction keeps its route (private if it had
+/// none) and retires its enhancement if nothing is left. Otherwise nothing shows whether it
+/// has transparent parts, so it is queued and routed like a scanned transaction whose
+/// compact data does not prove it Ironwood-only.
 pub(crate) fn finish_private_receipt(
-    conn: &Connection,
+    conn: &Transaction<'_>,
+    configured: Option<TransparentLedgerMode>,
     tx_ref: crate::TxRef,
+    txid: TxId,
 ) -> Result<(), SqliteClientError> {
+    let has_raw: bool = conn.query_row(
+        "SELECT raw IS NOT NULL FROM transactions WHERE id_tx = :tx",
+        named_params![":tx": tx_ref.0],
+        |row| row.get(0),
+    )?;
+    if !has_raw && route(conn, tx_ref)?.is_none() {
+        super::queue_tx_retrieval(conn, std::iter::once(txid), None)?;
+        return queue_transaction(
+            conn,
+            configured,
+            tx_ref,
+            &IronwoodEnhancementPlan::Ineligible,
+        );
+    }
     conn.execute(
         "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1,?2)
         ON CONFLICT(transaction_id) DO NOTHING",

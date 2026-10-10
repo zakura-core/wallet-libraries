@@ -250,6 +250,42 @@ fn a_rewind_reopens_a_closed_key_whose_receipt_it_unmines() {
     assert_eq!(close(&mut st, terminal), 1);
 }
 
+/// A refund key closed after a status reporting no refund reopens, and rescans what it
+/// missed, when a newer status reports one owed. A late older status or a repeated
+/// refund does not reopen it.
+#[test]
+fn a_newly_owed_refund_reopens_a_closed_refund_key() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key = refund_key(&mut st);
+    let terminal = registered_at() + HOUR;
+    observe_swap(&mut st, key.key_id(), Terminal(NoReceipt), terminal);
+    assert_eq!(close(&mut st, terminal), 1);
+    let paid = pay(&mut st, &key, 10_000);
+    assert!(unspent_keys(&st, paid).is_empty());
+    let refunded = |st: &mut State, at| {
+        let observation = Observation {
+            status: Terminal(Positive(None)),
+            deadline: None,
+        };
+        let db = st.wallet_mut().db_mut();
+        assert!(
+            db.record_operation_status(account, "swap", None, observation, false, at)
+                .unwrap()
+        );
+    };
+    refunded(&mut st, terminal - 1);
+    assert!(scanning_keys(&st).is_empty());
+    refunded(&mut st, terminal + HOUR);
+    assert_eq!(scanning_keys(&st), [key.key_id()]);
+    st.scan_cached_blocks_with_dynamic_ivks(paid, 1);
+    assert_eq!(unspent_keys(&st, paid), [Some(key.key_id())]);
+    confirm(&mut st);
+    assert_eq!(close(&mut st, terminal + HOUR), 1);
+    refunded(&mut st, terminal + 2 * HOUR);
+    assert!(scanning_keys(&st).is_empty());
+}
+
 #[test]
 fn a_key_closes_once_its_last_operation_is_final() {
     let mut st = scanned_wallet();
