@@ -29,7 +29,7 @@ use transparent_wallet::{ChainView, StaticChain};
 use zakura_pir_transparent::{
     BatchState, HoldCause, HttpExchange, HttpFailure, HttpMethod, HttpReply, HttpRequest,
     PassLimits, PassPlan, Retry, Step, TransparentHistoryRecovery,
-    TransparentHistoryRecoveryConfig, Trust, Ungated,
+    TransparentHistoryRecoveryConfig, Trust,
 };
 use zcash_client_backend::data_api::{
     Account as _,
@@ -336,12 +336,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         // permits commits only when publication continuity is Ready, and the
         // pass holds only a Ready batch.
         let report = reference.pass(watch, &chain, &exchange, RESPONSE_LIMIT, &|| false)?;
+        let held = reference.take_latest::<AccountUuid>();
         let mut receives = 0;
         let mut spends = 0;
-        for commit in reference
-            .latest::<AccountUuid>()
-            .map_or(&[][..], |batch| batch.commits())
-        {
+        for commit in held.as_ref().map_or(&[][..], |batch| batch.commits()) {
             receives += commit.receives.len();
             spends += commit.spends.len();
             if commit.receives.iter().any(|e| e.metadata.is_none())
@@ -353,9 +351,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         // The ordinary writer rechecks the captured account, policy, and chain
         // context for every commit. Observed commits are stored as candidate
         // evidence without qualifying the publisher or projecting these events
-        // into usable funds; the batch is acknowledged once every one applied.
-        let settled =
-            reference.settle_latest(state.wallet_mut().db_mut(), Trust::Observed, &mut Ungated);
+        // into usable funds; the batch is acknowledged once every one applied. This
+        // is `settle_latest` after reading the batch.
+        let settled = match held {
+            Some(batch) => reference
+                .apply_and_acknowledge(batch, state.wallet_mut().db_mut(), Trust::Observed)
+                .map(Some),
+            None => Ok(None),
+        };
         let grew = matches!(&settled, Ok(Some(applied)) if applied.stats.window_grew);
         passes.push(json!({
             "pass": passes.len(),

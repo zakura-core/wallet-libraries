@@ -193,11 +193,6 @@ impl<A> PassPlan<A> {
         &self.watch
     }
 
-    /// Passes counted so far.
-    pub fn passes(&self) -> usize {
-        self.passes
-    }
-
     /// The first step: [`Step::Pass`], or [`Step::Done`] with no retry while the
     /// watch set has no target.
     pub fn first(&self) -> Step {

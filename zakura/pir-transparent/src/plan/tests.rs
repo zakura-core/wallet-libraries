@@ -134,7 +134,7 @@ fn a_withdrawn_pass_holds_the_account() {
                 watch(2, false),
             );
             assert_eq!(step, Step::Hold(HoldCause::Withdrawn(cause)), "{outcome:?}");
-            assert_eq!(plan.passes(), 0);
+            assert_eq!(plan.passes, 0);
         }
     }
 }
@@ -162,7 +162,7 @@ fn every_failed_settlement_has_its_step() {
                 watch(1, false),
             );
             assert_eq!(step, expected, "{action:?} {outcome:?}");
-            assert_eq!(plan.passes(), 0);
+            assert_eq!(plan.passes, 0);
         }
     }
 }
@@ -178,7 +178,7 @@ fn stale_settlements_refresh_a_bounded_number_of_times() {
         assert_eq!(plan.next(&ready, &stale, watch(1, false)), Step::Refresh);
     }
     assert_eq!(plan.next(&ready, &stale, watch(1, false)), Step::Skip);
-    assert_eq!(plan.passes(), 0);
+    assert_eq!(plan.passes, 0);
 
     // A refresh that finds no target has nothing to pass.
     let mut plan = new_plan();
@@ -213,7 +213,7 @@ fn an_interrupted_settlement_skips_only_the_account() {
             watch(2, false),
         );
         assert_eq!(step, Step::Skip, "{outcome:?}");
-        assert_eq!(plan.passes(), 0);
+        assert_eq!(plan.passes, 0);
     }
 }
 
@@ -230,7 +230,7 @@ fn a_changed_policy_stops_the_run() {
             plan.next(&ready, &changed, watch(1, targetless)),
             Step::Stop(StopCause::PolicyChanged)
         );
-        assert_eq!(plan.passes(), 0);
+        assert_eq!(plan.passes, 0);
     }
     // After stale refreshes too.
     let mut plan = new_plan();
@@ -299,7 +299,7 @@ fn a_counted_pass_follows_its_retry() {
                         step, expected,
                         "{state:?} grew={grew} changed={addresses_changed} {outcome:?}"
                     );
-                    assert_eq!(plan.passes(), 1);
+                    assert_eq!(plan.passes, 1);
                 }
             }
         }
@@ -354,7 +354,7 @@ fn the_pass_limit_ends_the_passes() {
             Step::Done(Some(pass.retry())),
             "{outcome:?}"
         );
-        assert_eq!(plan.passes(), limits.passes);
+        assert_eq!(plan.passes, limits.passes);
     }
     let defaults = PassLimits::default();
     assert_eq!((defaults.passes, defaults.stale_refreshes), (8, 3));
@@ -387,7 +387,7 @@ fn the_table_never_retries_what_it_must_not() {
                         && settled
                             .as_ref()
                             .is_ok_and(|settled| settled.is_some() || state == BatchState::Pending);
-                    assert_eq!(plan.passes(), usize::from(counted), "{case}");
+                    assert_eq!(plan.passes, usize::from(counted), "{case}");
                     if targetless {
                         assert!(
                             !matches!(step, Step::Pass | Step::Refresh | Step::Wait(_)),

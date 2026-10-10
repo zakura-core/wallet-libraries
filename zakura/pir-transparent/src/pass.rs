@@ -35,9 +35,9 @@ impl PassReport {
         batch::retry(self.state, self.progress)
     }
 
-    /// Whether the pass held its batch for [`TransparentHistoryRecovery::settle_latest`]:
-    /// exactly when it is [`BatchState::Ready`].
-    pub fn settleable(&self) -> bool {
+    /// Whether the pass held its batch for settlement: exactly when it is
+    /// [`BatchState::Ready`].
+    pub(crate) fn settleable(&self) -> bool {
         self.state == BatchState::Ready
     }
 
@@ -80,22 +80,11 @@ pub enum PassError {
 }
 
 impl PassError {
-    /// Classifies `error`, a failure of any operation that sent its requests through a
-    /// [`TransparentPirHttp`], given whether that transport saw an outage
-    /// ([`TransparentPirHttp::outage`]): the rule [`TransparentHistoryRecovery::pass`]
-    /// applies, for wallets to apply to their other operations alike.
-    ///
-    /// Any failure while the transport saw an outage is [`PassError::Outage`], whatever it
-    /// was: the service failed every account alike, so stop visiting accounts until a later
-    /// run. Otherwise the variant of `error` carries over.
-    ///
-    /// - [`discover_active_addresses`](crate::discover_active_addresses): pass
-    ///   `http.outage()` of the `TransparentPirHttp` whose
-    ///   [`split`](TransparentPirHttp::split) supplied its filters and shards.
-    /// - [`Companion::open`](crate::Companion::open): its
-    ///   [`OpenError::Recovery`](crate::OpenError::Recovery) makes no request, so `outage`
-    ///   is false. Its other variants are the companion directory's, not the service's.
-    pub fn classify(error: RecoveryError, outage: bool) -> Self {
+    /// Classifies `error`, a failed pass, given whether its transport saw an outage
+    /// ([`TransparentPirHttp::outage`]): any failure while it did is [`PassError::Outage`],
+    /// whatever it was, since the service failed every account alike. Otherwise the variant
+    /// of `error` carries over.
+    fn classify(error: RecoveryError, outage: bool) -> Self {
         match error {
             _ if outage => PassError::Outage,
             RecoveryError::Invalid(message) => PassError::Invalid(message),
@@ -109,9 +98,9 @@ impl TransparentHistoryRecovery {
     /// One pass over `watch` through the caller's `exchange`, accepting
     /// successful bodies of at most `limit` bytes: the entry point for wallets.
     ///
-    /// Forgets the batch any earlier pass held, then runs [`Self::recover`] over
-    /// a fresh [`TransparentPirHttp`], so an earlier pass's outage does not carry
-    /// over. When the publication set changed ([`RecoveryError::PublicationChanged`]),
+    /// Forgets the batch any earlier pass held, then recovers through a fresh
+    /// [`TransparentPirHttp`], so an earlier pass's outage does not carry over. When
+    /// the publication set changed ([`RecoveryError::PublicationChanged`]),
     /// the companion's store was reset and its catalog kept, and the pass retries
     /// once over the same transports unless `should_stop` returns true. The reset
     /// store is bound to no set, so the retry binds whatever set it finds; a change
@@ -119,11 +108,64 @@ impl TransparentHistoryRecovery {
     ///
     /// A [`BatchState::Ready`] batch is held for [`Self::settle_latest`] (feature
     /// `sqlite`), or for [`Self::take_latest`]. Pending and withdrawn batches have
-    /// nothing to hold. A failure is classified by [`PassError::classify`]: any
-    /// failure while the transports saw an outage is [`PassError::Outage`].
+    /// nothing to hold. Any failure while the transports saw an outage is
+    /// [`PassError::Outage`].
     ///
     /// `should_stop` only declines the retry: cancelling requests in flight is the
     /// exchange's. A caller that stopped discards whatever the pass returned.
+    ///
+    /// `exchange` must reach the origin bound into this companion. Before any filter or private
+    /// retrieval, in order: the watch set's target must be accepted by `chain`; the watch set and
+    /// the companion's retained scripts must be within the script limit; the filters must not use
+    /// the parent filter experiment; the shard map, its shards and the revisions its re-cuts
+    /// declare superseded at or above the watch set's floor counted together, must be within the
+    /// shard limit, its declarations at any height within
+    /// [`MAX_SUPERSEDED`](transparent_filter::wire::MAX_SUPERSEDED), and it must name Zcash
+    /// mainnet's network and genesis block; and the service's init must name
+    /// [`SCHEMA`](crate::SCHEMA). A failed check is [`PassError::Invalid`] without further
+    /// requests. A watch set with no addresses needs nothing retrieved: once its target is
+    /// accepted, the pass sends no request and holds a batch with no commits,
+    /// [`Outcome::Complete`](crate::Outcome::Complete) at the target.
+    ///
+    /// `chain` answers for every block at or above the watch set's floor, its lowest required
+    /// height; below it the pass needs no wallet hashes and exports nothing. When the publication
+    /// ends below the target, the pass syncs to the publication's end if `chain` accepts it and the
+    /// companion holds nothing above it; completing there reports
+    /// [`Outcome::Behind`](crate::Outcome::Behind). Otherwise the pass is
+    /// [`Outcome::Behind`](crate::Outcome::Behind) at once. Commits keep the watch set's context
+    /// either way.
+    ///
+    /// The batch is built from the shard map the sync finished with, which is the first one fetched
+    /// unless the sync refreshed it; no further map is fetched. Its [`BatchState`] says whether the
+    /// commits may be applied.
+    ///
+    /// When the first map's set identity no longer continues the one the companion's store is bound
+    /// to, the pass resets the store, keeps the catalog, and retries as above. If that map ends
+    /// below the store's anchor while `chain` still accepts the anchor, the pass instead keeps the
+    /// store and waits for the map to catch up. That, and any divergence the sync itself finds (a
+    /// map refreshed mid-pass that does not continue the first), is a [`BatchState::Pending`] batch
+    /// with [`Outcome::Behind`](crate::Outcome::Behind) that claims no coverage, keeping companion
+    /// and catalog. A map that rewrites sealed history the store holds without declaring a re-cut,
+    /// where `chain` accepts both the stored range's end block and the end block of the map's
+    /// sealed shard now covering it, is refused by the sync before anything is read, after it
+    /// rolled back any reorg the chain alone shows. The pass reports a [`BatchState::Withdrawn`]
+    /// batch with [`WithdrawnCause::ChangedSealed`](crate::WithdrawnCause::ChangedSealed), claiming
+    /// no coverage, unless the map declares fewer re-cuts (a lower epoch) than one this companion
+    /// recorded: such a map is taken for a replica still serving the publication from before that
+    /// re-cut, and the batch is `Pending` and behind.
+    ///
+    /// A re-cut the map declares keeps the wallet's history: facts the store read under a sealed
+    /// revision the re-cut superseded are exported under that revision's own identity, which the
+    /// wallet holds, and the renumbered shards and tail keep their sources. An undeclared change of
+    /// sealed content never reaches the wallet: the sync refuses it, or the catalog withdraws it,
+    /// either way as [`BatchState::Withdrawn`]. A ready pass over a re-cut map records its re-cut
+    /// epoch once the store holds a fact under a revision any of its re-cuts superseded, or under
+    /// one the map publishes at or above its newest re-cut's first height. The epoch never stops a
+    /// sync: a map at a lower epoch that rewrites nothing the store has finished reading is synced
+    /// normally, and only a refused `SealedRewrite` is classified by the epoch. It tells a lagging
+    /// replica's refused map from a contradiction, so a forged epoch can at most soften a real
+    /// contradiction to `Pending`, and an honest map that rewrites nothing the store holds is never
+    /// held back.
     pub fn pass<A, C, E>(
         &mut self,
         watch: &TransparentAddressWatchSet<A>,
@@ -154,14 +196,9 @@ impl TransparentHistoryRecovery {
         Ok(report)
     }
 
-    /// The ready batch the latest [`Self::pass`] holds, for reading: `None` when
-    /// it held none, when it was taken or settled, or when `A` is not the account
-    /// type of that pass's watch set.
-    pub fn latest<A: 'static>(&self) -> Option<&RecoveryBatch<A>> {
-        self.latest.as_ref()?.downcast_ref()
-    }
-
-    /// Takes the batch [`Self::latest`] reads, for a caller that applies its
+    /// Takes the ready batch the latest [`Self::pass`] holds: `None` when it held
+    /// none, when it was taken or settled, or when `A` is not the account type of
+    /// that pass's watch set. For a caller that discards the batch, or applies its
     /// commits itself and acknowledges with [`Self::acknowledge_applied`]. With
     /// feature `sqlite`, settle it with [`Self::settle_latest`] instead.
     pub fn take_latest<A: 'static>(&mut self) -> Option<RecoveryBatch<A>> {

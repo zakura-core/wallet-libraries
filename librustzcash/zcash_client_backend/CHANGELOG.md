@@ -11,18 +11,19 @@ workspace.
 ## [Unreleased]
 
 ### Added
-- `transparent_ledger::AccountActivity`, `TransactionHistoryDetails::activity` and
-  `TransactionHistoryDetails::funding_step` (`FundingStepEvidence`): the activity rows a
-  transaction shows for the account, with each row's amount and the outputs it counts
-  (`ActivityOutputs`, `OutputRef`), and what TEX funding-step pairing needs. The rules
-  reproduce the classification Vizor applied on top of the history view, unchanged. They read
-  the history evidence and the account's outputs, never display facts; labels, the fee each row
-  shows, and grouping across transactions remain the wallet's.
+- `transparent_ledger::AccountActivity` and `TransactionHistoryDetails::activity`: the activity
+  rows private recovery reconstructs for the account (an inferred payment, a fee-only
+  self-transfer, a hidden funding step, an inferred outgoing value, a provisional debit, or the
+  outputs it links), with each row's amount and the outputs it counts (`ActivityOutputs`,
+  `OutputRef`), or `Unknown` where no rule applies. The rules reproduce Vizor's decisions for
+  privately recovered transactions, unchanged. They read the history evidence and the account's
+  outputs, never display facts; shieldings, pool migrations, labels, the fee each row shows,
+  and grouping across transactions remain the wallet's.
 - `TransparentDetailRead::transaction_receipt`, returning `TransactionReceipt`: the history
-  view, the transparent detail view and their `ReceiptAttribution` (whether the rows account
-  for the movement, a send's recipient as an `Attribution`, the `ReceiptSource` with its
-  `SourcePool`, settled effects, and whether the recipient or a transparent receipt completes
-  the receipt) from one read, reproducing Vizor's receipt rules. Shared or mixed funding blocks
+  view, the transparent detail view and their `ReceiptAttribution` (a send's recipient as an
+  `Attribution`, the `ReceiptSource` with its `SourcePool`, settled effects, and whether the
+  recipient or a transparent receipt completes the receipt) from one read, reproducing Vizor's
+  receipt rules. Shared or mixed funding blocks
   attribution. It is a display-level conclusion, separate from `DetailCompleteness`, and never
   changes the history view. This is a new required trait method.
 - `TransparentLedgerWrite::forget_transparent_ledger`, behind `transparent-inputs`, and its

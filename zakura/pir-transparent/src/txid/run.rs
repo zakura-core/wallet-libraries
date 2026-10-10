@@ -77,7 +77,7 @@ use crate::http::HttpExchange;
 ///                     Err(TxidError::Cancelled) if exiting() => DetailAnswer::Cancelled,
 ///                     // The run's budget, not the service: an attempt, deferred.
 ///                     Err(TxidError::Cancelled) => DetailAnswer::TimedOut,
-///                     _ => DetailAnswer::Display(found),
+///                     _ => DetailAnswer::Display(Box::new(found)),
 ///                 };
 ///                 // `()`: this caller never fetches publicly.
 ///                 if let Some(write) = run.record::<()>(&request, answer) {
@@ -165,7 +165,7 @@ impl MapChecked {
 #[derive(Debug)]
 pub enum DetailAnswer<R> {
     /// What [`TxidDisplayService::lookup`] returned for the request, with the map it used.
-    Display(DisplayLookup),
+    Display(Box<DisplayLookup>),
     /// What a public lookup returned: the transaction, or the outcome to defer it with
     /// (`Absent` for a transaction the server does not have, `Unavailable` for an outage,
     /// `Protocol` for an unusable answer).
@@ -364,25 +364,23 @@ impl<'a> DetailRun<'a> {
             map_sha256,
         };
         match answer {
-            DetailAnswer::Cancelled
-            | DetailAnswer::Display(DisplayLookup {
-                found: Err(TxidError::Cancelled),
-                ..
-            }) => None,
-            DetailAnswer::Display(DisplayLookup {
-                found: Ok(TxidLookup::Found { entry, provenance }),
-                map_sha256,
-            }) => Some(
-                match display_facts(request.txid, &entry, &provenance, request.mined_height) {
-                    Ok(facts) => DetailWrite::Store {
-                        facts: Box::new(facts),
-                        expected_generation: self.policy_generation,
-                    },
-                    Err(_) => defer(TransparentDetailOutcome::Protocol, map_sha256),
-                },
-            ),
-            DetailAnswer::Display(DisplayLookup { found, map_sha256 }) => {
-                deferral(&found).map(|outcome| defer(outcome, map_sha256))
+            DetailAnswer::Cancelled => None,
+            DetailAnswer::Display(lookup) => {
+                let DisplayLookup { found, map_sha256 } = *lookup;
+                match found {
+                    Err(TxidError::Cancelled) => None,
+                    Ok(TxidLookup::Found { entry, provenance }) => Some(
+                        match display_facts(request.txid, &entry, &provenance, request.mined_height)
+                        {
+                            Ok(facts) => DetailWrite::Store {
+                                facts: Box::new(facts),
+                                expected_generation: self.policy_generation,
+                            },
+                            Err(_) => defer(TransparentDetailOutcome::Protocol, map_sha256),
+                        },
+                    ),
+                    found => deferral(&found).map(|outcome| defer(outcome, map_sha256)),
+                }
             }
             DetailAnswer::Public(Ok(transaction)) if self.public_transport() => {
                 Some(DetailWrite::Raw {

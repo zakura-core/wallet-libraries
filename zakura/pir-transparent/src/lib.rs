@@ -77,8 +77,8 @@ pub use txid::{
     DetailAnswer, DetailApplied, DetailRun, DetailStep, DetailWrite, DisplayLookup, MapCheck,
     MapChecked, TxidDisplayService, deferral, display_facts, map_sha256,
 };
-// What a caller implements for `recover`: the chain view (or `WalletChain`), and
-// transports that reach the companion's origin and map service refusals.
+// What a caller implements for `pass` and `discover_active_addresses`: the chain view
+// (or `WalletChain`), and transports that reach the service and map its refusals.
 #[cfg(feature = "wallet")]
 pub use transparent_wallet::ChainView;
 #[cfg(feature = "wallet")]

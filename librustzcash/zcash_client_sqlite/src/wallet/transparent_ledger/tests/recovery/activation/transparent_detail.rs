@@ -2700,7 +2700,6 @@ fn receipt_names_the_only_payee_of_a_private_send() {
     // Before the display facts arrive, the receipt is the history view alone.
     let before = receipt(&st, account, spending);
     assert_eq!(before.attribution.recipient, Attribution::NotEstablished);
-    assert!(!before.attribution.accounts_for_movement);
     assert!(!before.attribution.recipient_completes);
 
     assert_eq!(store(&mut st, facts), TransparentDisplayStore::Stored);
@@ -2710,7 +2709,6 @@ fn receipt_names_the_only_payee_of_a_private_send() {
         Some(TransparentDisplayView::Available(_))
     ));
     assert!(r.attribution.effects_settled);
-    assert!(r.attribution.accounts_for_movement);
     assert_eq!(
         r.attribution.recipient,
         Attribution::Established(display_address(&st, FOREIGN))
@@ -2770,7 +2768,7 @@ fn shared_or_mixed_funding_keeps_receipt_attribution_incomplete() {
         vec![TransparentDisplayOmission::SharedFunding]
     );
     assert_eq!(r.attribution.recipient, Attribution::NotEstablished);
-    assert!(!r.attribution.accounts_for_movement && !r.attribution.recipient_completes);
+    assert!(!r.attribution.recipient_completes);
 
     // With one source script, every input spends the account's script: no other funder.
     facts.multiple_source_scripts = false;
@@ -2800,7 +2798,6 @@ fn receipt_source_and_accounting_of_a_receive() {
             address: Some(display_address(&st, FOREIGN)),
         }
     );
-    assert!(r.attribution.accounts_for_movement);
     // Without a fee the account paid, no recipient is named.
     assert_eq!(r.attribution.recipient, Attribution::NotEstablished);
     // The rows account for a settled transparent receipt from a known source.
@@ -2811,7 +2808,6 @@ fn receipt_source_and_accounting_of_a_receive() {
     more.output_count = 4;
     assert_eq!(store(&mut st, more), TransparentDisplayStore::Stored);
     let r = receipt(&st, account, txid);
-    assert!(!r.attribution.accounts_for_movement);
     assert!(!r.attribution.receive_completes);
 
     // Funded only from the shielded pools, by validated display facts.

@@ -33,9 +33,7 @@ use crate::{
 
 use super::{policy::pending_details, resolve_mode};
 
-use activity::{
-    ActivityEvidence, activity, has_orchard_spend, has_shielding_shape, read_outputs, summarize,
-};
+use activity::{ActivityEvidence, activity, has_orchard_spend, read_outputs, summarize};
 use classify::{
     account_fee, aggregate_payment, classification, inferred_outgoing, inferred_payment,
     is_private_shielding, whole_fee,
@@ -250,18 +248,14 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
                 .all(|e| e.completeness == EffectCompleteness::Complete),
         };
 
-        // What the transaction shows in the account's activity list.
+        // The activity rows private recovery reconstructs.
         let activity_evidence = ActivityEvidence {
-            shielding_shape: has_shielding_shape(conn, account_id, tx_facts.id)?,
             orchard_spend: has_orchard_spend(conn, tx_facts.id)?,
             mined: tx_facts.mined_height.is_some(),
             spent,
-            received,
             net: account_movement.net(),
-            details_complete: payment_details == DetailCompleteness::Complete,
             provisional: classification == HistoryClassification::Provisional || !settled,
             effects_settled: settled,
-            classification,
             fee,
             whole_fee: whole_transaction_fee
                 .filter(|_| spent > 0)
@@ -274,7 +268,6 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         let outputs = read_outputs(conn, account, account_id, tx_facts.id)?;
         let summary = summarize(&activity_evidence, &outputs)?;
         let activity = activity(&activity_evidence, &summary)?;
-        let funding_step = summary.funding_step()?;
 
         entries.push(TransactionHistoryDetails {
             has_transparent_outputs: tx_facts.has_transparent_outputs,
@@ -290,7 +283,6 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             fee,
             classification,
             activity,
-            funding_step,
             pending_private_details: pending_details(conn, mode, Some(tx_facts.id))?,
         });
     }

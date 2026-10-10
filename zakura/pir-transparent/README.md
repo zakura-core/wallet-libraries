@@ -21,7 +21,7 @@ private; callers use the types and traits re-exported by the crate.
 | Module | What it abstracts | Boundary it presents |
 | --- | --- | --- |
 | [`catalog`](src/catalog.rs) | Publication identity and the durable history of revisions seen or exported | Determines whether publication evidence can be handed to the wallet consistently |
-| [`transparent_history_recovery`](src/transparent_history_recovery.rs) | One account's bounded retrieval and conversion into wallet evidence | `TransparentHistoryRecovery::recover` returns an opaque `RecoveryBatch` |
+| [`transparent_history_recovery`](src/transparent_history_recovery.rs) | One account's bounded retrieval and conversion into wallet evidence | `TransparentHistoryRecovery::open`; each pass builds an opaque `RecoveryBatch` |
 | [`pass`](src/pass.rs) | One pass as a wallet runs it: fresh transports, a publication-change retry, and the ready batch held for settlement | `TransparentHistoryRecovery::pass` returns a `PassReport` or a `PassError` |
 | [`plan`](src/plan.rs) | Settling the held batch, and what an account does after each pass | `settle_latest`, and `PassPlan::next` returning a `Step` |
 | [`txid`](src/txid.rs) | Private display lookup for an already known transaction | `TxidDisplayService` returns lookup results; `display_facts` converts found entries to wallet display facts |
@@ -78,13 +78,14 @@ and batch construction behind `TransparentHistoryRecovery`.
 Address derivation stays with the caller. The API accepts a watch set and
 recovers its history during both wallet restoration and ongoing synchronization.
 
-The caller supplies a `TransparentAddressWatchSet`, a `ChainView`, and the two
-transport interfaces, `FilterSource` and `ShardTransport`. The watch set carries
+The caller supplies a `TransparentAddressWatchSet`, a `ChainView`, and an
+`HttpExchange`, over which a pass builds the two transport interfaces,
+`FilterSource` and `ShardTransport`. The watch set carries
 owned addresses, required history heights, pending work, and the wallet context
 under which results will be applied. `TransparentHistoryRecoveryConfig` supplies
 stable bindings and finite script, shard, event-export, query, and private-byte bounds.
 
-`recover` retrieves through the reference client into the companion, then
+A pass retrieves through the reference client into the companion, then
 normalizes stored receives, spends, coverage, and page work into
 `TransparentLedgerCommit` values. It consults the catalog before releasing them.
 The wallet writer validates those values again when they are applied; retrieval
@@ -261,7 +262,7 @@ while let Step::Pass | Step::Refresh | Step::Wait(_) = step {
    uses. Build `WalletChain` or another independent `ChainView` through its
    target; the required history floor is the account birthday. Open the
    account's companion once.
-2. `pass` runs `recover` over a fresh `TransparentPirHttp` on the caller's
+2. `pass` recovers through a fresh `TransparentPirHttp` on the caller's
    exchange, so an outage never carries over. Preflight checks target
    acceptance, script limits, refusal of selective parent filters, publication
    bounds, mainnet identity, and schema. An accepted empty watch set completes
@@ -276,14 +277,11 @@ while let Step::Pass | Step::Refresh | Step::Wait(_) = step {
    companion unless `should_stop` returns true. It returns a `PassReport`
    (state, progress, `retry()`, commit and retirement counts, whether the
    publication changed), which names nothing from the wallet's history, and
-   holds a ready batch inside the companion: `latest` reads it, and
-   `take_latest` takes it for a caller that settles without `sqlite`. A
-   `PassError` names only its variant: `Outage` for any failure while the
-   transports saw one, otherwise `Invalid`, `Failure` or, when the change was
-   found again or while stopping, `PublicationChanged`. `PassError::classify`
-   is that rule, for a wallet to classify `discover_active_addresses` failures
-   (with its `TransparentPirHttp`'s `outage()`) and `OpenError::Recovery` from
-   `Companion::open` (which makes no request) the same way.
+   holds a ready batch inside the companion: `take_latest` takes it for a
+   caller that discards it or settles without `sqlite`. A `PassError` names
+   only its variant: `Outage` for any failure while the transports saw one,
+   otherwise `Invalid`, `Failure` or, when the change was found again or while
+   stopping, `PublicationChanged`.
 5. Choose observed or trusted settlement explicitly. With `sqlite`,
    `settle_latest` takes the held batch and settles it through
    `apply_and_acknowledge_gated`, returning `Ok(None)` when the pass held
@@ -310,9 +308,9 @@ while let Step::Pass | Step::Refresh | Step::Wait(_) = step {
 
 The caller keeps what is policy: its time budgets and the cap on waits, how
 long a hold lasts, the trust it states, its write gate and threads, cancellation
-of requests in flight, and activation after `Done`. `recover`,
+of requests in flight, and activation after `Done`. `take_latest`,
 `apply_and_acknowledge` and `acknowledge_applied` remain for callers that bring
-their own transports or wallet writer.
+their own wallet writer.
 
 Settlement writes each commit in its own wallet transaction. An outer SQL
 transaction is refused, so an integrity rejection's recovery suspension cannot be

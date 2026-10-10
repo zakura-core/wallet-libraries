@@ -179,8 +179,8 @@ impl<E: HttpExchange> TransparentPirHttp<E> {
         }
     }
 
-    /// The filter source and shard transport a pass hands
-    /// `TransparentHistoryRecovery::recover`.
+    /// The filter source and shard transport over these routes, as
+    /// [`discover_active_addresses`](crate::discover_active_addresses) takes them.
     pub fn split(&mut self) -> (PirFilters<'_, E>, PirShards<'_, E>) {
         let http = &*self;
         (PirFilters { http }, PirShards { http })

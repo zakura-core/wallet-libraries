@@ -40,14 +40,12 @@
   since, even private and back to public, fails with
   `ForgetError::PolicyChanged` and forgets nothing: a companion created
   meanwhile would otherwise outlive the facts it records.
-- `PassError::classify` is the outage rule `pass` applies, public so wallets
-  classify `discover_active_addresses` and `Companion::open` failures alike.
 - One recovery pass driver, so wallets stop writing their own loop.
-  `TransparentHistoryRecovery::pass` runs `recover` over a fresh `TransparentPirHttp` on
+  `TransparentHistoryRecovery::pass` recovers through a fresh `TransparentPirHttp` on
   the caller's `HttpExchange`, retries once after
   `RecoveryError::PublicationChanged` unless the caller is stopping, maps any
   failure during an outage to `PassError::Outage`, and returns a `PassReport`
-  while holding a `Ready` batch inside the companion (`latest`, `take_latest`).
+  while holding a `Ready` batch inside the companion (`take_latest`).
   With feature `sqlite`, `settle_latest` settles the held batch through
   `apply_and_acknowledge_gated`, and `PassPlan` is the pure decision table that
   turns a pass, its settlement and the re-read watch set into the next `Step`:
@@ -133,7 +131,8 @@
   their re-check time has passed, yields one `DetailStep::RefreshMap`, whose `MapCheck` is
   recorded as started before the fetch, so failed and abandoned checks are bounded too;
   `relist` lists again only when the fetched map differs and the policy is unchanged. `record`
-  turns a lookup's `DetailAnswer` into a `DetailWrite`: display facts to store under the
+  turns a lookup's `DetailAnswer` (a boxed `DisplayLookup`, a public result, or a stopped
+  lookup) into a `DetailWrite`: display facts to store under the
   listing's generation, a deferral with the map the lookup used, or a public transaction
   handed back only under public transport. A cancelled lookup writes nothing.
   `DetailWrite::apply` performs a store or deferral and returns the public transaction to the
@@ -244,8 +243,9 @@
 - Stored facts are matched to commits by revision digest, and exported rows the
   map no longer publishes are classified by source and start height instead of
   shard id.
-- `ReferenceRecovery::recover` takes the caller's `FilterSource` and
-  `ShardTransport` for each pass. Before any retrieval it checks the target,
+- A pass retrieves through a `FilterSource` and a `ShardTransport`, which
+  `pass` builds over the caller's `HttpExchange`; the single attempt it makes is
+  internal. Before any retrieval it checks the target,
   the script limits, that the filter source does not use parent filters, the
   shard limit, and that the service's init names `SCHEMA`.
 - `RecoveryConfig::origin` replaces `filter_origin` and `shard_origin`. It is
@@ -261,7 +261,7 @@
   source.
 - The wallet-pir crates move to `648264bb4801ae8faf7a61f4638ea049edb167cf`,
   whose client accepts maps and manifests that carry txid display fields.
-- `recover` refuses, before the service's init, a shard map whose network or
+- A pass refuses, before the service's init, a shard map whose network or
   genesis block is not Zcash mainnet's.
 - A pass needs the chain view only from the watch set's floor, its lowest
   required height. Shards ending below it are neither exported nor cataloged,
@@ -312,7 +312,7 @@
   with a boolean or bypass the SQLite integration's apply/acknowledge ordering.
 - `transparent-shard-v10` support.
 - `RecoveryConfig::{schema, timeout, response_bytes}`, the `observer`
-  argument of `recover`, and the adapter's fixed HTTP user agent.
+  argument of a pass, and the adapter's fixed HTTP user agent.
 - `reqwest` from the normal dependency graph. Only the `recover-activity`
   example builds the reference HTTP transports.
 - The companion's `lineage` binding key, its `pir_bridge_revisions` table and

@@ -153,78 +153,12 @@ impl TransparentHistoryRecovery {
         })
     }
 
-    /// Recover a finite pass through the caller's transports and independently
-    /// accepted chain, returning its batch to the caller.
-    ///
-    /// Wallets drive passes with [`Self::pass`], which builds the transports,
-    /// retries a publication change, and holds the batch for its settlement;
-    /// this is the single attempt it makes, for callers that bring their own
-    /// [`FilterSource`] and [`ShardTransport`]. Either way, a new pass makes the
-    /// batch of every earlier one unacknowledgeable.
-    ///
-    /// `filters` and `transport` must reach the origin bound into this companion.
-    /// Before any filter or private retrieval, in order: the watch set's target
-    /// must be accepted by `chain`; the watch set and the companion's retained
-    /// scripts must be within the script limit; `filters` must not use the parent
-    /// filter experiment; the shard map, its shards and the revisions its re-cuts
-    /// declare superseded at or above the watch set's floor counted together,
-    /// must be within the shard limit, its declarations at any height within
-    /// [`MAX_SUPERSEDED`], and it must name Zcash mainnet's network and
-    /// genesis block; and the service's init must name
-    /// [`SCHEMA`]. A failed check returns [`RecoveryError::Invalid`] without
-    /// further requests. A watch set with no addresses needs nothing retrieved:
-    /// once its target is accepted, the pass sends no request and returns a batch
-    /// with no commits, [`Outcome::Complete`] at the target.
-    ///
-    /// `chain` answers for every block at or above the watch set's floor, its
-    /// lowest required height; below it the pass needs no wallet hashes and
-    /// exports nothing. When the publication ends below the target, the pass
-    /// syncs to the publication's end if `chain` accepts it and the companion
-    /// holds nothing above it; completing there reports [`Outcome::Behind`].
-    /// Otherwise the pass is [`Outcome::Behind`] at once. Commits keep the watch
-    /// set's context either way.
-    ///
-    /// The batch is built from the shard map the sync finished with, which is the
-    /// first one fetched unless the sync refreshed it; no further map is fetched.
-    /// Its [`BatchState`] says whether the commits may be applied.
-    ///
-    /// When the first map's set identity no longer continues the one the
-    /// companion's store is bound to, the pass resets the store, keeps the
-    /// catalog, and fails with [`RecoveryError::PublicationChanged`] before the
-    /// sync; retry once with the same companion, as [`Self::pass`] does. If that
-    /// map ends below the store's anchor while `chain` still accepts the anchor,
-    /// the pass instead keeps the store and waits for the map to catch up. That,
-    /// and any
-    /// divergence the sync itself finds (a map refreshed mid-pass that does not
-    /// continue the first), is a [`BatchState::Pending`] batch with
-    /// [`Outcome::Behind`] that claims no coverage, keeping companion and
-    /// catalog. A map that rewrites sealed history the store holds without
-    /// declaring a re-cut, where `chain` accepts both the stored range's end
-    /// block and the end block of the map's sealed shard now covering it, is
-    /// refused by the sync before anything is read, after it rolled back any
-    /// reorg the chain alone shows. The pass returns a [`BatchState::Withdrawn`]
-    /// batch with [`WithdrawnCause::ChangedSealed`], claiming no coverage,
-    /// unless the map declares fewer re-cuts (a lower epoch) than one this
-    /// companion recorded: such a map is taken for a replica still serving the
-    /// publication from before that re-cut, and the batch is `Pending` and
-    /// behind.
-    ///
-    /// A re-cut the map declares keeps the wallet's history: facts the store
-    /// read under a sealed revision the re-cut superseded are exported under
-    /// that revision's own identity, which the wallet holds, and the renumbered
-    /// shards and tail keep their sources. An undeclared change of sealed
-    /// content never reaches the wallet: the sync refuses it, or the catalog
-    /// withdraws it, either way as [`BatchState::Withdrawn`]. A ready pass over
-    /// a re-cut map records its re-cut epoch once the store holds a fact under
-    /// a revision any of its re-cuts superseded, or under one the map publishes
-    /// at or above its newest re-cut's first height. The epoch never stops a
-    /// sync: a map at a lower epoch that rewrites nothing the store has
-    /// finished reading is synced normally, and only a refused `SealedRewrite`
-    /// is classified by the epoch. It tells a lagging replica's refused map
-    /// from a contradiction, so a forged epoch can at most soften a real
-    /// contradiction to `Pending`, and an honest map that rewrites nothing the
-    /// store holds is never held back.
-    pub fn recover<A, C, F, T>(
+    /// One attempt of [`Self::pass`] through `filters` and `transport`, returning its
+    /// batch rather than holding it. A new attempt makes the batch of every earlier one
+    /// unacknowledgeable. When the publication set changed it resets the store, keeps the
+    /// catalog and fails with [`RecoveryError::PublicationChanged`], which `pass` retries
+    /// once.
+    pub(crate) fn recover<A, C, F, T>(
         &mut self,
         watch: &TransparentAddressWatchSet<A>,
         chain: &C,

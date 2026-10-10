@@ -1,13 +1,13 @@
-//! What a transaction shows in the account's activity list: the [`AccountActivity`] rules,
-//! from the entry's evidence and the account's outputs in the transaction.
+//! The activity rows private recovery reconstructs: the [`AccountActivity`] rules, from the
+//! entry's evidence and the account's outputs in the transaction.
 //!
-//! These rules reproduce the activity classification Vizor applied on top of this history,
-//! decision for decision; changing what they establish belongs in its own change.
+//! These rules reproduce the decisions Vizor took for privately recovered transactions on top
+//! of this history; changing what they establish belongs in its own change. Shieldings, pool
+//! migrations and transactions no rule covers stay the wallet's.
 
 use rusqlite::named_params;
 use zcash_client_backend::data_api::transparent_ledger::{
-    AccountActivity, ActivityOutputs, FeeState, FundingStepEvidence, HistoryClassification,
-    OutputRef,
+    AccountActivity, ActivityOutputs, FeeState, OutputRef,
 };
 use zcash_protocol::value::Zatoshis;
 
@@ -47,10 +47,6 @@ impl ActivityOutput {
             pool: parse_pool_code(self.pool)?,
             index: self.index,
         })
-    }
-
-    fn is_shielded(&self) -> bool {
-        matches!(self.pool, SAPLING_POOL | ORCHARD_POOL | IRONWOOD_POOL)
     }
 
     fn is_ironwood(&self) -> bool {
@@ -133,41 +129,6 @@ pub(super) fn read_outputs(
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// Whether the account's recorded effects meet the shielding shape of `v_transactions`: it
-/// spent outputs, all transparent; it received outputs, none transparent; and it recorded no
-/// sent output that is not received as change.
-pub(super) fn has_shielding_shape(
-    conn: &rusqlite::Connection,
-    account_id: i64,
-    transaction_id: i64,
-) -> Result<bool, SqliteClientError> {
-    Ok(conn.query_row(
-        "SELECT
-             EXISTS (SELECT 1 FROM v_received_outputs ro
-                     WHERE ro.account_id = :account_id AND ro.transaction_id = :transaction_id)
-             AND NOT EXISTS (SELECT 1 FROM v_received_outputs ro
-                             WHERE ro.account_id = :account_id
-                             AND ro.transaction_id = :transaction_id AND ro.pool = 0)
-             AND EXISTS (SELECT 1 FROM v_received_outputs ro
-                         JOIN v_received_output_spends ros
-                              ON ros.pool = ro.pool AND ros.received_output_id = ro.id_within_pool_table
-                         WHERE ro.account_id = :account_id AND ros.transaction_id = :transaction_id)
-             AND NOT EXISTS (SELECT 1 FROM v_received_outputs ro
-                             JOIN v_received_output_spends ros
-                                  ON ros.pool = ro.pool
-                                  AND ros.received_output_id = ro.id_within_pool_table
-                             WHERE ro.account_id = :account_id
-                             AND ros.transaction_id = :transaction_id AND ro.pool != 0)
-             AND NOT EXISTS (SELECT 1 FROM sent_notes sn
-                             LEFT JOIN v_received_outputs ro ON ro.sent_note_id = sn.id
-                             WHERE sn.from_account_id = :account_id
-                             AND sn.transaction_id = :transaction_id
-                             AND COALESCE(ro.is_change, 0) = 0)",
-        named_params![":account_id": account_id, ":transaction_id": transaction_id],
-        |row| row.get(0),
-    )?)
-}
-
 /// Whether some wallet account spent a version-2 Orchard note in the transaction.
 pub(super) fn has_orchard_spend(
     conn: &rusqlite::Connection,
@@ -187,23 +148,18 @@ pub(super) fn has_orchard_spend(
 /// The entry's facts the rules read.
 #[derive(Clone, Debug)]
 pub(super) struct ActivityEvidence {
-    /// The account's recorded effects meet the shielding shape ([`has_shielding_shape`]).
-    pub(super) shielding_shape: bool,
-    /// Some wallet account spent a version-2 Orchard note in it.
+    /// Some wallet account spent a version-2 Orchard note in it: the account's own Ironwood
+    /// outputs are then an internal move, not activity rows.
     pub(super) orchard_spend: bool,
     /// The transaction is mined.
     pub(super) mined: bool,
-    /// The account's recorded spent and received values, and their difference.
+    /// The account's recorded spent value, and its net movement.
     pub(super) spent: u64,
-    pub(super) received: u64,
     pub(super) net: i128,
-    /// The payment details are complete.
-    pub(super) details_complete: bool,
     /// The classification is provisional or an effect is not settled.
     pub(super) provisional: bool,
     /// Every effect is settled.
     pub(super) effects_settled: bool,
-    pub(super) classification: HistoryClassification,
     pub(super) fee: FeeState,
     /// The exact whole fee, when the account spent in the transaction.
     pub(super) whole_fee: Option<u64>,
@@ -214,15 +170,6 @@ pub(super) struct ActivityEvidence {
 }
 
 impl ActivityEvidence {
-    /// Only complete, final payment details show that the account moved its transparent funds
-    /// into its shielded pools and paid no one.
-    fn is_shielding(&self) -> bool {
-        self.shielding_shape
-            && self.details_complete
-            && !self.provisional
-            && self.classification != HistoryClassification::Provisional
-    }
-
     /// The fee subtracted from a movement: the attributed fee, or nothing.
     fn known_fee_or_zero(&self) -> u64 {
         match self.fee {
@@ -289,11 +236,6 @@ pub(super) struct Summary {
     internal_transparent: Group,
     /// An owned transparent receiver may later prove to be change rather than a receipt.
     pub(super) unknown_transparent_scope: bool,
-    shielded: Group,
-    internal_ironwood_transition: Group,
-    own_transparent: u64,
-    has_own_transparent: bool,
-    external_transparent_send: bool,
 }
 
 /// Sorts the account's outputs into their activity roles.
@@ -306,7 +248,6 @@ pub(super) fn summarize(
     // is; without another recipient it is the whole payment and shows as a send and a receive.
     let pays_others = outputs.iter().any(|o| o.from_own && !o.to_own);
     let recovered_self_transfer = ev.recovered_self_transfer();
-    let is_shielding = ev.is_shielding();
 
     for output in outputs {
         let (from_own, to_own) = (output.from_own, output.to_own);
@@ -319,21 +260,9 @@ pub(super) fn summarize(
             summary.unknown_transparent_scope = true;
         }
 
-        if is_shielding {
-            if to_own && output.is_shielded() {
-                summary.shielded.add(output)?;
-            }
-            continue;
-        }
-
+        // An Orchard-to-Ironwood move of the account's own funds.
         if from_own && to_own && ev.orchard_spend && output.is_ironwood() {
-            summary.internal_ironwood_transition.add(output)?;
             continue;
-        }
-
-        if output.pool == TRANSPARENT_POOL && from_own && to_own {
-            summary.has_own_transparent = true;
-            summary.own_transparent = summary.own_transparent.saturating_add(output.value);
         }
 
         if output.pool == TRANSPARENT_POOL
@@ -354,9 +283,6 @@ pub(super) fn summarize(
 
         if visible_sent {
             summary.sent.add(output)?;
-            if output.pool == TRANSPARENT_POOL && !to_own {
-                summary.external_transparent_send = true;
-            }
         }
         if visible_received {
             summary.received.add(output)?;
@@ -368,52 +294,11 @@ pub(super) fn summarize(
     Ok(summary)
 }
 
-impl Summary {
-    /// What the transaction contributes to funding-step grouping.
-    pub(super) fn funding_step(&self) -> Result<FundingStepEvidence, SqliteClientError> {
-        Ok(FundingStepEvidence {
-            own_transparent_outputs: if self.has_own_transparent {
-                Some(zatoshis(self.own_transparent)?)
-            } else {
-                None
-            },
-            external_transparent_send: self.external_transparent_send,
-        })
-    }
-}
-
 /// The activity of a transaction, in the order of [`AccountActivity`]'s variants.
 pub(super) fn activity(
     ev: &ActivityEvidence,
     summary: &Summary,
 ) -> Result<AccountActivity, SqliteClientError> {
-    if ev.is_shielding() {
-        let amount = if summary.shielded.amount > 0 {
-            summary.shielded.amount
-        } else {
-            ev.received
-        };
-        return Ok(AccountActivity::Shielding {
-            amount: zatoshis(amount)?,
-            outputs: summary.shielded.outputs.clone(),
-        });
-    }
-
-    // Owned Ironwood outputs do not prove an internal move when a positive outgoing value was
-    // reconciled: they may be change from an Orchard-funded payment.
-    if !ev.inferred_outgoing.is_some_and(|amount| amount > 0)
-        && ev.orchard_spend
-        && ev.spent > 0
-        && summary.internal_ironwood_transition.amount > 0
-        && summary.sent.amount == 0
-        && summary.received.amount == 0
-    {
-        return Ok(AccountActivity::PoolMigration {
-            amount: zatoshis(summary.internal_ironwood_transition.amount)?,
-            outputs: summary.internal_ironwood_transition.outputs.clone(),
-        });
-    }
-
     // The exact payment of a transparent-only debit the account fully funded, without its
     // recipients: no output it paid is visible, so the outputs it knows of are change.
     if let Some(payment) = ev.inferred_payment {
@@ -488,23 +373,6 @@ pub(super) fn activity(
     if sent.is_some() || received.is_some() {
         return Ok(AccountActivity::Outputs { sent, received });
     }
-
-    if !ev.mined && ev.net < 0 && ev.spent > 0 {
-        let amount = ev.debit().saturating_sub(ev.known_fee_or_zero());
-        if amount > 0 {
-            return Ok(AccountActivity::MovementDebit {
-                amount: zatoshis(amount)?,
-            });
-        }
-    }
-    if ev.spent > 0 && ev.received > 0 {
-        return Ok(AccountActivity::ChangeOnly);
-    }
-    if ev.net > 0 {
-        return Ok(AccountActivity::MovementCredit {
-            amount: zatoshis(u64::try_from(ev.net).unwrap_or(u64::MAX))?,
-        });
-    }
     Ok(AccountActivity::Unknown)
 }
 
@@ -519,7 +387,7 @@ mod tests {
     //! the facts Vizor's fixture gave and expects the rows it expected.
 
     use zcash_client_backend::data_api::transparent_ledger::{
-        AccountActivity, ActivityOutputs, FeeState, HistoryClassification, OutputRef,
+        AccountActivity, ActivityOutputs, FeeState, OutputRef,
     };
     use zcash_protocol::{PoolType, value::Zatoshis};
 
@@ -540,16 +408,12 @@ mod tests {
     /// with a 20 000 fee, in which a version-2 Orchard note is spent.
     fn base() -> ActivityEvidence {
         ActivityEvidence {
-            shielding_shape: false,
             orchard_spend: true,
             mined: true,
             spent: 625_000_000,
-            received: 0,
             net: -625_000_000,
-            details_complete: true,
             provisional: false,
             effects_settled: true,
-            classification: HistoryClassification::Reconstructed,
             fee: known(20_000),
             whole_fee: None,
             inferred_payment: None,
@@ -563,12 +427,9 @@ mod tests {
         ActivityEvidence {
             orchard_spend: false,
             spent: 100_000_000,
-            received: 30_000_000,
             net: -70_000_000,
-            details_complete: false,
             provisional: true,
             effects_settled: false,
-            classification: HistoryClassification::Provisional,
             fee: FeeState::Unknown,
             ..base()
         }
@@ -630,23 +491,15 @@ mod tests {
     }
 
     #[test]
-    fn classify_internal_ironwood_transition_as_migration() {
+    fn an_internal_ironwood_move_has_no_activity_rows() {
+        // The wallet shows the move; its own Ironwood outputs are no recovered row.
         let outputs = [own(IRONWOOD_POOL, 0, 624_980_000, None)];
         for outgoing in [None, Some(0)] {
             let ev = ActivityEvidence {
                 inferred_outgoing: outgoing,
                 ..base()
             };
-            assert_eq!(
-                classify(&ev, &outputs),
-                AccountActivity::PoolMigration {
-                    amount: zat(624_980_000),
-                    outputs: vec![OutputRef {
-                        pool: PoolType::IRONWOOD,
-                        index: 0,
-                    }],
-                }
-            );
+            assert_eq!(classify(&ev, &outputs), AccountActivity::Unknown);
         }
         // An Ironwood note kept in the Orchard table is the same move; an unmined one too.
         let legacy = ActivityOutput {
@@ -657,10 +510,7 @@ mod tests {
             mined: false,
             ..base()
         };
-        assert!(matches!(
-            classify(&ev, &[legacy]),
-            AccountActivity::PoolMigration { .. }
-        ));
+        assert_eq!(classify(&ev, &[legacy]), AccountActivity::Unknown);
         // Without the sent-note record the account's Ironwood output is a receipt.
         assert!(matches!(
             classify(&base(), &[received(IRONWOOD_POOL, 0, 624_980_000, None)]),
@@ -674,12 +524,9 @@ mod tests {
             for owned_receipt in [false, true] {
                 let ev = ActivityEvidence {
                     spent: 1_000_000,
-                    received: 735_000 + if owned_receipt { 250_000 } else { 0 },
                     net: if owned_receipt { -15_000 } else { -265_000 },
-                    details_complete: false,
                     provisional: true,
                     effects_settled: false,
-                    classification: HistoryClassification::Provisional,
                     fee: FeeState::Unattributed { whole: zat(15_000) },
                     whole_fee: Some(15_000),
                     inferred_outgoing: Some(250_000),
@@ -710,8 +557,6 @@ mod tests {
                 let public = ActivityEvidence {
                     inferred_outgoing: None,
                     provisional: false,
-                    details_complete: true,
-                    classification: HistoryClassification::Reconstructed,
                     fee: known(15_000),
                     ..ev
                 };
@@ -737,7 +582,6 @@ mod tests {
         for owned_receipt in [false, true] {
             let ev = ActivityEvidence {
                 spent: 107_485_000,
-                received: 107_220_000 + if owned_receipt { 250_000 } else { 0 },
                 net: if owned_receipt { -15_000 } else { -265_000 },
                 whole_fee: Some(15_000),
                 inferred_outgoing: Some(250_000),
@@ -768,7 +612,6 @@ mod tests {
     fn compact_funding(amount: u64) -> ActivityEvidence {
         ActivityEvidence {
             spent: 1_000_000 + amount + 15_000,
-            received: 1_000_000 + amount,
             net: -15_000,
             whole_fee: Some(15_000),
             inferred_outgoing: Some(amount),
@@ -879,7 +722,6 @@ mod tests {
     fn recovered_activity_keeps_unrelated_incoming_on_internal_receivers() {
         let ev = ActivityEvidence {
             spent: 0,
-            received: 20_000,
             net: 20_000,
             ..provisional_debit()
         };
@@ -898,9 +740,7 @@ mod tests {
         ActivityEvidence {
             orchard_spend: false,
             spent: 110_000,
-            received: 100_000,
             net: -10_000,
-            details_complete: false,
             fee: known(10_000),
             whole_fee: Some(10_000),
             inferred_payment: Some(0),
@@ -984,7 +824,6 @@ mod tests {
     #[test]
     fn a_recovered_send_with_change_is_its_exact_payment_not_a_receive() {
         let ev = ActivityEvidence {
-            details_complete: false,
             provisional: false,
             effects_settled: true,
             fee: known(10_000),
@@ -1045,8 +884,6 @@ mod tests {
         // A zero-value send keeps its sent row.
         let ev = ActivityEvidence {
             net: -10_000,
-            received: 90_000,
-            details_complete: true,
             fee: known(10_000),
             ..provisional_debit()
         };
@@ -1062,10 +899,8 @@ mod tests {
     #[test]
     fn a_complete_debit_with_change_keeps_its_classification() {
         let ev = ActivityEvidence {
-            details_complete: true,
             provisional: false,
             effects_settled: true,
-            classification: HistoryClassification::Reconstructed,
             fee: known(10_000),
             ..provisional_debit()
         };
@@ -1078,110 +913,25 @@ mod tests {
         );
     }
 
-    /// Vizor's net-reconstructed shielding: the account's 1 ZEC of transparent inputs became
-    /// its Ironwood receipt and the 10 000 whole fee.
-    fn net_shielding() -> ActivityEvidence {
-        ActivityEvidence {
-            shielding_shape: true,
-            orchard_spend: false,
-            spent: 100_000_000,
-            received: 99_990_000,
-            net: -10_000,
-            details_complete: true,
-            provisional: false,
-            effects_settled: true,
-            classification: HistoryClassification::NetReconstructed,
-            fee: FeeState::Unattributed { whole: zat(10_000) },
-            whole_fee: Some(10_000),
-            ..base()
-        }
-    }
-
     #[test]
-    fn only_complete_final_histories_justify_a_shielding() {
-        let receipt = [received(IRONWOOD_POOL, 0, 99_990_000, None)];
-        assert_eq!(
-            classify(&net_shielding(), &receipt),
-            AccountActivity::Shielding {
-                amount: zat(99_990_000),
-                outputs: vec![OutputRef {
-                    pool: PoolType::IRONWOOD,
-                    index: 0,
-                }],
-            }
-        );
-        // Without shielded receipts the amount is everything received.
-        assert_eq!(
-            classify(&net_shielding(), &[]),
-            AccountActivity::Shielding {
-                amount: zat(99_990_000),
-                outputs: vec![],
-            }
-        );
-        // Incomplete details, a provisional history, or no shielding shape justify none.
-        for ev in [
-            ActivityEvidence {
-                details_complete: false,
-                ..net_shielding()
-            },
-            ActivityEvidence {
-                classification: HistoryClassification::Provisional,
-                ..net_shielding()
-            },
-            ActivityEvidence {
-                provisional: true,
-                ..net_shielding()
-            },
-            ActivityEvidence {
-                shielding_shape: false,
-                ..net_shielding()
-            },
+    fn transactions_no_rule_covers_are_the_wallets() {
+        // Without visible outputs or recovered evidence a settled transaction has no rows to
+        // reconstruct: an unmined debit, a mined debit with change only, and a credit.
+        for (mined, spent, net) in [
+            (false, 100_000, -60_000),
+            (true, 100_000, -60_000),
+            (true, 0, 5_000),
+            (true, 0, 0),
         ] {
-            assert!(!matches!(
-                classify(&ev, &receipt),
-                AccountActivity::Shielding { .. }
-            ));
+            let ev = ActivityEvidence {
+                mined,
+                spent,
+                net,
+                fee: known(10_000),
+                ..base()
+            };
+            assert_eq!(classify(&ev, &[]), AccountActivity::Unknown);
         }
-    }
-
-    #[test]
-    fn fallbacks_without_visible_outputs() {
-        // An unmined debit is its movement less an attributed fee.
-        let ev = ActivityEvidence {
-            mined: false,
-            fee: known(10_000),
-            net: -60_000,
-            spent: 100_000,
-            received: 40_000,
-            ..base()
-        };
-        assert_eq!(
-            classify(&ev, &[]),
-            AccountActivity::MovementDebit {
-                amount: zat(50_000)
-            }
-        );
-        // A mined one with change only has no row.
-        let ev = ActivityEvidence { mined: true, ..ev };
-        assert_eq!(classify(&ev, &[]), AccountActivity::ChangeOnly);
-        // A credit with no visible output is its movement; nothing else is unknown.
-        let ev = ActivityEvidence {
-            spent: 0,
-            received: 5_000,
-            net: 5_000,
-            ..base()
-        };
-        assert_eq!(
-            classify(&ev, &[]),
-            AccountActivity::MovementCredit { amount: zat(5_000) }
-        );
-        let ev = ActivityEvidence {
-            spent: 0,
-            received: 0,
-            net: 0,
-            ..base()
-        };
-        assert_eq!(classify(&ev, &[]), AccountActivity::Unknown);
     }
 
     #[test]
@@ -1190,7 +940,6 @@ mod tests {
         // Spending without a sent row: the zero-value output may be unlinked change.
         let ev = ActivityEvidence {
             spent: 10_000,
-            received: 0,
             net: -10_000,
             mined: true,
             ..base()
@@ -1199,7 +948,6 @@ mod tests {
         // A receipt-only transaction keeps its memo-only receipt.
         let ev = ActivityEvidence {
             spent: 0,
-            received: 0,
             net: 0,
             ..base()
         };

@@ -101,8 +101,9 @@ pub(super) fn attribution<P: consensus::Parameters>(
         } => &rows.outputs,
         _ => &[],
     };
+    let source_known = source.pool == SourcePool::Shielded || source.address.is_some();
     let receive_completes = effects_settled
-        && source.is_known()
+        && source_known
         && !received_row.is_empty()
         && received_row
             .iter()
@@ -111,7 +112,6 @@ pub(super) fn attribution<P: consensus::Parameters>(
 
     ReceiptAttribution {
         effects_settled,
-        accounts_for_movement,
         recipient,
         recipient_completes,
         source,
@@ -284,12 +284,11 @@ mod tests {
     use transparent::address::TransparentAddress;
     use zcash_client_backend::data_api::transparent_ledger::{
         AccountActivity, AccountMovement, ActivityOutputs, AggregatePayment, Attribution,
-        DetailCompleteness, EffectCompleteness, FeeState, FundingStepEvidence,
-        HistoryClassification, OutputRef, PoolEffect, ReceiptAttribution, ReceiptSource,
-        SourcePool, TransactionHistoryDetails, TransparentDisplayAddress,
-        TransparentDisplayDetails, TransparentDisplayOmission, TransparentDisplayProvenance,
-        TransparentDisplaySource, TransparentDisplayView, TransparentDisplayViewOutput,
-        TransparentDisplayViewSender, WholeTransactionFee,
+        DetailCompleteness, EffectCompleteness, FeeState, HistoryClassification, OutputRef,
+        PoolEffect, ReceiptAttribution, ReceiptSource, SourcePool, TransactionHistoryDetails,
+        TransparentDisplayAddress, TransparentDisplayDetails, TransparentDisplayOmission,
+        TransparentDisplayProvenance, TransparentDisplaySource, TransparentDisplayView,
+        TransparentDisplayViewOutput, TransparentDisplayViewSender, WholeTransactionFee,
     };
     use zcash_primitives::transaction::TxId;
     use zcash_protocol::{
@@ -415,7 +414,6 @@ mod tests {
                     outputs: vec![OutputRef { pool, index: 0 }],
                 }),
             },
-            funding_step: FundingStepEvidence::default(),
             pending_private_details: vec![],
         }
     }
@@ -464,7 +462,7 @@ mod tests {
                     )
                 };
                 let control = attribute(&details, &view_with(rows.clone(), 1, vec![], funder()));
-                assert!(control.accounts_for_movement && control.recipient_completes);
+                assert!(control.recipient_completes);
                 assert_eq!(control.receive_completes, received);
 
                 let shared = attribute(&details, &view_with(rows, 1, vec![omission], funder()));
@@ -473,7 +471,6 @@ mod tests {
                     Attribution::NotEstablished,
                     "{omission:?}"
                 );
-                assert!(!shared.accounts_for_movement, "{omission:?}");
                 assert!(!shared.recipient_completes && !shared.receive_completes);
             }
         }
@@ -730,7 +727,7 @@ mod tests {
         ] {
             let a = attribution(&Network::MainNetwork, &details, display.as_ref(), &EVIDENCE);
             assert_eq!(a.source, unknown);
-            assert!(!a.accounts_for_movement && !a.receive_completes);
+            assert!(!a.receive_completes);
             assert_eq!(a.recipient, Attribution::NotEstablished);
         }
     }

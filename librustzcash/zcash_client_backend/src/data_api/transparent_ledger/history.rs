@@ -128,34 +128,16 @@ pub struct ActivityOutputs {
     pub outputs: Vec<OutputRef>,
 }
 
-/// What a transaction shows in an activity list for one account.
+/// The activity rows private recovery reconstructs for a transaction, for one account.
 ///
 /// Derived from the entry's evidence and the account's outputs in the transaction, never from
 /// txid display facts. A variant names the rows to show and the amounts and outputs they
-/// count; labels, the fee each row shows, and grouping steps of one operation across
-/// transactions (a TEX funding step and its payment, a swap) remain the wallet's. The rules are
-/// checked in this order; the first that applies decides.
+/// count where recovered evidence, rather than the outputs the wallet can see, decides them.
+/// Everything else stays the wallet's: shieldings, pool migrations, labels, the fee each row
+/// shows, and grouping steps of one operation across transactions (a TEX funding step and its
+/// payment, a swap). The rules are checked in this order; the first that applies decides.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AccountActivity {
-    /// The account moved its own transparent funds into its shielded pools: it spent only
-    /// transparent outputs, received no transparent output, recorded no output to others that
-    /// is not change, and its payment details are complete (including memos), its effects
-    /// settled and its classification not provisional. One row.
-    Shielding {
-        /// The shielded value it received, or everything it received when that is zero.
-        amount: Zatoshis,
-        /// Its shielded receipts.
-        outputs: Vec<OutputRef>,
-    },
-    /// An internal move of the account's Orchard funds into Ironwood: some wallet account spent
-    /// a version-2 Orchard note, the account sent itself Ironwood outputs (by its own sent-note
-    /// records), and nothing else is visible to send or receive. One row.
-    PoolMigration {
-        /// The Ironwood value it sent itself.
-        amount: Zatoshis,
-        /// Those outputs.
-        outputs: Vec<OutputRef>,
-    },
     /// The exact payment of a transparent-only debit the account alone funded, reconstructed
     /// from recovered metadata, with no visible output it sent. Its recipients are not known.
     /// One sent row.
@@ -189,42 +171,26 @@ pub enum AccountActivity {
         /// positive and covers the transparent receipts.
         settled: bool,
     },
-    /// A debit known only as the account's balance movement, less its attributed fee: a
-    /// provisional debit with no visible output the account sent, or an unmined debit with no
-    /// visible output at all. One row; a zero amount has no destination to show.
+    /// A provisional debit with no visible output the account sent, known only as the
+    /// account's balance movement less its attributed fee. One row; a zero amount has no
+    /// destination to show.
     MovementDebit {
         /// The debit less [`FeeState::Known`], never negative.
         amount: Zatoshis,
     },
-    /// The account's visible outputs: a sent row when it sent visible outputs (even of zero
-    /// value), and a received row when it received a positive value, or zero-value outputs in
-    /// a transaction that spent nothing or also has a sent row.
+    /// The account's visible outputs, as private recovery links them: a sent row when it sent
+    /// visible outputs (even of zero value), and a received row when it received a positive
+    /// value, or zero-value outputs in a transaction that spent nothing or also has a sent row.
+    /// An owned output no sent-note record links counts as sent only in a recovered
+    /// self-transfer.
     Outputs {
         /// The sent row.
         sent: Option<ActivityOutputs>,
         /// The received row.
         received: Option<ActivityOutputs>,
     },
-    /// The account spent and received but nothing is visible: its outputs are change. No row.
-    ChangeOnly,
-    /// A positive movement with no visible output: one received row of the movement.
-    MovementCredit {
-        /// The movement.
-        amount: Zatoshis,
-    },
-    /// Nothing else applies: one row of unknown kind and zero amount.
+    /// None of the above: the wallet shows the transaction from its own records.
     Unknown,
-}
-
-/// What a transaction contributes to grouping a transparent funding step with the payment that
-/// spends it, which the wallet does across transactions.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FundingStepEvidence {
-    /// The value of the transparent outputs the account sent itself, when it sent any, outside
-    /// a shielding and an Orchard-to-Ironwood move.
-    pub own_transparent_outputs: Option<Zatoshis>,
-    /// Whether a visible output the account sent is a transparent output to someone else.
-    pub external_transparent_send: bool,
 }
 
 /// One account's history view of one transaction, from one database read.
@@ -276,10 +242,8 @@ pub struct TransactionHistoryDetails {
     pub fee: FeeState,
     /// How the account's view was established.
     pub classification: HistoryClassification,
-    /// What the transaction shows in the account's activity list.
+    /// The activity rows private recovery reconstructs for the transaction.
     pub activity: AccountActivity,
-    /// What it contributes to grouping a transparent funding step with its payment.
-    pub funding_step: FundingStepEvidence,
     /// Transparent follow-on details for this transaction that the current policy withholds from
     /// public retrieval.
     pub pending_private_details: Vec<PrivateTransparentDetail>,

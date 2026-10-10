@@ -26,8 +26,7 @@ use transparent_wallet::http::{HttpOptions, HttpShardTransport};
 use zakura_pir_transparent::{
     ApplyAction, ApplyError, BatchState, Companion, CompanionDir, ForgetError, HoldCause,
     Interrupted, Outcome, PassError, PassLimits, PassPlan, PassReport, Progress, RecoveryBatch,
-    RecoveryError, Retry, ShardTransport, Step, TransparentHistoryRecovery,
-    TransparentHistoryRecoveryConfig, TransparentPirHttp, Trust, Ungated, WalletChain,
+    Retry, ShardTransport, Step, TransparentHistoryRecoveryConfig, Trust, Ungated, WalletChain,
     WithdrawnCause, WriteGate, forget_private_recovery,
 };
 use zcash_client_backend::data_api::{
@@ -208,7 +207,7 @@ impl Seen {
     /// The batch `report` describes, which the companion holds exactly when the
     /// pass was ready.
     fn of(report: &PassReport, held: Option<&RecoveryBatch<AccountUuid>>) -> Self {
-        assert_eq!(held.is_some(), report.settleable());
+        assert_eq!(held.is_some(), report.state == BatchState::Ready);
         let seen = Self {
             state: report.state,
             progress: report.progress,
@@ -454,17 +453,17 @@ impl Fixture {
         Loopback::new(self.url.as_deref().expect("a served publication"))
     }
 
-    /// One attempt, unsettled and returned rather than held: the current watch
-    /// set, the wallet's chain through its target, and fresh transports over the
-    /// exchange.
-    fn recover(&mut self) -> Result<RecoveryBatch<AccountUuid>, RecoveryError> {
+    /// One pass over the current watch set and the wallet's chain through its
+    /// target, its ready batch taken rather than settled.
+    fn recover(&mut self) -> Result<RecoveryBatch<AccountUuid>, PassError> {
         let watch = self.watch();
         self.note_watched(&watch);
-        let mut http = TransparentPirHttp::new(self.exchange(), RESPONSE_LIMIT);
-        let (mut filters, mut shards) = http.split();
+        let exchange = self.exchange();
         let companion = self.companion.as_mut().expect("an open companion");
         let chain = WalletChain::new(self.st.wallet().db(), watch.target.unwrap());
-        companion.recover(&watch, &chain, &mut filters, &mut shards)
+        let report = companion.pass(&watch, &chain, &exchange, RESPONSE_LIMIT, &|| false)?;
+        let batch = companion.take_latest::<AccountUuid>();
+        Ok(batch.unwrap_or_else(|| panic!("a ready pass, not {:?}", report.state)))
     }
 
     /// Applies `batch` to the wallet and acknowledges it with `trust`.
@@ -510,7 +509,8 @@ impl Fixture {
     }
 
     /// One pass of `plan`: the library's pass over the plan's watch set, then its
-    /// held batch settled through `settle_latest`, trusted once the service is.
+    /// held batch read and settled as `settle_latest` settles it, trusted once the
+    /// service is. A pass that held nothing is settled through `settle_latest`.
     /// Until then a batch with retirements is refused unsettled, and the plan holds
     /// the account: only trusted reconciliation resolves them.
     fn pass_in(&mut self, plan: &mut PassPlan<AccountUuid>) -> Result<Pass, PassError> {
@@ -519,8 +519,15 @@ impl Fixture {
         let companion = self.companion.as_mut().expect("an open companion");
         let chain = WalletChain::new(self.st.wallet().db(), plan.watch().target.unwrap());
         let report = companion.pass(plan.watch(), &chain, &exchange, RESPONSE_LIMIT, &|| false)?;
-        let batch = Seen::of(&report, companion.latest());
-        let settled = companion.settle_latest(self.st.wallet_mut().db_mut(), trust, &mut Ungated);
+        let held = companion.take_latest::<AccountUuid>();
+        let batch = Seen::of(&report, held.as_ref());
+        let wallet = self.st.wallet_mut().db_mut();
+        let settled = match held {
+            Some(held) => companion
+                .apply_and_acknowledge_gated(held, wallet, trust, &mut Ungated)
+                .map(Some),
+            None => companion.settle_latest(wallet, trust, &mut Ungated),
+        };
         let grew = match &settled {
             Ok(Some(applied)) => {
                 assert_eq!(applied.stats.applied, batch.commits.len());
@@ -541,7 +548,7 @@ impl Fixture {
                 false
             }
         };
-        assert!(companion.latest::<AccountUuid>().is_none());
+        assert!(companion.take_latest::<AccountUuid>().is_none());
         let step = plan.next(&report, &settled, self.watch());
         if settled.is_err() {
             assert_eq!(step, Step::Hold(HoldCause::Unreconciled));
@@ -1164,13 +1171,14 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
         changed.step,
         Step::Hold(HoldCause::Withdrawn(WithdrawnCause::ChangedSealed))
     );
-    // Nothing was held to settle, and the batch itself cannot be acknowledged.
-    let unread = f.recover().unwrap();
-    assert_eq!(unread.state(), UNDECLARED_REWRITE);
-    assert!(matches!(
-        f.companion.as_mut().unwrap().acknowledge_applied(&unread),
-        Err(RecoveryError::Invalid(_))
-    ));
+    // Nothing was held to settle or acknowledge.
+    assert!(
+        f.companion
+            .as_mut()
+            .unwrap()
+            .take_latest::<AccountUuid>()
+            .is_none()
+    );
     assert_eq!(f.dump(true), wallet);
     f.open();
     let reopened = f.pass().unwrap();

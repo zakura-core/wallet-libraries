@@ -195,7 +195,9 @@ impl Fixture {
                         u32::from(request.mined_height).into(),
                         &|| false,
                     );
-                    if let Some(write) = run.record::<()>(&request, DetailAnswer::Display(found)) {
+                    if let Some(write) =
+                        run.record::<()>(&request, DetailAnswer::Display(Box::new(found)))
+                    {
                         write.apply(self.st.wallet_mut().db_mut(), now).unwrap();
                     }
                 }
@@ -535,7 +537,7 @@ fn a_deferral_names_the_map_its_lookup_used() {
     );
     assert_eq!(service.map_sha256(), Some(exchange.map_sha256(1)));
     let write = run
-        .record::<()>(&request, DetailAnswer::Display(found))
+        .record::<()>(&request, DetailAnswer::Display(Box::new(found)))
         .unwrap();
     assert!(matches!(
         &write,
@@ -572,7 +574,7 @@ fn cancelled_lookup_writes_nothing() {
     );
     assert_eq!(found.found, Err(TxidError::Cancelled));
     assert!(
-        run.record::<()>(&request, DetailAnswer::Display(found))
+        run.record::<()>(&request, DetailAnswer::Display(Box::new(found)))
             .is_none()
     );
     assert!(
@@ -699,10 +701,10 @@ fn found_facts_are_stored() {
     let write = run
         .record::<()>(
             &request,
-            DetailAnswer::Display(DisplayLookup {
+            DetailAnswer::Display(Box::new(DisplayLookup {
                 found: Ok(TxidLookup::Found { entry, provenance }),
                 map_sha256: Some([0xab; 32]),
-            }),
+            })),
         )
         .unwrap();
     assert!(matches!(

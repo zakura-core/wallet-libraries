@@ -395,12 +395,6 @@ fn assert_reconstructed_shielding(case: &Shielding, shape: &Shape) {
         WholeTransactionFee::Exact(zat(FEE))
     );
     assert_eq!(entry.fee, FeeState::Unattributed { whole: zat(FEE) });
-    // The movement is a shielding of the Ironwood receipt; the fee stays unattributed.
-    let AccountActivity::Shielding { amount, outputs } = &entry.activity else {
-        panic!("expected a shielding, got {:?}", entry.activity);
-    };
-    assert_eq!(*amount, zat(shape.shielded));
-    assert!(outputs.iter().all(|o| o.pool == PoolType::IRONWOOD) && outputs.len() == 1);
     // No exact payment is fabricated: no outgoing record exists, only the balance.
     assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
     // The full transaction remains unavailable under PrivateRequired.

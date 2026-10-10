@@ -496,13 +496,6 @@ pub struct ReceiptSource {
     pub address: Option<TransparentDisplayAddress>,
 }
 
-impl ReceiptSource {
-    /// Whether the source is known: the shielded pools, or an address.
-    pub fn is_known(&self) -> bool {
-        self.pool == SourcePool::Shielded || self.address.is_some()
-    }
-}
-
 /// What one account's receipt of a transaction can show from its transparent details, beyond
 /// the history view.
 ///
@@ -516,27 +509,28 @@ pub struct ReceiptAttribution {
     /// Whether the account's effects are settled, the transaction is mined, and every owned
     /// transparent output's key scope is known.
     pub effects_settled: bool,
-    /// Whether the view's rows account for the account's movement: the view is available and
-    /// lists every transparent output, reports no shared funding
+    /// The recipient of a send whose wallet records name none, when the account has a fee
+    /// (attributed, or the whole fee when it spent and its share is not attributed) and the
+    /// view's rows account for its movement: the only row it does not own, or, with none, its
+    /// own address when the rows it owns have one address. Two or more rows it does not own,
+    /// or one without an address, establish no recipient.
+    ///
+    /// The rows account for the movement when the view is available and lists every
+    /// transparent output, reports no shared funding
     /// ([`TransparentDisplayOmission::SharedFunding`]) or mixed funding
     /// ([`TransparentDisplayOmission::ShieldedAndTransparentFunding`]), and the account's net
-    /// movement is minus its fee (attributed, or the whole fee when it spent and its share is
-    /// not attributed) and the outputs it does not own, or, without such a fee, the outputs it
-    /// owns. Other funders can offset unseen payments without breaking that equality, which
-    /// is why shared or mixed funding blocks it.
-    pub accounts_for_movement: bool,
-    /// The recipient of a send whose wallet records name none, when the account has a fee as
-    /// above and the rows account for its movement: the only row it does not own, or, with
-    /// none, its own address when the rows it owns have one address. Two or more rows it does
-    /// not own, or one without an address, establish no recipient.
+    /// movement is minus its fee and the outputs it does not own, or, without a fee, the
+    /// outputs it owns. Other funders can offset unseen payments without breaking that
+    /// equality, which is why shared or mixed funding blocks it.
     pub recipient: Attribution<TransparentDisplayAddress>,
     /// An established recipient completes a send's receipt once [`Self::effects_settled`].
     pub recipient_completes: bool,
     /// Who funded the transaction.
     pub source: ReceiptSource,
     /// Whether the display facts complete a received row's receipt: its effects are settled,
-    /// its source is known, the received row of the activity counts at least one output and
-    /// only transparent ones, which carry no memo, and the rows account for the movement.
+    /// its source is known (the shielded pools, or an address), the received row of the
+    /// activity counts at least one output and only transparent ones, which carry no memo, and
+    /// the rows account for the movement as for [`Self::recipient`].
     pub receive_completes: bool,
 }
 

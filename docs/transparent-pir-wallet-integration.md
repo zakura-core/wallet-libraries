@@ -226,8 +226,7 @@ ran out; or stop the run, when private recovery is not enabled or the wallet's
 policy changed during the run (for example, private queries were turned off),
 since no further private pass may run until the next sync reads the policy
 again. Vizor keeps the time budgets, how long a hold lasts, which accounts to
-visit, the trust decision, cancellation and activation. Discovery and opening
-the cache classify their failures by the same outage rule as a pass.
+visit, the trust decision, cancellation and activation.
 
 Private recovery follows foreground sync, then refreshes balances and Activity.
 Vizor visits the selected account first and rotates others. Retrieval has time
@@ -315,23 +314,21 @@ the payment unless evidence identifies another contributor. It can include an
 owned transparent destination; it is neither canonical recipient attribution
 nor a fee-share determination.
 
-Each history entry carries `AccountActivity`, derived from the same facts and
-the account's outputs in the transaction, never from display facts. The rules
-are checked in order:
+Each history entry carries `AccountActivity`, the rows private recovery
+reconstructs, derived from the same facts and the account's outputs in the
+transaction, never from display facts. The rules are checked in order:
 
 | Activity | When |
 | --- | --- |
-| `Shielding` | The account spent only transparent outputs, received only shielded ones, recorded no non-change output to others, and its payment details are complete, its effects settled and its classification not provisional |
-| `PoolMigration` | A version-2 Orchard note was spent and the account sent itself Ironwood outputs, by its own records, with nothing else visible |
 | `InferredPayment` | A reconstructed transparent-only payment the account alone funded, with no visible output it sent |
 | `FeeOnly` | A recovered self-transfer: zero exact payment, debit equal to the whole fee and the account's, no visible output it sent |
 | `HiddenFundingStep` / `InferredOutgoing` | The Activity-only outgoing value, net of the account's own internal and ephemeral transparent outputs; zero with no other transparent receipt is a funding step with no row |
-| `MovementDebit` | A provisional debit with no visible output it sent, or an unmined one with no visible output: the debit less an attributed fee |
-| `Outputs` | The visible sent and received outputs |
-| `ChangeOnly`, `MovementCredit`, `Unknown` | Nothing visible: change only, a credit, or neither |
+| `MovementDebit` | A provisional debit with no visible output it sent: the debit less an attributed fee |
+| `Outputs` | The visible sent and received outputs, with an unlinked owned output counted as sent only in a recovered self-transfer |
+| `Unknown` | None of the above |
 
-Labels, the fee each row shows, and grouping across transactions remain the
-wallet's.
+Shieldings, Orchard-to-Ironwood migrations, labels, the fee each row shows, and
+grouping across transactions remain the wallet's.
 
 ### Transparent receipt enhancement
 
