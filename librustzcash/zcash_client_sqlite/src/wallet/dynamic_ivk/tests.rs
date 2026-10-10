@@ -247,8 +247,18 @@ fn apply_payment(
     through: ChainPoint,
     (anchor, path): (ChainPoint, &MerklePath),
 ) -> Result<PaymentApplication, SqliteClientError> {
+    let configured = db.transparent_ledger_mode;
     tx(db, |c, p| {
-        store::apply::apply_payment(c, p, account, key, candidate, through, (anchor, path))
+        store::apply::apply_payment(
+            c,
+            p,
+            configured,
+            account,
+            key,
+            candidate,
+            through,
+            (anchor, path),
+        )
     })
     .map(|applied| applied.expect("the payment's blocks are on the wallet's chain"))
 }
@@ -463,6 +473,15 @@ fn external_payment(
     to: orchard::Address,
     memo: &zcash_protocol::memo::MemoBytes,
 ) -> zcash_primitives::transaction::Transaction {
+    external_payment_with(to, memo, vec![])
+}
+
+/// [`external_payment`], also making the `also` payments.
+fn external_payment_with(
+    to: orchard::Address,
+    memo: &zcash_protocol::memo::MemoBytes,
+    also: Vec<zip321::Payment>,
+) -> zcash_primitives::transaction::Transaction {
     use std::convert::Infallible;
     use zcash_client_backend::{
         data_api::wallet::{ConfirmationsPolicy, input_selection::GreedyInputSelector},
@@ -487,18 +506,16 @@ fn external_payment(
     funder.generate_and_scan_empty_blocks_with_dynamic_ivks(5);
     let network = *funder.network();
     let address = Address::Unified(UnifiedAddress::from_receivers(Some(to), None, None).unwrap());
-    let request = TransactionRequest::new(vec![
-        Payment::new(
-            address.to_zcash_address(&network),
-            Some(Zatoshis::const_from_u64(50_000)),
-            Some(memo.clone()),
-            None,
-            None,
-            vec![],
-        )
-        .unwrap(),
-    ])
+    let payment = Payment::new(
+        address.to_zcash_address(&network),
+        Some(Zatoshis::const_from_u64(50_000)),
+        Some(memo.clone()),
+        None,
+        None,
+        vec![],
+    )
     .unwrap();
+    let request = TransactionRequest::new(std::iter::once(payment).chain(also).collect()).unwrap();
     let strategy = standard::SingleOutputChangeStrategy::<TestDb>::new(
         StandardFeeRule::Zip317,
         None,
