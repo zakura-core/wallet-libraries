@@ -329,11 +329,11 @@ pub(super) fn finish(
             let changed = conn.execute(
                 "UPDATE ironwood_dynamic_operations
                  SET reference = ?2, memo = ?3, deadline = MIN(deadline, ?4)
-                 WHERE id = ?1 AND (reference IS NULL OR reference = ?2)",
+                 WHERE id = ?1 AND (reference IS NULL OR (reference = ?2 AND memo IS ?3))",
                 params![id, deposit.address, deposit.memo, deposit.deadline],
             )?;
             if changed != 1 {
-                return Err(invalid("operation deposit address changed"));
+                return Err(invalid("operation deposit instructions changed"));
             }
         }
         // A provider that rejected every request never saw the address.

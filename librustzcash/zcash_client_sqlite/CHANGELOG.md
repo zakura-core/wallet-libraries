@@ -146,7 +146,8 @@ workspace.
 - Operations: each quote is one provider operation. An incoming one is
   `begin_receive_operation`, `finish_receive_operation` (`OperationOutcome`) and
   `start_receive_operation`, which returns the `ReceiveDeposit` to show; an accepted
-  deadline cannot exceed the requested one. `record_operation_status` takes a provider
+  deadline cannot exceed the requested one, and a repeated acceptance cannot change the
+  deposit address or memo. `record_operation_status` takes a provider
   status the app normalized with `zakura_dynamic_ivk::lifecycle::near_observation` for
   either kind of operation, by deposit address and memo, and reclaims what it made
   reclaimable: an unstarted reservation after its latest deadline and
