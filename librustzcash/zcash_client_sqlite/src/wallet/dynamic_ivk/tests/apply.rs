@@ -83,12 +83,13 @@ fn directory_payment_applies_unscanned_key_note_atomically_and_reopens() {
     assert_eq!(notes[0].dynamic_key_id(), Some(key.key_id()));
     assert!(pending(st.wallet().db(), account, key.key_id()).is_empty());
     assert!(crate::wallet::enhance_pir::is_protected(st.wallet().conn(), candidate.txid).unwrap());
-    let stored_memo: Vec<u8> = st
+    // Nothing binds the directory's memo to the chain, so it is not stored.
+    let stored_memo: Option<Vec<u8>> = st
         .wallet()
         .conn()
         .query_row("SELECT memo FROM ironwood_received_notes", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(stored_memo, vec![4; 512]);
+    assert_eq!(stored_memo, None);
     // A duplicate directory answer does not double credit the note.
     queue_payment(st.wallet_mut().db_mut(), account, key.key_id(), &candidate).unwrap();
     assert_eq!(

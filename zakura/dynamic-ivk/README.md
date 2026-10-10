@@ -25,11 +25,6 @@ replace recipient, nullifier, signature, value, or change validation. The wallet
 owns reservation, persistence, coverage, lifecycle, and note selection. There is
 no alternate balance store in this crate.
 
-The SQLite backend implements this contract with its `orchard` feature: durable
-key registration, scanning, completion, and the restore sweeps that
-`zakura-pir-receiver` runs. Its rustdoc, starting at
-`zcash_client_sqlite::wallet::dynamic_ivk`, documents the calls a wallet makes.
-
 Software PCZT signing of dynamic-key notes works through the same builder.
 Hardware signers need firmware qualification before dynamic keys are enabled for
 hardware accounts.
@@ -79,8 +74,7 @@ and refund issuance waits for it, since it may hold a refund index.
 From the workspace root:
 
 ```sh
-cargo test -p zakura-dynamic-ivk --locked
-cargo test -p zakura-client-sqlite --features orchard,test-dependencies --locked dynamic_ivk
+python3 scripts/dev.py test --config default -p zakura-dynamic-ivk
 ```
 
 Regenerate the KDF vectors from this directory with

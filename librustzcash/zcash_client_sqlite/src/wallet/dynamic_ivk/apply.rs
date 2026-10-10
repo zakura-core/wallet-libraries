@@ -15,7 +15,6 @@ use zcash_note_encryption::ShieldedOutput as _;
 use zcash_protocol::{
     ShieldedPool,
     consensus::{BlockHeight, Parameters},
-    memo::MemoBytes,
 };
 
 use super::{
@@ -305,16 +304,6 @@ pub(super) fn apply_payment<P: Parameters>(
         tx_ref,
         Some(candidate.height),
         spent_in,
-    )?;
-    let memo = MemoBytes::from_bytes(recovered.memo()).expect("a full-length memo");
-    conn.execute(
-        "UPDATE ironwood_received_notes SET memo = ?1
-         WHERE transaction_id = ?2 AND action_index = ?3",
-        params![
-            wallet::memo_repr(Some(&memo)),
-            tx_ref.0,
-            candidate.action_index
-        ],
     )?;
     wallet::enhance_pir::finish_private_receipt(conn, tx_ref, candidate.action_index)?;
     dequeue()?;
