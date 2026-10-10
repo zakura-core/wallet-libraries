@@ -66,15 +66,17 @@ pub struct Observation {
 ///
 /// A refund key expects ZEC whenever the provider reports a positive refunded
 /// amount, and after an exact-output `SUCCESS`, which returns unused input once
-/// the swap completes. Otherwise an exact-input `SUCCESS` expects none, and a
-/// missing or unrecognized swap type is [`ReceiptExpectation::Unknown`]. A refund
-/// on the source chain is not a Zcash receipt. A zero payout amount is treated as
-/// unreported.
+/// the swap completes. An exact-input `SUCCESS` expects none only when it reports
+/// a zero refunded amount, since excess deposits are refunded for either swap
+/// type; without one, or with a missing or unrecognized swap type, it is
+/// [`ReceiptExpectation::Unknown`]. A refund on the source chain is not a Zcash
+/// receipt. A zero payout amount is treated as unreported.
 pub fn near_observation(purpose: crate::Purpose, status: &NearStatus<'_>) -> Observation {
     use crate::Purpose;
     use OperationStatus::*;
     use ReceiptExpectation::{Positive, Unknown};
     let refund = status.refunded_amount.filter(|v| !v.is_zero());
+    let refund_reported = status.refunded_amount.is_some();
     let outcome = match (status.status, purpose) {
         ("PENDING_DEPOSIT", _) => AwaitingDeposit,
         ("KNOWN_DEPOSIT_TX" | "INCOMPLETE_DEPOSIT" | "PROCESSING", _) => Active,
@@ -84,7 +86,7 @@ pub fn near_observation(purpose: crate::Purpose, status: &NearStatus<'_>) -> Obs
         ("SUCCESS", Purpose::Refund) => Terminal(match (refund, status.swap_type) {
             (Some(value), _) => Positive(Some(value)),
             (None, Some("EXACT_OUTPUT")) => Positive(None),
-            (None, Some("EXACT_INPUT")) => ReceiptExpectation::None,
+            (None, Some("EXACT_INPUT")) if refund_reported => ReceiptExpectation::None,
             (None, _) => Unknown,
         }),
         ("REFUNDED", Purpose::Refund) => Terminal(Positive(refund)),
@@ -189,16 +191,17 @@ mod tests {
     fn refund_success_requires_a_recognized_swap_type() {
         use ReceiptExpectation::{None as NoReceipt, Positive, Unknown};
         let amount = Zatoshis::const_from_u64(1_000);
-        // The expectation without a positive refunded amount.
+        // The expectations with an absent and a zero refunded amount.
         let cases = [
-            (None, Unknown),
-            (Some(""), Unknown),
-            (Some("FLEX_INPUT"), Unknown),
-            (Some("EXACT_INPUT"), NoReceipt),
-            (Some("EXACT_OUTPUT"), Positive(None)),
+            (None, Unknown, Unknown),
+            (Some(""), Unknown, Unknown),
+            (Some("FLEX_INPUT"), Unknown, Unknown),
+            // Exact-input swaps also refund excess deposits.
+            (Some("EXACT_INPUT"), Unknown, NoReceipt),
+            (Some("EXACT_OUTPUT"), Positive(None), Positive(None)),
         ];
-        for (swap_type, without_refund) in cases {
-            for refunded_amount in [None, Some(Zatoshis::ZERO)] {
+        for (swap_type, absent, zero) in cases {
+            for (refunded_amount, expected) in [(None, absent), (Some(Zatoshis::ZERO), zero)] {
                 let status = NearStatus {
                     status: "SUCCESS",
                     swap_type,
@@ -207,7 +210,7 @@ mod tests {
                 };
                 assert_eq!(
                     observe(Refund, status),
-                    Some(OperationStatus::Terminal(without_refund)),
+                    Some(OperationStatus::Terminal(expected)),
                     "{swap_type:?} {refunded_amount:?}"
                 );
             }
