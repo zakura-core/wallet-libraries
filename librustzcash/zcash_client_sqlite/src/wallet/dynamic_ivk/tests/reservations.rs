@@ -32,11 +32,11 @@ fn prepare(st: &mut State, now: i64) -> DynamicKey {
     try_prepare(st, now, None).unwrap().unwrap()
 }
 
-/// Prepares with a seen set covering quotes begun at `NOW` that holds `held`.
+/// Prepares with a seen set covering quotes begun from 0 to `NOW` that holds `held`.
 fn prepare_seen(st: &mut State, now: i64, held: &[[u8; 43]]) -> DynamicKey {
     let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
     let seen = ProviderSeen {
-        since: 0,
+        since: -SEEN_SLACK_SECONDS,
         until: NOW + SEEN_SLACK_SECONDS,
         contains: &contains,
     };
@@ -290,12 +290,12 @@ fn reclaimed_hole_stops_scanning_and_keeps_its_quotes() {
 
 /// A request whose answer was lost is reused, only when no fresh address is left, once a
 /// seen set covering it shows the provider never had the address. One the set holds is
-/// never issued again, even once a later set lacks it. A quote newer than the set's read,
-/// less the slack, may be missing from it, so it counts as seen.
+/// never issued again, even once a later set lacks it. A quote within the slack of the
+/// set's start or read may be missing from it, as the clocks differ, so it counts as seen.
 #[test]
 fn lost_requests_are_reused_only_once_a_seen_set_shows_them_unseen() {
     let stale = |receivers: &[[u8; 43]]| vec![false; receivers.len()];
-    for (case, reused) in [("unchecked", 0), ("held", 1), ("stale", 0)] {
+    for (case, reused) in [("unchecked", 0), ("held", 1), ("stale", 0), ("early", 0)] {
         let mut st = fixture();
         let account = st.test_account().unwrap().id();
         let lost = prepare(&mut st, NOW);
@@ -311,9 +311,24 @@ fn lost_requests_are_reused_only_once_a_seen_set_shows_them_unseen() {
             "held" => prepare_seen(&mut st, now, &held),
             _ => {
                 let from = tip(&st).height + 1;
+                // This wallet's clock may be ahead of the provider's, so a set starting
+                // just before the window's quotes may lack them.
+                let (since, until) = match case {
+                    "stale" => (-SEEN_SLACK_SECONDS, NOW + SEEN_SLACK_SECONDS - 1),
+                    _ => {
+                        st.wallet()
+                            .conn()
+                            .execute(
+                                "UPDATE ironwood_dynamic_operations SET begun_at = ?1",
+                                [NOW],
+                            )
+                            .unwrap();
+                        (NOW - SEEN_SLACK_SECONDS + 1, NOW + SEEN_SLACK_SECONDS)
+                    }
+                };
                 let set = ProviderSeen {
-                    since: 0,
-                    until: NOW + SEEN_SLACK_SECONDS - 1,
+                    since,
+                    until,
                     contains: &stale,
                 };
                 let db = st.wallet_mut().db_mut();

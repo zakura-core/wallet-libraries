@@ -111,15 +111,16 @@ pub(super) fn close_finished<P: Parameters>(
 
 /// Records `observation`, requested at `now`, on operation `id` unless a newer one is
 /// stored, and merges `funded` in either case (see `WalletDb::record_operation_status`).
-/// `expectation` stores the status: 0 active, 1 final with no receipt, 2 final with a
-/// receipt, 3 final but inconclusive, 4 awaiting a deposit.
+/// Returns whether `observation` was current and so recorded. `expectation` stores the
+/// status: 0 active, 1 final with no receipt, 2 final with a receipt, 3 final but
+/// inconclusive, 4 awaiting a deposit.
 pub(super) fn record(
     conn: &Connection,
     id: i64,
     observation: Observation,
     funded: bool,
     now: i64,
-) -> Result<(), SqliteClientError> {
+) -> Result<bool, SqliteClientError> {
     if now < 0 {
         return Err(invalid("invalid observation time"));
     }
@@ -138,14 +139,14 @@ pub(super) fn record(
         "UPDATE ironwood_dynamic_operations SET funded = MAX(funded, ?2) WHERE id = ?1",
         params![id, funded],
     )?;
-    conn.execute(
+    let current = conn.execute(
         "UPDATE ironwood_dynamic_operations SET
             observed_at = ?2, expectation = ?3, expected_value = ?4,
             deadline = COALESCE(deadline, ?5)
          WHERE id = ?1 AND observed_at <= ?2",
         params![id, now, expectation, amount, observation.deadline],
     )?;
-    Ok(())
+    Ok(current > 0)
 }
 
 /// Records `observation` on key `key`'s refund operation `reference`, adding it if new.
@@ -176,5 +177,6 @@ pub(super) fn record_refund(
             |r| r.get(0),
         )?,
     };
-    record(conn, id, observation, false, now)
+    record(conn, id, observation, false, now)?;
+    Ok(())
 }
