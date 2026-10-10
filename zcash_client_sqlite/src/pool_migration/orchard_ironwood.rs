@@ -28,7 +28,11 @@ use {
     shardtree::error::ShardTreeError,
     std::collections::HashMap,
     zcash_client_backend::{
-        data_api::{Account as _, SentTransaction, SentTransactionOutput, wallet::TargetHeight},
+        data_api::{
+            Account as _, SentTransaction, SentTransactionOutput,
+            anchor_retention::PoolMigrationParams, wallet::TargetHeight,
+            zip318::classify_decrypted_tx,
+        },
         decrypt_transaction,
         wallet::{Note, Recipient},
     },
@@ -135,6 +139,31 @@ const SOURCE_ROOT_AT: Option<store::SourceRootAt> = None;
 #[allow(dead_code)]
 pub(crate) fn init_migration_tables(conn: &Connection) -> rusqlite::Result<()> {
     store::init(conn, &TABLES)
+}
+
+/// The Orchard -> Ironwood per-account uniqueness index DDL, from the store's one generator, for
+/// the `orchard_ironwood_migration_history` schema migration: the migration path and the canonical
+/// DDL create the index from the same text, so its non-terminal predicate cannot drift between
+/// them.
+pub(crate) fn account_index_sql() -> String {
+    store::create_account_index_sql(&TABLES)
+}
+
+/// The Orchard -> Ironwood transactions-table DDL, from the store's one generator, for the
+/// `orchard_ironwood_migration_txid_blob` schema migration's table rebuild.
+pub(crate) fn transactions_table_sql() -> String {
+    store::create_transactions_sql(&TABLES)
+}
+
+/// The due-transactions index DDL, from the store's one generator, recreated by the same rebuild.
+pub(crate) fn tx_due_index_sql() -> String {
+    store::create_tx_due_index_sql(&TABLES)
+}
+
+/// The `v_migration_transactions` view DDL over the Orchard -> Ironwood tables, from the store's
+/// one generator, for the `v_migration_transactions` schema migration.
+pub(crate) fn migration_tx_view_sql() -> String {
+    store::create_migration_tx_view_sql(&TABLES)
 }
 
 /// The anchor bucket grids, in blocks, of every Orchard -> Ironwood migration in this database
@@ -257,6 +286,64 @@ impl<C: Borrow<Connection>, P, CL> PoolMigrations<C, P, CL> {
     pub fn migration_lock_owners(&self) -> Result<BTreeSet<LockOwner>, Error> {
         self.store.migration_lock_owners()
     }
+
+    /// The account's most recent migration WHATEVER its status: what a UI renders, where a
+    /// finished migration must stay visible after the pending-only
+    /// [`get_migration`](zcash_pool_migration::engine::PoolMigrationRead::get_migration) has
+    /// moved on to `None`.
+    ///
+    /// Inherent rather than on [`PoolMigrationRead`]: the engine never reads history, so the
+    /// trait would tax every store implementation with a method the engine never calls.
+    pub fn latest_migration(&self) -> Result<Option<MigrationState>, Error> {
+        self.store.latest_migration()
+    }
+
+    /// Every migration this account has run, newest first, as cheap SQL-projected summaries: no
+    /// stored PCZT is read or parsed. Resolve a row to its full state with
+    /// [`get_migration_by_id`](Self::get_migration_by_id).
+    pub fn list_migrations(&self) -> Result<Vec<crate::pool_migration::MigrationSummary>, Error> {
+        self.store.list_migrations()
+    }
+
+    /// The full state of the migration identified by `id` — historical or pending — or `None`
+    /// when this account has no such migration.
+    pub fn get_migration_by_id(
+        &self,
+        id: crate::pool_migration::MigrationUuid,
+    ) -> Result<Option<MigrationState>, Error> {
+        self.store.get_migration_by_id(id)
+    }
+}
+
+/// Cancellation, the one inherent method that must WRITE, and so the one that cannot join the
+/// read-only inherent block above: those methods need only a shared `Borrow<Connection>`, and
+/// `BorrowMut` is a strict subtrait of it, so merging the two would force every reader to hold a
+/// mutable borrow. It does not join the `BorrowMut` block below either, which is gated on the
+/// `orchard` feature and additionally bounded by `P` and `CL`; cancel requires none of the three.
+impl<C, P, CL> PoolMigrations<C, P, CL>
+where
+    C: BorrowMut<Connection>,
+{
+    /// Cancel this account's migration at the user's request: release every note reservation its
+    /// never-broadcast transactions hold, then move the record to the terminal `Cancelled`
+    /// status — in that order, in one database transaction, so a crash between the two leaves a
+    /// still-pending migration that a retried cancel finishes. After this returns, the engine
+    /// drives nothing, the released notes are back in DEFAULT note selection immediately (rather
+    /// than at lock expiry), and a replacement migration may be planned and committed over the
+    /// full balance; the cancelled record remains readable through
+    /// [`latest_migration`](Self::latest_migration) and its siblings.
+    ///
+    /// Works WITHOUT deserializing the migration state — the primary use case is an
+    /// unrecoverable wallet, and a record that will not parse is one of the ways to get there —
+    /// and is honest about what it cannot undo: transactions already broadcast may still mine,
+    /// and the returned [`CancelOutcome`](crate::pool_migration::CancelOutcome) reports them
+    /// rather than refusing (a refusal would reintroduce the stuck state cancel exists to
+    /// remove). Calling with no pending migration performs only the REPAIR half on the latest
+    /// retained record, releasing reservations a terminal record may still hold (for instance
+    /// one recorded `Failed` by an older client) without rewriting its status.
+    pub fn cancel_migration(&mut self) -> Result<crate::pool_migration::CancelOutcome, Error> {
+        self.store.cancel_migration()
+    }
 }
 
 impl<C: Borrow<Connection>, P, CL> PoolMigrationRead for PoolMigrations<C, P, CL> {
@@ -300,24 +387,27 @@ where
         self.store.update_transaction(id, state)
     }
 
-    /// The wallet-database form of the contract: apply the proof to `state`, then — in ONE
-    /// database transaction — persist the migration state and, with it, the finalized
-    /// transaction's wallet record (its raw bytes, fee, sent outputs, and input-spend marks, as
-    /// `store_transactions_to_be_sent` writes for the standard spend flows), so a transaction is
-    /// never durably recorded proved without the wallet knowing about it, nor the reverse. The
-    /// outputs are recovered by trial decryption under the account's unified full viewing key
-    /// (every real migration output is internal to the account; dummies decrypt under no key),
-    /// and the sent record's target height is the successor of the row's scheduled broadcast
-    /// height.
+    /// The wallet-database form of the contract: apply the proof to `state` and persist the
+    /// migration state, and nothing else.
+    ///
+    /// Deliberately NO wallet-side transaction record. The reservation that keeps another flow
+    /// off this transaction's inputs through the prove-to-broadcast window is the ADVISORY note
+    /// lock the proof arrived with ([`ProvedTransaction::lock_owner`]), which leaves the notes in
+    /// the user's spendable balance; the wallet's own record — raw bytes, sent outputs, hard
+    /// input-spend marks, and the status-retrieval queue entry — is written at the broadcast seam
+    /// by [`take_transaction_for_broadcast`](Self::take_transaction_for_broadcast), atomically
+    /// with handing the broadcastable bytes out.
+    ///
+    /// [`ProvedTransaction::lock_owner`]:
+    ///     zcash_pool_migration::engine::ProvedTransaction::lock_owner
     #[cfg(feature = "orchard")]
     fn store_proved_transaction(
         &mut self,
         state: &mut MigrationState,
         proven: zcash_pool_migration::engine::ProvedTransaction,
     ) -> Result<(), Self::Error> {
-        let id = proven.id();
         proven.apply(state);
-        self.finalize_and_store_proved(state, id)
+        self.replace_migration(state)
     }
 
     /// Without the `orchard` feature this wallet tracks no Orchard (or Ironwood) notes at all:
@@ -344,45 +434,51 @@ where
     P: zcash_protocol::consensus::Parameters,
     CL: crate::util::Clock,
 {
-    /// The body of [`PoolMigrationWrite::store_proved_transaction`], once the proof has been
-    /// applied to `state`: persist `state` and, atomically with it, finalize the
-    /// fully-constructed (proved and signed) migration transaction `proved` into the wallet's
-    /// own transaction tables.
+    /// The BROADCAST seam: finalize the proved migration transaction `proved` into its
+    /// broadcastable [`Transaction`](zcash_primitives::transaction::Transaction), record it in
+    /// the wallet's own transaction tables, and hand
+    /// it back for submission — one call, one database transaction, so the wallet record binds
+    /// at the ATTEMPT. A consumer that obtains bytes here and dies mid-submit has already left
+    /// the wallet record that the drive loop's `Proved`-row promotion sweep and the
+    /// status-retrieval queue rely on; there is no way to hold broadcastable bytes the wallet
+    /// does not know about.
     ///
-    /// The transaction named by `proved` must be in the [`Proved`](MigrationTxState::Proved)
-    /// lifecycle state in `state`: its stored bytes are then a PCZT carrying both signatures
-    /// (installed at commit) and proofs (installed by the prove step), from which the final
-    /// `Transaction` is extracted mechanically — the PCZT Spend Finalizer and Transaction
-    /// Extractor roles, the latter of which also verifies the proofs and signatures it
-    /// assembles. The wallet-side record is what
-    /// [`WalletWrite::store_transactions_to_be_sent`] writes for the standard spend flows, made
-    /// at the analogous moment: the transaction's raw bytes, fee, creation time, and target
-    /// height in the `transactions` table; its outputs as sent notes; and its input notes marked
-    /// spent — which is what prevents the wallet's OWN later spends from double-spending a
-    /// migration input during the (deliberately long, for a scheduled transfer) window between
-    /// proving and mining.
+    /// This — not proving — is where the transaction enters the wallet's view. From here its
+    /// input notes are HARD-spent (a mempool may mine it whatever the wallet does next), its
+    /// outputs are recorded as sent, and its txid may be asked after: the status-retrieval queue
+    /// entry is made here, so a never-broadcast txid is never disclosed to a light wallet
+    /// server. Before this call the only reservation on its inputs is the advisory lock taken at
+    /// proving, which is what keeps the user's full balance spendable through the deliberately
+    /// long prove-to-broadcast window.
     ///
-    /// The transaction's outputs are recovered by trial decryption under the account's unified
-    /// full viewing key rather than from PCZT metadata: every real output of a migration
-    /// transaction is internal to the migrating account, and the padded dummy outputs fail
-    /// decryption, so decryption separates them exactly. The sent-transaction target height is
-    /// the block the transaction aims to mine in: the successor of its scheduled broadcast
-    /// height.
+    /// The transaction named by `proved` must be [`Proved`](MigrationTxState::Proved) in
+    /// `state`: its stored bytes are then a PCZT carrying both signatures (installed at commit)
+    /// and proofs, from which the final `Transaction` is extracted mechanically — the PCZT Spend
+    /// Finalizer and Transaction Extractor roles, the latter of which re-verifies the proofs and
+    /// signatures it assembles, so a PCZT that would not survive broadcast is rejected here
+    /// rather than recorded. The outputs are recovered by trial decryption under the account's
+    /// unified full viewing key (every real output of a migration transaction is internal to the
+    /// migrating account; the padded dummies decrypt under no key). Idempotent: every write it
+    /// makes upserts, so a consumer that crashed between obtaining these bytes and submitting
+    /// them obtains the same bytes, over the same record, when the drive loop offers the
+    /// broadcast again.
     ///
-    /// Both writes — the migration state (as [`replace_migration`]) and the wallet transaction
-    /// record — happen in ONE database transaction, so a transaction is never durably recorded
-    /// proved without the wallet record, nor the reverse.
+    /// After submitting, the consumer records the outcome exactly as before:
+    /// [`MigrationState::mark_broadcast`] on success, or
+    /// [`MigrationState::report_broadcast_failure`] on a rejection, then persists.
     ///
-    /// [`WalletWrite::store_transactions_to_be_sent`]:
-    ///     zcash_client_backend::data_api::WalletWrite::store_transactions_to_be_sent
-    /// [`replace_migration`]: PoolMigrationWrite::replace_migration
-    /// [`PoolMigrationWrite::store_proved_transaction`]:
-    ///     zcash_pool_migration::engine::PoolMigrationWrite::store_proved_transaction
-    fn finalize_and_store_proved(
+    /// `rng` provides the randomness for the binding signatures and for verifying the extracted
+    /// transaction.
+    ///
+    /// [`MigrationState::mark_broadcast`]: zcash_pool_migration::engine::MigrationState::mark_broadcast
+    /// [`MigrationState::report_broadcast_failure`]:
+    ///     zcash_pool_migration::engine::MigrationState::report_broadcast_failure
+    pub fn take_transaction_for_broadcast<R: rand_core::Rng + rand_core::CryptoRng>(
         &mut self,
+        rng: R,
         state: &MigrationState,
         proved: MigrationTransferId,
-    ) -> Result<(), Error> {
+    ) -> Result<zcash_primitives::transaction::Transaction, Error> {
         let row = state
             .transactions()
             .iter()
@@ -401,7 +497,7 @@ where
             .finalize_spends()
             .map_err(|e| Error::Finalize(FinalizeError::Spends(e)))?;
         let tx = ::pczt::roles::tx_extractor::TransactionExtractor::new(finalized)
-            .extract()
+            .extract(rng)
             .map_err(|e| Error::Finalize(FinalizeError::Extract(e)))?;
 
         // The fee is fully determined by the shielded value balances: a migration transaction has
@@ -473,7 +569,7 @@ where
 
         let params = &self.params;
         self.store.replace_migration_with(state, |dbtx| {
-            crate::wallet::store_transaction_to_be_sent(
+            let tx_ref = crate::wallet::store_transaction_to_be_sent(
                 dbtx,
                 params,
                 // A migration transaction has no transparent outputs, so the gap-limit machinery
@@ -482,8 +578,32 @@ where
                 &zcash_keys::keys::transparent::gap_limits::GapLimits::default(),
                 &sent,
             )
-            .map_err(|e| Error::Wallet(Box::new(e)))
-        })
+            .map_err(|e| Error::Wallet(Box::new(e)))?;
+
+            // Record how the transaction classifies against ZIP 318, in the same database
+            // transaction as the record itself. The enhance path stamps this for transactions the
+            // wallet learns about by scanning, but a scheduled migration transaction sits stored
+            // and UNMINED from proving until its broadcast height — up to days — and during that
+            // window a wallet that wants to label (or hold back) its own migration traffic would
+            // otherwise read "not classified". This is the same one-moment argument the enhance
+            // path documents: the parsed transaction and its decrypted outputs are both in hand
+            // right here, and nowhere later. The enhance path re-stamps the same answer after the
+            // transaction mines, which is idempotent.
+            //
+            // Parameters are the SPECIFIED defaults, exactly as the enhance path reasons: the only
+            // wallet-overridable value is the anchor bucket interval, and this evidence source
+            // cannot evaluate the anchor clause at all, so the override cannot change the answer.
+            let migration_params = PoolMigrationParams::from(AnchorRetentionInterval::default());
+            let classification = classify_decrypted_tx(
+                &tx,
+                decrypted.orchard_outputs(),
+                decrypted.ironwood_outputs(),
+                &migration_params,
+            );
+            crate::wallet::put_zip318_classification(dbtx, tx_ref, classification)
+                .map_err(|e| Error::Wallet(Box::new(e)))
+        })?;
+        Ok(tx)
     }
 }
 
@@ -1665,16 +1785,95 @@ mod check_step_satisfiability {
 mod mined_height {
     use rusqlite::named_params;
 
+    use core::convert::Infallible;
+
+    use zcash_client_backend::data_api::Account as _;
+    use zcash_client_backend::data_api::WalletRead as _;
     use zcash_client_backend::data_api::testing::TestState;
-    use zcash_pool_migration::engine::PoolMigrationRead;
+    use zcash_pool_migration::engine::{MigrationState, MigrationTransaction, PoolMigrationRead};
+    use zcash_pool_migration::satisfiability::{ReorgSettleDepth, StepSatisfiability};
+    use zcash_pool_migration::wallet::WalletMigration;
     use zcash_protocol::TxId;
     use zcash_protocol::consensus::BlockHeight;
     use zcash_protocol::local_consensus::LocalNetwork;
 
     use super::PoolMigrations;
     use super::check_step_satisfiability::{unscanned_wallet, wallet_with_scanned_note};
+    use crate::AccountUuid;
     use crate::testing::{BlockCache, db::TestDb};
     use crate::util::SystemClock;
+
+    /// A store that refuses every question, so a [`WalletMigration`] built over it can only answer
+    /// from the WALLET. That is what makes [`store_and_adapter_agree`] a real comparison: an
+    /// adapter that delegated its mining lookup to its store would panic here rather than
+    /// trivially agreeing with the store it delegated to.
+    struct NoStore;
+
+    impl PoolMigrationRead for NoStore {
+        type Error = Infallible;
+
+        fn get_migration(&self) -> Result<Option<MigrationState>, Self::Error> {
+            panic!("the mining comparison reads no migration")
+        }
+
+        fn check_step_satisfiability(
+            &self,
+            _tx: &MigrationTransaction,
+            _settle: ReorgSettleDepth,
+        ) -> Result<StepSatisfiability, Self::Error> {
+            panic!("the mining comparison consults no oracle")
+        }
+
+        fn mined_height(&self, _txid: TxId) -> Result<Option<BlockHeight>, Self::Error> {
+            panic!("the adapter must answer mined_height from the wallet, not from its store")
+        }
+    }
+
+    /// Ask both implementations of the mining lookup about `txid` over one wallet — this store,
+    /// and `zcash_pool_migration`'s [`WalletMigration`] adapter reading the same wallet directly —
+    /// assert they agree, and return the answer they agree on.
+    ///
+    /// The two encode the same rollback-safety rule at different layers: the store applies the
+    /// fully-scanned bound in SQL, the adapter applies it over `WalletRead`. An application built
+    /// on this crate has both in play at once (the adapter's `PoolMigrationRead` impl wraps this
+    /// store), so a disagreement would make a migration's promotions depend on which one the
+    /// caller happened to hold — which is precisely the reason the adapter delegates nothing here.
+    fn store_and_adapter_agree(
+        st: &mut TestState<BlockCache, TestDb, LocalNetwork>,
+        account: AccountUuid,
+        txid: TxId,
+    ) -> Option<BlockHeight> {
+        let from_store = {
+            let store = PoolMigrations::for_account(
+                *st.network(),
+                SystemClock,
+                st.wallet_mut().conn_mut(),
+                account,
+            )
+            .expect("the account exists");
+            store.mined_height(txid).expect("the store answers")
+        };
+
+        // The adapter reads the wallet through `WalletRead`, so it needs the wallet itself — hence
+        // the store borrow above ends before this one begins.
+        let ufvk = st
+            .wallet()
+            .db()
+            .get_account(account)
+            .expect("the account reads")
+            .expect("the account exists")
+            .ufvk()
+            .expect("the account has a unified full viewing key")
+            .clone();
+        let adapter = WalletMigration::new(st.wallet().db(), account, ufvk, NoStore);
+        let from_adapter = adapter.mined_height(txid).expect("the adapter answers");
+
+        assert_eq!(
+            from_store, from_adapter,
+            "the store and the wallet-backed adapter must report one mined height for {txid:?}",
+        );
+        from_store
+    }
 
     /// Insert a transaction the wallet knows of, at `mined_height`, with no spend join: the mining
     /// lookup reads `transactions` alone, so nothing here needs a note or a spender.
@@ -1800,6 +1999,73 @@ mod mined_height {
         )
         .expect("the account exists");
         assert_eq!(store.mined_height(txid).expect("the store answers"), None);
+    }
+
+    /// This store and `zcash_pool_migration`'s `WalletMigration` adapter answer the mining lookup
+    /// ALIKE, over one wallet, in every state that distinguishes the rule: an unscanned wallet, an
+    /// inclusion inside the fully-scanned region, and one observed only above it.
+    ///
+    /// Two implementations of one rule is the thing worth testing here. The adapter is what an
+    /// application drives the engine through, and it wraps this store, so the pair is live in
+    /// every real migration; they nonetheless read the wallet by different routes (SQL over
+    /// `transactions` bounded by `fully_scanned_height`, versus `WalletRead::get_tx_height`
+    /// bounded by `block_fully_scanned`). Because they agree, the adapter needs no delegation to
+    /// this store to be correct — and this is what would catch the day one of the two routes
+    /// stopped applying the bound.
+    #[test]
+    fn the_store_and_the_wallet_adapter_report_one_mined_height() {
+        // Nothing scanned: no chain state backs an inclusion, so a transaction the wallet has been
+        // TOLD about (status retrieval, say) is still not promotable. The adapter must reach this
+        // answer without erroring, which is why it reads the fully-scanned bound before asking
+        // about the transaction at all.
+        let (mut st, account) = unscanned_wallet();
+        assert!(
+            st.wallet()
+                .block_fully_scanned()
+                .expect("reads the fully-scanned block")
+                .is_none(),
+            "precondition: the wallet has scanned nothing",
+        );
+        let unscanned_txid = TxId::from_bytes([8; 32]);
+        record_transaction(&mut st, unscanned_txid, Some(BlockHeight::from_u32(100)));
+        assert_eq!(
+            store_and_adapter_agree(&mut st, account, unscanned_txid),
+            None,
+            "an unscanned wallet promotes nothing",
+        );
+
+        let (mut st, account, _nf, as_of_height) = wallet_with_scanned_note();
+
+        // Inside the fully-scanned region: both report the height, and the drive promotes on it.
+        let mined_txid = TxId::from_bytes([9; 32]);
+        record_transaction(&mut st, mined_txid, Some(as_of_height));
+        assert_eq!(
+            store_and_adapter_agree(&mut st, account, mined_txid),
+            Some(as_of_height),
+        );
+
+        // Above it: a mined height the wallet learned ahead of scanning is withheld by both, so
+        // neither can promote onto a block whose rollback would not truncate the promotion.
+        let ahead_txid = TxId::from_bytes([10; 32]);
+        record_transaction(&mut st, ahead_txid, Some(as_of_height + 1));
+        assert_eq!(
+            store_and_adapter_agree(&mut st, account, ahead_txid),
+            None,
+            "an inclusion above the scanned region is not yet promotable",
+        );
+
+        // And the two absences that are not about the bound at all: a known-but-unmined
+        // transaction, and one the wallet has never heard of.
+        let unmined_txid = TxId::from_bytes([11; 32]);
+        record_transaction(&mut st, unmined_txid, None);
+        assert_eq!(
+            store_and_adapter_agree(&mut st, account, unmined_txid),
+            None
+        );
+        assert_eq!(
+            store_and_adapter_agree(&mut st, account, TxId::from_bytes([12; 32])),
+            None,
+        );
     }
 }
 
@@ -2058,8 +2324,9 @@ mod tests {
     use zcash_pool_migration::{
         denomination::DenominationPlan,
         engine::{
-            MigrationState, MigrationStatus, MigrationTransaction, MigrationTransferId,
-            MigrationTxKind, MigrationTxState, PoolMigrationRead, PoolMigrationWrite,
+            MigrationLockOwner, MigrationState, MigrationStatus, MigrationTransaction,
+            MigrationTransferId, MigrationTxKind, MigrationTxState, PoolMigrationRead,
+            PoolMigrationWrite,
         },
         preparation::PreparationPlan,
         satisfiability::{
@@ -2077,6 +2344,7 @@ mod tests {
     use crate::AccountUuid;
     use crate::util::SystemClock;
 
+    use core::num::NonZeroU32;
     use std::collections::BTreeSet;
     use zcash_client_backend::data_api::testing::TestBuilder;
     use zcash_client_backend::wallet::LockOwner;
@@ -2098,7 +2366,21 @@ mod tests {
         // row through `accounts(uuid)`.
         conn.execute_batch(
             "CREATE TABLE accounts (id INTEGER PRIMARY KEY, uuid BLOB NOT NULL);
-             CREATE UNIQUE INDEX accounts_uuid ON accounts (uuid);",
+             CREATE UNIQUE INDEX accounts_uuid ON accounts (uuid);
+             -- A minimal stand-in for the wallet's scan queue, which the identity-stamping half
+             -- of `replace_migration` reads the chain tip from (empty: no chain view yet).
+             CREATE TABLE scan_queue (
+                block_range_start INTEGER NOT NULL,
+                block_range_end INTEGER NOT NULL,
+                priority INTEGER NOT NULL
+             );
+             -- A minimal stand-in for the source pool's received-note rows: the columns note
+             -- locking records on them, which cancel and every terminal transition release.
+             CREATE TABLE orchard_received_notes (
+                id INTEGER PRIMARY KEY,
+                lock_expiry_height INTEGER,
+                lock_owner BLOB
+             );",
         )
         .expect("create accounts table");
         init_migration_tables(&conn).expect("create tables");
@@ -2131,6 +2413,655 @@ mod tests {
         assert_empty_is_none(&fresh_store());
     }
 
+    /// A migration keeps ONE identity — row id and uuid alike — for its whole life, and its
+    /// terminal record is retained beside its successor's. The parent row is updated in place on
+    /// every re-persistence (the state is persisted on every broadcast and every mine),
+    /// including the one that marks the migration terminal — which is how it enters the retained
+    /// history — while a replacement migration is a genuinely new row under a fresh identity,
+    /// leaving the history readable beside it.
+    #[test]
+    fn replace_preserves_identity_and_retains_history() {
+        let mut conn = fresh_conn();
+        let account = insert_account(&conn);
+        let interval = AnchorBucketInterval::ZIP_318;
+        let rows = |conn: &Connection| -> Vec<(i64, uuid::Uuid, String)> {
+            conn.prepare("SELECT id, uuid, status FROM orchard_ironwood_migrations ORDER BY id")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+
+        let mut live = migration_under(MigrationStatus::Committed, interval);
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&live)
+            .expect("first persist");
+        let first = rows(&conn);
+        assert_eq!(first.len(), 1, "one pending row");
+        let (row_id, original, _) = first[0].clone();
+        assert!(!original.is_nil());
+
+        // Re-persisting the live migration updates the row in place: same id, same uuid.
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&live)
+            .expect("re-persist");
+        assert_eq!(rows(&conn), vec![(row_id, original, "committed".into())]);
+
+        // Marking it terminal moves it into retained history, identity intact, and it leaves
+        // the pending read.
+        live.mark_superseded();
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&live)
+            .expect("terminal persist");
+        assert_eq!(rows(&conn), vec![(row_id, original, "superseded".into())]);
+        assert_eq!(
+            PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+                .expect("account exists")
+                .get_migration()
+                .expect("read"),
+            None,
+            "a terminal migration is history, not the migration in progress"
+        );
+
+        // A successor migration commits beside the history under its own identity.
+        let successor = migration_under(MigrationStatus::Committed, interval);
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&successor)
+            .expect("successor persist");
+        let after = rows(&conn);
+        assert_eq!(
+            after.len(),
+            2,
+            "the history survives the successor's commit"
+        );
+        assert_eq!(after[0], (row_id, original, "superseded".into()));
+        assert_ne!(after[1].1, original, "a new migration is a new identity");
+        assert_eq!(after[1].2, "committed");
+        assert_eq!(
+            PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+                .expect("account exists")
+                .get_migration()
+                .expect("read"),
+            Some(successor),
+            "the successor is the migration in progress"
+        );
+    }
+
+    /// A migration with one crossing of `value` zatoshis carried by one transfer in `tx_state`,
+    /// for exercising the history projections: the crossing list is what `value_migrated` sums
+    /// over, and the transfer's lifecycle state is what gates that sum.
+    fn migration_with_transfer(
+        status: MigrationStatus,
+        value: u64,
+        tx_state: MigrationTxState,
+    ) -> MigrationState {
+        let value = Zatoshis::const_from_u64(value);
+        let txid = match tx_state {
+            MigrationTxState::Broadcast { txid } | MigrationTxState::Mined { txid, .. } => txid,
+            _ => TxId::from_bytes([7; 32]),
+        };
+        MigrationState::from_parts(
+            status,
+            DenominationPlan::from_stored_parts(
+                vec![value],
+                Zatoshis::ZERO,
+                None,
+                Zatoshis::ZERO,
+                value,
+                value,
+            )
+            .expect("a consistent stored plan reconstructs"),
+            PreparationPlan::from_parts(Vec::new(), Vec::new()),
+            vec![MigrationTransaction::from_parts(
+                MigrationTransferId::new(0),
+                MigrationTxKind::Transfer { crossing: 0 },
+                vec![0xAB; 4],
+                Vec::new(),
+                BlockHeight::from_u32(10),
+                BlockHeight::from_u32(0),
+                None,
+                txid,
+                tx_state,
+                None,
+                None,
+                vec![[9; 32]],
+                None,
+            )],
+            AnchorBucketInterval::ZIP_318,
+            ReplanThreshold::DEFAULT,
+        )
+    }
+
+    /// The history reads: `latest_migration` keeps a finished migration visible after the
+    /// pending-only `get_migration` has moved on; `list_migrations` projects newest-first
+    /// summaries IN SQL — proven by corrupting every stored PCZT first, which a projection that
+    /// parsed them could not survive — and `get_migration_by_id` resolves a summary's identity
+    /// back to the full state, historical or pending.
+    #[test]
+    fn history_reads_survive_replacement() {
+        let mut conn = fresh_conn();
+        let account = insert_account(&conn);
+
+        // A finished migration: one 40k crossing, mined.
+        let mined = MigrationTxState::Mined {
+            txid: TxId::from_bytes([0xA0; 32]),
+            height: BlockHeight::from_u32(90),
+        };
+        let finished = migration_with_transfer(MigrationStatus::Complete, 40_000, mined);
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&finished)
+            .expect("persist finished");
+
+        // Its successor: pending, one 25k crossing, proved but not yet broadcast.
+        let successor =
+            migration_with_transfer(MigrationStatus::Committed, 25_000, MigrationTxState::Proved);
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&successor)
+            .expect("persist successor");
+
+        // The listing never touches the stored PCZTs: corrupt them all, and it must not notice.
+        conn.execute(
+            "UPDATE orchard_ironwood_migration_transactions SET pczt = X'DEAD'",
+            [],
+        )
+        .expect("corrupt every stored pczt");
+
+        let store =
+            PoolMigrations::for_account(NET, SystemClock, &mut conn, account).expect("account");
+        let summaries = store.list_migrations().expect("list");
+        assert_eq!(summaries.len(), 2, "history retains both migrations");
+
+        let newest = &summaries[0];
+        assert_eq!(newest.status(), MigrationStatus::Committed);
+        assert_eq!(newest.total_migratable(), Zatoshis::const_from_u64(25_000));
+        assert_eq!(newest.transaction_count(), 1);
+        assert_eq!(newest.mined_count(), 0);
+        assert_eq!(newest.value_migrated(), Zatoshis::ZERO);
+
+        let history = &summaries[1];
+        assert_eq!(history.status(), MigrationStatus::Complete);
+        assert_eq!(history.transaction_count(), 1);
+        assert_eq!(history.mined_count(), 1);
+        assert_eq!(
+            history.value_migrated(),
+            Zatoshis::const_from_u64(40_000),
+            "the mined transfer's crossing value has crossed"
+        );
+        assert_ne!(newest.id(), history.id());
+
+        // The latest migration is the successor, whatever `get_migration` says; the identities
+        // resolve to the full states (with the corrupted bytes read back verbatim, unparsed).
+        let latest = store.latest_migration().expect("latest");
+        assert_eq!(
+            latest.as_ref().map(|s| s.status()),
+            Some(MigrationStatus::Committed)
+        );
+        assert_eq!(
+            store
+                .get_migration_by_id(history.id())
+                .expect("by id")
+                .map(|s| s.status()),
+            Some(MigrationStatus::Complete),
+            "a historical record resolves by identity"
+        );
+        assert_eq!(
+            store
+                .get_migration_by_id(crate::pool_migration::MigrationUuid::from_uuid(
+                    Uuid::new_v4()
+                ))
+                .expect("by unknown id"),
+            None,
+            "an unknown identity resolves to nothing"
+        );
+    }
+
+    /// A freshly committed migration is stamped with the chain height the wallet knew at first
+    /// persistence — the "when" a history listing sorts by — and the stamp never moves with the
+    /// tip afterwards. With no chain view at all, no value is invented.
+    #[test]
+    fn committed_height_is_stamped_at_first_persistence() {
+        let mut conn = fresh_conn();
+        let account = insert_account(&conn);
+
+        // No chain view: nothing to stamp.
+        let first = migration_under(MigrationStatus::Committed, AnchorBucketInterval::ZIP_318);
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&first)
+            .expect("persist without a chain view");
+        let committed = |conn: &Connection| -> Vec<Option<u32>> {
+            conn.prepare("SELECT committed_height FROM orchard_ironwood_migrations ORDER BY id")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(committed(&conn), vec![None]);
+
+        // The wallet learns a chain tip; re-persisting the SAME migration does not invent a
+        // stamp for it retroactively, but its successor is stamped at first persistence.
+        conn.execute(
+            "INSERT INTO scan_queue (block_range_start, block_range_end, priority)
+             VALUES (0, 1001, 0)",
+            [],
+        )
+        .expect("record a scan range");
+        let mut ended = first.clone();
+        ended.mark_superseded();
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&ended)
+            .expect("re-persist");
+        let second = migration_under(MigrationStatus::Committed, AnchorBucketInterval::ZIP_318);
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&second)
+            .expect("persist successor");
+        assert_eq!(committed(&conn), vec![None, Some(1_000)]);
+    }
+
+    /// A locked source-note row under `owner`, standing in for the reservation the prover takes.
+    fn lock_note(conn: &Connection, id: u32, owner: [u8; 32]) {
+        conn.execute(
+            "INSERT INTO orchard_received_notes (id, lock_expiry_height, lock_owner)
+             VALUES (:id, 99999, :owner)",
+            rusqlite::named_params![":id": id, ":owner": owner],
+        )
+        .unwrap();
+    }
+
+    /// The owners currently holding locks in the stand-in note table.
+    fn locked_owners(conn: &Connection) -> Vec<[u8; 32]> {
+        conn.prepare(
+            "SELECT lock_owner FROM orchard_received_notes
+              WHERE lock_owner IS NOT NULL ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    }
+
+    /// Cancel classifies every transaction off its lifecycle column, releases exactly the
+    /// never-broadcast transactions' reservations (another flow's lock is untouched), flips the
+    /// record to `Cancelled`, and leaves it readable as history while `get_migration` moves on.
+    #[test]
+    fn cancel_releases_reservations_and_terminates() {
+        let mut conn = fresh_conn();
+        let account = insert_account(&conn);
+
+        let owner = [7u8; 32];
+        let rival = [9u8; 32];
+        lock_note(&conn, 1, owner);
+        lock_note(&conn, 2, rival);
+
+        // One transaction per disposition: proved-and-locked (released), broadcast (in flight),
+        // mined (history).
+        let mined_state = MigrationTxState::Mined {
+            txid: TxId::from_bytes([0xC0; 32]),
+            height: BlockHeight::from_u32(50),
+        };
+        let mut proved = migration_with_transfer(
+            MigrationStatus::InProgress,
+            40_000,
+            MigrationTxState::Proved,
+        );
+        let mut txs = proved.transactions().to_vec();
+        txs[0] = MigrationTransaction::from_parts(
+            txs[0].id(),
+            txs[0].kind(),
+            txs[0].pczt().to_vec(),
+            txs[0].depends_on().to_vec(),
+            txs[0].scheduled_height(),
+            txs[0].expiry_height(),
+            txs[0].anchor_boundary(),
+            txs[0].txid(),
+            MigrationTxState::Proved,
+            Some(MigrationLockOwner::from_bytes(owner)),
+            None,
+            txs[0].spend_nullifiers().to_vec(),
+            None,
+        );
+        txs.push(MigrationTransaction::from_parts(
+            MigrationTransferId::new(1),
+            MigrationTxKind::Preparation { layer: 0, index: 0 },
+            vec![1],
+            Vec::new(),
+            BlockHeight::from_u32(5),
+            BlockHeight::from_u32(0),
+            None,
+            TxId::from_bytes([0xB0; 32]),
+            MigrationTxState::Broadcast {
+                txid: TxId::from_bytes([0xB0; 32]),
+            },
+            None,
+            None,
+            Vec::new(),
+            None,
+        ));
+        txs.push(MigrationTransaction::from_parts(
+            MigrationTransferId::new(2),
+            MigrationTxKind::Preparation { layer: 0, index: 1 },
+            vec![2],
+            Vec::new(),
+            BlockHeight::from_u32(5),
+            BlockHeight::from_u32(0),
+            None,
+            TxId::from_bytes([0xC0; 32]),
+            mined_state,
+            None,
+            None,
+            Vec::new(),
+            None,
+        ));
+        proved = MigrationState::from_parts(
+            MigrationStatus::InProgress,
+            proved.denominations().clone(),
+            proved.preparation().clone(),
+            txs,
+            AnchorBucketInterval::ZIP_318,
+            ReplanThreshold::DEFAULT,
+        );
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&proved)
+            .expect("persist");
+
+        let outcome = PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .cancel_migration()
+            .expect("cancel succeeds");
+
+        assert_eq!(outcome.released(), &[MigrationTransferId::new(0)]);
+        assert_eq!(outcome.in_flight(), &[MigrationTransferId::new(1)]);
+        assert_eq!(outcome.mined(), &[MigrationTransferId::new(2)]);
+        assert_eq!(
+            locked_owners(&conn),
+            vec![rival],
+            "the migration's reservation is released; the rival flow's is untouched"
+        );
+
+        let store =
+            PoolMigrations::for_account(NET, SystemClock, &mut conn, account).expect("account");
+        assert_eq!(store.get_migration().expect("read"), None);
+        assert_eq!(
+            store
+                .latest_migration()
+                .expect("history reads back")
+                .map(|s| s.status()),
+            Some(MigrationStatus::Cancelled),
+            "the cancelled record is retained history"
+        );
+        // A replacement commits over it.
+        let successor = migration_under(MigrationStatus::Committed, AnchorBucketInterval::ZIP_318);
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&successor)
+            .expect("the commit guard's terminality requirement is satisfied");
+    }
+
+    /// Cancel succeeds against a migration whose STATE will not deserialize: it never parses the
+    /// record — the primary use case is an unrecoverable wallet, and a corrupt row is one of the
+    /// ways to get there.
+    #[test]
+    fn cancel_survives_a_corrupt_migration() {
+        let mut conn = fresh_conn();
+        let account = insert_account(&conn);
+        let live =
+            migration_with_transfer(MigrationStatus::Committed, 40_000, MigrationTxState::Proved);
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&live)
+            .expect("persist");
+
+        // Corrupt the transaction row's KIND, which the state reader must parse and cancel must
+        // not.
+        conn.execute(
+            "UPDATE orchard_ironwood_migration_transactions SET kind = 'garbage'",
+            [],
+        )
+        .expect("corrupts the row");
+        assert!(
+            PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+                .expect("account exists")
+                .get_migration()
+                .is_err(),
+            "premise: the state no longer deserializes"
+        );
+
+        let outcome = PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .cancel_migration()
+            .expect("cancel does not read what it does not need");
+        assert_eq!(outcome.released(), &[MigrationTransferId::new(0)]);
+        let status: String = conn
+            .query_row("SELECT status FROM orchard_ironwood_migrations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "cancelled");
+    }
+
+    /// Cancel with no PENDING migration performs the repair half only: the latest retained
+    /// record's reservations are released, and its recorded status — history — is untouched.
+    #[test]
+    fn cancel_repairs_an_already_terminal_record_without_rewriting_it() {
+        let mut conn = fresh_conn();
+        let account = insert_account(&conn);
+        let owner = [4u8; 32];
+        lock_note(&conn, 1, owner);
+
+        let mut txs =
+            migration_with_transfer(MigrationStatus::Failed, 40_000, MigrationTxState::Proved)
+                .transactions()
+                .to_vec();
+        txs[0] = MigrationTransaction::from_parts(
+            txs[0].id(),
+            txs[0].kind(),
+            txs[0].pczt().to_vec(),
+            txs[0].depends_on().to_vec(),
+            txs[0].scheduled_height(),
+            txs[0].expiry_height(),
+            txs[0].anchor_boundary(),
+            txs[0].txid(),
+            MigrationTxState::Proved,
+            Some(MigrationLockOwner::from_bytes(owner)),
+            None,
+            txs[0].spend_nullifiers().to_vec(),
+            None,
+        );
+        let failed =
+            migration_with_transfer(MigrationStatus::Failed, 40_000, MigrationTxState::Proved);
+        let failed = MigrationState::from_parts(
+            MigrationStatus::Failed,
+            failed.denominations().clone(),
+            failed.preparation().clone(),
+            txs,
+            AnchorBucketInterval::ZIP_318,
+            ReplanThreshold::DEFAULT,
+        );
+        // Insert the terminal record DIRECTLY as an old client would have left it (the
+        // terminal-transition release in `replace_migration` would otherwise discharge the lock
+        // on the way in, which is itself the behavior `supersede_releases_reservations` pins).
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&failed)
+            .expect("persist");
+        // Re-take the lock, modeling the stranded field state.
+        conn.execute(
+            "UPDATE orchard_received_notes SET lock_owner = :owner, lock_expiry_height = 99999",
+            rusqlite::named_params![":owner": owner],
+        )
+        .unwrap();
+
+        let outcome = PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .cancel_migration()
+            .expect("repair succeeds");
+        assert_eq!(outcome.released(), &[MigrationTransferId::new(0)]);
+        assert!(locked_owners(&conn).is_empty(), "the stranded lock is gone");
+        let status: String = conn
+            .query_row("SELECT status FROM orchard_ironwood_migrations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "failed", "history is never rewritten");
+    }
+
+    /// EVERY terminal transition that flows through the ordinary persist path releases the
+    /// never-broadcast reservations: the consumer's `mark_superseded` response to `Replan` must
+    /// not strand the live transfers' locks behind a record nothing will revisit.
+    #[test]
+    fn supersede_releases_reservations_on_persist() {
+        let mut conn = fresh_conn();
+        let account = insert_account(&conn);
+        let owner = [5u8; 32];
+        lock_note(&conn, 1, owner);
+
+        let live = migration_with_transfer(
+            MigrationStatus::InProgress,
+            40_000,
+            MigrationTxState::Proved,
+        );
+        let mut txs = live.transactions().to_vec();
+        txs[0] = MigrationTransaction::from_parts(
+            txs[0].id(),
+            txs[0].kind(),
+            txs[0].pczt().to_vec(),
+            txs[0].depends_on().to_vec(),
+            txs[0].scheduled_height(),
+            txs[0].expiry_height(),
+            txs[0].anchor_boundary(),
+            txs[0].txid(),
+            MigrationTxState::Proved,
+            Some(MigrationLockOwner::from_bytes(owner)),
+            None,
+            txs[0].spend_nullifiers().to_vec(),
+            None,
+        );
+        let mut live = MigrationState::from_parts(
+            MigrationStatus::InProgress,
+            live.denominations().clone(),
+            live.preparation().clone(),
+            txs,
+            AnchorBucketInterval::ZIP_318,
+            ReplanThreshold::DEFAULT,
+        );
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&live)
+            .expect("persist live");
+        assert_eq!(locked_owners(&conn), vec![owner]);
+
+        live.mark_superseded();
+        PoolMigrations::for_account(NET, SystemClock, &mut conn, account)
+            .expect("account exists")
+            .replace_migration(&live)
+            .expect("persist superseded");
+        assert!(
+            locked_owners(&conn).is_empty(),
+            "persisting the terminal state released the reservation"
+        );
+    }
+
+    /// A migration in `status`, recorded under `interval`. The plan itself is empty filler: the
+    /// test using this is about which grids a status still owes retention to, and nothing else.
+    fn migration_under(status: MigrationStatus, interval: AnchorBucketInterval) -> MigrationState {
+        MigrationState::from_parts(
+            status,
+            DenominationPlan::from_stored_parts(
+                Vec::new(),
+                Zatoshis::ZERO,
+                None,
+                Zatoshis::ZERO,
+                Zatoshis::ZERO,
+                Zatoshis::ZERO,
+            )
+            .expect("an empty stored plan reconstructs"),
+            PreparationPlan::from_parts(Vec::new(), Vec::new()),
+            Vec::new(),
+            interval,
+            ReplanThreshold::DEFAULT,
+        )
+    }
+
+    /// Anchor-checkpoint retention is owed by every NON-TERMINAL migration, and by no terminal one
+    /// — not merely by every migration that is not `complete`.
+    ///
+    /// The distinction is the point: `complete` is the only terminal status a migration reaches by
+    /// finishing its work, so a query written against it alone lets a `failed`, `superseded`, or
+    /// `cancelled` migration pin its grid for the lifetime of the wallet. Nothing will ever drive
+    /// those migrations again, so the checkpoints are kept for proofs that will never be requested,
+    /// and being terminal they are never revisited to notice.
+    ///
+    /// One account per status, each under its own grid, so the surviving intervals name exactly
+    /// which statuses still owe retention.
+    #[test]
+    fn anchor_retention_is_owed_by_every_non_terminal_status() {
+        /// Grid width recorded for the first status; each subsequent one takes the next block
+        /// count, so an interval identifies the status that was recorded under it.
+        const FIRST_GRID_BLOCKS: u32 = 10;
+
+        let mut conn = fresh_conn();
+        let mut expected: BTreeSet<u32> = BTreeSet::new();
+
+        for (i, status) in MigrationStatus::ALL.iter().copied().enumerate() {
+            let blocks = FIRST_GRID_BLOCKS + u32::try_from(i).expect("a handful of statuses");
+            let interval =
+                AnchorBucketInterval::custom(NonZeroU32::new(blocks).expect("nonzero grid"));
+            let account = insert_account(&conn);
+            let mut store = PoolMigrations::for_account(NET, SystemClock, conn, account)
+                .expect("the account exists");
+            store
+                .replace_migration(&migration_under(status, interval))
+                .expect("persists the migration");
+            conn = store.into_inner();
+
+            if !status.is_terminal() {
+                expected.insert(blocks);
+            }
+        }
+
+        let active: BTreeSet<u32> = super::active_anchor_bucket_intervals(&conn)
+            .expect("reads the active grids")
+            .into_iter()
+            .map(|interval| interval.block_count().get())
+            .collect();
+
+        assert_eq!(
+            active, expected,
+            "exactly the non-terminal migrations' grids are still retained"
+        );
+
+        // Spelled out for the three statuses the previous `status <> 'complete'` query retained
+        // forever, since that is the regression this pins.
+        for status in [
+            MigrationStatus::Failed,
+            MigrationStatus::Superseded,
+            MigrationStatus::Cancelled,
+        ] {
+            let position = MigrationStatus::ALL
+                .iter()
+                .position(|s| *s == status)
+                .expect("every status is in ALL");
+            let blocks =
+                FIRST_GRID_BLOCKS + u32::try_from(position).expect("a handful of statuses");
+            assert!(
+                !active.contains(&blocks),
+                "{status:?} must not pin its {blocks}-block grid",
+            );
+        }
+    }
+
     /// A transaction's `lock_owner` round-trips exactly through the store's `BLOB` column: a
     /// `Some` token comes back byte-for-byte and a `None` comes back as `None`, not a zeroed or
     /// otherwise substituted token. This pins the two cases the column must distinguish; the
@@ -2157,7 +3088,7 @@ mod tests {
         let spend_nullifiers: Vec<[u8; 32]> = Vec::new();
         let broadcast_failure_at: Option<BlockHeight> = None;
 
-        let owner_bytes = [7u8; 32];
+        let owner = MigrationLockOwner::from_bytes([7u8; 32]);
         let locked = MigrationTransaction::from_parts(
             MigrationTransferId::new(0),
             MigrationTxKind::Preparation { layer: 0, index: 0 },
@@ -2168,7 +3099,7 @@ mod tests {
             anchor_boundary,
             TxId::from_bytes([0; 32]),
             MigrationTxState::Signed,
-            Some(owner_bytes),
+            Some(owner),
             unsatisfiable,
             spend_nullifiers.clone(),
             broadcast_failure_at,
@@ -2210,7 +3141,7 @@ mod tests {
         );
         assert_eq!(
             loaded.transactions()[0].lock_owner(),
-            Some(owner_bytes),
+            Some(owner),
             "a `Some` lock_owner must survive exactly"
         );
         assert_eq!(
@@ -2232,8 +3163,8 @@ mod tests {
             "an account with no migration must report no lock owners"
         );
 
-        let owner_a_bytes = [0xA1u8; 32];
-        let owner_b_bytes = [0xB2u8; 32];
+        let owner_a = MigrationLockOwner::from_bytes([0xA1u8; 32]);
+        let owner_b = MigrationLockOwner::from_bytes([0xB2u8; 32]);
 
         let denominations = DenominationPlan::from_stored_parts(
             Vec::new(),
@@ -2245,7 +3176,7 @@ mod tests {
         )
         .expect("an empty stored plan reconstructs");
 
-        let tx = |id: u32, crossing: usize, lock_owner: Option<[u8; 32]>| {
+        let tx = |id: u32, crossing: usize, lock_owner: Option<MigrationLockOwner>| {
             MigrationTransaction::from_parts(
                 MigrationTransferId::new(id),
                 MigrationTxKind::Transfer { crossing },
@@ -2268,11 +3199,11 @@ mod tests {
             denominations,
             PreparationPlan::from_parts(Vec::new(), Vec::new()),
             vec![
-                tx(0, 0, Some(owner_a_bytes)),
-                tx(1, 1, Some(owner_b_bytes)),
+                tx(0, 0, Some(owner_a)),
+                tx(1, 1, Some(owner_b)),
                 tx(2, 2, None),
                 // A second transaction locked by A, to prove duplicates collapse.
-                tx(3, 3, Some(owner_a_bytes)),
+                tx(3, 3, Some(owner_a)),
             ],
             AnchorBucketInterval::ZIP_318,
             ReplanThreshold::DEFAULT,
@@ -2283,7 +3214,10 @@ mod tests {
         let owners = store.migration_lock_owners().expect("read succeeds");
         assert_eq!(
             owners,
-            BTreeSet::from([LockOwner::new(owner_a_bytes), LockOwner::new(owner_b_bytes)]),
+            BTreeSet::from([
+                LockOwner::new(*owner_a.as_bytes()),
+                LockOwner::new(*owner_b.as_bytes()),
+            ]),
             "must contain exactly the distinct non-None lock owners, deduped"
         );
     }
@@ -2783,12 +3717,15 @@ mod tests {
                     .expect("read for B"),
                 None
             );
+            // Pending-only: a terminal state was persisted into A's retained history rather
+            // than as its migration in progress.
+            let expected_a = (!state.is_terminal()).then_some(state);
             prop_assert_eq!(
                 PoolMigrations::for_account(NET, SystemClock, &conn, account_a)
                     .expect("account A exists")
                     .get_migration()
                     .expect("read for A"),
-                Some(state)
+                expected_a
             );
         }
 
@@ -2817,25 +3754,29 @@ mod tests {
                 .replace_migration(&state_a_2)
                 .expect("write A second");
 
+            // Pending-only reads on both sides: a terminal write lands in retained history.
+            let expected_a = (!state_a_2.is_terminal()).then_some(state_a_2);
+            let expected_b = (!state_b.is_terminal()).then_some(state_b);
             prop_assert_eq!(
                 PoolMigrations::for_account(NET, SystemClock, &conn, account_a)
                     .expect("account A exists")
                     .get_migration()
                     .expect("read A"),
-                Some(state_a_2)
+                expected_a
             );
             prop_assert_eq!(
                 PoolMigrations::for_account(NET, SystemClock, &conn, account_b)
                     .expect("account B exists")
                     .get_migration()
                     .expect("read B"),
-                Some(state_b)
+                expected_b
             );
         }
 
-        /// A second `replace_migration` for the same account still replaces: the per-account
-        /// singleton semantics hold (enforced by the unique index over `account_id`), because
-        /// the account's existing row is deleted before the new one is inserted.
+        /// A second `replace_migration` for the same account still replaces the account's
+        /// migration IN PROGRESS: at most one pending row per account (enforced by the partial
+        /// unique index over `account_id`), because the account's pending row is deleted before
+        /// the new one is inserted, while terminal rows accumulate as retained history.
         #[test]
         fn replace_migration_replaces_same_account(
             first in arb_migration_state(),
@@ -2846,7 +3787,8 @@ mod tests {
             let mut store = PoolMigrations::for_account(NET, SystemClock, conn, account).expect("account exists");
             store.replace_migration(&first).expect("write first");
             store.replace_migration(&second).expect("write second");
-            prop_assert_eq!(store.get_migration().expect("read"), Some(second));
+            let expected = (!second.is_terminal()).then_some(second);
+            prop_assert_eq!(store.get_migration().expect("read"), expected);
         }
 
         /// `update_transaction` is scoped to its account: advancing a transaction's state for
@@ -2858,6 +3800,9 @@ mod tests {
             new in arb_migration_tx_state(),
         ) {
             prop_assume!(!state.transactions().is_empty());
+            // A terminal migration has no pending row to update; lifecycle updates are a
+            // pending-migration operation, which is all this scoping property is about.
+            prop_assume!(!state.is_terminal());
             let id = first_transaction_id(&state).expect("non-empty by the assumption above");
 
             let mut conn = fresh_conn();

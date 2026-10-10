@@ -11,7 +11,7 @@
 //! and reject a non-NULL blob that is not exactly 32 bytes); and each cached real-spend
 //! `nullifier`, one per row of the spend-nullifier child table, held to its 32-byte width by a
 //! `CHECK` and read back through those same fixed-size impls. All amounts are zatoshi `INTEGER`
-//! columns; the broadcast `txid` is stored as hex `TEXT`.
+//! columns; the `txid` is stored as the transaction id's raw internal bytes (`TxId::as_ref`).
 //!
 //! The preparation plan's layers/transactions grid has no tables of its own: each input and output
 //! row carries its transaction's `(layer, tx_index)` coordinate, and every transaction a real plan
@@ -39,8 +39,8 @@ use rusqlite::{Connection, OptionalExtension, named_params, params};
 use zcash_client_backend::wallet::LockOwner;
 use zcash_pool_migration::denomination::DenominationPlan;
 use zcash_pool_migration::engine::{
-    MigrationState, MigrationStatus, MigrationTransaction, MigrationTransferId, MigrationTxKind,
-    MigrationTxState,
+    MigrationLockOwner, MigrationState, MigrationStatus, MigrationTransaction, MigrationTransferId,
+    MigrationTxKind, MigrationTxState,
 };
 use zcash_pool_migration::preparation::{PrepInput, PrepOutput, PrepTransaction, PreparationPlan};
 use zcash_pool_migration::satisfiability::{
@@ -136,21 +136,28 @@ const ANCHOR_PROBE_LIMIT: usize = 1024;
 // DDL
 // ---------------------------------------------------------------------------
 
+/// The terminal statuses as a parenthesizable SQL literal list (`'complete', 'failed', ...`),
+/// generated from [`MigrationStatus::terminal`] so the database's notion of terminal cannot drift
+/// from the crate's. Used wherever terminality must appear in SQL TEXT rather than as bound
+/// parameters — the partial unique index's predicate, which SQLite stores as DDL — and by the
+/// pending-only read queries, so every site derives from the one decision in `is_terminal`.
+pub(crate) fn terminal_status_sql_list() -> String {
+    MigrationStatus::terminal()
+        .map(|s| format!("'{}'", s.wire_name()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn create_migrations_sql(t: &Tables) -> String {
-    // `anchor_bucket_interval` carries a `DEFAULT` only so that this DDL and the `ADD COLUMN` in
-    // the `orchard_ironwood_migration_anchor_interval` schema migration produce the same stored
-    // schema text: SQLite cannot add a `NOT NULL` column without one. The store always binds the
-    // column explicitly, so no insert ever falls back to it.
+    // Column semantics are documented on the golden copy,
+    // `crate::wallet::db::TABLE_ORCHARD_IRONWOOD_MIGRATIONS`. Constraints shaping this DDL:
     //
-    // `replan_threshold` carries a `DEFAULT` for the same reason, matching the `ADD COLUMN` in the
-    // `orchard_ironwood_migration_unsatisfiability` schema migration; its default is
-    // `ReplanThreshold::DEFAULT`'s percent.
-    //
-    // `account_id` is a foreign key into the wallet's `accounts` table: the pool-migration tables
-    // live in the wallet database alongside `accounts`, so an account's migration is owned by its
-    // account row and removed with it. Deleting an account cascades to its migration here, whose
-    // child rows in turn cascade from the parent migration row. The `accounts` table name is the
-    // same for every pool, so it is referenced directly rather than through `Tables`.
+    // - `account_id` references the wallet's `accounts` table directly (its name is the same for
+    //   every pool), so an account's migrations and their child rows are removed with it.
+    // - The `DEFAULT`s on `anchor_bucket_interval`, `replan_threshold`, and `uuid` exist only so
+    //   this DDL and the corresponding schema migrations' `ADD COLUMN`s produce identical stored
+    //   schema text (SQLite cannot add a `NOT NULL` column without one); the store binds all
+    //   three explicitly.
     format!(
         "CREATE TABLE IF NOT EXISTS {} (
             id INTEGER PRIMARY KEY,
@@ -162,7 +169,9 @@ fn create_migrations_sql(t: &Tables) -> String {
             note_split_total_input INTEGER NOT NULL,
             note_split_total_migratable INTEGER NOT NULL,
             anchor_bucket_interval INTEGER NOT NULL DEFAULT {},
-            replan_threshold INTEGER NOT NULL DEFAULT {}
+            replan_threshold INTEGER NOT NULL DEFAULT {},
+            uuid BLOB NOT NULL DEFAULT X'',
+            committed_height INTEGER
         )",
         t.migrations,
         AnchorBucketInterval::ZIP_318.block_count(),
@@ -229,7 +238,7 @@ fn create_prep_direct_funding_sql(t: &Tables) -> String {
     )
 }
 
-fn create_transactions_sql(t: &Tables) -> String {
+pub(crate) fn create_transactions_sql(t: &Tables) -> String {
     // `unsatisfiable_at` and `unsatisfiable_kind` are one value in two columns — the height an
     // unsatisfiability observation rests on, and which observation it was — so they are `NULL`
     // together or non-`NULL` together, and the read path rejects a row where they disagree.
@@ -251,7 +260,7 @@ fn create_transactions_sql(t: &Tables) -> String {
             expiry_height INTEGER NOT NULL,
             anchor_boundary INTEGER,
             state TEXT NOT NULL,
-            txid TEXT,
+            txid BLOB,
             mined_height INTEGER,
             lock_owner BLOB,
             unsatisfiable_at INTEGER,
@@ -302,17 +311,108 @@ fn create_spend_nullifiers_sql(t: &Tables) -> String {
     )
 }
 
-fn create_tx_due_index_sql(t: &Tables) -> String {
+pub(crate) fn create_tx_due_index_sql(t: &Tables) -> String {
     format!(
         "CREATE INDEX IF NOT EXISTS {} ON {} (state, scheduled_height)",
         t.tx_due_index, t.transactions
     )
 }
 
-fn create_account_index_sql(t: &Tables) -> String {
+/// The `v_migration_transactions` view DDL: one row per SCHEDULED migration transaction — a
+/// transaction of a non-terminal migration that has not yet been broadcast (and so has no row in
+/// the wallet's `transactions` table). Values are projected from the migration store's typed
+/// columns: a transfer spends its funding note (crossing value plus the per-note fee buffer,
+/// which IS the canonical transfer's ZIP-317 fee) and receives the crossing; a preparation's
+/// values are the sums of its input and output rows. Every wire name, classification code, and
+/// the terminal-status list are generated from their defining types.
+pub(crate) fn create_migration_tx_view_sql(t: &Tables) -> String {
+    use zcash_pool_migration::engine::{MigrationTxKind, MigrationTxState};
+    use zcash_protocol::zip318::{Zip318Classification, Zip318TxKind};
+
+    let transfer = MigrationTxKind::Transfer { crossing: 0 };
+    let pending_states = [
+        MigrationTxState::AwaitingSignature,
+        MigrationTxState::Signed,
+        MigrationTxState::Proved,
+    ]
+    .iter()
+    .map(|st| format!("'{}'", st.as_ref()))
+    .collect::<Vec<_>>()
+    .join(", ");
     format!(
-        "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {} (account_id)",
-        t.account_index, t.migrations
+        "CREATE VIEW v_migration_transactions AS
+        SELECT accounts.uuid AS account_uuid,
+               m.uuid AS migration_uuid,
+               mt.txid AS txid,
+               mt.kind AS kind,
+               mt.state AS state,
+               mt.scheduled_height AS scheduled_height,
+               mt.expiry_height AS expiry_height,
+               CASE mt.kind WHEN '{transfer}' THEN cv.value + m.note_split_fee_buffer
+                    ELSE pin.value_in END AS value_spent,
+               CASE mt.kind WHEN '{transfer}' THEN cv.value
+                    ELSE pout.value_out END AS value_received,
+               CASE mt.kind WHEN '{transfer}' THEN m.note_split_fee_buffer
+                    ELSE pin.value_in - pout.value_out END AS fee,
+               CASE mt.kind WHEN '{transfer}' THEN cv.value END AS pool_crossing_value,
+               CASE mt.kind WHEN '{transfer}' THEN 1 ELSE pin.input_count END AS spent_note_count,
+               CASE mt.kind WHEN '{transfer}' THEN 1
+                    ELSE pout.output_count - pout.change_count END AS received_note_count,
+               CASE mt.kind WHEN '{transfer}' THEN 0
+                    ELSE pout.change_count > 0 END AS has_change,
+               CASE mt.kind WHEN '{transfer}' THEN {transfer_code}
+                    ELSE {prep_code} END AS zip318_kind
+        FROM {tx} mt
+        JOIN {migrations} m ON m.id = mt.migration_id
+        JOIN accounts ON accounts.id = m.account_id
+        LEFT JOIN {cv} cv
+               ON cv.migration_id = mt.migration_id AND cv.ordinal = mt.kind_crossing
+        LEFT JOIN (SELECT migration_id, layer, tx_index,
+                          SUM(value) AS value_in, COUNT(*) AS input_count
+                     FROM {pin} GROUP BY migration_id, layer, tx_index) pin
+               ON pin.migration_id = mt.migration_id
+              AND pin.layer = mt.kind_layer AND pin.tx_index = mt.kind_index
+        LEFT JOIN (SELECT migration_id, layer, tx_index,
+                          SUM(value) AS value_out, COUNT(*) AS output_count,
+                          SUM(role = '{change}') AS change_count
+                     FROM {pout} GROUP BY migration_id, layer, tx_index) pout
+               ON pout.migration_id = mt.migration_id
+              AND pout.layer = mt.kind_layer AND pout.tx_index = mt.kind_index
+        WHERE m.status NOT IN ({terminal})
+          AND mt.state IN ({pending_states})
+          AND NOT EXISTS (SELECT 1 FROM transactions tt WHERE tt.txid = mt.txid)",
+        transfer = transfer.as_ref(),
+        transfer_code = Zip318Classification::Conforms(Zip318TxKind::Transfer).to_code(),
+        prep_code = Zip318Classification::Conforms(Zip318TxKind::Preparation).to_code(),
+        change = "change",
+        tx = t.transactions,
+        migrations = t.migrations,
+        cv = t.crossing_values,
+        pin = t.prep_inputs,
+        pout = t.prep_outputs,
+        terminal = terminal_status_sql_list(),
+        pending_states = pending_states,
+    )
+}
+
+/// The at-most-one-PENDING-migration-per-account invariant, as a database constraint: a PARTIAL
+/// unique index over the non-terminal rows. An account accumulates terminal migrations without
+/// limit — they are the history the store retains — while the engine's commit guard admits a new
+/// migration only once the outstanding one is terminal, and this index makes the database uphold
+/// the same rule, so a logic bug surfaces as a constraint violation rather than as two live
+/// migrations racing. The predicate is generated from [`MigrationStatus::terminal`]
+/// ([`terminal_status_sql_list`]), never restated as literals.
+///
+/// `pub(crate)` because the `orchard_ironwood_migration_history` schema migration creates the
+/// index from this same generator, so the migration path and the canonical DDL cannot disagree
+/// about the predicate.
+pub(crate) fn create_account_index_sql(t: &Tables) -> String {
+    format!(
+        "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {} (account_id)
+            WHERE status NOT IN ({})",
+        t.account_index,
+        t.migrations,
+        terminal_status_sql_list()
     )
 }
 
@@ -389,6 +489,129 @@ impl<C: Borrow<Connection>> Store<C> {
         read_migration(self.conn.borrow(), self.tables, self.account_id)
     }
 
+    /// The account's most recent migration WHATEVER its status — the record a UI renders, where a
+    /// finished migration must remain visible after [`get_migration`](Self::get_migration) (the
+    /// pending-only drive read) has moved on to `None`. Recency is row order: rows are only ever
+    /// inserted, and the identity-preserving rewrite re-inserts a migration in place of itself,
+    /// so a later row id is a later migration.
+    pub(crate) fn latest_migration(&self) -> Result<Option<MigrationState>, Error> {
+        let conn = self.conn.borrow();
+        let row: Option<i64> = conn
+            .query_row(
+                &format!(
+                    "SELECT id FROM {} WHERE account_id = ? ORDER BY id DESC LIMIT 1",
+                    self.tables.migrations
+                ),
+                params![self.account_id.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        row.map(|id| read_migration_row(conn, self.tables, id))
+            .transpose()
+    }
+
+    /// The full state of the account's migration identified by `uuid` — historical or pending —
+    /// or `None` when the account has no such migration.
+    pub(crate) fn get_migration_by_id(
+        &self,
+        id: crate::pool_migration::MigrationUuid,
+    ) -> Result<Option<MigrationState>, Error> {
+        let conn = self.conn.borrow();
+        let row: Option<i64> = conn
+            .query_row(
+                &format!(
+                    "SELECT id FROM {} WHERE account_id = ? AND uuid = ?",
+                    self.tables.migrations
+                ),
+                params![self.account_id.0, id.expose_uuid()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        row.map(|id| read_migration_row(conn, self.tables, id))
+            .transpose()
+    }
+
+    /// Every migration the account has run, newest first, PROJECTED IN SQL: the aggregate counts
+    /// and mined value are computed by the database over the typed columns, and no stored PCZT is
+    /// ever read, let alone parsed — a full [`MigrationState`] runs to megabytes of proofs, and a
+    /// history listing must render without deserializing any of them.
+    pub(crate) fn list_migrations(
+        &self,
+    ) -> Result<Vec<crate::pool_migration::MigrationSummary>, Error> {
+        let conn = self.conn.borrow();
+        let t = self.tables;
+        // The lifecycle discriminants and the transfer kind are the engine's wire names, written
+        // through `AsRef<str>` on the way in; stated here via the same constants' values rather
+        // than re-derived per row.
+        let mut stmt = conn.prepare(&format!(
+            "SELECT m.uuid, m.status, m.committed_height,
+                    m.note_split_total_input, m.note_split_total_migratable, m.note_split_change,
+                    (SELECT COUNT(*) FROM {tx} t WHERE t.migration_id = m.id),
+                    (SELECT COUNT(*) FROM {tx} t
+                      WHERE t.migration_id = m.id AND t.state = 'mined'),
+                    (SELECT COUNT(*) FROM {tx} t
+                      WHERE t.migration_id = m.id AND t.state = 'broadcast'),
+                    (SELECT COUNT(*) FROM {tx} t
+                      WHERE t.migration_id = m.id AND t.unsatisfiable_at IS NOT NULL),
+                    (SELECT IFNULL(SUM(cv.value), 0)
+                       FROM {tx} t
+                       JOIN {cv} cv
+                         ON cv.migration_id = t.migration_id AND cv.ordinal = t.kind_crossing
+                      WHERE t.migration_id = m.id AND t.kind = 'transfer' AND t.state = 'mined')
+               FROM {m} m
+              WHERE m.account_id = ?
+              ORDER BY m.id DESC",
+            m = t.migrations,
+            tx = t.transactions,
+            cv = t.crossing_values,
+        ))?;
+        let rows = stmt.query_map(params![self.account_id.0], |row| {
+            Ok((
+                row.get::<_, uuid::Uuid>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<u32>>(2)?,
+                row.get::<_, u64>(3)?,
+                row.get::<_, u64>(4)?,
+                row.get::<_, Option<u64>>(5)?,
+                row.get::<_, u64>(6)?,
+                row.get::<_, u64>(7)?,
+                row.get::<_, u64>(8)?,
+                row.get::<_, u64>(9)?,
+                row.get::<_, u64>(10)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (
+                uuid,
+                status,
+                committed_height,
+                total_input,
+                total_migratable,
+                change,
+                total,
+                mined,
+                in_flight,
+                unsatisfiable,
+                value_migrated,
+            ) = row?;
+            Ok(crate::pool_migration::MigrationSummary {
+                id: crate::pool_migration::MigrationUuid::from_uuid(uuid),
+                status: MigrationStatus::try_from(status.as_str())
+                    .map_err(|_| Error::Corrupt("status"))?,
+                committed_height: committed_height.map(BlockHeight::from_u32),
+                total_input: Zatoshis::from_u64(total_input)?,
+                total_migratable: Zatoshis::from_u64(total_migratable)?,
+                change: change.map(Zatoshis::from_u64).transpose()?,
+                transaction_count: total as usize,
+                mined_count: mined as usize,
+                in_flight_count: in_flight as usize,
+                unsatisfiable_count: unsatisfiable as usize,
+                value_migrated: Zatoshis::from_u64(value_migrated)?,
+            })
+        })
+        .collect()
+    }
+
     /// Returns the set of [`LockOwner`]s under which this account's in-progress migration has
     /// locked notes (empty if the account has no migration, or none of its transactions hold a
     /// lock).
@@ -430,6 +653,34 @@ impl<C: Borrow<Connection>> Store<C> {
 impl<C: BorrowMut<Connection>> Store<C> {
     pub(crate) fn replace_migration(&mut self, state: &MigrationState) -> Result<(), Error> {
         self.replace_migration_with(state, |_| Ok(()))
+    }
+
+    /// Cancel the account's migration: release every note reservation its never-broadcast
+    /// transactions hold, then move its record to the terminal `cancelled` status — in that
+    /// order, in one database transaction, so every crash prefix leaves a still-pending
+    /// migration that a retried cancel finishes (the reverse order could leave a terminal
+    /// record nothing will revisit while its reservations stand).
+    ///
+    /// Deliberately performed WITHOUT deserializing the migration state: the primary use case is
+    /// an unrecoverable wallet, and a record that will not parse is one of the ways to get
+    /// there. Everything needed — each transaction's lifecycle state and lock-owner token — is
+    /// readable from typed columns.
+    ///
+    /// When the account has no PENDING migration, the latest retained record (if any) gets the
+    /// REPAIR half only: its never-broadcast transactions' reservations are released, and its
+    /// terminal status is left exactly as recorded — cancel never rewrites history, but a
+    /// stranded reservation is not history, and the field contains terminal records (the mobile
+    /// SDK's hand-rolled cancel persisted `failed`) whose locks nothing else will release before
+    /// they expire.
+    pub(crate) fn cancel_migration(
+        &mut self,
+    ) -> Result<crate::pool_migration::CancelOutcome, Error> {
+        let tables = self.tables;
+        let account_id = self.account_id;
+        let tx = self.conn.borrow_mut().transaction()?;
+        let outcome = cancel_migration(&tx, tables, account_id)?;
+        tx.commit()?;
+        Ok(outcome)
     }
 
     /// Replace the migration as [`replace_migration`](Self::replace_migration) does, then run
@@ -499,17 +750,25 @@ fn resolve_migration_id(
     t: &Tables,
     account_id: AccountRef,
 ) -> Result<Option<i64>, Error> {
+    // PENDING-ONLY: terminal migrations are retained history, and every operation that addresses
+    // "the account's migration" means the one still in progress. The partial unique index on
+    // `(account_id) WHERE status NOT IN (terminal)` is what keeps this `query_row` well-defined
+    // now that an account accumulates terminal rows.
     Ok(conn
         .query_row(
-            &format!("SELECT id FROM {} WHERE account_id = ?", t.migrations),
+            &format!(
+                "SELECT id FROM {} WHERE account_id = ? AND status NOT IN ({})",
+                t.migrations,
+                terminal_status_sql_list()
+            ),
             params![account_id.0],
             |row| row.get(0),
         )
         .optional()?)
 }
 
-/// The distinct anchor bucket intervals, in blocks, of every migration in `t.migrations` that is
-/// not yet complete — the grids the wallet still owes anchor-checkpoint retention to.
+/// The distinct anchor bucket intervals, in blocks, of every migration in `t.migrations` that has
+/// not reached a terminal status — the grids the wallet still owes anchor-checkpoint retention to.
 ///
 /// This is read from the database rather than from any in-memory configuration on purpose. A
 /// migration's transfers are anchored to boundaries of the grid it was COMMITTED under, and are
@@ -518,18 +777,29 @@ fn resolve_migration_id(
 /// a boundary the migration still needs without retaining it — unrecoverably, since the checkpoint
 /// is gone by the time anything notices.
 ///
-/// A `complete` migration has no transfer left to prove, so its grid is dropped.
+/// A TERMINAL migration has no transfer left to prove, so its grid is dropped. For `complete` that
+/// is because every transfer mined; for the policy determinations (`failed`, `superseded`,
+/// `cancelled`) it is because nothing will drive the migration further, so retaining checkpoints
+/// for proofs that will never be requested costs storage to no purpose — and, since a terminal
+/// migration is never revisited, costs it forever.
+///
+/// The excluded set is [`MigrationStatus::terminal`], not a list of literals written out here: a
+/// second list is a second place for a new status to be forgotten, and forgetting it here fails
+/// silently, as unbounded retention rather than as an error.
 pub(crate) fn active_anchor_bucket_intervals(
     conn: &Connection,
     t: &Tables,
 ) -> Result<BTreeSet<NonZeroU32>, Error> {
+    let terminal: Vec<MigrationStatus> = MigrationStatus::terminal().collect();
+    let placeholders = vec!["?"; terminal.len()].join(", ");
     let mut stmt = conn.prepare(&format!(
-        "SELECT DISTINCT anchor_bucket_interval FROM {} WHERE status <> ?",
+        "SELECT DISTINCT anchor_bucket_interval FROM {} WHERE status NOT IN ({placeholders})",
         t.migrations
     ))?;
-    let rows = stmt.query_map(params![MigrationStatus::Complete.as_ref()], |row| {
-        row.get::<_, u32>(0)
-    })?;
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(terminal.iter().map(AsRef::<str>::as_ref)),
+        |row| row.get::<_, u32>(0),
+    )?;
     rows.map(|blocks| NonZeroU32::new(blocks?).ok_or(Error::Corrupt("anchor_bucket_interval")))
         .collect()
 }
@@ -550,40 +820,204 @@ pub(crate) fn truncate_to_height(
     t: &Tables,
     height: BlockHeight,
 ) -> Result<(), Error> {
-    let accounts: Vec<i64> = {
-        let mut stmt = tx.prepare(&format!("SELECT account_id FROM {}", t.migrations))?;
-        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+    // The walk visits every migration ROW whose determinations chain state can still revise: the
+    // pending rows, and the `Complete` ones — `Complete` is chain-derived and exactly as revocable
+    // as the chain it was derived from, so a reorg can un-mine a PREVIOUS migration's transfers
+    // and must demote it. The policy determinations (`failed`, `superseded`, `cancelled`) record
+    // decisions, not chain state, and stay put. Iterating rows rather than accounts is what
+    // reaches retained history at all; each row is rewritten in place by id, preserving its
+    // identity.
+    //
+    // Known sharp edge, deliberate for now: demoting a `Complete` row whose account has since
+    // committed a NEW pending migration would violate the one-pending-per-account partial index,
+    // and this walk lets that surface as a constraint error rather than silently skipping the
+    // demotion — at that point two migrations genuinely claim liveness, and suppressing either
+    // record would be worse than failing loudly. The resolution (how a revived historical
+    // migration should coexist with its successor) is the history read API's problem, not the
+    // truncation walk's.
+    let policy_terminal = MigrationStatus::terminal()
+        .filter(|s| !matches!(s, MigrationStatus::Complete))
+        .map(|s| format!("'{}'", s.wire_name()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows: Vec<(i64, i64)> = {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT id, account_id FROM {} WHERE status NOT IN ({})",
+            t.migrations, policy_terminal
+        ))?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
         rows.collect::<Result<_, _>>()?
     };
-    for account_id in accounts {
-        let account = AccountRef(account_id);
-        let Some(before) = read_migration(tx, t, account)? else {
-            continue;
-        };
+    for (migration_id, account_id) in rows {
+        let before = read_migration_row(tx, t, migration_id)?;
         let mut truncated = before.clone();
         truncated.truncate_to_height(height);
         if truncated != before {
-            replace_migration(tx, t, account, &truncated)?;
+            replace_migration_row(
+                tx,
+                t,
+                AccountRef(account_id),
+                Some(migration_id),
+                &truncated,
+            )?;
         }
     }
     Ok(())
 }
 
+/// What [`classify_for_cancel`] hands back: the outcome to report to the caller, paired with the
+/// lock-owner tokens whose reservations the cancel must then release. The two travel together
+/// because one pass over the transaction rows produces both.
+type CancelClassification = (
+    crate::pool_migration::CancelOutcome,
+    Vec<MigrationLockOwner>,
+);
+
+/// The classification a cancel makes of one migration transaction, straight off its lifecycle
+/// column: everything before broadcast is releasable (its reservation can be cleared and it will
+/// never be submitted), everything at or past broadcast is chain reality to report, not undo.
+fn classify_for_cancel(
+    conn: &Connection,
+    t: &Tables,
+    migration_id: i64,
+) -> Result<CancelClassification, Error> {
+    let mut outcome = crate::pool_migration::CancelOutcome::default();
+    let mut owners: Vec<MigrationLockOwner> = Vec::new();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT transfer_id, state, lock_owner FROM {} WHERE migration_id = ? ORDER BY transfer_id",
+        t.transactions
+    ))?;
+    let rows = stmt.query_map(params![migration_id], |row| {
+        Ok((
+            row.get::<_, u32>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<[u8; 32]>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (transfer_id, state, lock_owner) = row?;
+        let id = MigrationTransferId::new(transfer_id);
+        match state.as_str() {
+            "broadcast" => outcome.in_flight.push(id),
+            "mined" => outcome.mined.push(id),
+            // `awaiting_signature`, `signed`, `proved` — and, defensively, anything a future
+            // release might add before broadcast: never submitted, so releasable.
+            _ => {
+                outcome.released.push(id);
+                if let Some(owner) = lock_owner {
+                    owners.push(MigrationLockOwner::from_bytes(owner));
+                }
+            }
+        }
+    }
+    Ok((outcome, owners))
+}
+
+/// Release the note reservations held under `owners` on the migration's SOURCE pool: the lock
+/// columns note locking records on the received-note rows are cleared wherever they name one of
+/// these tokens. Scoped strictly by owner token — which the prover derived from each
+/// transaction's own spent notes — so no other flow's reservation can be touched.
+///
+/// Returns the number of note rows actually unlocked, which is informational only: it is NOT the
+/// number of owners, since one token may hold several notes and a token whose notes have already
+/// expired or been released holds none. Callers must not treat a zero here as a failure.
+fn release_lock_owners(
+    conn: &Connection,
+    t: &Tables,
+    owners: &[MigrationLockOwner],
+) -> Result<usize, Error> {
+    let mut stmt = conn.prepare(&format!(
+        "UPDATE {} SET lock_expiry_height = NULL, lock_owner = NULL WHERE lock_owner = ?",
+        t.source_notes
+    ))?;
+    let mut released = 0;
+    for owner in owners {
+        released += stmt.execute(params![owner.as_bytes()])?;
+    }
+    Ok(released)
+}
+
+/// The body of [`Store::cancel_migration`]; see its documentation for the contract, the ordering
+/// argument, and the no-pending repair behavior.
+fn cancel_migration(
+    tx: &rusqlite::Transaction,
+    t: &Tables,
+    account_id: AccountRef,
+) -> Result<crate::pool_migration::CancelOutcome, Error> {
+    let (migration_id, is_pending) = match resolve_migration_id(tx, t, account_id)? {
+        Some(id) => (Some(id), true),
+        None => {
+            // No pending migration: the repair half only, on the latest retained record.
+            let latest: Option<i64> = tx
+                .query_row(
+                    &format!(
+                        "SELECT id FROM {} WHERE account_id = ? ORDER BY id DESC LIMIT 1",
+                        t.migrations
+                    ),
+                    params![account_id.0],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            (latest, false)
+        }
+    };
+    let Some(migration_id) = migration_id else {
+        return Ok(crate::pool_migration::CancelOutcome::default());
+    };
+
+    let (outcome, owners) = classify_for_cancel(tx, t, migration_id)?;
+    // Release BEFORE the status flip (and in the same transaction): a crash between the two
+    // leaves a still-pending migration a retried cancel finishes.
+    let released = release_lock_owners(tx, t, &owners)?;
+    tracing::debug!(
+        "cancel released {released} note reservation(s) across {} never-broadcast transaction(s); \
+         {} in flight, {} already mined",
+        outcome.released.len(),
+        outcome.in_flight.len(),
+        outcome.mined.len()
+    );
+    if is_pending {
+        tx.execute(
+            &format!("UPDATE {} SET status = ? WHERE id = ?", t.migrations),
+            params![MigrationStatus::Cancelled.wire_name(), migration_id],
+        )?;
+    }
+    Ok(outcome)
+}
+
+/// The account's migration IN PROGRESS, if any: resolves the pending row (see
+/// [`resolve_migration_id`] for why the read is pending-only) and reads it back. Terminal rows are
+/// retained history, addressed by row through [`read_migration_row`] instead.
 fn read_migration(
     conn: &Connection,
     t: &Tables,
     account_id: AccountRef,
 ) -> Result<Option<MigrationState>, Error> {
+    match resolve_migration_id(conn, t, account_id)? {
+        Some(migration_id) => read_migration_row(conn, t, migration_id).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Read the migration stored as row `migration_id`, whatever its status: the row-addressed reader
+/// that pending-only resolution and the truncation walk (which must revisit `Complete` rows —
+/// chain-derived, and exactly as revocable as the chain they were derived from) share. Erring on
+/// an absent row rather than returning an `Option`, because every caller has just SELECTed the id.
+fn read_migration_row(
+    conn: &Connection,
+    t: &Tables,
+    migration_id: i64,
+) -> Result<MigrationState, Error> {
     let row = conn
         .query_row(
             &format!(
                 "SELECT id, status, note_split_fee_buffer, note_split_change, note_split_prep_fees,
                         note_split_total_input, note_split_total_migratable, anchor_bucket_interval,
                         replan_threshold
-                   FROM {} WHERE account_id = ?",
-                t.migrations
+                   FROM {} WHERE id = ?",
+                t.migrations,
             ),
-            params![account_id.0],
+            params![migration_id],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -612,7 +1046,7 @@ fn read_migration(
         replan_threshold,
     )) = row
     else {
-        return Ok(None);
+        return Err(Error::Corrupt("read_migration_row: no such migration"));
     };
     let anchor_bucket_interval = NonZeroU32::new(anchor_bucket_interval)
         .map(AnchorBucketInterval::custom)
@@ -636,14 +1070,14 @@ fn read_migration(
 
     let status =
         MigrationStatus::try_from(status.as_str()).map_err(|_| Error::Corrupt("status"))?;
-    Ok(Some(MigrationState::from_parts(
+    Ok(MigrationState::from_parts(
         status,
         denominations,
         preparation,
         transactions,
         anchor_bucket_interval,
         replan_threshold,
-    )))
+    ))
 }
 
 /// Read an ordered list of zatoshi amounts (`ordinal`, `value`) from a child table.
@@ -853,16 +1287,7 @@ fn read_transactions(
         // is required rather than optional — and it is the SAME value the lifecycle state carries
         // once broadcast, which is why the state is reassembled from it below rather than from a
         // separately stored copy that could disagree.
-        let txid = r
-            .txid
-            .ok_or(Error::Corrupt("txid"))
-            .and_then(|s| {
-                hex::decode(&s)
-                    .ok()
-                    .and_then(|v| <[u8; 32]>::try_from(v).ok())
-                    .ok_or(Error::Corrupt("txid"))
-            })
-            .map(TxId::from_bytes)?;
+        let txid = r.txid.map(TxId::from_bytes).ok_or(Error::Corrupt("txid"))?;
         let state = MigrationTxState::from_stored(
             &r.state,
             Some(<[u8; 32]>::from(txid)),
@@ -908,7 +1333,7 @@ fn read_transactions(
             r.anchor_boundary.map(BlockHeight::from_u32),
             txid,
             state,
-            r.lock_owner,
+            r.lock_owner.map(MigrationLockOwner::from_bytes),
             unsatisfiable,
             spend_nullifiers,
             r.broadcast_failure_at.map(BlockHeight::from_u32),
@@ -961,7 +1386,7 @@ struct TxRow {
     state: String,
     /// The hex-encoded consensus transaction ID the transaction was broadcast under; `NULL` until
     /// it is broadcast. Unrelated to `transfer_id` above.
-    txid: Option<String>,
+    txid: Option<[u8; 32]>,
     mined_height: Option<u32>,
     /// The stored lock-owner token, read directly as a fixed-size blob: `rusqlite`'s `[u8; 32]`
     /// `FromSql` impl errors cleanly (`InvalidBlobSize`) if a non-NULL blob is not exactly 32
@@ -1363,6 +1788,23 @@ fn replace_migration(
     account_id: AccountRef,
     state: &MigrationState,
 ) -> Result<(), Error> {
+    let prior = resolve_migration_id(tx, t, account_id)?;
+    replace_migration_row(tx, t, account_id, prior, state)
+}
+
+/// Persist `state` as the migration row `prior` — updating the parent row in place and replacing
+/// its child rows wholesale — or insert it fresh when `prior` is `None`. A record therefore keeps
+/// its `id`, `uuid`, and `committed_height` for its whole life; every other column mirrors
+/// `state`. The row-addressed half of [`replace_migration`], shared with the truncation walk —
+/// which rewrites rows (including revisited `Complete` history) that pending-only resolution
+/// cannot name.
+fn replace_migration_row(
+    tx: &rusqlite::Transaction,
+    t: &Tables,
+    account_id: AccountRef,
+    prior: Option<i64>,
+    state: &MigrationState,
+) -> Result<(), Error> {
     // The layers/transactions grid is stored only through the input and output rows, so a layer
     // with no transactions, or a transaction with neither inputs nor outputs, would leave no trace
     // and read back with later coordinates silently renumbered — misdirecting prior-output
@@ -1380,52 +1822,117 @@ fn replace_migration(
         }
     }
 
-    // Replace semantics: the store holds at most one migration per account. Delete the account's
-    // existing children first (in case foreign-key cascades are not enabled), then its parent row.
-    if let Some(migration_id) = resolve_migration_id(tx, t, account_id)? {
-        for table in [
-            t.transaction_deps,
-            t.spend_nullifiers,
-            t.transactions,
-            t.prep_inputs,
-            t.prep_outputs,
-            t.prep_direct_funding,
-            t.crossing_values,
-        ] {
-            tx.execute(
-                &format!("DELETE FROM {table} WHERE migration_id = ?"),
-                params![migration_id],
-            )?;
-        }
-        tx.execute(
-            &format!("DELETE FROM {} WHERE id = ?", t.migrations),
-            params![migration_id],
-        )?;
+    // The child tables are replaced wholesale (delete, then reinsert below): the state is a
+    // nested aggregate and this keeps "the store agrees with `state`" true by construction, with
+    // no per-row diff logic to drift. The PARENT row is updated in place, so `id` is stable for
+    // the record's life (the children key off it), as are the identity columns the state does
+    // not carry: `uuid`, and `committed_height` (a fact about the one commit event). A state
+    // persisted as terminal keeps its row — `resolve_migration_id` is pending-only, so nothing
+    // ever addresses it as "the account's migration" again — which is how a migration enters the
+    // retained history. Children are deleted explicitly in case foreign-key cascades are not
+    // enabled.
+    // A state persisted as TERMINAL is leaving service: nothing will ever broadcast its pending
+    // transactions, so the reservations they hold are released here, in the same write that
+    // records the terminal status. This is what discharges the release obligation for EVERY
+    // terminal transition that flows through the ordinary persist path — the consumer's
+    // `mark_superseded` response to `Replan`, an engine-side `mark_cancelled`, a `Failed`
+    // post-mortem — not only the store-level cancel (which exists for records this path cannot
+    // read).
+    if state.is_terminal() {
+        let owners: Vec<MigrationLockOwner> = state
+            .transactions()
+            .iter()
+            .filter(|t| {
+                !matches!(
+                    t.state(),
+                    MigrationTxState::Broadcast { .. } | MigrationTxState::Mined { .. }
+                )
+            })
+            .filter_map(|t| t.lock_owner())
+            .collect();
+        let released = release_lock_owners(tx, t, &owners)?;
+        tracing::debug!(
+            "released {released} note reservation(s) held by {} transaction(s) of the migration \
+             now persisted as terminal",
+            owners.len()
+        );
     }
 
     let ns = state.denominations();
-    tx.execute(
-        &format!(
-            "INSERT INTO {} (account_id, status, note_split_fee_buffer, note_split_change,
-                             note_split_prep_fees, note_split_total_input, note_split_total_migratable,
-                             anchor_bucket_interval, replan_threshold)
-             VALUES (:account_id, :status, :fee_buffer, :change, :prep_fees, :total_input, :total_migratable,
-                     :anchor_bucket_interval, :replan_threshold)",
-            t.migrations
-        ),
-        named_params! {
-            ":account_id": account_id.0,
-            ":status": state.status().as_ref(),
-            ":fee_buffer": ns.note_fee_buffer().into_u64(),
-            ":change": ns.change().map(Zatoshis::into_u64),
-            ":prep_fees": ns.prep_fees().into_u64(),
-            ":total_input": ns.total_input().into_u64(),
-            ":total_migratable": ns.total_migratable().into_u64(),
-            ":anchor_bucket_interval": state.anchor_bucket_interval().block_count().get(),
-            ":replan_threshold": state.replan_threshold().percent(),
-        },
-    )?;
-    let migration_id = tx.last_insert_rowid();
+    let migration_id = match prior {
+        Some(migration_id) => {
+            for table in [
+                t.transaction_deps,
+                t.spend_nullifiers,
+                t.transactions,
+                t.prep_inputs,
+                t.prep_outputs,
+                t.prep_direct_funding,
+                t.crossing_values,
+            ] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE migration_id = ?"),
+                    params![migration_id],
+                )?;
+            }
+            tx.execute(
+                &format!(
+                    "UPDATE {} SET status = :status,
+                                   note_split_fee_buffer = :fee_buffer,
+                                   note_split_change = :change,
+                                   note_split_prep_fees = :prep_fees,
+                                   note_split_total_input = :total_input,
+                                   note_split_total_migratable = :total_migratable,
+                                   anchor_bucket_interval = :anchor_bucket_interval,
+                                   replan_threshold = :replan_threshold
+                     WHERE id = :id",
+                    t.migrations
+                ),
+                named_params! {
+                    ":id": migration_id,
+                    ":status": state.status().as_ref(),
+                    ":fee_buffer": ns.note_fee_buffer().into_u64(),
+                    ":change": ns.change().map(Zatoshis::into_u64),
+                    ":prep_fees": ns.prep_fees().into_u64(),
+                    ":total_input": ns.total_input().into_u64(),
+                    ":total_migratable": ns.total_migratable().into_u64(),
+                    ":anchor_bucket_interval": state.anchor_bucket_interval().block_count().get(),
+                    ":replan_threshold": state.replan_threshold().percent(),
+                },
+            )?;
+            migration_id
+        }
+        None => {
+            // A fresh record: mint its identity, and stamp the chain height the wallet
+            // currently knows as its commit height — the "when" a history listing sorts by.
+            // `None` when the wallet has no chain view yet (a fixture, a wallet before first
+            // sync); the column is nullable and no value is invented.
+            tx.execute(
+                &format!(
+                    "INSERT INTO {} (account_id, status, note_split_fee_buffer, note_split_change,
+                                     note_split_prep_fees, note_split_total_input, note_split_total_migratable,
+                                     anchor_bucket_interval, replan_threshold, uuid, committed_height)
+                     VALUES (:account_id, :status, :fee_buffer, :change, :prep_fees, :total_input, :total_migratable,
+                             :anchor_bucket_interval, :replan_threshold, :uuid, :committed_height)",
+                    t.migrations
+                ),
+                named_params! {
+                    ":account_id": account_id.0,
+                    ":uuid": uuid::Uuid::new_v4(),
+                    ":committed_height": crate::wallet::chain_tip_height(tx)?.map(u32::from),
+                    ":status": state.status().as_ref(),
+                    ":fee_buffer": ns.note_fee_buffer().into_u64(),
+                    ":change": ns.change().map(Zatoshis::into_u64),
+                    ":prep_fees": ns.prep_fees().into_u64(),
+                    ":total_input": ns.total_input().into_u64(),
+                    ":total_migratable": ns.total_migratable().into_u64(),
+                    ":anchor_bucket_interval": state.anchor_bucket_interval().block_count().get(),
+                    ":replan_threshold": state.replan_threshold().percent(),
+                },
+            )?;
+            tx.last_insert_rowid()
+        }
+    };
 
     insert_zatoshi_list(tx, t.crossing_values, migration_id, ns.crossing_values())?;
 
@@ -1543,9 +2050,9 @@ fn replace_migration(
                 ":expiry_height": u32::from(mtx.expiry_height()),
                 ":anchor_boundary": mtx.anchor_boundary().map(u32::from),
                 ":state": tx_state.as_ref(),
-                ":txid": hex::encode(mtx.txid().as_ref()),
+                ":txid": mtx.txid().as_ref(),
                 ":mined_height": tx_state.mined_height().map(u32::from),
-                ":lock_owner": mtx.lock_owner(),
+                ":lock_owner": mtx.lock_owner().map(|o| *o.as_bytes()),
                 ":unsatisfiable_at": unsatisfiable_at.map(u32::from),
                 ":unsatisfiable_kind": unsatisfiable_kind.as_ref().map(|k| k.as_ref()),
                 ":broadcast_failure_at": mtx.broadcast_failure_at().map(u32::from),

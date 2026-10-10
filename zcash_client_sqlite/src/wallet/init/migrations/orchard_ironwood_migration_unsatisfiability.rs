@@ -97,7 +97,7 @@ use crate::wallet::init::WalletMigrationError;
 /// real-spend nullifiers in a table of their own.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xd334a9fa_b9dc_46bd_9b31_1fba6aa47f55);
 
-const DEPENDENCIES: &[Uuid] = &[orchard_ironwood_migration_anchor_interval::MIGRATION_ID];
+pub(super) const DEPENDENCIES: &[Uuid] = &[orchard_ironwood_migration_anchor_interval::MIGRATION_ID];
 
 /// The nullifier-cache table this migration introduces, which no published migration creates.
 ///
@@ -151,7 +151,7 @@ impl schemerz::Migration<Uuid> for Migration {
 fn real_spend_nullifiers(pczt_bytes: &[u8]) -> Result<Vec<[u8; 32]>, WalletMigrationError> {
     let pczt = pczt::Pczt::parse(pczt_bytes).map_err(|e| {
         WalletMigrationError::CorruptedData(format!(
-            "stored pool-migration PCZT does not parse: {e:?}"
+            "stored pool-migration PCZT does not parse: {e}"
         ))
     })?;
     Ok(pczt
@@ -599,7 +599,7 @@ mod tests {
         use orchard::note::{Note, NoteVersion, RandomSeed, Rho};
         use orchard::value::NoteValue;
         use rand_chacha::ChaCha8Rng;
-        use rand_core::{RngCore, SeedableRng};
+        use rand_core::{Rng, SeedableRng};
         use zcash_client_backend::data_api::testing::TestBuilder;
         use zcash_pool_migration::build::build_transfer_pczt;
         use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
@@ -896,7 +896,10 @@ mod tests {
                 id, account_id, status, note_split_fee_buffer, note_split_prep_fees,
                 note_split_total_input, note_split_total_migratable
              )
-             VALUES (1, 1, 'complete', 0, 0, 0, 0)",
+             -- Non-terminal on purpose: the post-repair read below goes through the
+             -- pending-only `get_migration`, and this test is about the txid repair, not
+             -- about history retention.
+             VALUES (1, 1, 'in_progress', 0, 0, 0, 0)",
         )
         .unwrap();
         insert_transfer_row(&conn, 0, &proven, "mined");
@@ -918,6 +921,20 @@ mod tests {
             cached_nullifiers(&conn, 0).is_empty(),
             "the mined row is exempt from the backfill, so it caches nothing",
         );
+
+        // The read below goes through the CURRENT store, which reads `txid` as the id's raw bytes,
+        // while this migration writes the hex text that its own schema declares. The descendant
+        // `..._txid_blob` is what converts the column, and it is an unconditional descendant, so
+        // no wallet ever presents the reader with the text form. Running it here is what puts the
+        // fixture at the schema the reader requires; the repair under test is still this
+        // migration's, and a txid it failed to write would arrive below as NULL either way.
+        let tx = conn.transaction().unwrap();
+        RusqliteMigration::up(
+            &super::super::orchard_ironwood_migration_txid_blob::Migration,
+            &tx,
+        )
+        .unwrap();
+        tx.commit().unwrap();
 
         let store = PoolMigrations::for_account((), (), &conn, AccountUuid::from_uuid(account))
             .expect("the account exists");

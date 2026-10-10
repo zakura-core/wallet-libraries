@@ -95,7 +95,7 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
         .zip(scope_code)
         .map(|(ufvk_str, scope_code)| {
             let ufvk = UnifiedFullViewingKey::decode(params, &ufvk_str)
-                .map_err(SqliteClientError::CorruptedData)?;
+                .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?;
 
             let spending_key_scope = zip32::Scope::try_from(KeyScope::decode(scope_code)?)
                 .map_err(|_| {
@@ -463,6 +463,11 @@ pub(crate) mod tests {
     #[test]
     fn send_single_step_proposed_transfer() {
         testing::pool::send_single_step_proposed_transfer::<SaplingPoolTester>()
+    }
+
+    #[test]
+    fn create_to_address_respects_recipient_expiry() {
+        testing::pool::create_to_address_respects_recipient_expiry::<SaplingPoolTester>()
     }
 
     #[test]

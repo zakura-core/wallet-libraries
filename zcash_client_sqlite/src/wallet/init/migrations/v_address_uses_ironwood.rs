@@ -38,7 +38,7 @@ use super::ironwood_received_notes;
 /// Adds Ironwood received notes to the `v_address_uses` view.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xdab89587_cd05_43b0_a5b5_8cb64a702791);
 
-const DEPENDENCIES: &[Uuid] = &[ironwood_received_notes::MIGRATION_ID];
+pub(super) const DEPENDENCIES: &[Uuid] = &[ironwood_received_notes::MIGRATION_ID];
 
 pub(super) struct Migration;
 
@@ -103,7 +103,7 @@ mod tests {
     use secrecy::Secret;
     use tempfile::NamedTempFile;
     use zcash_keys::keys::UnifiedSpendingKey;
-    use zcash_protocol::consensus::Network;
+    use zcash_protocol::{consensus::Network};
 
     #[cfg(feature = "transparent-inputs")]
     use crate::{TxRef, wallet::involved_accounts};
@@ -203,8 +203,8 @@ mod tests {
                     ":has_spend_key": HAS_SPEND_KEY,
                     ":seed_fingerprint": &SEED_FINGERPRINT[..],
                     ":account_index": ZIP32_ACCOUNT_INDEX,
-                    ":ufvk": ufvk.encode(&NETWORK),
-                    ":uivk": ufvk.to_unified_incoming_viewing_key().encode(&NETWORK),
+                    ":ufvk": ufvk.encode(&NETWORK).unwrap(),
+                    ":uivk": ufvk.to_unified_incoming_viewing_key().encode(&NETWORK).unwrap(),
                     ":birthday_height": BIRTHDAY_HEIGHT,
                 ],
             )

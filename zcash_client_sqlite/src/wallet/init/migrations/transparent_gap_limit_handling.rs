@@ -1,7 +1,7 @@
 //! Add support for general transparent gap limit handling, and unify the `addresses` and
 //! `ephemeral_addresses` tables.
 
-use rand_core::RngCore;
+use rand_core::Rng;
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
@@ -44,7 +44,7 @@ use {
 /// `ephemeral_addresses` tables.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xc41dfc0e_e870_4859_be47_d2f572f5ca73);
 
-const DEPENDENCIES: &[Uuid] = &[add_account_uuids::MIGRATION_ID];
+pub(super) const DEPENDENCIES: &[Uuid] = &[add_account_uuids::MIGRATION_ID];
 
 pub(super) struct Migration<P, C, R> {
     pub(super) params: P,
@@ -164,7 +164,7 @@ pub(super) fn insert_initial_transparent_addrs<P: consensus::Parameters>(
     Ok(())
 }
 
-impl<P: consensus::Parameters, C: Clock, R: RngCore> RusqliteMigration for Migration<P, C, R> {
+impl<P: consensus::Parameters, C: Clock, R: Rng> RusqliteMigration for Migration<P, C, R> {
     type Error = WalletMigrationError;
 
     fn up(&self, conn: &Transaction) -> Result<(), WalletMigrationError> {
@@ -242,8 +242,7 @@ impl<P: consensus::Parameters, C: Clock, R: RngCore> RusqliteMigration for Migra
                     let transparent_external = diversifier_index
                         .and_then(|di| NonHardenedChildIndex::try_from(di).ok())
                         .and_then(|idx| {
-                            uivk.transparent()
-                                .as_ref()
+                            uivk.p2pkh()
                                 .and_then(|external_ivk| external_ivk.derive_address(idx).ok())
                                 .map(|t_addr| (idx, t_addr.encode(&self.params)))
                         });
