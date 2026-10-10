@@ -50,10 +50,18 @@ expiration. Expiry uses the library view's private-history fallback; expiration
 retains the view's existing stored-transaction expiry predicate. Completeness and
 financial authority remain separate reads; a summary does not establish either.
 
-Vizor still owns output attribution for its display, TEX step pairing, self-transfer,
-shielding, migration, swap and gift-card labels, sorting, and display limits. Apply
-limits after pairing and classification so a TEX funding leg is not lost. Results
-have unspecified order and cover all stored transactions with account effects.
+`TransactionHistoryDetails::activity` is the activity classification Vizor
+derived on top of these reads, moved into the library unchanged: from the history
+view and the account's outputs in the transaction it decides the rows a transaction
+shows (a shielding, an Orchard-to-Ironwood migration, an inferred payment, a recovered
+self-transfer's fee, an inferred outgoing value, a movement debit or credit, the
+visible sent and received outputs, change only, or unknown), with each row's amount
+and the outputs its receipt lists. `funding_step` carries what TEX funding-step
+pairing needs. Vizor still owns the labels, the fee each row shows (including a
+paired funding step's), TEX step pairing across transactions, swap and gift-card
+labels, sorting, and display limits. Apply limits after pairing and classification
+so a TEX funding leg is not lost. Results have unspecified order and cover all
+stored transactions with account effects.
 
 This library PR prepares that replacement. It does not modify Vizor or remove its
 other output SQL. Consumer integration should pin this exact head (and repin after

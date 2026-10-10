@@ -11,6 +11,20 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- `transparent_ledger::AccountActivity`, `TransactionHistoryDetails::activity` and
+  `TransactionHistoryDetails::funding_step` (`FundingStepEvidence`): the activity rows a
+  transaction shows for the account, with each row's amount and the outputs it counts
+  (`ActivityOutputs`, `OutputRef`), and what TEX funding-step pairing needs. The rules
+  reproduce the classification Vizor applied on top of the history view, unchanged. They read
+  the history evidence and the account's outputs, never display facts; labels, the fee each row
+  shows, and grouping across transactions remain the wallet's.
+- `TransparentDetailRead::transaction_receipt`, returning `TransactionReceipt`: the history
+  view, the transparent detail view and their `ReceiptAttribution` (whether the rows account
+  for the movement, a send's recipient as an `Attribution`, the `ReceiptSource` with its
+  `SourcePool`, settled effects, and whether the recipient or a transparent receipt completes
+  the receipt) from one read, reproducing Vizor's receipt rules. Shared or mixed funding blocks
+  attribution. It is a display-level conclusion, separate from `DetailCompleteness`, and never
+  changes the history view. This is a new required trait method.
 - `TransparentLedgerWrite::forget_transparent_ledger`, behind `transparent-inputs`, and its
   result `ForgottenTransparentLedger`: under `Public`, atomically removes what private recovery
   alone contributed, so a publication's facts do not outlive the policy that admitted them.
@@ -55,6 +69,9 @@ workspace.
   `activate_transparent_ledger`, matching the candidate-to-active ledger transition.
 - Rename the prototype `TransparentWatchSet` to `TransparentAddressWatchSet`.
   Its account context, watched addresses, and pending pages are unchanged.
+- `transparent_ledger::FeeState` gains `Unattributed { whole }`: the account spent in the
+  transaction and the whole fee is exact, but its share is not established. History entries
+  report it where they reported `Unknown` with an exact `whole_fee`.
 - `TransactionHistoryDetails::inferred_outgoing` documents the Activity default that the account
   funded a recovered send and its fee unless recovered evidence identifies another contributor.
   This display assumption does not establish payment or fee attribution.

@@ -3,13 +3,15 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use zcash_client_backend::data_api::transparent_ledger::{
-    TRANSPARENT_DISPLAY_MAP_RECHECK, TransactionMetadata, TransparentDetailOutcome,
-    TransparentDetailParked, TransparentDetailRead as _, TransparentDetailReasons,
-    TransparentDetailWrite as _, TransparentDisplayContradiction, TransparentDisplayDetails,
-    TransparentDisplayFacts, TransparentDisplayOmission, TransparentDisplayOutput,
-    TransparentDisplayProvenance, TransparentDisplaySender, TransparentDisplaySource,
-    TransparentDisplayStore, TransparentDisplayView, TransparentDisplayViewSender,
-    WholeTransactionFee, transparent_display_address,
+    AccountActivity, Attribution, DetailCompleteness, FeeState, ReceiptSource, SourcePool,
+    TRANSPARENT_DISPLAY_MAP_RECHECK, TransactionMetadata, TransactionReceipt,
+    TransparentDetailOutcome, TransparentDetailParked, TransparentDetailRead as _,
+    TransparentDetailReasons, TransparentDetailWrite as _, TransparentDisplayAddress,
+    TransparentDisplayContradiction, TransparentDisplayDetails, TransparentDisplayFacts,
+    TransparentDisplayOmission, TransparentDisplayOutput, TransparentDisplayProvenance,
+    TransparentDisplaySender, TransparentDisplaySource, TransparentDisplayStore,
+    TransparentDisplayView, TransparentDisplayViewSender, WholeTransactionFee,
+    transparent_display_address,
 };
 
 use super::*;
@@ -2656,5 +2658,198 @@ fn raw_view_sender_from_unlocking_scripts() {
     assert_eq!(
         details.omissions,
         vec![O::NonStandardSender, O::ShieldedAndTransparentFunding]
+    );
+}
+
+fn receipt(st: &State, account: AccountUuid, txid: TxId) -> TransactionReceipt {
+    st.wallet()
+        .db()
+        .transaction_receipt(account, txid)
+        .unwrap()
+        .unwrap()
+}
+
+fn display_address(st: &State, address: TransparentAddress) -> TransparentDisplayAddress {
+    TransparentDisplayAddress {
+        address,
+        encoded: zcash_keys::encoding::encode_transparent_address_p(st.network(), &address),
+    }
+}
+
+/// The fixture's spending transaction (`[3; 32]`) as a transparent-only send of 24 000 to
+/// [`FOREIGN`] with a 1 000 fee, its whole fee recorded.
+fn paying_foreign(st: &State) -> TransparentDisplayFacts {
+    conn(st)
+        .execute(
+            "UPDATE transactions SET fee = 1000 WHERE txid = ?1",
+            [TxId::from_bytes([3; 32]).as_ref()],
+        )
+        .unwrap();
+    let mut facts = spend_facts(st);
+    facts.shielded_components = false;
+    facts.output_count = 1;
+    facts.outputs = vec![output(24_000, Some(FOREIGN))];
+    facts
+}
+
+#[test]
+fn receipt_names_the_only_payee_of_a_private_send() {
+    let (mut st, account, _) = active_wallet();
+    let spending = TxId::from_bytes([3; 32]);
+    let facts = paying_foreign(&st);
+    // Before the display facts arrive, the receipt is the history view alone.
+    let before = receipt(&st, account, spending);
+    assert_eq!(before.attribution.recipient, Attribution::NotEstablished);
+    assert!(!before.attribution.accounts_for_movement);
+    assert!(!before.attribution.recipient_completes);
+
+    assert_eq!(store(&mut st, facts), TransparentDisplayStore::Stored);
+    let r = receipt(&st, account, spending);
+    assert!(matches!(
+        r.display,
+        Some(TransparentDisplayView::Available(_))
+    ));
+    assert!(r.attribution.effects_settled);
+    assert!(r.attribution.accounts_for_movement);
+    assert_eq!(
+        r.attribution.recipient,
+        Attribution::Established(display_address(&st, FOREIGN))
+    );
+    assert!(r.attribution.recipient_completes);
+    // The account's own address funded it, which names no source for a receipt.
+    assert_eq!(
+        r.attribution.source,
+        ReceiptSource {
+            pool: SourcePool::Unknown,
+            address: None
+        }
+    );
+    assert!(!r.attribution.receive_completes);
+    // The history view is the one read without display facts, whose conclusions never reach
+    // it: its payment details stay incomplete and its activity a provisional debit.
+    assert_eq!(r.details, before.details);
+    assert_eq!(
+        st.wallet()
+            .db()
+            .transaction_history_details(account, &[spending])
+            .unwrap(),
+        vec![r.details.clone()]
+    );
+    assert_eq!(r.details.payment_details, DetailCompleteness::Incomplete);
+    assert_eq!(r.details.fee, FeeState::Known(zat(1_000)));
+    assert_eq!(
+        r.details.activity,
+        AccountActivity::MovementDebit {
+            amount: zat(24_000)
+        }
+    );
+}
+
+#[test]
+fn shared_or_mixed_funding_keeps_receipt_attribution_incomplete() {
+    let (mut st, account, _) = active_wallet();
+    let spending = TxId::from_bytes([3; 32]);
+    let spent = spent_address(&st, spending, 0);
+    // The account funded one of two inputs; the other spends another script. Its own debit
+    // still balances against the payee and the fee, but the other input could have paid an
+    // output the account did not.
+    let mut facts = paying_foreign(&st);
+    facts.input_count = 2;
+    facts.multiple_source_scripts = true;
+    facts.sender = TransparentDisplaySender::Address(spent);
+    assert_eq!(
+        store(&mut st, facts.clone()),
+        TransparentDisplayStore::Stored
+    );
+    let r = receipt(&st, account, spending);
+    let Some(TransparentDisplayView::Available(details)) = &r.display else {
+        panic!("expected available details");
+    };
+    assert_eq!(
+        details.omissions,
+        vec![TransparentDisplayOmission::SharedFunding]
+    );
+    assert_eq!(r.attribution.recipient, Attribution::NotEstablished);
+    assert!(!r.attribution.accounts_for_movement && !r.attribution.recipient_completes);
+
+    // With one source script, every input spends the account's script: no other funder.
+    facts.multiple_source_scripts = false;
+    assert_eq!(store(&mut st, facts), TransparentDisplayStore::Stored);
+    let r = receipt(&st, account, spending);
+    assert_eq!(
+        r.attribution.recipient,
+        Attribution::Established(display_address(&st, FOREIGN))
+    );
+    assert!(r.attribution.recipient_completes);
+}
+
+#[test]
+fn receipt_source_and_accounting_of_a_receive() {
+    let (mut st, account, unspent) = active_wallet();
+    let txid = txid_of(&unspent);
+    // A receive from another wallet's address, next to an `OP_RETURN` output it does not own.
+    assert_eq!(
+        store(&mut st, facts_for(&unspent)),
+        TransparentDisplayStore::Stored
+    );
+    let r = receipt(&st, account, txid);
+    assert_eq!(
+        r.attribution.source,
+        ReceiptSource {
+            pool: SourcePool::Transparent,
+            address: Some(display_address(&st, FOREIGN)),
+        }
+    );
+    assert!(r.attribution.accounts_for_movement);
+    // Without a fee the account paid, no recipient is named.
+    assert_eq!(r.attribution.recipient, Attribution::NotEstablished);
+    // The rows account for a settled transparent receipt from a known source.
+    assert!(r.attribution.receive_completes);
+
+    // Outputs past the listed two leave the movement unaccounted for.
+    let mut more = facts_for(&unspent);
+    more.output_count = 4;
+    assert_eq!(store(&mut st, more), TransparentDisplayStore::Stored);
+    let r = receipt(&st, account, txid);
+    assert!(!r.attribution.accounts_for_movement);
+    assert!(!r.attribution.receive_completes);
+
+    // Funded only from the shielded pools, by validated display facts.
+    let mut unshielding = facts_for(&unspent);
+    unshielding.input_count = 0;
+    unshielding.sender = TransparentDisplaySender::Absent;
+    unshielding.shielded_components = true;
+    unshielding.output_count = 1;
+    unshielding.outputs.truncate(1);
+    assert_eq!(store(&mut st, unshielding), TransparentDisplayStore::Stored);
+    let r = receipt(&st, account, txid);
+    assert_eq!(
+        r.attribution.source,
+        ReceiptSource {
+            pool: SourcePool::Shielded,
+            address: None,
+        }
+    );
+    assert!(r.attribution.receive_completes);
+}
+
+#[test]
+fn receipt_requires_an_entry_for_the_account() {
+    let (mut st, account, unspent) = active_wallet();
+    let unrelated = TxId::from_bytes([0xee; 32]);
+    assert_eq!(
+        st.wallet()
+            .db()
+            .transaction_receipt(account, unrelated)
+            .unwrap(),
+        None
+    );
+    let other = import_account(&mut st, 9);
+    assert_eq!(
+        st.wallet()
+            .db()
+            .transaction_receipt(other, txid_of(&unspent))
+            .unwrap(),
+        None
     );
 }

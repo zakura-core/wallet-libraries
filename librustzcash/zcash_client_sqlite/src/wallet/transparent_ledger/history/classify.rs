@@ -170,8 +170,8 @@ pub(super) fn inferred_outgoing(
 /// blind spot. The result is therefore classified as
 /// [`HistoryClassification::NetReconstructed`], not `Reconstructed`: the account's net movement
 /// is final, but its split between a self-transfer and the fee is not proven. The fee is not
-/// attributed to the account; `FeeState` stays unknown, and the whole-transaction fee remains
-/// available from the metadata.
+/// attributed to the account: it is [`FeeState::Unattributed`], with the whole-transaction fee
+/// from the metadata.
 pub(super) fn is_private_shielding(
     tx_facts: &TransactionFacts,
     effects: &[PoolEffect],

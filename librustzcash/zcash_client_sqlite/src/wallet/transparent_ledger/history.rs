@@ -8,14 +8,15 @@
 #[cfg(test)]
 mod tests;
 
+mod activity;
 mod classify;
 mod completeness;
 mod evidence;
 
 use rusqlite::{OptionalExtension as _, named_params};
 use zcash_client_backend::data_api::transparent_ledger::{
-    AccountMovement, DetailCompleteness, EffectCompleteness, TransactionHistoryDetails,
-    TransparentLedgerMode,
+    AccountMovement, DetailCompleteness, EffectCompleteness, FeeState, HistoryClassification,
+    TransactionHistoryDetails, TransparentLedgerMode,
 };
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
@@ -32,6 +33,9 @@ use crate::{
 
 use super::{policy::pending_details, resolve_mode};
 
+use activity::{
+    ActivityEvidence, activity, has_orchard_spend, has_shielding_shape, read_outputs, summarize,
+};
 use classify::{
     account_fee, aggregate_payment, classification, inferred_outgoing, inferred_payment,
     is_private_shielding, whole_fee,
@@ -190,16 +194,21 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         );
         let aggregate_payment = aggregate_payment(&tx_facts, inferred_payment, recorded_sent)?;
 
-        // Fees and the Activity-only outgoing value.
-        let fee = account_fee(
+        // Fees and the Activity-only outgoing value. A whole fee the account's share of which is
+        // not established stays unattributed rather than unknown.
+        let whole_transaction_fee = whole_fee(tx_facts.fee, transaction_metadata.as_ref());
+        let fee = match account_fee(
             &tx_facts,
             spent,
             transaction_metadata.as_ref(),
             sole_transparent_funding,
             inferred_payment,
             received_only,
-        );
-        let whole_transaction_fee = whole_fee(tx_facts.fee, transaction_metadata.as_ref());
+        ) {
+            FeeState::Unknown if spent > 0 => whole_transaction_fee
+                .map_or(FeeState::Unknown, |whole| FeeState::Unattributed { whole }),
+            fee => fee,
+        };
         // A database may retain owned amounts from a pool disabled in this build. The effects
         // above omit that pool, so their completeness cannot justify dropping its known amounts.
         let effects_cover_known = recorded_amounts.iter().all(|amounts| {
@@ -233,6 +242,39 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             inferred_payment,
             net_shielding,
         );
+        let account_movement = AccountMovement {
+            received,
+            spent,
+            complete: effects
+                .iter()
+                .all(|e| e.completeness == EffectCompleteness::Complete),
+        };
+
+        // What the transaction shows in the account's activity list.
+        let activity_evidence = ActivityEvidence {
+            shielding_shape: has_shielding_shape(conn, account_id, tx_facts.id)?,
+            orchard_spend: has_orchard_spend(conn, tx_facts.id)?,
+            mined: tx_facts.mined_height.is_some(),
+            spent,
+            received,
+            net: account_movement.net(),
+            details_complete: payment_details == DetailCompleteness::Complete,
+            provisional: classification == HistoryClassification::Provisional || !settled,
+            effects_settled: settled,
+            classification,
+            fee,
+            whole_fee: whole_transaction_fee
+                .filter(|_| spent > 0)
+                .map(Zatoshis::into_u64),
+            inferred_payment: inferred_payment
+                .filter(|_| classification == HistoryClassification::Reconstructed)
+                .map(Zatoshis::into_u64),
+            inferred_outgoing: inferred_outgoing_value.map(Zatoshis::into_u64),
+        };
+        let outputs = read_outputs(conn, account, account_id, tx_facts.id)?;
+        let summary = summarize(&activity_evidence, &outputs)?;
+        let activity = activity(&activity_evidence, &summary)?;
+        let funding_step = summary.funding_step()?;
 
         entries.push(TransactionHistoryDetails {
             has_transparent_outputs: tx_facts.has_transparent_outputs,
@@ -240,21 +282,57 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             whole_fee: whole_transaction_fee,
             aggregate_payment,
             inferred_outgoing: inferred_outgoing_value,
-            account_movement: AccountMovement {
-                received,
-                spent,
-                complete: effects
-                    .iter()
-                    .all(|e| e.completeness == EffectCompleteness::Complete),
-            },
+            account_movement,
             txid: *txid,
             mined_height: tx_facts.mined_height,
             effects,
             payment_details,
             fee,
             classification,
+            activity,
+            funding_step,
             pending_private_details: pending_details(conn, mode, Some(tx_facts.id))?,
         });
     }
     Ok(entries)
+}
+
+/// What an account's receipt of a transaction needs beyond its history view, from the same
+/// records. The caller provides the read snapshot.
+pub(crate) struct ReceiptEvidence {
+    /// An owned transparent output pays an address whose key scope is not one the wallet uses.
+    pub(crate) unknown_transparent_scope: bool,
+    /// The stored raw transaction, when there is one.
+    pub(crate) raw: Option<Vec<u8>>,
+}
+
+/// Reads `account`'s [`ReceiptEvidence`] for the transaction of `entry`.
+pub(crate) fn receipt_evidence(
+    conn: &rusqlite::Connection,
+    account: AccountUuid,
+    txid: &TxId,
+) -> Result<Option<ReceiptEvidence>, SqliteClientError> {
+    let account_id: i64 = conn
+        .query_row(
+            "SELECT id FROM accounts WHERE uuid = :uuid",
+            named_params![":uuid": account.0],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or(SqliteClientError::AccountUnknown)?;
+    let Some(tx_facts) = transaction_facts(conn, txid)? else {
+        return Ok(None);
+    };
+    let unknown_transparent_scope = read_outputs(conn, account, account_id, tx_facts.id)?
+        .iter()
+        .any(|output| output.has_unknown_transparent_scope());
+    let raw = conn.query_row(
+        "SELECT raw FROM transactions WHERE id_tx = ?1",
+        [tx_facts.id],
+        |row| row.get(0),
+    )?;
+    Ok(Some(ReceiptEvidence {
+        unknown_transparent_scope,
+        raw,
+    }))
 }

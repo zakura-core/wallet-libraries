@@ -20,9 +20,9 @@ use zcash_client_backend::{
         testing::single_output_change_strategy,
         testing::{IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester},
         transparent_ledger::{
-            AggregatePayment, DetailCompleteness, EffectCompleteness, FeeState,
-            HistoryClassification, PoolEffect, TransactionHistoryDetails, TransactionMetadata,
-            WholeTransactionFee,
+            AccountActivity, ActivityOutputs, AggregatePayment, DetailCompleteness,
+            EffectCompleteness, FeeState, HistoryClassification, OutputRef, PoolEffect,
+            TransactionHistoryDetails, TransactionMetadata, WholeTransactionFee,
         },
         wallet::decrypt_and_store_transaction,
         wallet::{ConfirmationsPolicy, input_selection::GreedyInputSelector},
@@ -341,8 +341,25 @@ fn effect(entry: &TransactionHistoryDetails, pool: PoolType) -> PoolEffect {
 fn assert_only_activity_inferred(entry: &TransactionHistoryDetails) {
     assert_eq!(entry.classification, HistoryClassification::Provisional);
     assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
-    assert_eq!(entry.fee, FeeState::Unknown);
+    // A whole fee is shown unattributed, never charged to the account.
+    assert_eq!(
+        entry.fee,
+        entry
+            .whole_fee
+            .map_or(FeeState::Unknown, |whole| FeeState::Unattributed { whole })
+    );
     assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
+    // Without the inference, the provisional debit is shown as the movement, with no fee
+    // subtracted from it.
+    if entry.inferred_outgoing.is_none() {
+        assert_eq!(
+            entry.activity,
+            AccountActivity::MovementDebit {
+                amount: Zatoshis::from_u64(u64::try_from(-entry.account_movement.net()).unwrap())
+                    .unwrap()
+            }
+        );
+    }
 }
 
 /// The reported transaction: private recovery shows the same outgoing Activity and network fee
@@ -358,6 +375,22 @@ fn reported_send_shows_its_outgoing_value_and_network_fee() {
     assert_eq!(public.recorded_transparent_sends(), SENT);
     assert_eq!(effect(&control, PoolType::IRONWOOD).spent, zat(SPENT));
     assert_eq!(effect(&control, PoolType::IRONWOOD).received, zat(CHANGE));
+    // With the full transaction the output is the account's own external one: a
+    // self-payment, sent and received.
+    let own_row = Some(ActivityOutputs {
+        amount: zat(SENT),
+        outputs: vec![OutputRef {
+            pool: PoolType::Transparent,
+            index: 0,
+        }],
+    });
+    assert_eq!(
+        control.activity,
+        AccountActivity::Outputs {
+            sent: own_row.clone(),
+            received: own_row.clone(),
+        }
+    );
 
     // Without any transparent rows or transparent metadata.
     let private = privately_recovered(Destination::OwnTransparent, None, true, Some(FEE));
@@ -409,6 +442,14 @@ fn reported_send_shows_its_outgoing_value_and_network_fee() {
         Some(public.recorded_transparent_sends())
     );
     assert_only_activity_inferred(&entry);
+    assert_eq!(
+        entry.activity,
+        AccountActivity::InferredOutgoing {
+            outgoing: zat(SENT),
+            received: None,
+            settled: true,
+        }
+    );
 
     // With the account's receipt of its own transparent output recovered privately: the net
     // movement is the fee alone, but the outgoing value is unchanged.
@@ -423,14 +464,44 @@ fn reported_send_shows_its_outgoing_value_and_network_fee() {
     assert_eq!(entry.whole_fee, Some(zat(FEE)));
     assert_eq!(entry.inferred_outgoing, Some(zat(SENT)));
     assert_only_activity_inferred(&entry);
+    // The receipt on its external address is shown apart from the outgoing value.
+    let AccountActivity::InferredOutgoing {
+        outgoing,
+        received: Some(received),
+        settled: true,
+    } = &entry.activity
+    else {
+        panic!(
+            "expected an outgoing value and a receipt, got {:?}",
+            entry.activity
+        );
+    };
+    assert_eq!((*outgoing, received.amount), (zat(SENT), zat(SENT)));
+    assert_eq!(received.outputs.len(), 1);
+    assert_eq!(received.outputs[0].pool, PoolType::Transparent);
 
     // A payment to someone else has the same Activity, publicly and privately.
     let public = publicly_recovered(Destination::ExternalTransparent);
     assert_eq!(public.recorded_transparent_sends(), SENT);
+    assert_eq!(
+        public.history().activity,
+        AccountActivity::Outputs {
+            sent: own_row,
+            received: None,
+        }
+    );
     let entry =
         privately_recovered(Destination::ExternalTransparent, None, true, Some(FEE)).history();
     assert_eq!(entry.inferred_outgoing, Some(zat(SENT)));
     assert_only_activity_inferred(&entry);
+    assert_eq!(
+        entry.activity,
+        AccountActivity::InferredOutgoing {
+            outgoing: zat(SENT),
+            received: None,
+            settled: true,
+        }
+    );
 }
 
 /// The whole fee, from either private source, is required, and must agree with the other.
@@ -667,6 +738,20 @@ fn a_recorded_send_suppresses_the_inference() {
         .unwrap();
     let entry = case.history();
     assert_eq!(entry.inferred_outgoing, None);
+    // The recorded output is the send's row.
+    assert_eq!(
+        entry.activity,
+        AccountActivity::Outputs {
+            sent: Some(ActivityOutputs {
+                amount: zat(SENT),
+                outputs: vec![OutputRef {
+                    pool: PoolType::Transparent,
+                    index: 0,
+                }],
+            }),
+            received: None,
+        }
+    );
 }
 
 /// Classification follows its evidence: an unmined transaction infers nothing.
@@ -678,4 +763,11 @@ fn reorg_withdraws_the_inference() {
     let entry = case.history();
     assert_eq!(entry.mined_height, None);
     assert_eq!(entry.inferred_outgoing, None);
+    // The unmined debit is shown as the movement, the whole fee not subtracted.
+    assert_eq!(
+        entry.activity,
+        AccountActivity::MovementDebit {
+            amount: zat(SENT + FEE)
+        }
+    );
 }

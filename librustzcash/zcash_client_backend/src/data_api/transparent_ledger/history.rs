@@ -67,9 +67,18 @@ pub enum DetailCompleteness {
 /// The fee of a transaction, as far as it concerns the account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeeState {
-    /// The account spent funds in the transaction and its fee is recorded.
+    /// The account spent funds in the transaction and paid its fee, which is recorded.
     Known(Zatoshis),
-    /// The account spent funds, or may have, but the fee is not recorded. Never zero.
+    /// The account spent funds in the transaction and the whole transaction's fee is exact, but
+    /// the evidence does not establish the account's share of it: another party may have paid
+    /// some or all of it. The account's movement includes whatever share it paid; no amount
+    /// this history reports has the fee subtracted. Never a fee attributed to the account.
+    Unattributed {
+        /// The exact fee of the whole transaction, [`TransactionHistoryDetails::whole_fee`].
+        whole: Zatoshis,
+    },
+    /// The account spent funds, or may have, and neither its fee nor the whole transaction's is
+    /// established. Never zero.
     Unknown,
     /// The account provably spent nothing in the transaction, so it paid no fee.
     NotApplicable,
@@ -99,6 +108,123 @@ pub enum HistoryClassification {
     /// Reconstructed from incomplete evidence. Later discovery or enhancement can change it; a
     /// provisional net debit is not a final payment amount.
     Provisional,
+}
+
+/// One output of a transaction: its pool and its index within that pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OutputRef {
+    /// The pool.
+    pub pool: PoolType,
+    /// Its index within the pool's outputs (the action index for Orchard and Ironwood).
+    pub index: u32,
+}
+
+/// The outputs one activity row counts, and their total value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivityOutputs {
+    /// The total value of [`Self::outputs`].
+    pub amount: Zatoshis,
+    /// The outputs, ordered by pool and index. A receipt of the row shows exactly these.
+    pub outputs: Vec<OutputRef>,
+}
+
+/// What a transaction shows in an activity list for one account.
+///
+/// Derived from the entry's evidence and the account's outputs in the transaction, never from
+/// txid display facts. A variant names the rows to show and the amounts and outputs they
+/// count; labels, the fee each row shows, and grouping steps of one operation across
+/// transactions (a TEX funding step and its payment, a swap) remain the wallet's. The rules are
+/// checked in this order; the first that applies decides.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AccountActivity {
+    /// The account moved its own transparent funds into its shielded pools: it spent only
+    /// transparent outputs, received no transparent output, recorded no output to others that
+    /// is not change, and its payment details are complete (including memos), its effects
+    /// settled and its classification not provisional. One row.
+    Shielding {
+        /// The shielded value it received, or everything it received when that is zero.
+        amount: Zatoshis,
+        /// Its shielded receipts.
+        outputs: Vec<OutputRef>,
+    },
+    /// An internal move of the account's Orchard funds into Ironwood: some wallet account spent
+    /// a version-2 Orchard note, the account sent itself Ironwood outputs (by its own sent-note
+    /// records), and nothing else is visible to send or receive. One row.
+    PoolMigration {
+        /// The Ironwood value it sent itself.
+        amount: Zatoshis,
+        /// Those outputs.
+        outputs: Vec<OutputRef>,
+    },
+    /// The exact payment of a transparent-only debit the account alone funded, reconstructed
+    /// from recovered metadata, with no visible output it sent. Its recipients are not known.
+    /// One sent row.
+    InferredPayment {
+        /// The payment, excluding the fee.
+        amount: Zatoshis,
+    },
+    /// A recovered transparent self-transfer with no visible output it sent: the exact
+    /// payment outside the account is zero and the debit equals the whole fee, which is also
+    /// the account's. One sent row whose amount is the fee.
+    FeeOnly {
+        /// The fee, which is the debit.
+        fee: Zatoshis,
+    },
+    /// [`TransactionHistoryDetails::inferred_outgoing`], less the account's own internal and
+    /// ephemeral transparent outputs, is zero and it received no other transparent output: a
+    /// funding step with no row.
+    HiddenFundingStep,
+    /// [`TransactionHistoryDetails::inferred_outgoing`] with no visible output the account
+    /// sent: a sent row of the outgoing value and, when the account received transparent
+    /// outputs other than internal ones, a received row. Activity amounts under that field's
+    /// funding convention, not payments.
+    InferredOutgoing {
+        /// The outgoing value less the account's internal and ephemeral transparent outputs, or
+        /// the gross value when that leaves nothing positive.
+        outgoing: Zatoshis,
+        /// The received row, when there is one.
+        received: Option<ActivityOutputs>,
+        /// Whether the rows are final: every effect is settled, the transaction is mined, every
+        /// owned transparent output's key scope is known, and the net outgoing value is
+        /// positive and covers the transparent receipts.
+        settled: bool,
+    },
+    /// A debit known only as the account's balance movement, less its attributed fee: a
+    /// provisional debit with no visible output the account sent, or an unmined debit with no
+    /// visible output at all. One row; a zero amount has no destination to show.
+    MovementDebit {
+        /// The debit less [`FeeState::Known`], never negative.
+        amount: Zatoshis,
+    },
+    /// The account's visible outputs: a sent row when it sent visible outputs (even of zero
+    /// value), and a received row when it received a positive value, or zero-value outputs in
+    /// a transaction that spent nothing or also has a sent row.
+    Outputs {
+        /// The sent row.
+        sent: Option<ActivityOutputs>,
+        /// The received row.
+        received: Option<ActivityOutputs>,
+    },
+    /// The account spent and received but nothing is visible: its outputs are change. No row.
+    ChangeOnly,
+    /// A positive movement with no visible output: one received row of the movement.
+    MovementCredit {
+        /// The movement.
+        amount: Zatoshis,
+    },
+    /// Nothing else applies: one row of unknown kind and zero amount.
+    Unknown,
+}
+
+/// What a transaction contributes to grouping a transparent funding step with the payment that
+/// spends it, which the wallet does across transactions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FundingStepEvidence {
+    /// The value of the transparent outputs the account sent itself, when it sent any, outside
+    /// a shielding and an Orchard-to-Ironwood move.
+    pub own_transparent_outputs: Option<Zatoshis>,
+    /// Whether a visible output the account sent is a transparent output to someone else.
+    pub external_transparent_send: bool,
 }
 
 /// One account's history view of one transaction, from one database read.
@@ -150,6 +276,10 @@ pub struct TransactionHistoryDetails {
     pub fee: FeeState,
     /// How the account's view was established.
     pub classification: HistoryClassification,
+    /// What the transaction shows in the account's activity list.
+    pub activity: AccountActivity,
+    /// What it contributes to grouping a transparent funding step with its payment.
+    pub funding_step: FundingStepEvidence,
     /// Transparent follow-on details for this transaction that the current policy withholds from
     /// public retrieval.
     pub pending_private_details: Vec<PrivateTransparentDetail>,

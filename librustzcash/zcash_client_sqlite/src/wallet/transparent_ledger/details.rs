@@ -3,11 +3,13 @@
 //! Work rows (`transparent_detail_work`) are written where the wallet records a transaction of
 //! ours without its raw bytes: ledger projection and the Enhance PIR route-2 marker. Storing raw
 //! bytes deletes them. Display facts (`transparent_tx_display*`) are display only: no balance,
-//! spendability or history query reads them. See
+//! spendability or history query reads them. The receipt read (`receipt`) combines them with
+//! the history view into display-level conclusions it never stores. See
 //! `docs/transparent-pir-wallet-integration.md#transparent-receipt-enhancement`.
 
 mod codes;
 mod queue;
+mod receipt;
 mod schedule;
 mod script;
 mod sql;
@@ -20,6 +22,7 @@ pub(crate) use queue::enqueue_tx;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use queue::enqueue_txid;
 pub(crate) use queue::{enqueue_mined_route_two, enqueue_route_two};
+pub(crate) use receipt::receipt;
 #[cfg(all(test, feature = "transparent-inputs"))]
 pub(crate) use schedule::{PARKED_BACKSTOP, backoff};
 pub(crate) use schedule::{defer, parked_work, work};

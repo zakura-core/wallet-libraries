@@ -17,6 +17,12 @@ workspace.
 - Rename the prototype ledger activation method to `activate_transparent_ledger`
   and `SqliteClientError::TransparentPromotionBlocked` to `TransparentActivationBlocked`.
   Recovery readiness checks and the atomic candidate-to-active transition are unchanged.
+- History entries carry `TransactionHistoryDetails::activity` and `funding_step`, and report
+  `FeeState::Unattributed` for an exact whole fee whose account share is not established.
+  Activity reads the account's outputs in the transaction (`v_tx_outputs`), its shielding
+  shape and Orchard spends in the same snapshot; no display fact is read. `WalletDb`
+  implements `TransparentDetailRead::transaction_receipt` in one read snapshot. There is no
+  schema change.
 
 - `SqliteClientError::TransparentAuthorityUnavailable` carries an `AuthorityRefusal`:
   `Pending { accounts }` when every refused input is a held, unspent, unexpired, mature and

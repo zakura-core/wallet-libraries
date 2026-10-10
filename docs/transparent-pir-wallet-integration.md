@@ -69,9 +69,10 @@ private queries are encoded and retrieved.
 | Protocol client → recovery adapter | Retrieve script histories and publication information within finite bounds | wallet-pir's `FilterSource` and `ShardTransport` |
 | Vizor → recovery adapter | Supply account identity, origin, watched addresses, locally accepted chain, and routed transport; settle each pass and follow the plan's next step | `TransparentHistoryRecoveryConfig`, `WalletChain`, `HttpExchange`, `TransparentHistoryRecovery::pass`, `settle_latest`, `PassPlan` |
 | Adapter → wallet store | Apply normalized events, coverage, source revisions, and continuation work | `TransparentLedgerCommit`, `TransparentLedgerWrite` |
-| Wallet store → application | Read balance together with authority, coverage, and blockers; read account-specific history | `TransparentLedgerSnapshot`, `transaction_history_details` |
+| Wallet store → application | Read balance together with authority, coverage, and blockers; read account-specific history and its activity rows | `TransparentLedgerSnapshot`, `transaction_history_details`, `AccountActivity` |
 | Receipt scheduler → wallet store | List due work, validate returned display facts, record failures, and read cached details | `TransparentDetailRead`, `TransparentDetailWrite` |
 | Receipt scheduler → detail run | Order the lookups, check the display map when work waits for it, and turn each lookup's result into one wallet write | `DetailRun`, `TxidDisplayService` |
+| Receipt screen → wallet store | Read one transaction's history view, transparent details, and what they establish together, in one snapshot | `transaction_receipt`, `ReceiptAttribution` |
 
 The ledger APIs do not depend on wallet-pir's wire types. The adapter,
 `zakura-pir-transparent`, translates protocol records, leaving publisher trust
@@ -269,7 +270,8 @@ The wallet keeps these quantities separate:
 | Account movement | Owned value received minus owned value spent, across pools; completeness is explicit |
 | Aggregate payment | Amount sent outside the selected account; exact, partial, or unknown |
 | Whole-transaction fee | Total fee established by transaction evidence, independent of who paid it |
-| Account fee | Fee applicable to this account, known, unknown, or not applicable |
+| Account fee | Fee applicable to this account: known, unattributed (the whole fee is exact but the account's share is not established), unknown, or not applicable |
+| Activity | The rows a transaction shows for the account, their amounts and the outputs each counts; the wallet labels, prices and groups them |
 | Payment-detail completeness | Whether recipients, payment amounts, and memos are accounted for |
 | Chain status | Mining, confirmation, expiry, or conflict; independent of receipt completeness |
 
@@ -308,6 +310,24 @@ the payment unless evidence identifies another contributor. It can include an
 owned transparent destination; it is neither canonical recipient attribution
 nor a fee-share determination.
 
+Each history entry carries `AccountActivity`, derived from the same facts and
+the account's outputs in the transaction, never from display facts. The rules
+are checked in order:
+
+| Activity | When |
+| --- | --- |
+| `Shielding` | The account spent only transparent outputs, received only shielded ones, recorded no non-change output to others, and its payment details are complete, its effects settled and its classification not provisional |
+| `PoolMigration` | A version-2 Orchard note was spent and the account sent itself Ironwood outputs, by its own records, with nothing else visible |
+| `InferredPayment` | A reconstructed transparent-only payment the account alone funded, with no visible output it sent |
+| `FeeOnly` | A recovered self-transfer: zero exact payment, debit equal to the whole fee and the account's, no visible output it sent |
+| `HiddenFundingStep` / `InferredOutgoing` | The Activity-only outgoing value, net of the account's own internal and ephemeral transparent outputs; zero with no other transparent receipt is a funding step with no row |
+| `MovementDebit` | A provisional debit with no visible output it sent, or an unmined one with no visible output: the debit less an attributed fee |
+| `Outputs` | The visible sent and received outputs |
+| `ChangeOnly`, `MovementCredit`, `Unknown` | Nothing visible: change only, a credit, or neither |
+
+Labels, the fee each row shows, and grouping across transactions remain the
+wallet's.
+
 ### Transparent receipt enhancement
 
 Private recovery or mixed enhancement queues durable receipt work for mined
@@ -328,12 +348,30 @@ shielded evidence. Checks reject provable contradictions without assuming full
 knowledge. Later evidence can invalidate the cache and queue another lookup.
 
 The private display cache changes neither balances nor library history
-classification/completeness. Vizor can use the combined history and display
-view to name a receipt source or recipient and complete a receipt when all
-effects are settled, all relevant outputs are shown, and their amounts account
-for its movement. Shared or mixed funding can prevent that conclusion even
-when the arithmetic balances. Public raw-transaction storage instead goes
-through ordinary transaction ingestion and can add wallet facts.
+classification, activity, or completeness. `transaction_receipt` reads the
+history view and the detail view in one snapshot and returns their
+`ReceiptAttribution`, a display-level conclusion that is never stored or fed
+back into the history:
+
+- The rows account for the movement when every transparent output is listed,
+  no shared or mixed funding is reported, and the account's net movement equals
+  minus its fee (attributed, or whole when it spent and its share is not) and the
+  outputs it does not own, or, without such a fee, the outputs it owns. Other
+  funders can offset an unseen payment without breaking that equality, so shared
+  or mixed funding blocks every conclusion below.
+- With such a fee and accounted rows, the only output the account does not own
+  is a send's recipient; with none, its own address when its outputs have one.
+  It completes a send whose records name no recipient once the effects are
+  settled, the transaction mined, and every owned transparent output's key scope
+  known.
+- The source of a receipt is the stored raw transaction's reading, completed by
+  display facts' shielded source or the first address-shaped input the account
+  does not own. It names no person, wallet, or sole funder.
+- A received row whose outputs are all transparent, from a known source, with
+  accounted rows and settled effects, is complete.
+
+Public raw-transaction storage instead goes through ordinary transaction
+ingestion and can add wallet facts.
 
 Opening a receipt shows cached details immediately and prioritizes missing
 details for the next bounded lookup run: the wallet lists a preferred receipt
