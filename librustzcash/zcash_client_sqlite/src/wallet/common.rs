@@ -397,8 +397,9 @@ where
     }
 }
 
-/// Selects the fewest eligible notes needed to cover `value`, followed by small notes that the
-/// input selector may use for shape-preserving consolidation.
+/// Selects the fewest eligible notes needed to cover `value`, followed by notes that the input
+/// selector may use for shape-preserving consolidation: dynamic-key notes first, so spare input
+/// slots move their value into ordinary change, then the smallest notes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn select_spendable_notes_for_consolidation<P: consensus::Parameters, F, Note>(
     conn: &Connection,
@@ -676,7 +677,8 @@ enum ValueSelection {
     Accumulate,
     /// Accumulate larger notes first after honoring lock-tier preference.
     LargestFirst,
-    /// Return up to `limit` notes in ascending value order from the specified lock tier.
+    /// Return up to `limit` notes from the specified lock tier: dynamic-key notes first, then in
+    /// ascending value order.
     SmallestFirst { lock_tier: i64, limit: usize },
 }
 
@@ -773,6 +775,11 @@ where
         .unwrap_or(("0", "ASC"));
     let crossing_note_subquery =
         "SELECT * from eligible WHERE so_far >= :target_value ORDER BY so_far LIMIT 1";
+    let dynamic_note = if protocol == ShieldedPool::Ironwood {
+        "rn.receiving_key_id IS NOT NULL"
+    } else {
+        "0"
+    };
     let result_columns = format!(
         "id, txid, {output_index_col},
                 diversifier, value, {note_reconstruction_cols}, commitment_tree_position,
@@ -803,7 +810,7 @@ where
         ValueSelection::SmallestFirst { .. } => format!(
             "SELECT {result_columns}
          FROM eligible WHERE lock_tier = :selected_lock_tier
-         ORDER BY value ASC, commitment_tree_position, id"
+         ORDER BY dynamic_note DESC, value ASC, commitment_tree_position, id"
         ),
     };
     let eligible_condition = output_eligible_condition(lock_filter, "rn");
@@ -814,6 +821,7 @@ where
                  rn.diversifier, rn.value,
                  {note_reconstruction_cols}, rn.commitment_tree_position,
                  {tier_column} AS lock_tier,
+                 {dynamic_note} AS dynamic_note,
                  {so_far} AS so_far,
                  accounts.ufvk as ufvk, rn.recipient_key_scope,
                  t.block AS mined_height,

@@ -509,8 +509,9 @@ pub enum NoteSelection {
     /// changing the transaction's fee or observable shape.
     ///
     /// Necessary funding is not capped. When the selected pool's existing transaction shape has
-    /// no more than five actions, the selector may add the smallest eligible notes while keeping
-    /// the total selected from that pool at no more than five and preserving the existing shape.
+    /// no more than five actions, the selector may add the data source's additional candidates
+    /// (see [`InputSource::select_spendable_notes_for_consolidation`]) while keeping the total
+    /// selected from that pool at no more than five and preserving the existing shape.
     /// Pool and locked-input preferences still take precedence; if no single permitted pool can
     /// fund the payment, selection falls back to ordinary multi-pool funding. If consolidation is
     /// not possible, the funding-only proposal is returned.

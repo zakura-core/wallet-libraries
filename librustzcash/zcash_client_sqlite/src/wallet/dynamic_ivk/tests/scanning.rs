@@ -209,6 +209,105 @@ fn scan_reopen_and_spend(close_keys: bool) {
 }
 
 #[test]
+fn spare_input_slots_spend_dynamic_key_notes_first() {
+    use std::convert::Infallible;
+    use zcash_client_backend::{
+        data_api::wallet::{
+            ConfirmationsPolicy,
+            input_selection::{GreedyInputSelector, NoteSelection, SpendPolicy},
+        },
+        fees::{DustOutputPolicy, StandardFeeRule, standard},
+        wallet::OvkPolicy,
+    };
+    use zcash_keys::address::{Address, UnifiedAddress};
+    use zcash_protocol::ShieldedPool;
+    use zip321::{Payment, TransactionRequest};
+
+    let mut st = ironwood_wallet();
+    let network = *st.network();
+    let account = st.test_account().cloned().unwrap();
+    let ordinary = IronwoodFvk(FullViewingKey::from(account.usk().orchard()));
+    let start = st.sapling_activation_height();
+    let refund = reserve_key(
+        st.wallet_mut().db_mut(),
+        account.id(),
+        Purpose::Refund,
+        start,
+    );
+    let (first, _, _) = st.generate_next_block(
+        &ordinary,
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(1_000_000),
+    );
+    st.generate_next_block(
+        &IronwoodFvk(refund.full_viewing_key().clone()),
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(200_000),
+    );
+    st.generate_next_block(
+        &ordinary,
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(100_000),
+    );
+    st.scan_cached_blocks_with_dynamic_ivks(first, 3);
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(5);
+
+    // The largest note funds the payment alone. Its payment and change outputs leave one
+    // spare spend slot, which the swap note takes instead of the smaller ordinary note.
+    let receiver =
+        FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap())
+            .address_at(0u32, Scope::External);
+    let address =
+        Address::Unified(UnifiedAddress::from_receivers(Some(receiver), None, None).unwrap());
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        address.to_zcash_address(&network),
+        Zatoshis::const_from_u64(300_000),
+    )])
+    .unwrap();
+    let change_strategy = standard::SingleOutputChangeStrategy::<TestDb>::new(
+        StandardFeeRule::Zip317,
+        None,
+        ShieldedPool::Orchard,
+        DustOutputPolicy::default(),
+    );
+    let policy = SpendPolicy::shielded_pools([ShieldedPool::Ironwood])
+        .with_note_selection(NoteSelection::PreferConsolidation);
+    let proposal = st
+        .propose_transfer_with_policy(
+            account.id(),
+            &GreedyInputSelector::new(),
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+            &policy,
+        )
+        .unwrap();
+    let mut inputs: Vec<_> = proposal
+        .steps()
+        .first()
+        .shielded_inputs()
+        .unwrap()
+        .notes()
+        .iter()
+        .map(|note| u64::from(note.note().value()))
+        .collect();
+    inputs.sort_unstable();
+    assert_eq!(inputs, [200_000, 1_000_000]);
+
+    let created = st
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .unwrap();
+    let (height, _) = st.generate_next_block_including(created[0]);
+    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    // The dynamic-key note's value now sits in ordinary internal change.
+    assert_eq!(unspent_keys(&st, height), [None, None]);
+}
+
+#[test]
 fn dynamic_ivk_rejects_mismatched_note_metadata() {
     use incrementalmerkletree::Position;
     use orchard::note::{Note, NoteVersion, RandomSeed, Rho};
