@@ -247,10 +247,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// address and memo, then reclaims what became reclaimable. Returns whether any
     /// matched. `funded`, sticky, says a deposit was seen.
     ///
-    /// An older observation than the stored one is ignored, and its deadline only fills a
-    /// missing one, so a status can neither close a key early nor hold it open. A refund
-    /// key this wallet never funded starts at its issuance point on a refund owed or an
-    /// inconclusive end, in case the deposit was paid from elsewhere.
+    /// The status fields of an observation older than the stored one are ignored, but its
+    /// `funded` still sticks. A deadline only fills a missing one, so a status can neither
+    /// close a key early nor hold it open. A refund key this wallet never funded starts
+    /// at its issuance point on a refund owed or an inconclusive end, in case the deposit
+    /// was paid from elsewhere.
     pub fn record_operation_status(
         &mut self,
         account: AccountUuid,
