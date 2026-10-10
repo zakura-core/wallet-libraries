@@ -236,8 +236,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     }
 
     /// Records how `request` ended. An accepted deadline only shortens the requested one,
-    /// and a repeat must keep the accepted deposit address and memo. A rejection releases
-    /// the request's hold on the address.
+    /// and a repeat must keep the accepted deposit address and memo, which no other
+    /// operation in the account may hold. A rejection releases the request's hold on the
+    /// address.
     pub fn finish_receive_operation(
         &mut self,
         account: AccountUuid,
@@ -267,7 +268,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// close a key early nor hold it open. A refund key this wallet never funded starts
     /// at its issuance point on a refund owed or an inconclusive end, in case the deposit
     /// was paid from elsewhere. A closed refund key reopens, rescanning from its start,
-    /// when a status newly reports either.
+    /// when a status newly reports either, and a closed incoming key when a status of its
+    /// funded operation leaves it expecting more than it received.
     pub fn record_operation_status(
         &mut self,
         account: AccountUuid,
