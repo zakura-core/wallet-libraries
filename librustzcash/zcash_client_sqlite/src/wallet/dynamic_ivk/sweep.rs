@@ -119,6 +119,10 @@ pub(crate) fn queue_directory_lookup<P: Parameters>(
     payments: &[DirectoryPayment],
     note_data: &BTreeMap<u64, [u8; 528]>,
 ) -> Result<Result<bool, SweepDeferral>, SqliteClientError> {
+    // A deferral changes nothing, so check before replacing queued candidates.
+    if canonical(conn, Some(anchor))?.is_none() {
+        return Ok(Err(SweepDeferral::UnknownAnchor));
+    }
     let (kept, missing) = sort_directory_payments(conn, account, key, payments)?;
     for old in pending_payments(conn, account, key)? {
         if !kept.contains(&old) {

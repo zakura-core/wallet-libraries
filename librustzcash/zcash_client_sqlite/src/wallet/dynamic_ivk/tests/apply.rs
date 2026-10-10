@@ -657,7 +657,31 @@ fn a_corrected_answer_replaces_a_partially_queued_candidate() {
             .unwrap()
             .unwrap()
     );
-    assert_eq!(pending(db, account, key).len(), 1);
+    let queued = pending(db, account, key);
+    assert_eq!(queued.len(), 1);
+    let sweep = |db: &Db| -> (Option<u32>, Option<Vec<u8>>, Option<u32>) {
+        db.conn
+            .query_row(
+                "SELECT lookup_height, lookup_hash, done_height FROM ironwood_dynamic_sweeps
+                 WHERE receiving_key_id = ?1",
+                [key_ref(&db.conn, account, key).unwrap()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    };
+    let before = sweep(db);
+    // An answer at an anchor off the wallet's chain defers without touching the queue.
+    let reorged = ChainPoint {
+        hash: BlockHash([99; 32]),
+        ..through
+    };
+    assert_eq!(
+        db.queue_directory_lookup(account, key, reorged, std::slice::from_ref(&right), &data)
+            .unwrap(),
+        Err(SweepDeferral::UnknownAnchor)
+    );
+    assert!(pending(db, account, key) == queued);
+    assert_eq!(sweep(db), before);
     assert_eq!(
         db.directory_note_data_needed(account, key, std::slice::from_ref(&right))
             .unwrap(),
