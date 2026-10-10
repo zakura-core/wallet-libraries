@@ -17,7 +17,7 @@ use crate::wallet::init::WalletMigrationError;
 /// Migration that adds transaction summary views & add fee information to transactions.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x282fad2e_8372_4ca0_8bed_71821320909f);
 
-const DEPENDENCIES: &[Uuid] = &[
+pub(super) const DEPENDENCIES: &[Uuid] = &[
     add_utxo_account::MIGRATION_ID,
     sent_notes_to_internal::MIGRATION_ID,
 ];
@@ -270,7 +270,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use zcash_keys::keys::UnifiedSpendingKey;
-    use zcash_protocol::consensus::Network;
+    use zcash_protocol::{consensus::Network};
     use zip32::AccountId;
 
     use crate::{
@@ -316,7 +316,7 @@ mod tests {
             .conn
             .execute(
                 "INSERT INTO accounts (account, ufvk) VALUES (0, ?)",
-                params![ufvk.encode(&network)],
+                params![ufvk.encode(&network).unwrap()],
             )
             .unwrap();
 
@@ -445,7 +445,7 @@ mod tests {
             ))
             .expect("A valid default address exists for the UFVK");
         let taddr = ufvk
-            .transparent()
+            .p2pkh()
             .and_then(|k| {
                 k.derive_external_ivk()
                     .ok()
@@ -455,7 +455,11 @@ mod tests {
 
         db_data.conn.execute(
             "INSERT INTO accounts (account, ufvk, address, transparent_address) VALUES (0, ?, ?, ?)",
-            params![ufvk.encode(&network), ua.encode(&network), &taddr]
+            params![
+                ufvk.encode(&network).unwrap(),
+                ua.encode_receiver_preserving(&network),
+                &taddr
+            ]
         ).unwrap();
         db_data
             .conn

@@ -4,6 +4,7 @@
 use ambassador::Delegate;
 use rusqlite::Connection;
 use std::num::NonZeroU32;
+use std::ops::Range;
 use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
@@ -60,8 +61,11 @@ use crate::{
 #[cfg(feature = "transparent-inputs")]
 use {
     crate::TransparentAddressMetadata,
-    ::transparent::{address::TransparentAddress, bundle::OutPoint, keys::NonHardenedChildIndex},
-    core::ops::Range,
+    ::transparent::{
+        address::TransparentAddress,
+        bundle::OutPoint,
+        keys::{NonHardenedChildIndex, TransparentKeyScope},
+    },
     zcash_client_backend::fees::StandardFeeRule,
     zcash_keys::keys::transparent::gap_limits::GapLimits,
 };

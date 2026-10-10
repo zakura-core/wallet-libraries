@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
+=======
+use rand_core::CryptoRng;
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 use sapling::{
     BatchValidator, Bundle,
     bundle::Authorized,
@@ -7,6 +11,7 @@ use sapling::{
 use zcash_protocol::value::ZatBalance;
 
 pub(super) fn verify_bundle(
+    rng: impl CryptoRng,
     bundle: &Bundle<Authorized, ZatBalance>,
     spend_vk: &SpendVerifyingKey,
     output_vk: &OutputVerifyingKey,
@@ -18,7 +23,11 @@ pub(super) fn verify_bundle(
         return Err(SaplingError::ConsensusRuleViolation);
     }
 
+<<<<<<< HEAD
     if !validator.validate(spend_vk, output_vk, UnwrapErr(SysRng)) {
+=======
+    if !validator.validate(spend_vk, output_vk, rng) {
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         return Err(SaplingError::InvalidProofsOrSignatures);
     }
 

@@ -174,6 +174,7 @@ pub enum Recipient<AccountId> {
 pub struct WalletTx<AccountId> {
     txid: TxId,
     block_index: TxIndex,
+    transparent_spends: Vec<WalletTransparentSpend<AccountId>>,
     transparent_outputs: Vec<WalletTransparentOutput<AccountId>>,
     sapling_spends: Vec<WalletSaplingSpend<AccountId>>,
     sapling_outputs: Vec<WalletSaplingOutput<AccountId>>,
@@ -274,6 +275,7 @@ impl<AccountId> WalletTx<AccountId> {
     pub fn new(
         txid: TxId,
         block_index: TxIndex,
+        transparent_spends: Vec<WalletTransparentSpend<AccountId>>,
         transparent_outputs: Vec<WalletTransparentOutput<AccountId>>,
         sapling_spends: Vec<WalletSaplingSpend<AccountId>>,
         sapling_outputs: Vec<WalletSaplingOutput<AccountId>>,
@@ -289,6 +291,7 @@ impl<AccountId> WalletTx<AccountId> {
         Self {
             txid,
             block_index,
+            transparent_spends,
             transparent_outputs,
             sapling_spends,
             sapling_outputs,
@@ -326,6 +329,12 @@ impl<AccountId> WalletTx<AccountId> {
     /// Returns the index of the transaction in the containing block.
     pub fn block_index(&self) -> TxIndex {
         self.block_index
+    }
+
+    /// Returns a record for each transparent output belonging to the wallet that was spent in
+    /// the transaction.
+    pub fn transparent_spends(&self) -> &[WalletTransparentSpend<AccountId>] {
+        &self.transparent_spends
     }
 
     /// Returns a record for each transparent coin received or produced by the wallet.
@@ -567,7 +576,6 @@ impl<AccountId: Debug> transparent_fees::InputView for WalletTransparentOutput<A
         match self.known_input_size {
             Some(size) => transparent_fees::InputSize::Known(size),
             None => {
-                // Fall back to default: only P2PKH is recognized.
                 match zcash_script::script::PubKey::parse(&self.txout.script_pubkey().0)
                     .ok()
                     .as_ref()
@@ -575,6 +583,17 @@ impl<AccountId: Debug> transparent_fees::InputView for WalletTransparentOutput<A
                 {
                     Some(zcash_script::solver::ScriptKind::PubKeyHash { .. }) => {
                         transparent_fees::InputSize::STANDARD_P2PKH
+                    }
+                    Some(zcash_script::solver::ScriptKind::ScriptHash { .. }) => {
+                        // P2SH input size depends on the redeem script, which the
+                        // wallet must set via `with_known_input_size` (the SQLite
+                        // backend does this by reading the redeem script from the DB
+                        // and computing the exact size via
+                        // `p2sh_input_serialized_len`). Without it we cannot
+                        // determine the exact input size; return `Unknown` so the
+                        // estimator falls back to the consensus-maximum input size
+                        // rather than guessing.
+                        transparent_fees::InputSize::Unknown(self.outpoint.clone())
                     }
                     _ => transparent_fees::InputSize::Unknown(self.outpoint.clone()),
                 }
@@ -629,6 +648,45 @@ pub type WalletOrchardSpend<AccountId> = WalletSpend<orchard::note::Nullifier, A
 /// is a distinct pool from Orchard.
 #[cfg(feature = "orchard")]
 pub type WalletIronwoodSpend<AccountId> = WalletSpend<orchard::note::Nullifier, AccountId>;
+
+/// A reference to a transparent output belonging to the wallet that is spent within a
+/// transaction.
+///
+/// This is the transparent counterpart of [`WalletSpend`]. A transparent output is identified by
+/// the [`OutPoint`] that names it rather than by a nullifier, so unlike a shielded spend it can be
+/// recognized only by a wallet that already knows of the output being spent.
+#[derive(Clone, Debug)]
+pub struct WalletTransparentSpend<AccountId> {
+    index: usize,
+    outpoint: OutPoint,
+    account_id: AccountId,
+}
+
+impl<AccountId> WalletTransparentSpend<AccountId> {
+    /// Constructs a `WalletTransparentSpend` from its constituent parts.
+    pub fn from_parts(index: usize, outpoint: OutPoint, account_id: AccountId) -> Self {
+        Self {
+            index,
+            outpoint,
+            account_id,
+        }
+    }
+
+    /// Returns the index of the transparent input within the spending transaction.
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Returns the outpoint of the output being spent.
+    pub fn outpoint(&self) -> &OutPoint {
+        &self.outpoint
+    }
+
+    /// Returns the identifier for the account to which the spent output belonged.
+    pub fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+}
 
 /// An output that was successfully decrypted in the process of wallet scanning.
 #[derive(Clone)]
@@ -1178,6 +1236,18 @@ impl TransparentAddressMetadata {
         }
     }
 
+    /// Returns a [`TransparentAddressMetadata`] with [`TransparentAddressSource::StandaloneAddress`]
+    /// source information for an imported bare transparent address and the specified exposure
+    /// height.
+    #[cfg(feature = "transparent-key-import")]
+    pub fn standalone_address(exposure: Exposure, next_check_time: Option<SystemTime>) -> Self {
+        Self {
+            source: TransparentAddressSource::StandaloneAddress,
+            exposure,
+            next_check_time,
+        }
+    }
+
     /// Returns the source metadata for the address.
     pub fn source(&self) -> &TransparentAddressSource {
         &self.source
@@ -1256,6 +1326,13 @@ pub enum TransparentAddressSource {
     /// This variant provides the redeem script directly.
     #[cfg(feature = "transparent-key-import")]
     StandaloneScript(script::Redeem),
+
+    /// The address was imported as a bare transparent address, without any associated key
+    /// material. The wallet watches for outputs received by the address, but holds neither
+    /// the public key (P2PKH) nor the redeem script (P2SH) from which it was derived, so
+    /// funds received by it cannot be spent unless that material is subsequently imported.
+    #[cfg(feature = "transparent-key-import")]
+    StandaloneAddress,
 }
 
 #[cfg(feature = "transparent-inputs")]
@@ -1269,6 +1346,8 @@ impl TransparentAddressSource {
             TransparentAddressSource::StandalonePubkey(_) => None,
             #[cfg(feature = "transparent-key-import")]
             TransparentAddressSource::StandaloneScript(_) => None,
+            #[cfg(feature = "transparent-key-import")]
+            TransparentAddressSource::StandaloneAddress => None,
         }
     }
 
@@ -1281,6 +1360,8 @@ impl TransparentAddressSource {
             TransparentAddressSource::StandalonePubkey(_) => None,
             #[cfg(feature = "transparent-key-import")]
             TransparentAddressSource::StandaloneScript(_) => None,
+            #[cfg(feature = "transparent-key-import")]
+            TransparentAddressSource::StandaloneAddress => None,
         }
     }
 
@@ -1294,6 +1375,8 @@ impl TransparentAddressSource {
             TransparentAddressSource::StandalonePubkey(_) => None,
             #[cfg(feature = "transparent-key-import")]
             TransparentAddressSource::StandaloneScript(redeem_script) => Some(redeem_script),
+            #[cfg(feature = "transparent-key-import")]
+            TransparentAddressSource::StandaloneAddress => None,
         }
     }
 }

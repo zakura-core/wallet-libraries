@@ -44,7 +44,7 @@ use {
 /// `ephemeral_addresses` tables.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xc41dfc0e_e870_4859_be47_d2f572f5ca73);
 
-const DEPENDENCIES: &[Uuid] = &[add_account_uuids::MIGRATION_ID];
+pub(super) const DEPENDENCIES: &[Uuid] = &[add_account_uuids::MIGRATION_ID];
 
 pub(super) struct Migration<P, C, R> {
     pub(super) params: P,
@@ -242,8 +242,7 @@ impl<P: consensus::Parameters, C: Clock, R: Rng> RusqliteMigration for Migration
                     let transparent_external = diversifier_index
                         .and_then(|di| NonHardenedChildIndex::try_from(di).ok())
                         .and_then(|idx| {
-                            uivk.transparent()
-                                .as_ref()
+                            uivk.p2pkh()
                                 .and_then(|external_ivk| external_ivk.derive_address(idx).ok())
                                 .map(|t_addr| (idx, t_addr.encode(&self.params)))
                         });

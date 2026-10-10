@@ -1,7 +1,11 @@
 [package]
 name = "zakura-client-sqlite"
 description = "An SQLite-based Zcash light client"
+<<<<<<< HEAD
 version = "0.1.0-rc7"
+=======
+version = "0.23.0-pre.1"
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 authors = [
     "Jack Grigg <jack@z.cash>",
     "Kris Nuttycombe <kris@electriccoin.co>"
@@ -90,6 +94,7 @@ regex = { workspace = true }
 # (Breaking upgrades to these are usually backwards-compatible, but check MSRVs.)
 document-features.workspace = true
 maybe-rayon.workspace = true
+pastey = { workspace = true, optional = true }
 pczt.workspace = true
 rand_core.workspace = true
 rand_distr.workspace = true
@@ -110,6 +115,7 @@ pczt = { workspace = true, features = ["orchard", "tx-extractor"] }
 shardtree = { workspace = true, features = ["legacy-api", "test-dependencies"] }
 orchard = { workspace = true, features = ["test-dependencies"] }
 proptest.workspace = true
+rand = { workspace = true, features = ["sys_rng"] }
 rand_chacha.workspace = true
 rand_core.workspace = true
 secp256k1 = { workspace = true, features = ["rand"] }
@@ -124,7 +130,12 @@ zcash_address = { workspace = true, features = ["test-dependencies"] }
 zip321 = { workspace = true }
 
 [features]
+<<<<<<< HEAD
 default = ["multicore"]
+=======
+default = ["multicore", "orchard"]
+zip-233 = ["zcash_primitives/zip-233", "zcash_client_backend/zip-233"]
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 
 ## Enables multithreading support for creating proofs and building subtrees.
 multicore = ["maybe-rayon/threads", "zcash_primitives/multicore"]
@@ -209,7 +220,7 @@ serde = ["dep:serde", "uuid/serde"]
 #! ### Experimental features
 
 ## Exposes unstable APIs. Their behaviour may change at any time.
-unstable = ["zcash_client_backend/unstable"]
+unstable = ["dep:pastey", "zcash_client_backend/unstable"]
 
 ## A feature used to isolate tests that are expensive to run. Test-only.
 expensive-tests = []

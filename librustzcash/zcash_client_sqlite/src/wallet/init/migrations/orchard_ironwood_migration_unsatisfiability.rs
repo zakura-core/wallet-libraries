@@ -94,7 +94,7 @@ use crate::wallet::init::WalletMigrationError;
 /// real-spend nullifiers in a table of their own.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xd334a9fa_b9dc_46bd_9b31_1fba6aa47f55);
 
-const DEPENDENCIES: &[Uuid] = &[orchard_ironwood_migration_anchor_interval::MIGRATION_ID];
+pub(super) const DEPENDENCIES: &[Uuid] = &[orchard_ironwood_migration_anchor_interval::MIGRATION_ID];
 
 /// The nullifier-cache table this migration introduces, which no published migration creates.
 ///
@@ -170,7 +170,7 @@ fn stored_pczt_txid(bytes: &[u8]) -> Result<::zcash_protocol::TxId, &'static str
 fn real_spend_nullifiers(pczt_bytes: &[u8]) -> Result<Vec<[u8; 32]>, WalletMigrationError> {
     let pczt = pczt::Pczt::parse(pczt_bytes).map_err(|e| {
         WalletMigrationError::CorruptedData(format!(
-            "stored pool-migration PCZT does not parse: {e:?}"
+            "stored pool-migration PCZT does not parse: {e}"
         ))
     })?;
     Ok(pczt
@@ -547,6 +547,219 @@ mod tests {
         );
     }
 
+<<<<<<< HEAD
+=======
+    /// A REAL serialized migration transfer (built by `zcash_pool_migration`'s builder against a
+    /// local network with NU6.3 active), paired with its one real spend's nullifier.
+    #[cfg(feature = "orchard")]
+    fn built_transfer_pczt() -> (Vec<u8>, [u8; 32]) {
+        use orchard::keys::{FullViewingKey, Scope, SpendingKey};
+        use orchard::note::{Note, NoteVersion, RandomSeed, Rho};
+        use orchard::value::NoteValue;
+        use rand_chacha::ChaCha8Rng;
+        use rand_core::{Rng, SeedableRng};
+        use zcash_client_backend::data_api::testing::TestBuilder;
+        use zcash_pool_migration::build::build_transfer_pczt;
+        use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
+        use zcash_protocol::consensus::BlockHeight;
+        use zcash_protocol::local_consensus::LocalNetwork;
+        use zcash_protocol::value::Zatoshis;
+
+        /// A deterministic Orchard full viewing key (drawing bytes until they form a valid
+        /// spending key).
+        fn test_fvk() -> FullViewingKey {
+            let mut rng = ChaCha8Rng::seed_from_u64(11);
+            loop {
+                let mut bytes = [0u8; 32];
+                rng.fill_bytes(&mut bytes);
+                if let Some(sk) = SpendingKey::from_bytes(bytes).into_option() {
+                    return FullViewingKey::from(&sk);
+                }
+            }
+        }
+
+        /// An Orchard note of `value` owned by `fvk`, with deterministic randomness (drawing
+        /// bytes until they form a valid `rho`/`rseed` pair).
+        fn note_owned_by(fvk: &FullViewingKey, value: u64) -> Note {
+            let mut rng = ChaCha8Rng::seed_from_u64(7);
+            loop {
+                let mut rho_bytes = [0u8; 32];
+                rng.fill_bytes(&mut rho_bytes);
+                let Some(rho) = Rho::from_bytes(&rho_bytes).into_option() else {
+                    continue;
+                };
+                let mut rseed_bytes = [0u8; 32];
+                rng.fill_bytes(&mut rseed_bytes);
+                let Some(rseed) = RandomSeed::from_bytes(rseed_bytes, &rho).into_option() else {
+                    continue;
+                };
+                if let Some(note) = Note::from_parts(
+                    fvk.address_at(0u32, Scope::External),
+                    NoteValue::from_raw(value),
+                    rho,
+                    rseed,
+                    NoteVersion::V2,
+                )
+                .into_option()
+                {
+                    return note;
+                }
+            }
+        }
+
+        // A network with NU6.3 active below the transfer's target height, so the V6 format that
+        // permits deferred anchors is available.
+        let activation = BlockHeight::from_u32(100);
+        let network = LocalNetwork {
+            nu6: Some(activation),
+            nu6_1: Some(activation),
+            nu6_2: Some(activation),
+            nu6_3: Some(activation),
+            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+        };
+
+        // A self-funding note: the crossing value plus the transfer's exact ZIP 317 fee (three
+        // actions: the real spend, its Orchard padding dummy, and the Ironwood output).
+        let fvk = test_fvk();
+        let crossing = 100_000_000u64;
+        let fee = 3 * MARGINAL_FEE.into_u64();
+        let note = note_owned_by(&fvk, crossing + fee);
+        let nullifier = note.nullifier(&fvk).to_bytes();
+
+        let pczt = build_transfer_pczt(
+            &network,
+            200,
+            240,
+            &fvk,
+            note,
+            Zatoshis::const_from_u64(crossing),
+            None,
+            ChaCha8Rng::seed_from_u64(13),
+        )
+        .expect("the self-funding note builds a balanced transfer");
+        let pczt_bytes = pczt.serialize().expect("a built PCZT serializes");
+        (pczt_bytes, nullifier)
+    }
+
+    /// The PROVEN shape of a built migration PCZT: every deferred spend witness installed, which
+    /// is the structural effect proving has on the stored bytes, so the deferred-witness rule no
+    /// longer identifies any real spend. The paths are arbitrary (single-leaf trees); nothing
+    /// under test inspects them.
+    #[cfg(feature = "orchard")]
+    fn proven_shaped(pczt_bytes: &[u8]) -> Vec<u8> {
+        use incrementalmerkletree::{Hashable, Level};
+        use orchard::tree::{MerkleHashOrchard, MerklePath};
+
+        let parsed = pczt::Pczt::parse(pczt_bytes).expect("the built PCZT parses");
+        let deferred: Vec<usize> = parsed
+            .orchard()
+            .actions()
+            .iter()
+            .enumerate()
+            .filter(|(_, action)| action.spend().witness().is_none())
+            .map(|(index, _)| index)
+            .collect();
+        assert!(
+            !deferred.is_empty(),
+            "a built migration PCZT defers its real spends' witnesses"
+        );
+        let witnesses = deferred.into_iter().map(|index| {
+            let auth_path = core::array::from_fn(|level| {
+                MerkleHashOrchard::empty_root(Level::from(level as u8))
+            });
+            (index, MerklePath::from_parts(0, auth_path))
+        });
+        pczt::roles::updater::Updater::new(parsed)
+            .set_orchard_spend_witnesses(witnesses)
+            .expect("the witnesses install on the deferred spends")
+            .finish()
+            .serialize()
+            .expect("the proven-shaped PCZT serializes")
+    }
+
+    /// The upgrade path with data: a row whose `pczt` column holds a REAL serialized migration
+    /// transfer is backfilled with exactly its real spend's nullifier — the padding dummy spend
+    /// (which carries its own witness) contributes nothing — and `unsatisfiable_at`,
+    /// `unsatisfiable_kind`, and `broadcast_failure_at` all start out `NULL`: a database that had
+    /// none of these columns carried neither an unsatisfiability observation nor a
+    /// broadcast-failure report, so there is nothing for them to say. The row's transfer ordinal
+    /// arrives under its new name, with nothing left answering to the old one.
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn backfills_real_spend_nullifiers_from_the_stored_pczt() {
+        let (pczt_bytes, expected_nullifier) = built_transfer_pczt();
+
+        // The bundle carries more spends than the one real one (the padding dummy at least), so
+        // the exact-32-byte assertion below is load-bearing for the witness filter.
+        let parsed = pczt::Pczt::parse(&pczt_bytes).expect("the serialized PCZT parses back");
+        assert!(parsed.orchard().actions().len() >= 2);
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        create_released_tables(&conn);
+        insert_parent_migration(&conn);
+        insert_transfer_row(&conn, 0, &pczt_bytes, "signed");
+
+        let tx = conn.transaction().unwrap();
+        RusqliteMigration::up(&Migration, &tx).unwrap();
+        tx.commit().unwrap();
+
+        assert!(transactions_has_column(&conn, "transfer_id"));
+        assert!(!transactions_has_column(&conn, "tx_id"));
+
+        let (unsatisfiable_at, unsatisfiable_kind, broadcast_failure_at) = conn
+            .query_row(
+                "SELECT unsatisfiable_at, unsatisfiable_kind, broadcast_failure_at
+                   FROM orchard_ironwood_migration_transactions
+                  WHERE transfer_id = 0",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<u32>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<u32>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(unsatisfiable_at, None);
+        assert_eq!(unsatisfiable_kind, None);
+        assert_eq!(broadcast_failure_at, None);
+        assert_eq!(
+            cached_nullifiers(&conn, 0),
+            vec![expected_nullifier.to_vec()],
+            "one cache row per real spend, at the ordinal it was extracted under",
+        );
+    }
+
+    /// A not-yet-mined row whose stored PCZT is already PROVEN — every spend witness installed,
+    /// the shape `proved` and `broadcast` rows have once the proving flow has run — fails the
+    /// migration loudly: the deferred-witness rule extracts nothing from proven bytes, so the
+    /// nullifier cache cannot be reconstructed, and writing it empty would silently exempt the
+    /// transaction from unsatisfiability detection.
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn a_proven_pczt_on_a_non_mined_row_fails_the_migration() {
+        let (pczt_bytes, _) = built_transfer_pczt();
+        let proven = proven_shaped(&pczt_bytes);
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        create_released_tables(&conn);
+        insert_parent_migration(&conn);
+        insert_transfer_row(&conn, 0, &proven, "broadcast");
+
+        let tx = conn.transaction().unwrap();
+        let result = RusqliteMigration::up(&Migration, &tx);
+        assert!(matches!(
+            result,
+            Err(WalletMigrationError::CorruptedData(_))
+        ));
+    }
+
+    /// The wallet-owned tables the txid recovery reads, plus the `accounts` row a pool-migration
+    /// store is scoped by: a minimal stand-in for the wallet schema these unit fixtures build
+    /// their pre-fix pool-migration tables beside.
+    #[cfg(feature = "orchard")]
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
     fn create_wallet_tables(conn: &Connection) {
         conn.execute_batch(
             "CREATE TABLE accounts (
@@ -570,6 +783,148 @@ mod tests {
         .unwrap();
     }
 
+<<<<<<< HEAD
+=======
+    /// Record the wallet's own view of a mined transaction `txid` at `mined_height` spending the
+    /// note whose nullifier is `nf` — exactly the evidence the txid recovery reads back.
+    #[cfg(feature = "orchard")]
+    fn record_wallet_spend(conn: &Connection, txid: [u8; 32], mined_height: u32, nf: [u8; 32]) {
+        conn.execute(
+            "INSERT INTO transactions (txid, mined_height) VALUES (:txid, :mined_height)",
+            named_params![":txid": txid.as_slice(), ":mined_height": mined_height],
+        )
+        .unwrap();
+        let tx_ref = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO orchard_received_notes (nf) VALUES (:nf)",
+            named_params![":nf": nf.as_slice()],
+        )
+        .unwrap();
+        let note_ref = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO orchard_received_note_spends (orchard_received_note_id, transaction_id)
+             VALUES (:note_ref, :tx_ref)",
+            named_params![":note_ref": note_ref, ":tx_ref": tx_ref],
+        )
+        .unwrap();
+    }
+
+    /// The same proven bytes on a `mined` row are exempt from the nullifier-cache reconstruction:
+    /// the transaction is terminal, so no satisfiability question remains for the cache to answer,
+    /// and the row keeps the empty cache.
+    ///
+    /// Its erased `txid` is a different matter, and is repaired: a published release nulled the
+    /// column on the way to `mined`, and the reconstructing reader requires it, so this asserts the
+    /// whole round trip — the migration DERIVES the id from the row's own stored PCZT, and
+    /// `get_migration()` reads the row back as a `Mined` state carrying it. Without the repair this
+    /// read fails permanently, which is the condition the backfill exists to prevent.
+    ///
+    /// The wallet's record of the spend is deliberately NOT what the repair reads. A transaction's
+    /// id is a function of the transaction, so the stored bytes answer for every row whatever its
+    /// lifecycle state — including one whose spend evidence the wallet no longer holds.
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn a_mined_row_keeps_its_empty_cache_and_regains_its_txid() {
+        use uuid::Uuid;
+        use zcash_pool_migration::engine::{MigrationTxState, PoolMigrationRead};
+        use zcash_protocol::TxId;
+        use zcash_protocol::consensus::BlockHeight;
+
+        use crate::AccountUuid;
+        use crate::pool_migration::orchard_ironwood::PoolMigrations;
+
+        const MINED_TXID: [u8; 32] = [0x3C; 32];
+        const MINED_HEIGHT: u32 = 220;
+
+        let (pczt_bytes, nullifier) = built_transfer_pczt();
+        let proven = proven_shaped(&pczt_bytes);
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        // The wallet's own tables as well as the pool-migration ones: this test reads the repaired
+        // store back through `PoolMigrations`, and the txid the repair recovers comes from the
+        // wallet's record of the spend.
+        create_wallet_tables(&conn);
+        create_released_tables(&conn);
+
+        let account = Uuid::from_u128(0x5A);
+        conn.execute(
+            "INSERT INTO accounts (id, uuid) VALUES (1, :uuid)",
+            named_params![":uuid": account.as_bytes().as_slice()],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO orchard_ironwood_migrations (
+                id, account_id, status, note_split_fee_buffer, note_split_prep_fees,
+                note_split_total_input, note_split_total_migratable
+             )
+             -- Non-terminal on purpose: the post-repair read below goes through the
+             -- pending-only `get_migration`, and this test is about the txid repair, not
+             -- about history retention.
+             VALUES (1, 1, 'in_progress', 0, 0, 0, 0)",
+        )
+        .unwrap();
+        insert_transfer_row(&conn, 0, &proven, "mined");
+        conn.execute(
+            "UPDATE orchard_ironwood_migration_transactions SET mined_height = :mined_height",
+            named_params![":mined_height": MINED_HEIGHT],
+        )
+        .unwrap();
+        // A wallet record of the spend, under a DIFFERENT txid than the transaction actually
+        // has: the repair must not consult it. (A real wallet would record the true id; this
+        // pins that the derivation is what answers.)
+        record_wallet_spend(&conn, MINED_TXID, MINED_HEIGHT, nullifier);
+
+        let tx = conn.transaction().unwrap();
+        RusqliteMigration::up(&Migration, &tx).unwrap();
+        tx.commit().unwrap();
+
+        assert!(
+            cached_nullifiers(&conn, 0).is_empty(),
+            "the mined row is exempt from the backfill, so it caches nothing",
+        );
+
+        // The read below goes through the CURRENT store, which reads `txid` as the id's raw bytes,
+        // while this migration writes the hex text that its own schema declares. The descendant
+        // `..._txid_blob` is what converts the column, and it is an unconditional descendant, so
+        // no wallet ever presents the reader with the text form. Running it here is what puts the
+        // fixture at the schema the reader requires; the repair under test is still this
+        // migration's, and a txid it failed to write would arrive below as NULL either way.
+        let tx = conn.transaction().unwrap();
+        RusqliteMigration::up(
+            &super::super::orchard_ironwood_migration_txid_blob::Migration,
+            &tx,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let store = PoolMigrations::for_account((), (), &conn, AccountUuid::from_uuid(account))
+            .expect("the account exists");
+        let state = store
+            .get_migration()
+            .expect("the repaired store reads back")
+            .expect("the migration is present");
+        let derived = stored_pczt_txid(&proven).expect("the stored PCZT yields its id");
+        assert_ne!(
+            derived,
+            TxId::from_bytes(MINED_TXID),
+            "premise: the wallet's spend record names a different id than the transaction has",
+        );
+        assert_eq!(
+            state.transactions()[0].state(),
+            MigrationTxState::Mined {
+                txid: derived,
+                height: BlockHeight::from_u32(MINED_HEIGHT),
+            },
+            "the mined row reconstructs with the id derived from its own stored PCZT",
+        );
+        assert_eq!(
+            state.transactions()[0].txid(),
+            derived,
+            "and the row itself carries the same id",
+        );
+    }
+
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
     /// A row whose stored PCZT cannot yield a transaction id fails the migration, naming the row,
     /// rather than leaving a store that reads back as corrupt ever after.
     ///

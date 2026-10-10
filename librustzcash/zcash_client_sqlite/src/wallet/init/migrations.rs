@@ -7,6 +7,7 @@
 //! Omitted versions had the same migration state as the first prior version that is
 //! included.
 
+<<<<<<< HEAD
 mod account_delete_cascade;
 mod add_account_birthdays;
 mod add_account_uuids;
@@ -90,21 +91,209 @@ mod v_tx_outputs_use_legacy_false;
 mod wallet_summaries;
 mod witness_stabilized_notes;
 mod zip318_classification;
+=======
+/// Returns whether `id` appears in any of the given dependency lists.
+const fn is_depended_on(id: Uuid, dependencies: &[&[Uuid]]) -> bool {
+    let mut i = 0;
+    while i < dependencies.len() {
+        let deps = dependencies[i];
+        let mut j = 0;
+        while j < deps.len() {
+            if deps[j].as_u128() == id.as_u128() {
+                return true;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Counts the identifiers in `ids` that appear in none of the given dependency lists.
+const fn count_leaves(ids: &[Uuid], dependencies: &[&[Uuid]]) -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    while i < ids.len() {
+        if !is_depended_on(ids[i], dependencies) {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
+/// Collects the identifiers in `ids` that appear in none of the given dependency lists,
+/// preserving their order in `ids`.
+///
+/// `N` must equal [`count_leaves`] for the same arguments; const evaluation fails otherwise.
+const fn collect_leaves<const N: usize>(ids: &[Uuid], dependencies: &[&[Uuid]]) -> [Uuid; N] {
+    let mut leaves = [Uuid::nil(); N];
+    let mut count = 0;
+    let mut i = 0;
+    while i < ids.len() {
+        if !is_depended_on(ids[i], dependencies) {
+            leaves[count] = ids[i];
+            count += 1;
+        }
+        i += 1;
+    }
+    assert!(count == N);
+    leaves
+}
+
+/// Declares the given migration modules, and defines [`CURRENT_LEAF_MIGRATIONS`] as the
+/// leaves of the migration dependency graph, computed at compile time.
+///
+/// Each module contributes its `MIGRATION_ID` and `DEPENDENCIES` constants to the graph;
+/// the leaves are the migrations on which no other migration depends. Because this macro
+/// is what declares the modules, the graph necessarily covers every migration module.
+///
+/// Under the `unstable` feature, this also generates the `ids` module, re-exporting each
+/// migration's identifier under the SCREAMING_SNAKE_CASE version of its module name.
+macro_rules! migration_modules {
+    ($($migration:ident),+ $(,)?) => {
+        $(mod $migration;)+
+
+        /// The identifiers of all migrations in the dependency graph.
+        const ALL_MIGRATION_IDS: &[Uuid] = &[$($migration::MIGRATION_ID),+];
+
+        /// The dependencies of each migration, in the same order as [`ALL_MIGRATION_IDS`].
+        const ALL_DEPENDENCIES: &[&[Uuid]] = &[$($migration::DEPENDENCIES),+];
+
+        const LEAF_MIGRATION_IDS: [Uuid; count_leaves(ALL_MIGRATION_IDS, ALL_DEPENDENCIES)] =
+            collect_leaves(ALL_MIGRATION_IDS, ALL_DEPENDENCIES);
+
+        /// Leaf migrations as of the current repository state.
+        pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &LEAF_MIGRATION_IDS;
+
+        #[cfg(feature = "unstable")]
+        pastey::paste! {
+            /// Identifiers of the individual migrations that make up this crate's internal
+            /// migration graph.
+            ///
+            /// External migrations registered via
+            /// [`WalletMigrator::with_external_migrations`] are applied as part of a single
+            /// graph alongside the internal ones, so an external migration that reads or
+            /// extends internal schema must declare a dependency that orders it after the
+            /// migration which creates that schema.
+            ///
+            /// These identifiers are unstable by nature, which is why they sit behind the
+            /// `unstable` feature: each names an individual migration rather than a state of
+            /// the graph that a published release exposed, so the set of them, and which of
+            /// them are reachable, changes between releases. A release constant such as
+            /// [`V_0_19_0`] carries no such risk. The intended shape is therefore to depend
+            /// on an identifier here while developing against unreleased schema, and to move
+            /// the anchor to the release constant that covers it once that release exists.
+            ///
+            /// Depending on an identifier here only orders your migration *after* the named
+            /// one; it does not prevent later internal migrations from being applied before
+            /// yours.
+            ///
+            /// [`WalletMigrator::with_external_migrations`]: super::WalletMigrator::with_external_migrations
+            pub mod ids {
+                $(pub use super::$migration::MIGRATION_ID as [<$migration:upper>];)+
+            }
+        }
+    };
+}
+
+migration_modules!(
+    account_delete_cascade,
+    add_account_birthdays,
+    add_account_uuids,
+    add_transaction_trust_marker,
+    add_transaction_views,
+    add_transparent_receiver_address_index,
+    add_transparent_value_index,
+    add_utxo_account,
+    addresses_table,
+    ensure_default_transparent_address,
+    ensure_orchard_ua_receiver,
+    ephemeral_addresses,
+    fix_bad_change_flagging,
+    fix_bad_ironwood_change_flagging,
+    fix_broken_commitment_trees,
+    fix_transparent_received_outputs,
+    fix_v_transactions_expired_unmined,
+    fix_v_transactions_multi_account_totals,
+    full_account_ids,
+    initial_setup,
+    ironwood_pool_code_views,
+    ironwood_received_notes,
+    ironwood_shardtree,
+    ivk_item_cache,
+    note_locking,
+    nullifier_map,
+    orchard_ironwood_broadcast_binding,
+    orchard_ironwood_migration_anchor_interval,
+    orchard_ironwood_migration_history,
+    orchard_ironwood_migration_txid_blob,
+    orchard_ironwood_migration_tables,
+    orchard_ironwood_migration_unsatisfiability,
+    orchard_note_version,
+    orchard_received_notes,
+    orchard_shardtree,
+    received_notes_nullable_nf,
+    receiving_key_scopes,
+    sapling_memo_consistency,
+    sent_notes_to_internal,
+    shardtree_support,
+    spend_key_available,
+    standalone_address,
+    standalone_p2sh,
+    support_legacy_sqlite,
+    support_zcashd_wallet_import,
+    transparent_gap_limit_handling,
+    transparent_spend_locator_map,
+    tree_retained_checkpoints,
+    tx_observation_height,
+    tx_retrieval_queue,
+    tx_retrieval_queue_expiry,
+    tx_status_observation_intent,
+    ufvk_support,
+    utxos_table,
+    utxos_to_txos,
+    v_address_uses_ironwood,
+    v_received_output_spends_account,
+    v_sapling_shard_unscanned_ranges,
+    v_transactions_additional_totals,
+    v_transactions_net,
+    v_transactions_note_uniqueness,
+    v_transactions_pool_crossing,
+    v_transactions_shielding_balance,
+    v_transactions_transparent_history,
+    v_migration_transactions,
+    v_transactions_zip318_kind,
+    v_tx_outputs_diversifier_index,
+    v_tx_outputs_key_scopes,
+    v_tx_outputs_return_addrs,
+    v_tx_outputs_transparent_addresses,
+    v_tx_outputs_use_legacy_false,
+    wallet_summaries,
+    witness_stabilized_notes,
+    zip318_classification,
+);
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 
 use std::{rc::Rc, sync::Mutex};
 
 use rand_core::Rng;
+<<<<<<< HEAD
 use rusqlite::{OptionalExtension, named_params};
+=======
+use rusqlite::named_params;
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 use schemerz_rusqlite::RusqliteMigration;
 use secrecy::SecretVec;
 use uuid::Uuid;
-use zcash_address::unified::{Encoding as _, Ufvk};
+use zcash_address::unified::{Encoding as _, Ufvk, Uivk};
 use zcash_protocol::consensus;
 
 use crate::util::Clock;
 
 use super::WalletMigrationError;
 
+<<<<<<< HEAD
 /// Identifiers of the individual migrations that make up this crate's internal migration graph.
 ///
 /// External migrations registered via
@@ -211,6 +400,8 @@ pub mod ids {
     };
 }
 
+=======
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 pub(super) fn all_migrations<
     P: consensus::Parameters + 'static,
     C: Clock + Clone + 'static,
@@ -221,6 +412,9 @@ pub(super) fn all_migrations<
     rng: R,
     seed: Option<Rc<SecretVec<u8>>>,
 ) -> Vec<Box<dyn RusqliteMigration<Error = WalletMigrationError>>> {
+    // Edges implied by transitivity may be omitted. A node whose parents cannot be reached by a
+    // drawn edge names them in `(<- parent, ...)`.
+    //
     //                                   initial_setup
     //                                   /           \
     //                          utxos_table         ufvk_support
@@ -243,55 +437,76 @@ pub(super) fn all_migrations<
     //   |   v_sapling_shard_unscanned_ranges    \           |       v_tx_outputs_use_legacy_false           |
     //   |                    |                   \          |                     |                         |
     //   |            wallet_summaries             \         |      v_transactions_shielding_balance         /
-    //   \                    \                     \        |                     |                        /
-    //    \                    \                     \       |      v_transactions_note_uniqueness         /
-    //     \                    \                     \      |        /                                   /
-    //      \                    `------------------- full_account_ids                                   /
-    //       \                                        /               \                                 /
-    //        \                         orchard_received_notes        spend_key_available              /
-    //         \                            /          \                      /                       /
-    //          \     ensure_orchard_ua_receiver     utxos_to_txos           /                       /
-    //           \                          \              |                /                       /
-    //            \                          \     ephemeral_addresses     /                       /
-    //             \                          \            |              /                       /
-    //              `----------------------------- tx_retrieval_queue ---------------------------'
-    //                                                  /    \
-    //                              support_legacy_sqlite    tx_retrieval_queue_expiry ----------------.
-    //                                 /              \                                                 \
-    //            fix_broken_commitment_trees         add_account_uuids                                  \
-    //                       /                                /        \                                  \
-    //    fix_bad_change_flagging      transparent_gap_limit_handling   v_transactions_additional_totals   \
-    //                       \                       |                      /                               \
-    //                        \      ensure_default_transparent_address    /                                 \
-    //                         \                     |                    /                                   \
-    //                          `---- fix_transparent_received_outputs --'                                     \
-    //                                    /         /           \                                              |
-    //                                   /         /             \                                             |
-    //                                  /         /               \                                            |
-    //           support_zcashd_wallet_import    /             fix_v_transactions_expired_unmined              |
-    //                \                         /                    /        |         \                      |
-    //                 \      tx_observation_height                 /         |          \                     |
-    //                  \                       \                  /          |           \                    /
-    //                   \                   add_transaction_trust_marker     |  v_tx_outputs_return_addrs    /
-    //                    \                       \                           |                     /        /
-    //                     \                       \         v_received_output_spends_account      /        /
-    //                      \                       \               /                             /        /
-    //                       `------------------- account_delete_cascade ---------------------------------'
-    //                              /               /                  |              \
-    //     add_transparent_value_index  v_tx_outputs_key_scopes  standalone_p2sh    witness_stabilized_notes
-    //                                     /        |             /            \
-    //                               ivk_item_cache |            /           orchard_note_version
-    //                             .----------------'           /                  \
+    //   \              /     \                     \        |                     |                        /
+    //  / \            /       \                     \       |      v_transactions_note_uniqueness         /
+    //  |  \          /         \                     \      |        /                                   /
+    //  |   \        /           `------------------- full_account_ids                                   /
+    //  |    \      /                                 /               \                                 /
+    //  |     \    /                    orchard_received_notes        spend_key_available              /
+    //  |      \  /                         /          \                      /                       /
+    //  |       \.    ensure_orchard_ua_receiver     utxos_to_txos           /                       /
+    //  |       .\                          \              |                /                       /
+    //  |      /  \                          \     ephemeral_addresses     /                       /
+    //  |     /    \                          \            |              /                       /
+    //  |     |     `----------------------------- tx_retrieval_queue ---------------------------'
+    //  |     |                                         /    \      \---------------------------------------.
+    //  |     |                                        /      \      \                                       \
+    //  |     |                     support_legacy_sqlite    tx_retrieval_queue_expiry ----------------.    transparent_spend_locator_map
+    //  |     |                        /              \                                                 \
+    //  |     |   fix_broken_commitment_trees         add_account_uuids                                  \
+    //  |     .              /                                /        \                                  \
+    //  | fix_bad_change_flagging      transparent_gap_limit_handling   v_transactions_additional_totals   \
+    //  |     .              \                       |                      /                               \
+    //  |     |               \      ensure_default_transparent_address    /                                 \
+    //  |     |                \                     |                    /                                   \
+    //  |     |                 `---- fix_transparent_received_outputs --'                                     \
+    //  |     |                           /         /           \                                              |
+    //  |     |                          /         /             \                                             |
+    //  |     |                         /         /               \                                            |
+    //  |     |  support_zcashd_wallet_import    /             fix_v_transactions_expired_unmined              |
+    //  |     |       \                         /                    /        |         \                      |
+    //  |     |        \      tx_observation_height                 /         |          \                     |
+    //  |     .         \                       \                  /          |           \                    /
+    // orchard_shardtree \                   add_transaction_trust_marker     |  v_tx_outputs_return_addrs    /
+    //  |     .           \                       \                           |                     /        /
+    //  |     |            \                       \         v_received_output_spends_account      /        /
+    // ironwood_shardtree   \                       \               /                             /        /
+    //      \                `------------------- account_delete_cascade ---------------------------------'
+    //       \                      /               /                 |               \
+    //        \                    /               /                  |                \
+    //         \                  /               /                   |                 \
+    //      witness_stabilized_notes    v_tx_outputs_key_scopes  standalone_p2sh      add_transparent_value_index
+    //               /                     /        |             /            \
+    //  tree_retained_checkpoints   ivk_item_cache  |            /      orchard_note_version
+    //                                              |           /                \
+    //                             .----------------'          /                  \
+    //                             |                          /                    \
     //                             |  add_transparent_receiver_address_index        \
-    //                             |                                                 \
-    //                             |                                        ironwood_received_notes ----------------
-    //                             |                                        /         |          \                  \
-    //                             |                     ironwood_pool_code_views     |      note_locking  fix_bad_ironwood_change_flagging
-    //                             |                             |          \         |
-    //                             |                             |           \ v_address_uses_ironwood
-    //                             |                             |            \
-    //                             |              v_transactions_pool_crossing \
-    //                             `------------------------------------------- v_tx_outputs_transparent_addresses
+    //                             |               |                                 \
+    //                             |      standalone_address               ironwood_received_notes -----------------------------------------.
+    //                             |                                        /         |         \                  \                        |
+    //                             |                     ironwood_pool_code_views     |     note_locking  fix_bad_ironwood_change_flagging  |
+    //                             |                             |         \          |                |                                    |
+    //                             |                             |          \  v_address_uses_ironwood |                   orchard_ironwood_migration_tables
+    //                             |                             |           \                         |                                    |
+    //                             |                             |            \                 tx_status_observation_intent                |
+    //                             |                             |             \                                                            |
+    //                             `------ v_tx_outputs_transparent_addresses   \                                          orchard_ironwood_migration_anchor_interval
+    //                                                      |                    |                                                          |
+    //                                       v_tx_outputs_diversifier_index      |                                                          |
+    //                                                                           \                                                          |
+    //                                                                      v_transactions_pool_crossing                                    |
+    //                                                                                   |                           orchard_ironwood_migration_unsatisfiability
+    //                                                                         zip318_classification                                        |
+    //                                                                                   |                               orchard_ironwood_migration_history
+    //                                                                      v_transactions_zip318_kind                                      |
+    //                                                                          /                    \                   orchard_ironwood_broadcast_binding
+    //                                                                         /                      \                                     |
+    //                                                                        /                        \                orchard_ironwood_migration_txid_blob
+    //                                                                       /                          \                  /
+    //                                                                      /                          v_migration_transactions
+    //                                                                     /                            /
+    //                                                                 fix_v_transactions_multi_account_totals
     //
     // Not drawn above: the ZIP 318 and status tail of the graph. It runs
     // v_transactions_pool_crossing -> zip318_classification -> v_transactions_zip318_kind ->
@@ -408,6 +623,7 @@ pub(super) fn all_migrations<
         Box::new(v_address_uses_ironwood::Migration),
         Box::new(v_transactions_pool_crossing::Migration),
         Box::new(zip318_classification::Migration),
+        Box::new(transparent_spend_locator_map::Migration),
         Box::new(v_transactions_zip318_kind::Migration),
         Box::new(orchard_ironwood_migration_tables::Migration),
         Box::new(tree_retained_checkpoints::Migration),
@@ -416,7 +632,9 @@ pub(super) fn all_migrations<
         Box::new(status_inclusion_evidence::Migration),
         Box::new(orchard_ironwood_migration_anchor_interval::Migration),
         Box::new(v_tx_outputs_transparent_addresses::Migration),
+        Box::new(v_tx_outputs_diversifier_index::Migration),
         Box::new(orchard_ironwood_migration_unsatisfiability::Migration),
+<<<<<<< HEAD
         Box::new(drop_zip318_pool_migration::Migration),
         Box::new(transparent_ledger_schema::Migration),
         Box::new(transparent_policy_generation::Migration),
@@ -432,6 +650,14 @@ pub(super) fn all_migrations<
         Box::new(ironwood_unsupported_memo_retry::Migration),
         Box::new(ironwood_transparent_output_shape::Migration),
         Box::new(transparent_txid_enhancement::Migration),
+=======
+        Box::new(orchard_ironwood_migration_history::Migration),
+        Box::new(orchard_ironwood_broadcast_binding::Migration),
+        Box::new(orchard_ironwood_migration_txid_blob::Migration),
+        Box::new(v_migration_transactions::Migration),
+        Box::new(standalone_address::Migration),
+        Box::new(fix_v_transactions_multi_account_totals::Migration),
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
     ]
 }
 
@@ -444,7 +670,12 @@ pub(super) fn all_migrations<
 const PUBLIC_MIGRATION_STATES: &[&[Uuid]] = &[
     V_0_4_0,
     V_0_6_0,
+    V_0_7_0,
+    V_0_8_0_RC1,
+    V_0_8_0_RC4,
+    V_0_8_0_RC5,
     V_0_8_0,
+    V_0_8_1,
     V_0_9_0,
     V_0_10_0,
     V_0_10_3,
@@ -458,6 +689,7 @@ const PUBLIC_MIGRATION_STATES: &[&[Uuid]] = &[
     V_0_16_0,
     V_0_16_2,
     V_0_16_4,
+    V_0_17_0,
     V_0_17_2,
     V_0_17_3,
     V_0_18_0,
@@ -466,8 +698,13 @@ const PUBLIC_MIGRATION_STATES: &[&[Uuid]] = &[
     V_0_20_0,
     V_0_22_0_RC1,
     V_0_22_0_RC2,
+<<<<<<< HEAD
     V_ZAKURA_0_1_0_RC5,
     V_ZAKURA_0_1_0_RC7,
+=======
+    V_0_22_0_RC5,
+    V_0_22_0_RC6,
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 ];
 
 /// Leaf migrations in the 0.4.0 release.
@@ -476,8 +713,39 @@ pub const V_0_4_0: &[Uuid] = &[add_transaction_views::MIGRATION_ID];
 /// Leaf migrations in the 0.6.0 release.
 pub const V_0_6_0: &[Uuid] = &[v_transactions_net::MIGRATION_ID];
 
+/// Leaf migrations in the 0.7.0 release.
+pub const V_0_7_0: &[Uuid] = &[received_notes_nullable_nf::MIGRATION_ID];
+
+/// Leaf migrations in the 0.8.0-rc.1 release.
+pub const V_0_8_0_RC1: &[Uuid] = &[
+    nullifier_map::MIGRATION_ID,
+    sapling_memo_consistency::MIGRATION_ID,
+    wallet_summaries::MIGRATION_ID,
+];
+
+/// Leaf migrations in the 0.8.0-rc.4 release.
+pub const V_0_8_0_RC4: &[Uuid] = &[
+    nullifier_map::MIGRATION_ID,
+    v_transactions_transparent_history::MIGRATION_ID,
+    wallet_summaries::MIGRATION_ID,
+];
+
+/// Leaf migrations in the 0.8.0-rc.5 release.
+pub const V_0_8_0_RC5: &[Uuid] = &[
+    nullifier_map::MIGRATION_ID,
+    v_tx_outputs_use_legacy_false::MIGRATION_ID,
+    wallet_summaries::MIGRATION_ID,
+];
+
 /// Leaf migrations in the 0.8.0 release.
 pub const V_0_8_0: &[Uuid] = &[
+    nullifier_map::MIGRATION_ID,
+    v_transactions_shielding_balance::MIGRATION_ID,
+    wallet_summaries::MIGRATION_ID,
+];
+
+/// Leaf migrations in the 0.8.1 release.
+pub const V_0_8_1: &[Uuid] = &[
     nullifier_map::MIGRATION_ID,
     v_transactions_note_uniqueness::MIGRATION_ID,
     wallet_summaries::MIGRATION_ID,
@@ -623,18 +891,37 @@ pub const V_0_22_0_RC2: &[Uuid] = &[
     note_locking::MIGRATION_ID,
 ];
 
+<<<<<<< HEAD
 /// Leaf migrations in the published zakura-client-sqlite 0.1.0-rc5 release.
 pub const V_ZAKURA_0_1_0_RC5: &[Uuid] = &[
+=======
+/// Leaf migrations in the 0.22.0-rc.5 release.
+pub const V_0_22_0_RC5: &[Uuid] = &[
+    v_tx_outputs_key_scopes::MIGRATION_ID,
+    ivk_item_cache::MIGRATION_ID,
+    add_transparent_receiver_address_index::MIGRATION_ID,
+    add_transparent_value_index::MIGRATION_ID,
+    ironwood_pool_code_views::MIGRATION_ID,
+    orchard_ironwood_migration_tables::MIGRATION_ID,
+    tree_retained_checkpoints::MIGRATION_ID,
+    fix_bad_ironwood_change_flagging::MIGRATION_ID,
+    v_address_uses_ironwood::MIGRATION_ID,
+    tx_status_observation_intent::MIGRATION_ID,
+];
+
+/// Leaf migrations in the 0.22.0-rc.6 release.
+pub const V_0_22_0_RC6: &[Uuid] = &[
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
     v_tx_outputs_transparent_addresses::MIGRATION_ID,
     ivk_item_cache::MIGRATION_ID,
     add_transparent_receiver_address_index::MIGRATION_ID,
     add_transparent_value_index::MIGRATION_ID,
     fix_bad_ironwood_change_flagging::MIGRATION_ID,
     v_address_uses_ironwood::MIGRATION_ID,
-    orchard_ironwood_migration_unsatisfiability::MIGRATION_ID,
+    v_transactions_pool_crossing::MIGRATION_ID,
+    orchard_ironwood_migration_anchor_interval::MIGRATION_ID,
     tree_retained_checkpoints::MIGRATION_ID,
     tx_status_observation_intent::MIGRATION_ID,
-    v_transactions_zip318_kind::MIGRATION_ID,
 ];
 
 /// Leaf migrations in the published zakura-client-sqlite 0.1.0-rc7 release.
@@ -693,41 +980,92 @@ pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
 ) -> Result<(), WalletMigrationError> {
-    // Ensure that the `ufvk_support` migration has been applied; if it hasn't, we won't be able to
-    // validate that the UFVKs in the wallet correspond to the network type that the wallet is
-    // being migrated for.
-    let has_ufvk = conn
-        .query_row(
-            &format!(
-                "SELECT 1 FROM {} WHERE id = :migration_id",
-                super::MIGRATIONS_TABLE
-            ),
-            named_params![":migration_id": &ufvk_support::MIGRATION_ID.as_bytes()[..]],
-            |row| row.get::<_, bool>(0),
-        )
-        .optional()?
-        == Some(true);
+    // This check runs before any not-yet-applied migrations for the current library version,
+    // so the `accounts` table may be in any of its historical shapes, or absent entirely
+    // (prior to `initial_setup`). Probe its actual columns directly, rather than keying off
+    // the id of the migration that happened to introduce them, so the check states its real
+    // precondition and stays correct across future migration reorganizations. Querying
+    // `pragma_table_info` for a nonexistent table simply returns no rows, so a wallet with no
+    // `accounts` table yet is handled the same way as one that has the table but lacks the
+    // column.
+    let has_column = |name: &str| -> Result<bool, WalletMigrationError> {
+        Ok(conn
+            .prepare("SELECT 1 FROM pragma_table_info('accounts') WHERE name = :name")?
+            .exists(named_params![":name": name])?)
+    };
+    let has_ufvk = has_column("ufvk")?;
+    let has_uivk = has_column("uivk")?;
 
-    if has_ufvk {
-        let mut fvks_stmt = conn.prepare("SELECT ufvk FROM accounts")?;
+    let network_name = |n| match n {
+        consensus::NetworkType::Main => "mainnet",
+        consensus::NetworkType::Test => "testnet",
+        consensus::NetworkType::Regtest => "regtest",
+    };
+    let mismatch_err = |account_id: i64, key_kind: &str, network: consensus::NetworkType| {
+        WalletMigrationError::CorruptedData(format!(
+            "Network type mismatch: account {account_id} {key_kind} is for {} but attempting to initialize for {}.",
+            network_name(network),
+            network_name(params.network_type())
+        ))
+    };
+
+    if has_uivk {
+        // `ufvk` may be NULL for accounts imported by UIVK; `uivk` is otherwise always
+        // present for such accounts. Validate the network of whichever key the account
+        // actually stores a value for, preferring the UFVK when both are available.
+        let mut stmt = conn.prepare("SELECT id, ufvk, uivk FROM accounts")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let account_id: i64 = row.get(0)?;
+            let ufvk_parsed = row
+                .get::<_, Option<String>>(1)?
+                .map(|ufvk_str| {
+                    let (network, _, _) = Ufvk::decode(&ufvk_str).map_err(|e| {
+                        WalletMigrationError::CorruptedData(format!(
+                            "Unable to parse UFVK for account {account_id}: {e}"
+                        ))
+                    })?;
+                    Ok::<_, WalletMigrationError>((network, "UFVK"))
+                })
+                .transpose()?;
+
+            let uivk_parsed = row
+                .get::<_, Option<String>>(2)?
+                .map(|uivk_str| {
+                    let (network, _, _) = Uivk::decode(&uivk_str).map_err(|e| {
+                        WalletMigrationError::CorruptedData(format!(
+                            "Unable to parse UIVK for account {account_id}: {e}"
+                        ))
+                    })?;
+                    Ok::<_, WalletMigrationError>((network, "UIVK"))
+                })
+                .transpose()?;
+
+            let (network, key_kind) =
+                ufvk_parsed
+                    .or(uivk_parsed)
+                    .ok_or(WalletMigrationError::CorruptedData(
+                        "account has neither a UFVK nor a UIVK".to_string(),
+                    ))?;
+
+            if network != params.network_type() {
+                return Err(mismatch_err(account_id, key_kind, network));
+            }
+        }
+    } else if has_ufvk {
+        let mut fvks_stmt = conn.prepare("SELECT account, ufvk FROM accounts")?;
         let mut rows = fvks_stmt.query([])?;
         while let Some(row) = rows.next()? {
-            let ufvk_str = row.get::<_, String>(0)?;
-            let (network, _) = Ufvk::decode(&ufvk_str).map_err(|e| {
-                WalletMigrationError::CorruptedData(format!("Unable to parse UFVK: {e}"))
+            let account_id: i64 = row.get(0)?;
+            let ufvk_str = row.get::<_, String>(1)?;
+            let (network, _, _) = Ufvk::decode(&ufvk_str).map_err(|e| {
+                WalletMigrationError::CorruptedData(format!(
+                    "Unable to parse UFVK for account {account_id}: {e}"
+                ))
             })?;
 
             if network != params.network_type() {
-                let network_name = |n| match n {
-                    consensus::NetworkType::Main => "mainnet",
-                    consensus::NetworkType::Test => "testnet",
-                    consensus::NetworkType::Regtest => "regtest",
-                };
-                return Err(WalletMigrationError::CorruptedData(format!(
-                    "Network type mismatch: account UFVK is for {} but attempting to initialize for {}.",
-                    network_name(network),
-                    network_name(params.network_type())
-                )));
+                return Err(mismatch_err(account_id, "UFVK", network));
             }
         }
     }
@@ -742,18 +1080,23 @@ pub(crate) mod tests {
     // Used only by the orchard-gated note-generation strategies below.
     #[cfg(feature = "orchard")]
     use proptest::{prelude::any, prop_compose};
-    use rusqlite::Connection;
+    use rusqlite::{Connection, named_params};
     use secrecy::Secret;
     use tempfile::NamedTempFile;
     use uuid::Uuid;
-    use zcash_protocol::consensus::Network;
+    use zcash_keys::keys::{UnifiedAddressRequest, UnifiedIncomingViewingKey, UnifiedSpendingKey};
+    use zcash_protocol::consensus::{BlockHeight, Network, NetworkUpgrade, Parameters};
 
-    #[cfg(feature = "unstable")]
-    use super::ids;
+    #[cfg(feature = "transparent-inputs")]
+    use {::transparent::keys::NonHardenedChildIndex, zcash_keys::encoding::AddressCodec as _};
+
     use crate::{
         WalletDb,
         testing::db::{test_clock, test_rng},
-        wallet::init::WalletMigrator,
+        wallet::{
+            encoding::{KeyScope, ReceiverFlags, encode_diversifier_index_be},
+            init::WalletMigrator,
+        },
     };
     use schemerz::Migration;
 
@@ -764,9 +1107,9 @@ pub(crate) mod tests {
 
     /// `CURRENT_LEAF_MIGRATIONS` must list exactly the leaves of the migration dependency graph
     /// (the migrations that no other migration depends on), so that migrating to the current
-    /// state reaches every migration. This recomputes the leaves from the graph and checks them
-    /// against the constant, so a newly added migration that supersedes an existing leaf cannot
-    /// silently leave a stale entry behind.
+    /// state reaches every migration. This recomputes the leaves from the runtime migration
+    /// graph and checks them against the compile-time computation, guarding against divergence
+    /// between the two views of the graph.
     #[test]
     fn current_leaf_migrations_are_the_dag_leaves() {
         let migrations =
@@ -780,10 +1123,12 @@ pub(crate) mod tests {
         assert_eq!(computed_leaves, listed_leaves);
     }
 
-    /// Every migration in the graph must have a publicly-exported identifier, so that an
-    /// external migration can always anchor itself precisely. Listing them here rather than
-    /// deriving them means a migration added without an `ids` entry fails this test.
+    /// Every migration module declared via `migration_modules!` must be registered in
+    /// `all_migrations`, or the runtime migration graph would be missing migrations that the
+    /// compile-time graph includes. (The converse is a compile error: a migration cannot be
+    /// registered without its module being declared.)
     #[test]
+<<<<<<< HEAD
     #[cfg(feature = "unstable")]
     fn ids_module_covers_every_migration() {
         let exported: HashSet<Uuid> = HashSet::from([
@@ -872,11 +1217,15 @@ pub(crate) mod tests {
             ids::ZIP318_CLASSIFICATION,
         ]);
 
+=======
+    fn all_migrations_registers_every_module() {
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         let migrations =
             super::all_migrations(&Network::TestNetwork, test_clock(), test_rng(), None);
-        let all_ids: HashSet<Uuid> = migrations.iter().map(|m| m.id()).collect();
 
-        assert_eq!(all_ids, exported);
+        let runtime_ids: HashSet<Uuid> = migrations.iter().map(|m| m.id()).collect();
+        let listed_ids: HashSet<Uuid> = super::ALL_MIGRATION_IDS.iter().copied().collect();
+        assert_eq!(runtime_ids, listed_ids);
     }
 
     /// A synthetic set of Orchard note payload values, for exercising migrations that touch the
@@ -998,21 +1347,23 @@ pub(crate) mod tests {
 
         let seed = [0xab; 32].to_vec();
 
-        let mut prev_state = HashSet::new();
-        let mut ensure_migration_state_changed = |conn: &Connection| {
-            let new_state = conn
-                .prepare_cached("SELECT * FROM schemer_migrations")
+        let read_applied_state = |conn: &Connection| {
+            conn.prepare_cached("SELECT * FROM schemer_migrations")
                 .unwrap()
                 .query_map([], |row| row.get::<_, [u8; 16]>(0).map(Uuid::from_bytes))
                 .unwrap()
                 .collect::<Result<HashSet<Uuid>, _>>()
-                .unwrap();
-            assert!(prev_state != new_state);
-            prev_state = new_state;
+                .unwrap()
         };
 
-        let mut prev_leaves: &[Uuid] = &[];
+        let mut prev_state = HashSet::new();
         for migrations in super::PUBLIC_MIGRATION_STATES {
+            // A release may target a leaf that an earlier release already applied (its
+            // successors having been introduced and later superseded on a parallel branch
+            // of the graph), so novelty is judged against the applied set, not against the
+            // previous release's leaf list.
+            let expect_change = migrations.iter().any(|m| !prev_state.contains(m));
+
             assert_matches!(
                 WalletMigrator::new()
                     .with_seed(Secret::new(seed.clone()))
@@ -1021,14 +1372,11 @@ pub(crate) mod tests {
                 Ok(_)
             );
 
-            // If we have any new leaves, ensure the migration state changed. This lets us
-            // represent releases that changed the graph edges without introducing any new
-            // migrations.
-            if migrations.iter().any(|m| !prev_leaves.contains(m)) {
-                ensure_migration_state_changed(&db_data.conn);
+            let new_state = read_applied_state(&db_data.conn);
+            if expect_change {
+                assert!(prev_state != new_state);
             }
-
-            prev_leaves = *migrations;
+            prev_state = new_state;
         }
 
         // Now check that we can migrate from the last public release to the current
@@ -1041,5 +1389,250 @@ pub(crate) mod tests {
             Ok(_)
         );
         // We don't ensure that the migration state changed, because it may not have.
+    }
+
+    /// A UIVK-only account (one imported without a UFVK, e.g. via an incoming viewing key)
+    /// stores `NULL` in the `accounts.ufvk` column. `verify_network_compatibility` must fall
+    /// back to checking the network of the account's `uivk` in that case, rather than choking
+    /// on the `NULL` `ufvk` as it did prior to this fix.
+    ///
+    /// The wallet is migrated only to the most recent published release, then given the rows
+    /// that release stores for a view-only UIVK import. The subsequent `init_or_migrate` call
+    /// therefore still has migrations to apply, which must also tolerate the `NULL` `ufvk`.
+    ///
+    /// Those rows are written as raw SQL rather than by calling `wallet::add_account`.
+    /// Applying the current `add_account` to a historical schema is a combination no wallet
+    /// is ever in: an application migrates to the current schema before it performs any
+    /// wallet operation. It also fails as soon as a runtime path reached from `add_account`
+    /// touches a table that a later migration introduces. All this test needs from
+    /// `add_account` is the data state it leaves behind, so the fixture writes that state
+    /// directly.
+    #[test]
+    fn uivk_only_account_is_network_compatible() {
+        let data_file = NamedTempFile::new().unwrap();
+        let mut db_data = WalletDb::for_path(
+            data_file.path(),
+            Network::TestNetwork,
+            test_clock(),
+            test_rng(),
+        )
+        .unwrap();
+
+        let seed = [0xab; 32];
+        WalletMigrator::new()
+            .with_seed(Secret::new(seed.to_vec()))
+            .ignore_seed_relevance()
+            .init_or_migrate_to(&mut db_data, super::V_0_22_0_RC6)
+            .unwrap();
+
+        let uivk =
+            UnifiedSpendingKey::from_seed(&Network::TestNetwork, &seed, zip32::AccountId::ZERO)
+                .unwrap()
+                .to_unified_full_viewing_key()
+                .to_unified_incoming_viewing_key();
+
+        let birthday_height = Network::TestNetwork
+            .activation_height(NetworkUpgrade::Sapling)
+            .unwrap();
+
+        let account_id = insert_uivk_only_account(
+            &db_data.conn,
+            *Uuid::new_v4().as_bytes(),
+            &uivk,
+            &Network::TestNetwork,
+            birthday_height,
+        );
+
+        // The account's default Unified Address is the only `addresses` row that
+        // `add_account` writes for a UIVK-only account: a UIVK carries a single transparent
+        // receiver instead of an extended pubkey, so no transparent gap addresses can be
+        // derived from it. The row is part of the fixture because `standalone_address`, one
+        // of the migrations still pending at V_0_22_0_RC6, rebuilds the `addresses` table
+        // and copies every existing row through tightened CHECK constraints.
+        let (address, d_idx) = uivk
+            .default_address(UnifiedAddressRequest::AllAvailableKeys)
+            .unwrap();
+
+        // Mirrors the transparent bookkeeping in `wallet::upsert_address`, which upholds the
+        // `addresses` table's transparent-index consistency constraint.
+        #[cfg(feature = "transparent-inputs")]
+        let (transparent_child_index, cached_transparent_receiver_address) = match (
+            NonHardenedChildIndex::try_from(d_idx).ok(),
+            address.transparent(),
+        ) {
+            (Some(idx), Some(receiver)) => (
+                Some(idx.index()),
+                Some(receiver.encode(&Network::TestNetwork)),
+            ),
+            _ => (None, None),
+        };
+        #[cfg(not(feature = "transparent-inputs"))]
+        let (transparent_child_index, cached_transparent_receiver_address): (
+            Option<u32>,
+            Option<String>,
+        ) = (None, None);
+
+        db_data
+            .conn
+            .execute(
+                "INSERT INTO addresses (
+                     account_id, key_scope, diversifier_index_be, address,
+                     transparent_child_index, cached_transparent_receiver_address,
+                     exposed_at_height, receiver_flags
+                 )
+                 VALUES (
+                     :account_id, :key_scope, :diversifier_index_be, :address,
+                     :transparent_child_index, :cached_transparent_receiver_address,
+                     :exposed_at_height, :receiver_flags
+                 )",
+                named_params![
+                    ":account_id": account_id,
+                    ":key_scope": KeyScope::EXTERNAL.encode(),
+                    ":diversifier_index_be": &encode_diversifier_index_be(d_idx)[..],
+                    ":address": address.encode(&Network::TestNetwork),
+                    ":transparent_child_index": transparent_child_index,
+                    ":cached_transparent_receiver_address": cached_transparent_receiver_address,
+                    ":exposed_at_height": u32::from(birthday_height),
+                    ":receiver_flags": ReceiverFlags::from(&address).bits(),
+                ],
+            )
+            .unwrap();
+
+        // Re-running the migrator is exactly what a wallet upgrade does; it must succeed
+        // rather than failing with an `InvalidColumnType` error on the NULL `ufvk`, and the
+        // migrations still pending since V_0_22_0_RC6 must not choke on it either.
+        assert_matches!(
+            WalletMigrator::new()
+                .with_seed(Secret::new(seed.to_vec()))
+                .ignore_seed_relevance()
+                .init_or_migrate(&mut db_data),
+            Ok(())
+        );
+    }
+
+    /// Pins the `has_ufvk`-but-not-`has_uivk` branch of `verify_network_compatibility`
+    /// against a wallet actually carrying an account row in that era's shape, rather than
+    /// only against empty databases. At `V_0_9_0`, `accounts` predates `full_account_ids`:
+    /// `account` is the primary key and `ufvk` is the sole (non-nullable) viewing key column;
+    /// `uivk` does not exist yet. Migrating such a wallet the rest of the way to the current
+    /// schema exercises `full_account_ids` carrying real account data across the shape
+    /// change, immediately after the pre-existing branch has validated it.
+    #[test]
+    fn ufvk_only_account_predating_uivk_column_migrates() {
+        let data_file = NamedTempFile::new().unwrap();
+        let mut db_data = WalletDb::for_path(
+            data_file.path(),
+            Network::TestNetwork,
+            test_clock(),
+            test_rng(),
+        )
+        .unwrap();
+
+        let seed = [0xab; 32];
+        WalletMigrator::new()
+            .with_seed(Secret::new(seed.to_vec()))
+            .ignore_seed_relevance()
+            .init_or_migrate_to(&mut db_data, super::V_0_9_0)
+            .unwrap();
+
+        let ufvk =
+            UnifiedSpendingKey::from_seed(&Network::TestNetwork, &seed, zip32::AccountId::ZERO)
+                .unwrap()
+                .to_unified_full_viewing_key();
+        db_data
+            .conn
+            .execute(
+                "INSERT INTO accounts (account, ufvk, birthday_height) VALUES (0, :ufvk, 0)",
+                named_params![":ufvk": ufvk.encode(&Network::TestNetwork).unwrap()],
+            )
+            .unwrap();
+
+        assert_matches!(
+            WalletMigrator::new()
+                .with_seed(Secret::new(seed.to_vec()))
+                .ignore_seed_relevance()
+                .init_or_migrate(&mut db_data),
+            Ok(())
+        );
+    }
+
+    /// Inserts the `accounts` row that `wallet::add_account` writes for an
+    /// [`AccountPurpose::ViewOnly`](zcash_client_backend::data_api::AccountPurpose) UIVK
+    /// import: `account_kind = 1` (imported), no HD derivation metadata, no spend key, and a
+    /// `NULL` `ufvk`. Returns the new row's `id`.
+    ///
+    /// Writing the row directly gives these tests control over the two things `add_account`
+    /// fixes for them: the network the stored `uivk` is encoded for (`add_account` always
+    /// uses the wallet's own [`consensus::Parameters`]), and the schema version the row is
+    /// written against. The IVK-cache and birthday-tree-size columns are left `NULL`; nothing
+    /// under test reads them, so this is not a faithful general-purpose account fixture.
+    fn insert_uivk_only_account(
+        conn: &Connection,
+        uuid: [u8; 16],
+        uivk: &UnifiedIncomingViewingKey,
+        uivk_network: &Network,
+        birthday_height: BlockHeight,
+    ) -> i64 {
+        conn.query_row(
+            "INSERT INTO accounts (
+                 name, uuid, account_kind, ufvk, uivk, has_spend_key, birthday_height
+             )
+             VALUES (:name, :uuid, :account_kind, NULL, :uivk, 0, :birthday_height)
+             RETURNING id",
+            named_params![
+                ":name": "uivk-only",
+                ":uuid": &uuid[..],
+                ":account_kind": 1,
+                ":uivk": uivk.encode(uivk_network).unwrap(),
+                ":birthday_height": u32::from(birthday_height),
+            ],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// A UIVK-only account whose stored `uivk` was encoded for a different network must still
+    /// be caught by `verify_network_compatibility`, exactly as a `ufvk`-bearing account is.
+    #[test]
+    fn uivk_only_account_network_mismatch_is_rejected() {
+        let data_file = NamedTempFile::new().unwrap();
+        let mut db_data = WalletDb::for_path(
+            data_file.path(),
+            Network::TestNetwork,
+            test_clock(),
+            test_rng(),
+        )
+        .unwrap();
+
+        let seed = [0xab; 32];
+        WalletMigrator::new()
+            .with_seed(Secret::new(seed.to_vec()))
+            .ignore_seed_relevance()
+            .init_or_migrate(&mut db_data)
+            .unwrap();
+
+        // Encode the account's `uivk` for mainnet while the wallet itself is testnet.
+        let uivk =
+            UnifiedSpendingKey::from_seed(&Network::MainNetwork, &seed, zip32::AccountId::ZERO)
+                .unwrap()
+                .to_unified_full_viewing_key()
+                .to_unified_incoming_viewing_key();
+        insert_uivk_only_account(
+            &db_data.conn,
+            [7; 16],
+            &uivk,
+            &Network::MainNetwork,
+            BlockHeight::from_u32(0),
+        );
+
+        assert_matches!(
+            WalletMigrator::new()
+                .with_seed(Secret::new(seed.to_vec()))
+                .ignore_seed_relevance()
+                .init_or_migrate(&mut db_data),
+            Err(schemerz::MigratorError::Adapter(
+                super::WalletMigrationError::CorruptedData(msg)
+            )) if msg.contains("UIVK")
+        );
     }
 }

@@ -5,7 +5,13 @@ use std::{
     convert::Infallible,
     fmt,
     hash::Hash,
+<<<<<<< HEAD
     num::{NonZeroU8, NonZeroU32, NonZeroU64},
+=======
+    num::NonZeroU32,
+    ops::Range,
+    time::Duration,
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 };
 
 #[cfg(feature = "pczt")]
@@ -14,7 +20,11 @@ use assert_matches::assert_matches;
 use group::ff::Field;
 use incrementalmerkletree::{Marking, Retention};
 use nonempty::NonEmpty;
+<<<<<<< HEAD
 use rand_08::{CryptoRng as CryptoRng08, Rng as Rng08, RngCore as RngCore08, SeedableRng};
+=======
+use rand::{CryptoRng, Rng, RngExt, SeedableRng};
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 use rand_chacha::ChaChaRng;
 use secrecy::{ExposeSecret, Secret, SecretVec};
 use shardtree::{
@@ -33,7 +43,11 @@ use {
         },
     },
     crate::wallet::TransparentAddressMetadata,
-    ::transparent::address::TransparentAddress,
+    ::transparent::{
+        address::{Script, TransparentAddress},
+        bundle::OutPoint,
+        keys::TransparentKeyScope,
+    },
     zcash_keys::keys::transparent::gap_limits::GapLimits,
 };
 
@@ -261,6 +275,7 @@ use crate::{
     proto::compact_formats::{
         self, CompactBlock, CompactSaplingOutput, CompactSaplingSpend, CompactTx,
     },
+    util::testing::FixedClock,
     wallet::{
         LockOwner, Note, NoteId, OutputRef, OvkPolicy, ReceivedNote, WalletTransparentOutput,
     },
@@ -681,6 +696,10 @@ pub trait Reset: WalletTest + Sized {
 }
 
 /// The state for a `zcash_client_backend` test.
+/// The fixed instant (2025-02-25T00:00:00Z) at which a [`TestState`]'s clock starts,
+/// as an offset from the Unix epoch.
+const TEST_CLOCK_EPOCH_OFFSET: Duration = Duration::from_secs(1740441600);
+
 pub struct TestState<Cache, DataStore: WalletTest, Network> {
     cache: Cache,
     cached_blocks: BTreeMap<BlockHeight, CachedBlock>,
@@ -688,10 +707,20 @@ pub struct TestState<Cache, DataStore: WalletTest, Network> {
     wallet_data: DataStore,
     network: Network,
     test_account: Option<(SecretVec<u8>, TestAccount<DataStore::Account>)>,
+<<<<<<< HEAD
     rng: TestRng,
+=======
+    rng: ChaChaRng,
+    clock: FixedClock,
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 }
 
 impl<Cache, DataStore: WalletTest, Network> TestState<Cache, DataStore, Network> {
+    /// Exposes the fixed clock that this test state passes to wallet operations.
+    pub fn clock(&self) -> &FixedClock {
+        &self.clock
+    }
+
     /// Exposes an immutable reference to the test's `DataStore`.
     pub fn wallet(&self) -> &DataStore {
         &self.wallet_data
@@ -873,6 +902,72 @@ where
         );
 
         (height, res, nfs)
+    }
+
+    /// Adds a block at the next height containing a single transparent-only transaction that
+    /// spends `vin` and creates an output of each `(address, value)` in `vout`, and inserts it
+    /// into the cache.
+    ///
+    /// The transaction is placed at index 1 within the block, behind a placeholder occupying the
+    /// coinbase position, so that the outputs it creates are not subject to the coinbase maturity
+    /// rule. Returns the height of the block and the id of the transparent transaction.
+    #[cfg(feature = "transparent-inputs")]
+    pub fn generate_next_block_transparent(
+        &mut self,
+        vin: &[OutPoint],
+        vout: &[(TransparentAddress, Zatoshis)],
+    ) -> (BlockHeight, Cache::InsertResult, TxId) {
+        let pre_activation_block = CachedBlock::none(self.sapling_activation_height() - 1);
+        let prior_cached_block = self
+            .latest_cached_block()
+            .unwrap_or(&pre_activation_block)
+            .clone();
+        let height = prior_cached_block.height() + 1;
+
+        let mut coinbase = fake_compact_tx(&mut self.rng);
+        coinbase.index = 0;
+
+        let mut ctx = fake_compact_tx(&mut self.rng);
+        ctx.index = 1;
+        ctx.vin = vin
+            .iter()
+            .map(|outpoint| compact_formats::CompactTxIn {
+                prevout_txid: outpoint.hash().to_vec(),
+                prevout_index: outpoint.n(),
+            })
+            .collect();
+        ctx.vout = vout
+            .iter()
+            .map(|(addr, value)| compact_formats::TxOut {
+                value: value.into_u64(),
+                script_pub_key: Script::from(addr.script()).0.0,
+            })
+            .collect();
+        let txid = TxId::from_bytes(ctx.txid[..].try_into().expect("txid is 32 bytes"));
+
+        let mut cb = CompactBlock {
+            hash: {
+                let mut hash = vec![0; 32];
+                self.rng.fill_bytes(&mut hash);
+                hash
+            },
+            height: height.into(),
+            ..Default::default()
+        };
+        cb.prev_hash
+            .extend_from_slice(&prior_cached_block.chain_state.block_hash().0);
+        cb.vtx.push(coinbase);
+        cb.vtx.push(ctx);
+        cb.chain_metadata = Some(compact_formats::ChainMetadata {
+            sapling_commitment_tree_size: prior_cached_block.sapling_end_size,
+            orchard_commitment_tree_size: prior_cached_block.orchard_end_size,
+            ironwood_commitment_tree_size: prior_cached_block.ironwood_end_size,
+        });
+
+        let res = self.cache_block(&prior_cached_block, cb);
+        self.latest_block_height = Some(height);
+
+        (height, res, txid)
     }
 
     /// Adds an empty block to the cache, advancing the simulated chain height.
@@ -1333,9 +1428,12 @@ where
             None,
         )?;
 
+        let clock = self.clock.clone();
         create_proposed_transactions(
-            self.wallet_mut(),
+            &mut self.wallet_data,
             &network,
+            &clock,
+            &mut self.rng,
             &MockSpendProver,
             &MockOutputProver,
             &SpendingKeys::from_unified_spending_key(usk.clone()),
@@ -1584,9 +1682,12 @@ where
         FeeRuleT: FeeRule,
     {
         let network = self.network().clone();
+        let clock = self.clock.clone();
         create_proposed_transactions(
-            self.wallet_mut(),
+            &mut self.wallet_data,
             &network,
+            &clock,
+            &mut self.rng,
             &MockSpendProver,
             &MockOutputProver,
             &SpendingKeys::from_unified_spending_key(usk.clone()),
@@ -1617,9 +1718,12 @@ where
     {
         let network = self.network().clone();
 
+        let clock = self.clock.clone();
         create_pczt_from_proposal(
-            self.wallet_mut(),
+            &mut self.wallet_data,
             &network,
+            &clock,
+            &mut self.rng,
             spend_from_account,
             ovk_policy,
             proposal,
@@ -1643,8 +1747,11 @@ where
         let prover = real_test_prover();
         let (spend_vk, output_vk) = prover.verifying_keys();
 
+        let clock = self.clock.clone();
         extract_and_store_transaction_from_pczt(
-            self.wallet_mut(),
+            &mut self.wallet_data,
+            &clock,
+            &mut self.rng,
             pczt,
             Some((&spend_vk, &output_vk)),
             None,
@@ -1672,9 +1779,12 @@ where
         ChangeT: ChangeStrategy<MetaSource = DbT>,
     {
         let network = self.network().clone();
+        let clock = self.clock.clone();
         shield_transparent_funds(
-            self.wallet_mut(),
+            &mut self.wallet_data,
             &network,
+            &clock,
+            &mut self.rng,
             &MockSpendProver,
             &MockOutputProver,
             input_selector,
@@ -1919,6 +2029,8 @@ impl TestBuilder<(), ()> {
         nu6_2: None,
         nu6_3: None,
         nu7: None,
+        #[cfg(zcash_unstable = "nutachyon")]
+        nu_tachyon: None,
     };
 
     /// Constructs a new test environment builder.
@@ -2287,6 +2399,7 @@ impl<Cache, DsFactory: DataStoreFactory> TestBuilder<Cache, DsFactory> {
             network: self.network,
             test_account,
             rng: self.rng,
+            clock: FixedClock::new(std::time::UNIX_EPOCH + TEST_CLOCK_EPOCH_OFFSET),
         }
     }
 }
@@ -2309,7 +2422,11 @@ pub trait TestFvk: Clone {
 
     /// Adds a single spend to the given [`CompactTx`] of a note previously received by
     /// this full viewing key.
+<<<<<<< HEAD
     fn add_spend<R: TestRngCore>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, rng: &mut R);
+=======
+    fn add_spend<R: Rng + CryptoRng>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, rng: &mut R);
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 
     /// Adds a single output to the given [`CompactTx`], where the output will be discovered when
     /// scanning with an incoming viewing key corresponding to this FVK. Its outputs will also be
@@ -2321,7 +2438,11 @@ pub trait TestFvk: Clone {
     /// Returns the nullifier of the newly created note, so that tests can readily have it on hand
     /// for the purpose of spending that note.
     #[allow(clippy::too_many_arguments)]
+<<<<<<< HEAD
     fn add_output<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_output<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2349,7 +2470,11 @@ pub trait TestFvk: Clone {
     /// Returns the nullifier full the newly created note which will need to be revealed when that
     /// note is later spent.
     #[allow(clippy::too_many_arguments)]
+<<<<<<< HEAD
     fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_logical_action<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2377,11 +2502,19 @@ impl<A: TestFvk> TestFvk for &A {
         (*self).ovk_bytes(scope)
     }
 
+<<<<<<< HEAD
     fn add_spend<R: TestRngCore>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, rng: &mut R) {
         (*self).add_spend(ctx, nf, rng)
     }
 
     fn add_output<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_spend<R: Rng + CryptoRng>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, rng: &mut R) {
+        (*self).add_spend(ctx, nf, rng)
+    }
+
+    fn add_output<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2406,7 +2539,11 @@ impl<A: TestFvk> TestFvk for &A {
         )
     }
 
+<<<<<<< HEAD
     fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_logical_action<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2446,12 +2583,20 @@ impl TestFvk for DiversifiableFullViewingKey {
         self.to_ovk(scope).0
     }
 
+<<<<<<< HEAD
     fn add_spend<R: TestRngCore>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, _: &mut R) {
+=======
+    fn add_spend<R: Rng + CryptoRng>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, _: &mut R) {
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         let cspend = CompactSaplingSpend { nf: nf.to_vec() };
         ctx.spends.push(cspend);
     }
 
+<<<<<<< HEAD
     fn add_output<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_output<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2474,11 +2619,15 @@ impl TestFvk for DiversifiableFullViewingKey {
             compact_sapling_output(params, height, recipient, value, sender_ovk.copied(), rng);
         ctx.outputs.push(cout);
 
-        note.nf(&self.fvk().vk.nk, u64::from(position))
+        note.nf(self.fvk().vk.nk(), u64::from(position))
     }
 
     #[allow(clippy::too_many_arguments)]
+<<<<<<< HEAD
     fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_logical_action<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2517,7 +2666,11 @@ impl TestFvk for ::orchard::keys::FullViewingKey {
         *self.to_ovk(scope).as_ref()
     }
 
+<<<<<<< HEAD
     fn add_spend<R: TestRngCore>(
+=======
+    fn add_spend<R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         &self,
         ctx: &mut CompactTx,
         nullifier_to_reveal: Self::Nullifier,
@@ -2540,7 +2693,11 @@ impl TestFvk for ::orchard::keys::FullViewingKey {
         ctx.actions.push(cact);
     }
 
+<<<<<<< HEAD
     fn add_output<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_output<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         &self,
         ctx: &mut CompactTx,
         _: &P,
@@ -2574,7 +2731,11 @@ impl TestFvk for ::orchard::keys::FullViewingKey {
         note.nullifier(self)
     }
 
+<<<<<<< HEAD
     fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_logical_action<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         &self,
         ctx: &mut CompactTx,
         _: &P,
@@ -2627,7 +2788,11 @@ impl TestFvk for IronwoodFvk {
         *self.0.to_ovk(scope).as_ref()
     }
 
+<<<<<<< HEAD
     fn add_spend<R: TestRngCore>(
+=======
+    fn add_spend<R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         &self,
         ctx: &mut CompactTx,
         nullifier_to_reveal: Self::Nullifier,
@@ -2650,7 +2815,11 @@ impl TestFvk for IronwoodFvk {
         ctx.ironwood_actions.push(cact);
     }
 
+<<<<<<< HEAD
     fn add_output<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_output<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         &self,
         ctx: &mut CompactTx,
         _: &P,
@@ -2684,7 +2853,11 @@ impl TestFvk for IronwoodFvk {
         note.nullifier(&self.0)
     }
 
+<<<<<<< HEAD
     fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_logical_action<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         &self,
         ctx: &mut CompactTx,
         _: &P,
@@ -2737,7 +2910,11 @@ pub enum AddressType {
 /// Creates a `CompactSaplingOutput` at the given height paying the given recipient.
 ///
 /// Returns the `CompactSaplingOutput` and the new note.
+<<<<<<< HEAD
 fn compact_sapling_output<P: consensus::Parameters, R: TestRngCore>(
+=======
+fn compact_sapling_output<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
     params: &P,
     height: BlockHeight,
     recipient: ::sapling::PaymentAddress,
@@ -2765,7 +2942,7 @@ fn compact_sapling_output<P: consensus::Parameters, R: TestRngCore>(
         CompactSaplingOutput {
             cmu,
             ephemeral_key,
-            ciphertext: enc_ciphertext[..52].to_vec(),
+            ciphertext: enc_ciphertext.0[..::sapling::note_encryption::COMPACT_NOTE_SIZE].to_vec(),
         },
         note,
     )
@@ -2775,7 +2952,11 @@ fn compact_sapling_output<P: consensus::Parameters, R: TestRngCore>(
 ///
 /// Returns the `CompactOrchardAction` and the new note.
 #[cfg(feature = "orchard")]
+<<<<<<< HEAD
 fn compact_orchard_action<R: TestRngCore>(
+=======
+fn compact_orchard_action<R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
     nf_old: ::orchard::note::Nullifier,
     recipient: ::orchard::Address,
     value: Zatoshis,
@@ -2795,16 +2976,17 @@ fn compact_orchard_action<R: TestRngCore>(
             nullifier: compact_action.nullifier().to_bytes().to_vec(),
             cmx: compact_action.cmx().to_bytes().to_vec(),
             ephemeral_key:
-                ShieldedOutput::<::orchard::note_encryption::OrchardDomain, 52>::ephemeral_key(
+                ShieldedOutput::<::orchard::note_encryption::OrchardDomain>::ephemeral_key(
                     &compact_action,
                 )
                 .0
                 .to_vec(),
             ciphertext:
-                ShieldedOutput::<::orchard::note_encryption::OrchardDomain, 52>::enc_ciphertext(
+                ShieldedOutput::<::orchard::note_encryption::OrchardDomain>::enc_ciphertext_compact(
                     &compact_action,
-                )[..52]
-                    .to_vec(),
+                )
+                .0
+                .to_vec(),
         },
         note,
     )
@@ -2815,7 +2997,11 @@ fn compact_orchard_action<R: TestRngCore>(
 /// `CompactOrchardAction` and the note. This mirrors [`compact_orchard_action`], but constructs the
 /// action directly because the orchard crate's `fake_compact_action` only produces version 2 notes.
 #[cfg(feature = "orchard")]
+<<<<<<< HEAD
 fn compact_ironwood_action<R: TestRngCore>(
+=======
+fn compact_ironwood_action<R: Rng + CryptoRng>(
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
     nf_old: ::orchard::note::Nullifier,
     recipient: ::orchard::Address,
     value: Zatoshis,
@@ -2851,14 +3037,18 @@ fn compact_ironwood_action<R: TestRngCore>(
             nullifier: nf_old.to_bytes().to_vec(),
             cmx: cmx.to_bytes().to_vec(),
             ephemeral_key: ephemeral_key.0.to_vec(),
-            ciphertext: enc_ciphertext[..52].to_vec(),
+            ciphertext: enc_ciphertext.0[..::orchard::note_encryption::COMPACT_NOTE_SIZE].to_vec(),
         },
         note,
     )
 }
 
 /// Creates a fake `CompactTx` with a random transaction ID and no spends or outputs.
+<<<<<<< HEAD
 fn fake_compact_tx<R: TestRngCore>(rng: &mut R) -> CompactTx {
+=======
+fn fake_compact_tx<R: Rng + CryptoRng>(rng: &mut R) -> CompactTx {
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
     let mut ctx = CompactTx::default();
     let mut txid = vec![0; 32];
     RngCore08::fill_bytes(rng, &mut txid);
@@ -2891,11 +3081,15 @@ impl<Fvk> FakeCompactOutput<Fvk> {
 
     /// Constructs a new random fake external output to the given FVK with a value in the range
     /// 10000..1000000 ZAT.
+<<<<<<< HEAD
     pub fn random<R: RngCore08>(rng: &mut R, recipient_fvk: Fvk) -> Self {
+=======
+    pub fn random<R: Rng>(rng: &mut R, recipient_fvk: Fvk) -> Self {
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
         Self {
             recipient_fvk,
             recipient_address_type: AddressType::DefaultExternal,
-            value: Zatoshis::const_from_u64(rng.gen_range(10000..1000000)),
+            value: Zatoshis::const_from_u64(rng.random_range(10000..1000000)),
         }
     }
 }
@@ -2914,7 +3108,11 @@ fn fake_compact_block<P: consensus::Parameters, Fvk: TestFvk>(
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
     initial_ironwood_tree_size: u32,
+<<<<<<< HEAD
     mut rng: impl TestRngCore,
+=======
+    mut rng: impl CryptoRng,
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 ) -> (CompactBlock, Vec<Fvk::Nullifier>) {
     // Create a fake CompactBlock containing the note
     let mut ctx = fake_compact_tx(&mut rng);
@@ -2956,7 +3154,11 @@ fn fake_compact_block_from_tx(
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
     initial_ironwood_tree_size: u32,
+<<<<<<< HEAD
     rng: impl RngCore08,
+=======
+    rng: impl Rng,
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 ) -> CompactBlock {
     // Create a fake CompactTx containing the transaction.
     let mut ctx = CompactTx {
@@ -3013,7 +3215,11 @@ fn fake_compact_block_spending<P: consensus::Parameters, Fvk: TestFvk>(
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
     initial_ironwood_tree_size: u32,
+<<<<<<< HEAD
     mut rng: impl TestRngCore,
+=======
+    mut rng: impl CryptoRng,
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 ) -> CompactBlock {
     let mut ctx = fake_compact_tx(&mut rng);
 
@@ -3037,7 +3243,7 @@ fn fake_compact_block_spending<P: consensus::Parameters, Fvk: TestFvk>(
             compact_sapling_output(
                 params,
                 height,
-                recipient,
+                *recipient,
                 value,
                 Some(::sapling::keys::OutgoingViewingKey(ovk_bytes)),
                 &mut rng,
@@ -3111,7 +3317,11 @@ fn fake_compact_block_from_compact_tx(
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
     initial_ironwood_tree_size: u32,
+<<<<<<< HEAD
     mut rng: impl RngCore08,
+=======
+    mut rng: impl Rng,
+>>>>>>> 9753b8d9b00f160dee2ed0b8aa7c977bf3c2b772
 ) -> CompactBlock {
     let mut cb = CompactBlock {
         hash: {
@@ -3493,6 +3703,23 @@ impl WalletRead for MockWalletDb {
     }
 
     #[cfg(feature = "transparent-inputs")]
+    fn get_unspent_transparent_outpoints(
+        &self,
+    ) -> Result<HashMap<OutPoint, Self::AccountId>, Self::Error> {
+        Ok(HashMap::new())
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn get_transparent_receiver_accounts(
+        &self,
+    ) -> Result<
+        HashMap<TransparentAddress, (Self::AccountId, Option<TransparentKeyScope>)>,
+        Self::Error,
+    > {
+        Ok(HashMap::new())
+    }
+
+    #[cfg(feature = "transparent-inputs")]
     fn get_transparent_receivers(
         &self,
         _account: Self::AccountId,
@@ -3673,6 +3900,13 @@ impl WalletWrite for MockWalletDb {
         _retain_with_priority: Option<ScanPriority>,
     ) -> Result<u64, <Self as WalletRead>::Error> {
         Ok(0)
+    }
+
+    fn queue_rescan(
+        &mut self,
+        _range: Range<BlockHeight>,
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        Ok(())
     }
 
     fn store_decrypted_tx(
