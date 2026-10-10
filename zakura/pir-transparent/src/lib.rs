@@ -2,17 +2,23 @@
 #[cfg(feature = "sqlite")]
 mod apply;
 #[cfg(feature = "wallet")]
+mod batch;
+#[cfg(feature = "wallet")]
 mod catalog;
 #[cfg(feature = "wallet")]
 mod chain;
 #[cfg(feature = "wallet")]
 mod companion;
 #[cfg(feature = "wallet")]
+mod convert;
+#[cfg(feature = "wallet")]
 mod discover;
 #[cfg(feature = "wallet")]
-mod display;
+mod error;
 #[cfg(feature = "wallet")]
 mod http;
+#[cfg(feature = "wallet")]
+mod progress;
 #[cfg(feature = "wallet")]
 mod recovery;
 #[cfg(all(test, feature = "wallet"))]
@@ -27,7 +33,7 @@ pub use apply::{
     WriteGate,
 };
 #[cfg(feature = "wallet")]
-pub use catalog::{BatchState, WithdrawnCause};
+pub use batch::{BatchState, RecoveryBatch, WithdrawnCause};
 #[cfg(feature = "wallet")]
 pub use chain::WalletChain;
 #[cfg(feature = "wallet")]
@@ -35,7 +41,7 @@ pub use companion::{Companion, CompanionDir, OpenError};
 #[cfg(feature = "wallet")]
 pub use discover::{Discovery, DiscoveryLimits, discover_active_addresses};
 #[cfg(feature = "wallet")]
-pub use display::{deferral, display_facts, map_sha256};
+pub use error::RecoveryError;
 // Both services over the caller's raw HTTP exchange.
 #[cfg(feature = "wallet")]
 pub use http::{
@@ -43,10 +49,9 @@ pub use http::{
     PirShards, TransparentPirHttp, TxidHttp,
 };
 #[cfg(feature = "wallet")]
-pub use recovery::{
-    Outcome, Progress, RecoveryBatch, RecoveryConfig, RecoveryError, ReferenceRecovery, Retry,
-    SCHEMA,
-};
+pub use progress::{Outcome, Progress, Retry};
+#[cfg(feature = "wallet")]
+pub use recovery::{RecoveryConfig, ReferenceRecovery, SCHEMA};
 #[cfg(feature = "wallet")]
 pub use transparent_txid_client::{
     Address as EntryAddress, AddressKind, DisplayEntry, EntryOutput, Placement, ProfileCache,
@@ -54,7 +59,7 @@ pub use transparent_txid_client::{
     TxidReply, TxidRequest, TxidTransport,
 };
 #[cfg(feature = "wallet")]
-pub use txid::TxidDisplayService;
+pub use txid::{TxidDisplayService, deferral, display_facts, map_sha256};
 // What a caller implements for `recover`: the chain view (or `WalletChain`), and
 // transports that reach the companion's origin and map service refusals.
 #[cfg(feature = "wallet")]

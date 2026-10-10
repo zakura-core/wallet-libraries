@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use crate::recovery::{RecoveryConfig, RecoveryError, ReferenceRecovery, SCHEMA};
+use crate::error::RecoveryError;
+use crate::recovery::{RecoveryConfig, ReferenceRecovery, SCHEMA};
 
 /// SQLite files a companion may leave, after its base name.
 const FILES: [&str; 4] = ["", "-wal", "-shm", "-journal"];

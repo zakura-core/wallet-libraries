@@ -16,9 +16,9 @@ use zcash_client_backend::data_api::transparent_ledger::{
     RecoveryRevision, TransparentLedgerCommit,
 };
 
-use crate::catalog::BatchState;
+use crate::batch::{BatchState, RecoveryBatch};
 use crate::http::{HttpMethod, HttpReply};
-use crate::recovery::{Progress, RecoveryBatch};
+use crate::progress::Progress;
 
 /// A batch as a pass returns it: `commits` (empty unless `state` is ready), the pass's
 /// `progress`, and the retired revisions it resolves.

@@ -10,7 +10,7 @@ use zcash_client_backend::data_api::transparent_ledger::{
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
-use crate::recovery::{RecoveryError, failure, require};
+use crate::error::{RecoveryError, failure, require};
 use transparent_txid_client::{
     Address, AddressKind, DisplayEntry, OUTPUT_SLOTS, Placement, Provenance, Tag, TxidError,
     TxidLookup,

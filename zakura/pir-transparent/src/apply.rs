@@ -19,8 +19,11 @@ use zcash_client_backend::data_api::transparent_ledger::{
 use zcash_client_sqlite::{AccountUuid, WalletDb, error::SqliteClientError};
 use zcash_protocol::consensus;
 
-use crate::catalog::{self, BatchState};
-use crate::recovery::{Progress, RecoveryBatch, RecoveryError, ReferenceRecovery};
+use crate::batch::{BatchState, RecoveryBatch};
+use crate::catalog;
+use crate::error::RecoveryError;
+use crate::progress::Progress;
+use crate::recovery::ReferenceRecovery;
 
 /// How the wallet treats the revisions of the commits it applies. The caller decides; the
 /// adapter never infers trust from the publication, the batch, or the wallet's policy.
@@ -299,7 +302,7 @@ impl ReferenceRecovery {
                     .map_err(ApplyError::Acknowledge)?;
                 acknowledgment
                     .commit()
-                    .map_err(|error| ApplyError::Acknowledge(crate::recovery::failure(error)))
+                    .map_err(|error| ApplyError::Acknowledge(crate::error::failure(error)))
             })
         })
         .map_err(|Interrupted| failure(ApplyError::Interrupted, stats))?
@@ -420,7 +423,7 @@ mod tests {
             (ApplyError::NotReady(BatchState::Pending), A::Skip),
             (ApplyError::StaleReceipt, A::Skip),
             (
-                ApplyError::Acknowledge(crate::recovery::failure("companion")),
+                ApplyError::Acknowledge(crate::error::failure("companion")),
                 A::Skip,
             ),
             (ApplyError::NotEnabled, A::NotEnabled),

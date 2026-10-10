@@ -5,7 +5,7 @@ use zcash_client_backend::data_api::{WalletRead, transparent_ledger::ChainPoint}
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::BlockHeight;
 
-use crate::recovery::block_hash;
+use crate::convert::block_hash;
 
 /// A [`ChainView`] over the blocks a wallet scanned, answering only through `target`.
 ///

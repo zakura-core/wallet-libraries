@@ -22,10 +22,10 @@ use transparent_wallet::{
     ScriptOrigin, StaticChain, StaticScripts, SyncError, WalletStore, WorkLimits,
 };
 
-use crate::recovery::{
-    Outcome, Progress, RecoveryError, address_script, check_publication_limits, failure, progress,
-    require, service_geometry,
-};
+use crate::convert::address_script;
+use crate::error::{RecoveryError, failure, require};
+use crate::progress::{Outcome, Progress, progress};
+use crate::recovery::{check_publication_limits, service_geometry};
 
 /// Finite bounds for one discovery.
 #[derive(Clone, Copy, Debug)]
