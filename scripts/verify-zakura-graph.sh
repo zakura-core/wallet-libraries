@@ -94,6 +94,16 @@ for name, found in sorted(versions.items()):
     if len(found) > 1 and (name.startswith("zakura-") or name in expected_packages):
         problems.append(f"{name}: {len(found)} versions in the graph: {sorted(found)}")
 
+# Two git sources of one name are separate crates even at one version. Checked
+# over the whole workspace graph, where the PIR clients share wallet-pir crates.
+git_sources = defaultdict(set)
+for package in packages.values():
+    if (package["source"] or "").startswith("git+"):
+        git_sources[package["name"]].add(package["source"])
+for name, found in sorted(git_sources.items()):
+    if len(found) > 1:
+        problems.append(f"{name}: {len(found)} git sources in the graph: {sorted(found)}")
+
 missing = expected_packages - versions.keys()
 for name in sorted(missing):
     problems.append(f"{name}: vendored crate is not in the resolved graph")
