@@ -2,8 +2,9 @@
 //! entry's evidence and the account's outputs in the transaction.
 //!
 //! These rules reproduce the decisions Vizor took for privately recovered transactions on top
-//! of this history; changing what they establish belongs in its own change. Shieldings, pool
-//! migrations and transactions no rule covers stay the wallet's.
+//! of this history, with the differences `docs/account-history-summaries.md` lists; changing
+//! what they establish belongs in its own change. Shieldings, pool migrations and transactions
+//! no rule covers stay the wallet's, which classifies shieldings and migrations first.
 
 use rusqlite::named_params;
 use zcash_client_backend::data_api::transparent_ledger::{
@@ -980,6 +981,55 @@ mod tests {
                 sent: row(50_000, &[(TRANSPARENT_POOL, 1)]),
                 received: row(50_000, &[(TRANSPARENT_POOL, 1)]),
             }
+        );
+    }
+
+    /// Transparent funds moved into another account's Ironwood pool, seen from each side. The
+    /// rows come from the outputs the account sees, not from recovered evidence.
+    #[test]
+    fn cross_account_shapes_keep_each_accounts_view() {
+        // The payer, whether the recipient is another wallet or another account of this one:
+        // a sent row of the Ironwood payment, never the recipient's output as change. Its own
+        // transparent change is internal and shows no row.
+        let payer = ActivityEvidence {
+            orchard_spend: false,
+            spent: 1_500_000,
+            net: -1_020_000,
+            ..base()
+        };
+        for outputs in [
+            vec![paid(IRONWOOD_POOL, 0, 1_000_000)],
+            vec![
+                paid(IRONWOOD_POOL, 0, 1_000_000),
+                own(TRANSPARENT_POOL, 1, 480_000, Some(1)),
+            ],
+        ] {
+            assert_eq!(
+                classify(&payer, &outputs),
+                AccountActivity::Outputs {
+                    sent: row(1_000_000, &[(IRONWOOD_POOL, 0)]),
+                    received: None,
+                },
+                "payer: {outputs:?}"
+            );
+        }
+
+        // The recipient, whether the payer is another account of this wallet or someone
+        // else entirely: an incoming Ironwood payment, with no spend and no fee of its own.
+        let receiver = ActivityEvidence {
+            orchard_spend: false,
+            spent: 0,
+            net: 1_000_000,
+            fee: FeeState::NotApplicable,
+            ..base()
+        };
+        assert_eq!(
+            classify(&receiver, &[received(IRONWOOD_POOL, 0, 1_000_000, Some(0))]),
+            AccountActivity::Outputs {
+                sent: None,
+                received: row(1_000_000, &[(IRONWOOD_POOL, 0)]),
+            },
+            "recipient"
         );
     }
 }

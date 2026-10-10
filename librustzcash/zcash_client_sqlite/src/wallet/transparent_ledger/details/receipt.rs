@@ -3,7 +3,9 @@
 //!
 //! Only this read combines display facts with history. Nothing here is stored, and the history
 //! view it returns is the one [`transaction_history_details`] gives without display facts.
-//! These rules reproduce the receipt conclusions Vizor drew from the same views.
+//! These rules reproduce the receipt conclusions Vizor drew from the same views, except that a
+//! receipt's transparent source address comes from the raw transaction when the wallet holds it
+//! (`docs/account-history-summaries.md`).
 
 use std::collections::BTreeMap;
 

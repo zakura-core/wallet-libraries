@@ -16,9 +16,10 @@ workspace.
   self-transfer, a hidden funding step, an inferred outgoing value, a provisional debit, or the
   outputs it links), with each row's amount and the outputs it counts (`ActivityOutputs`,
   `OutputRef`), or `Unknown` where no rule applies. The rules reproduce Vizor's decisions for
-  privately recovered transactions, unchanged. They read the history evidence and the account's
-  outputs, never display facts; shieldings, pool migrations, labels, the fee each row shows,
-  and grouping across transactions remain the wallet's.
+  privately recovered transactions, except where `docs/account-history-summaries.md` lists a
+  difference. They read the history evidence and the account's outputs, never display facts;
+  shieldings, pool migrations, labels, the fee each row shows, and grouping across transactions
+  remain the wallet's, which classifies shieldings and migrations before reading the activity.
 - `TransparentDetailRead::transaction_receipt`, returning `TransactionReceipt`: the history
   view, the transparent detail view and their `ReceiptAttribution` (a send's recipient as an
   `Attribution`, the `ReceiptSource` with its `SourcePool`, settled effects, and whether the

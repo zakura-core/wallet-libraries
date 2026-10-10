@@ -51,7 +51,8 @@ retains the view's existing stored-transaction expiry predicate. Completeness an
 financial authority remain separate reads; a summary does not establish either.
 
 `TransactionHistoryDetails::activity` is the part of Vizor's activity
-classification that private recovery decides, moved into the library unchanged:
+classification that private recovery decides, moved into the library with the
+differences listed below:
 from the history view and the account's outputs in the transaction it decides the
 rows of a privately recovered transaction (an inferred payment, a recovered
 self-transfer's fee, a hidden funding step, an inferred outgoing value, a
@@ -63,6 +64,23 @@ shows (including a paired funding step's), TEX step pairing across transactions,
 swap and gift-card labels, sorting, and display limits. Apply limits after pairing and classification
 so a TEX funding leg is not lost. Results have unspecified order and cover all
 stored transactions with account effects.
+
+The wallet must classify shieldings and Orchard-to-Ironwood migrations before it
+reads `activity`, and ignore `activity` for them. The rules do not recognize a
+shielding: one that moves the account's own transparent funds into its shielded
+pools reads as `Outputs` with the shielded receipt as a received row, as an
+incoming payment would. The two reported mainnet shieldings are pinned that way
+in `mixed_shielding`.
+
+Differences from the rules Vizor applied before the move:
+
+- A gift card's mined-height override stays Vizor's.
+- A row lists its outputs ordered by pool, then output index.
+- A receipt's transparent source address comes from the raw transaction when the
+  wallet holds it.
+- A provisional debit with no visible output whose movement is exactly its
+  attributed fee is `MovementDebit { amount: 0 }`, where Vizor showed a row of
+  unknown kind. Vizor maps a zero amount back to that row.
 
 This library PR prepares that replacement. It does not modify Vizor or remove its
 other output SQL. Consumer integration should pin this exact head (and repin after

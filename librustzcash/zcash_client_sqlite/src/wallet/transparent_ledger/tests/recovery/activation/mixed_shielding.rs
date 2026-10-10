@@ -16,9 +16,9 @@ use zcash_client_backend::data_api::{
         FakeCompactOutput, IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
     },
     transparent_ledger::{
-        AccountActivity, AggregatePayment, DetailCompleteness, EffectCompleteness, FeeState,
-        HistoryClassification, PoolEffect, PrivateTransparentDetail, TransactionHistoryDetails,
-        TransactionMetadata, WholeTransactionFee,
+        AccountActivity, ActivityOutputs, AggregatePayment, DetailCompleteness, EffectCompleteness,
+        FeeState, HistoryClassification, PoolEffect, PrivateTransparentDetail,
+        TransactionHistoryDetails, TransactionMetadata, WholeTransactionFee,
     },
 };
 use zcash_protocol::{PoolType, local_consensus::LocalNetwork};
@@ -395,6 +395,17 @@ fn assert_reconstructed_shielding(case: &Shielding, shape: &Shape) {
         WholeTransactionFee::Exact(zat(FEE))
     );
     assert_eq!(entry.fee, FeeState::Unattributed { whole: zat(FEE) });
+    // Recovery decides no row of a shielding: the wallet classifies it from its own records
+    // before reading the activity, which names the receipt as it would an incoming payment.
+    let AccountActivity::Outputs {
+        sent: None,
+        received: Some(ActivityOutputs { amount, outputs }),
+    } = &entry.activity
+    else {
+        panic!("a received row, not {:?}", entry.activity);
+    };
+    assert_eq!(*amount, zat(shape.shielded));
+    assert!(outputs.len() == 1 && outputs[0].pool == PoolType::IRONWOOD);
     // No exact payment is fabricated: no outgoing record exists, only the balance.
     assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
     // The full transaction remains unavailable under PrivateRequired.

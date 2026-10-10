@@ -136,6 +136,11 @@ pub struct ActivityOutputs {
 /// Everything else stays the wallet's: shieldings, pool migrations, labels, the fee each row
 /// shows, and grouping steps of one operation across transactions (a TEX funding step and its
 /// payment, a swap). The rules are checked in this order; the first that applies decides.
+///
+/// A wallet classifies shieldings and Orchard-to-Ironwood moves itself, before it reads this
+/// value, and ignores it for them. The rules do not recognize a shielding: one of the account's
+/// own transparent funds into its shielded pools reads as [`Self::Outputs`] with its shielded
+/// receipt as a received row, as an incoming payment would.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AccountActivity {
     /// The exact payment of a transparent-only debit the account alone funded, reconstructed
