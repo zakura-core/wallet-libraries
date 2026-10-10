@@ -110,6 +110,10 @@ const OUTSTANDING_OUTGOING: &str = concat!(
     active_private_tx!()
 );
 
+/// Retires the ordinary request of a privately protected transaction with no private work
+/// left. A dynamic-key note without its memo keeps the request: only the full transaction
+/// supplies that memo (see `wallet::dynamic_ivk`), and protection still withholds public
+/// dispatch.
 fn retire_enhancement_if_complete(
     tx: &Connection,
     tx_ref: crate::TxRef,
@@ -127,7 +131,10 @@ fn retire_enhancement_if_complete(
             has_private_work!(),
             "
            AND NOT EXISTS (
-               SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx)"
+               SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx)
+           AND NOT EXISTS (
+               SELECT 1 FROM ironwood_received_notes
+               WHERE transaction_id = :tx AND receiving_key_id IS NOT NULL AND memo IS NULL)"
         ),
         named_params![
             ":tx": tx_ref.0,
@@ -313,10 +320,11 @@ fn require_lwd(
 }
 
 /// Settles enhancement for `tx_ref`, which holds a note a dynamic IVK restore sweep
-/// retrieved privately. A stored or routed transaction keeps its route (private if it had
-/// none) and retires its enhancement if nothing is left. Otherwise nothing shows whether it
-/// has transparent parts, so it is queued and routed like a scanned transaction whose
-/// compact data does not prove it Ironwood-only.
+/// retrieved privately. Without the raw transaction, its retrieval is queued for the note's
+/// memo (see [`retire_enhancement_if_complete`]), and if unrouted, nothing shows whether it
+/// has transparent parts, so it is routed like a scanned transaction whose compact data
+/// does not prove it Ironwood-only. A stored or routed transaction keeps its route (private
+/// if it had none) and retires its enhancement if nothing is left.
 pub(crate) fn finish_private_receipt(
     conn: &Transaction<'_>,
     configured: Option<TransparentLedgerMode>,
@@ -328,15 +336,16 @@ pub(crate) fn finish_private_receipt(
         named_params![":tx": tx_ref.0],
         |row| row.get(0),
     )?;
-    // A routed transaction already has its retrieval request; route 0 keeps its memo private.
-    if !has_raw && route(conn, tx_ref)?.is_none() {
+    if !has_raw {
         super::queue_tx_retrieval(conn, std::iter::once(txid), None)?;
-        return queue_transaction(
-            conn,
-            configured,
-            tx_ref,
-            &IronwoodEnhancementPlan::Ineligible,
-        );
+        if route(conn, tx_ref)?.is_none() {
+            return queue_transaction(
+                conn,
+                configured,
+                tx_ref,
+                &IronwoodEnhancementPlan::Ineligible,
+            );
+        }
     }
     conn.execute(
         "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1,?2)
