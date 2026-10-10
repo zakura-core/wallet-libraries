@@ -124,31 +124,6 @@ fn a_batch_needs_a_canonical_chain_point() {
 }
 
 #[test]
-fn a_batch_resumes_queued_lookups() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let older = tip(&st);
-    let db = st.wallet_mut().db_mut();
-    let keys: Vec<_> = (0..3)
-        .map(|i| watch(db, account, i, older.height).key_id())
-        .collect();
-    // Any canonical lookup is resumed, however old.
-    queue_lookup(db, account, keys[2], older, &[]).unwrap();
-    let through = advance(&mut st, 1);
-    queue_lookup(st.wallet_mut().db_mut(), account, keys[0], through, &[]).unwrap();
-    let second = batch(&mut st, through, NOW);
-    let lookups: Vec<_> = second.iter().map(|w| (w.key, w.lookup)).collect();
-    assert_eq!(
-        lookups,
-        [
-            (keys[0], Some(through)),
-            (keys[1], None),
-            (keys[2], Some(older))
-        ]
-    );
-}
-
-#[test]
 fn attempts_back_off_from_one_minute_to_twelve_hours() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();

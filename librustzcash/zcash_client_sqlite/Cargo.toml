@@ -70,7 +70,7 @@ static_assertions.workspace = true
 # - Shielded protocols
 orchard = { workspace = true, optional = true }
 sapling.workspace = true
-zakura-dynamic-ivk = { version = "0.0.0", path = "../../zakura/dynamic-ivk", optional = true }
+zakura-dynamic-ivk = { version = "=0.0.1-rc0", path = "../../zakura/dynamic-ivk", optional = true }
 
 # - Transparent protocol
 secp256k1 = { workspace = true, optional = true }

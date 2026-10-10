@@ -70,7 +70,7 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
     }
     // A finished sweep is offered again while a late lookup left candidates queued.
     let mut stmt = conn.prepare(
-        "SELECT k.purpose, k.key_index, k.receiver, s.lookup_height, s.lookup_hash
+        "SELECT k.purpose, k.key_index, k.receiver
          FROM ironwood_dynamic_sweeps s
          JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
          WHERE k.account_id = ?1 AND k.scan_from <= ?2 AND s.next_attempt_at <= ?3
@@ -93,7 +93,6 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
                 .get::<_, Vec<u8>>(2)?
                 .try_into()
                 .map_err(|_| corrupt("invalid stored receiver"))?,
-            lookup: canonical(conn, anchor(r.get(3)?, r.get(4)?))?,
         });
     }
     Ok(Ok(work))
