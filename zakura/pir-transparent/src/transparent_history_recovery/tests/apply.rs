@@ -1,4 +1,5 @@
 use super::*;
+use crate::apply::Ungated;
 use crate::apply::{ApplyError, Trust};
 use crate::batch::unready_batch;
 use zcash_client_backend::data_api::testing::{TestBuilder, TestState};
@@ -48,7 +49,12 @@ fn an_empty_ready_batch_is_acknowledged_and_spends_its_receipt() {
         .issue_ready_batch::<AccountUuid>(vec![], vec![], MORE)
         .unwrap();
     let applied = adapter
-        .apply_and_acknowledge(batch, st.wallet_mut().db_mut(), Trust::Observed)
+        .apply_and_acknowledge_gated(
+            batch,
+            st.wallet_mut().db_mut(),
+            Trust::Observed,
+            &mut Ungated,
+        )
         .unwrap();
     assert_eq!(applied.stats, Default::default());
     assert_eq!(applied.progress, MORE);
@@ -67,10 +73,11 @@ fn unready_and_stale_batches_apply_nothing() {
         BatchState::Withdrawn(WithdrawnCause::Equivocation),
     ] {
         let failure = adapter
-            .apply_and_acknowledge(
+            .apply_and_acknowledge_gated(
                 unready_batch::<AccountUuid>(state, MORE),
                 st.wallet_mut().db_mut(),
                 Trust::Trusted,
+                &mut Ungated,
             )
             .unwrap_err();
         assert!(matches!(failure.error, ApplyError::NotReady(s) if s == state));
@@ -85,7 +92,12 @@ fn unready_and_stale_batches_apply_nothing() {
         .issue_ready_batch::<AccountUuid>(vec![], vec![retired()], MORE)
         .unwrap();
     let failure = adapter
-        .apply_and_acknowledge(earlier, st.wallet_mut().db_mut(), Trust::Trusted)
+        .apply_and_acknowledge_gated(
+            earlier,
+            st.wallet_mut().db_mut(),
+            Trust::Trusted,
+            &mut Ungated,
+        )
         .unwrap_err();
     assert!(matches!(failure.error, ApplyError::StaleReceipt));
     assert!(adapter.is_outstanding_receipt(&later));
@@ -102,7 +114,12 @@ fn a_surrounding_transaction_is_refused_before_anything_applies() {
         .unwrap();
     st.wallet().conn().execute_batch("BEGIN").unwrap();
     let failure = adapter
-        .apply_and_acknowledge(batch, st.wallet_mut().db_mut(), Trust::Trusted)
+        .apply_and_acknowledge_gated(
+            batch,
+            st.wallet_mut().db_mut(),
+            Trust::Trusted,
+            &mut Ungated,
+        )
         .unwrap_err();
     assert!(matches!(failure.error, ApplyError::OuterTransaction));
     st.wallet().conn().execute_batch("ROLLBACK").unwrap();
@@ -120,7 +137,12 @@ fn observed_trust_refuses_retirements_before_applying() {
         .issue_ready_batch::<AccountUuid>(vec![], vec![retired()], MORE)
         .unwrap();
     let failure = adapter
-        .apply_and_acknowledge(batch, st.wallet_mut().db_mut(), Trust::Observed)
+        .apply_and_acknowledge_gated(
+            batch,
+            st.wallet_mut().db_mut(),
+            Trust::Observed,
+            &mut Ungated,
+        )
         .unwrap_err();
     assert!(matches!(failure.error, ApplyError::Unreconciled));
     assert!(adapter.outstanding_receipt.is_some());

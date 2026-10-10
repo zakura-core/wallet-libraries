@@ -1,7 +1,10 @@
 //! Export intents: acknowledging the revisions a batch handed to the wallet, and pruning
 //! rows no batch can need.
 
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, Transaction};
+#[cfg(any(test, feature = "sqlite"))]
+use rusqlite::{TransactionBehavior, params};
+#[cfg(any(test, feature = "sqlite"))]
 use zcash_client_backend::data_api::transparent_ledger::RecoveryRevision;
 
 use crate::error::{RecoveryError, failure};
@@ -9,6 +12,7 @@ use crate::error::{RecoveryError, failure};
 /// Clears the export intent of `replaced` rows, whose successors the wallet
 /// applied after reconciling them, and prunes the catalog. The batch's own
 /// revisions were recorded as exported by its pass.
+#[cfg(test)]
 pub(crate) fn acknowledge(
     conn: &mut Connection,
     replaced: &[RecoveryRevision],
@@ -21,6 +25,7 @@ pub(crate) fn acknowledge(
 /// The immediate catalog transaction an acknowledgment runs in. Applying takes it
 /// before the wallet's read transaction, so waiting for the companion's lock holds
 /// no wallet reservation.
+#[cfg(any(test, feature = "sqlite"))]
 pub(crate) fn acknowledgment_transaction(
     conn: &mut Connection,
 ) -> Result<Transaction<'_>, RecoveryError> {
@@ -28,7 +33,9 @@ pub(crate) fn acknowledgment_transaction(
         .map_err(failure)
 }
 
-/// [`acknowledge`] within `tx`, which the caller commits.
+/// Clears the export intent of `replaced` rows and prunes the catalog within `tx`, which the
+/// caller commits.
+#[cfg(any(test, feature = "sqlite"))]
 pub(crate) fn acknowledge_in_transaction(
     tx: &Transaction<'_>,
     replaced: &[RecoveryRevision],

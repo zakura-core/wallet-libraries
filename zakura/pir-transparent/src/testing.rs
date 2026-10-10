@@ -35,7 +35,7 @@ pub fn batch<A>(
     RecoveryBatch::unissued(commits, progress, state, retired)
 }
 
-/// Applies `batch` through `TransparentHistoryRecovery::apply_and_acknowledge`'s own commit loop,
+/// Applies `batch` through `TransparentHistoryRecovery::apply_and_acknowledge_gated`'s commit loop,
 /// with no companion: the same checks before any commit (a ready batch, no outer SQL
 /// transaction, trust for retirements), the same commits, each in its own wallet
 /// transaction, and the same policy-generation check after them, with the same failures.

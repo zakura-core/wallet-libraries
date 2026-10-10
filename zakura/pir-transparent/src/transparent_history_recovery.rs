@@ -270,22 +270,15 @@ impl TransparentHistoryRecovery {
         Ok((published, declarations))
     }
 
-    /// Acknowledge the latest batch after every wallet commit succeeded, when it
-    /// lists no retired revision.
+    /// Acknowledges the latest batch, when it lists no retired revision, as if a
+    /// wallet applied its commits: drives the companion in tests without a wallet.
     ///
     /// Only a [`BatchState::Ready`] batch from this companion's latest pass, with
-    /// no [`RecoveryBatch::retired_revisions`], is acknowledged. A batch with
-    /// retirements is refused, even when its commits applied, and its durable
-    /// notifications are left unchanged: only
-    /// [`Self::apply_and_acknowledge`] with trusted commits reconciles them. A
+    /// no [`RecoveryBatch::retired_revisions`], is acknowledged. A
     /// [`BatchState::Pending`] or [`BatchState::Withdrawn`] batch, or the receipt
     /// of an earlier pass, is refused too.
-    ///
-    /// The batch's own revisions were recorded as exported before it was
-    /// returned, so a crash before this acknowledgment replays the same candidate
-    /// facts. It never advances a wallet's qualification, coverage or financial
-    /// authority.
-    pub fn acknowledge_applied<A>(
+    #[cfg(test)]
+    pub(crate) fn acknowledge_applied<A>(
         &mut self,
         batch: &RecoveryBatch<A>,
     ) -> Result<(), RecoveryError> {

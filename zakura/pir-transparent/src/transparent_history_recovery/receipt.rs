@@ -9,8 +9,11 @@ use zcash_client_backend::data_api::transparent_ledger::{
 
 use super::TransparentHistoryRecovery;
 use crate::batch::{BatchState, RecoveryBatch};
+#[cfg(test)]
 use crate::catalog;
-use crate::error::{RecoveryError, ensure_valid, failure};
+#[cfg(test)]
+use crate::error::ensure_valid;
+use crate::error::{RecoveryError, failure};
 use crate::progress::Progress;
 
 /// What an acknowledgment must present: the batch's binding, store position,
@@ -66,6 +69,7 @@ impl TransparentHistoryRecovery {
     /// successors, and replaying the trusted operation on its commits changes
     /// nothing. The one exception is [`RecoveryError::PublicationChanged`],
     /// which forgets those of sources the new map no longer names.
+    #[cfg(test)]
     pub(super) fn acknowledge<A>(&mut self, batch: &RecoveryBatch<A>) -> Result<(), RecoveryError> {
         ensure_valid(
             batch.state == BatchState::Ready,
@@ -90,6 +94,7 @@ impl TransparentHistoryRecovery {
     }
 
     /// Whether `batch` is this companion's latest unacknowledged pass.
+    #[cfg(any(test, feature = "sqlite"))]
     pub(crate) fn is_outstanding_receipt<A>(&self, batch: &RecoveryBatch<A>) -> bool {
         self.outstanding_receipt == Some(batch.receipt)
     }

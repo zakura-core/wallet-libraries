@@ -1,14 +1,13 @@
 //! Applying a ready batch to a SQLite wallet and acknowledging it, with feature `sqlite`.
 //!
-//! [`TransparentHistoryRecovery::apply_and_acknowledge`] consumes the batch, so its commits cannot be
-//! edited or dropped before its retirements are acknowledged. Each commit applies in its own
+//! [`TransparentHistoryRecovery::apply_and_acknowledge_gated`] consumes the batch, so its commits
+//! cannot be edited or dropped before its retirements are acknowledged. Each commit applies in its own
 //! wallet transaction, exactly as the wallet's commit operations do on their own; the
 //! companion is acknowledged afterwards, in its own database. Nothing makes the two databases
 //! atomic: a failure or crash between them leaves the batch unacknowledged, and the next pass
 //! exports the same revisions again, whose replay changes nothing the wallet already holds.
 //!
-//! [`TransparentHistoryRecovery::apply_and_acknowledge_gated`] runs each of those wallet writes
-//! through a [`WriteGate`], so an application that serializes its wallet writes holds its
+//! It runs each of those wallet writes through a [`WriteGate`], so an application that serializes its wallet writes holds its
 //! serialization for one write at a time, not the whole batch, and can stop the batch
 //! between writes.
 
@@ -83,7 +82,7 @@ pub trait WriteGate {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Interrupted;
 
-/// The [`WriteGate`] of [`TransparentHistoryRecovery::apply_and_acknowledge`]: every write runs.
+/// The [`WriteGate`] under which every write runs.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Ungated;
 
@@ -261,20 +260,11 @@ impl TransparentHistoryRecovery {
     /// until acknowledgment commits; it is rolled back, since all wallet facts are
     /// already durable. Companion lock waits do not hold a wallet SQL reservation.
     ///
-    /// No network request is made here; run it under the wallet's write serialization if the
-    /// application has one, or use [`Self::apply_and_acknowledge_gated`] to hold it for one
-    /// write at a time. It never activates an account or authorizes spending.
-    pub fn apply_and_acknowledge<P: consensus::Parameters, CL, R>(
-        &mut self,
-        batch: RecoveryBatch<AccountUuid>,
-        wallet: &mut WalletDb<Connection, P, CL, R>,
-        trust: Trust,
-    ) -> Result<Applied, ApplyFailure> {
-        self.apply_and_acknowledge_gated(batch, wallet, trust, &mut Ungated)
-    }
-
-    /// [`Self::apply_and_acknowledge`], running each wallet write through `gate`: every
-    /// commit's wallet transaction, then the acknowledgment's immediate read transaction.
+    /// Each wallet write runs through `gate`: every commit's wallet transaction, then the
+    /// acknowledgment's immediate read transaction, so an application that serializes its
+    /// wallet writes holds its serialization for one write at a time ([`Ungated`] when it has
+    /// none). No network request is made here, and it never activates an account or authorizes
+    /// spending. [`Self::settle_latest`] settles the batch the latest pass held this way.
     ///
     /// When `gate` declines a write, the batch stops there with [`ApplyError::Interrupted`]
     /// and is not acknowledged. The commits before it stay applied, and the account's next
@@ -344,8 +334,8 @@ pub(crate) fn check_policy_generation(
 
 /// Applies a ready batch's commits to `wallet` in order, each in its own wallet
 /// transaction run through `gate`, after the checks
-/// [`TransparentHistoryRecovery::apply_and_acknowledge`] makes of any batch; `start` runs once they
-/// pass, before the first commit. Returns what applied, the batch's retirements and the
+/// [`TransparentHistoryRecovery::apply_and_acknowledge_gated`] makes of any batch; `start` runs
+/// once they pass, before the first commit. Returns what applied, the batch's retirements and the
 /// policy generation its commits were built under.
 pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(
     batch: RecoveryBatch<AccountUuid>,

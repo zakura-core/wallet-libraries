@@ -250,7 +250,7 @@ struct Fixture {
     companion: Option<Companion>,
     /// The public key hash of every address any watch set named.
     watched: BTreeSet<[u8; 20]>,
-    /// Retired revisions acknowledged through trusted `apply_and_acknowledge`.
+    /// Retired revisions acknowledged through trusted settlement.
     reconciled: Vec<RecoveryRevision>,
     /// Whether passes settle batches as trusted.
     trusted: bool,
@@ -486,7 +486,12 @@ impl Fixture {
         trust: Trust,
     ) -> Result<zakura_pir_transparent::Applied, zakura_pir_transparent::ApplyFailure> {
         let companion = self.companion.as_mut().expect("an open companion");
-        companion.apply_and_acknowledge(batch, self.st.wallet_mut().db_mut(), trust)
+        companion.apply_and_acknowledge_gated(
+            batch,
+            self.st.wallet_mut().db_mut(),
+            trust,
+            &mut Ungated,
+        )
     }
 
     /// Settles `batch` through `gate`, one wallet write at a time.

@@ -19,7 +19,9 @@ mod pass;
 mod recut;
 mod store_tables;
 
-pub(crate) use exports::{acknowledge, exported_any};
+#[cfg(test)]
+pub(crate) use exports::acknowledge;
+pub(crate) use exports::exported_any;
 #[cfg(feature = "sqlite")]
 pub(crate) use exports::{acknowledge_in_transaction, acknowledgment_transaction};
 #[cfg(test)]

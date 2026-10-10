@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Removed
+
+- `TransparentHistoryRecovery::apply_and_acknowledge`: settle the held batch
+  with `settle_latest`, or a taken one with `apply_and_acknowledge_gated` and
+  `Ungated`. `acknowledge_applied` is no longer public: a batch is acknowledged
+  only through SQLite settlement, and one read or discarded without it is
+  exported again by the next pass. Neither had a wallet caller.
+
 ### Changed
 
 - `PassPlan::next` skips the account (`Step::Skip`) after a settlement the

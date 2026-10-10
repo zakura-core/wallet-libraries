@@ -29,7 +29,7 @@ use transparent_wallet::{ChainView, StaticChain};
 use zakura_pir_transparent::{
     BatchState, HoldCause, HttpExchange, HttpFailure, HttpMethod, HttpReply, HttpRequest,
     PassLimits, PassPlan, Retry, Step, TransparentHistoryRecovery,
-    TransparentHistoryRecoveryConfig, Trust,
+    TransparentHistoryRecoveryConfig, Trust, Ungated,
 };
 use zcash_client_backend::data_api::{
     Account as _,
@@ -352,10 +352,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         // context for every commit. Observed commits are stored as candidate
         // evidence without qualifying the publisher or projecting these events
         // into usable funds; the batch is acknowledged once every one applied. This
-        // is `settle_latest` after reading the batch.
+        // is what `settle_latest` does after reading the batch.
         let settled = match held {
             Some(batch) => reference
-                .apply_and_acknowledge(batch, state.wallet_mut().db_mut(), Trust::Observed)
+                .apply_and_acknowledge_gated(
+                    batch,
+                    state.wallet_mut().db_mut(),
+                    Trust::Observed,
+                    &mut Ungated,
+                )
                 .map(Some),
             None => Ok(None),
         };

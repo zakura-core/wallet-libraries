@@ -22,7 +22,7 @@ pub enum BatchState {
     /// through the trusted operation. The predecessors are the batch's
     /// [`RecoveryBatch::retired_revisions`](crate::RecoveryBatch::retired_revisions),
     /// and such a batch is acknowledged only by applying its commits through
-    /// the trusted operation with `TransparentHistoryRecovery::apply_and_acknowledge`
+    /// the trusted operation with `TransparentHistoryRecovery::settle_latest`
     /// (feature `sqlite`).
     Ready,
     /// The publication or this companion's retrieval is behind what the
@@ -83,14 +83,12 @@ pub enum WithdrawnCause {
 
 /// Candidate observations and reference progress from one pass.
 ///
-/// The batch is opaque: its commits can be read, never edited. A
-/// [`BatchState::Ready`] batch is settled in one of two ways. With feature
-/// `sqlite`, [`TransparentHistoryRecovery::apply_and_acknowledge`] consumes it, applies
-/// every commit to a SQLite wallet and acknowledges it, reconciling its
+/// The batch is opaque: its commits can be read, never edited. With feature
+/// `sqlite`, settling a [`BatchState::Ready`] batch consumes it, applies every
+/// commit to a SQLite wallet and acknowledges it, reconciling its
 /// [`RecoveryBatch::retired_revisions`] when the caller trusts the commits.
-/// Otherwise the caller applies [`RecoveryBatch::commits`] itself and
-/// acknowledges with [`TransparentHistoryRecovery::acknowledge_applied`], which refuses a
-/// batch listing retirements. Neither the batch nor a server withdrawal is
+/// Without it, a batch can be read or discarded, never acknowledged, so the next
+/// pass exports it again. Neither the batch nor a server withdrawal is
 /// authority to change local facts or activate an account.
 pub struct RecoveryBatch<AccountId> {
     /// The commits in the order they apply; empty unless `state` is ready.
@@ -105,6 +103,8 @@ pub struct RecoveryBatch<AccountId> {
     /// What acknowledging the batch must present: the companion's
     /// outstanding receipt when the batch was issued. All zero for a batch that
     /// cannot be acknowledged.
+    // Only settlement (feature `sqlite`) acknowledges a batch.
+    #[cfg_attr(not(any(test, feature = "sqlite")), allow(dead_code))]
     pub(crate) receipt: [u8; 32],
 }
 
@@ -146,10 +146,9 @@ impl<A> RecoveryBatch<A> {
     /// wallet resolves them when it applies every commit through its trusted
     /// operation, `TransparentLedgerWrite::qualify_and_apply_transparent_ledger_commit`,
     /// which qualifies each successor and withdraws its source's older
-    /// provisional evidence in the same wallet transaction. Only
-    /// [`TransparentHistoryRecovery::apply_and_acknowledge`] with trusted commits
-    /// acknowledges such a batch; [`TransparentHistoryRecovery::acknowledge_applied`]
-    /// refuses it. The trusted operation qualifies whatever it is given, so a
+    /// provisional evidence in the same wallet transaction. Only settlement
+    /// (feature `sqlite`) with trusted commits acknowledges such a batch. The
+    /// trusted operation qualifies whatever it is given, so a
     /// caller that does not trust the batch's origin cannot use it and never
     /// acknowledges a batch with retirements.
     ///

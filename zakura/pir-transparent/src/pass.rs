@@ -198,9 +198,9 @@ impl TransparentHistoryRecovery {
 
     /// Takes the ready batch the latest [`Self::pass`] holds: `None` when it held
     /// none, when it was taken or settled, or when `A` is not the account type of
-    /// that pass's watch set. For a caller that discards the batch, or applies its
-    /// commits itself and acknowledges with [`Self::acknowledge_applied`]. With
-    /// feature `sqlite`, settle it with [`Self::settle_latest`] instead.
+    /// that pass's watch set. For a caller that reads or discards the batch, which
+    /// stays unacknowledged; with feature `sqlite`, settle it with
+    /// `settle_latest` instead.
     pub fn take_latest<A: 'static>(&mut self) -> Option<RecoveryBatch<A>> {
         match self.latest.take()?.downcast() {
             Ok(batch) => Some(*batch),

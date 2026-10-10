@@ -321,9 +321,9 @@ the next account's.
 
 The caller keeps what is policy: its time budgets and the cap on waits, how
 long a hold lasts, the trust it states, its write gate and threads, cancellation
-of requests in flight, and activation after `Done`. `take_latest`,
-`apply_and_acknowledge` and `acknowledge_applied` remain for callers that bring
-their own wallet writer.
+of requests in flight, and activation after `Done`. `take_latest` hands the
+held batch to a caller that reads or discards it; only settlement acknowledges
+a batch, so without `sqlite` the next pass exports it again.
 
 Settlement writes each commit in its own wallet transaction. An outer SQL
 transaction is refused, so an integrity rejection's recovery suspension cannot be
@@ -339,10 +339,7 @@ unacknowledged batch in the companion. `ApplyFailure::stats` reports that prefix
 The next pass re-exports the work; replay preserves already applied facts.
 Only the latest issued ready batch's receipt can be acknowledged.
 
-A custom wallet writer can apply `batch.commits()` and then call
-`acknowledge_applied` when there are no retirements. A batch with retirements
-requires the trusted SQLite settlement helper; manual acknowledgment refuses it.
-`PassPlan` holds an untrusted caller's account (`HoldCause::Unreconciled`) at
+A batch with retirements requires trusted settlement. `PassPlan` holds an untrusted caller's account (`HoldCause::Unreconciled`) at
 the first such batch instead of repeatedly accumulating successors it cannot
 reconcile.
 
