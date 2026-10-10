@@ -31,7 +31,7 @@ use zakura_pir_receiver::{
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _,
     chain::BlockSource as _,
-    dynamic_ivk::{DynamicIvkRead, DynamicIvkWrite as _},
+    dynamic_ivk::{DynamicIvkRead, DynamicIvkWrite as _, PaymentApplication},
     testing::{AddressType, IronwoodFvk, TestBuilder, TestState},
     transparent_ledger::ChainPoint,
 };
@@ -623,6 +623,100 @@ async fn seen_addresses_keep_scanning_and_are_never_issued_again() {
         .wallet_mut()
         .db_mut()
         .prepare_receive_reservation(account, NOW, through.height, Some(&view))
+        .unwrap()
+        .unwrap();
+    assert_eq!(issued.key_id(), KeyId::new(Purpose::Receive, 1));
+}
+
+/// A seen hit counts from the attempt that observes it. When publication A's seen set
+/// holds a receiver whose payment it then misstates, a later publication whose seen set
+/// misses the receiver and whose lookup finds nothing does not make it issuable.
+#[tokio::test]
+async fn a_seen_hit_outlives_a_rejected_payment_and_a_later_miss() {
+    let mut st = ironwood_wallet();
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    let key = KeyId::new(Purpose::Receive, 0);
+    let (record, note_data) = pay_restored_key(&mut st, key.index(), 0);
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let seen = |st: &State| -> bool {
+        st.wallet()
+            .conn()
+            .query_row(
+                "SELECT provider_seen FROM ironwood_receiving_keys
+                 WHERE purpose = 1 AND key_index = ?1",
+                [key.index().to_be_bytes()],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let mut notes = Notes {
+        data: BTreeMap::from([(record.payment.position, note_data)]),
+        requested: Vec::new(),
+    };
+    // Publication A's witnesses are over another tree, so its payment is rejected.
+    let a = Directory::new(publish(
+        std::slice::from_ref(&record),
+        &[record.payment.cmx, [1; 32]],
+        through,
+        &provider(&[record.receiver]),
+    ));
+    let swept = sweep(
+        st.wallet_mut().db_mut(),
+        &network,
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &a,
+        &mut notes,
+        &NoLock,
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            &swept.deferred[..],
+            [(deferred, Error::Queued(PaymentApplication::Rejected))] if *deferred == key
+        ),
+        "{:?}",
+        swept.deferred
+    );
+    assert!(seen(&st));
+
+    let b = Directory::new(publish(&[], &[], through, &provider(&[])));
+    let later = NOW + 3_600;
+    let swept = sweep(
+        st.wallet_mut().db_mut(),
+        &network,
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &b,
+        &mut notes,
+        &NoLock,
+        later,
+    )
+    .await
+    .unwrap();
+    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
+    assert!(!swept.pending);
+    assert!(seen(&st));
+    let fetched = fetch_seen(ORIGIN, &b).await.unwrap();
+    let contains = |receivers: &[[u8; 43]]| fetched.contains(receivers);
+    let view = ProviderSeen {
+        since: fetched.since(),
+        until: fetched.until(),
+        contains: &contains,
+    };
+    let issued = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, later, through.height, Some(&view))
         .unwrap()
         .unwrap();
     assert_eq!(issued.key_id(), KeyId::new(Purpose::Receive, 1));

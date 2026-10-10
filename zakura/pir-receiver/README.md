@@ -7,8 +7,8 @@ Each dynamic key recovered from the seed, a refund key from its funding memo or 
 incoming lookahead key, is first tested against the publication's filters, which
 every wallet downloads alike. Only a receiver in the paid set is looked up over PIR,
 and the payments found are imported only after the wallet checks them against its own
-chain. A receiver in a swap provider's seen set is marked seen, so issuance does not
-hand it out again. Every swept key then keeps scanning for the store's restore watch,
+chain. A receiver in a swap provider's seen set is marked seen as its sweep attempt
+starts, before any lookup, so issuance does not hand it out again. Every swept key then keeps scanning for the store's restore watch,
 from the block after the publication's end, so a payment the publication missed is
 found by scanning; the store documents how long the watch lasts (for
 `zakura-client-sqlite`, `close_finished_dynamic_keys`). A run that finds nothing to
