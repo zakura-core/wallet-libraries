@@ -697,11 +697,12 @@ fn restored_accounts_issue_unquoted_addresses_only_with_covering_seen_evidence()
         Ok(0)
     );
 
-    // A covering set that holds it marks it seen, and issuance moves past it.
+    // A covering set that holds it marks it seen. The next address has no key yet, so
+    // issuance waits for the lookahead to check it.
     let (mut st, until, _) = restored();
     assert_eq!(
         issue_seen(&mut st, EARLIEST_RECEIVE_QUOTE, until, &[receiver]),
-        Ok(1)
+        gap
     );
     let seen: bool = st
         .wallet()
@@ -724,6 +725,99 @@ fn restored_accounts_issue_unquoted_addresses_only_with_covering_seen_evidence()
         issue_seen(&mut st, EARLIEST_RECEIVE_QUOTE, i64::MAX, &[]),
         gap
     );
+}
+
+/// Through the public path, seen hits that widen a restored account's window first
+/// register and sweep the newly exposed addresses, so issuance waits rather than
+/// issuing one unchecked, and a newly exposed address the set holds is skipped once
+/// checked.
+#[test]
+fn seen_hits_extend_a_restored_lookahead_before_issuance() {
+    let restored = || {
+        let mut st = fixture();
+        let through = tip(&st);
+        let restored_at = restore_through(&st, through.height).unwrap();
+        let account = st.test_account().unwrap().id();
+        let db = st.wallet_mut().db_mut();
+        assert_eq!(
+            refusal(db.prepare_receive_reservation(account, NOW, through.height, None)),
+            Some(ReservationPolicy::Gap)
+        );
+        sweep_from(&mut st, 0);
+        (st, restored_at + SEEN_SLACK_SECONDS)
+    };
+    let issue = |st: &mut State, since, until, held: u64| {
+        let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
+        let held: Vec<[u8; 43]> = (0..held)
+            .map(|index| {
+                let fvk = KeyId::new(Purpose::Receive, index).derive(&parent).unwrap();
+                fvk.address_at(0u32, Scope::External).to_raw_address_bytes()
+            })
+            .collect();
+        let contains =
+            |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
+        let seen = ProviderSeen {
+            since,
+            until,
+            contains: &contains,
+        };
+        let account = st.test_account().unwrap().id();
+        let through = tip(st).height;
+        let db = st.wallet_mut().db_mut();
+        let issued = db.prepare_receive_reservation(account, NOW, through, Some(&seen));
+        issued.unwrap().map(|k| k.key_id().index())
+    };
+    let window = RECEIVE_GAP_LIMIT;
+    let gap = Err(ReservationPolicy::Gap);
+
+    // The set holds the whole swept window but its feed started too late.
+    let (mut st, until) = restored();
+    assert_eq!(
+        issue(&mut st, EARLIEST_RECEIVE_QUOTE + 1, until, window),
+        gap
+    );
+    let account = st.test_account().unwrap().id();
+    assert_eq!(
+        all_keys(st.wallet().db(), account).unwrap().len() as u64,
+        2 * window
+    );
+    assert!(
+        st.wallet()
+            .db()
+            .dynamic_history_pending(account, tip(&st).height)
+            .unwrap()
+    );
+
+    // A covering set also holds the next address, which is checked before any issuance.
+    let (mut st, until) = restored();
+    assert_eq!(
+        issue(&mut st, EARLIEST_RECEIVE_QUOTE, until, window + 1),
+        gap
+    );
+    sweep_from(&mut st, window);
+    assert_eq!(
+        issue(&mut st, EARLIEST_RECEIVE_QUOTE, until, window + 1),
+        gap
+    );
+    sweep_from(&mut st, 2 * window);
+    assert_eq!(
+        issue(&mut st, EARLIEST_RECEIVE_QUOTE, until, window + 1),
+        Ok(window + 1)
+    );
+}
+
+/// Finishes the sweeps of the test account's incoming keys from `from` up, after empty
+/// lookups at the tip, as a receiver directory that saw nothing would.
+fn sweep_from(st: &mut State, from: u64) {
+    let account = st.test_account().unwrap().id();
+    let through = tip(st);
+    let db = st.wallet_mut().db_mut();
+    for key in all_keys(db, account).unwrap() {
+        let id = key.key_id();
+        if id.purpose() == Purpose::Receive && id.index() >= from {
+            finish_sweep(db, account, id, through);
+        }
+    }
 }
 
 /// An account created here rather than restored was never quoted elsewhere, so its
