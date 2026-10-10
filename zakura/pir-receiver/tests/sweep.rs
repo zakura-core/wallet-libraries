@@ -149,15 +149,15 @@ fn pay_restored_key(st: &mut State, index: u64, position: u64) -> (Record, [u8; 
     (record, ciphertext[52..].try_into().unwrap())
 }
 
-/// A swap provider's sets: the receivers it was given within the wallet's restore watch,
-/// and every receiver it ever had, from a feed that started long before [`NOW`] and last
-/// read the provider a minute before it.
-fn provider(recent: &[Receiver], seen: &[Receiver]) -> Vec<ProviderSet> {
-    provider_named("near-intents", recent, seen)
+/// A swap provider's sets: an empty recent set, which wallets do not read, and every
+/// receiver it ever had, from a feed that started long before [`NOW`] and last read the
+/// provider a minute before it.
+fn provider(seen: &[Receiver]) -> Vec<ProviderSet> {
+    provider_named("near-intents", seen)
 }
 
 /// [`provider`]'s sets for the provider `name`.
-fn provider_named(name: &str, recent: &[Receiver], seen: &[Receiver]) -> Vec<ProviderSet> {
+fn provider_named(name: &str, seen: &[Receiver]) -> Vec<ProviderSet> {
     let since_unix = NOW - 2 * RESTORE_WATCH_SECS;
     let until_unix = NOW - 60;
     vec![
@@ -166,7 +166,7 @@ fn provider_named(name: &str, recent: &[Receiver], seen: &[Receiver]) -> Vec<Pro
             window_secs: Some(RESTORE_WATCH_SECS.try_into().unwrap()),
             since_unix,
             until_unix,
-            receivers: recent.to_vec(),
+            receivers: Vec::new(),
         },
         ProviderSet {
             label: format!("{name}/seen"),
@@ -342,7 +342,7 @@ async fn a_restore_sweep_finds_a_payout_and_moves_the_lookahead_past_it() {
         std::slice::from_ref(&record),
         &[record.payment.cmx],
         through,
-        &provider(&[], &[]),
+        &provider(&[]),
     ));
     let mut notes = Notes {
         data: BTreeMap::from([(record.payment.position, note_data)]),
@@ -420,7 +420,7 @@ async fn a_key_paid_twice_is_imported_in_full() {
         &[first.clone(), second.clone()],
         &[first.payment.cmx, second.payment.cmx],
         through,
-        &provider(&[], &[]),
+        &provider(&[]),
     ));
     let mut notes = Notes {
         data: BTreeMap::from([(0, first_data), (1, second_data)]),
@@ -478,12 +478,7 @@ async fn a_long_history_takes_its_note_data_in_batches() {
     restore(&mut st, account);
     let through = tip(&st);
     let commitments: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
-    let directory = Directory::new(publish(
-        &records,
-        &commitments,
-        through,
-        &provider(&[], &[]),
-    ));
+    let directory = Directory::new(publish(&records, &commitments, through, &provider(&[])));
     let mut notes = Notes {
         data,
         requested: Vec::new(),
@@ -520,7 +515,7 @@ async fn a_wallet_without_payments_downloads_only_the_filters() {
     st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
-    let directory = Directory::new(publish(&[], &[], through, &provider(&[], &[])));
+    let directory = Directory::new(publish(&[], &[], through, &provider(&[])));
     let mut notes = Notes {
         data: BTreeMap::new(),
         requested: Vec::new(),
@@ -547,12 +542,18 @@ async fn a_wallet_without_payments_downloads_only_the_filters() {
     assert_eq!(requests.len(), 2, "{requests:?}");
     assert!(requests[1].starts_with("GET /v1/receiver/filters/"));
     assert!(notes.requested.is_empty());
-    // No swap reached these addresses recently, so none keeps scanning.
-    assert!(st.wallet().get_dynamic_scanning_keys().unwrap().is_empty());
+    // Every swept key keeps scanning, so a payment after the publication is found.
+    let scanning = st.wallet().get_dynamic_scanning_keys().unwrap().len();
+    assert_eq!(scanning as u64, RECEIVE_GAP_LIMIT);
+    pay_restored_key(&mut st, 0, 0);
+    assert_eq!(
+        st.get_total_balance(account),
+        Zatoshis::const_from_u64(VALUE)
+    );
 }
 
 #[tokio::test]
-async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
+async fn seen_addresses_keep_scanning_and_are_never_issued_again() {
     let mut st = ironwood_wallet();
     let network = *st.network();
     let account = st.test_account().unwrap().id();
@@ -567,7 +568,7 @@ async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
             .address_at(0u32, Scope::External);
         Receiver::from_bytes(address.to_raw_address_bytes()).unwrap()
     };
-    // The old device quoted addresses 0 and 2, and 2 only today.
+    // The old device quoted addresses 0 and 2.
     let (old, quoted) = (
         KeyId::new(Purpose::Receive, 0),
         KeyId::new(Purpose::Receive, 2),
@@ -576,7 +577,7 @@ async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
         &[],
         &[],
         through,
-        &provider(&[receiver(quoted)], &[receiver(old), receiver(quoted)]),
+        &provider(&[receiver(old), receiver(quoted)]),
     ));
     let mut notes = Notes {
         data: BTreeMap::new(),
@@ -597,14 +598,9 @@ async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
     .await
     .unwrap();
     assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
-    let scanning: Vec<_> = st
-        .wallet()
-        .get_dynamic_scanning_keys()
-        .unwrap()
-        .iter()
-        .map(|k| k.key_id())
-        .collect();
-    assert_eq!(scanning, [quoted]);
+    // The seen address 2 moves the lookahead, and every swept key keeps scanning.
+    let scanning = st.wallet().get_dynamic_scanning_keys().unwrap().len();
+    assert_eq!(scanning as u64, RECEIVE_GAP_LIMIT + 3);
     // Issuance reads the same seen set, skips both, and takes the lowest address the
     // provider never had.
     let seen = fetch_seen(ORIGIN, &directory).await.unwrap();
@@ -630,90 +626,6 @@ async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
         .unwrap()
         .unwrap();
     assert_eq!(issued.key_id(), KeyId::new(Purpose::Receive, 1));
-}
-
-#[tokio::test]
-async fn every_address_keeps_scanning_when_the_recent_set_falls_short_of_the_watch() {
-    let mut st = ironwood_wallet();
-    let network = *st.network();
-    let account = st.test_account().unwrap().id();
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    // A swap quoted two hours ago is outside a one-hour recent set.
-    let mut sets = provider(&[], &[]);
-    sets[0].window_secs = Some(3600);
-    let directory = Directory::new(publish(&[], &[], through, &sets));
-    let mut notes = Notes {
-        data: BTreeMap::new(),
-        requested: Vec::new(),
-    };
-    let swept = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        &[account],
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut notes,
-        &NoLock,
-        NOW,
-    )
-    .await
-    .unwrap();
-    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
-    let scanning = st.wallet().get_dynamic_scanning_keys().unwrap().len();
-    assert_eq!(scanning as u64, RECEIVE_GAP_LIMIT);
-}
-
-#[tokio::test]
-async fn every_address_keeps_scanning_unless_each_provider_has_a_recent_set() {
-    for both_recent in [true, false] {
-        let mut st = ironwood_wallet();
-        let network = *st.network();
-        let account = st.test_account().unwrap().id();
-        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
-        restore(&mut st, account);
-        let through = tip(&st);
-        // Provider `b` publishes only its seen set when `both_recent` is false.
-        let mut sets = provider_named("a", &[], &[]);
-        let b = provider_named("b", &[], &[]);
-        sets.extend(b.into_iter().skip(usize::from(!both_recent)));
-        let directory = Directory::new(publish(&[], &[], through, &sets));
-        let mut notes = Notes {
-            data: BTreeMap::new(),
-            requested: Vec::new(),
-        };
-        let swept = sweep(
-            st.wallet_mut().db_mut(),
-            &network,
-            &[account],
-            through,
-            GENESIS,
-            ORIGIN,
-            &directory,
-            &mut notes,
-            &NoLock,
-            NOW,
-        )
-        .await
-        .unwrap();
-        assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
-        let scanning = st.wallet().get_dynamic_scanning_keys().unwrap().len() as u64;
-        if both_recent {
-            assert_eq!(scanning, 0);
-        } else {
-            assert_eq!(scanning, RECEIVE_GAP_LIMIT);
-            // `b` may have quoted any address, so a payment after the publication is
-            // still found by scanning.
-            pay_restored_key(&mut st, 0, 0);
-            assert_eq!(
-                st.get_total_balance(account),
-                Zatoshis::const_from_u64(VALUE)
-            );
-        }
-    }
 }
 
 /// A directory whose queries fail after it accepted the session.
@@ -744,7 +656,7 @@ async fn a_revoked_session_stops_the_run_before_leasing_more_keys() {
         std::slice::from_ref(&record),
         &[record.payment.cmx],
         through,
-        &provider(&[], &[]),
+        &provider(&[]),
     )));
     let mut notes = Notes {
         data: BTreeMap::new(),
@@ -793,7 +705,7 @@ async fn a_publication_off_the_wallets_chain_is_refused_before_any_lookup() {
         std::slice::from_ref(&record),
         &[record.payment.cmx],
         other,
-        &provider(&[], &[]),
+        &provider(&[]),
     ));
     let mut notes = Notes {
         data: BTreeMap::from([(record.payment.position, note_data)]),

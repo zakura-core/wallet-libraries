@@ -5,12 +5,11 @@ use std::{collections::BTreeMap, num::NonZeroU32};
 use futures_util::StreamExt;
 use receiver_directory::{
     Receiver,
-    filter::{Filters, PAID, RECENT, SEEN},
-    snapshot::FilterSet,
+    filter::{Filters, PAID, SEEN},
     witness::WitnessSnapshot,
 };
 use receiver_pir::{AcceptedCoverage, transport::DirectoryClient};
-use zakura_dynamic_ivk::{KeyId, lifecycle::RESTORE_WATCH_SECS};
+use zakura_dynamic_ivk::KeyId;
 use zakura_pir_enhance::{
     ClientError, ClientResourceLimits,
     transport::{Client, PendingClient, Transport as EnhanceTransport},
@@ -20,7 +19,7 @@ use zcash_client_backend::data_api::{
     WalletRead,
     dynamic_ivk::{
         DirectoryPayment, DiscoveryWork, DynamicIvkRead, DynamicIvkWrite, PaymentApplication,
-        ProviderView, SweepDeferral,
+        SweepDeferral,
     },
     enhance_pir::EnhancePirRead,
     transparent_ledger::ChainPoint,
@@ -41,9 +40,6 @@ const BATCH: NonZeroU32 = NonZeroU32::new(64).unwrap();
 /// Positions whose note data one request asks for. Each batch is queued as it arrives,
 /// so a long history keeps its progress when a run stops partway.
 const NOTE_BATCH: usize = 64;
-/// How long before `now` a provider's recent set may have last read its feed and still
-/// rule a receiver out. A quote made after that read is missing from the set.
-const RECENT_SET_MAX_AGE_SECS: i64 = 15 * 60;
 
 /// Why a sweep run, or one key's sweep, stopped. `E` is the wallet's error type.
 #[derive(Debug, thiserror::Error)]
@@ -183,23 +179,17 @@ pub struct Swept<E> {
 /// a block the wallet accepts (see [`DynamicIvkRead::directory_publication_anchor`]).
 ///
 /// Each key's receiver is first tested against the publication's filters, which every
-/// wallet downloads alike: only a receiver in the paid set is looked up over PIR. A
-/// swap provider's sets then say whether a swap may still pay the receiver, which keeps
-/// its key scanning after the sweep, and whether the provider ever had it (see
-/// [`ProviderView`]). A provider's recent set can rule a receiver out only if it is
-/// current and complete: its feed's last read began at most fifteen minutes before
-/// `now`, and its window, with the feed running throughout, covers the wallet's own
-/// restore watch, [`RESTORE_WATCH_SECS`]. If any recent set falls short, a provider
-/// with sets has no recent set, or the publication has no provider sets, every key
-/// keeps scanning.
+/// wallet downloads alike: only a receiver in the paid set is looked up over PIR, and
+/// one in a swap provider's seen set is never issued again. Whatever the provider sets
+/// say, every swept key then keeps scanning for the wallet's restore watch (see
+/// [`DynamicIvkWrite::apply_dynamic_sweep`]).
 ///
 /// A run that looks nothing up opens no PIR session and fetches no witnesses. New
 /// payments a lookup finds take their note data from `notes`. After each batch the
 /// incoming lookahead moves past paid indices and its new keys are swept too. A key
 /// that fails is backed off and listed in [`Swept::deferred`], and the others go on,
 /// unless the directory's session or connection failed: then the run stops before
-/// leasing more keys. `now` is the caller's clock in seconds, for retry backoff and the
-/// recent sets.
+/// leasing more keys. `now` is the caller's clock in seconds, for retry backoff.
 #[allow(clippy::too_many_arguments)]
 pub async fn sweep<W, P, T, N, L>(
     wallet: &mut W,
@@ -247,7 +237,7 @@ where
                 }
             };
             'run: loop {
-                let checks = directory.check(&work, now)?;
+                let checks = directory.check(&work)?;
                 let lookups = work
                     .iter()
                     .zip(&checks)
@@ -316,8 +306,8 @@ where
 struct Check {
     /// The paid set holds it, so a lookup may find payments.
     paid: bool,
-    /// What the swap provider sets say.
-    provider: ProviderView,
+    /// A swap provider's seen set holds it, so it is never issued again.
+    seen: bool,
 }
 
 /// A receiver-directory publication accepted at a block the wallet scanned, with its
@@ -380,13 +370,8 @@ impl<'a, T: Transport> Directory<'a, T> {
         })
     }
 
-    /// What the filters say about each item's receiver at `now`; see [`sweep`] for how
-    /// the provider sets are read.
-    fn check<A>(
-        &self,
-        work: &[(A, DiscoveryWork)],
-        now: i64,
-    ) -> Result<Vec<Check>, DirectoryError> {
+    /// What the filters say about each item's receiver.
+    fn check<A>(&self, work: &[(A, DiscoveryWork)]) -> Result<Vec<Check>, DirectoryError> {
         let receivers = work
             .iter()
             .map(|(_, item)| Receiver::from_bytes(item.receiver))
@@ -401,38 +386,13 @@ impl<'a, T: Transport> Directory<'a, T> {
         };
         let mut checks: Vec<_> = matches(PAID)
             .into_iter()
-            .map(|paid| Check {
-                paid,
-                provider: ProviderView::default(),
-            })
+            .map(|paid| Check { paid, seen: false })
             .collect();
-        // Each provider with a set, and whether its recent sets, if any, are all current
-        // and complete.
-        let mut providers = BTreeMap::<&str, Option<bool>>::new();
         for set in &self.manifest.directory.filters {
-            match set.label.split_once('/') {
-                Some((provider, RECENT)) => {
-                    let covers = covers_restore_watch(set, now);
-                    let complete = providers.entry(provider).or_default();
-                    *complete = Some(complete.unwrap_or(true) && covers);
-                    if covers {
-                        for (check, hit) in checks.iter_mut().zip(matches(&set.label)) {
-                            check.provider.recent |= hit;
-                        }
-                    }
+            if set.label.split_once('/').map(|(_, kind)| kind) == Some(SEEN) {
+                for (check, hit) in checks.iter_mut().zip(matches(&set.label)) {
+                    check.seen |= hit;
                 }
-                Some((provider, SEEN)) => {
-                    providers.entry(provider).or_default();
-                    for (check, hit) in checks.iter_mut().zip(matches(&set.label)) {
-                        check.provider.seen |= hit;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if providers.is_empty() || providers.values().any(|&complete| complete != Some(true)) {
-            for check in &mut checks {
-                check.provider.recent = true;
             }
         }
         Ok(checks)
@@ -457,22 +417,6 @@ impl<'a, T: Transport> Directory<'a, T> {
             self.session = Some(Session { client, witnesses });
         }
         Ok(self.session.as_mut().expect("opened above"))
-    }
-}
-
-/// Whether a provider's recent set can rule a receiver out at `now`: its feed's last
-/// read began at most [`RECENT_SET_MAX_AGE_SECS`] before `now`, and its window, which
-/// reaches back from that read through the time the feed was running, covers
-/// [`RESTORE_WATCH_SECS`].
-fn covers_restore_watch(set: &FilterSet, now: i64) -> bool {
-    let window = set.window_secs.and_then(|w| i64::try_from(w).ok());
-    match (window, set.since_unix, set.until_unix) {
-        (Some(window), Some(since), Some(until)) => {
-            window >= RESTORE_WATCH_SECS
-                && since <= until.saturating_sub(window)
-                && until >= now.saturating_sub(RECENT_SET_MAX_AGE_SECS)
-        }
-        _ => false,
     }
 }
 
@@ -578,7 +522,7 @@ where
                 key,
                 through,
                 anchor,
-                check.provider,
+                check.seen,
                 |position, cmx| witnesses.and_then(|w| w.path(position, cmx).ok()),
             )
         })
@@ -603,59 +547,5 @@ fn directory_payment(payment: receiver_directory::Payment) -> DirectoryPayment {
         cmx: payment.cmx,
         ephemeral_key: payment.ephemeral_key,
         ciphertext_prefix: payment.ciphertext_prefix,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A recent set of `window_secs` from a feed that started at `since_unix` and last
-    /// read the provider at `until_unix`.
-    fn recent(window_secs: Option<u64>, since_unix: Option<i64>, until_unix: i64) -> FilterSet {
-        FilterSet {
-            label: "near-intents/recent".into(),
-            count: 0,
-            window_secs,
-            since_unix,
-            until_unix: Some(until_unix),
-        }
-    }
-
-    #[test]
-    fn a_recent_set_rules_receivers_out_only_when_current_across_the_whole_watch() {
-        let now = 10 * RESTORE_WATCH_SECS;
-        let watch = RESTORE_WATCH_SECS as u64;
-        let read = now - 60;
-        let started = Some(read - RESTORE_WATCH_SECS);
-        assert!(covers_restore_watch(
-            &recent(Some(watch), started, read),
-            now
-        ));
-        assert!(covers_restore_watch(
-            &recent(Some(2 * watch), Some(0), read),
-            now
-        ));
-        // A shorter window, or a feed younger than the window, can miss a quote.
-        assert!(!covers_restore_watch(
-            &recent(Some(watch - 1), started, read),
-            now
-        ));
-        assert!(!covers_restore_watch(
-            &recent(Some(watch), Some(read - 60), read),
-            now
-        ));
-        assert!(!covers_restore_watch(&recent(None, started, read), now));
-        assert!(!covers_restore_watch(&recent(Some(watch), None, read), now));
-        // So can a set whose feed stalled: quotes after its last read are missing.
-        let stalled = now - RECENT_SET_MAX_AGE_SECS - 1;
-        let started = Some(stalled - RESTORE_WATCH_SECS);
-        assert!(!covers_restore_watch(
-            &recent(Some(watch), started, stalled),
-            now
-        ));
-        let mut undated = recent(Some(watch), started, read);
-        undated.until_unix = None;
-        assert!(!covers_restore_watch(&undated, now));
     }
 }
