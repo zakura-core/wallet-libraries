@@ -28,7 +28,7 @@ use {
 };
 
 /// The pools this build supports, in the order history entries report them.
-pub(super) fn supported_pools() -> Vec<PoolType> {
+fn supported_pools() -> Vec<PoolType> {
     vec![
         #[cfg(feature = "transparent-inputs")]
         PoolType::Transparent,
@@ -76,7 +76,7 @@ pub(super) fn transparent_discovery<P: consensus::Parameters>(
 /// can discover a funding note without linking its unmined spender, since the reverse nullifier
 /// map contains mined transactions only. A scanned chain tip therefore does not suffice: every
 /// currently known owned nullifier in the payload must also have its spend link.
-pub(super) fn has_unlinked_shielded_spend(
+fn has_unlinked_shielded_spend(
     conn: &rusqlite::Connection,
     account_id: i64,
     transaction_id: i64,
@@ -166,7 +166,7 @@ pub(super) fn has_unretrieved_memo(
 /// address without recording its receipt. Local construction defers the receipt of a shielded
 /// payment to one of the wallet's own external addresses until scanning or enhancement finds it,
 /// so any such output may be an owned receipt not yet recorded.
-pub(super) fn has_unrecorded_sent_output(
+fn has_unrecorded_sent_output(
     conn: &rusqlite::Connection,
     transaction_id: i64,
     pool: PoolType,
@@ -190,7 +190,7 @@ pub(super) fn has_unrecorded_sent_output(
 /// Whether a parent of one of the transaction's unresolved transparent inputs is queued for
 /// retrieval. Until it arrives, the input may spend one of the account's outputs.
 #[cfg(feature = "transparent-inputs")]
-pub(super) fn has_pending_parent(
+fn has_pending_parent(
     conn: &rusqlite::Connection,
     transaction_id: i64,
 ) -> Result<bool, SqliteClientError> {
@@ -214,7 +214,7 @@ pub(super) fn has_pending_parent(
 /// Whether the account's ledger records a spend in `txid` whose output it has not recovered.
 /// Recovery's `unresolved_spends` count considers only placed spends, across transactions.
 #[cfg(feature = "transparent-inputs")]
-pub(super) fn has_unresolved_spend(
+fn has_unresolved_spend(
     conn: &rusqlite::Connection,
     account_id: i64,
     txid: &TxId,

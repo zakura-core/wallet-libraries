@@ -24,7 +24,7 @@ use super::script::spent_address;
 use super::sql::listable_work_sql;
 use super::store::stored_facts;
 
-pub(super) type OwnedInputScripts = BTreeMap<([u8; 32], u32), Vec<u8>>;
+type OwnedInputScripts = BTreeMap<([u8; 32], u32), Vec<u8>>;
 
 /// Spent outpoints whose ownership the account can affirm now, with their spent scripts.
 /// The private branch is the per-account form of history's `has_ledger_spend`, adding the
@@ -80,7 +80,7 @@ pub(super) fn owned_inputs(
 /// The net value the shielded pools contribute to the transparent side: the sum of the shielded
 /// value balances, which equals the fee plus the transparent outputs minus the transparent
 /// inputs. `None` when it overflows.
-pub(super) fn shielded_contribution(transaction: &Transaction) -> Option<i64> {
+fn shielded_contribution(transaction: &Transaction) -> Option<i64> {
     let zero = ZatBalance::zero();
     let total = [
         transaction
@@ -144,7 +144,7 @@ pub(super) fn omissions(
 
 /// What the wallet records of an account's part in a transaction's transparent side.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Participation {
+enum Participation {
     /// The account has no part in the transaction, or the wallet records no transparent
     /// side of it.
     None,
@@ -164,7 +164,7 @@ pub(super) enum Participation {
 /// the route-2 marker, which outlive the work they replace. Raw bytes replace work and
 /// display facts alike, so for a shielded part in a transaction with raw bytes, those bytes
 /// decide.
-pub(super) fn participation(
+fn participation(
     conn: &Connection,
     id_tx: i64,
     account: i64,

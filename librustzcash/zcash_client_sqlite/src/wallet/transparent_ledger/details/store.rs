@@ -21,9 +21,7 @@ use super::sql::related_transaction_sql;
 use super::validate::validate;
 
 /// The `(kind, hash)` columns of a display address; `None` is a non-standard script.
-pub(super) fn encode_address_columns(
-    address: Option<TransparentAddress>,
-) -> (i64, Option<[u8; 20]>) {
+fn encode_address_columns(address: Option<TransparentAddress>) -> (i64, Option<[u8; 20]>) {
     match address {
         Some(TransparentAddress::PublicKeyHash(hash)) => (KIND_P2PKH, Some(hash)),
         Some(TransparentAddress::ScriptHash(hash)) => (KIND_P2SH, Some(hash)),
@@ -32,7 +30,7 @@ pub(super) fn encode_address_columns(
 }
 
 /// The `(kind, hash)` columns of a display sender.
-pub(super) fn encode_sender_columns(sender: TransparentDisplaySender) -> (i64, Option<[u8; 20]>) {
+fn encode_sender_columns(sender: TransparentDisplaySender) -> (i64, Option<[u8; 20]>) {
     match sender {
         TransparentDisplaySender::Absent => (KIND_ABSENT, None),
         TransparentDisplaySender::Address(address) => encode_address_columns(Some(address)),
@@ -42,7 +40,7 @@ pub(super) fn encode_sender_columns(sender: TransparentDisplaySender) -> (i64, O
 
 /// Decodes `(kind, hash)` address columns, of a sender or of an output. An output's columns
 /// never hold the absent kind; the caller rejects it.
-pub(super) fn decode_address_columns(
+fn decode_address_columns(
     kind: i64,
     hash: Option<[u8; 20]>,
 ) -> Result<TransparentDisplaySender, SqliteClientError> {

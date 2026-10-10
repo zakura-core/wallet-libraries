@@ -4,7 +4,7 @@ use transparent::address::TransparentAddress;
 
 /// The pushes of a push-only script, or `None` when it is malformed or not push-only. A small
 /// number opcode (`OP_1NEGATE`, `OP_1` to `OP_16`) pushes its opcode byte.
-pub(super) fn pushes(script: &[u8]) -> Option<Vec<&[u8]>> {
+fn pushes(script: &[u8]) -> Option<Vec<&[u8]>> {
     let mut out = Vec::new();
     let mut rest = script;
     while let Some((&op, tail)) = rest.split_first() {
@@ -33,7 +33,7 @@ pub(super) fn pushes(script: &[u8]) -> Option<Vec<&[u8]>> {
 }
 
 /// The last opcode of a well-formed script: every push is within the script.
-pub(super) fn last_opcode(script: &[u8]) -> Option<u8> {
+fn last_opcode(script: &[u8]) -> Option<u8> {
     let mut last = None;
     let mut rest = script;
     while let Some((&op, tail)) = rest.split_first() {

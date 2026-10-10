@@ -19,8 +19,8 @@ use super::codes::{
 };
 use super::sql::{REARMED, eligible_work_sql, parked_work_sql};
 
-pub(super) const MINUTE: u64 = 60;
-pub(super) const HOUR: u64 = 60 * MINUTE;
+const MINUTE: u64 = 60;
+const HOUR: u64 = 60 * MINUTE;
 pub(super) const DAY: u64 = 24 * HOUR;
 
 /// How long a parked row waits for a changed display map before it is due anyway.
@@ -34,7 +34,7 @@ pub(super) fn unix(now: SystemTime) -> i64 {
 }
 
 /// Whole seconds of `d` as stored in the work table, saturating.
-pub(super) fn i64_secs(d: Duration) -> i64 {
+fn i64_secs(d: Duration) -> i64 {
     i64::try_from(d.as_secs()).unwrap_or(i64::MAX)
 }
 
@@ -85,7 +85,7 @@ pub(crate) fn work(
 }
 
 /// The time of a stored Unix timestamp; negative ones read as the epoch.
-pub(super) fn system_time(unix: i64) -> SystemTime {
+fn system_time(unix: i64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(u64::try_from(unix).unwrap_or(0))
 }
 
@@ -146,7 +146,7 @@ pub(crate) fn parked_work(
 }
 
 /// A deterministic jitter fraction in `[0, 1)` for this row and attempt.
-pub(super) fn jitter(txid: &TxId, attempts: u32) -> f64 {
+fn jitter(txid: &TxId, attempts: u32) -> f64 {
     // SplitMix64 over the txid prefix and attempt count; spreads retries of many rows apart
     // without a random source.
     let mut x = u64::from_le_bytes(txid.as_ref()[..8].try_into().expect("8 bytes"))
@@ -158,7 +158,7 @@ pub(super) fn jitter(txid: &TxId, attempts: u32) -> f64 {
 }
 
 /// Exponential backoff from `base`, doubling per attempt, plus up to 25% jitter, capped at `cap`.
-pub(super) fn exponential_backoff(base: u64, cap: u64, attempts: u32, txid: &TxId) -> u64 {
+fn exponential_backoff(base: u64, cap: u64, attempts: u32, txid: &TxId) -> u64 {
     let doubled = base.saturating_mul(1u64 << attempts.saturating_sub(1).min(32));
     let delay = doubled.min(cap);
     (delay + (delay as f64 * 0.25 * jitter(txid, attempts)) as u64).min(cap)
@@ -187,7 +187,7 @@ pub(crate) fn backoff(outcome: TransparentDetailOutcome, attempts: u32, txid: &T
 }
 
 /// The persisted code of `outcome`.
-pub(super) fn outcome_code(outcome: TransparentDetailOutcome) -> i64 {
+fn outcome_code(outcome: TransparentDetailOutcome) -> i64 {
     match outcome {
         TransparentDetailOutcome::Unavailable { .. } => UNAVAILABLE,
         TransparentDetailOutcome::Absent => ABSENT,
@@ -202,7 +202,7 @@ pub(super) fn outcome_code(outcome: TransparentDetailOutcome) -> i64 {
 /// Outcomes sharing a backoff schedule. A change of class starts a fresh backoff, so that
 /// minutes-apart `NotYetPublished` retries do not lengthen a later `Unavailable` or `Absent`
 /// backoff.
-pub(super) fn outcome_class(code: i64) -> i64 {
+fn outcome_class(code: i64) -> i64 {
     match code {
         UNAVAILABLE | PROTOCOL => UNAVAILABLE,
         NOT_COVERED | UNSUPPORTED | CONTRADICTION => NOT_COVERED,

@@ -16,7 +16,7 @@ use super::super::output_observation_condition;
 
 /// What the wallet knows about one outpoint a transaction spends.
 #[derive(Default)]
-pub(super) struct KnownInput {
+struct KnownInput {
     /// The spending input's index, when a recovered spend names it.
     input_index: Option<u32>,
     /// The script of the spent output, when known.
@@ -30,7 +30,7 @@ pub(super) struct KnownInput {
 /// spend links to owned outputs (script and value only while financial queries count
 /// the output), and public spend links from the spend map (the outpoint only).
 /// These records can reject a contradiction even when they no longer establish ownership.
-pub(super) fn known_inputs(
+fn known_inputs(
     conn: &Connection,
     id_tx: i64,
     txid: &[u8],
@@ -72,7 +72,7 @@ pub(super) fn known_inputs(
 /// The address the first address-shaped input spends, when the wallet knows the index and
 /// spent script of every input up to it: `Some(None)` when it knows all `count` inputs and
 /// none is address-shaped, `None` when an input before the first address-shaped one is unknown.
-pub(super) fn known_first_address(
+fn known_first_address(
     inputs: &BTreeMap<([u8; 32], u32), KnownInput>,
     count: u32,
 ) -> Option<Option<TransparentAddress>> {
@@ -96,7 +96,7 @@ pub(super) fn known_first_address(
 /// one's address; knowing every script but not every index, the sender must be one of them.
 /// Otherwise it can only require the flag when it already knows two distinct scripts, and,
 /// when the flag is clear, the sender to be the one script every input spends.
-pub(super) fn sender_contradiction(
+fn sender_contradiction(
     facts: &TransparentDisplayFacts,
     inputs: &BTreeMap<([u8; 32], u32), KnownInput>,
 ) -> Option<TransparentDisplayContradiction> {
@@ -140,7 +140,7 @@ pub(super) fn sender_contradiction(
 ///
 /// The shielded pools' net contribution is the fee plus the outputs minus the inputs. With
 /// only the first two outputs given, the fee and those outputs bound it from below.
-pub(super) fn funding_contradiction(
+fn funding_contradiction(
     facts: &TransparentDisplayFacts,
     inputs: &BTreeMap<([u8; 32], u32), KnownInput>,
 ) -> Option<TransparentDisplayContradiction> {

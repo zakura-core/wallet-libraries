@@ -30,7 +30,7 @@ pub(super) fn whole_fee(
 
 /// Whether the account recorded an output it sent in the transaction to anyone but itself, even
 /// one of zero value, or another wallet account spent funds in it.
-pub(super) fn has_other_outgoing_evidence(
+fn has_other_outgoing_evidence(
     conn: &rusqlite::Connection,
     account_id: i64,
     transaction_id: i64,
@@ -62,10 +62,7 @@ pub(super) fn has_other_outgoing_evidence(
 /// Candidate recovery and withdrawn or quarantined observations are not Activity evidence.
 /// An unresolved parent does not erase an otherwise established funding participant.
 #[cfg(feature = "transparent-inputs")]
-pub(super) fn has_ledger_spend(
-    conn: &rusqlite::Connection,
-    txid: &TxId,
-) -> Result<bool, SqliteClientError> {
+fn has_ledger_spend(conn: &rusqlite::Connection, txid: &TxId) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
         "SELECT EXISTS (
              SELECT 1 FROM tpir_spend_events s

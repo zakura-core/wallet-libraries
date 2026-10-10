@@ -15,7 +15,7 @@ use super::{sql::ROUTE_TWO, store::revalidate};
 /// Stored facts are first checked against what the wallet now holds: facts that were valid when
 /// stored can contradict a receive or spend projected later (a withdrawn receive reported
 /// again, say). Contradicted facts are deleted, so the transaction is looked up again.
-pub(super) fn enqueue(
+fn enqueue(
     conn: &Connection,
     filter: &str,
     params: &[(&str, &dyn rusqlite::ToSql)],
