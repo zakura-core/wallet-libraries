@@ -6081,8 +6081,8 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
 
 /// The height from which Ironwood nullifiers stay tracked for dynamic IVK restore
 /// sweeps. Shared retention uses the oldest unfinished account, so a completed account
-/// cannot release another account's spend evidence.
-#[cfg(feature = "orchard")]
+/// cannot release another account's spend evidence. It reads only the schema, so
+/// builds without `orchard` keep that evidence too.
 pub(crate) fn ironwood_nullifier_retention_height(
     conn: &Connection,
 ) -> Result<Option<BlockHeight>, SqliteClientError> {
@@ -6102,11 +6102,8 @@ pub(crate) fn prune_nullifier_map(
     conn: &rusqlite::Transaction<'_>,
     block_height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
-    #[cfg(feature = "orchard")]
     let ironwood_floor = ironwood_nullifier_retention_height(conn)?
         .map_or(block_height, |floor| floor.min(block_height));
-    #[cfg(not(feature = "orchard"))]
-    let ironwood_floor = block_height;
     conn.execute(
         "DELETE FROM nullifier_map WHERE block_height < ?1
          AND (spend_pool != ?2 OR block_height < ?3)",
@@ -8229,6 +8226,63 @@ mod tests {
         assert!(
             !is_change(&tx, pool),
             "an external-scope note must not be reclassified as change"
+        );
+    }
+
+    /// Pruning keeps Ironwood spend evidence at or above the durable restore retention
+    /// floor in every build, so reopening with `orchard` still finds it.
+    #[test]
+    fn nullifier_pruning_keeps_the_dynamic_retention_floor() {
+        use zcash_protocol::PoolType;
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let conn = st.wallet_mut().conn_mut();
+        conn.execute(
+            "INSERT INTO ironwood_dynamic_spend_retention (account_id, nullifier_retention_height)
+             SELECT id, 200 FROM accounts",
+            [],
+        )
+        .unwrap();
+        for (height, pool, nf) in [
+            (100u32, PoolType::IRONWOOD, 1u8),
+            (200, PoolType::IRONWOOD, 2),
+            (200, PoolType::SAPLING, 3),
+        ] {
+            conn.execute(
+                "INSERT OR IGNORE INTO tx_locator_map VALUES(?1, 0, ?2)",
+                rusqlite::params![height, [height as u8; 32]],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO nullifier_map VALUES(?1, ?2, ?3, 0)",
+                rusqlite::params![super::encoding::pool_code(pool), [nf; 32], height],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR IGNORE INTO ironwood_nullifier_scan_blocks VALUES(?1)",
+                [height],
+            )
+            .unwrap();
+        }
+        let tx = conn.transaction().unwrap();
+        super::prune_nullifier_map(&tx, 300.into()).unwrap();
+        let heights = |sql: &str| -> Vec<u32> {
+            let mut stmt = tx.prepare(sql).unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(heights("SELECT block_height FROM nullifier_map"), vec![200]);
+        assert_eq!(
+            heights("SELECT block_height FROM tx_locator_map"),
+            vec![200]
+        );
+        assert_eq!(
+            heights("SELECT height FROM ironwood_nullifier_scan_blocks"),
+            vec![200]
         );
     }
 }
