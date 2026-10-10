@@ -109,7 +109,7 @@ use super::atomically;
 #[cfg(feature = "transparent-inputs")]
 use commit::{account_lifecycle, account_quarantined};
 #[cfg(feature = "transparent-inputs")]
-use events::{apply_receive, apply_spend, open_page, record_range};
+use events::{CoverageSupport, apply_receive, apply_spend, open_page, record_range};
 #[cfg(feature = "transparent-inputs")]
 use watch::{WINDOW_LIMIT, WINDOW_SCOPES, Watch};
 

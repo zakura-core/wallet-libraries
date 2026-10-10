@@ -15,6 +15,19 @@ pub(crate) fn with_read_snapshot<T, F>(
 where
     F: FnOnce(&rusqlite::Connection) -> Result<T, SqliteClientError>,
 {
+    in_transaction(conn, f)
+}
+
+/// Runs `f` in a new deferred transaction, committed when `f` succeeds, or in the caller's
+/// transaction when one is open. A deferred transaction takes the write lock at its first
+/// write.
+pub(super) fn in_transaction<T, F>(
+    conn: &rusqlite::Connection,
+    f: F,
+) -> Result<T, SqliteClientError>
+where
+    F: FnOnce(&rusqlite::Connection) -> Result<T, SqliteClientError>,
+{
     if conn.is_autocommit() {
         let tx = conn.unchecked_transaction()?;
         let value = f(&tx)?;

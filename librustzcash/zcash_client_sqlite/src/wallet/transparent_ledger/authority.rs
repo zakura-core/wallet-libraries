@@ -5,7 +5,9 @@ use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
 
 use crate::{error::SqliteClientError, wallet::chain_tip_height};
 
-use super::policy::{DurablePolicy, durable_policy, resolve_mode};
+use zcash_client_backend::data_api::transparent_ledger::AppliedTransparentPolicy;
+
+use super::policy::{durable_policy, resolve_mode};
 
 #[cfg(feature = "transparent-inputs")]
 use {
@@ -200,7 +202,7 @@ pub(crate) fn transparent_funds_current(
 ) -> Result<bool, SqliteClientError> {
     let durable_private = matches!(
         durable_policy(conn)?,
-        Some(DurablePolicy {
+        Some(AppliedTransparentPolicy {
             mode: TransparentLedgerMode::PrivateRequired,
             ..
         })

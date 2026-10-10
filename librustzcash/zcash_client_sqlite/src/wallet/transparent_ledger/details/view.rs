@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use rusqlite::{Connection, OptionalExtension as _, named_params};
 use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::transparent_ledger::{
-    TransparentDisplayAddress, TransparentDisplayDetails, TransparentDisplayOmission,
-    TransparentDisplaySender, TransparentDisplaySource, TransparentDisplayView,
-    TransparentDisplayViewOutput, TransparentDisplayViewSender, TransparentLedgerMode,
-    WholeTransactionFee, transparent_display_address,
+    TransparentDisplayAddress, TransparentDisplayDetails, TransparentDisplayFacts,
+    TransparentDisplayOmission, TransparentDisplaySender, TransparentDisplaySource,
+    TransparentDisplayView, TransparentDisplayViewOutput, TransparentDisplayViewSender,
+    TransparentLedgerMode, WholeTransactionFee, transparent_display_address,
 };
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
@@ -231,6 +231,9 @@ pub(super) fn participation(
 }
 
 /// The detail view; see `TransparentDetailRead::transparent_display_view`.
+///
+/// The view comes from the first source the wallet holds: the raw transaction, then stored
+/// display facts, then the state of the transaction's detail work.
 pub(crate) fn view<P: consensus::Parameters>(
     conn: &Connection,
     params: &P,
@@ -300,17 +303,56 @@ pub(crate) fn view<P: consensus::Parameters>(
             })
         });
     }
-    let display_address = |address: TransparentAddress| TransparentDisplayAddress {
-        address,
-        encoded: zcash_keys::encoding::encode_transparent_address_p(params, &address),
+    let account = AccountView {
+        conn,
+        params,
+        account_id,
+        owned_inputs,
+        owned_outputs,
     };
-    // A sender is the account's own when the account is known to have spent an output paying
-    // it here or, for a sender the publisher asserts from the spent outputs, when it is one of
-    // the account's addresses. An unlocking script alone can show any public key that has ever
-    // signed, so in a raw transaction only a known spend makes the sender the account's.
-    let sender_of = |found: TransparentAddress, asserted: bool| -> Result<_, SqliteClientError> {
-        let found = display_address(found);
-        let owned = owned_inputs
+    if let Some(transaction) = transaction {
+        return view_from_raw(&account, account_part, &transaction, stored_fee);
+    }
+    if let Some(facts) = stored_facts(conn, id_tx)? {
+        return view_from_stored_facts(&account, facts).map(Some);
+    }
+    view_from_work(conn, mode, id_tx, txid).map(Some)
+}
+
+/// The account's own part in one transaction, which marks senders and outputs as its own.
+struct AccountView<'a, P> {
+    conn: &'a Connection,
+    params: &'a P,
+    /// The account's internal id; `None` when the account is unknown.
+    account_id: Option<i64>,
+    /// The spent outpoints whose ownership the account can affirm, with their spent scripts.
+    owned_inputs: OwnedInputScripts,
+    /// The indices of the account's outputs that financial queries count.
+    owned_outputs: Vec<u32>,
+}
+
+impl<P: consensus::Parameters> AccountView<'_, P> {
+    fn display_address(&self, address: TransparentAddress) -> TransparentDisplayAddress {
+        TransparentDisplayAddress {
+            address,
+            encoded: zcash_keys::encoding::encode_transparent_address_p(self.params, &address),
+        }
+    }
+
+    /// The view of sender `found`, marked as the account's own when the account is known to
+    /// have spent an output paying it here or, for a sender the publisher asserts from the
+    /// spent outputs (`asserted`), when it is one of the account's addresses. An unlocking
+    /// script alone can show any public key that has ever signed, so in a raw transaction
+    /// only a known spend makes the sender the account's.
+    fn sender(
+        &self,
+        found: TransparentAddress,
+        asserted: bool,
+    ) -> Result<TransparentDisplayViewSender, SqliteClientError> {
+        let (conn, account_id) = (self.conn, self.account_id);
+        let found = self.display_address(found);
+        let owned = self
+            .owned_inputs
             .values()
             .any(|script| transparent_display_address(script) == Some(found.address))
             || asserted
@@ -325,139 +367,180 @@ pub(crate) fn view<P: consensus::Parameters>(
             address: found,
             owned,
         })
-    };
-    let view_output = |index: u32, value: Zatoshis, found: Option<TransparentAddress>| {
+    }
+
+    /// The view of output `index`, marked as the account's own when financial queries count it.
+    fn output(
+        &self,
+        index: u32,
+        value: Zatoshis,
+        found: Option<TransparentAddress>,
+    ) -> TransparentDisplayViewOutput {
         TransparentDisplayViewOutput {
             index,
             value,
-            address: found.map(display_address),
-            owned: owned_outputs.contains(&index),
+            address: found.map(|address| self.display_address(address)),
+            owned: self.owned_outputs.contains(&index),
+        }
+    }
+}
+
+fn count(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// The view read from the raw transaction. `None` when the account's part is only shielded and
+/// the transaction has no transparent side.
+fn view_from_raw<P: consensus::Parameters>(
+    account: &AccountView<'_, P>,
+    account_part: Participation,
+    transaction: &Transaction,
+    stored_fee: Option<u64>,
+) -> Result<Option<TransparentDisplayView>, SqliteClientError> {
+    let bundle = transaction.transparent_bundle();
+    let coinbase = bundle.is_some_and(|b| b.is_coinbase());
+    let vin = match bundle {
+        Some(b) if !coinbase => &b.vin[..],
+        _ => &[],
+    };
+    // The address each input spends, as far as its unlocking script shows it.
+    let spent_addresses: Vec<Option<TransparentAddress>> = vin
+        .iter()
+        .map(|i| spent_address(&i.script_sig().0.0))
+        .collect();
+    let sender = if coinbase {
+        TransparentDisplayViewSender::Coinbase
+    } else if vin.is_empty() {
+        TransparentDisplayViewSender::Shielded
+    } else {
+        match spent_addresses.iter().flatten().next() {
+            Some(found) => account.sender(*found, false)?,
+            None => TransparentDisplayViewSender::NonStandard,
         }
     };
-    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-
-    if let Some(transaction) = transaction {
-        let bundle = transaction.transparent_bundle();
-        let coinbase = bundle.is_some_and(|b| b.is_coinbase());
-        let vin = match bundle {
-            Some(b) if !coinbase => &b.vin[..],
-            _ => &[],
-        };
-        // The address each input spends, as far as its unlocking script shows it.
-        let spent_addresses: Vec<Option<TransparentAddress>> = vin
-            .iter()
-            .map(|i| spent_address(&i.script_sig().0.0))
-            .collect();
-        let sender = if coinbase {
-            TransparentDisplayViewSender::Coinbase
-        } else if vin.is_empty() {
-            TransparentDisplayViewSender::Shielded
-        } else {
-            match spent_addresses.iter().flatten().next() {
-                Some(found) => sender_of(*found, false)?,
-                None => TransparentDisplayViewSender::NonStandard,
-            }
-        };
-        let outputs: Vec<_> = bundle
-            .map(|b| {
-                b.vout
-                    .iter()
-                    .zip(0u32..)
-                    .map(|(o, index)| {
-                        view_output(
-                            index,
-                            o.value(),
-                            transparent_display_address(&o.script_pubkey().0.0),
-                        )
-                    })
-                    .collect()
+    let outputs: Vec<_> = bundle
+        .map(|b| {
+            b.vout
+                .iter()
+                .zip(0u32..)
+                .map(|(o, index)| {
+                    account.output(
+                        index,
+                        o.value(),
+                        transparent_display_address(&o.script_pubkey().0.0),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let owned = count(
+        vin.iter()
+            .filter(|i| {
+                account
+                    .owned_inputs
+                    .contains_key(&(*i.prevout().hash(), i.prevout().n()))
             })
-            .unwrap_or_default();
-        let owned = count(
-            vin.iter()
-                .filter(|i| owned_inputs.contains_key(&(*i.prevout().hash(), i.prevout().n())))
-                .count(),
-        );
-        let input_count = count(vin.len());
-        if account_part == Participation::IfRawShowsOne && outputs.is_empty() && input_count == 0 {
-            return Ok(None);
-        }
-        let omissions = omissions(
-            &sender,
-            spent_addresses.windows(2).any(|w| w[0] != w[1]),
-            owned,
+            .count(),
+    );
+    let input_count = count(vin.len());
+    if account_part == Participation::IfRawShowsOne && outputs.is_empty() && input_count == 0 {
+        return Ok(None);
+    }
+    let omissions = omissions(
+        &sender,
+        spent_addresses.windows(2).any(|w| w[0] != w[1]),
+        owned,
+        input_count,
+        !vin.is_empty() && shielded_contribution(&transaction).is_some_and(|c| c > 0),
+        &outputs,
+        false,
+    );
+    let fee = if coinbase {
+        WholeTransactionFee::NotApplicable
+    } else {
+        stored_fee
+            .and_then(|f| Zatoshis::from_u64(f).ok())
+            .map_or(WholeTransactionFee::Unknown, WholeTransactionFee::Exact)
+    };
+    Ok(Some(TransparentDisplayView::Available(
+        TransparentDisplayDetails {
+            coinbase,
+            fee,
             input_count,
-            !vin.is_empty() && shielded_contribution(&transaction).is_some_and(|c| c > 0),
-            &outputs,
-            false,
-        );
-        let fee = if coinbase {
-            WholeTransactionFee::NotApplicable
-        } else {
-            stored_fee
-                .and_then(|f| Zatoshis::from_u64(f).ok())
-                .map_or(WholeTransactionFee::Unknown, WholeTransactionFee::Exact)
-        };
-        return Ok(Some(TransparentDisplayView::Available(
-            TransparentDisplayDetails {
-                coinbase,
-                fee,
-                input_count,
-                output_count: count(outputs.len()),
-                shielded: transaction.sprout_bundle().is_some()
-                    || transaction.sapling_bundle().is_some()
-                    || transaction.orchard_bundle().is_some()
-                    || transaction.ironwood_bundle().is_some(),
-                sender,
-                outputs,
-                omissions,
-                source: TransparentDisplaySource::RawTransaction,
-            },
-        )));
-    }
+            output_count: count(outputs.len()),
+            shielded: transaction.sprout_bundle().is_some()
+                || transaction.sapling_bundle().is_some()
+                || transaction.orchard_bundle().is_some()
+                || transaction.ironwood_bundle().is_some(),
+            sender,
+            outputs,
+            omissions,
+            source: TransparentDisplaySource::RawTransaction,
+        },
+    )))
+}
 
-    if let Some(facts) = stored_facts(conn, id_tx)? {
-        let sender = match facts.sender {
-            TransparentDisplaySender::Absent if facts.coinbase => {
-                TransparentDisplayViewSender::Coinbase
-            }
-            TransparentDisplaySender::Absent => TransparentDisplayViewSender::Shielded,
-            TransparentDisplaySender::Address(found) => sender_of(found, true)?,
-            TransparentDisplaySender::NonStandard => TransparentDisplayViewSender::NonStandard,
-        };
-        let outputs: Vec<_> = facts
-            .outputs
-            .iter()
-            .zip(0u32..)
-            .map(|(o, index)| view_output(index, o.value, o.address))
-            .collect();
-        let omissions = omissions(
-            &sender,
-            facts.multiple_source_scripts,
-            count(owned_inputs.len()),
-            facts.input_count,
-            facts.shielded_and_transparent_funding,
-            &outputs,
-            facts.more_than_two_outputs(),
-        );
-        return Ok(Some(TransparentDisplayView::Available(
-            TransparentDisplayDetails {
-                coinbase: facts.coinbase,
-                fee: facts.metadata().fee,
-                input_count: facts.input_count,
-                output_count: facts.output_count,
-                shielded: facts.shielded_components,
-                sender,
-                outputs,
-                omissions,
-                source: TransparentDisplaySource::Display(facts.provenance),
-            },
-        )));
-    }
+/// The view read from stored display facts.
+fn view_from_stored_facts<P: consensus::Parameters>(
+    account: &AccountView<'_, P>,
+    facts: TransparentDisplayFacts,
+) -> Result<TransparentDisplayView, SqliteClientError> {
+    let sender = match facts.sender {
+        TransparentDisplaySender::Absent if facts.coinbase => {
+            TransparentDisplayViewSender::Coinbase
+        }
+        TransparentDisplaySender::Absent => TransparentDisplayViewSender::Shielded,
+        TransparentDisplaySender::Address(found) => account.sender(found, true)?,
+        TransparentDisplaySender::NonStandard => TransparentDisplayViewSender::NonStandard,
+    };
+    let outputs: Vec<_> = facts
+        .outputs
+        .iter()
+        .zip(0u32..)
+        .map(|(o, index)| account.output(index, o.value, o.address))
+        .collect();
+    let omissions = omissions(
+        &sender,
+        facts.multiple_source_scripts,
+        count(account.owned_inputs.len()),
+        facts.input_count,
+        facts.shielded_and_transparent_funding,
+        &outputs,
+        facts.more_than_two_outputs(),
+    );
+    Ok(TransparentDisplayView::Available(
+        TransparentDisplayDetails {
+            coinbase: facts.coinbase,
+            fee: facts.metadata().fee,
+            input_count: facts.input_count,
+            output_count: facts.output_count,
+            shielded: facts.shielded_components,
+            sender,
+            outputs,
+            omissions,
+            source: TransparentDisplaySource::Display(facts.provenance),
+        },
+    ))
+}
 
+/// The detail work the listing would return for a transaction.
+enum ListedWork {
+    /// No listable work: none is queued, or the listing would not return it.
+    None,
+    /// Listable work, with the outcome code of its last lookup; `None` before the first.
+    Listed(Option<i64>),
+}
+
+/// The view of a transaction without raw bytes or stored facts, from its detail work.
+fn view_from_work(
+    conn: &Connection,
+    mode: TransparentLedgerMode,
+    id_tx: i64,
+    txid: TxId,
+) -> Result<TransparentDisplayView, SqliteClientError> {
     // Work counts only while the listing would return it, now or once the transaction is mined
     // again; otherwise the view is what it would be without work.
-    let work: Option<Option<i64>> = conn
+    let listed_work = conn
         .query_row(
             &format!(
                 "SELECT w.last_outcome FROM transparent_detail_work w
@@ -470,16 +553,17 @@ pub(crate) fn view<P: consensus::Parameters>(
                 ":public": mode.retains_public_authority(),
                 ":enhancement": TxQueryType::Enhancement.code(),
             ],
-            |row| row.get(0),
+            |row| row.get::<_, Option<i64>>(0),
         )
-        .optional()?;
-    Ok(Some(match work {
-        Some(None | Some(NOT_YET_PUBLISHED)) => TransparentDisplayView::Pending,
-        Some(Some(NOT_COVERED)) => TransparentDisplayView::NotCovered,
-        Some(Some(_)) => TransparentDisplayView::Unavailable,
+        .optional()?
+        .map_or(ListedWork::None, ListedWork::Listed);
+    Ok(match listed_work {
+        ListedWork::Listed(None | Some(NOT_YET_PUBLISHED)) => TransparentDisplayView::Pending,
+        ListedWork::Listed(Some(NOT_COVERED)) => TransparentDisplayView::NotCovered,
+        ListedWork::Listed(Some(_)) => TransparentDisplayView::Unavailable,
         // Payload retrieval fetches the raw transaction only under public authority.
-        None if !mode.retains_public_authority() => TransparentDisplayView::Unavailable,
-        None => {
+        ListedWork::None if !mode.retains_public_authority() => TransparentDisplayView::Unavailable,
+        ListedWork::None => {
             let payload_owned: bool = conn.query_row(
                 "SELECT EXISTS (SELECT 1 FROM tx_retrieval_queue
                                 WHERE txid = :txid AND query_type = :enhancement)",
@@ -495,5 +579,5 @@ pub(crate) fn view<P: consensus::Parameters>(
                 TransparentDisplayView::Unavailable
             }
         }
-    }))
+    })
 }

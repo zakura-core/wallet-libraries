@@ -18,13 +18,8 @@ pub(crate) fn promote<P: consensus::Parameters>(
         }
         let watch = Watch::load(conn, params, gap_limits, account)?
             .ok_or(SqliteClientError::AccountUnknown)?;
-        let account_ref = watch.account.internal_id();
-        let ledger = AccountLedger {
-            account_ref,
-            lifecycle: account_lifecycle(conn, account_ref)?,
-            quarantined: account_quarantined(conn, account_ref)?,
-            status: recovery_status(conn, gap_limits, &watch)?,
-        };
+        let ledger = AccountLedger::from_watch(conn, gap_limits, &watch)?;
+        let account_ref = ledger.account_ref;
         if ledger.lifecycle == AccountLifecycle::Active {
             return Ok(());
         }

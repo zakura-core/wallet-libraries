@@ -15,6 +15,21 @@ pub(crate) struct AccountLedger {
 
 #[cfg(feature = "transparent-inputs")]
 impl AccountLedger {
+    /// Reads the ledger state of `watch`'s account. The caller provides the read snapshot.
+    pub(super) fn from_watch(
+        conn: &rusqlite::Connection,
+        gap_limits: &GapLimits,
+        watch: &Watch,
+    ) -> Result<Self, SqliteClientError> {
+        let account_ref = watch.account.internal_id();
+        Ok(AccountLedger {
+            account_ref,
+            lifecycle: account_lifecycle(conn, account_ref)?,
+            quarantined: account_quarantined(conn, account_ref)?,
+            status: recovery_status(conn, gap_limits, watch)?,
+        })
+    }
+
     /// Whether the account holds private authority for a transaction targeting the block after
     /// `tip`: it is active and not quarantined, and its ledger is complete through a local
     /// target that is the chain tip.
@@ -39,13 +54,7 @@ pub(crate) fn account_ledger<P: consensus::Parameters>(
 ) -> Result<AccountLedger, SqliteClientError> {
     let watch =
         Watch::load(conn, params, gap_limits, account)?.ok_or(SqliteClientError::AccountUnknown)?;
-    let account_ref = watch.account.internal_id();
-    Ok(AccountLedger {
-        account_ref,
-        lifecycle: account_lifecycle(conn, account_ref)?,
-        quarantined: account_quarantined(conn, account_ref)?,
-        status: recovery_status(conn, gap_limits, &watch)?,
-    })
+    AccountLedger::from_watch(conn, gap_limits, &watch)
 }
 
 /// Why `ledger`'s account lacks private authority after `tip`, or cannot be promoted.

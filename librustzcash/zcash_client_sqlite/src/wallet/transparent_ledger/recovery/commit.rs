@@ -243,10 +243,24 @@ fn apply_facts<P: consensus::Parameters>(
     }
 
     for range in &commit.coverage {
-        record_range(conn, account_ref, revision_id, &commit.anchor, range, true)?;
+        record_range(
+            conn,
+            account_ref,
+            revision_id,
+            &commit.anchor,
+            range,
+            CoverageSupport::Supported,
+        )?;
     }
     for range in &commit.unsupported {
-        record_range(conn, account_ref, revision_id, &commit.anchor, range, false)?;
+        record_range(
+            conn,
+            account_ref,
+            revision_id,
+            &commit.anchor,
+            range,
+            CoverageSupport::Unsupported,
+        )?;
     }
 
     let window_grew = if active {

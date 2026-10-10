@@ -3,7 +3,8 @@
 
 use rusqlite::named_params;
 use zcash_client_backend::data_api::transparent_ledger::{
-    EffectCompleteness, PoolEffect, TransactionMetadataEvidence, WholeTransactionFee,
+    AggregatePayment, EffectCompleteness, FeeState, HistoryClassification, PoolEffect,
+    TransactionMetadataEvidence, WholeTransactionFee,
 };
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{PoolType, value::Zatoshis};
@@ -207,4 +208,106 @@ pub(super) fn is_private_shielding(
         && tx_facts.has_transparent_outputs == Some(false)
         && shape
         && sent_elsewhere == 0
+}
+
+/// The amount the account paid others in a transaction it alone funded from transparent
+/// inputs: its spent value less what it received back and the exact whole-transaction fee.
+/// `None` unless the account's transparent effect is complete and its inputs are every input.
+pub(super) fn inferred_payment(
+    transaction_metadata: Option<&TransactionMetadataEvidence>,
+    transparent_effect: Option<&PoolEffect>,
+    sole_transparent_funding: bool,
+) -> Option<Zatoshis> {
+    transaction_metadata.and_then(|e| {
+        let WholeTransactionFee::Exact(fee) = e.metadata.fee else {
+            return None;
+        };
+        let effect = transparent_effect?;
+        if !sole_transparent_funding || effect.completeness != EffectCompleteness::Complete {
+            return None;
+        }
+        effect
+            .spent
+            .into_u64()
+            .checked_sub(effect.received.into_u64())?
+            .checked_sub(fee.into_u64())
+            .and_then(|v| Zatoshis::from_u64(v).ok())
+    })
+}
+
+/// The aggregate payment to others: exact for a transaction the wallet constructed or whose
+/// payment the evidence pins down, partial when only some sent outputs are recorded.
+pub(super) fn aggregate_payment(
+    tx_facts: &TransactionFacts,
+    inferred_payment: Option<Zatoshis>,
+    recorded_sent: u64,
+) -> Result<AggregatePayment, SqliteClientError> {
+    Ok(if tx_facts.constructed {
+        AggregatePayment::Exact(
+            Zatoshis::from_u64(recorded_sent)
+                .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?,
+        )
+    } else if let Some(amount) = inferred_payment {
+        AggregatePayment::Exact(amount)
+    } else if recorded_sent > 0 {
+        AggregatePayment::Partial(
+            Zatoshis::from_u64(recorded_sent)
+                .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?,
+        )
+    } else {
+        AggregatePayment::Unknown
+    })
+}
+
+/// The fee attributed to the account.
+///
+/// Local construction records the fee independently of recovered metadata.
+/// Mixed-pool metadata cannot erase that richer local-send fact. Without full data, a
+/// mixed transaction's stored fee is the whole transaction's, and never the account's.
+pub(super) fn account_fee(
+    tx_facts: &TransactionFacts,
+    spent: u64,
+    transaction_metadata: Option<&TransactionMetadataEvidence>,
+    sole_transparent_funding: bool,
+    inferred_payment: Option<Zatoshis>,
+    received_only: bool,
+) -> FeeState {
+    match tx_facts.fee {
+        Some(fee)
+            if spent > 0
+                && (tx_facts.constructed
+                    || (!tx_facts.mixed_without_full_data
+                        && (transaction_metadata.is_none() || sole_transparent_funding))) =>
+        {
+            FeeState::Known(fee)
+        }
+        _ if sole_transparent_funding && inferred_payment.is_some() => {
+            match transaction_metadata.unwrap().metadata.fee {
+                WholeTransactionFee::Exact(fee) => FeeState::Known(fee),
+                _ => FeeState::Unknown,
+            }
+        }
+        _ if received_only => FeeState::NotApplicable,
+        _ => FeeState::Unknown,
+    }
+}
+
+/// How far the entry reconstructs what the transaction did. A missing memo does not change
+/// what the transaction did; missing effects or payments can.
+pub(super) fn classification(
+    tx_facts: &TransactionFacts,
+    received_only: bool,
+    payments_accounted: bool,
+    inferred_payment: Option<Zatoshis>,
+    net_shielding: bool,
+) -> HistoryClassification {
+    if tx_facts.created_locally {
+        HistoryClassification::LocalIntent
+    } else if received_only || payments_accounted || inferred_payment.is_some() {
+        HistoryClassification::Reconstructed
+    } else if net_shielding {
+        HistoryClassification::NetReconstructed
+    } else {
+        HistoryClassification::Provisional
+    }
 }

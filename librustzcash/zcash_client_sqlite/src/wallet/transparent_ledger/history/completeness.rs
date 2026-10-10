@@ -4,6 +4,7 @@
 use std::rc::Rc;
 
 use rusqlite::{named_params, types::Value};
+use zcash_client_backend::data_api::transparent_ledger::{EffectCompleteness, PoolEffect};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{PoolType, ShieldedPool, consensus::BlockHeight};
 
@@ -11,6 +12,10 @@ use crate::{
     error::SqliteClientError,
     wallet::{common::table_constants, encoding::pool_code},
 };
+
+use zcash_protocol::value::Zatoshis;
+
+use super::evidence::{KnownPoolAmount, TransactionFacts};
 
 #[cfg(feature = "transparent-inputs")]
 use {
@@ -224,4 +229,125 @@ pub(super) fn has_unresolved_spend(
         named_params![":account_id": account_id, ":txid": txid.as_ref()],
         |row| row.get(0),
     )?)
+}
+
+/// What decides how complete one account's effect in each pool of one transaction is.
+pub(super) struct EffectEvidence<'a> {
+    pub(super) conn: &'a rusqlite::Connection,
+    pub(super) account_id: i64,
+    #[cfg(feature = "transparent-inputs")]
+    pub(super) txid: &'a TxId,
+    pub(super) tx_facts: &'a TransactionFacts,
+    /// Contiguous scanning has reached the transaction's mined height.
+    pub(super) scanned: bool,
+    /// The full data of an unmined transaction, decoded when scanning has reached the tip and
+    /// its spends can be checked for links to notes found since it was ingested.
+    pub(super) unmined_data: Option<&'a Transaction>,
+    /// The account's full viewing key lets scanning detect its shielded spends.
+    pub(super) detects_shielded_spends: bool,
+    #[cfg(feature = "transparent-inputs")]
+    pub(super) discovery: &'a TransparentDiscovery,
+}
+
+impl EffectEvidence<'_> {
+    /// How complete the account's recorded effect in `pool` is.
+    pub(super) fn completeness(
+        &self,
+        pool: PoolType,
+    ) -> Result<EffectCompleteness, SqliteClientError> {
+        if self.tx_facts.constructed {
+            // The wallet built and stored it, recording every input it spent and every
+            // output to its own transparent or internal addresses. A shielded payment to one
+            // of its external addresses is recorded only once scanning or enhancement finds
+            // it.
+            return Ok(match pool {
+                PoolType::Shielded(_)
+                    if !self.scanned
+                        && has_unrecorded_sent_output(self.conn, self.tx_facts.id, pool)? =>
+                {
+                    EffectCompleteness::Incomplete
+                }
+                _ => EffectCompleteness::Complete,
+            });
+        }
+        Ok(match pool {
+            PoolType::Transparent => {
+                #[cfg(feature = "transparent-inputs")]
+                match self.discovery {
+                    // Public discovery is authoritative only once its own pending input
+                    // work is done.
+                    TransparentDiscovery::Public
+                        if has_pending_parent(self.conn, self.tx_facts.id)? =>
+                    {
+                        EffectCompleteness::Incomplete
+                    }
+                    TransparentDiscovery::Public => EffectCompleteness::PublicDiscovery,
+                    TransparentDiscovery::Private { covered_through } => {
+                        match (self.tx_facts.mined_height, *covered_through) {
+                            (Some(mined), Some(covered))
+                                if mined <= covered
+                                    && !has_unresolved_spend(
+                                        self.conn,
+                                        self.account_id,
+                                        self.txid,
+                                    )? =>
+                            {
+                                EffectCompleteness::Complete
+                            }
+                            _ => EffectCompleteness::Incomplete,
+                        }
+                    }
+                }
+                #[cfg(not(feature = "transparent-inputs"))]
+                EffectCompleteness::Incomplete
+            }
+            // Without a full viewing key, no amount of scanning reveals the account's spends.
+            PoolType::Shielded(_) if !self.detects_shielded_spends => {
+                EffectCompleteness::Incomplete
+            }
+            // Scanning a block finds every owned output and every spend of an output found
+            // earlier, so everything through the contiguously scanned height is known. An
+            // unmined transaction's full data reveals its owned outputs, but its spends are
+            // linked only to notes already found. Once scanning reaches the tip, verify that
+            // notes discovered after payload ingestion have their spend links too.
+            PoolType::Shielded(pool) => match (self.tx_facts.mined_height, self.unmined_data) {
+                (Some(_), _) if self.scanned => EffectCompleteness::Complete,
+                (None, Some(data))
+                    if !has_unlinked_shielded_spend(
+                        self.conn,
+                        self.account_id,
+                        self.tx_facts.id,
+                        data,
+                        pool,
+                    )? =>
+                {
+                    EffectCompleteness::Complete
+                }
+                _ => EffectCompleteness::Incomplete,
+            },
+        })
+    }
+
+    /// The account's effect in each pool this build supports, from its recorded amounts.
+    pub(super) fn pool_effects(
+        &self,
+        recorded_amounts: &[KnownPoolAmount],
+    ) -> Result<Vec<PoolEffect>, SqliteClientError> {
+        let mut effects = vec![];
+        for pool in supported_pools() {
+            let (received, spent) = recorded_amounts
+                .iter()
+                .find(|amounts| amounts.pool == pool)
+                .map_or((Zatoshis::ZERO, Zatoshis::ZERO), |amounts| {
+                    (amounts.received, amounts.spent)
+                });
+            effects.push(PoolEffect {
+                pool,
+                received,
+                spent,
+                completeness: self.completeness(pool)?,
+            });
+        }
+        Ok(effects)
+    }
 }

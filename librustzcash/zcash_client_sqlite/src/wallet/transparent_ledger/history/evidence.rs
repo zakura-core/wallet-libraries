@@ -158,13 +158,20 @@ pub(super) fn zatoshis(value: i64) -> Result<Zatoshis, SqliteClientError> {
         .map_err(|_| SqliteClientError::CorruptedData(format!("invalid value {value}")))
 }
 
+/// The account's recorded received and spent amounts in one pool of a transaction.
+pub(super) struct KnownPoolAmount {
+    pub(super) pool: PoolType,
+    pub(super) received: Zatoshis,
+    pub(super) spent: Zatoshis,
+}
+
 /// The account's recorded received and spent amounts per pool in the transaction. Empty when the
 /// account has no recorded output or spend in it.
 pub(super) fn known_amounts(
     conn: &rusqlite::Connection,
     account_id: i64,
     transaction_id: i64,
-) -> Result<Vec<(PoolType, Zatoshis, Zatoshis)>, SqliteClientError> {
+) -> Result<Vec<KnownPoolAmount>, SqliteClientError> {
     let mut stmt = conn.prepare_cached(
         "SELECT pool, SUM(received), SUM(spent) FROM (
              SELECT ro.pool, ro.value AS received, 0 AS spent
@@ -185,11 +192,11 @@ pub(super) fn known_amounts(
     ])?;
     let mut amounts = vec![];
     while let Some(row) = rows.next()? {
-        amounts.push((
-            parse_pool_code(row.get(0)?)?,
-            zatoshis(row.get(1)?)?,
-            zatoshis(row.get(2)?)?,
-        ));
+        amounts.push(KnownPoolAmount {
+            pool: parse_pool_code(row.get(0)?)?,
+            received: zatoshis(row.get(1)?)?,
+            spent: zatoshis(row.get(2)?)?,
+        });
     }
     Ok(amounts)
 }

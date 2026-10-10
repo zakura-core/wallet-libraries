@@ -421,6 +421,15 @@ pub(super) fn open_page(
     Ok(())
 }
 
+/// Whether a coverage range is one the revision indexed (supported) or one it declares it
+/// cannot index (unsupported).
+#[cfg(feature = "transparent-inputs")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CoverageSupport {
+    Supported,
+    Unsupported,
+}
+
 #[cfg(feature = "transparent-inputs")]
 pub(super) fn record_range(
     conn: &rusqlite::Connection,
@@ -428,8 +437,9 @@ pub(super) fn record_range(
     revision_id: i64,
     anchor: &ChainPoint,
     range: &AddressRange,
-    supported: bool,
+    support: CoverageSupport,
 ) -> Result<(), SqliteClientError> {
+    let supported = support == CoverageSupport::Supported;
     let script = script_bytes(&range.address);
     let (from, through) = (u32::from(range.from), u32::from(range.through));
     let contradicted: bool = conn.query_row(

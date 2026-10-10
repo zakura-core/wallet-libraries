@@ -14,9 +14,8 @@ mod evidence;
 
 use rusqlite::{OptionalExtension as _, named_params};
 use zcash_client_backend::data_api::transparent_ledger::{
-    AccountMovement, AggregatePayment, DetailCompleteness, EffectCompleteness, FeeState,
-    HistoryClassification, PoolEffect, TransactionHistoryDetails, TransparentLedgerMode,
-    WholeTransactionFee,
+    AccountMovement, DetailCompleteness, EffectCompleteness, TransactionHistoryDetails,
+    TransparentLedgerMode,
 };
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
@@ -33,10 +32,11 @@ use crate::{
 
 use super::{policy::pending_details, resolve_mode};
 
-use classify::{inferred_outgoing, is_private_shielding, whole_fee};
-use completeness::{
-    has_unlinked_shielded_spend, has_unrecorded_sent_output, has_unretrieved_memo, supported_pools,
+use classify::{
+    account_fee, aggregate_payment, classification, inferred_outgoing, inferred_payment,
+    is_private_shielding, whole_fee,
 };
+use completeness::{EffectEvidence, has_unretrieved_memo};
 use evidence::{
     known_amounts, metadata_evidence, qualified_owned_spend_inputs, sent_elsewhere,
     transaction_facts,
@@ -44,10 +44,7 @@ use evidence::{
 
 #[cfg(feature = "transparent-inputs")]
 use {
-    completeness::{
-        TransparentDiscovery, has_pending_parent, has_unresolved_spend, transparent_discovery,
-    },
-    evidence::has_active_ledger_spend,
+    completeness::transparent_discovery, evidence::has_active_ledger_spend,
     zcash_keys::keys::transparent::gap_limits::GapLimits,
 };
 
@@ -79,6 +76,7 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
 
     let mut entries = vec![];
     for txid in txids {
+        // Load the transaction row and the account's recorded amounts in it.
         let Some(tx_facts) = transaction_facts(conn, txid)? else {
             continue;
         };
@@ -92,6 +90,7 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             continue;
         }
 
+        // Effects: each supported pool's recorded amounts, and how complete they are.
         let scanned = tx_facts
             .mined_height
             .is_some_and(|mined| fully_scanned.is_some_and(|scanned| mined <= scanned));
@@ -112,109 +111,45 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         } else {
             None
         };
-        let completeness = |pool: PoolType| -> Result<EffectCompleteness, SqliteClientError> {
-            if tx_facts.constructed {
-                // The wallet built and stored it, recording every input it spent and every
-                // output to its own transparent or internal addresses. A shielded payment to one
-                // of its external addresses is recorded only once scanning or enhancement finds
-                // it.
-                return Ok(match pool {
-                    PoolType::Shielded(_)
-                        if !scanned && has_unrecorded_sent_output(conn, tx_facts.id, pool)? =>
-                    {
-                        EffectCompleteness::Incomplete
-                    }
-                    _ => EffectCompleteness::Complete,
-                });
-            }
-            Ok(match pool {
-                PoolType::Transparent => {
-                    #[cfg(feature = "transparent-inputs")]
-                    match &discovery {
-                        // Public discovery is authoritative only once its own pending input
-                        // work is done.
-                        TransparentDiscovery::Public if has_pending_parent(conn, tx_facts.id)? => {
-                            EffectCompleteness::Incomplete
-                        }
-                        TransparentDiscovery::Public => EffectCompleteness::PublicDiscovery,
-                        TransparentDiscovery::Private { covered_through } => {
-                            match (tx_facts.mined_height, *covered_through) {
-                                (Some(mined), Some(covered))
-                                    if mined <= covered
-                                        && !has_unresolved_spend(conn, account_id, txid)? =>
-                                {
-                                    EffectCompleteness::Complete
-                                }
-                                _ => EffectCompleteness::Incomplete,
-                            }
-                        }
-                    }
-                    #[cfg(not(feature = "transparent-inputs"))]
-                    EffectCompleteness::Incomplete
-                }
-                // Without a full viewing key, no amount of scanning reveals the account's spends.
-                PoolType::Shielded(_) if !detects_shielded_spends => EffectCompleteness::Incomplete,
-                // Scanning a block finds every owned output and every spend of an output found
-                // earlier, so everything through the contiguously scanned height is known. An
-                // unmined transaction's full data reveals its owned outputs, but its spends are
-                // linked only to notes already found. Once scanning reaches the tip, verify that
-                // notes discovered after payload ingestion have their spend links too.
-                PoolType::Shielded(pool) => match (tx_facts.mined_height, unmined_data.as_ref()) {
-                    (Some(_), _) if scanned => EffectCompleteness::Complete,
-                    (None, Some(data))
-                        if !has_unlinked_shielded_spend(
-                            conn,
-                            account_id,
-                            tx_facts.id,
-                            data,
-                            pool,
-                        )? =>
-                    {
-                        EffectCompleteness::Complete
-                    }
-                    _ => EffectCompleteness::Incomplete,
-                },
-            })
+        let effect_evidence = EffectEvidence {
+            conn,
+            account_id,
+            #[cfg(feature = "transparent-inputs")]
+            txid,
+            tx_facts: &tx_facts,
+            scanned,
+            unmined_data: unmined_data.as_ref(),
+            detects_shielded_spends,
+            #[cfg(feature = "transparent-inputs")]
+            discovery: &discovery,
         };
-
-        let mut effects = vec![];
-        for pool in supported_pools() {
-            let (received, spent) = recorded_amounts
-                .iter()
-                .find(|(p, _, _)| *p == pool)
-                .map_or((Zatoshis::ZERO, Zatoshis::ZERO), |(_, r, s)| (*r, *s));
-            effects.push(PoolEffect {
-                pool,
-                received,
-                spent,
-                completeness: completeness(pool)?,
-            });
-        }
+        let effects = effect_evidence.pool_effects(&recorded_amounts)?;
         let transaction_metadata = metadata_evidence(conn, account_id, txid)?;
         let settled = effects.iter().all(|e| e.completeness.is_settled());
         let spent: u64 = recorded_amounts
             .iter()
-            .map(|(_, _, spent)| spent.into_u64())
+            .map(|amounts| amounts.spent.into_u64())
             .sum();
         let received: u64 = recorded_amounts
             .iter()
-            .map(|(_, received, _)| received.into_u64())
+            .map(|amounts| amounts.received.into_u64())
             .sum();
 
+        // Payments: whether the account's recorded movements account for all it spent.
         // The account provably only received: every effect is settled and none is a spend. Creation
         // evidence without the stored construction details means the wallet likely funded the
         // transaction through spends it has not recorded.
         let received_only =
             settled && spent == 0 && !(tx_facts.created_locally && !tx_facts.constructed);
+        let recorded_sent = sent_elsewhere(conn, account_id, tx_facts.id)?;
         // Every unit the account spent is accounted for by what it received back, the recorded
         // outputs it sent elsewhere, and the fee, so no unknown payment of its funds remains.
         // Full data alone proves nothing: outputs that cannot be decrypted are not recorded.
         let payments_accounted = match tx_facts.fee {
             Some(fee) if settled && spent > 0 => {
-                let sent = sent_elsewhere(conn, account_id, tx_facts.id)?;
                 Some(spent)
                     == received
-                        .checked_add(sent)
+                        .checked_add(recorded_sent)
                         .and_then(|v| v.checked_add(fee.into_u64()))
             }
             _ => false,
@@ -231,7 +166,7 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
                 &effects,
                 transaction_metadata.as_ref(),
                 owned_inputs,
-                sent_elsewhere(conn, account_id, tx_facts.id)?,
+                recorded_sent,
             );
         let payments_accounted = payments_accounted && !tx_facts.mixed_without_full_data;
         let payment_details = if tx_facts.constructed
@@ -248,64 +183,28 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
                 && owned_inputs > 0
                 && owned_inputs == e.metadata.transparent_input_count
         });
-        let inferred_payment = transaction_metadata.as_ref().and_then(|e| {
-            let WholeTransactionFee::Exact(fee) = e.metadata.fee else {
-                return None;
-            };
-            let effect = transparent_effect?;
-            if !sole_transparent_funding || effect.completeness != EffectCompleteness::Complete {
-                return None;
-            }
-            effect
-                .spent
-                .into_u64()
-                .checked_sub(effect.received.into_u64())?
-                .checked_sub(fee.into_u64())
-                .and_then(|v| Zatoshis::from_u64(v).ok())
-        });
-        let recorded_sent = sent_elsewhere(conn, account_id, tx_facts.id)?;
-        let aggregate_payment = if tx_facts.constructed {
-            AggregatePayment::Exact(
-                Zatoshis::from_u64(recorded_sent)
-                    .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?,
-            )
-        } else if let Some(amount) = inferred_payment {
-            AggregatePayment::Exact(amount)
-        } else if recorded_sent > 0 {
-            AggregatePayment::Partial(
-                Zatoshis::from_u64(recorded_sent)
-                    .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?,
-            )
-        } else {
-            AggregatePayment::Unknown
-        };
-        // Local construction records the fee independently of recovered metadata.
-        // Mixed-pool metadata cannot erase that richer local-send fact. Without full data, a
-        // mixed transaction's stored fee is the whole transaction's, and never the account's.
-        let fee = match tx_facts.fee {
-            Some(fee)
-                if spent > 0
-                    && (tx_facts.constructed
-                        || (!tx_facts.mixed_without_full_data
-                            && (transaction_metadata.is_none() || sole_transparent_funding))) =>
-            {
-                FeeState::Known(fee)
-            }
-            _ if sole_transparent_funding && inferred_payment.is_some() => {
-                match transaction_metadata.as_ref().unwrap().metadata.fee {
-                    WholeTransactionFee::Exact(fee) => FeeState::Known(fee),
-                    _ => FeeState::Unknown,
-                }
-            }
-            _ if received_only => FeeState::NotApplicable,
-            _ => FeeState::Unknown,
-        };
+        let inferred_payment = inferred_payment(
+            transaction_metadata.as_ref(),
+            transparent_effect,
+            sole_transparent_funding,
+        );
+        let aggregate_payment = aggregate_payment(&tx_facts, inferred_payment, recorded_sent)?;
+
+        // Fees and the Activity-only outgoing value.
+        let fee = account_fee(
+            &tx_facts,
+            spent,
+            transaction_metadata.as_ref(),
+            sole_transparent_funding,
+            inferred_payment,
+            received_only,
+        );
         let whole_transaction_fee = whole_fee(tx_facts.fee, transaction_metadata.as_ref());
         // A database may retain owned amounts from a pool disabled in this build. The effects
         // above omit that pool, so their completeness cannot justify dropping its known amounts.
-        let effects_cover_known = recorded_amounts.iter().all(|(pool, received, spent)| {
-            (*received == Zatoshis::ZERO && *spent == Zatoshis::ZERO)
-                || effects.iter().any(|effect| effect.pool == *pool)
+        let effects_cover_known = recorded_amounts.iter().all(|amounts| {
+            (amounts.received == Zatoshis::ZERO && amounts.spent == Zatoshis::ZERO)
+                || effects.iter().any(|effect| effect.pool == amounts.pool)
         });
         let inferred_outgoing_value = match whole_transaction_fee {
             Some(fee)
@@ -327,17 +226,13 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             }
             _ => None,
         };
-        // A missing memo does not change what the transaction did; missing effects or payments
-        // can.
-        let classification = if tx_facts.created_locally {
-            HistoryClassification::LocalIntent
-        } else if received_only || payments_accounted || inferred_payment.is_some() {
-            HistoryClassification::Reconstructed
-        } else if net_shielding {
-            HistoryClassification::NetReconstructed
-        } else {
-            HistoryClassification::Provisional
-        };
+        let classification = classification(
+            &tx_facts,
+            received_only,
+            payments_accounted,
+            inferred_payment,
+            net_shielding,
+        );
 
         entries.push(TransactionHistoryDetails {
             has_transparent_outputs: tx_facts.has_transparent_outputs,

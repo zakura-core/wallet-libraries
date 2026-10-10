@@ -1,6 +1,9 @@
 use super::*;
 #[cfg(feature = "orchard")]
-use zcash_protocol::consensus::BlockHeight;
+use {
+    zcash_client_backend::data_api::transparent_ledger::{FeeState, HistoryClassification},
+    zcash_protocol::consensus::BlockHeight,
+};
 
 mod activity_outgoing;
 
