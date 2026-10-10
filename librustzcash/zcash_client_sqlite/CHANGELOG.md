@@ -156,7 +156,7 @@ workspace.
   `verify_refund_funding_proposal`. The refund index travels in a memo on the funding
   transaction's internal Ironwood change, whose only transparent output is the deposit. A
   refund key starts scanning when `store_transactions_to_be_sent` stores its funding
-  transaction, or when the provider reports a refund owed for a deposit paid from
+  transaction, which fails if the deposit is not recorded for that key, or when the provider reports a refund owed for a deposit paid from
   elsewhere.
 - Lifecycle: `close_finished_dynamic_keys`. A key closes once its final provider status
   and expected receipts are in, or 30 days after the quote deadline (a provider status can
