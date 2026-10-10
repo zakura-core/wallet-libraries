@@ -146,9 +146,10 @@ workspace.
   abandoned. Seen addresses move the gap like paid ones, since a restore walks past them.
   In an account restored with `AccountBirthday::recover_until`, an address without local
   quotes is issued only when the set lacks it and covers its quotes from
-  `EARLIEST_RECEIVE_QUOTE` until the time of the `recover_until` block, and an index
-  without a key waits for the restore lookahead to register and sweep it; otherwise
-  issuance returns `ReservationPolicy::Gap`.
+  `EARLIEST_RECEIVE_QUOTE` until the time of the `recover_until` block; otherwise
+  issuance returns `ReservationPolicy::Gap`. Such an account's restore lookahead stays
+  `RECEIVE_GAP_LIMIT` past every allocated address, including ones this wallet issues,
+  and an index waits until its key is registered and swept.
 - Operations: each quote is one provider operation. An incoming one is
   `begin_receive_operation`, `finish_receive_operation` (`OperationOutcome`) and
   `start_receive_operation`, which returns the `ReceiveDeposit` to show; an accepted
