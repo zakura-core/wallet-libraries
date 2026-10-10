@@ -2669,10 +2669,12 @@ fn rediscovery_is_routed_privately_and_can_change_the_next_route() {
     assert_eq!(queries_for(&private), 1);
 }
 
-// Notes found by a dynamic key go through the same private discovery. Their memo
-// decrypts with that key, never the account's.
+// A note found by a dynamic key binds its transaction's metadata with that key, never
+// the account's, but its memo is never retrieved privately: anyone who recovers the
+// note through the public zero OVK can re-encrypt it with another memo that still
+// decrypts.
 #[test]
-fn dynamic_key_notes_authenticate_memos_after_reopen() {
+fn dynamic_key_notes_bind_metadata_without_private_memos_after_reopen() {
     use crate::{
         WalletDb,
         testing::db::{test_clock, test_rng},
@@ -2734,13 +2736,13 @@ fn dynamic_key_notes_authenticate_memos_after_reopen() {
         let requests = st.wallet().db().query_requests().unwrap();
         assert_eq!(requests.len(), 1);
         let request = requests[0];
-        let pending = st
-            .wallet()
-            .db()
-            .pending_memo(request.position())
-            .unwrap()
-            .unwrap();
-        assert_eq!(pending.note.recipient(), key.receiver());
+        assert!(
+            st.wallet()
+                .db()
+                .pending_memo(request.position())
+                .unwrap()
+                .is_none()
+        );
 
         let mut suffix = *record.enc_ciphertext_suffix();
         suffix[527] ^= 1;
@@ -2778,7 +2780,7 @@ fn dynamic_key_notes_authenticate_memos_after_reopen() {
             EnhancePirStoreResult::Stored
         );
         assert!(st.wallet().db().query_requests().unwrap().is_empty());
-        let (memo, key_ref): (Vec<u8>, Option<i64>) = st
+        let (memo, key_ref): (Option<Vec<u8>>, Option<i64>) = st
             .wallet()
             .conn()
             .query_row(
@@ -2787,7 +2789,7 @@ fn dynamic_key_notes_authenticate_memos_after_reopen() {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(memo, [4; 512]);
+        assert_eq!(memo, None);
         assert!(key_ref.is_some());
         assert!(!visible(&st, request));
         assert!(

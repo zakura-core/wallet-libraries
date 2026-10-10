@@ -1,4 +1,4 @@
-use super::apply::fixture;
+use super::apply::{fixture, fixture_in};
 use super::*;
 use zakura_dynamic_ivk::lifecycle::OperationStatus;
 
@@ -213,9 +213,12 @@ fn retention_prunes_other_pools_and_respects_the_oldest_account() {
     tx.commit().unwrap();
 }
 
-#[test]
-fn missing_spend_history_queues_replay_and_recovers_after_restart() {
-    let (mut st, key, candidate, through, path) = fixture();
+/// [`fixture_in`] `st`, retaining spend history without coverage of its payment, which
+/// has queued a replay of that history.
+fn awaiting_spend_history(
+    st: State,
+) -> (State, DynamicKey, PendingPayment, ChainPoint, MerklePath) {
+    let (mut st, key, candidate, through, path) = fixture_in(st);
     let account = st.test_account().unwrap().id();
     retain(st.wallet_mut().db_mut(), account);
     st.wallet()
@@ -241,6 +244,19 @@ fn missing_spend_history_queues_replay_and_recovers_after_restart() {
         .unwrap(),
         PaymentApplication::AwaitingSpendHistory
     );
+    (st, key, candidate, through, path)
+}
+
+/// Whether the wallet suggests scanning `height`.
+fn suggests_scanning(st: &State, height: BlockHeight) -> bool {
+    let ranges = st.wallet().db().suggest_scan_ranges().unwrap();
+    ranges.iter().any(|r| r.block_range().contains(&height))
+}
+
+#[test]
+fn missing_spend_history_queues_replay_and_recovers_after_restart() {
+    let (mut st, key, candidate, through, path) = awaiting_spend_history(ironwood_wallet());
+    let account = st.test_account().unwrap().id();
     let reopened = WalletDb::for_path(
         st.wallet().data_file_path(),
         *st.network(),
@@ -249,12 +265,7 @@ fn missing_spend_history_queues_replay_and_recovers_after_restart() {
     )
     .unwrap();
     *st.wallet_mut().db_mut() = reopened;
-    let ranges = st.wallet().db().suggest_scan_ranges().unwrap();
-    assert!(
-        ranges
-            .iter()
-            .any(|r| r.block_range().contains(&candidate.height))
-    );
+    assert!(suggests_scanning(&st, candidate.height));
     assert!(
         st.wallet()
             .db()
@@ -275,6 +286,40 @@ fn missing_spend_history_queues_replay_and_recovers_after_restart() {
         .unwrap(),
         PaymentApplication::Applied
     );
+}
+
+#[test]
+fn account_deletion_requeues_a_completed_replay() {
+    let mut st = ironwood_wallet();
+    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+    let birthday = st.test_account().unwrap().birthday().clone();
+    let (other, _) = st
+        .wallet_mut()
+        .db_mut()
+        .create_account("other", &seed, &birthday, None)
+        .unwrap();
+    let (mut st, key, candidate, through, path) = awaiting_spend_history(st);
+    let account = st.test_account().unwrap().id();
+    // The replay completes, but the payment stays queued.
+    st.scan_cached_blocks_with_dynamic_ivks(candidate.height, 1);
+    assert!(!suggests_scanning(&st, candidate.height));
+    // Deleting another account discards the replay's coverage.
+    st.wallet_mut().delete_account(other).unwrap();
+    let apply = |st: &mut State| {
+        apply_payment(
+            st.wallet_mut().db_mut(),
+            account,
+            key.key_id(),
+            &candidate,
+            through,
+            (through, &path),
+        )
+        .unwrap()
+    };
+    assert_eq!(apply(&mut st), PaymentApplication::AwaitingSpendHistory);
+    assert!(suggests_scanning(&st, candidate.height));
+    st.scan_cached_blocks_with_dynamic_ivks(candidate.height, 1);
+    assert_eq!(apply(&mut st), PaymentApplication::Applied);
 }
 
 #[test]

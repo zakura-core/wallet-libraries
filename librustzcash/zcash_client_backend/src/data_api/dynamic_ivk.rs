@@ -8,8 +8,8 @@
 //! and [`decrypt_and_store_transaction_with_dynamic_ivks`], which try its open keys
 //! alongside the account keys. A restored wallet cannot rescan public history for
 //! every key its seed may have used, so it looks each recovered key up once in a
-//! receiver directory instead: a restore sweep, which `zakura-pir-receiver` runs with
-//! the sweep steps of these traits.
+//! receiver directory instead: a restore sweep, run with the sweep steps of these
+//! traits.
 //!
 //! [`decrypt_and_store_transaction_with_dynamic_ivks`]: super::wallet::decrypt_and_store_transaction_with_dynamic_ivks
 
@@ -106,8 +106,11 @@ pub enum PaymentApplication {
     /// or its transaction identity against stored data. The key's queued lookup is
     /// discarded, so its next attempt asks the directory again.
     Rejected,
-    /// Note, memo, witness, key identity, and any known spend were committed together,
-    /// or the wallet already stored the note under another transaction.
+    /// Note, witness, key identity, and any known spend were committed together, or the
+    /// wallet already stored the note under another transaction. The retrieved memo is
+    /// untrusted (see [`EncryptedNote::decrypt`]).
+    ///
+    /// [`EncryptedNote::decrypt`]: zakura_dynamic_ivk::recovery::EncryptedNote::decrypt
     Applied,
 }
 
@@ -122,15 +125,13 @@ pub trait DynamicIvkRead: WalletRead {
     /// Selects keys for full transaction decryption, retaining known-note ownership
     /// even after a key stops scanning. `receivers` come from ordinary authenticated
     /// decryption and preserve self-payments before compact scanning.
-    /// Stores without a transaction index can conservatively return all keys.
+    /// Stores without a transaction index can conservatively return every registered key.
     fn get_dynamic_transaction_keys(
         &self,
-        _txid: TxId,
-        _height: Option<BlockHeight>,
-        _receivers: &[orchard::Address],
-    ) -> Result<Vec<DynamicScanningKey<Self::AccountId>>, Self::Error> {
-        self.get_dynamic_scanning_keys()
-    }
+        txid: TxId,
+        height: Option<BlockHeight>,
+        receivers: &[orchard::Address],
+    ) -> Result<Vec<DynamicScanningKey<Self::AccountId>>, Self::Error>;
 
     /// The anchor of a directory publication covering blocks through `height`, as the
     /// wallet's own chain records it. `through` is the wallet's fully scanned tip. Defers

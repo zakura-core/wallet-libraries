@@ -312,21 +312,13 @@ fn require_lwd(
     Ok(())
 }
 
-/// Settles enhancement for the Ironwood note at `action_index` of `tx_ref`, whose memo a
-/// dynamic IVK restore sweep retrieved privately: dequeues its memo retrieval, keeps the
-/// transaction on private routing unless it already has a route, and retires its
-/// enhancement if nothing is left.
+/// Settles enhancement for `tx_ref`, which holds a note a dynamic IVK restore sweep
+/// retrieved privately: keeps the transaction on private routing unless it already has a
+/// route, and retires its enhancement if nothing is left.
 pub(crate) fn finish_private_receipt(
     conn: &Connection,
     tx_ref: crate::TxRef,
-    action_index: u32,
 ) -> Result<(), SqliteClientError> {
-    conn.execute(
-        "DELETE FROM ironwood_memo_retrieval_queue WHERE received_note_id IN
-            (SELECT id FROM ironwood_received_notes
-             WHERE transaction_id = ?1 AND action_index = ?2)",
-        rusqlite::params![tx_ref.0, action_index],
-    )?;
     conn.execute(
         "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1,?2)
         ON CONFLICT(transaction_id) DO NOTHING",
@@ -844,11 +836,12 @@ fn queue_transaction(
          WHERE received_note_id IN (SELECT id FROM ironwood_received_notes WHERE transaction_id = :tx)",
         named_params![":tx": tx_ref.0],
     )?;
+    // A dynamic-key note's memo is never retrieved privately (see `wallet::dynamic_ivk`).
     conn.execute(
         "INSERT INTO ironwood_memo_retrieval_queue (received_note_id, commitment_tree_position)
          SELECT id, commitment_tree_position FROM ironwood_received_notes
          WHERE transaction_id = :tx AND memo IS NULL AND note_version = 3
-           AND commitment_tree_position IS NOT NULL
+           AND commitment_tree_position IS NOT NULL AND receiving_key_id IS NULL
          ON CONFLICT(commitment_tree_position) DO UPDATE SET received_note_id = excluded.received_note_id",
         named_params![":tx": tx_ref.0],
     )?;

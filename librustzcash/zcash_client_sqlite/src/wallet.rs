@@ -829,10 +829,12 @@ pub(crate) fn delete_account(
         delete_intent.execute(named_params![":txid": txid])?;
     }
     // Known wallet spends are omitted from the unlinked nullifier map. Deleting
-    // their account removes that evidence, so absence needs fresh scan coverage.
+    // their account removes that evidence, so absence needs fresh scan coverage,
+    // and replays already recorded must run again.
     conn.execute("DELETE FROM ironwood_nullifier_scan_blocks", [])?;
     conn.execute(
-        "UPDATE ironwood_dynamic_spend_retention SET nullifier_retention_height=0",
+        "UPDATE ironwood_dynamic_spend_retention
+         SET nullifier_retention_height=0, replay_through=NULL",
         [],
     )?;
 
