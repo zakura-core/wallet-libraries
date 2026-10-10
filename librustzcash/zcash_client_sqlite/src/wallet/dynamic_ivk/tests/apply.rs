@@ -6,7 +6,13 @@ use zcash_primitives::transaction::TxId;
 /// then watches the key from the next block and queues the payment. Also returns the
 /// tip and the payment's path there.
 pub(super) fn fixture() -> (State, DynamicKey, PendingPayment, ChainPoint, MerklePath) {
-    let mut st = ironwood_wallet();
+    fixture_in(ironwood_wallet())
+}
+
+/// [`fixture`] in `st`, an [`ironwood_wallet`] with no blocks.
+pub(super) fn fixture_in(
+    mut st: State,
+) -> (State, DynamicKey, PendingPayment, ChainPoint, MerklePath) {
     let account = st.test_account().unwrap().id();
     let id = KeyId::new(Purpose::Receive, 8);
     let candidate = pay_candidate(&mut st, id);
