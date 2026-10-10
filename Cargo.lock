@@ -3724,6 +3724,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pir-control"
+version = "0.1.0"
+source = "git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35#0d6ad4aa94abbb2838d4182c869f06e1881e6c35"
+dependencies = [
+ "axum",
+ "hex",
+ "rand 0.8.8",
+ "serde",
+ "sha2 0.10.9",
+ "tokio",
+]
+
+[[package]]
 name = "pir-native"
 version = "0.1.0"
 source = "git+https://github.com/valargroup/wallet-pir?rev=06a972db469f302d8c561416d4674e937fdde0cb#06a972db469f302d8c561416d4674e937fdde0cb"
@@ -3736,9 +3749,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "pir-native"
+version = "0.1.0"
+source = "git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35#0d6ad4aa94abbb2838d4182c869f06e1881e6c35"
+dependencies = [
+ "ipir-sp 0.1.0-rc.6 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6)",
+ "rand 0.8.8",
+ "rand_chacha 0.3.1",
+ "rayon",
+ "reinspiring 0.1.2 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6)",
+]
+
+[[package]]
 name = "pir-observability"
 version = "0.1.0"
 source = "git+https://github.com/valargroup/wallet-pir?rev=06a972db469f302d8c561416d4674e937fdde0cb#06a972db469f302d8c561416d4674e937fdde0cb"
+dependencies = [
+ "axum",
+ "http-body",
+ "serde",
+]
+
+[[package]]
+name = "pir-observability"
+version = "0.1.0"
+source = "git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35#0d6ad4aa94abbb2838d4182c869f06e1881e6c35"
 dependencies = [
  "axum",
  "http-body",
@@ -4260,6 +4295,52 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d92195228612ac8eed47adbc2ed0f04e513a4ccb98175b6f2bd04d963b533655"
 dependencies = [
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "receiver-directory"
+version = "0.0.1"
+source = "git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35#0d6ad4aa94abbb2838d4182c869f06e1881e6c35"
+dependencies = [
+ "bitcoin",
+ "incrementalmerkletree",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "zakura-orchard",
+ "zcash_note_encryption",
+]
+
+[[package]]
+name = "receiver-pir"
+version = "0.0.1"
+source = "git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35#0d6ad4aa94abbb2838d4182c869f06e1881e6c35"
+dependencies = [
+ "hex",
+ "ipir-sp 0.1.0-rc.6 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6)",
+ "pir-native 0.1.0 (git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35)",
+ "rand 0.8.8",
+ "receiver-directory",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "receiver-pir-server"
+version = "0.0.1"
+source = "git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35#0d6ad4aa94abbb2838d4182c869f06e1881e6c35"
+dependencies = [
+ "axum",
+ "hex",
+ "pir-control 0.1.0 (git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35)",
+ "pir-observability 0.1.0 (git+https://github.com/valargroup/wallet-pir?rev=0d6ad4aa94abbb2838d4182c869f06e1881e6c35)",
+ "receiver-directory",
+ "receiver-pir",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -6839,7 +6920,7 @@ version = "0.1.0"
 source = "git+https://github.com/valargroup/wallet-pir?rev=06a972db469f302d8c561416d4674e937fdde0cb#06a972db469f302d8c561416d4674e937fdde0cb"
 dependencies = [
  "hex",
- "pir-native",
+ "pir-native 0.1.0 (git+https://github.com/valargroup/wallet-pir?rev=06a972db469f302d8c561416d4674e937fdde0cb)",
  "rayon",
  "serde",
  "serde_json",
@@ -6873,8 +6954,8 @@ dependencies = [
  "http-body",
  "ipir-sp 0.1.0-rc.6 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6)",
  "memmap2",
- "pir-control",
- "pir-observability",
+ "pir-control 0.1.0 (git+https://github.com/valargroup/wallet-pir?rev=06a972db469f302d8c561416d4674e937fdde0cb)",
+ "pir-observability 0.1.0 (git+https://github.com/valargroup/wallet-pir?rev=06a972db469f302d8c561416d4674e937fdde0cb)",
  "rayon",
  "reinspiring 0.1.2 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6)",
  "rustix",
@@ -8174,6 +8255,32 @@ dependencies = [
  "rand 0.8.8",
  "rand_chacha 0.3.1",
  "reinspiring 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "zakura-pir-receiver"
+version = "0.0.1-rc0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "futures-util",
+ "hex",
+ "receiver-directory",
+ "receiver-pir",
+ "receiver-pir-server",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "zakura-client-backend",
+ "zakura-client-sqlite",
+ "zakura-dynamic-ivk",
+ "zakura-orchard",
+ "zakura-pir-enhance",
+ "zakura-primitives",
+ "zakura-protocol",
+ "zcash_note_encryption",
 ]
 
 [[package]]
