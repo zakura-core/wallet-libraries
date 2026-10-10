@@ -78,7 +78,7 @@ pub struct TransparentRecoveryContext<AccountId> {
 /// One account's watched addresses, with the context a recovery run captures.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransparentWatchSet<AccountId> {
-    /// The account.
+    /// The account the watched addresses belong to.
     pub account: AccountId,
     /// The account's lifecycle at the time of the read.
     pub lifecycle: AccountLifecycle,
@@ -119,8 +119,9 @@ pub struct PublicationAnchor {
 /// A source revision that supplied a commit's facts.
 ///
 /// Identifiers are opaque and compared bytewise. Within a source, each replacement revision has
-/// a strictly greater `lineage`. A provisional revision is superseded only by a trusted qualification transition
-/// to a newer revision of the same source; observing a revision does not authorize replacement; a sealed revision never is.
+/// a strictly greater `lineage`. A provisional revision is superseded only by a trusted
+/// qualification transition to a newer revision of the same source; observing a revision does not
+/// authorize replacement. A sealed revision is never superseded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryRevision {
     /// The source identifier.
@@ -129,7 +130,8 @@ pub struct RecoveryRevision {
     pub revision: Vec<u8>,
     /// Replacement order within the source; at most `i64::MAX`.
     pub lineage: u64,
-    /// Whether the revision is sealed.
+    /// Whether the revision is sealed: its content is final, and no later revision of the source
+    /// supersedes it. An unsealed revision is provisional.
     pub sealed: bool,
     /// The publisher's asserted position for this revision.
     pub publication: PublicationAnchor,
@@ -192,7 +194,8 @@ pub struct AddressRange {
 /// usually alongside the events and coverage it produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageRequest {
-    /// The page identifier within its revision.
+    /// The page identifier within its revision: opaque bytes the recovery source assigns, which a
+    /// later commit names in [`TransparentLedgerCommit::completed_pages`] to complete the page.
     pub page: Vec<u8>,
     /// The watched addresses the page answers for.
     pub addresses: Vec<TransparentAddress>,
@@ -237,7 +240,8 @@ pub struct TransparentLedgerCommit<AccountId> {
     pub unsupported: Vec<AddressRange>,
     /// Pages this commit opens.
     pub opened_pages: Vec<PageRequest>,
-    /// Pages of this revision that this commit completes.
+    /// Pages of this revision that this commit completes, by their [`PageRequest::page`]
+    /// identifiers.
     pub completed_pages: Vec<Vec<u8>>,
 }
 
@@ -401,7 +405,7 @@ pub enum InvalidCommit {
 /// recovered net can be above or below the real balance, and it never authorizes a spend.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CandidateRecovery<AccountId> {
-    /// The account.
+    /// The account whose candidate recovery this reports.
     pub account: AccountId,
     /// The highest contiguously scanned local block.
     pub target: Option<ChainPoint>,

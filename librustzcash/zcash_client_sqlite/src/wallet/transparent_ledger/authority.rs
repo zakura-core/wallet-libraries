@@ -169,6 +169,10 @@ pub(crate) fn check_address_owners<P: consensus::Parameters>(
 #[cfg(feature = "transparent-inputs")]
 /// Returns whether public transparent discovery is permitted for this handle. It requires an
 /// explicitly configured mode that retains public authority.
+///
+/// This equals [`retains_public_authority`](super::retains_public_authority) for a configured
+/// handle, but fails for an unconfigured one, where that lower-level check consults the durable
+/// policy alone.
 pub(crate) fn public_discovery_permitted(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,

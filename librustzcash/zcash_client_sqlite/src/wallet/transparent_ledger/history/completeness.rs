@@ -52,6 +52,8 @@ pub(super) enum TransparentDiscovery {
     },
 }
 
+/// What the account's transparent evidence establishes under `mode`: public discovery, or the
+/// height its active, unquarantined ledger covers. The caller provides the read snapshot.
 #[cfg(feature = "transparent-inputs")]
 pub(super) fn transparent_discovery<P: consensus::Parameters>(
     conn: &rusqlite::Connection,

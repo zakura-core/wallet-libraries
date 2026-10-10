@@ -1,5 +1,7 @@
 //! Codes persisted in the detail tables: lookup outcomes and display address kinds.
 
+/// Outcome codes of `transparent_detail_work.last_outcome`, one per
+/// `TransparentDetailOutcome` variant.
 pub(super) const UNAVAILABLE: i64 = 0;
 pub(super) const ABSENT: i64 = 1;
 pub(super) const NOT_COVERED: i64 = 2;

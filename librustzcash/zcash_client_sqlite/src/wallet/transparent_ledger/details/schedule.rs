@@ -26,12 +26,14 @@ pub(super) const DAY: u64 = 24 * HOUR;
 /// How long a parked row waits for a changed display map before it is due anyway.
 pub(crate) const PARKED_BACKSTOP: Duration = Duration::from_secs(7 * DAY);
 
+/// Seconds since the Unix epoch, as stored in the work table; times before it read as 0.
 pub(super) fn unix(now: SystemTime) -> i64 {
     now.duration_since(UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
 
+/// Whole seconds of `d` as stored in the work table, saturating.
 pub(super) fn i64_secs(d: Duration) -> i64 {
     i64::try_from(d.as_secs()).unwrap_or(i64::MAX)
 }
@@ -82,6 +84,7 @@ pub(crate) fn work(
     })
 }
 
+/// The time of a stored Unix timestamp; negative ones read as the epoch.
 pub(super) fn system_time(unix: i64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(u64::try_from(unix).unwrap_or(0))
 }
@@ -183,6 +186,7 @@ pub(crate) fn backoff(outcome: TransparentDetailOutcome, attempts: u32, txid: &T
     Duration::from_secs(secs)
 }
 
+/// The persisted code of `outcome`.
 pub(super) fn outcome_code(outcome: TransparentDetailOutcome) -> i64 {
     match outcome {
         TransparentDetailOutcome::Unavailable { .. } => UNAVAILABLE,
@@ -206,6 +210,13 @@ pub(super) fn outcome_class(code: i64) -> i64 {
     }
 }
 
+/// Records a failed lookup of `txid` at `looked_up_height` on its work row: the attempt, its
+/// outcome and map, and when the next attempt is due.
+///
+/// Does nothing when the transaction has no work row or is no longer mined at
+/// `looked_up_height`, so a late result never parks or backs off work for another placement.
+/// Consecutive failures of one outcome class at one placement lengthen the backoff; a new
+/// placement or class restarts it. The caller provides the transaction.
 pub(super) fn record_outcome(
     conn: &Connection,
     txid: &TxId,

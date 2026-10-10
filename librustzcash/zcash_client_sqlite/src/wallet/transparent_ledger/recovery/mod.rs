@@ -113,11 +113,13 @@ use events::{CoverageSupport, apply_receive, apply_spend, open_page, record_rang
 #[cfg(feature = "transparent-inputs")]
 use watch::{WINDOW_LIMIT, WINDOW_SCOPES, Watch};
 
+/// The output script an address is paid to.
 #[cfg(feature = "transparent-inputs")]
 fn script_bytes(address: &TransparentAddress) -> Vec<u8> {
     transparent::address::Script::from(address.script()).0.0
 }
 
+/// The address a stored recovery script pays; anything but a standard address is corrupt.
 #[cfg(feature = "transparent-inputs")]
 fn address_from_script(bytes: Vec<u8>) -> Result<TransparentAddress, SqliteClientError> {
     script::FromChain::parse(&script::Code(bytes))
@@ -128,6 +130,7 @@ fn address_from_script(bytes: Vec<u8>) -> Result<TransparentAddress, SqliteClien
         })
 }
 
+/// The error that refuses a commit for `rejection`.
 #[cfg(feature = "transparent-inputs")]
 fn reject(rejection: CommitRejection) -> SqliteClientError {
     SqliteClientError::TransparentLedgerCommitRejected(rejection)
@@ -142,6 +145,7 @@ fn local_target(conn: &rusqlite::Connection) -> Result<Option<ChainPoint>, Sqlit
     Ok(get_block_hash(conn, height)?.map(|hash| ChainPoint { height, hash }))
 }
 
+/// Whether the wallet holds `point` as its block at that height.
 #[cfg(feature = "transparent-inputs")]
 fn is_local_block(
     conn: &rusqlite::Connection,
@@ -150,11 +154,14 @@ fn is_local_block(
     Ok(get_block_hash(conn, point.height)? == Some(point.hash))
 }
 
+/// A stored block height.
 #[cfg(feature = "transparent-inputs")]
 fn height(value: u32) -> BlockHeight {
     BlockHeight::from_u32(value)
 }
 
+/// Reads a revision from six consecutive columns starting at `offset`: `source`, `revision`,
+/// `lineage`, `sealed`, `publication_height`, `publication_hash` of `tpir_revisions`.
 #[cfg(feature = "transparent-inputs")]
 fn read_revision(
     row: &rusqlite::Row<'_>,
@@ -175,6 +182,7 @@ fn read_revision(
     })
 }
 
+/// A stored block hash, which must be 32 bytes.
 #[cfg(feature = "transparent-inputs")]
 fn read_hash(bytes: Vec<u8>) -> Result<BlockHash, SqliteClientError> {
     BlockHash::try_from_slice(&bytes)

@@ -40,6 +40,8 @@ pub(crate) enum ProjectionOrigin {
 }
 
 impl ProjectionOrigin {
+    /// The persisted code of `tpir_output_origins.origin` and `tpir_spend_origins.origin`. SQL
+    /// conditions over those columns use these literals directly.
     #[cfg_attr(not(feature = "transparent-inputs"), allow(dead_code))]
     fn code(self) -> i64 {
         match self {

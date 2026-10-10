@@ -15,6 +15,8 @@ use crate::error::SqliteClientError;
 /// Version 6 separates observed revisions from trusted replacement; revision writes require 6.
 /// Version 7 maintains source-bound transaction facts through withdrawals and rewinds.
 /// Version 8 retains shared derivation origins after address materialization.
+///
+/// This is the newest version below, under the name readers check against.
 pub(crate) const TPIR_READER_VERSION: i64 = SHARED_DERIVATION_READER_VERSION;
 
 /// The reader version retained shared derivation origins require.

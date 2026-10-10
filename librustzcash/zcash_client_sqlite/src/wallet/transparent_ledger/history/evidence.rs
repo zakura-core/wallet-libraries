@@ -11,6 +11,10 @@ use zcash_protocol::{PoolType, consensus::BlockHeight, value::Zatoshis};
 use crate::{error::SqliteClientError, wallet::encoding::parse_pool_code};
 
 /// Current qualified facts, kept separate from independently stored local-send records.
+///
+/// Fee states decode as recovery's `apply_metadata` stores them: 0 is an exact fee, 1 unknown,
+/// 2 not applicable. Recovery's candidate reader (`candidate_metadata`) is stricter, also
+/// requiring that only an exact fee has an amount and that a not-applicable fee has no inputs.
 pub(super) fn metadata_evidence(
     conn: &rusqlite::Connection,
     account: i64,
@@ -71,6 +75,8 @@ pub(super) fn metadata_evidence(
     Ok(evidence)
 }
 
+/// The number of the account's distinct transparent inputs in `txid` that qualified,
+/// unquarantined ledger evidence records as mined spends.
 pub(super) fn qualified_owned_spend_inputs(
     conn: &rusqlite::Connection,
     account: i64,
@@ -86,9 +92,13 @@ pub(super) fn qualified_owned_spend_inputs(
 
 /// The `transactions` row facts a history entry depends on.
 pub(super) struct TransactionFacts {
+    /// The internal transaction id, `id_tx`.
     pub(super) id: i64,
+    /// The height the wallet holds the transaction mined at, if any.
     pub(super) mined_height: Option<BlockHeight>,
+    /// The wallet stores the raw transaction.
     pub(super) has_full_data: bool,
+    /// The whole-transaction fee stored on the row.
     pub(super) fee: Option<Zatoshis>,
     /// The wallet constructed and stored the transaction, recording every input it spent and
     /// every output it created, with recipients and memos. Deleting the funding account deletes
@@ -105,6 +115,7 @@ pub(super) struct TransactionFacts {
     pub(super) has_transparent_outputs: Option<bool>,
 }
 
+/// Reads the facts of the `transactions` row for `txid`; `None` when the wallet has no row.
 pub(super) fn transaction_facts(
     conn: &rusqlite::Connection,
     txid: &TxId,
@@ -153,6 +164,7 @@ pub(super) fn transaction_facts(
     .transpose()
 }
 
+/// A stored amount, which must be non-negative and at most `MAX_MONEY`.
 pub(super) fn zatoshis(value: i64) -> Result<Zatoshis, SqliteClientError> {
     Zatoshis::from_nonnegative_i64(value)
         .map_err(|_| SqliteClientError::CorruptedData(format!("invalid value {value}")))
@@ -223,7 +235,8 @@ pub(super) fn sent_elsewhere(
 
 /// Whether an active account's ledger records a spend in `txid`. Such a spend makes the account a
 /// party to the transaction even before the output it consumes is recovered. A candidate ledger
-/// is isolated from history.
+/// is isolated from history. Any recorded spend counts here, qualified or not; see
+/// `classify::has_ledger_spend` for the qualified evidence Activity requires.
 #[cfg(feature = "transparent-inputs")]
 pub(super) fn has_active_ledger_spend(
     conn: &rusqlite::Connection,

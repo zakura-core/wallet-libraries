@@ -50,7 +50,7 @@ pub struct PoolEffect {
 }
 
 /// Whether a transaction's payment details are known: its recipients, payment amounts, and
-/// memos.
+/// memos. [`EffectCompleteness`] covers the account's amounts in each pool instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DetailCompleteness {
     /// The wallet constructed and stored the transaction; or every effect is settled, every memo

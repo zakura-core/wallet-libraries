@@ -10,8 +10,11 @@ pub(crate) struct RecoveryStatus {
     pub(crate) covered_through: Option<BlockHeight>,
     /// Why recovery is incomplete; empty when complete through the target.
     pub(super) blockers: Vec<CandidateBlocker>,
+    /// The number of addresses the account must have recovered.
     pub(super) watched_addresses: usize,
+    /// The number of pages opened for retrieval and not yet completed.
     pub(super) pending_pages: usize,
+    /// The number of distinct outpoints a mined spend consumes without a mined receive.
     pub(super) unresolved_spends: usize,
     /// The unverified sum of mined receives no mined spend consumes; `None` above `MAX_MONEY`.
     pub(crate) recovered_unverified: Option<Zatoshis>,

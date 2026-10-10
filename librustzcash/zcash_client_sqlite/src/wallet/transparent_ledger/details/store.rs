@@ -20,6 +20,7 @@ use super::schedule::{record_outcome, unix};
 use super::sql::related_transaction_sql;
 use super::validate::validate;
 
+/// The `(kind, hash)` columns of a display address; `None` is a non-standard script.
 pub(super) fn encode_address_columns(
     address: Option<TransparentAddress>,
 ) -> (i64, Option<[u8; 20]>) {
@@ -30,6 +31,7 @@ pub(super) fn encode_address_columns(
     }
 }
 
+/// The `(kind, hash)` columns of a display sender.
 pub(super) fn encode_sender_columns(sender: TransparentDisplaySender) -> (i64, Option<[u8; 20]>) {
     match sender {
         TransparentDisplaySender::Absent => (KIND_ABSENT, None),
@@ -38,6 +40,8 @@ pub(super) fn encode_sender_columns(sender: TransparentDisplaySender) -> (i64, O
     }
 }
 
+/// Decodes `(kind, hash)` address columns, of a sender or of an output. An output's columns
+/// never hold the absent kind; the caller rejects it.
 pub(super) fn decode_address_columns(
     kind: i64,
     hash: Option<[u8; 20]>,

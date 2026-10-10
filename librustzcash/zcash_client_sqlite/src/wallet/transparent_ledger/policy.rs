@@ -13,6 +13,7 @@ use crate::{error::SqliteClientError, wallet::init::migrations::TRANSPARENT_LEDG
 
 use super::{reader_version::TPIR_READER_VERSION, transactions::in_transaction};
 
+/// Decodes `tpir_meta.applied_mode`. Code 1 belonged to the removed shadow mode and is refused.
 fn mode_from_code(code: i64) -> Result<TransparentLedgerMode, SqliteClientError> {
     match code {
         0 => Ok(TransparentLedgerMode::Public),
@@ -23,6 +24,7 @@ fn mode_from_code(code: i64) -> Result<TransparentLedgerMode, SqliteClientError>
     }
 }
 
+/// The persisted `tpir_meta.applied_mode` code of `mode`.
 fn mode_code(mode: TransparentLedgerMode) -> i64 {
     match mode {
         TransparentLedgerMode::Public => 0,
@@ -37,6 +39,12 @@ fn missing_policy_row() -> SqliteClientError {
 
 /// Reads the durable policy. A wallet that predates the ledger schema has none, and so cannot
 /// hold a stricter policy than any handle.
+///
+/// Fails when the wallet requires a newer reader than this build
+/// ([`TransparentLedgerIncompatible`](SqliteClientError::TransparentLedgerIncompatible)), or
+/// when the policy table or its row is missing after the ledger migration. Callers that only
+/// need that refusal call it as a guard: a build that cannot interpret the ledger state must
+/// not write or rewind it.
 pub(crate) fn durable_policy(
     conn: &rusqlite::Connection,
 ) -> Result<Option<AppliedTransparentPolicy>, SqliteClientError> {
