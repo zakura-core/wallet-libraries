@@ -76,6 +76,33 @@ Every pass has script, publication, query, byte and export bounds. Its
 | `Overloaded` | The service refused for capacity throughout its retry budget. |
 | `Stalled` | An unknown chain block, unresolved spends or unbounded script discovery. |
 
+## Import-time discovery
+
+`discover_active_addresses` answers which of a few candidate addresses hold
+transparent history from a floor height on, with no wallet, companion or chain
+view: a wallet importing a recovery phrase uses it to find the higher accounts
+another wallet used, without asking an indexer about each address. It checks,
+in order and before any retrieval, that the candidates are nonempty, distinct
+and within the script limit, that the bounds are positive, that the filter
+source does not use the parent experiment, and that the shard map is well
+formed, within the shard limit, for Zcash mainnet and starts at or below the
+floor; then that the service's init names `SCHEMA`. A floor above the
+publication's end is `Behind` after only the map is fetched.
+
+It runs the reference client over a fresh in-memory store, discarded on
+return, with the publication as its own chain view, from the floor through the
+end of the tail: every filter from the floor's shard is downloaded, whatever
+matches, and every filter match is confirmed by private retrieval, so a false
+positive never reports a candidate. A candidate is active when a receive or a
+spend of it lies at or above the floor; a spend of an output paid below the
+floor counts, and history below the floor in the first shard does not. Only
+`Complete` says nothing was missed.
+
+The publication vouches for its own blocks only because a discovery grants
+nothing: the caller imports the accounts it reports and recovers each against
+the wallet's chain. A dishonest publication can hide or invent history, as an
+indexer answering per address can.
+
 The companion store owns reference page continuation and revision-bound caches;
 the wallet store owns candidate evidence, qualification and activation. The
 adapter never qualifies a revision, promotes an account or authorizes a spend.

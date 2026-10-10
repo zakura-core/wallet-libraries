@@ -11,7 +11,7 @@ use transparent_filter::{MAINNET_GENESIS_DISPLAY, NETWORK, ShardMap, wire::MAX_S
 use transparent_wallet::transport::{BoxError, FilterSource, ShardTransport};
 use transparent_wallet::{
     Acceptance, Anchor, ChainView, Completion, IncompleteReason, ScriptEntry, ScriptOrigin,
-    SetIdentity, StaticScripts, SyncError, SyncReport, WalletStore, WorkLimits,
+    ServiceGeometry, SetIdentity, StaticScripts, SyncError, SyncReport, WalletStore, WorkLimits,
 };
 use transparent_wallet_store::SqliteStore;
 use zcash_client_backend::data_api::transparent_ledger::{
@@ -127,7 +127,7 @@ impl Progress {
 ///
 /// A `clamped` pass synced to the publication's end below the wallet's target,
 /// so even its completion is [`Outcome::Behind`].
-fn progress(report: &SyncReport, clamped: bool) -> Progress {
+pub(crate) fn progress(report: &SyncReport, clamped: bool) -> Progress {
     let outcome = match &report.completion {
         Completion::Complete if clamped => Outcome::Behind,
         Completion::Complete => Outcome::Complete,
@@ -373,7 +373,7 @@ impl<F: FilterSource> FilterSource for Recorded<'_, F> {
     }
 }
 
-fn address_script(address: TransparentAddress) -> Vec<u8> {
+pub(crate) fn address_script(address: TransparentAddress) -> Vec<u8> {
     match address {
         TransparentAddress::PublicKeyHash(hash) => {
             [vec![0x76, 0xa9, 20], hash.to_vec(), vec![0x88, 0xac]].concat()
@@ -800,6 +800,37 @@ fn declarations(map: &ShardMap) -> usize {
     map.recuts.iter().map(|recut| recut.superseded.len()).sum()
 }
 
+/// Refuses a map with more shards and declarations at or above `floor` than
+/// `shards`, or more declarations in all than [`MAX_SUPERSEDED`].
+pub(crate) fn check_publication_limits(
+    map: &ShardMap,
+    floor: u64,
+    shards: usize,
+) -> Result<(), RecoveryError> {
+    require(
+        entries(map, floor) <= shards,
+        "publication shard limit exceeded",
+    )?;
+    require(
+        declarations(map) <= MAX_SUPERSEDED,
+        "publication declaration limit exceeded",
+    )
+}
+
+/// The service's geometry from its init, refusing a service whose init names a
+/// schema other than [`SCHEMA`].
+pub(crate) fn service_geometry(
+    transport: &mut impl ShardTransport,
+) -> Result<ServiceGeometry, RecoveryError> {
+    let (raw_init, _) = transport.init().map_err(failure)?;
+    let geometry = transparent_wallet::parse_init(&raw_init).map_err(failure)?;
+    require(
+        geometry.schema == SCHEMA,
+        "service serves an unsupported shard schema",
+    )?;
+    Ok(geometry)
+}
+
 /// The caller's chain, accepting every block below the watch set's floor. Passed
 /// to `sync_into` only.
 ///
@@ -1089,12 +1120,7 @@ impl ReferenceRecovery {
             map.network == NETWORK && map.genesis_hash == MAINNET_GENESIS_DISPLAY,
             "publication is not for Zcash mainnet",
         )?;
-        let (raw_init, _) = transport.init().map_err(failure)?;
-        let geometry = transparent_wallet::parse_init(&raw_init).map_err(failure)?;
-        require(
-            geometry.schema == SCHEMA,
-            "service serves an unsupported shard schema",
-        )?;
+        let geometry = service_geometry(transport)?;
         // The set check the sync would make when binding, made here so that a
         // changed publication restarts the store rather than stopping the sync.
         let set = SetIdentity::of_schema(&map, SCHEMA);
@@ -1215,14 +1241,7 @@ impl ReferenceRecovery {
     /// than the shard limit, or more declarations in all than
     /// [`MAX_SUPERSEDED`].
     fn check_limits(&self, map: &ShardMap, floor: u64) -> Result<(), RecoveryError> {
-        require(
-            entries(map, floor) <= self.config.shards,
-            "publication shard limit exceeded",
-        )?;
-        require(
-            declarations(map) <= MAX_SUPERSEDED,
-            "publication declaration limit exceeded",
-        )
+        check_publication_limits(map, floor, self.config.shards)
     }
 
     /// Every revision `map`, under `set`, publishes, and every one its re-cuts
@@ -1683,7 +1702,7 @@ mod tests {
             }
         }
     }
-    use std::cell::Cell;
+    use crate::test_support::{CountingFilters, CountingShards, MAP};
     use transparent_filter::{Recut, SealParameters, ShardMapEntry, SupersededShard};
     use transparent_wallet::client::Table;
     use transparent_wallet::{Ledger, PendingPages, SetupBlob, SetupKey, StaticChain, StoredEvent};
@@ -1696,7 +1715,6 @@ mod tests {
         covered_through: 0,
         outcome: Outcome::More,
     };
-    const MAP: &[u8] = include_bytes!("../tests/fixtures/shard-map.json");
 
     fn config() -> RecoveryConfig {
         RecoveryConfig {
@@ -1747,109 +1765,6 @@ mod tests {
             replaced_revisions: vec![],
             scripts_added: 0,
             commits: 0,
-        }
-    }
-
-    /// A public filter source that counts every call and serves only a shard map,
-    /// the fixture's by default.
-    struct CountingFilters {
-        map: Vec<u8>,
-        parents: bool,
-        parent_checks: Cell<usize>,
-        maps: usize,
-        filters: usize,
-    }
-    impl Default for CountingFilters {
-        fn default() -> Self {
-            Self::serving(MAP.to_vec())
-        }
-    }
-    impl CountingFilters {
-        fn serving(map: Vec<u8>) -> Self {
-            Self {
-                map,
-                parents: false,
-                parent_checks: Cell::new(0),
-                maps: 0,
-                filters: 0,
-            }
-        }
-        fn calls(&self) -> usize {
-            self.parent_checks.get() + self.maps + self.filters
-        }
-    }
-    impl FilterSource for CountingFilters {
-        fn uses_parents(&self) -> bool {
-            self.parent_checks.set(self.parent_checks.get() + 1);
-            self.parents
-        }
-        fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
-            self.maps += 1;
-            Ok((self.map.clone(), self.map.len() as u64))
-        }
-        fn filter(&mut self, _shard_id: u64) -> Result<(Vec<u8>, u64), BoxError> {
-            self.filters += 1;
-            Err("the counting source serves no filters".into())
-        }
-    }
-
-    /// A private shard transport that counts every call and serves only an init.
-    #[derive(Default)]
-    struct CountingShards {
-        schema: &'static str,
-        inits: usize,
-        manifests: usize,
-        setups: usize,
-        queries: usize,
-    }
-    impl CountingShards {
-        fn serving(schema: &'static str) -> Self {
-            Self {
-                schema,
-                ..Default::default()
-            }
-        }
-        fn calls(&self) -> usize {
-            self.inits + self.manifests + self.setups + self.queries
-        }
-    }
-    impl ShardTransport for CountingShards {
-        fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
-            self.inits += 1;
-            let init = serde_json::to_vec(&serde_json::json!({
-                "schema": self.schema,
-                "geometries": [],
-            }))?;
-            let cost = init.len() as u64;
-            Ok((init, cost))
-        }
-        fn manifest(
-            &mut self,
-            _shard_id: u64,
-            _revision: &str,
-        ) -> Result<(Vec<u8>, u64), BoxError> {
-            self.manifests += 1;
-            Err("the counting transport serves no manifests".into())
-        }
-        fn setup(
-            &mut self,
-            _shard_id: u64,
-            _revision: &str,
-            _table: Table,
-            _segment: u32,
-        ) -> Result<(Vec<u8>, u64), BoxError> {
-            self.setups += 1;
-            Err("the counting transport serves no setup".into())
-        }
-        fn query(
-            &mut self,
-            _shard_id: u64,
-            _revision: &str,
-            _table: Table,
-            _body: &[u8],
-        ) -> Result<Vec<u8>, BoxError> {
-            self.queries += 1;
-            Err("the counting transport answers no queries".into())
         }
     }
 

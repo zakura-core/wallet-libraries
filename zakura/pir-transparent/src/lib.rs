@@ -8,11 +8,15 @@ mod chain;
 #[cfg(feature = "wallet")]
 mod companion;
 #[cfg(feature = "wallet")]
+mod discover;
+#[cfg(feature = "wallet")]
 mod display;
 #[cfg(feature = "wallet")]
 mod http;
 #[cfg(feature = "wallet")]
 mod recovery;
+#[cfg(all(test, feature = "wallet"))]
+mod test_support;
 #[cfg(feature = "testing")]
 pub mod testing;
 #[cfg(feature = "wallet")]
@@ -28,6 +32,8 @@ pub use catalog::{BatchState, WithdrawnCause};
 pub use chain::WalletChain;
 #[cfg(feature = "wallet")]
 pub use companion::{Companion, CompanionDir, OpenError};
+#[cfg(feature = "wallet")]
+pub use discover::{Discovery, DiscoveryLimits, discover_active_addresses};
 #[cfg(feature = "wallet")]
 pub use display::{deferral, display_facts, map_sha256};
 // Both services over the caller's raw HTTP exchange.

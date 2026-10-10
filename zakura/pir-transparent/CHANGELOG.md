@@ -4,6 +4,12 @@
 
 ### Added
 
+- `discover_active_addresses`, `Discovery` and `DiscoveryLimits`: import-time
+  discovery of which candidate addresses hold transparent history from a floor
+  on, before any wallet exists. It downloads every filter from the floor's
+  shard through the publication's end and confirms each match by private
+  retrieval over an in-memory store, so filter false positives are never
+  reported and nothing is stored.
 - `ReferenceRecovery::apply_and_acknowledge_gated` runs each wallet write of a
   settlement (every commit's transaction, then the acknowledgment's) through a
   `WriteGate`. An application that serializes its wallet writes holds that
