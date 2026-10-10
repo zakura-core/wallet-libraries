@@ -543,6 +543,72 @@ fn a_restored_dynamic_note_keeps_its_completed_transactions_retrieval() {
     assert!(!requested(&st));
 }
 
+/// A restore sweep that adds a dynamic-key note to a transaction already stored in full,
+/// here for its ordinary output, takes the note's memo from the stored transaction.
+#[test]
+fn a_restored_dynamic_note_takes_its_memo_from_the_stored_transaction() {
+    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction_with_dynamic_ivks;
+    use zcash_keys::address::{Address, UnifiedAddress};
+    use zcash_protocol::memo::MemoBytes;
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let network = *st.network();
+    let id = KeyId::new(Purpose::Receive, 8);
+    let wallet_fvk = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
+    let fvk = id.derive(&wallet_fvk).unwrap();
+    let ordinary = Address::Unified(
+        UnifiedAddress::from_receivers(
+            Some(wallet_fvk.address_at(0u32, Scope::External)),
+            None,
+            None,
+        )
+        .unwrap(),
+    );
+    let ordinary = zip321::Payment::new(
+        ordinary.to_zcash_address(&network),
+        Some(Zatoshis::const_from_u64(30_000)),
+        None,
+        None,
+        None,
+        vec![],
+    )
+    .unwrap();
+    let memo = MemoBytes::from_bytes(b"dynamic memo").unwrap();
+    let paid = external_payment_with(fvk.address_at(0u32, Scope::External), &memo, vec![ordinary]);
+    let (height, _) = st.generate_next_block_from_tx(1, &paid);
+    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &paid, Some(height))
+        .unwrap();
+    let stored = |st: &State| -> (bool, i64, Option<Vec<u8>>) {
+        st.wallet()
+            .conn()
+            .query_row(
+                "SELECT t.raw IS NOT NULL,
+                    (SELECT COUNT(*) FROM tx_retrieval_queue q WHERE q.txid = t.txid)
+                    + (SELECT COUNT(*) FROM ironwood_memo_retrieval_queue),
+                    (SELECT memo FROM ironwood_received_notes
+                     WHERE transaction_id = t.id_tx AND receiving_key_id IS NOT NULL)
+                 FROM transactions t WHERE t.txid = ?1",
+                [paid.txid().as_ref()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(stored(&st), (true, 0, None));
+
+    let candidate = candidate_at(&st, height, &fvk);
+    let through = tip(&st);
+    let path = witness_at(&st, candidate.position);
+    let db = st.wallet_mut().db_mut();
+    watch(db, account, 8, height + 1);
+    queue_payment(db, account, id, &candidate).unwrap();
+    assert_eq!(
+        apply_payment(db, account, id, &candidate, through, (through, &path)).unwrap(),
+        PaymentApplication::Applied
+    );
+    assert_eq!(stored(&st), (true, 0, Some(memo.as_slice().to_vec())));
+}
+
 #[test]
 fn directory_payment_imports_an_already_spent_note_without_crediting_it() {
     use zcash_keys::address::{Address, UnifiedAddress};

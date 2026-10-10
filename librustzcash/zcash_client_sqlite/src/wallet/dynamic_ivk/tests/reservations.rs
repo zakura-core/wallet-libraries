@@ -1155,6 +1155,42 @@ fn accepted_deposit_instructions_cannot_change() {
     assert_eq!(operation(&st, "plain").unwrap().0, NOW);
 }
 
+/// A deposit identity, its address and memo, belongs to one operation in the account: an
+/// identical repeat on that operation succeeds, and another operation cannot take it, on
+/// the same reservation or another.
+#[test]
+fn a_deposit_identity_binds_only_one_operation() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let r = prepare(&mut st, NOW);
+    quote(&mut st, &r, "first", false);
+    let deposit = accepted("first", None, NOW + 60);
+    st.wallet_mut()
+        .db_mut()
+        .finish_receive_operation(account, "first", &deposit)
+        .unwrap();
+    begin(&mut st, &r, "retry").unwrap().unwrap();
+    st.wallet_mut()
+        .db_mut()
+        .start_receive_operation(account, "first")
+        .unwrap()
+        .unwrap();
+    let other = prepare(&mut st, NOW);
+    assert_ne!(other.key_id(), r.key_id());
+    begin(&mut st, &other, "other").unwrap().unwrap();
+    for request in ["retry", "other"] {
+        let db = st.wallet_mut().db_mut();
+        assert!(matches!(
+            db.finish_receive_operation(account, request, &deposit),
+            Err(SqliteClientError::InvalidDynamicIvkInput(_))
+        ));
+        assert!(matches!(
+            db.start_receive_operation(account, request),
+            Ok(Err(ReservationPolicy::Stale))
+        ));
+    }
+}
+
 #[test]
 fn begin_returns_a_fresh_request_identity() {
     let mut st = fixture();
