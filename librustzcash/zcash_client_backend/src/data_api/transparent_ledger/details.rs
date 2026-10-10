@@ -71,7 +71,7 @@ pub struct TransparentDetailWork {
     pub mode: TransparentLedgerMode,
     /// The durable policy generation (`0` before any policy was applied).
     pub policy_generation: u64,
-    /// The due lookups, in priority order.
+    /// The due lookups, in priority order: preferred ones first.
     pub requests: Vec<TransparentDetailRequest>,
 }
 
@@ -458,8 +458,14 @@ pub enum TransparentDisplayView {
 
 /// Reads transparent txid enhancement work and the detail view.
 pub trait TransparentDetailRead: super::TransparentLedgerRead {
-    /// Returns up to `limit` due lookups at `now`, with the mode and policy generation read
-    /// in the same snapshot.
+    /// Returns the due lookups at `now` among `prefer`, in its order, then up to `limit` other
+    /// due lookups, with the mode and policy generation read in the same snapshot.
+    ///
+    /// `prefer` names transactions the caller wants first, such as receipts a user opened. It
+    /// changes only the order and the window: a preferred transaction is listed only when it is
+    /// due, and preferred ones do not count against `limit`. The other lookups come in the
+    /// wallet's order: never-attempted and re-armed work first, then by mined height, newest
+    /// first.
     ///
     /// A transaction is due when it is mined, lacks raw bytes, is still related to the
     /// wallet, and either its mined height changed since the last attempt or its next
@@ -473,6 +479,7 @@ pub trait TransparentDetailRead: super::TransparentLedgerRead {
         &self,
         now: SystemTime,
         limit: usize,
+        prefer: &[TxId],
         map_sha256: Option<[u8; 32]>,
     ) -> Result<TransparentDetailWork, Self::Error>;
 

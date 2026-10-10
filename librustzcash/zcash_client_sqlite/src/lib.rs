@@ -2216,6 +2216,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
         &self,
         now: std::time::SystemTime,
         limit: usize,
+        prefer: &[TxId],
         map_sha256: Option<[u8; 32]>,
     ) -> Result<TransparentDetailWork, Self::Error> {
         wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
@@ -2224,6 +2225,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
                 self.transparent_ledger_mode,
                 now,
                 limit,
+                prefer,
                 map_sha256,
             )
         })

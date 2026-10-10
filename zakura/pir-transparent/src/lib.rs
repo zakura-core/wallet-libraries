@@ -61,7 +61,10 @@ pub use transparent_txid_client::{
     TxidReply, TxidRequest, TxidTransport,
 };
 #[cfg(feature = "wallet")]
-pub use txid::{TxidDisplayService, deferral, display_facts, map_sha256};
+pub use txid::{
+    DetailAnswer, DetailApplied, DetailRun, DetailStep, DetailWrite, DisplayLookup, MapCheck,
+    MapChecked, TxidDisplayService, deferral, display_facts, map_sha256,
+};
 // What a caller implements for `recover`: the chain view (or `WalletChain`), and
 // transports that reach the companion's origin and map service refusals.
 #[cfg(feature = "wallet")]

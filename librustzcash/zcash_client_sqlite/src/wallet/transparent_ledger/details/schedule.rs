@@ -1,8 +1,9 @@
 //! Listing due and parked lookups, and scheduling retries after a failed one.
 
+use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension as _, named_params};
+use rusqlite::{Connection, OptionalExtension as _, named_params, types::Value};
 use zcash_client_backend::data_api::transparent_ledger::{
     TRANSPARENT_DISPLAY_MAP_RECHECK, TransparentDetailOutcome, TransparentDetailParked,
     TransparentDetailReasons, TransparentDetailRequest, TransparentDetailWork,
@@ -40,47 +41,69 @@ fn i64_secs(d: Duration) -> i64 {
 
 /// The due lookups; see `TransparentDetailRead::transparent_detail_work`. The caller supplies
 /// the read snapshot.
+///
+/// Two listings of the same due rows: the preferred ones, without a limit (each txid names at
+/// most one row), then the rest up to `limit`.
 pub(crate) fn work(
     conn: &Connection,
     configured: Option<TransparentLedgerMode>,
     now: SystemTime,
     limit: usize,
+    prefer: &[TxId],
     map_sha256: Option<[u8; 32]>,
 ) -> Result<TransparentDetailWork, SqliteClientError> {
     let mode = resolve_mode(conn, configured)?;
     let policy_generation = durable_policy(conn)?.map_or(0, |p| p.generation);
-    let mut stmt = conn.prepare_cached(&format!(
-        "SELECT t.txid, t.mined_height, w.reasons
-         FROM transparent_detail_work w
-         JOIN transactions t ON t.id_tx = w.transaction_id
-         WHERE {eligible}
-           AND ({REARMED} OR (w.next_attempt_at <= :now AND NOT ({parked})))
-         ORDER BY (w.attempts = 0 OR {REARMED}) DESC, t.mined_height DESC, t.txid
-         LIMIT :limit",
-        eligible = eligible_work_sql(),
-        parked = parked_work_sql(),
-    ))?;
-    let rows = stmt.query_map(
-        named_params![
-            ":now": unix(now),
-            ":map": map_sha256.as_ref().map(|m| &m[..]),
-            ":backstop": i64_secs(PARKED_BACKSTOP),
-            ":public": mode.retains_public_authority(),
-            ":enhancement": TxQueryType::Enhancement.code(),
-            ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
-        ],
-        |row| {
-            Ok(TransparentDetailRequest {
-                txid: TxId::from_bytes(row.get(0)?),
-                mined_height: BlockHeight::from_u32(row.get(1)?),
-                reasons: TransparentDetailReasons::from_bits(row.get(2)?),
-            })
-        },
-    )?;
+    let preferred = Rc::new(
+        prefer
+            .iter()
+            .map(|txid| Value::Blob(txid.as_ref().to_vec()))
+            .collect::<Vec<_>>(),
+    );
+    let list = |among: &str, limit: usize| -> Result<Vec<_>, SqliteClientError> {
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT t.txid, t.mined_height, w.reasons
+             FROM transparent_detail_work w
+             JOIN transactions t ON t.id_tx = w.transaction_id
+             WHERE {eligible}
+               AND ({REARMED} OR (w.next_attempt_at <= :now AND NOT ({parked})))
+               AND {among}
+             ORDER BY (w.attempts = 0 OR {REARMED}) DESC, t.mined_height DESC, t.txid
+             LIMIT :limit",
+            eligible = eligible_work_sql(),
+            parked = parked_work_sql(),
+        ))?;
+        let rows = stmt.query_map(
+            named_params![
+                ":now": unix(now),
+                ":map": map_sha256.as_ref().map(|m| &m[..]),
+                ":backstop": i64_secs(PARKED_BACKSTOP),
+                ":public": mode.retains_public_authority(),
+                ":enhancement": TxQueryType::Enhancement.code(),
+                ":prefer": &preferred,
+                ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
+            ],
+            |row| {
+                Ok(TransparentDetailRequest {
+                    txid: TxId::from_bytes(row.get(0)?),
+                    mined_height: BlockHeight::from_u32(row.get(1)?),
+                    reasons: TransparentDetailReasons::from_bits(row.get(2)?),
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    };
+    let mut requests = if prefer.is_empty() {
+        vec![]
+    } else {
+        list("t.txid IN rarray(:prefer)", prefer.len())?
+    };
+    requests.sort_by_key(|r| prefer.iter().position(|txid| *txid == r.txid));
+    requests.extend(list("t.txid NOT IN rarray(:prefer)", limit)?);
     Ok(TransparentDetailWork {
         mode,
         policy_generation,
-        requests: rows.collect::<Result<_, _>>()?,
+        requests,
     })
 }
 

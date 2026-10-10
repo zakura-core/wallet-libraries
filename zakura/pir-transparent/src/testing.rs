@@ -288,7 +288,8 @@ mod tests {
         let service = TxidDisplayService::new();
         let publication = Serving(TxidPublication::new(3_000_000, 3_000_009));
         let found = service.lookup(&publication, [7; 32], 3_000_005, &|| false);
-        assert_eq!(found, Ok(TxidLookup::Absent));
+        assert_eq!(found.found, Ok(TxidLookup::Absent));
+        assert_eq!(found.map_sha256, Some(publication.0.map_sha256()));
         assert_eq!(service.map_sha256(), Some(publication.0.map_sha256()));
     }
 }

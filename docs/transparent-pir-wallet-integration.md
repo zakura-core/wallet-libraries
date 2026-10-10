@@ -71,6 +71,7 @@ private queries are encoded and retrieved.
 | Adapter → wallet store | Apply normalized events, coverage, source revisions, and continuation work | `TransparentLedgerCommit`, `TransparentLedgerWrite` |
 | Wallet store → application | Read balance together with authority, coverage, and blockers; read account-specific history | `TransparentLedgerSnapshot`, `transaction_history_details` |
 | Receipt scheduler → wallet store | List due work, validate returned display facts, record failures, and read cached details | `TransparentDetailRead`, `TransparentDetailWrite` |
+| Receipt scheduler → detail run | Order the lookups, check the display map when work waits for it, and turn each lookup's result into one wallet write | `DetailRun`, `TxidDisplayService` |
 
 The ledger APIs do not depend on wallet-pir's wire types. The adapter,
 `zakura-pir-transparent`, translates protocol records, leaving publisher trust
@@ -317,12 +318,33 @@ when the arithmetic balances. Public raw-transaction storage instead goes
 through ordinary transaction ingestion and can add wallet facts.
 
 Opening a receipt shows cached details immediately and prioritizes missing
-details for the next bounded lookup run. Failures keep the receipt pending,
-unavailable, or explicitly not covered. Retries are spaced out; work waiting
-for new publication data periodically checks for updates instead of repeating
-the same lookup continuously. Re-mining makes the lookup eligible again, and
+details for the next bounded lookup run: the wallet lists a preferred receipt
+ahead of other work however old it is, but only once its lookup is due.
+Failures keep the receipt pending, unavailable, or explicitly not covered.
+Retries are spaced out; work waiting for new publication data periodically
+checks for updates instead of repeating the same lookup continuously, and a
+check that fails counts too. Re-mining makes the lookup eligible again, and
 old responses cannot overwrite newer state. Closing a receipt does not stop
 financial recovery.
+
+The adapter's `DetailRun` carries this protocol for one run, so an application
+keeps only transport, scheduling, cancellation, and its write lock:
+
+1. `DetailRun::plan` lists the due lookups under the display map the
+   `TxidDisplayService` holds, preferred receipts first. The run's mode and
+   policy generation come from that listing; the caller checks them against
+   the policy it captured before any lookup.
+2. When nothing is due but lookups wait for a changed map and their re-check
+   time has passed, the only step is `RefreshMap`. The check is recorded before
+   the map is fetched, and `relist` lists again only when the map changed and
+   the policy did not.
+3. Each `Lookup` runs with no wallet lock held. `record` turns its result into
+   one write: display facts to validate and store, a deferral naming the map
+   the lookup used, or, under public transport only, the raw transaction. A
+   cancelled lookup is not an attempt and writes nothing.
+4. `DetailWrite::apply` stores or defers under the caller's write lock and hands
+   a raw transaction back: the application stores it through ordinary
+   transaction ingestion, re-checking its policy in the same wallet transaction.
 
 ## 6. How transactions work, case by case
 

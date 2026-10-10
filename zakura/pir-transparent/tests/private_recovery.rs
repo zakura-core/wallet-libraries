@@ -1621,7 +1621,7 @@ fn private_details_end_to_end() {
         let work =
             f.st.wallet()
                 .db()
-                .transparent_detail_work(at, 10, None)
+                .transparent_detail_work(at, 10, &[], None)
                 .unwrap();
         assert!(!work.public_transport());
         work.requests
@@ -1712,7 +1712,7 @@ fn private_details_end_to_end() {
         let snapshot =
             f.st.wallet()
                 .db()
-                .transparent_detail_work(at, 10, None)
+                .transparent_detail_work(at, 10, &[], None)
                 .unwrap();
         let current =
             f.st.wallet()
@@ -1847,7 +1847,7 @@ fn private_details_end_to_end() {
     let public =
         f.st.wallet()
             .db()
-            .transparent_detail_work(at, 10, None)
+            .transparent_detail_work(at, 10, &[], None)
             .unwrap();
     assert!(public.public_transport());
     let work: Vec<(TxId, u64)> = public

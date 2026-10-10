@@ -294,12 +294,21 @@ means all candidates were checked; a partial list is not a complete import.
 ### Receipt lookup
 
 Reuse `TxidDisplayService` for the origin and call `lookup` with the txid in
-internal byte order, its mined height, and cancellation. Convert a found entry
-with `display_facts`, then submit it to the wallet's detail writer. For other
-results, `deferral` supplies the detail-work outcome to record. Refreshing the
+internal byte order, its mined height, and cancellation. The `DisplayLookup` it
+returns names the map that lookup used. Convert a found entry with
+`display_facts`, then submit it to the wallet's detail writer. For other
+results, `deferral` supplies the detail-work outcome to record with that map. Refreshing the
 map can detect newly published or newly supported data. Account recovery and
 receipt lookup have separate state and scheduling, so display unavailability
 does not hold financial recovery open.
+
+`DetailRun` drives one run of the wallet's txid detail work through the
+service: which lookups to make (receipts the caller prefers first), when to
+check the display map, and which wallet write each result makes. It records a
+map check before fetching, so a failed or abandoned check is bounded too, and
+writes nothing for a cancelled lookup. It holds no lock, thread or budget; the
+caller looks up between steps with no wallet lock held and applies each write
+under its own.
 
 ## Transport and failure contracts
 

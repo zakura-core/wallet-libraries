@@ -32,6 +32,17 @@ impl Default for TxidDisplayService {
     }
 }
 
+/// A lookup's result, with the display map it was answered under.
+#[derive(Debug, PartialEq)]
+pub struct DisplayLookup {
+    /// What the lookup found.
+    pub found: Result<TxidLookup, TxidError>,
+    /// The digest of the map the client held when the lookup finished, read before another
+    /// lookup could change it: the map the lookup was placed under, or `None` when the client
+    /// holds none, such as after a lookup cancelled while waiting for the client.
+    pub map_sha256: Option<[u8; 32]>,
+}
+
 /// The client, and whether its last lookup found the display unsupported.
 struct Client {
     client: TxidDisplayClient,
@@ -66,14 +77,17 @@ impl TxidDisplayService {
     /// until a map is accepted, so after [`TxidLookup::Unsupported`] the next
     /// lookup first fetches the map, which drops that init and still refuses
     /// a map of another chain than the client pinned.
+    ///
+    /// The result names the map the lookup used, which [`Self::map_sha256`]
+    /// cannot once another lookup or refresh has run.
     pub fn lookup(
         &self,
         exchange: &impl HttpExchange,
         txid: [u8; 32],
         mined_height: u64,
         cancel: &dyn Fn() -> bool,
-    ) -> Result<TxidLookup, TxidError> {
-        self.with_client(cancel, |state| {
+    ) -> DisplayLookup {
+        let (found, map_sha256) = self.with_client(cancel, |state| {
             let mut http = TxidHttp::new(exchange);
             if state.unsupported {
                 state.client.refresh_map(&mut http, cancel)?;
@@ -82,7 +96,8 @@ impl TxidDisplayService {
             let found = state.client.lookup(&mut http, txid, mined_height, cancel);
             state.unsupported = matches!(found, Ok(TxidLookup::Unsupported));
             found
-        })
+        });
+        DisplayLookup { found, map_sha256 }
     }
 
     /// Fetches the recent map now and returns its digest; see
@@ -100,6 +115,7 @@ impl TxidDisplayService {
             state.unsupported &= refreshed.is_err();
             refreshed
         })
+        .0
     }
 
     /// The digest of the map the client held after its last request, without
@@ -120,23 +136,26 @@ impl TxidDisplayService {
     }
 
     /// Runs `call` once the client is free, unless `cancel` holds first, and
-    /// records the map digest the client holds afterwards.
+    /// records and returns the map digest the client holds afterwards.
     fn with_client<T>(
         &self,
         cancel: &dyn Fn() -> bool,
         call: impl FnOnce(&mut Client) -> Result<T, TxidError>,
-    ) -> Result<T, TxidError> {
+    ) -> (Result<T, TxidError>, Option<[u8; 32]>) {
         let mut client = loop {
             match self.client.try_lock() {
                 Ok(client) => break client,
                 Err(TryLockError::Poisoned(client)) => break client.into_inner(),
-                Err(TryLockError::WouldBlock) if cancel() => return Err(TxidError::Cancelled),
+                Err(TryLockError::WouldBlock) if cancel() => {
+                    return (Err(TxidError::Cancelled), None);
+                }
                 Err(TryLockError::WouldBlock) => std::thread::sleep(CLIENT_WAIT_STEP),
             }
         };
         let result = call(&mut client);
-        *lock(&self.map) = client.client.map_sha256().and_then(map_sha256);
-        result
+        let map = client.client.map_sha256().and_then(map_sha256);
+        *lock(&self.map) = map;
+        (result, map)
     }
 }
 
@@ -205,7 +224,9 @@ mod tests {
         };
         let service = TxidDisplayService::new();
         assert_eq!(
-            service.lookup(&exchange, [7; 32], 3_460_000, &|| false),
+            service
+                .lookup(&exchange, [7; 32], 3_460_000, &|| false)
+                .found,
             Ok(TxidLookup::Unsupported)
         );
         assert_eq!(*lock(&exchange.paths), ["/v1/txid/init"]);
@@ -213,6 +234,7 @@ mod tests {
         assert!(
             service
                 .lookup(&exchange, [7; 32], 3_460_000, &|| false)
+                .found
                 .is_err()
         );
         assert_eq!(lock(&exchange.paths)[1], "/v1/txid/map");
@@ -262,17 +284,17 @@ mod tests {
         // The first map pins the chain; the service's display is unsupported.
         service.refresh_map(&exchange, &never).unwrap();
         assert_eq!(
-            service.lookup(&exchange, [7; 32], 3_000_005, &never),
+            service.lookup(&exchange, [7; 32], 3_000_005, &never).found,
             Ok(TxidLookup::Unsupported)
         );
         phase.store(1, Ordering::SeqCst);
         assert_eq!(
-            service.lookup(&exchange, [7; 32], 3_000_005, &never),
+            service.lookup(&exchange, [7; 32], 3_000_005, &never).found,
             Err(TxidError::Protocol(ProtocolKind::Map))
         );
         phase.store(2, Ordering::SeqCst);
         assert_eq!(
-            service.lookup(&exchange, [7; 32], 3_000_005, &never),
+            service.lookup(&exchange, [7; 32], 3_000_005, &never).found,
             Ok(TxidLookup::Absent)
         );
     }
@@ -294,7 +316,13 @@ mod tests {
             });
             std::thread::sleep(Duration::from_millis(20));
             cancelled.store(true, Ordering::SeqCst);
-            assert_eq!(waiting.join().unwrap(), Err(TxidError::Cancelled));
+            assert_eq!(
+                waiting.join().unwrap(),
+                DisplayLookup {
+                    found: Err(TxidError::Cancelled),
+                    map_sha256: None,
+                }
+            );
         });
         drop(held);
         assert_eq!(exchange.sent.load(Ordering::SeqCst), 0);

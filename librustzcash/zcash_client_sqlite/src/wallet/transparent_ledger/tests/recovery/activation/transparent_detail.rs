@@ -86,7 +86,7 @@ fn attempts(st: &State, txid: TxId) -> u32 {
 fn listing_at(st: &State, at: SystemTime, map: Option<[u8; 32]>) -> Vec<TxId> {
     st.wallet()
         .db()
-        .transparent_detail_work(at, 100, map)
+        .transparent_detail_work(at, 100, &[], map)
         .unwrap()
         .requests
         .into_iter()
@@ -613,7 +613,7 @@ fn priority_and_backoff_order() {
     assert_eq!(
         st.wallet()
             .db()
-            .transparent_detail_work(now(), 2, None)
+            .transparent_detail_work(now(), 2, &[], None)
             .unwrap()
             .requests
             .len(),
@@ -683,6 +683,41 @@ fn priority_and_backoff_order() {
         backoff(TransparentDetailOutcome::Absent, 1, &spending),
         backoff(TransparentDetailOutcome::Absent, 1, &unspent)
     );
+}
+
+#[test]
+fn preferred_work_lists_first_without_counting_against_the_limit() {
+    let (mut st, _, unspent) = active_wallet();
+    let unspent = txid_of(&unspent);
+    let spent = TxId::from_bytes([2; 32]);
+    let spending = TxId::from_bytes([3; 32]);
+    let list = |st: &State, limit, prefer: &[TxId]| -> Vec<TxId> {
+        st.wallet()
+            .db()
+            .transparent_detail_work(now(), limit, prefer, None)
+            .unwrap()
+            .requests
+            .into_iter()
+            .map(|r| r.txid)
+            .collect()
+    };
+    // Without a preference, the wallet's order.
+    assert_eq!(list(&st, 10, &[]), vec![spending, unspent, spent]);
+    assert_eq!(list(&st, 1, &[]), vec![spending]);
+    // The oldest transaction, outside a one-row window, is listed first and the window still
+    // holds one other row.
+    assert_eq!(list(&st, 1, &[spent]), vec![spent, spending]);
+    assert_eq!(list(&st, 0, &[spent]), vec![spent]);
+    // Preferred rows keep the caller's order; unknown txids and repeats change nothing.
+    let unknown = TxId::from_bytes([0x77; 32]);
+    assert_eq!(
+        list(&st, 1, &[unknown, spent, unspent, spent]),
+        vec![spent, unspent, spending]
+    );
+    // A preferred row is listed only when it is due.
+    defer(&mut st, spent, unavailable(), now());
+    assert_eq!(list(&st, 10, &[spent]), vec![spending, unspent]);
+    assert_eq!(list(&st, 1, &[spent]), vec![spending]);
 }
 
 #[test]
@@ -1100,7 +1135,7 @@ fn stale_generation_rejected() {
     let listed = st
         .wallet()
         .db()
-        .transparent_detail_work(now(), 10, None)
+        .transparent_detail_work(now(), 10, &[], None)
         .unwrap();
     assert_eq!(listed.policy_generation, generation(&st));
     set_policy(&mut st, Public);
@@ -1124,7 +1159,7 @@ fn listing_reports_policy_snapshot() {
     let work = |st: &State| {
         st.wallet()
             .db()
-            .transparent_detail_work(now(), 10, None)
+            .transparent_detail_work(now(), 10, &[], None)
             .unwrap()
     };
     let private = work(&st);

@@ -18,7 +18,8 @@ workspace.
   add it.
 - `transparent_ledger::{TransparentDetailRead, TransparentDetailWrite}` (prototype): durable
   transparent txid enhancement work (`transparent_detail_work`, returning the requests with the
-  mode and policy generation of the same snapshot as `TransparentDetailWork`;
+  mode and policy generation of the same snapshot as `TransparentDetailWork`, the due ones among
+  the caller's `prefer` first and outside its `limit`;
   `transparent_detail_parked`, reporting work that waits for a display map change under the
   caller's map as `TransparentDetailParked`, with a refresh time bounded by
   `TRANSPARENT_DISPLAY_MAP_RECHECK`), validated

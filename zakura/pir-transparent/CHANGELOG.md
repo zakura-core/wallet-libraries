@@ -80,6 +80,19 @@
   process: lookups take turns on the client, a waiting lookup stops at cancellation, the map
   digest and the last map check time are read without waiting, and a lookup that finds the
   display unsupported leaves only the derived native profiles, so the next lookup asks again.
+  `lookup` returns a `DisplayLookup`: the result with the digest of the map that lookup used,
+  read before another lookup or map check can change it.
+- `DetailRun`, the wallet's txid detail work protocol for one run, so callers keep only
+  transport, scheduling and their write lock: `plan` lists the due lookups (preferred ones
+  first) under the service's display map and, when nothing is due but lookups are parked and
+  their re-check time has passed, yields one `DetailStep::RefreshMap`, whose `MapCheck` is
+  recorded as started before the fetch, so failed and abandoned checks are bounded too;
+  `relist` lists again only when the fetched map differs and the policy is unchanged. `record`
+  turns a lookup's `DetailAnswer` into a `DetailWrite`: display facts to store under the
+  listing's generation, a deferral with the map the lookup used, or a public transaction
+  handed back only under public transport. A cancelled lookup writes nothing.
+  `DetailWrite::apply` performs a store or deferral and returns the public transaction to the
+  caller's own policy-checked ingestion.
 - `CompanionDir`, one wallet's companions: `open` names each `{account}-{tag}.sqlite` (the
   tag binds the origin and `SCHEMA`), prunes the account's companions for other origins and
   those of accounts the caller no longer has, and holds an operating system lock on the

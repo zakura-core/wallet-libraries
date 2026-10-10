@@ -52,8 +52,9 @@ workspace.
   after seven days without a display map change; under public authority nothing is parked, and
   held work is due at its ordinary retry. Failed lookups and contradictions only
   change retry state while the looked-up height still matches the transaction's mined height;
-  a change of outcome class restarts the backoff. The view shows work as pending only while the
-  listing would return it.
+  a change of outcome class restarts the backoff. The listing returns the due preferred
+  transactions in the caller's order before up to `limit` others; a preference never makes work
+  due. The view shows work as pending only while the listing would return it.
   Facts are validated against the coinbase
   position, owned outputs that financial queries count, recovered metadata, the stored fee,
   known shielded components, and known spends (input indexes and the number of distinct spent
