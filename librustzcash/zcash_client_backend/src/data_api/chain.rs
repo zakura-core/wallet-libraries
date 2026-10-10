@@ -769,6 +769,7 @@ where
             )
             .map_err(Error::Scan)?;
 
+            // ScanSummary omits ordinary and dynamic Ironwood notes; adding Ironwood counters is separate work.
             for wtx in &scanned_block.transactions {
                 scan_summary.spent_sapling_note_count += wtx.sapling_spends().len();
                 scan_summary.received_sapling_note_count += wtx.sapling_outputs().len();

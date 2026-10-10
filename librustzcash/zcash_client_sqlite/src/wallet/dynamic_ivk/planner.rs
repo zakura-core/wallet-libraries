@@ -70,7 +70,7 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
     }
     // A finished sweep is offered again while a late lookup left candidates queued.
     let mut stmt = conn.prepare(
-        "SELECT k.purpose, k.key_index, k.receiver, s.lookup_height, s.lookup_hash
+        "SELECT k.purpose, k.key_index, k.receiver
          FROM ironwood_dynamic_sweeps s
          JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
          WHERE k.account_id = ?1 AND k.scan_from <= ?2 AND s.next_attempt_at <= ?3
@@ -93,7 +93,6 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
                 .get::<_, Vec<u8>>(2)?
                 .try_into()
                 .map_err(|_| corrupt("invalid stored receiver"))?,
-            lookup: canonical(conn, anchor(r.get(3)?, r.get(4)?))?,
         });
     }
     Ok(Ok(work))
@@ -127,8 +126,10 @@ pub(crate) fn begin_sweep_attempt(
     Ok(())
 }
 
-/// Queues authenticated candidates from a lookup of `key` at `anchor` and, if
-/// `complete`, records its coverage, which the caller validated.
+/// Queues authenticated candidates from a lookup of `key` at `anchor`, the answer that
+/// replaced the key's queued set, and reopens the sweep: a `complete` answer records
+/// its coverage, which the caller validated, and an incomplete one clears it, so the
+/// sweep finishes only once its current answer is applied.
 pub(super) fn queue_lookup<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -147,16 +148,16 @@ pub(super) fn queue_lookup<P: Parameters>(
         }
         queue_payment(conn, params, account, key, payment)?;
     }
-    if complete {
-        conn.execute(
-            "UPDATE ironwood_dynamic_sweeps SET lookup_height = ?2, lookup_hash = ?3
-             WHERE receiving_key_id = ?1 AND (lookup_height IS NULL OR lookup_height <= ?2)",
-            params![
-                key_ref(conn, account, key)?,
-                u32::from(anchor.height),
-                anchor.hash.0
-            ],
-        )?;
-    }
+    let coverage = complete.then_some(anchor);
+    conn.execute(
+        "UPDATE ironwood_dynamic_sweeps
+         SET lookup_height = ?2, lookup_hash = ?3, done_height = NULL
+         WHERE receiving_key_id = ?1",
+        params![
+            key_ref(conn, account, key)?,
+            coverage.map(|a| u32::from(a.height)),
+            coverage.map(|a| a.hash.0)
+        ],
+    )?;
     Ok(Ok(()))
 }

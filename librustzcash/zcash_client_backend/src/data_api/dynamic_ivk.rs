@@ -37,8 +37,6 @@ pub struct DiscoveryWork {
     pub key: KeyId,
     /// The key's receiver, as canonical address bytes.
     pub receiver: [u8; 43],
-    /// A completed lookup whose payments are queued. Resume those first.
-    pub lookup: Option<ChainPoint>,
 }
 
 /// A payment the receiver directory reports for a receiver, from public block data.
@@ -93,7 +91,7 @@ pub enum PaymentApplication {
     BeforeBirthday,
     /// The directory's claim failed a local check: the note's block or inclusion path,
     /// or its transaction identity against stored data. The key's queued lookup is
-    /// discarded, so its next attempt asks the directory again.
+    /// discarded.
     Rejected,
     /// Note, witness, key identity, and any known spend were committed together, or the
     /// wallet already stored the note under another transaction. The retrieved memo is
@@ -157,8 +155,8 @@ pub trait DynamicIvkRead: WalletRead {
 ///
 /// A restore sweep takes each due [`DiscoveryWork`] item from
 /// [`Self::prepare_dynamic_sweeps`] and leases it with
-/// [`Self::begin_dynamic_sweep_attempt`]. Unless its lookup is already queued, it looks
-/// the item's receiver up in the directory, then retrieves note data for the positions
+/// [`Self::begin_dynamic_sweep_attempt`]. Every attempt looks the item's receiver up
+/// in the directory's current publication, then retrieves note data for the positions
 /// [`DynamicIvkRead::directory_note_data_needed`] returns and queues it with
 /// [`Self::queue_directory_lookup`], in batches, until the lookup is done. Then it
 /// calls [`Self::apply_dynamic_sweep`]. Each step commits atomically, so a caller may
