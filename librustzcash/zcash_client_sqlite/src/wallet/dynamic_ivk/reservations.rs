@@ -45,8 +45,8 @@ pub const EARLIEST_RECEIVE_QUOTE: i64 = 1_790_640_000;
 ///
 /// In an account restored from its seed, a registered address without local quotes may
 /// have been quoted by the old device. It is issued only if a set lacks it and covers
-/// every quote from [`EARLIEST_RECEIVE_QUOTE`] until the restore, the time of the
-/// account's `recover_until` block, widened by [`SEEN_SLACK_SECONDS`]; otherwise
+/// every quote from [`EARLIEST_RECEIVE_QUOTE`] until [`SEEN_SLACK_SECONDS`] after the
+/// restore, the time of the account's `recover_until` block; otherwise
 /// issuance waits with [`ReservationPolicy::Gap`]. Wallets must pass
 /// `AccountBirthday::recover_until` when restoring an account from a seed, or it counts
 /// as new and this check does not apply.
@@ -82,10 +82,13 @@ pub enum OperationOutcome {
     Rejected,
 }
 
-/// The quote times `seen` covers, as `SEEN`'s bounds; without a set, none.
+/// The local quote times `seen` covers, as `SEEN`'s bounds; without a set, none.
 fn coverage(seen: Option<&ProviderSeen<'_>>) -> (i64, i64) {
     seen.map_or((i64::MAX, i64::MIN), |s| {
-        (s.since, s.until.saturating_sub(SEEN_SLACK_SECONDS))
+        (
+            s.since.saturating_add(SEEN_SLACK_SECONDS),
+            s.until.saturating_sub(SEEN_SLACK_SECONDS),
+        )
     })
 }
 
@@ -496,8 +499,11 @@ pub(super) fn prepare<P: Parameters>(
             |r| r.get::<_, Option<i64>>(0),
         )
         .optional()?;
+    // `EARLIEST_RECEIVE_QUOTE` is not a local time and already precedes every quote, so
+    // it meets the feed's start without slack, which would bar feeds starting there.
     let unquoted_wait = restore.is_some_and(|restored_at| {
-        coverage.0 > EARLIEST_RECEIVE_QUOTE || restored_at.is_none_or(|t| t > coverage.1)
+        seen.is_none_or(|s| s.since > EARLIEST_RECEIVE_QUOTE)
+            || restored_at.is_none_or(|t| t > coverage.1)
     });
     // An address the provider was given without seeing it, such as a request that never
     // reached it, is reissued only when the gap rule leaves no fresh one.
