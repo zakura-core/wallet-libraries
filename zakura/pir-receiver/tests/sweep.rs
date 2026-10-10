@@ -355,24 +355,10 @@ async fn a_restore_sweep_finds_a_payout_and_moves_the_lookahead_past_it() {
         data: BTreeMap::from([(record.payment.position, note_data)]),
         requested: Vec::new(),
     };
-    let swept = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        &[account],
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut notes,
-        &NoLock,
-        NOW,
-    )
-    .await
-    .unwrap();
-    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
-    assert!(!swept.pending);
-    // The first window, then the keys above it that the paid index brings in.
-    assert_eq!(swept.finished as u64, RECEIVE_GAP_LIMIT + paid + 1);
+    let finished = settle(&mut st, &[account], through, &directory, &mut notes).await;
+    // The first window, then, in a later run, the keys above it that the paid index
+    // brings in.
+    assert_eq!(finished as u64, RECEIVE_GAP_LIMIT + paid + 1);
     assert_eq!(notes.requested, [vec![record.payment.position]]);
     assert_eq!(
         st.get_total_balance(account),
@@ -412,7 +398,6 @@ async fn a_restore_sweep_finds_a_payout_and_moves_the_lookahead_past_it() {
 #[tokio::test]
 async fn a_key_paid_twice_is_imported_in_full() {
     let mut st = ironwood_wallet();
-    let network = *st.network();
     let account = st.test_account().unwrap().id();
     let paid = 2;
     let (mut first, first_data) = pay_restored_key(&mut st, paid, 0);
@@ -433,22 +418,7 @@ async fn a_key_paid_twice_is_imported_in_full() {
         data: BTreeMap::from([(0, first_data), (1, second_data)]),
         requested: Vec::new(),
     };
-    let swept = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        &[account],
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut notes,
-        &NoLock,
-        NOW,
-    )
-    .await
-    .unwrap();
-    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
-    assert!(!swept.pending);
+    settle(&mut st, &[account], through, &directory, &mut notes).await;
     assert_eq!(notes.requested, [vec![0, 1]]);
     assert_eq!(
         st.get_total_balance(account),
@@ -467,7 +437,6 @@ async fn a_key_paid_twice_is_imported_in_full() {
 #[tokio::test]
 async fn a_long_history_takes_its_note_data_in_batches() {
     let mut st = ironwood_wallet();
-    let network = *st.network();
     let account = st.test_account().unwrap().id();
     let paid = 1;
     // One more payment than a batch of note data holds.
@@ -490,22 +459,7 @@ async fn a_long_history_takes_its_note_data_in_batches() {
         data,
         requested: Vec::new(),
     };
-    let swept = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        &[account],
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut notes,
-        &NoLock,
-        NOW,
-    )
-    .await
-    .unwrap();
-    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
-    assert!(!swept.pending);
+    settle(&mut st, &[account], through, &directory, &mut notes).await;
     let batches: Vec<_> = notes.requested.iter().map(Vec::len).collect();
     assert_eq!(batches, [64, 1]);
     assert_eq!(
@@ -562,7 +516,6 @@ async fn a_wallet_without_payments_downloads_only_the_filters() {
 #[tokio::test]
 async fn seen_addresses_keep_scanning_and_are_never_issued_again() {
     let mut st = ironwood_wallet();
-    let network = *st.network();
     let account = st.test_account().unwrap().id();
     st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
     restore(&mut st, account);
@@ -590,21 +543,7 @@ async fn seen_addresses_keep_scanning_and_are_never_issued_again() {
         data: BTreeMap::new(),
         requested: Vec::new(),
     };
-    let swept = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        &[account],
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut notes,
-        &NoLock,
-        NOW,
-    )
-    .await
-    .unwrap();
-    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
+    settle(&mut st, &[account], through, &directory, &mut notes).await;
     // The seen address 2 moves the lookahead, and every swept key keeps scanning.
     let scanning = st.wallet().get_dynamic_scanning_keys().unwrap().len();
     assert_eq!(scanning as u64, RECEIVE_GAP_LIMIT + 3);
@@ -1148,6 +1087,29 @@ async fn run(
     .await
 }
 
+/// Runs sweeps at [`NOW`] until none is pending, expecting no deferral, and returns how
+/// many keys they finished.
+async fn settle(
+    st: &mut State,
+    accounts: &[AccountUuid],
+    through: ChainPoint,
+    directory: &Directory,
+    notes: &mut Notes,
+) -> usize {
+    let mut finished = 0;
+    for _ in 0..20 {
+        let swept = run(st, accounts, through, directory, notes, NOW)
+            .await
+            .unwrap();
+        assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
+        finished += swept.finished;
+        if !swept.pending {
+            return finished;
+        }
+    }
+    panic!("sweeps are still pending after 20 runs");
+}
+
 /// A queued candidate that defers is replaced by each later attempt's answer from the
 /// publication it uses: a corrected payment is recovered, and a paid-filter miss drops
 /// the candidate, whatever made it wait.
@@ -1233,22 +1195,16 @@ async fn a_deferred_candidate_takes_each_publications_current_answer() {
         } else {
             publish(&[], &[], through, &provider(&[]))
         };
-        let swept = run(
-            &mut st,
-            &[account],
-            through,
-            &Directory::new(b),
-            &mut notes,
-            NOW + 60,
-        )
-        .await
-        .unwrap();
+        let b = Directory::new(b);
+        let swept = run(&mut st, &[account], through, &b, &mut notes, NOW + 60)
+            .await
+            .unwrap();
         assert!(
             swept.deferred.is_empty(),
             "{deferral:?}: {:?}",
             swept.deferred
         );
-        assert!(!swept.pending, "{deferral:?}");
+        settle(&mut st, &[account], through, &b, &mut notes).await;
         let value = if corrected { VALUE } else { 0 };
         assert_eq!(
             st.get_total_balance(account),
@@ -1293,9 +1249,16 @@ async fn an_unchanged_answer_reuses_queued_note_data() {
         swept.deferred
     );
     // The replay the deferral queued is still unscanned.
-    let swept = run(&mut st, &[account], through, &directory, &mut notes, NOW + 60)
-        .await
-        .unwrap();
+    let swept = run(
+        &mut st,
+        &[account],
+        through,
+        &directory,
+        &mut notes,
+        NOW + 60,
+    )
+    .await
+    .unwrap();
     assert!(
         matches!(
             &swept.deferred[..],
@@ -1311,4 +1274,61 @@ async fn an_unchanged_answer_reuses_queued_note_data() {
         .count();
     assert!(posts >= 2, "{:?}", directory.requests());
     assert_eq!(notes.requested, [vec![record.payment.position]]);
+}
+
+/// The receiver of `account_fvk`'s incoming dynamic key `index`.
+fn incoming_receiver(account_fvk: &FullViewingKey, index: u64) -> Receiver {
+    let fvk = KeyId::new(Purpose::Receive, index)
+        .derive(account_fvk)
+        .unwrap();
+    Receiver::from_bytes(fvk.address_at(0u32, Scope::External).to_raw_address_bytes()).unwrap()
+}
+
+/// A seen set that holds every restored receiver moves the lookahead after each batch,
+/// so a run sweeps at most one batch per account and leaves the new keys pending. Later
+/// runs progress and find a payment far past the first batch.
+#[tokio::test]
+async fn each_run_sweeps_one_batch_and_later_runs_progress() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let paid = 100;
+    let (record, note_data) = pay_restored_key(&mut st, paid, 0);
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
+    // The set is finite, so an unbounded run stops past it instead of hanging.
+    let seen: Vec<_> = (0..200).map(|i| incoming_receiver(&parent, i)).collect();
+    let directory = Directory::new(publish(
+        std::slice::from_ref(&record),
+        &[record.payment.cmx],
+        through,
+        &provider(&seen),
+    ));
+    let mut notes = Notes {
+        data: BTreeMap::from([(record.payment.position, note_data)]),
+        requested: Vec::new(),
+    };
+    let mut runs = 0;
+    loop {
+        let swept = run(&mut st, &[account], through, &directory, &mut notes, NOW)
+            .await
+            .unwrap();
+        runs += 1;
+        assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
+        assert!(
+            (1..=64).contains(&swept.finished),
+            "run {runs} finished {}",
+            swept.finished
+        );
+        if !swept.pending {
+            break;
+        }
+        assert!(runs < 20);
+    }
+    assert!(runs > 1);
+    assert_eq!(
+        st.get_total_balance(account),
+        Zatoshis::const_from_u64(VALUE)
+    );
 }

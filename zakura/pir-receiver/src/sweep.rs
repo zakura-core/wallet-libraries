@@ -188,10 +188,11 @@ pub struct Swept<E> {
 /// [`DynamicIvkWrite::apply_dynamic_sweep`]).
 ///
 /// A run that looks nothing up opens no PIR session and fetches no witnesses. New
-/// payments a lookup finds take their note data from `notes`. After each batch the
-/// incoming lookahead moves past paid indices and its new keys are swept too. A key
-/// that fails is backed off and listed in [`Swept::deferred`], and the others go on,
-/// unless the directory's session or connection failed: then the run stops before
+/// payments a lookup finds take their note data from `notes`. A run sweeps at most one
+/// batch of due keys per account, then moves the incoming lookahead past paid and seen
+/// indices; its new keys are left for a later run, and [`Swept::pending`] reports them.
+/// A key that fails is backed off and listed in [`Swept::deferred`], and the others go
+/// on, unless the directory's session or connection failed: then the run stops before
 /// leasing more keys. A lease the wallet fails to store stops the run with its error.
 /// `now` is the caller's clock in seconds, for retry backoff.
 #[allow(clippy::too_many_arguments)]
@@ -221,7 +222,7 @@ where
     };
     let tip = wallet.chain_height().map_err(Error::Wallet)?;
     if tip == Some(through.height) {
-        let mut work = due(wallet, accounts, through, lock, now)?;
+        let work = due(wallet, accounts, through, lock, now)?;
         if !work.is_empty() {
             let accepted =
                 Directory::accept(wallet, params, through, genesis, origin, transport).await;
@@ -240,57 +241,52 @@ where
                     return Err(e);
                 }
             };
-            'run: loop {
-                let checks = directory.check(&work)?;
-                let lookups = checks.iter().filter(|check| check.paid).count();
-                if let Some(session) = &mut directory.session {
-                    session.client.use_file_for_work(lookups).await?;
-                }
-                for ((account, item), check) in work.into_iter().zip(checks) {
-                    // A key whose lease is not stored would be due again at once.
-                    lock.write("dynamic_sweep.attempt", || {
-                        wallet.begin_dynamic_sweep_attempt(account, item.key, now, check.seen)
-                    })
-                    .map_err(Error::Wallet)?;
-                    let swept_key = sweep_key(
-                        wallet,
-                        &mut directory,
-                        account,
-                        &item,
-                        check.paid,
-                        lookups,
-                        through,
-                        notes,
-                        lock,
-                    );
-                    match swept_key.await {
-                        Ok(()) => swept.finished += 1,
-                        Err(e) => {
-                            // Every later key would fail the same way and back off.
-                            let unavailable = matches!(
-                                e,
-                                Error::Directory(
-                                    DirectoryError::Revision | DirectoryError::Transport(_)
-                                )
-                            );
-                            swept.deferred.push((item.key, e));
-                            if unavailable {
-                                break 'run;
-                            }
+            let checks = directory.check(&work)?;
+            let lookups = checks.iter().filter(|check| check.paid).count();
+            if let Some(session) = &mut directory.session {
+                session.client.use_file_for_work(lookups).await?;
+            }
+            for ((account, item), check) in work.into_iter().zip(checks) {
+                // A key whose lease is not stored would be due again at once.
+                lock.write("dynamic_sweep.attempt", || {
+                    wallet.begin_dynamic_sweep_attempt(account, item.key, now, check.seen)
+                })
+                .map_err(Error::Wallet)?;
+                let swept_key = sweep_key(
+                    wallet,
+                    &mut directory,
+                    account,
+                    &item,
+                    check.paid,
+                    lookups,
+                    through,
+                    notes,
+                    lock,
+                );
+                match swept_key.await {
+                    Ok(()) => swept.finished += 1,
+                    Err(e) => {
+                        // Every later key would fail the same way and back off.
+                        let unavailable = matches!(
+                            e,
+                            Error::Directory(
+                                DirectoryError::Revision | DirectoryError::Transport(_)
+                            )
+                        );
+                        swept.deferred.push((item.key, e));
+                        if unavailable {
+                            break;
                         }
                     }
                 }
-                lock.write("dynamic_sweep.lookahead", || {
-                    accounts
-                        .iter()
-                        .try_for_each(|account| wallet.maintain_dynamic_ivks(*account))
-                })
-                .map_err(Error::Wallet)?;
-                work = due(wallet, accounts, through, lock, now)?;
-                if work.is_empty() {
-                    break;
-                }
             }
+            // New lookahead keys wait for a later run, which bounds this one.
+            lock.write("dynamic_sweep.lookahead", || {
+                accounts
+                    .iter()
+                    .try_for_each(|account| wallet.maintain_dynamic_ivks(*account))
+            })
+            .map_err(Error::Wallet)?;
         }
     }
     for account in accounts {
