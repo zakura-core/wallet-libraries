@@ -247,18 +247,8 @@ fn apply_payment(
     through: ChainPoint,
     (anchor, path): (ChainPoint, &MerklePath),
 ) -> Result<PaymentApplication, SqliteClientError> {
-    let configured = db.transparent_ledger_mode;
-    tx(db, |c, p| {
-        store::apply::apply_payment(
-            c,
-            p,
-            configured,
-            account,
-            key,
-            candidate,
-            through,
-            (anchor, path),
-        )
+    db.transactionally(|db| {
+        store::apply::apply_payment(db, account, key, candidate, through, (anchor, path))
     })
     .map(|applied| applied.expect("the payment's blocks are on the wallet's chain"))
 }
