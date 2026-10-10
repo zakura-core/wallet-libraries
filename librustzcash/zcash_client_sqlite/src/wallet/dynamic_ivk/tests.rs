@@ -549,6 +549,39 @@ fn first_leaf_path() -> MerklePath {
     )
 }
 
+/// `candidate` as the directory reports it, with its note data by position.
+fn directory_answer(
+    candidate: &PendingPayment,
+) -> (DirectoryPayment, std::collections::BTreeMap<u64, [u8; 528]>) {
+    let note = candidate.encrypted_note.to_bytes();
+    let payment = DirectoryPayment {
+        height: u32::from(candidate.height),
+        block_hash: candidate.block_hash.0,
+        txid: *candidate.txid.as_ref(),
+        tx_index: candidate.tx_index.into(),
+        action_index: candidate.action_index,
+        position: candidate.position.into(),
+        action_nullifier: note[..32].try_into().unwrap(),
+        cmx: note[32..64].try_into().unwrap(),
+        ephemeral_key: note[64..96].try_into().unwrap(),
+        ciphertext_prefix: note[96..148].try_into().unwrap(),
+    };
+    let data = [(payment.position, note[148..].try_into().unwrap())].into();
+    (payment, data)
+}
+
+/// Reopens `st`'s wallet database from its file.
+fn reopen(st: &mut State) {
+    let reopened = WalletDb::for_path(
+        st.wallet().data_file_path(),
+        *st.network(),
+        test_clock(),
+        test_rng(),
+    )
+    .unwrap();
+    *st.wallet_mut().db_mut() = reopened;
+}
+
 mod apply;
 mod enhancement;
 mod key_access;

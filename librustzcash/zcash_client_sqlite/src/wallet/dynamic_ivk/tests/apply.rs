@@ -606,20 +606,7 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
         .conn()
         .execute("DELETE FROM ironwood_dynamic_payment_recovery", [])
         .unwrap();
-    let note = candidate.encrypted_note.to_bytes();
-    let payment = DirectoryPayment {
-        height: u32::from(candidate.height),
-        block_hash: candidate.block_hash.0,
-        txid: *candidate.txid.as_ref(),
-        tx_index: candidate.tx_index.into(),
-        action_index: candidate.action_index,
-        position: candidate.position.into(),
-        action_nullifier: note[..32].try_into().unwrap(),
-        cmx: note[32..64].try_into().unwrap(),
-        ephemeral_key: note[64..96].try_into().unwrap(),
-        ciphertext_prefix: note[96..148].try_into().unwrap(),
-    };
-    let suffix: [u8; 528] = note[148..].try_into().unwrap();
+    let (payment, note_data) = directory_answer(&candidate);
     let db = st.wallet_mut().db_mut();
 
     let deferred = |result: Result<_, SqliteClientError>| match result {
@@ -649,7 +636,6 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
             .unwrap(),
         [0]
     );
-    let note_data = BTreeMap::from([(payment.position, suffix)]);
     db.begin_dynamic_sweep_attempt(account, key, 1_700_000_000, false)
         .unwrap();
     let backoff = |conn: &rusqlite::Connection| -> (u32, i64) {
@@ -954,20 +940,7 @@ fn a_corrected_answer_replaces_a_partially_queued_candidate() {
         .conn()
         .execute("DELETE FROM ironwood_dynamic_payment_recovery", [])
         .unwrap();
-    let note = candidate.encrypted_note.to_bytes();
-    let right = DirectoryPayment {
-        height: u32::from(candidate.height),
-        block_hash: candidate.block_hash.0,
-        txid: *candidate.txid.as_ref(),
-        tx_index: candidate.tx_index.into(),
-        action_index: candidate.action_index,
-        position: candidate.position.into(),
-        action_nullifier: note[..32].try_into().unwrap(),
-        cmx: note[32..64].try_into().unwrap(),
-        ephemeral_key: note[64..96].try_into().unwrap(),
-        ciphertext_prefix: note[96..148].try_into().unwrap(),
-    };
-    let data = BTreeMap::from([(right.position, note[148..].try_into().unwrap())]);
+    let (right, data) = directory_answer(&candidate);
     // The first answer misstates the transaction index, and another payment whose note
     // data never arrived leaves the lookup unfinished.
     let wrong = DirectoryPayment {

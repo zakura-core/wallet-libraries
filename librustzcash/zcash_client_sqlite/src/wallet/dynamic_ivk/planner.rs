@@ -126,8 +126,10 @@ pub(crate) fn begin_sweep_attempt(
     Ok(())
 }
 
-/// Queues authenticated candidates from a lookup of `key` at `anchor` and, if
-/// `complete`, records its coverage, which the caller validated.
+/// Queues authenticated candidates from a lookup of `key` at `anchor`, the answer that
+/// replaced the key's queued set, and reopens the sweep: a `complete` answer records
+/// its coverage, which the caller validated, and an incomplete one clears it, so the
+/// sweep finishes only once its current answer is applied.
 pub(super) fn queue_lookup<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -146,16 +148,16 @@ pub(super) fn queue_lookup<P: Parameters>(
         }
         queue_payment(conn, params, account, key, payment)?;
     }
-    if complete {
-        conn.execute(
-            "UPDATE ironwood_dynamic_sweeps SET lookup_height = ?2, lookup_hash = ?3
-             WHERE receiving_key_id = ?1 AND (lookup_height IS NULL OR lookup_height <= ?2)",
-            params![
-                key_ref(conn, account, key)?,
-                u32::from(anchor.height),
-                anchor.hash.0
-            ],
-        )?;
-    }
+    let coverage = complete.then_some(anchor);
+    conn.execute(
+        "UPDATE ironwood_dynamic_sweeps
+         SET lookup_height = ?2, lookup_hash = ?3, done_height = NULL
+         WHERE receiving_key_id = ?1",
+        params![
+            key_ref(conn, account, key)?,
+            coverage.map(|a| u32::from(a.height)),
+            coverage.map(|a| a.hash.0)
+        ],
+    )?;
     Ok(Ok(()))
 }

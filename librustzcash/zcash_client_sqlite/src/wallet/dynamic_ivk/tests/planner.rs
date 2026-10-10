@@ -1,6 +1,6 @@
 use super::*;
 use rusqlite::params;
-use std::num::NonZeroU32;
+use std::{collections::BTreeMap, num::NonZeroU32};
 use zakura_dynamic_ivk::lifecycle::{OperationStatus, RESTORE_WATCH_SECS, ReceiptExpectation};
 
 const NOW: i64 = 1_000;
@@ -144,7 +144,7 @@ fn attempts_back_off_from_one_minute_to_twelve_hours() {
 }
 
 #[test]
-fn lookup_coverage_advances_only_with_canonical_anchors() {
+fn lookup_coverage_records_only_canonical_anchors() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let older = tip(&st);
@@ -164,8 +164,10 @@ fn lookup_coverage_advances_only_with_canonical_anchors() {
     }
     assert_eq!(lookup_coverage(db, account, key), None);
     queue_lookup(db, account, key, newer, &[]).unwrap();
+    // Coverage is the current answer's, even an older publication's, since its
+    // candidates replace the newer answer's.
     queue_lookup(db, account, key, older, &[]).unwrap();
-    assert_eq!(lookup_coverage(db, account, key), Some(newer));
+    assert_eq!(lookup_coverage(db, account, key), Some(older));
 }
 
 #[test]
@@ -510,8 +512,47 @@ fn candidates_queued_after_finish_are_offered_again() {
     let db = st.wallet_mut().db_mut();
     finish_sweep(db, account, key, through);
     // An overlapping attempt whose lease expired can still persist its lookup.
-    queue_lookup(db, account, key, through, &[candidate]).unwrap();
+    let late = PendingPayment {
+        tx_index: candidate.tx_index + 1,
+        ..candidate.clone()
+    };
+    queue_lookup(db, account, key, through, &[late]).unwrap();
     assert_eq!(due(&mut st, through, NOW), [key]);
+    // A corrected answer whose note data has not arrived replaces the late candidate,
+    // and the sweep stays unfinished across a reopen.
+    let (corrected, data) = directory_answer(&candidate);
+    let corrected = std::slice::from_ref(&corrected);
+    let db = st.wallet_mut().db_mut();
+    db.begin_dynamic_sweep_attempt(account, key, NOW, false)
+        .unwrap();
+    assert!(
+        !db.queue_directory_lookup(account, key, through, corrected, &BTreeMap::new())
+            .unwrap()
+            .unwrap()
+    );
+    reopen(&mut st);
+    let db = st.wallet_mut().db_mut();
+    assert!(db.dynamic_history_pending(account, through.height).unwrap());
+    assert_eq!(lookup_coverage(db, account, key), None);
+    assert!(due(&mut st, through, NOW).is_empty());
+    assert_eq!(due(&mut st, through, NOW + 60), [key]);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.queue_directory_lookup(account, key, through, corrected, &data)
+            .unwrap()
+            .unwrap()
+    );
+    // A complete replacement records its coverage but not completion.
+    assert_eq!(lookup_coverage(db, account, key), Some(through));
+    assert!(db.dynamic_history_pending(account, through.height).unwrap());
+    let siblings = first_leaf_path().auth_path().map(|hash| hash.to_bytes());
+    assert_eq!(
+        db.apply_dynamic_sweep(account, key, through, through, |_, _| Some(siblings))
+            .unwrap(),
+        Ok(PaymentApplication::Applied)
+    );
+    assert!(!db.dynamic_history_pending(account, through.height).unwrap());
+    assert_eq!(unspent_keys(&st, through.height), [Some(key)]);
 }
 
 #[test]
