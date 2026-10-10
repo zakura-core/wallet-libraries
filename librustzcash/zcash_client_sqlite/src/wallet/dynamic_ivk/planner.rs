@@ -9,7 +9,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
     KeyId, PendingPayment, account_key, corrupt, invalid, key_ref, payments::queue_payment,
-    stored_key_id,
+    reservations::record_provider_seen, stored_key_id,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -109,14 +109,8 @@ pub(crate) fn begin_sweep_attempt(
     seen: bool,
 ) -> Result<(), SqliteClientError> {
     let id = key_ref(conn, account, key)?;
-    // Never issued again, so like a paid key it extends the restore walk and the gap
-    // (see `recovery_end`).
     if seen {
-        conn.execute(
-            "UPDATE ironwood_receiving_keys
-             SET provider_seen = 1, advances_allocation = 1 WHERE id = ?1",
-            [id],
-        )?;
+        record_provider_seen(conn, id)?;
     }
     let attempt: u32 = conn.query_row(
         "SELECT attempts FROM ironwood_dynamic_sweeps WHERE receiving_key_id = ?1",

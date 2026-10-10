@@ -558,11 +558,20 @@ fn record_seen(
     }
     for ((id, _), hit) in keys.iter().zip(hits) {
         if hit {
-            conn.execute(
-                "UPDATE ironwood_receiving_keys SET provider_seen = 1 WHERE id = ?1",
-                [id],
-            )?;
+            record_provider_seen(conn, *id)?;
         }
     }
+    Ok(())
+}
+
+/// Records that a swap provider was given key `id`'s receiver as a payout address. The
+/// key is never issued again, so like a paid key it extends the restore walk and the gap
+/// (see [`recovery_end`]). Nothing clears this.
+pub(super) fn record_provider_seen(conn: &Connection, id: i64) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_receiving_keys
+         SET provider_seen = 1, advances_allocation = 1 WHERE id = ?1",
+        [id],
+    )?;
     Ok(())
 }
