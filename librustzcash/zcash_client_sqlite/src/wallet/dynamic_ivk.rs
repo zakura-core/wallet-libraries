@@ -3,7 +3,10 @@
 //! Issued keys scan from issuance, refund keys from their stored funding transaction,
 //! until they close. Keys recovered from the seed are swept once through a receiver
 //! directory, then scanned only while a swap may still pay them. A closed key keeps its
-//! notes. A wallet drives dynamic IVKs with these calls:
+//! notes. A dynamic-key note's memo is stored only from its full transaction, never from
+//! a directory or private Enhance retrieval: dynamic-key payments use the public zero
+//! OVK, so anyone can re-encrypt the note with another memo under the same compact
+//! fields. A wallet drives dynamic IVKs with these calls:
 //!
 //! - `scan_cached_blocks_with_dynamic_ivks` and
 //!   `decrypt_and_store_transaction_with_dynamic_ivks` in place of the ordinary

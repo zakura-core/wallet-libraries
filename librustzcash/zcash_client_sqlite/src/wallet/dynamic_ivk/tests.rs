@@ -407,6 +407,14 @@ fn pay_candidate(st: &mut State, key: KeyId) -> PendingPayment {
         Zatoshis::const_from_u64(100_000),
     );
     st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    let candidate = candidate_at(st, height, &fvk);
+    assert_eq!(candidate.position, 0);
+    candidate
+}
+
+/// The first output to `fvk`'s external address in cached block `height`, as a directory
+/// candidate whose note data carries [`encrypt_note`]'s memo.
+fn candidate_at(st: &State, height: BlockHeight, fvk: &FullViewingKey) -> PendingPayment {
     let data: Vec<u8> = st
         .cache()
         .0
@@ -417,28 +425,113 @@ fn pay_candidate(st: &mut State, key: KeyId) -> PendingPayment {
         )
         .unwrap();
     let block = CompactBlock::decode(data.as_slice()).unwrap();
-    let tx = &block.vtx[0];
-    let action = CompactAction::try_from(&tx.ironwood_actions[0]).unwrap();
-    let (note, _) = try_compact_note_decryption(
-        &IronwoodDomain::for_compact_action(&action),
-        &fvk.to_ivk(Scope::External).prepare(),
-        &action,
-    )
-    .unwrap();
-    let encrypted_note = encrypt_note(note);
-    assert_eq!(
-        &encrypted_note.to_bytes()[96..148],
-        tx.ironwood_actions[0].ciphertext.as_slice()
-    );
-    PendingPayment {
-        txid: tx.txid(),
-        action_index: 0,
-        height,
-        block_hash: block.hash(),
-        tx_index: tx.index.try_into().unwrap(),
-        position: 0,
-        encrypted_note,
+    let ivk = fvk.to_ivk(Scope::External).prepare();
+    let actions: u32 = block
+        .vtx
+        .iter()
+        .map(|tx| tx.ironwood_actions.len() as u32)
+        .sum();
+    let mut position = block
+        .chain_metadata
+        .as_ref()
+        .unwrap()
+        .ironwood_commitment_tree_size
+        - actions;
+    for tx in &block.vtx {
+        for (index, compact) in tx.ironwood_actions.iter().enumerate() {
+            let action = CompactAction::try_from(compact).unwrap();
+            let domain = IronwoodDomain::for_compact_action(&action);
+            if let Some((note, _)) = try_compact_note_decryption(&domain, &ivk, &action) {
+                let encrypted_note = encrypt_note(note);
+                assert_eq!(
+                    &encrypted_note.to_bytes()[96..148],
+                    compact.ciphertext.as_slice()
+                );
+                return PendingPayment {
+                    txid: tx.txid(),
+                    action_index: index.try_into().unwrap(),
+                    height,
+                    block_hash: block.hash(),
+                    tx_index: tx.index.try_into().unwrap(),
+                    position,
+                    encrypted_note,
+                };
+            }
+            position += 1;
+        }
     }
+    panic!("no output to the key in block {height}");
+}
+
+/// A transaction another wallet built, paying 50,000 zatoshis to `to` with `memo` from
+/// its own Ironwood funds, so this wallet neither funded nor stored it.
+fn external_payment(
+    to: orchard::Address,
+    memo: &zcash_protocol::memo::MemoBytes,
+) -> zcash_primitives::transaction::Transaction {
+    use std::convert::Infallible;
+    use zcash_client_backend::{
+        data_api::wallet::{ConfirmationsPolicy, input_selection::GreedyInputSelector},
+        fees::{DustOutputPolicy, StandardFeeRule, standard},
+        wallet::OvkPolicy,
+    };
+    use zcash_keys::address::{Address, UnifiedAddress};
+    use zip321::{Payment, TransactionRequest};
+    let mut funder = ironwood_wallet();
+    let birthday = funder.test_account().unwrap().birthday().clone();
+    let (account, usk) = funder
+        .wallet_mut()
+        .db_mut()
+        .create_account("funder", &SecretVec::new(vec![7; 32]), &birthday, None)
+        .unwrap();
+    let (height, _, _) = funder.generate_next_block(
+        &IronwoodFvk(FullViewingKey::from(usk.orchard())),
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(1_000_000),
+    );
+    funder.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    funder.generate_and_scan_empty_blocks_with_dynamic_ivks(5);
+    let network = *funder.network();
+    let address = Address::Unified(UnifiedAddress::from_receivers(Some(to), None, None).unwrap());
+    let request = TransactionRequest::new(vec![
+        Payment::new(
+            address.to_zcash_address(&network),
+            Some(Zatoshis::const_from_u64(50_000)),
+            Some(memo.clone()),
+            None,
+            None,
+            vec![],
+        )
+        .unwrap(),
+    ])
+    .unwrap();
+    let strategy = standard::SingleOutputChangeStrategy::<TestDb>::new(
+        StandardFeeRule::Zip317,
+        None,
+        zcash_protocol::ShieldedPool::Orchard,
+        DustOutputPolicy::default(),
+    );
+    let proposal = funder
+        .propose_transfer(
+            account,
+            &GreedyInputSelector::new(),
+            &strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    let created = funder
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            &usk,
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .unwrap();
+    funder
+        .wallet()
+        .get_transaction(created[0])
+        .unwrap()
+        .unwrap()
 }
 
 /// Encrypts `note` with a `[4; 512]` memo, as a directory candidate carries it.

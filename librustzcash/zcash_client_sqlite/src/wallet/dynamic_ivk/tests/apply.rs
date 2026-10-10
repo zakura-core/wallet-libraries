@@ -131,9 +131,15 @@ fn directory_payment_applies_unscanned_key_note_atomically_and_reopens() {
 
 /// The path of the chain's first Ironwood leaf at the cached tip.
 fn first_leaf_witness(st: &State) -> MerklePath {
+    witness_at(st, 0)
+}
+
+/// The path of the chain's Ironwood leaf at `position` at the cached tip.
+fn witness_at(st: &State, position: u32) -> MerklePath {
     let mut tree =
         incrementalmerkletree::frontier::CommitmentTree::<MerkleHashOrchard, 32>::empty();
     let mut witness = None;
+    let mut leaves = 0;
     let mut stmt = st
         .cache()
         .0
@@ -147,16 +153,75 @@ fn first_leaf_witness(st: &State) -> MerklePath {
                 match &mut witness {
                     None => {
                         tree.append(cmx).unwrap();
-                        witness = incrementalmerkletree::witness::IncrementalWitness::from_tree(
-                            tree.clone(),
-                        );
+                        if leaves == position {
+                            witness = incrementalmerkletree::witness::IncrementalWitness::from_tree(
+                                tree.clone(),
+                            );
+                        }
                     }
                     Some(witness) => witness.append(cmx).unwrap(),
                 }
+                leaves += 1;
             }
         }
     }
     witness.unwrap().path().unwrap().into()
+}
+
+/// Nothing binds a directory's note data past its compact prefix to the chain: anyone who
+/// recovers the note through the public zero OVK can re-encrypt it with another memo. The
+/// sweep credits the note without a memo, and the full transaction supplies the real one.
+#[test]
+fn a_substituted_directory_memo_is_never_stored() {
+    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction_with_dynamic_ivks;
+    use zcash_protocol::memo::MemoBytes;
+    let mut st = ironwood_wallet();
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    let id = KeyId::new(Purpose::Receive, 8);
+    let fvk = id
+        .derive(&FullViewingKey::from(
+            st.test_account().unwrap().usk().orchard(),
+        ))
+        .unwrap();
+    let memo = MemoBytes::from_bytes(b"the payment's memo").unwrap();
+    let tx = external_payment(fvk.address_at(0u32, Scope::External), &memo);
+    let (height, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    // The candidate carries a substituted memo under the chain's compact prefix.
+    let candidate = candidate_at(&st, height, &fvk);
+    let through = tip(&st);
+    let path = witness_at(&st, candidate.position);
+    let db = st.wallet_mut().db_mut();
+    watch(db, account, 8, height + 1);
+    queue_payment(db, account, id, &candidate).unwrap();
+    assert_eq!(
+        apply_payment(db, account, id, &candidate, through, (through, &path)).unwrap(),
+        PaymentApplication::Applied
+    );
+    let stored = |st: &State| -> (Option<Vec<u8>>, u64, bool) {
+        st.wallet()
+            .conn()
+            .query_row(
+                "SELECT n.memo, n.value, EXISTS(SELECT 1 FROM ironwood_memo_retrieval_queue)
+                 FROM ironwood_received_notes n",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(stored(&st), (None, 50_000, false));
+    assert_eq!(unspent_keys(&st, through.height), vec![Some(id)]);
+    // Private memo retrieval skips the note even where it would recover other memos.
+    st.wallet()
+        .conn()
+        .execute("UPDATE ironwood_enhance_routing SET route = 2", [])
+        .unwrap();
+    crate::wallet::enhance_pir::queue_unsupported_memos(st.wallet().conn(), None).unwrap();
+    assert_eq!(stored(&st), (None, 50_000, false));
+    decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &tx, Some(height))
+        .unwrap();
+    assert_eq!(stored(&st), (Some(memo.as_slice().to_vec()), 50_000, false));
 }
 
 #[test]

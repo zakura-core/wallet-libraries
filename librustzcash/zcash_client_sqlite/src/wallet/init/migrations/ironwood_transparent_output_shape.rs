@@ -29,7 +29,20 @@ impl RusqliteMigration for Migration {
             "ALTER TABLE ironwood_enhance_routing ADD COLUMN has_transparent_outputs INTEGER
                  CHECK (has_transparent_outputs IN (0, 1));",
         )?;
-        crate::wallet::ironwood_hooks::queue_ironwood_output_shape(conn, None)?;
+        // `queue_ironwood_output_shape` without its dynamic-key filter: that column may not
+        // exist yet, and no dynamic-key note can.
+        conn.execute_batch(
+            "INSERT INTO ironwood_memo_retrieval_queue (received_note_id, commitment_tree_position)
+             SELECT rn.id, rn.commitment_tree_position
+             FROM ironwood_received_notes rn
+             JOIN transactions t ON t.id_tx = rn.transaction_id
+             JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
+             WHERE r.route = 2 AND t.raw IS NULL AND t.mined_height IS NOT NULL
+               AND rn.memo IS NULL AND rn.note_version = 3
+               AND rn.commitment_tree_position IS NOT NULL
+             ON CONFLICT DO NOTHING;",
+        )?;
+        crate::wallet::ironwood_hooks::queue_output_shape_metadata(conn, None)?;
         Ok(())
     }
     fn down(&self, _conn: &rusqlite::Transaction) -> Result<(), Self::Error> {

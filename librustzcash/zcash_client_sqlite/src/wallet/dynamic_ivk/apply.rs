@@ -73,7 +73,8 @@ fn merkle_path(position: u32, siblings: [[u8; 32]; 32]) -> Option<MerklePath> {
 }
 
 /// Applies queued `candidate` with its inclusion path at an anchor on the wallet's chain,
-/// which authenticates the note and position but not its transaction ID.
+/// which authenticates the note and position but not its transaction ID or memo, which is
+/// not stored (see `wallet::dynamic_ivk`).
 pub(super) fn apply_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -305,7 +306,7 @@ pub(super) fn apply_payment<P: Parameters>(
         Some(candidate.height),
         spent_in,
     )?;
-    wallet::enhance_pir::finish_private_receipt(conn, tx_ref, candidate.action_index)?;
+    wallet::enhance_pir::finish_private_receipt(conn, tx_ref)?;
     dequeue()?;
     Ok(Ok(PaymentApplication::Applied))
 }
