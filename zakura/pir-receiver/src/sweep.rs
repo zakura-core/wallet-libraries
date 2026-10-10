@@ -495,8 +495,7 @@ where
             .into_iter()
             .take(NOTE_BATCH)
             .collect();
-        let requested = batch.len();
-        let note_data = notes.note_data(wallet, batch).await?;
+        let note_data = notes.note_data(wallet, batch.clone()).await?;
         let done = lock
             .write("dynamic_sweep.queue", || {
                 wallet.queue_directory_lookup(account, key, anchor, &payments, &note_data)
@@ -506,7 +505,8 @@ where
         if done {
             break;
         }
-        if note_data.len() < requested {
+        // A requested position left without data would be asked for again forever.
+        if batch.iter().any(|p| !note_data.contains_key(p)) {
             return Err(Error::Unavailable(
                 "note data is missing for a directory payment",
             ));

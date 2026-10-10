@@ -479,6 +479,71 @@ async fn a_long_history_takes_its_note_data_in_batches() {
     );
 }
 
+/// Note data keyed by the position after each requested one.
+struct Mislabeled {
+    data: [u8; 528],
+    calls: usize,
+}
+
+impl<W: DynamicIvkRead> NoteSource<W> for Mislabeled {
+    async fn note_data(
+        &mut self,
+        _: &W,
+        positions: Vec<u64>,
+    ) -> Result<BTreeMap<u64, [u8; 528]>, Error<W::Error>> {
+        self.calls += 1;
+        assert!(self.calls <= 3, "the sweep keeps asking for {positions:?}");
+        Ok(positions.into_iter().map(|p| (p + 1, self.data)).collect())
+    }
+}
+
+#[tokio::test]
+async fn note_data_for_other_positions_is_missing_data() {
+    let mut st = ironwood_wallet();
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    let paid = 1;
+    let (record, note_data) = pay_restored_key(&mut st, paid, 0);
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let directory = Directory::new(publish(
+        std::slice::from_ref(&record),
+        &[record.payment.cmx],
+        through,
+        &provider(&[]),
+    ));
+    let mut notes = Mislabeled {
+        data: note_data,
+        calls: 0,
+    };
+    let swept = sweep(
+        st.wallet_mut().db_mut(),
+        &network,
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &directory,
+        &mut notes,
+        &NoLock,
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert_eq!(notes.calls, 1);
+    assert!(
+        matches!(
+            swept.deferred.as_slice(),
+            [(_, key, Error::Unavailable("note data is missing for a directory payment"))]
+                if key.index() == paid
+        ),
+        "{:?}",
+        swept.deferred
+    );
+    assert_eq!(st.get_total_balance(account), Zatoshis::ZERO);
+}
+
 #[tokio::test]
 async fn a_wallet_without_payments_downloads_only_the_filters() {
     let mut st = ironwood_wallet();
