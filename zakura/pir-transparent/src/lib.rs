@@ -15,6 +15,8 @@ mod convert;
 mod discover;
 #[cfg(feature = "wallet")]
 mod error;
+#[cfg(feature = "sqlite")]
+mod forget;
 #[cfg(feature = "wallet")]
 mod http;
 #[cfg(feature = "wallet")]
@@ -42,6 +44,8 @@ pub use companion::{Companion, CompanionDir, OpenError};
 pub use discover::{Discovery, DiscoveryLimits, discover_active_addresses};
 #[cfg(feature = "wallet")]
 pub use error::RecoveryError;
+#[cfg(feature = "sqlite")]
+pub use forget::{ForgetError, forget_private_recovery};
 // Both services over the caller's raw HTTP exchange.
 #[cfg(feature = "wallet")]
 pub use http::{

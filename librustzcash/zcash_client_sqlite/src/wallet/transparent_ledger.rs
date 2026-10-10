@@ -26,9 +26,11 @@ pub(crate) use authority::check_transparent_authority;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use authority::{
     InputAuthority, check_address_owners, check_public_discovery, grants_private_authority,
-    input_authority, public_discovery_permitted,
+    input_authority, pending_result, public_discovery_permitted, refuse_unadmitted_input,
 };
-pub(crate) use authority::{has_transparent_inputs, transparent_funds_current};
+pub(crate) use authority::{
+    has_transparent_inputs, refused, transparent_funds_current, transparent_funds_refusal,
+};
 pub(crate) use history::transaction_history_details;
 pub(crate) use origins::output_observation_condition;
 #[cfg(feature = "transparent-inputs")]

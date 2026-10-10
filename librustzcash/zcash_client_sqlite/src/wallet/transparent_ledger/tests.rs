@@ -432,7 +432,11 @@ mod handles {
     use super::{State, conn, funded_wallet};
     use crate::{
         AccountUuid, WalletDb,
-        error::SqliteClientError,
+        error::{
+            AuthorityRefusal::Refused,
+            RefusalReason::{ChainUnknown, NoAuthority, NotAdmitted},
+            SqliteClientError,
+        },
         testing::{
             BlockCache,
             db::{TestDbFactory, test_clock, test_rng},
@@ -642,7 +646,9 @@ mod handles {
         for error in selector_errors(&st, &funded) {
             assert!(matches!(
                 error,
-                Some(SqliteClientError::TransparentAuthorityUnavailable)
+                Some(SqliteClientError::TransparentAuthorityUnavailable(Refused(
+                    NotAdmitted
+                )))
             ));
         }
 
@@ -786,7 +792,9 @@ mod handles {
         );
         assert!(matches!(
             selector_errors(&st, &funded)[0],
-            Some(SqliteClientError::TransparentAuthorityUnavailable)
+            Some(SqliteClientError::TransparentAuthorityUnavailable(Refused(
+                NotAdmitted
+            )))
         ));
 
         // A weaker handle resolves to the durable policy and reads exactly what a matching
@@ -810,7 +818,9 @@ mod handles {
         );
         assert!(matches!(
             check_transparent_authority(conn(&st), Some(mode)),
-            Err(SqliteClientError::TransparentAuthorityUnavailable)
+            Err(SqliteClientError::TransparentAuthorityUnavailable(Refused(
+                NoAuthority
+            )))
         ));
         assert!(
             !crate::wallet::transparent_ledger::public_discovery_permitted(conn(&st), Some(mode))
@@ -973,7 +983,9 @@ mod handles {
             st.wallet()
                 .db()
                 .get_transparent_balances(account, target, ConfirmationsPolicy::MIN),
-            Err(SqliteClientError::TransparentAuthorityUnavailable)
+            Err(SqliteClientError::TransparentAuthorityUnavailable(Refused(
+                NoAuthority
+            )))
         ));
 
         // A durable private policy has the same effect on a weaker handle's summary.
@@ -1038,7 +1050,9 @@ mod handles {
         // matching the snapshot.
         assert!(matches!(
             check_transparent_authority(conn(&st), Some(Public)),
-            Err(SqliteClientError::TransparentAuthorityUnavailable)
+            Err(SqliteClientError::TransparentAuthorityUnavailable(Refused(
+                ChainUnknown
+            )))
         ));
         // Balance reads apply the same availability rule for any caller-supplied target.
         assert!(matches!(
@@ -1047,7 +1061,9 @@ mod handles {
                 TargetHeight::from(zcash_protocol::consensus::BlockHeight::from(1)),
                 ConfirmationsPolicy::MIN,
             ),
-            Err(SqliteClientError::TransparentAuthorityUnavailable)
+            Err(SqliteClientError::TransparentAuthorityUnavailable(Refused(
+                ChainUnknown
+            )))
         ));
     }
 

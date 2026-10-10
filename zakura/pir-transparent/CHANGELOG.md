@@ -11,6 +11,13 @@
 
 ### Added
 
+- `forget_private_recovery` (feature `sqlite`) removes what private recovery
+  contributed once the wallet's policy is `Public` on the handle and durably:
+  it deletes every companion of a `CompanionDir`, then runs
+  `forget_transparent_ledger` through the caller's `WriteGate`. A companion
+  still held fails with `ForgetError::CompanionBusy` and forgets nothing; a
+  wallet not public fails with `ForgetError::NotPublic` before anything is
+  deleted, and also when the policy is raised after the companions went.
 - `discover_active_addresses`, `Discovery` and `DiscoveryLimits`: import-time
   discovery of which candidate addresses hold transparent history from a floor
   on, before any wallet exists. It downloads every filter from the floor's

@@ -71,7 +71,7 @@ use super::{
 };
 use crate::{
     AccountRef, AccountUuid, AddressRef, TxRef, UtxoId,
-    error::SqliteClientError,
+    error::{RefusalReason, SqliteClientError},
     util::Clock,
     wallet::{
         common::tx_unexpired_condition,
@@ -1309,6 +1309,64 @@ pub(crate) fn excluding_immature_coinbase_outputs(tx: &str) -> String {
         "#
     )
 }
+
+/// A SQL condition that `u`, created by transaction `t`, is projected from a receive the private
+/// ledger currently places. A rewind clears the placement of the receives above the retained
+/// block but leaves their projection; until a later commit places the receive again, the
+/// projection is no evidence that the output exists on the current chain.
+macro_rules! placed_ledger_receive {
+    () => {
+        "EXISTS (
+             SELECT 1 FROM tpir_output_origins oo
+             JOIN tpir_receive_events re
+                 ON re.txid = t.txid
+                 AND re.output_index = u.output_index
+                 AND re.account_id = u.account_id
+             WHERE oo.output_id = u.id AND oo.origin = 2 AND re.mined_height IS NOT NULL
+         )"
+    };
+}
+
+/// The conditions besides authority under which a wallet output `u`, created by transaction
+/// `t`, may fund a transaction targeting `:target_height`, each with the refusal it reports
+/// when it fails, in the order a refusal names them. A condition that evaluates to NULL fails,
+/// as it does in a WHERE clause. A spend by the `:retry_txid` transaction, when that is not
+/// null, does not count.
+fn input_conditions() -> [(RefusalReason, String); 5] {
+    [
+        // the transaction that created the output is mined or is definitely unexpired
+        (RefusalReason::Expired, tx_unexpired_condition("t")),
+        // the output is unspent
+        (
+            RefusalReason::Spent,
+            format!(
+                "u.id NOT IN (
+                     SELECT txo_spends.transparent_received_output_id
+                     FROM transparent_received_output_spends txo_spends
+                     JOIN transactions stx ON stx.id_tx = txo_spends.transaction_id
+                     WHERE ({}) AND (:retry_txid IS NULL OR stx.txid != :retry_txid)
+                 )",
+                tx_unexpired_condition("stx")
+            ),
+        ),
+        // exclude likely-spent wallet-internal ephemeral outputs
+        (
+            RefusalReason::Spent,
+            excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+        ),
+        // exclude immature coinbase outputs
+        (
+            RefusalReason::ImmatureCoinbase,
+            excluding_immature_coinbase_outputs("t"),
+        ),
+        // exclude withdrawn ledger-only receives
+        (
+            RefusalReason::Withdrawn,
+            super::transparent_ledger::output_observation_condition("u"),
+        ),
+    ]
+}
+
 /// Get information about a transparent output controlled by the wallet.
 ///
 /// This is a direct lookup by `outpoint`, not a selection query, so it does not filter on lock
@@ -1325,7 +1383,54 @@ pub(crate) fn get_wallet_transparent_output(
     target_height: Option<TargetHeight>,
     authority: &InputAuthority,
 ) -> Result<Option<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
-    get_wallet_transparent_output_for_retry(conn, outpoint, target_height, authority, None)
+    // This could return as unspent outputs that are actually not spendable, if they are the
+    // outputs of deshielding transactions where the spend anchors have been invalidated by a
+    // rewind or spent in a transaction that has not been observed by this wallet. There isn't a
+    // way to detect the circumstance related to anchor invalidation at present, but it should be
+    // vanishingly rare as the vast majority of rewinds are of a single block.
+    let spendable = input_conditions()
+        .map(|(_, condition)| format!("({condition})"))
+        .join(" AND ");
+    let mut stmt_select_utxo = conn.prepare_cached(&format!(
+        "SELECT t.txid, u.output_index, u.script,
+                u.value_zat, addresses.key_scope,
+                accounts.uuid AS account_uuid,
+                u.transaction_id AS creating_tx_id,
+                t.mined_height AS received_height
+         FROM transparent_received_outputs u
+         JOIN transactions t ON t.id_tx = u.transaction_id
+         JOIN accounts ON accounts.id = u.account_id
+         JOIN addresses ON addresses.id = u.address_id
+         WHERE t.txid = :txid
+         AND u.output_index = :output_index
+         AND (:allow_unspendable OR ({spendable}))
+         AND ({INPUT_AUTHORITY_CONDITION}) -- the transparent authority admits the output",
+    ))?;
+
+    let retry_txid_bytes: Option<[u8; 32]> = None;
+    let txid_bytes = outpoint.hash();
+    let output_index = outpoint.n();
+    let target_height_arg = target_height.map(u32::from);
+    let allow_unspendable = target_height.is_none();
+    let (private_authority, eligible_accounts) = authority.sql_params();
+    let sql_params: Vec<(&str, &dyn ToSql)> = vec![
+        (":txid", &txid_bytes),
+        (":retry_txid", &retry_txid_bytes),
+        (":output_index", &output_index),
+        (":target_height", &target_height_arg),
+        (":allow_unspendable", &allow_unspendable),
+        (":private_authority", &private_authority),
+        (":eligible_accounts", &eligible_accounts),
+    ];
+
+    let result: Result<Option<WalletTransparentOutput<_>>, SqliteClientError> = stmt_select_utxo
+        .query_and_then(&sql_params[..], |row| {
+            to_unspent_transparent_output(conn, row)
+        })?
+        .next()
+        .transpose();
+
+    result
 }
 
 /// Checks both linked wallet spends and spends recorded before a receive was discovered.
@@ -1357,80 +1462,80 @@ pub(crate) fn has_competing_transparent_spend(
     )?)
 }
 
-/// Applies the ordinary selection rules, except for a spend by an independently matched retry.
-pub(crate) fn get_wallet_transparent_output_for_retry(
+/// Where a wallet output stands as an input to a transaction targeting a given height, before
+/// transparent authority is consulted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum InputStanding {
+    /// The wallet holds no such output.
+    Unknown,
+    /// The output cannot fund the transaction under any authority.
+    Excluded(RefusalReason),
+    /// The output can fund the transaction if the transparent authority admits it.
+    Eligible {
+        /// The owning account.
+        account: AccountUuid,
+        /// The owning account's row.
+        account_ref: AccountRef,
+        /// Whether the output is projected from a receive the private ledger places, which
+        /// private authority requires.
+        placed: bool,
+    },
+}
+
+/// Classifies `outpoint` as an input to a transaction targeting `target` by the ordinary
+/// selection rules (see [`get_wallet_transparent_output`]), except that a spend by the
+/// `retry_txid` transaction does not count. Authority is left to the caller: an `Eligible`
+/// output is one [`InputAuthority::admits_output`] decides.
+pub(crate) fn transparent_input_standing(
     conn: &rusqlite::Connection,
     outpoint: &OutPoint,
-    target_height: Option<TargetHeight>,
-    authority: &InputAuthority,
+    target: TargetHeight,
     retry_txid: Option<TxId>,
-) -> Result<Option<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
-    // This could return as unspent outputs that are actually not spendable, if they are the
-    // outputs of deshielding transactions where the spend anchors have been invalidated by a
-    // rewind or spent in a transaction that has not been observed by this wallet. There isn't a
-    // way to detect the circumstance related to anchor invalidation at present, but it should be
-    // vanishingly rare as the vast majority of rewinds are of a single block.
-    let mut stmt_select_utxo = conn.prepare_cached(&format!(
-        "SELECT t.txid, u.output_index, u.script,
-                u.value_zat, addresses.key_scope,
-                accounts.uuid AS account_uuid,
-                u.transaction_id AS creating_tx_id,
-                t.mined_height AS received_height
+) -> Result<InputStanding, SqliteClientError> {
+    let conditions = input_conditions();
+    let columns = conditions
+        .iter()
+        .map(|(_, condition)| format!("({condition})"))
+        .collect::<Vec<_>>()
+        .join(",\n                ");
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT accounts.uuid, u.account_id,
+                ({}) AS placed,
+                {columns}
          FROM transparent_received_outputs u
          JOIN transactions t ON t.id_tx = u.transaction_id
          JOIN accounts ON accounts.id = u.account_id
          JOIN addresses ON addresses.id = u.address_id
          WHERE t.txid = :txid
-         AND u.output_index = :output_index
-         AND (
-             :allow_unspendable
-             OR (
-                 -- the transaction that created the output is mined or is definitely unexpired
-                 ({}) -- the transaction is unexpired
-                 AND u.id NOT IN ({}) -- and the output is unspent
-                 AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
-                 AND ({}) -- exclude immature coinbase outputs
-                 AND ({}) -- exclude withdrawn ledger-only receives
-             )
-         )
-         AND ({INPUT_AUTHORITY_CONDITION}) -- the transparent authority admits the output",
-        tx_unexpired_condition("t"),
-        format!(
-            "SELECT txo_spends.transparent_received_output_id
-                 FROM transparent_received_output_spends txo_spends
-                 JOIN transactions stx ON stx.id_tx = txo_spends.transaction_id
-                 WHERE ({}) AND (:retry_txid IS NULL OR stx.txid != :retry_txid)",
-            tx_unexpired_condition("stx")
-        ),
-        excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
-        excluding_immature_coinbase_outputs("t"),
-        super::transparent_ledger::output_observation_condition("u"),
+         AND u.output_index = :output_index",
+        placed_ledger_receive!()
     ))?;
-
     let retry_txid_bytes = retry_txid.map(|id| *id.as_ref());
-    let txid_bytes = outpoint.hash();
-    let output_index = outpoint.n();
-    let target_height_arg = target_height.map(u32::from);
-    let allow_unspendable = target_height.is_none();
-    let (private_authority, eligible_accounts) = authority.sql_params();
-    let sql_params: Vec<(&str, &dyn ToSql)> = vec![
-        (":txid", &txid_bytes),
-        (":retry_txid", &retry_txid_bytes),
-        (":output_index", &output_index),
-        (":target_height", &target_height_arg),
-        (":allow_unspendable", &allow_unspendable),
-        (":private_authority", &private_authority),
-        (":eligible_accounts", &eligible_accounts),
-    ];
-
-    let result: Result<Option<WalletTransparentOutput<_>>, SqliteClientError> = stmt_select_utxo
-        .query_and_then(&sql_params[..], |row| {
-            to_unspent_transparent_output(conn, row)
-        })?
-        .next()
-        .transpose();
-
-    result
+    let standing = stmt
+        .query_row(
+            named_params![
+                ":txid": outpoint.hash(),
+                ":output_index": outpoint.n(),
+                ":target_height": u32::from(target),
+                ":retry_txid": retry_txid_bytes,
+            ],
+            |row| {
+                for (i, (reason, _)) in conditions.iter().enumerate() {
+                    // A condition can be NULL, as the expiry of an unmined transaction with
+                    // unknown expiry is; as in a WHERE clause, only true admits the output.
+                    if row.get::<_, Option<bool>>(3 + i)? != Some(true) {
+                        return Ok(InputStanding::Excluded(*reason));
+                    }
+                }
+                Ok(InputStanding::Eligible {
+                    account: AccountUuid(row.get(0)?),
+                    account_ref: AccountRef(row.get(1)?),
+                    placed: row.get(2)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(standing.unwrap_or(InputStanding::Unknown))
 }
 
 /// Builds the SQL query body shared by `get_spendable_transparent_outputs[_for_addresses]`
@@ -1956,23 +2061,6 @@ pub(crate) enum BalanceProvenance {
     LegacyPublic,
     /// Some counted output has only a local-construction origin.
     IncludesLocalOnly,
-}
-
-/// A SQL condition that `u`, created by transaction `t`, is projected from a receive the private
-/// ledger currently places. A rewind clears the placement of the receives above the retained
-/// block but leaves their projection; until a later commit places the receive again, the
-/// projection is no evidence that the output exists on the current chain.
-macro_rules! placed_ledger_receive {
-    () => {
-        "EXISTS (
-             SELECT 1 FROM tpir_output_origins oo
-             JOIN tpir_receive_events re
-                 ON re.txid = t.txid
-                 AND re.output_index = u.output_index
-                 AND re.account_id = u.account_id
-             WHERE oo.output_id = u.id AND oo.origin = 2 AND re.mined_height IS NOT NULL
-         )"
-    };
 }
 
 /// A SQL condition admitting `u` as an input under the handle's transparent authority: every

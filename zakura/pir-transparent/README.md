@@ -277,6 +277,13 @@ requires the trusted SQLite settlement helper; manual acknowledgment refuses it.
 An untrusted caller should stop at the first such batch instead of repeatedly
 accumulating successors it cannot reconcile.
 
+`forget_private_recovery` turns private recovery off once the wallet's
+transparent policy is `Public` on the handle and durably: it deletes every
+companion, then runs the wallet's `forget_transparent_ledger` through a
+`WriteGate`. Companions go first because one that outlived the facts would make
+a later private pass skip them; a companion in use, a declined gate or a policy
+raised meanwhile forgets nothing.
+
 ### Import discovery
 
 `discover_active_addresses` checks candidate addresses from a floor through the

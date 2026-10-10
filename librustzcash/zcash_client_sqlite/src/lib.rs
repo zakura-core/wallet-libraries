@@ -122,6 +122,8 @@ use crate::{
     error::SqliteClientError,
     wallet::{chain_tip_height, commitment_tree::SqliteShardStore},
 };
+#[cfg(feature = "transparent-inputs")]
+use error::RefusalReason;
 use wallet::{
     SubtreeProgressEstimator,
     commitment_tree::{self, put_shard_roots},
@@ -1244,7 +1246,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
     ) -> Result<Option<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
         wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
             let authority = self.input_authority(conn, target_height)?;
-            admitted_transparent_output(conn, outpoint, target_height, &authority)
+            self.admitted_transparent_output(conn, outpoint, target_height, &authority)
         })
     }
 
@@ -1262,8 +1264,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
             wallet::transparent_ledger::check_address_owners(
                 conn,
                 &self.params,
+                &self.gap_limits,
                 &authority,
                 core::slice::from_ref(address),
+                target_height,
             )?;
             wallet::transparent::get_spendable_transparent_outputs(
                 conn,
@@ -1292,8 +1296,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
             wallet::transparent_ledger::check_address_owners(
                 conn,
                 &self.params,
+                &self.gap_limits,
                 &authority,
                 addresses,
+                target_height,
             )?;
             wallet::transparent::get_spendable_transparent_outputs_for_addresses(
                 conn,
@@ -1325,7 +1331,19 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
             let authority = self.input_authority(conn, target_height)?;
             let account_ref = wallet::get_account_ref(conn, account)?;
             if !authority.admits(account_ref) {
-                return Err(SqliteClientError::TransparentAuthorityUnavailable);
+                // Selection draws on ledger outputs only, so no output-level refusal applies.
+                let mut pending = vec![];
+                wallet::transparent_ledger::refuse_unadmitted_input(
+                    conn,
+                    &self.params,
+                    &self.gap_limits,
+                    &authority,
+                    account,
+                    account_ref,
+                    target_height,
+                    &mut pending,
+                )?;
+                wallet::transparent_ledger::pending_result(pending)?;
             }
             wallet::transparent::select_spendable_transparent_outputs(
                 conn,
@@ -1704,11 +1722,11 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         // report the absence of authority rather than an empty or public result. The policy
         // and the balances come from one snapshot, so a concurrent transition cannot separate them.
         wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
-            if !wallet::transparent_ledger::transparent_funds_current(
+            if let Some(reason) = wallet::transparent_ledger::transparent_funds_refusal(
                 conn,
                 self.transparent_ledger_mode,
             )? {
-                return Err(SqliteClientError::TransparentAuthorityUnavailable);
+                return Err(wallet::transparent_ledger::refused(reason));
             }
             wallet::transparent::get_transparent_balances(
                 conn,
@@ -1912,7 +1930,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
     /// This method is read-only and does not validate signatures or proofs. The caller
     /// must validate the batch first and hold a database snapshot (and a writer reservation
     /// through submission) to prevent authorization from changing before network dispatch.
-    /// Incompatible readers and unavailable authority return the existing wallet errors.
+    /// Incompatible readers return the existing wallet errors.
+    ///
+    /// Unavailable authority is [`SqliteClientError::TransparentAuthorityUnavailable`],
+    /// classified within the same read: [`AuthorityRefusal::Pending`] when every refused
+    /// input is a sound wallet output kept out only because private recovery has not caught
+    /// up with the chain tip for its account, and otherwise [`AuthorityRefusal::Refused`] with
+    /// the first refused input's reason, which no waiting changes.
+    ///
+    /// [`AuthorityRefusal::Pending`]: error::AuthorityRefusal::Pending
+    /// [`AuthorityRefusal::Refused`]: error::AuthorityRefusal::Refused
     pub fn check_transparent_transaction_inputs(
         &self,
         tx: &Transaction,
@@ -1933,6 +1960,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
             .optional()?
             .flatten();
         let retry_txid = (stored.as_deref() == Some(raw.as_slice())).then_some(tx.txid());
+        let mut pending = vec![];
         for input in tx
             .transparent_bundle()
             .map_or(&[][..], |bundle| &bundle.vin[..])
@@ -1941,7 +1969,9 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
             if wallet::transparent::has_competing_transparent_spend(
                 conn, prevout, target, retry_txid,
             )? {
-                return Err(SqliteClientError::TransparentAuthorityUnavailable);
+                return Err(wallet::transparent_ledger::refused(
+                    RefusalReason::CompetingSpend,
+                ));
             }
             if let Some(parent) = earlier
                 .iter()
@@ -1951,28 +1981,69 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
                     .transparent_bundle()
                     .is_none_or(|bundle| bundle.vout.get(prevout.n() as usize).is_none())
                 {
-                    return Err(SqliteClientError::TransparentAuthorityUnavailable);
+                    return Err(wallet::transparent_ledger::refused(
+                        RefusalReason::ChainedOutputMissing,
+                    ));
                 }
                 continue;
             }
-            if wallet::transparent::get_wallet_transparent_output_for_retry(
+            self.check_transparent_input(
                 conn,
-                prevout,
-                Some(target),
                 &authority,
+                prevout,
+                target,
                 retry_txid,
-            )?
-            .is_none()
-            {
-                return Err(SqliteClientError::TransparentAuthorityUnavailable);
-            }
+                &mut pending,
+            )?;
         }
-        Ok(())
+        wallet::transparent_ledger::pending_result(pending)
+    }
+
+    /// Checks that `authority` admits the wallet output `prevout` as an input to a transaction
+    /// targeting `target`, by the ordinary selection rules except that a spend by the
+    /// `retry_txid` transaction does not count. Records the owner of an input refused only
+    /// pending private recovery in `pending`, and fails on any other refusal.
+    fn check_transparent_input(
+        &self,
+        conn: &rusqlite::Connection,
+        authority: &wallet::transparent_ledger::InputAuthority,
+        prevout: &OutPoint,
+        target: TargetHeight,
+        retry_txid: Option<TxId>,
+        pending: &mut Vec<AccountUuid>,
+    ) -> Result<(), SqliteClientError> {
+        use wallet::transparent::InputStanding;
+        match wallet::transparent::transparent_input_standing(conn, prevout, target, retry_txid)? {
+            InputStanding::Unknown => Err(wallet::transparent_ledger::refused(
+                RefusalReason::UnknownOutput,
+            )),
+            InputStanding::Excluded(reason) => Err(wallet::transparent_ledger::refused(reason)),
+            InputStanding::Eligible {
+                account_ref,
+                placed,
+                ..
+            } if authority.admits_output(account_ref, placed) => Ok(()),
+            InputStanding::Eligible {
+                account,
+                account_ref,
+                ..
+            } => wallet::transparent_ledger::refuse_unadmitted_input(
+                conn,
+                &self.params,
+                &self.gap_limits,
+                authority,
+                account,
+                account_ref,
+                target,
+                pending,
+            ),
+        }
     }
 
     /// Checks that every transparent input of `sent_tx` is admitted by the transparent
     /// authority at its target height. An input created by one of the `earlier` transactions of
     /// the same batch is local chained evidence, such as the second step of a TEX transfer.
+    /// Refusals are classified as by [`Self::check_transparent_transaction_inputs`].
     fn check_transparent_inputs(
         &self,
         earlier: &[SentTransaction<AccountUuid>],
@@ -1985,6 +2056,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
             return Ok(());
         }
         let chained: HashSet<TxId> = earlier.iter().map(|t| t.tx().txid()).collect();
+        let mut pending = vec![];
         for txin in sent_tx
             .tx()
             .transparent_bundle()
@@ -1994,48 +2066,44 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
             if chained.contains(prevout.txid()) {
                 continue;
             }
-            if wallet::transparent::get_wallet_transparent_output(
-                conn,
-                prevout,
-                Some(target),
-                &authority,
-            )?
-            .is_none()
-            {
-                return Err(SqliteClientError::TransparentAuthorityUnavailable);
-            }
+            self.check_transparent_input(conn, &authority, prevout, target, None, &mut pending)?;
         }
-        Ok(())
+        wallet::transparent_ledger::pending_result(pending)
     }
-}
 
-/// Looks up an unspent wallet output for a transaction targeting `target`. An output the wallet
-/// holds but the transparent authority does not admit is an error, not an absent output.
-#[cfg(feature = "transparent-inputs")]
-fn admitted_transparent_output(
-    conn: &rusqlite::Connection,
-    outpoint: &OutPoint,
-    target: TargetHeight,
-    authority: &wallet::transparent_ledger::InputAuthority,
-) -> Result<Option<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
-    let output = wallet::transparent::get_wallet_transparent_output(
-        conn,
-        outpoint,
-        Some(target),
-        &wallet::transparent_ledger::InputAuthority::Public,
-    )?;
-    if output.is_some()
-        && wallet::transparent::get_wallet_transparent_output(
-            conn,
-            outpoint,
-            Some(target),
-            authority,
-        )?
-        .is_none()
-    {
-        return Err(SqliteClientError::TransparentAuthorityUnavailable);
+    /// Looks up an unspent wallet output for a transaction targeting `target`. An output the
+    /// wallet holds but the transparent authority does not admit is an error, classified as by
+    /// [`Self::check_transparent_transaction_inputs`], not an absent output.
+    fn admitted_transparent_output(
+        &self,
+        conn: &rusqlite::Connection,
+        outpoint: &OutPoint,
+        target: TargetHeight,
+        authority: &wallet::transparent_ledger::InputAuthority,
+    ) -> Result<Option<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
+        use wallet::transparent::InputStanding;
+        if let InputStanding::Eligible {
+            account,
+            account_ref,
+            placed,
+        } = wallet::transparent::transparent_input_standing(conn, outpoint, target, None)?
+            && !authority.admits_output(account_ref, placed)
+        {
+            let mut pending = vec![];
+            wallet::transparent_ledger::refuse_unadmitted_input(
+                conn,
+                &self.params,
+                &self.gap_limits,
+                authority,
+                account,
+                account_ref,
+                target,
+                &mut pending,
+            )?;
+            wallet::transparent_ledger::pending_result(pending)?;
+        }
+        wallet::transparent::get_wallet_transparent_output(conn, outpoint, Some(target), authority)
     }
-    Ok(output)
 }
 
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> TransparentLedgerRead

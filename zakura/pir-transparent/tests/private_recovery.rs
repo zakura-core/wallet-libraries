@@ -24,17 +24,18 @@ use transparent_events::{ReceiveEvent, SpendEvent, TransparentEvent, Txid};
 use transparent_filter::{Recut, ScriptBytes, SealParameters, ShardMap};
 use transparent_wallet::http::{HttpFilterSource, HttpOptions, HttpShardTransport};
 use zakura_pir_transparent::{
-    ApplyAction, ApplyError, BatchState, Interrupted, Outcome, Progress, RecoveryBatch,
-    RecoveryError, ShardTransport, TransparentHistoryRecovery, TransparentHistoryRecoveryConfig,
-    Trust, WalletChain, WithdrawnCause, WriteGate,
+    ApplyAction, ApplyError, BatchState, Companion, CompanionDir, ForgetError, Interrupted,
+    Outcome, Progress, RecoveryBatch, RecoveryError, ShardTransport,
+    TransparentHistoryRecoveryConfig, Trust, Ungated, WalletChain, WithdrawnCause, WriteGate,
+    forget_private_recovery,
 };
 use zcash_client_backend::data_api::{
     Account as _, CoinbaseFilter, InputSource as _, WalletRead as _,
     chain::ChainState,
     testing::{InitialChainState, TestBuilder, TestState},
     transparent_ledger::{
-        AccountLifecycle, CommitRejection, RecoveryRevision, StaleCommit,
-        TransparentAddressWatchSet, TransparentAuthority, TransparentLedgerCommit,
+        AccountLifecycle, CommitRejection, ForgottenTransparentLedger, RecoveryRevision,
+        StaleCommit, TransparentAddressWatchSet, TransparentAuthority, TransparentLedgerCommit,
         TransparentLedgerMode::{self, PrivateRequired},
         TransparentLedgerRead as _, TransparentLedgerWrite as _, WatchOrigin,
     },
@@ -45,7 +46,7 @@ use zcash_client_backend::data_api::{
 };
 use zcash_client_sqlite::{
     AccountUuid,
-    error::SqliteClientError,
+    error::{AuthorityRefusal, SqliteClientError},
     testing::{
         BlockCache,
         db::{TestDb, TestDbFactory},
@@ -228,7 +229,7 @@ struct Fixture {
     dir: tempfile::TempDir,
     publications: usize,
     url: Option<String>,
-    companion: Option<TransparentHistoryRecovery>,
+    companion: Option<Companion>,
     /// The public key hash of every address any watch set named.
     watched: BTreeSet<[u8; 20]>,
     /// Retired revisions acknowledged through trusted `apply_and_acknowledge`.
@@ -351,14 +352,34 @@ impl Fixture {
         }
     }
 
-    fn companion_path(&self) -> PathBuf {
-        self.dir.path().join("companion.sqlite")
+    /// The directory holding the wallet's companions.
+    fn companions(&self) -> CompanionDir {
+        CompanionDir::new(self.dir.path().join("companions"))
     }
 
+    /// The account's name in companion files.
+    fn account_name(&self) -> String {
+        self.account.expose_uuid().to_string()
+    }
+
+    fn companion_path(&self) -> PathBuf {
+        self.companions()
+            .companion_path(&self.account_name(), ORIGIN)
+    }
+
+    /// Opens the account's companion, holding its lock until it is closed or reopened.
     fn open(&mut self) {
         self.companion = None;
+        let account = self.account_name();
         self.companion = Some(
-            TransparentHistoryRecovery::open(self.companion_path(), config(self.account)).unwrap(),
+            self.companions()
+                .open(
+                    &account,
+                    config(self.account),
+                    || Ok(BTreeSet::from([account.clone()])),
+                    &|| false,
+                )
+                .unwrap(),
         );
     }
 
@@ -943,7 +964,9 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     f.scan_to(t2);
     assert!(matches!(
         f.spendable(),
-        Err(SqliteClientError::TransparentAuthorityUnavailable)
+        Err(SqliteClientError::TransparentAuthorityUnavailable(
+            AuthorityRefusal::Pending { accounts }
+        )) if accounts == vec![f.account]
     ));
     let moved_map = f.publish(&lifecycle(&owned, t2, 1, false), SEAL);
     let moved = f.drive();
@@ -2426,4 +2449,120 @@ fn an_integrity_rejection_records_recovery_suspension_for_durably_without_acknow
         failure.error
     );
     assert_eq!(failure.stats.applied, 0);
+}
+
+impl Fixture {
+    /// Forgets private recovery through `gate`, waiting for no companion.
+    fn forget(
+        &mut self,
+        gate: &mut impl WriteGate,
+    ) -> Result<ForgottenTransparentLedger, ForgetError> {
+        forget_private_recovery(
+            &self.companions(),
+            self.st.wallet_mut().db_mut(),
+            gate,
+            Duration::ZERO,
+        )
+    }
+
+    /// The private ledger facts the wallet holds: recovered events and coverage.
+    fn ledger_facts(&self) -> i64 {
+        self.count("tpir_receive_events")
+            + self.count("tpir_spend_events")
+            + self.count("tpir_coverage")
+    }
+}
+
+#[test]
+fn forgetting_private_recovery_deletes_companions_before_the_facts() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, _) = private_fixture();
+    f.drive();
+    let facts = f.ledger_facts();
+    assert!(facts > 0);
+    f.companion = None;
+
+    // A wallet still recovering privately keeps its facts and its companions.
+    assert!(matches!(
+        f.forget(&mut Ungated),
+        Err(ForgetError::NotPublic)
+    ));
+    assert!(f.companion_path().exists());
+    assert_eq!(f.ledger_facts(), facts);
+
+    // A companion in use defers forgetting: the facts stay with it.
+    f.set_policy(TransparentLedgerMode::Public);
+    f.open();
+    assert!(matches!(
+        f.forget(&mut Ungated),
+        Err(ForgetError::CompanionBusy)
+    ));
+    assert!(f.companion_path().exists());
+    assert_eq!(f.ledger_facts(), facts);
+
+    // A declined write forgets nothing, but the companions are gone already.
+    f.companion = None;
+    assert!(matches!(
+        f.forget(&mut AllowWrites { allow: 0, ran: 0 }),
+        Err(ForgetError::Interrupted)
+    ));
+    assert!(!f.companion_path().exists());
+    assert_eq!(f.ledger_facts(), facts);
+
+    let forgotten = f.forget(&mut Ungated).unwrap();
+    assert!(!forgotten.removed_nothing());
+    assert_eq!(f.ledger_facts(), 0);
+    // Forgetting again finds nothing.
+    assert!(f.forget(&mut Ungated).unwrap().removed_nothing());
+
+    // A later private run starts afresh, from a new companion, and recovers the facts again.
+    f.set_policy(PrivateRequired);
+    f.open();
+    f.drive();
+    assert!(f.ledger_facts() > 0);
+}
+
+/// A [`WriteGate`] that raises the wallet's durable policy to `PrivateRequired` through
+/// another connection before running the write.
+struct RaisePolicy {
+    wallet: Connection,
+}
+
+impl WriteGate for RaisePolicy {
+    fn write<T>(&mut self, write: impl FnOnce() -> T) -> Result<T, Interrupted> {
+        self.wallet
+            .execute(
+                "UPDATE tpir_meta SET applied_mode = 2,
+                 policy_generation = policy_generation + 1",
+                [],
+            )
+            .unwrap();
+        Ok(write())
+    }
+}
+
+#[test]
+fn a_policy_raised_after_the_companions_are_deleted_forgets_nothing() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, _) = private_fixture_with_factory(TestDbFactory::file_backed());
+    f.drive();
+    let facts = f.ledger_facts();
+    assert!(facts > 0);
+    f.companion = None;
+    f.set_policy(TransparentLedgerMode::Public);
+    let wallet_path = f.st.wallet().conn().path().unwrap().to_owned();
+    let mut gate = RaisePolicy {
+        wallet: Connection::open(wallet_path).unwrap(),
+    };
+    assert!(matches!(f.forget(&mut gate), Err(ForgetError::NotPublic)));
+    assert!(!f.companion_path().exists());
+    assert_eq!(f.ledger_facts(), facts);
+    assert_eq!(
+        f.st.wallet()
+            .db()
+            .applied_transparent_policy()
+            .unwrap()
+            .mode,
+        PrivateRequired
+    );
 }

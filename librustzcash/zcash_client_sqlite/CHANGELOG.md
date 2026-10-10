@@ -18,6 +18,16 @@ workspace.
   and `SqliteClientError::TransparentPromotionBlocked` to `TransparentActivationBlocked`.
   Recovery readiness checks and the atomic candidate-to-active transition are unchanged.
 
+- `SqliteClientError::TransparentAuthorityUnavailable` carries an `AuthorityRefusal`:
+  `Pending { accounts }` when every refused input is a held, unspent, unexpired, mature and
+  unwithdrawn output of an active account not suspended from recovery whose only blockers are
+  `Recovery(IncompleteCoverage)` and `ChainBehindTip` (with none needed when the target is
+  ahead of the chain), and `Refused(RefusalReason)` otherwise. Any other blocker, such as open
+  pages or unresolved spends, is `NotAdmitted`. Other reasons include `UnknownOutput`,
+  `CompetingSpend`, `Spent`, `ImmatureCoinbase`, `Withdrawn`, `NotInLedger` and `StaleTarget`. `check_transparent_transaction_inputs`,
+  direct lookup, selection and final storage classify within the read that refused. Messages
+  name no outpoint, transaction or address.
+
 - `WalletDb` implements `TransparentLedgerWrite::forget_transparent_ledger`. Under `Public`
   on the handle and durably, it removes in one transaction every spend link, pending spend,
   output and transaction that only the transparent ledger supports, the ledger origin of rows

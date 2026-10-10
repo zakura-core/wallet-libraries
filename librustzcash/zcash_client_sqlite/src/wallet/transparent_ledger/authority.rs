@@ -3,7 +3,10 @@
 
 use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
 
-use crate::{error::SqliteClientError, wallet::chain_tip_height};
+use crate::{
+    error::{AuthorityRefusal, RefusalReason, SqliteClientError},
+    wallet::chain_tip_height,
+};
 
 use zcash_client_backend::data_api::transparent_ledger::AppliedTransparentPolicy;
 
@@ -13,7 +16,10 @@ use super::policy::{durable_policy, resolve_mode};
 use {
     super::recovery,
     crate::{AccountRef, AccountUuid},
-    zcash_client_backend::data_api::wallet::TargetHeight,
+    zcash_client_backend::data_api::{
+        transparent_ledger::{AccountLifecycle, CandidateBlocker, RecoveryBlocker},
+        wallet::TargetHeight,
+    },
     zcash_keys::keys::transparent::gap_limits::GapLimits,
     zcash_protocol::consensus::{self, BlockHeight},
 };
@@ -33,6 +39,11 @@ pub(crate) fn grants_private_authority(
             == Some(TransparentLedgerMode::PrivateRequired))
 }
 
+/// The error refusing transparent inputs for `reason`.
+pub(crate) fn refused(reason: RefusalReason) -> SqliteClientError {
+    SqliteClientError::TransparentAuthorityUnavailable(AuthorityRefusal::Refused(reason))
+}
+
 /// Checks that the handle may authorize consuming transparent inputs.
 ///
 /// Public authority is retained only by explicitly configured `Public` handles; financial
@@ -45,12 +56,12 @@ pub(crate) fn check_transparent_authority(
     configured: Option<TransparentLedgerMode>,
 ) -> Result<(), SqliteClientError> {
     match resolve_mode(conn, configured)? {
-        TransparentLedgerMode::PrivateRequired => {
-            Err(SqliteClientError::TransparentAuthorityUnavailable)
-        }
+        TransparentLedgerMode::PrivateRequired => Err(refused(RefusalReason::NoAuthority)),
         TransparentLedgerMode::Public => {
-            if cfg!(not(feature = "transparent-inputs")) || chain_tip_height(conn)?.is_none() {
-                Err(SqliteClientError::TransparentAuthorityUnavailable)
+            if cfg!(not(feature = "transparent-inputs")) {
+                Err(refused(RefusalReason::NoAuthority))
+            } else if chain_tip_height(conn)?.is_none() {
+                Err(refused(RefusalReason::ChainUnknown))
             } else {
                 Ok(())
             }
@@ -94,6 +105,15 @@ impl InputAuthority {
             Self::Private(accounts) => accounts.contains(&account),
         }
     }
+
+    /// Whether the authority admits an output of `account`, `placed` when the private ledger
+    /// places the receive it is projected from. Private authority admits only placed outputs.
+    pub(crate) fn admits_output(&self, account: AccountRef, placed: bool) -> bool {
+        match self {
+            Self::Public => true,
+            Self::Private(accounts) => placed && accounts.contains(&account),
+        }
+    }
 }
 
 /// Resolves which outputs may fund a transaction targeting `target`.
@@ -116,7 +136,7 @@ pub(crate) fn input_authority<P: consensus::Parameters>(
         return Ok(InputAuthority::Public);
     }
     let Some(tip) = chain_tip_height(conn)? else {
-        return Err(SqliteClientError::TransparentAuthorityUnavailable);
+        return Err(refused(RefusalReason::ChainUnknown));
     };
     if BlockHeight::from(target) != tip + 1 {
         return Ok(InputAuthority::Private(vec![]));
@@ -137,14 +157,104 @@ pub(crate) fn input_authority<P: consensus::Parameters>(
     Ok(InputAuthority::Private(eligible))
 }
 
+/// Why private authority, which does not admit `account`, keeps its outputs out of a
+/// transaction targeting `target`, or `None` when only private recovery catching up does: see
+/// [`AuthorityRefusal::Pending`]. The caller provides the read snapshot.
+///
+/// That requires an active account not suspended from recovery, at a target above the chain tip, whose only
+/// blockers are `Recovery(IncompleteCoverage)` and `ChainBehindTip`. Any other blocker, such as
+/// open pages, unresolved spends or an unknown local chain point, is
+/// [`RefusalReason::NotAdmitted`]. An account blocked by nothing at the block after the tip
+/// would be admitted; one that is not lacks authority for a reason no blocker names, which
+/// waiting does not resolve.
+#[cfg(feature = "transparent-inputs")]
+pub(crate) fn private_exclusion<P: consensus::Parameters>(
+    conn: &rusqlite::Connection,
+    params: &P,
+    gap_limits: &GapLimits,
+    account: AccountUuid,
+    target: TargetHeight,
+) -> Result<Option<RefusalReason>, SqliteClientError> {
+    let Some(tip) = chain_tip_height(conn)? else {
+        return Ok(Some(RefusalReason::ChainUnknown));
+    };
+    let target = BlockHeight::from(target);
+    if target <= tip {
+        return Ok(Some(RefusalReason::StaleTarget));
+    }
+    let ledger = recovery::account_ledger(conn, params, gap_limits, account)?;
+    if ledger.lifecycle != AccountLifecycle::Active || ledger.recovery_suspended {
+        return Ok(Some(RefusalReason::NotAdmitted));
+    }
+    let blockers = recovery::ledger_blockers(conn, &ledger, Some(tip))?;
+    let catching_up = blockers.iter().all(|blocker| {
+        matches!(
+            blocker,
+            RecoveryBlocker::Recovery(CandidateBlocker::IncompleteCoverage)
+                | RecoveryBlocker::ChainBehindTip
+        )
+    });
+    if !catching_up || (target == tip + 1 && blockers.is_empty()) {
+        return Ok(Some(RefusalReason::NotAdmitted));
+    }
+    Ok(None)
+}
+
+/// The refusal of inputs that `authority` does not admit, owned by `account` (`account_ref`):
+/// [`RefusalReason::NotInLedger`] when the account holds private authority and the output is
+/// not `placed`, and otherwise its [`private_exclusion`], recording a pending account in
+/// `pending` once.
+#[cfg(feature = "transparent-inputs")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn refuse_unadmitted_input<P: consensus::Parameters>(
+    conn: &rusqlite::Connection,
+    params: &P,
+    gap_limits: &GapLimits,
+    authority: &InputAuthority,
+    account: AccountUuid,
+    account_ref: AccountRef,
+    target: TargetHeight,
+    pending: &mut Vec<AccountUuid>,
+) -> Result<(), SqliteClientError> {
+    if authority.admits(account_ref) {
+        return Err(refused(RefusalReason::NotInLedger));
+    }
+    match private_exclusion(conn, params, gap_limits, account, target)? {
+        Some(reason) => Err(refused(reason)),
+        None => {
+            if !pending.contains(&account) {
+                pending.push(account);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The result of an input check that refused nothing outright: success, or
+/// [`AuthorityRefusal::Pending`] for the accounts in `pending`.
+#[cfg(feature = "transparent-inputs")]
+pub(crate) fn pending_result(pending: Vec<AccountUuid>) -> Result<(), SqliteClientError> {
+    if pending.is_empty() {
+        Ok(())
+    } else {
+        Err(SqliteClientError::TransparentAuthorityUnavailable(
+            AuthorityRefusal::Pending { accounts: pending },
+        ))
+    }
+}
+
 /// Fails when private authority admits none of the accounts owning `addresses`. Selection over
-/// several accounts' addresses otherwise proceeds with the eligible ones only.
+/// several accounts' addresses otherwise proceeds with the eligible ones only, so the refusal
+/// is pending when any owner is (see [`private_exclusion`]): its authority alone would let
+/// selection proceed.
 #[cfg(feature = "transparent-inputs")]
 pub(crate) fn check_address_owners<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
+    gap_limits: &GapLimits,
     authority: &InputAuthority,
     addresses: &[transparent::address::TransparentAddress],
+    target: TargetHeight,
 ) -> Result<(), SqliteClientError> {
     let InputAuthority::Private(_) = authority else {
         return Ok(());
@@ -157,13 +267,27 @@ pub(crate) fn check_address_owners<P: consensus::Parameters>(
                 conn, params, address,
             )?
         {
-            owners.push(crate::wallet::get_account_ref(conn, account)?);
+            owners.push((account, crate::wallet::get_account_ref(conn, account)?));
         }
     }
-    if !owners.is_empty() && !owners.iter().any(|owner| authority.admits(*owner)) {
-        return Err(SqliteClientError::TransparentAuthorityUnavailable);
+    if owners.is_empty() || owners.iter().any(|(_, owner)| authority.admits(*owner)) {
+        return Ok(());
     }
-    Ok(())
+    let mut pending = vec![];
+    let mut reason = None;
+    for (account, _) in owners {
+        match private_exclusion(conn, params, gap_limits, account, target)? {
+            None if !pending.contains(&account) => pending.push(account),
+            None => {}
+            Some(refusal) => {
+                reason.get_or_insert(refusal);
+            }
+        }
+    }
+    match reason {
+        Some(reason) if pending.is_empty() => Err(refused(reason)),
+        _ => pending_result(pending),
+    }
 }
 
 #[cfg(feature = "transparent-inputs")]
@@ -204,6 +328,17 @@ pub(crate) fn transparent_funds_current(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,
 ) -> Result<bool, SqliteClientError> {
+    Ok(transparent_funds_refusal(conn, configured)?.is_none())
+}
+
+/// Why balance reads may not report transparent funds as current (see
+/// [`transparent_funds_current`]), in the order [`check_transparent_authority`] reports them:
+/// [`RefusalReason::NoAuthority`] under a required-private policy or without transparent
+/// support, then [`RefusalReason::ChainUnknown`] before the chain tip is known.
+pub(crate) fn transparent_funds_refusal(
+    conn: &rusqlite::Connection,
+    configured: Option<TransparentLedgerMode>,
+) -> Result<Option<RefusalReason>, SqliteClientError> {
     let durable_private = matches!(
         durable_policy(conn)?,
         Some(AppliedTransparentPolicy {
@@ -211,10 +346,18 @@ pub(crate) fn transparent_funds_current(
             ..
         })
     );
-    Ok(cfg!(feature = "transparent-inputs")
-        && !durable_private
-        && configured != Some(TransparentLedgerMode::PrivateRequired)
-        && chain_tip_height(conn)?.is_some())
+    Ok(
+        if cfg!(not(feature = "transparent-inputs"))
+            || durable_private
+            || configured == Some(TransparentLedgerMode::PrivateRequired)
+        {
+            Some(RefusalReason::NoAuthority)
+        } else if chain_tip_height(conn)?.is_none() {
+            Some(RefusalReason::ChainUnknown)
+        } else {
+            None
+        },
+    )
 }
 
 /// Returns whether `tx` consumes transparent inputs. A locally stored transaction with

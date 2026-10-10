@@ -217,7 +217,14 @@ and resource limits so one account cannot consume an unbounded amount of work.
 Stops and restarts retain saved progress.
 
 An outage ends the run. If published data lags behind the chain, transparent
-spending waits for recovery to catch up. Repeated stalls or unexplained
+spending waits for recovery to catch up. A refused input check says which: an
+`AuthorityRefusal::Pending` refusal names accounts whose sound, unspent inputs
+only await coverage of the chain tip: their only blockers are incomplete
+coverage and a local chain behind the tip, so a retry after recovery catches up
+may succeed. Any other blocker (open pages, unresolved spends, recovery suspension, an
+account not yet active) is `Refused(NotAdmitted)`, and like every `Refused`
+reason (a spent, immature or unknown input, among others) needs more than
+waiting. Repeated stalls or unexplained
 disagreements with saved wallet facts pause an account for an hour before retry;
 recovery suspension survives restart. Other ready accounts and eligible shielded-funded
 operations continue. Ledger hardware accounts pause transparent recovery
@@ -500,11 +507,18 @@ the new setting. Previously withheld transactions can be fetched publicly.
 Resumed address and transaction queries can link privately learned information
 to the wallet.
 
-After removing companions, `forget_transparent_ledger` removes private-only
-spends, outputs, events, coverage, and source-bound facts. Public discovery
-rebuilds from its own observations. Independently supported records, shielded
-state, and reservations survive. Locked/referenced outputs may remain without
-counting value; unsupported transaction rows are removed.
+`forget_private_recovery` (zakura-pir-transparent, feature `sqlite`) deletes
+every companion and only then runs `forget_transparent_ledger` through the
+application's `WriteGate`. A companion records which revisions the wallet
+holds; one that outlived the facts would make a later private run skip them, so
+a companion still in use (`ForgetError::CompanionBusy`), a declined gate, or a
+policy raised back to private before the forget leaves the facts in place. It
+refuses a wallet not public on the handle and durably before deleting anything.
+The forget removes private-only spends, outputs, events, coverage, and
+source-bound facts. Public discovery rebuilds from its own observations.
+Independently supported records, shielded state, and reservations survive.
+Locked/referenced outputs may remain without counting value; unsupported
+transaction rows are removed.
 
 Source trust, publication ordering, and recovery suspension are retained: returning to
 private mode cannot accept an older publication or clear a suspended source.

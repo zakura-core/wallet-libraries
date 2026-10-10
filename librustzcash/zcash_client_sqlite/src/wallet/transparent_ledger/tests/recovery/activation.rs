@@ -1468,6 +1468,7 @@ mod qualification;
 mod gating {
     mod coinbase;
     mod forget;
+    mod refusal;
     mod withdrawal;
 
     use std::convert::Infallible;
@@ -1490,6 +1491,8 @@ mod gating {
     use zcash_keys::address::Address;
     use zcash_protocol::ShieldedPool;
     use zip321::{Payment, TransactionRequest};
+
+    use crate::error::{AuthorityRefusal, RefusalReason};
 
     use super::*;
 
@@ -1545,12 +1548,13 @@ mod gating {
         ]
     }
 
-    fn all_unavailable(selections: Selections) {
+    /// Asserts that every selector refuses with `refusal`.
+    fn all_unavailable(selections: Selections, refusal: AuthorityRefusal) {
         for selection in selections {
             assert!(
                 matches!(
-                    selection,
-                    Err(SqliteClientError::TransparentAuthorityUnavailable)
+                    &selection,
+                    Err(SqliteClientError::TransparentAuthorityUnavailable(r)) if *r == refusal
                 ),
                 "{selection:?}"
             );
@@ -1580,27 +1584,41 @@ mod gating {
         for selection in selections(&st, account, &[taddr], &unspent.outpoint, target) {
             assert_eq!(selection.unwrap(), vec![unspent.outpoint.clone()]);
         }
-        // Coverage through H supports only target H + 1.
-        for other in [BlockHeight::from(target) - 1, BlockHeight::from(target) + 1] {
-            all_unavailable(selections(
-                &st,
-                account,
-                &[taddr],
-                &unspent.outpoint,
-                TargetHeight::from(other),
-            ));
+        // Coverage through H supports only target H + 1: a target at the tip is stale, and one
+        // above the next block waits for the chain to reach it.
+        for (other, refusal) in [
+            (
+                BlockHeight::from(target) - 1,
+                AuthorityRefusal::Refused(RefusalReason::StaleTarget),
+            ),
+            (
+                BlockHeight::from(target) + 1,
+                AuthorityRefusal::Pending {
+                    accounts: vec![account],
+                },
+            ),
+        ] {
+            all_unavailable(
+                selections(
+                    &st,
+                    account,
+                    &[taddr],
+                    &unspent.outpoint,
+                    TargetHeight::from(other),
+                ),
+                refusal,
+            );
         }
 
         // A new block the ledger has not covered pauses authority.
         scan_new_blocks(&mut st, 1);
         let target = next_target(&st);
-        all_unavailable(selections(
-            &st,
-            account,
-            &[taddr],
-            &unspent.outpoint,
-            target,
-        ));
+        all_unavailable(
+            selections(&st, account, &[taddr], &unspent.outpoint, target),
+            AuthorityRefusal::Pending {
+                accounts: vec![account],
+            },
+        );
         cover(&mut st, account, &revision(1, true), vec![]);
         for selection in selections(&st, account, &[taddr], &unspent.outpoint, target) {
             assert_eq!(selection.unwrap(), vec![unspent.outpoint.clone()]);
@@ -1613,13 +1631,10 @@ mod gating {
                 [],
             )
             .unwrap();
-        all_unavailable(selections(
-            &st,
-            account,
-            &[taddr],
-            &unspent.outpoint,
-            target,
-        ));
+        all_unavailable(
+            selections(&st, account, &[taddr], &unspent.outpoint, target),
+            AuthorityRefusal::Refused(RefusalReason::NotAdmitted),
+        );
     }
 
     #[test]
@@ -1664,7 +1679,9 @@ mod gating {
         .unwrap();
         assert!(matches!(
             by_outpoint,
-            Err(SqliteClientError::TransparentAuthorityUnavailable)
+            Err(SqliteClientError::TransparentAuthorityUnavailable(
+                AuthorityRefusal::Refused(RefusalReason::NotInLedger)
+            ))
         ));
         assert_eq!(by_address.unwrap(), vec![]);
         assert_eq!(by_addresses.unwrap(), vec![]);
@@ -1745,7 +1762,9 @@ mod gating {
             assert!(
                 matches!(
                     result,
-                    Err(SqliteClientError::TransparentAuthorityUnavailable)
+                    Err(SqliteClientError::TransparentAuthorityUnavailable(
+                        AuthorityRefusal::Refused(RefusalReason::NotAdmitted)
+                    ))
                 ),
                 "{result:?}"
             );
@@ -1790,7 +1809,9 @@ mod gating {
         assert_eq!(select(&both).unwrap(), vec![funded[0].outpoint.clone()]);
         assert!(matches!(
             select(&both[1..]),
-            Err(SqliteClientError::TransparentAuthorityUnavailable)
+            Err(SqliteClientError::TransparentAuthorityUnavailable(
+                AuthorityRefusal::Refused(RefusalReason::NotAdmitted)
+            ))
         ));
     }
 
@@ -1841,7 +1862,9 @@ mod gating {
                 &stale,
             ),
             Err(zcash_client_backend::data_api::error::Error::DataSource(
-                SqliteClientError::TransparentAuthorityUnavailable
+                SqliteClientError::TransparentAuthorityUnavailable(AuthorityRefusal::Refused(
+                    RefusalReason::StaleTarget
+                ))
             ))
         ));
         assert_eq!(transactions(&st), before);
@@ -1994,7 +2017,9 @@ mod gating {
         let db = st.wallet().db();
         assert!(matches!(
             db.get_unspent_transparent_output(&local, next_target(&st)),
-            Err(SqliteClientError::TransparentAuthorityUnavailable)
+            Err(SqliteClientError::TransparentAuthorityUnavailable(
+                AuthorityRefusal::Refused(RefusalReason::NotInLedger)
+            ))
         ));
     }
 }
