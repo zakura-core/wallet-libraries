@@ -1119,3 +1119,196 @@ async fn enhance_notes_accept_fresh_routing_after_a_refused_query() {
         assert_eq!((enhance.inits.get(), enhance.queries.get()), (2, 2));
     }
 }
+
+/// Runs one sweep of `accounts` through `through` at `now`.
+async fn run(
+    st: &mut State,
+    accounts: &[AccountUuid],
+    through: ChainPoint,
+    directory: impl Transport,
+    notes: &mut Notes,
+    now: i64,
+) -> Result<
+    zakura_pir_receiver::Swept<zcash_client_sqlite::error::SqliteClientError>,
+    Error<zcash_client_sqlite::error::SqliteClientError>,
+> {
+    let network = *st.network();
+    sweep(
+        st.wallet_mut().db_mut(),
+        &network,
+        accounts,
+        through,
+        GENESIS,
+        ORIGIN,
+        directory,
+        notes,
+        &NoLock,
+        now,
+    )
+    .await
+}
+
+/// A queued candidate that defers is replaced by each later attempt's answer from the
+/// publication it uses: a corrected payment is recovered, and a paid-filter miss drops
+/// the candidate, whatever made it wait.
+#[tokio::test]
+async fn a_deferred_candidate_takes_each_publications_current_answer() {
+    use PaymentApplication::{AwaitingScan, AwaitingSpendHistory, AwaitingWitness};
+    for (deferral, corrected) in [
+        (AwaitingScan, true),
+        (AwaitingScan, false),
+        (AwaitingWitness, false),
+        (AwaitingSpendHistory, false),
+    ] {
+        let mut st = ironwood_wallet();
+        let account = st.test_account().unwrap().id();
+        let key = KeyId::new(Purpose::Receive, 0);
+        let (record, note_data) = pay_restored_key(&mut st, key.index(), 0);
+        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+        restore(&mut st, account);
+        let mut through = tip(&st);
+        let mut first = record.clone();
+        let mut commitments = vec![record.payment.cmx];
+        match deferral {
+            // A block below the tip is not scanned yet.
+            AwaitingScan => {
+                st.generate_empty_block();
+                let (top, _) = st.generate_empty_block();
+                st.scan_cached_blocks_with_dynamic_ivks(top, 1);
+                let block = st.wallet().block_metadata(top).unwrap().unwrap();
+                through = ChainPoint {
+                    height: top,
+                    hash: block.block_hash(),
+                };
+                if corrected {
+                    // Publication A misplaces the payment in another tree.
+                    first.payment.position = 1;
+                    commitments.insert(0, [1; 32]);
+                }
+            }
+            AwaitingWitness => {
+                st.wallet()
+                    .conn()
+                    .execute("DELETE FROM ironwood_tree_checkpoints", [])
+                    .unwrap();
+            }
+            _ => {
+                st.wallet()
+                    .conn()
+                    .execute_batch(
+                        "DELETE FROM nullifier_map; DELETE FROM ironwood_nullifier_scan_blocks;",
+                    )
+                    .unwrap();
+            }
+        }
+        let mut notes = Notes {
+            data: BTreeMap::from([(0, note_data), (1, note_data)]),
+            requested: Vec::new(),
+        };
+        let a = Directory::new(publish(&[first], &commitments, through, &provider(&[])));
+        let swept = run(&mut st, &[account], through, &a, &mut notes, NOW)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &swept.deferred[..],
+                [(k, Error::Queued(d))] if *k == key && *d == deferral
+            ),
+            "{deferral:?}: {:?}",
+            swept.deferred
+        );
+        assert!(swept.pending);
+        if deferral == AwaitingScan {
+            st.scan_cached_blocks_with_dynamic_ivks(through.height - 1, 1);
+        }
+
+        // Publication B, after the attempt's backoff.
+        let b = if corrected {
+            publish(
+                std::slice::from_ref(&record),
+                &[record.payment.cmx],
+                through,
+                &provider(&[]),
+            )
+        } else {
+            publish(&[], &[], through, &provider(&[]))
+        };
+        let swept = run(
+            &mut st,
+            &[account],
+            through,
+            &Directory::new(b),
+            &mut notes,
+            NOW + 60,
+        )
+        .await
+        .unwrap();
+        assert!(
+            swept.deferred.is_empty(),
+            "{deferral:?}: {:?}",
+            swept.deferred
+        );
+        assert!(!swept.pending, "{deferral:?}");
+        let value = if corrected { VALUE } else { 0 };
+        assert_eq!(
+            st.get_total_balance(account),
+            Zatoshis::const_from_u64(value),
+            "{deferral:?}"
+        );
+    }
+}
+
+/// An unchanged answer reuses the queued candidate's note data.
+#[tokio::test]
+async fn an_unchanged_answer_reuses_queued_note_data() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let (record, note_data) = pay_restored_key(&mut st, 0, 0);
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    st.wallet()
+        .conn()
+        .execute_batch("DELETE FROM nullifier_map; DELETE FROM ironwood_nullifier_scan_blocks;")
+        .unwrap();
+    let mut notes = Notes {
+        data: BTreeMap::from([(record.payment.position, note_data)]),
+        requested: Vec::new(),
+    };
+    let directory = Directory::new(publish(
+        std::slice::from_ref(&record),
+        &[record.payment.cmx],
+        through,
+        &provider(&[]),
+    ));
+    let swept = run(&mut st, &[account], through, &directory, &mut notes, NOW)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            &swept.deferred[..],
+            [(_, Error::Queued(PaymentApplication::AwaitingSpendHistory))]
+        ),
+        "{:?}",
+        swept.deferred
+    );
+    // The replay the deferral queued is still unscanned.
+    let swept = run(&mut st, &[account], through, &directory, &mut notes, NOW + 60)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            &swept.deferred[..],
+            [(_, Error::Queued(PaymentApplication::AwaitingScan))]
+        ),
+        "{:?}",
+        swept.deferred
+    );
+    let posts = directory
+        .requests()
+        .iter()
+        .filter(|r| *r == "POST /v1/receiver/query")
+        .count();
+    assert!(posts >= 2, "{:?}", directory.requests());
+    assert_eq!(notes.requested, [vec![record.payment.position]]);
+}
