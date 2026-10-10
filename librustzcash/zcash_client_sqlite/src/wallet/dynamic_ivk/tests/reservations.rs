@@ -609,63 +609,100 @@ fn undone_incoming_sweep_blocks_new_reservations() {
     );
     finish_sweep(st.wallet_mut().db_mut(), account, swept, through);
     // Issuance resumes at the lowest address never quoted.
-    let issued = try_prepare(&mut st, NOW, Some(&covering_seen()));
-    assert_eq!(issued.unwrap().unwrap().key_id().index(), 0);
+    assert_eq!(prepare(&mut st, NOW).key_id().index(), 0);
 }
 
-/// A restored address without local quotes is issued only once a seen set covers
-/// every time it can have been quoted, from [`EARLIEST_RECEIVE_QUOTE`] to its
-/// registration here, and lacks it. Without that evidence issuance waits rather than
-/// skipping ahead.
+/// Restores the test account from its seed through `height`, its `recover_until`,
+/// and returns that block's time, if the wallet has scanned it.
+fn restore_through(st: &State, height: BlockHeight) -> Option<i64> {
+    let conn = st.wallet().conn();
+    conn.execute(
+        "UPDATE accounts SET recover_until_height = ?1",
+        [u32::from(height)],
+    )
+    .unwrap();
+    conn.query_row(
+        "SELECT time FROM blocks WHERE height = ?1",
+        [u32::from(height)],
+        |r| r.get(0),
+    )
+    .optional()
+    .unwrap()
+}
+
+/// A swept lookahead key 0 of the test account, registered a day after `restored_at`,
+/// with its receiver.
+fn swept_key_registered_after(st: &mut State, restored_at: i64) -> [u8; 43] {
+    let account = st.test_account().unwrap().id();
+    let swept_at = tip(st);
+    let db = st.wallet_mut().db_mut();
+    let key = watch(db, account, 0, swept_at.height);
+    finish_sweep(db, account, key.key_id(), swept_at);
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE ironwood_receiving_keys SET registered_at = ?1",
+            [restored_at + 24 * 60 * 60],
+        )
+        .unwrap();
+    key.receiver().to_raw_address_bytes()
+}
+
+/// The index issued with a seen set read from `since` to `until` that holds `held`.
+fn issue_seen(
+    st: &mut State,
+    since: i64,
+    until: i64,
+    held: &[[u8; 43]],
+) -> Result<u64, ReservationPolicy> {
+    let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
+    let seen = ProviderSeen {
+        since,
+        until,
+        contains: &contains,
+    };
+    let issued = try_prepare(st, NOW, Some(&seen)).unwrap();
+    issued.map(|k| k.key_id().index())
+}
+
+/// In an account restored from its seed, an address without local quotes may have
+/// been quoted by the old device. It is issued only once a seen set lacks it and covers
+/// every time it can have been quoted, from [`EARLIEST_RECEIVE_QUOTE`] until the
+/// restore; otherwise issuance waits rather than skipping ahead. A key registered after
+/// the restore does not wait for a read past its own registration.
 #[test]
-fn restored_addresses_need_seen_evidence_covering_their_quotes() {
-    let fixture = || {
-        let mut st = fixture();
-        let account = st.test_account().unwrap().id();
-        let swept_at = tip(&st);
-        let db = st.wallet_mut().db_mut();
-        let key = watch(db, account, 0, swept_at.height);
-        finish_sweep(db, account, key.key_id(), swept_at);
-        let receiver = key.receiver().to_raw_address_bytes();
-        (st, receiver)
-    };
-    let registered = clock_now();
-    let covered = registered + SEEN_SLACK_SECONDS;
-    let issue = |st: &mut State, since, until, held: &[[u8; 43]]| {
-        let contains =
-            |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
-        let seen = ProviderSeen {
-            since,
-            until,
-            contains: &contains,
-        };
-        try_prepare(st, registered, Some(&seen)).unwrap()
-    };
-    let (mut st, receiver) = fixture();
+fn restored_accounts_issue_unquoted_addresses_only_with_covering_seen_evidence() {
     let gap = Err(ReservationPolicy::Gap);
-    // The feed started too late, or its read ends before the key was recovered here.
+    let restored = || {
+        let mut st = fixture();
+        let restored_at = restore_through(&st, tip(&st).height).unwrap();
+        let receiver = swept_key_registered_after(&mut st, restored_at);
+        (st, restored_at + SEEN_SLACK_SECONDS, receiver)
+    };
+    let (mut st, until, receiver) = restored();
+    // The feed started too late, or its read ends before the restore.
     assert_eq!(
-        issue(&mut st, EARLIEST_RECEIVE_QUOTE + 1, covered, &[]).map(|k| k.key_id()),
+        issue_seen(&mut st, EARLIEST_RECEIVE_QUOTE + 1, until, &[]),
         gap
     );
     assert_eq!(
-        issue(&mut st, EARLIEST_RECEIVE_QUOTE, covered - 1, &[]).map(|k| k.key_id()),
+        issue_seen(&mut st, EARLIEST_RECEIVE_QUOTE, until - 1, &[]),
         gap
     );
+    let none = try_prepare(&mut st, NOW, None).unwrap();
+    let none = none.map(|k| k.key_id().index());
+    assert_eq!(none, gap);
     assert_eq!(
-        try_prepare(&mut st, registered, None)
-            .unwrap()
-            .map(|k| k.key_id()),
-        gap
+        issue_seen(&mut st, EARLIEST_RECEIVE_QUOTE, until, &[]),
+        Ok(0)
     );
-    let issued = issue(&mut st, EARLIEST_RECEIVE_QUOTE, covered, &[]).unwrap();
-    assert_eq!(issued.key_id().index(), 0);
 
     // A covering set that holds it marks it seen, and issuance moves past it.
-    let (mut st, receiver_0) = fixture();
-    assert_eq!(receiver_0, receiver);
-    let issued = issue(&mut st, EARLIEST_RECEIVE_QUOTE, covered, &[receiver]).unwrap();
-    assert_eq!(issued.key_id().index(), 1);
+    let (mut st, until, _) = restored();
+    assert_eq!(
+        issue_seen(&mut st, EARLIEST_RECEIVE_QUOTE, until, &[receiver]),
+        Ok(1)
+    );
     let seen: bool = st
         .wallet()
         .conn()
@@ -677,6 +714,32 @@ fn restored_addresses_need_seen_evidence_covering_their_quotes() {
         )
         .unwrap();
     assert!(seen);
+
+    // Until the wallet has scanned the restore's block, its time is unknown.
+    let mut st = fixture();
+    let swept_at = tip(&st);
+    assert_eq!(restore_through(&st, swept_at.height + 1), None);
+    swept_key_registered_after(&mut st, 0);
+    assert_eq!(
+        issue_seen(&mut st, EARLIEST_RECEIVE_QUOTE, i64::MAX, &[]),
+        gap
+    );
+}
+
+/// An account created here rather than restored was never quoted elsewhere, so its
+/// swept lookahead addresses are issued without covering seen evidence.
+#[test]
+fn new_accounts_issue_unquoted_addresses_without_seen_evidence() {
+    let mut st = fixture();
+    swept_key_registered_after(&mut st, clock_now());
+    let issued = try_prepare(&mut st, NOW, None).unwrap().unwrap();
+    assert_eq!(issued.key_id().index(), 0);
+    let mut st = fixture();
+    swept_key_registered_after(&mut st, clock_now());
+    assert_eq!(
+        issue_seen(&mut st, EARLIEST_RECEIVE_QUOTE + 1, 0, &[]),
+        Ok(0)
+    );
 }
 
 #[test]
@@ -696,16 +759,11 @@ fn issuance_skips_restored_addresses_the_provider_saw() {
             .unwrap()
             .unwrap();
     }
-    let covered = |st: &mut State| {
-        try_prepare(st, NOW, Some(&covering_seen()))
-            .unwrap()
-            .unwrap()
-    };
-    assert_eq!(covered(&mut st).key_id().index(), 3);
+    assert_eq!(prepare(&mut st, NOW).key_id().index(), 3);
     // Seen addresses move the gap and are never reused, even once every other address
     // in the window was quoted and abandoned, nor is one accepted here.
     abandon_indices(&mut st, 4..RECEIVE_GAP_LIMIT + 3);
-    let draft = covered(&mut st);
+    let draft = prepare(&mut st, NOW);
     assert_eq!(draft.key_id().index(), 3);
     quote(&mut st, &draft, "after-restore", true);
     let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
@@ -787,7 +845,7 @@ fn issuance_starts_after_the_scanned_tip_once_the_restore_lookahead_is_swept() {
         finish_sweep(db, account, key.key_id(), through);
     }
     let r = db
-        .prepare_receive_reservation(account, NOW, near, Some(&covering_seen()))
+        .prepare_receive_reservation(account, NOW, near, None)
         .unwrap()
         .unwrap();
     // Issuance takes the lowest address never quoted.

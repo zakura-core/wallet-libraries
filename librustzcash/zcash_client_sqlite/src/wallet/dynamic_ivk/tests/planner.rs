@@ -423,7 +423,7 @@ fn issuing_a_key_after_its_watch_needs_no_rescan() {
         account,
         NOW,
         through.height + 1,
-        Some(&covering_seen()),
+        None,
     )
     .unwrap()
     .unwrap();
@@ -590,7 +590,7 @@ fn issuing_a_lookahead_key_does_not_extend_the_lookahead() {
     for i in 0..window {
         finish_sweep(db, account, KeyId::new(Purpose::Receive, i), through);
     }
-    let issued = prepare_from(db, account, NOW, through.height + 1, Some(&covering_seen()))
+    let issued = prepare_from(db, account, NOW, through.height + 1, None)
         .unwrap()
         .unwrap();
     assert_eq!(issued.key_id().index(), 0);
@@ -601,7 +601,7 @@ fn issuing_a_lookahead_key_does_not_extend_the_lookahead() {
         account,
         NOW,
         through.height + 1,
-        Some(&covering_seen()),
+        None,
     )
     .unwrap()
     .unwrap();
