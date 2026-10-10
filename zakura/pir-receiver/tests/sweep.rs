@@ -48,9 +48,7 @@ use zcash_client_sqlite::{
         BlockCache,
         db::{TestDb, TestDbFactory},
     },
-    wallet::dynamic_ivk::{
-        EARLIEST_RECEIVE_QUOTE, KeyId, ProviderSeen, Purpose, RECEIVE_GAP_LIMIT,
-    },
+    wallet::dynamic_ivk::{KeyId, ProviderSeen, Purpose, RECEIVE_GAP_LIMIT},
 };
 use zcash_note_encryption::{Domain as _, try_compact_note_decryption};
 use zcash_primitives::block::BlockHash;
@@ -71,8 +69,8 @@ const GENESIS: [u8; 32] = [9; 32];
 const ORIGIN: &str = "https://receiver.test";
 /// Ironwood activation, the history every publication must cover.
 const ACTIVATION: u32 = 100_000;
-/// The caller's clock, a day after any dynamic address can first have been quoted.
-const NOW: i64 = EARLIEST_RECEIVE_QUOTE + 24 * 60 * 60;
+/// The caller's clock.
+const NOW: i64 = 1_700_000_000;
 /// The payout's value.
 const VALUE: u64 = 100_000;
 
@@ -159,8 +157,8 @@ fn pay_restored_key(st: &mut State, index: u64, position: u64) -> (Record, [u8; 
 }
 
 /// A swap provider's sets: an empty recent set, which wallets do not read, and every
-/// receiver it ever had, from a feed that started before any dynamic address existed
-/// and last read the provider a minute before [`NOW`].
+/// receiver it ever had, from a feed that started long before [`NOW`] and last read the
+/// provider a minute before it.
 fn provider(seen: &[Receiver]) -> Vec<ProviderSet> {
     provider_named("near-intents", seen)
 }

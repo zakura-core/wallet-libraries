@@ -43,10 +43,13 @@ pub const EARLIEST_RECEIVE_QUOTE: i64 = 1_790_640_000;
 /// addresses the set holds. The set's answers are kept, so a later set that lacks an
 /// address cannot make it issuable again.
 ///
-/// A registered address without local quotes, such as a restored one, may have been
-/// quoted by another device. It is issued only if a set lacks it and covers every quote
-/// from [`EARLIEST_RECEIVE_QUOTE`] until this wallet registered it, widened by
-/// [`SEEN_SLACK_SECONDS`]; otherwise issuance waits with [`ReservationPolicy::Gap`].
+/// In an account restored from its seed, a registered address without local quotes may
+/// have been quoted by the old device. It is issued only if a set lacks it and covers
+/// every quote from [`EARLIEST_RECEIVE_QUOTE`] until the restore, the time of the
+/// account's `recover_until` block, widened by [`SEEN_SLACK_SECONDS`]; otherwise
+/// issuance waits with [`ReservationPolicy::Gap`]. Wallets must pass
+/// `AccountBirthday::recover_until` when restoring an account from a seed, or it counts
+/// as new and this check does not apply.
 pub struct ProviderSeen<'a> {
     /// When the provider's feed started, in Unix seconds. Receivers the provider was
     /// given earlier are missing.
@@ -481,12 +484,27 @@ pub(super) fn prepare<P: Parameters>(
         Some((key, _, true)) => abandon(conn, key, now)?,
         None => {}
     }
+    // Whether a restored account's addresses without local quotes must wait for a set
+    // covering the restore (see `ProviderSeen`). A restore whose block time is not yet
+    // known is not covered.
+    let unquoted_wait = conn
+        .query_row(
+            "SELECT b.time FROM accounts a
+             LEFT JOIN blocks b ON b.height = a.recover_until_height
+             WHERE a.id = ?1 AND a.recover_until_height IS NOT NULL",
+            [a.0],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .is_some_and(|restored_at| {
+            coverage.0 > EARLIEST_RECEIVE_QUOTE || restored_at.is_none_or(|t| t > coverage.1)
+        });
     // An address the provider was given without seeing it, such as a request that never
     // reached it, is reissued only when the gap rule leaves no fresh one.
     let mut abandoned = None;
     let mut fresh = None;
     for index in 0..end {
-        let (blocked, quoted, uncovered): (bool, bool, bool) = conn
+        let (blocked, quoted, unquoted): (bool, bool, bool) = conn
             .query_row(
                 &format!(
                     "SELECT k.used = 1 OR {SEEN} OR {RESERVED}
@@ -496,7 +514,6 @@ pub(super) fn prepare<P: Parameters>(
                             WHERE o.receiving_key_id = k.id AND o.request IS NOT NULL),
                         NOT EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
                             WHERE o.receiving_key_id = k.id)
-                          AND NOT (:since <= :earliest AND k.registered_at <= :covered)
                      FROM ironwood_receiving_keys k
                      WHERE k.account_id = :account AND k.purpose = 1 AND k.key_index = :index"
                 ),
@@ -505,7 +522,6 @@ pub(super) fn prepare<P: Parameters>(
                     ":index": index.to_be_bytes(),
                     ":since": coverage.0,
                     ":covered": coverage.1,
-                    ":earliest": EARLIEST_RECEIVE_QUOTE,
                 ],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -515,7 +531,7 @@ pub(super) fn prepare<P: Parameters>(
             continue;
         }
         // Skipping it could hand out a higher index the old device also quoted.
-        if uncovered {
+        if unquoted && unquoted_wait {
             return Ok(Err(ReservationPolicy::Gap));
         }
         if !quoted {
