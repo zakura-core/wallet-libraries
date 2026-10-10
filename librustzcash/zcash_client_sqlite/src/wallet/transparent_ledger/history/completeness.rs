@@ -212,6 +212,7 @@ pub(super) fn has_pending_parent(
 }
 
 /// Whether the account's ledger records a spend in `txid` whose output it has not recovered.
+/// Recovery's `unresolved_spends` count considers only placed spends, across transactions.
 #[cfg(feature = "transparent-inputs")]
 pub(super) fn has_unresolved_spend(
     conn: &rusqlite::Connection,

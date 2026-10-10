@@ -235,7 +235,8 @@ const UNOBSERVED_SPEND: &str =
     "NOT EXISTS (SELECT 1 FROM tpir_spend_observations ob WHERE ob.spend_id = e.id)";
 
 /// A SQL condition that the spend of `e.prevout_*` by transaction `st` has an origin
-/// in `{origins}`.
+/// in `{origins}`. `recovery::lifecycle::forget_ledger` states the same ledger-only test over
+/// its own aliases (`ledger_only_spend`).
 fn spend_origin(origins: &str) -> String {
     format!(
         "EXISTS (
@@ -313,6 +314,7 @@ pub(super) fn unproject_unobserved(conn: &rusqlite::Connection) -> Result<(), Sq
      ) AND EXISTS (
          SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = o.id AND oo.origin = 2
      )";
+    // Narrower than `forget_ledger`'s ledger-only output: only one whose receive is unobserved.
     let ledger_only_output = format!(
         "{unobserved_receive} AND NOT EXISTS (
              SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = o.id AND oo.origin != 2

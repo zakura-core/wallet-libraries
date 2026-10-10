@@ -75,7 +75,8 @@ pub(super) fn recovery_status(
         |row| row.get::<_, i64>(0),
     )? as usize;
 
-    // Distinct outpoints consumed by a mined spend but not recovered as a mined receive.
+    // Distinct outpoints consumed by a mined spend but not recovered as a mined receive. History's
+    // `has_unresolved_spend` asks the same of one transaction's spends, placed or not.
     let unresolved_spends: usize = conn.query_row(
         "SELECT COUNT(*) FROM (
              SELECT DISTINCT s.prevout_txid, s.prevout_output_index

@@ -4,7 +4,10 @@ use zcash_client_backend::data_api::transparent_ledger::{
     TransactionMetadata, WholeTransactionFee,
 };
 
-/// Candidate assertions observed at the event's current placement. These remain
+/// Candidate assertions observed at the event's current placement. History's
+/// `metadata_evidence` requires the same observation and additionally qualification;
+/// `forget_reattributed_script` deletes metadata whose revision observes no event of the
+/// account, at any placement. These remain
 /// unqualified diagnostics and never grant financial authority.
 pub(super) fn candidate_metadata(
     conn: &rusqlite::Connection,

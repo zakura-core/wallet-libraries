@@ -76,7 +76,9 @@ pub(super) fn metadata_evidence(
 }
 
 /// The number of the account's distinct transparent inputs in `txid` that qualified,
-/// unquarantined ledger evidence records as mined spends.
+/// unquarantined ledger evidence records as mined spends. Unlike `has_ledger_spend` and the
+/// detail view's `owned_inputs`, it requires neither an active account nor placement at the
+/// wallet's mined height.
 pub(super) fn qualified_owned_spend_inputs(
     conn: &rusqlite::Connection,
     account: i64,

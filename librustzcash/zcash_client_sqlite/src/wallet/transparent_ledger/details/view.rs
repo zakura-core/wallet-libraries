@@ -27,6 +27,9 @@ use super::store::stored_facts;
 pub(super) type OwnedInputScripts = BTreeMap<([u8; 32], u32), Vec<u8>>;
 
 /// Spent outpoints whose ownership the account can affirm now, with their spent scripts.
+/// The private branch is the per-account form of history's `has_ledger_spend`, adding the
+/// spent script; `qualified_owned_spend_inputs` counts inputs without the active-account and
+/// placement requirements.
 /// Private evidence must be active, qualified, non-quarantined and at the transaction's
 /// accepted height. Independently recorded public or local spends retain their semantics;
 /// ledger projection alone cannot bypass the private evidence checks.

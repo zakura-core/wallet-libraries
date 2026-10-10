@@ -206,7 +206,8 @@ pub(crate) fn forget_ledger(
             .collect::<Result<_, _>>()?;
 
         // A spend whose only origin is the ledger, for spending transaction `{tx}` and the
-        // prevout `{prevout_txid}`:`{prevout_index}`.
+        // prevout `{prevout_txid}`:`{prevout_index}`. Projection's `unproject_unobserved` builds
+        // the same test from `spend_origin`, over fixed aliases.
         let ledger_only_spend = |tx: &str, prevout_txid: &str, prevout_index: &str| {
             format!(
                 "EXISTS (
@@ -283,7 +284,8 @@ pub(crate) fn forget_ledger(
         )?;
 
         // Every output left with the ledger origin is ledger-only. Nothing searches for its
-        // spend any longer.
+        // spend any longer. Unlike projection's `ledger_only_output`, which also requires the
+        // receive to have lost its last observation, forgetting covers every ledger-only output.
         let ledger_only_output = "EXISTS (
              SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = o.id AND oo.origin = 2
          )";
