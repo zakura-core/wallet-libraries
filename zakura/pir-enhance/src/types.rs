@@ -28,6 +28,9 @@ pub const MAX_QUERY_SHARDS: u64 = 24;
 pub const SCHEMA_VERSION: u16 = 11;
 pub const PROTOCOL_REVISION: &str = "ironwood-enhance-pir-v9-native-two-mask-m29";
 pub const HEADER_BYTES: usize = 116;
+/// A query's selection covers whole blocks of this many rows: the native ring
+/// degree, which is also the smallest mutable unit.
+pub const QUERY_ROW_QUANTUM: u64 = 2048;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -165,6 +168,26 @@ impl QueryShard {
         } else {
             geometry.logical_rows(self.records)
         }
+    }
+
+    /// Rows a query selects over: the end of the last row any unit can hold,
+    /// rounded up to whole [`QUERY_ROW_QUANTUM`] blocks. Every later row is
+    /// prescribed zero padding, so its selection coefficients cannot change
+    /// the answer and a native query omits them. Full and composed domains
+    /// select over every logical row.
+    ///
+    /// A function of `id` and `records` alone, both of which the session ID
+    /// binds, and never of the lifecycle state, which it does not. Every query
+    /// to a session therefore has the same length whatever row it selects.
+    /// Must stay identical to wallet-pir's `QueryShard::query_rows`.
+    pub fn query_rows(&self, geometry: Geometry) -> Result<u64, String> {
+        let end = self
+            .expected_units(geometry)?
+            .iter()
+            .map(|u| u.local_row_start + u.used_rows.next_multiple_of(QUERY_ROW_QUANTUM))
+            .max()
+            .ok_or("empty query shard")?;
+        Ok(end.min(self.expected_logical_rows(geometry)?))
     }
 }
 
@@ -535,14 +558,21 @@ pub fn response_len(logical_rows: u64) -> Result<usize, String> {
     Ok(HEADER_BYTES + crate::native::response_len(crate::native::COLS))
 }
 
-/// Exact length of a query request for `logical_rows`, including the
-/// [`HEADER_BYTES`] binding: one uploaded `K_g` key and a selection dithered to
+/// Exact length of a query request selecting over a domain's first
+/// `query_rows` ([`QueryShard::query_rows`]), including the [`HEADER_BYTES`]
+/// binding: one uploaded `K_g` key and a selection dithered to
 /// [`crate::native::DITHERED_QUERY_BITS`]. The server accepts this alongside
-/// the 49-bit selection of its profile and tells them apart by length.
-pub fn request_len(logical_rows: u64) -> Result<usize, String> {
-    let params = parameters(logical_rows)?;
+/// the 49-bit selection of its profile, over every row or the same prefix, and
+/// tells them apart by length.
+pub fn request_len(query_rows: u64) -> Result<usize, String> {
+    if query_rows == 0
+        || !query_rows.is_multiple_of(QUERY_ROW_QUANTUM)
+        || query_rows > crate::native::MAX_ROWS as u64
+    {
+        return Err("unqualified query rows".into());
+    }
     Ok(HEADER_BYTES
-        + crate::native::request_len_bits(params.db_rows, crate::native::DITHERED_QUERY_BITS))
+        + crate::native::request_len_bits(query_rows as usize, crate::native::DITHERED_QUERY_BITS))
 }
 
 /// Native identity binds the q48 transport profile to every native packing
