@@ -178,6 +178,27 @@ pub(super) fn extend_receive_lookahead<P: Parameters>(
     maintain_receive_lookahead(conn, params, account, RECEIVE_LOOKAHEAD, start, now)
 }
 
+/// `account`'s highest allocated incoming index, and whether its key is a restored one.
+/// The lookahead grows only above a restored key or none (see
+/// [`maintain_receive_lookahead`]).
+pub(super) fn allocated_top(
+    conn: &Connection,
+    account: i64,
+) -> Result<Option<(u64, bool)>, SqliteClientError> {
+    conn.query_row(
+        &format!(
+            "SELECT k.key_index, ({RESTORED}) FROM ironwood_receiving_keys k
+             WHERE k.account_id = ?1 AND k.purpose = 1 AND k.advances_allocation = 1
+             ORDER BY k.key_index DESC LIMIT 1"
+        ),
+        [account],
+        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get(1)?)),
+    )
+    .optional()?
+    .map(|(index, restored)| Ok((decode_index(index)?, restored)))
+    .transpose()
+}
+
 /// Keeps `count` swept incoming keys above the highest allocated index, while that index
 /// is a restored one or there is none: above a key this wallet issued, it handed nothing
 /// out. This is bounded-gap recovery, not a completeness proof.
@@ -190,20 +211,9 @@ pub(super) fn maintain_receive_lookahead<P: Parameters>(
     now: i64,
 ) -> Result<(), SqliteClientError> {
     let (account_ref, _) = account_key(conn, params, account)?;
-    let top: Option<(Vec<u8>, bool)> = conn
-        .query_row(
-            &format!(
-                "SELECT k.key_index, ({RESTORED}) FROM ironwood_receiving_keys k
-                 WHERE k.account_id = ?1 AND k.purpose = 1 AND k.advances_allocation = 1
-                 ORDER BY k.key_index DESC LIMIT 1"
-            ),
-            [account_ref.0],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    let start = match top {
+    let start = match allocated_top(conn, account_ref.0)? {
         Some((_, false)) => return Ok(()),
-        Some((index, true)) => next_index(decode_index(index)?)?,
+        Some((index, true)) => next_index(index)?,
         None => 0,
     };
     for offset in 0..u64::from(count) {

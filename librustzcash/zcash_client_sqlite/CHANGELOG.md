@@ -146,7 +146,8 @@ workspace.
   abandoned. Seen addresses move the gap like paid ones, since a restore walks past them.
   In an account restored with `AccountBirthday::recover_until`, an address without local
   quotes is issued only when the set lacks it and covers its quotes from
-  `EARLIEST_RECEIVE_QUOTE` until the time of the `recover_until` block; otherwise
+  `EARLIEST_RECEIVE_QUOTE` until the time of the `recover_until` block, and an index
+  without a key waits for the restore lookahead to register and sweep it; otherwise
   issuance returns `ReservationPolicy::Gap`.
 - Operations: each quote is one provider operation. An incoming one is
   `begin_receive_operation`, `finish_receive_operation` (`OperationOutcome`) and
