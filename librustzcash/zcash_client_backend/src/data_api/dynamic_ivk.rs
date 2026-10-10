@@ -106,8 +106,11 @@ pub enum PaymentApplication {
     /// or its transaction identity against stored data. The key's queued lookup is
     /// discarded, so its next attempt asks the directory again.
     Rejected,
-    /// Note, memo, witness, key identity, and any known spend were committed together,
-    /// or the wallet already stored the note under another transaction.
+    /// Note, witness, key identity, and any known spend were committed together, or the
+    /// wallet already stored the note under another transaction. The retrieved memo is
+    /// untrusted (see [`EncryptedNote::decrypt`]).
+    ///
+    /// [`EncryptedNote::decrypt`]: zakura_dynamic_ivk::recovery::EncryptedNote::decrypt
     Applied,
 }
 
