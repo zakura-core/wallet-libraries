@@ -242,11 +242,7 @@ where
             };
             'run: loop {
                 let checks = directory.check(&work)?;
-                let lookups = work
-                    .iter()
-                    .zip(&checks)
-                    .filter(|((_, item), check)| item.lookup.is_none() && check.paid)
-                    .count();
+                let lookups = checks.iter().filter(|check| check.paid).count();
                 if let Some(session) = &mut directory.session {
                     session.client.use_file_for_work(lookups).await?;
                 }
@@ -455,9 +451,9 @@ fn due<W: DynamicIvkWrite, L: WriteLock>(
 }
 
 /// Sweeps one key whose attempt is leased: looks up its receiver if `paid`, the paid
-/// set holds it, and no earlier lookup is queued, queues the new payments with their
-/// note data in batches, and applies them with the publication's witnesses. `lookups`
-/// is the batch's lookup count, which sizes a session that this key opens.
+/// set holds it, queues the answer, empty on a miss, with new payments' note data in
+/// batches, and applies it with the publication's witnesses. `lookups` is the batch's
+/// lookup count, which sizes a session that this key opens.
 #[allow(clippy::too_many_arguments)]
 async fn sweep_key<W, T, N, L>(
     wallet: &mut W,
@@ -478,47 +474,46 @@ where
 {
     let key = item.key;
     let anchor = directory.anchor;
-    if item.lookup.is_none() {
-        let payments: Vec<_> = if paid {
-            let receiver = Receiver::from_bytes(item.receiver).map_err(DirectoryError::from)?;
-            let accepted = directory.accepted;
-            let session = directory.session(lookups).await?;
-            session
-                .client
-                .lookup(receiver, accepted)
-                .await?
-                .into_iter()
-                .map(directory_payment)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        loop {
-            let batch: Vec<_> = wallet
-                .directory_note_data_needed(account, key, &payments)
-                .map_err(Error::Wallet)?
-                .into_iter()
-                .take(NOTE_BATCH)
-                .collect();
-            let requested = batch.len();
-            let note_data = notes.note_data(wallet, batch).await?;
-            let done = lock
-                .write("dynamic_sweep.queue", || {
-                    wallet.queue_directory_lookup(account, key, anchor, &payments, &note_data)
-                })
-                .map_err(Error::Wallet)?
-                .map_err(Error::Deferred)?;
-            if done {
-                break;
-            }
-            if note_data.len() < requested {
-                return Err(Error::Unavailable(
-                    "note data is missing for a directory payment",
-                ));
-            }
+    let payments: Vec<_> = if paid {
+        let receiver = Receiver::from_bytes(item.receiver).map_err(DirectoryError::from)?;
+        let accepted = directory.accepted;
+        let session = directory.session(lookups).await?;
+        session
+            .client
+            .lookup(receiver, accepted)
+            .await?
+            .into_iter()
+            .map(directory_payment)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    loop {
+        let batch: Vec<_> = wallet
+            .directory_note_data_needed(account, key, &payments)
+            .map_err(Error::Wallet)?
+            .into_iter()
+            .take(NOTE_BATCH)
+            .collect();
+        let requested = batch.len();
+        let note_data = notes.note_data(wallet, batch).await?;
+        let done = lock
+            .write("dynamic_sweep.queue", || {
+                wallet.queue_directory_lookup(account, key, anchor, &payments, &note_data)
+            })
+            .map_err(Error::Wallet)?
+            .map_err(Error::Deferred)?;
+        if done {
+            break;
+        }
+        if note_data.len() < requested {
+            return Err(Error::Unavailable(
+                "note data is missing for a directory payment",
+            ));
         }
     }
-    let witnesses = if paid || item.lookup.is_some() {
+    // A miss queued nothing to apply.
+    let witnesses = if paid {
         Some(&directory.session(lookups).await?.witnesses)
     } else {
         None

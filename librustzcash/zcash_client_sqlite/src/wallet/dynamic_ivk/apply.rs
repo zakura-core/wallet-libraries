@@ -215,7 +215,23 @@ pub(super) fn apply_payment<P: Parameters>(
         ],
         |r| r.get(0),
     )?;
-    if conflict {
+    // A stored raw transaction must hold the claimed action; absent bytes prove nothing.
+    let contradicted =
+        wallet::get_transaction(conn, params, candidate.txid)?.is_some_and(|(_, tx)| {
+            let action = tx.ironwood_bundle().and_then(|b| {
+                b.actions()
+                    .get(usize::try_from(candidate.action_index).ok()?)
+            });
+            !action.is_some_and(|a| {
+                candidate.encrypted_note.matches_compact(
+                    a.nullifier().to_bytes(),
+                    a.cmx().to_bytes(),
+                    a.encrypted_note().epk_bytes,
+                    a.encrypted_note().enc_ciphertext[..52].try_into().unwrap(),
+                )
+            })
+        });
+    if conflict || contradicted {
         return reject(conn, key_ref);
     }
     let spent = match spend_status(conn, candidate, recovered.nullifier(), through)? {

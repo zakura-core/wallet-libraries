@@ -98,8 +98,32 @@ missing = expected_packages - versions.keys()
 for name in sorted(missing):
     problems.append(f"{name}: vendored crate is not in the resolved graph")
 
+# Packaging rewrites a path dependency to a registry requirement, so a
+# publishable package cannot depend (other than for development) on a local
+# `publish = false` package.
+local = {
+    package["name"]: package
+    for package in packages.values()
+    if package["source"] is None
+}
+for package in local.values():
+    if package["publish"] == []:
+        continue
+    for dependency in package["dependencies"]:
+        target = local.get(dependency["name"])
+        if (
+            dependency.get("path")
+            and dependency["kind"] != "dev"
+            and target is not None
+            and target["publish"] == []
+        ):
+            problems.append(
+                f"{package['name']}: publishable but depends on unpublishable "
+                f"{dependency['name']}"
+            )
+
 if problems:
-    print("the resolved graph is not Zakura-only:", file=sys.stderr)
+    print("the resolved graph failed verification:", file=sys.stderr)
     for problem in problems:
         print(f"  {problem}", file=sys.stderr)
     raise SystemExit(1)

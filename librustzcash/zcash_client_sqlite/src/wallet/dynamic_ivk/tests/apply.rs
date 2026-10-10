@@ -224,6 +224,128 @@ fn a_substituted_directory_memo_is_never_stored() {
     assert_eq!(stored(&st), (Some(memo.as_slice().to_vec()), 50_000, false));
 }
 
+/// Stores `raw` as mined at `height`, index 1, as enhancement does.
+fn store_mined(db: &mut Db, raw: &zcash_primitives::transaction::Transaction, height: BlockHeight) {
+    let meta = zcash_client_backend::wallet::WalletTx::new(
+        raw.txid(),
+        1u16.into(),
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+    );
+    tx(db, |c, _| {
+        crate::wallet::put_tx_meta(c, &meta, height)?;
+        crate::wallet::put_tx_data(c, raw, None, None, None, height)
+    })
+    .unwrap();
+}
+
+/// The inclusion path does not authenticate a claimed transaction ID or action index,
+/// so a stored raw transaction must hold the claimed action; without one the claim is
+/// accepted.
+#[test]
+fn a_claim_contradicting_a_stored_raw_transaction_is_rejected() {
+    use zcash_primitives::transaction::{Authorized, TransactionData};
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Raw {
+        Absent,
+        Matching,
+        OtherAction,
+        OutOfRange,
+        NoIronwood,
+    }
+    for raw in [
+        Raw::Absent,
+        Raw::Matching,
+        Raw::OtherAction,
+        Raw::OutOfRange,
+        Raw::NoIronwood,
+    ] {
+        let mut st = ironwood_wallet();
+        let account = st.test_account().unwrap().id();
+        let id = KeyId::new(Purpose::Receive, 8);
+        let fvk = id
+            .derive(&FullViewingKey::from(
+                st.test_account().unwrap().usk().orchard(),
+            ))
+            .unwrap();
+        let memo = zcash_protocol::memo::MemoBytes::empty();
+        let paid = external_payment(fvk.address_at(0u32, Scope::External), &memo);
+        let (height, _) = st.generate_next_block_from_tx(1, &paid);
+        st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+        let genuine = candidate_at(&st, height, &fvk);
+        let through = tip(&st);
+        let path = witness_at(&st, genuine.position);
+        let actions = paid.ironwood_bundle().unwrap().actions().len() as u32;
+        let empty = TransactionData::<Authorized>::from_parts_v6(
+            paid.consensus_branch_id(),
+            0,
+            paid.expiry_height(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        let (stored, candidate) = match raw {
+            Raw::Absent => (None, genuine),
+            Raw::Matching => (Some(&paid), genuine),
+            Raw::OtherAction => (
+                Some(&paid),
+                PendingPayment {
+                    action_index: (genuine.action_index + 1) % actions,
+                    ..genuine
+                },
+            ),
+            Raw::OutOfRange => (
+                Some(&paid),
+                PendingPayment {
+                    action_index: actions,
+                    ..genuine
+                },
+            ),
+            Raw::NoIronwood => (
+                Some(&empty),
+                PendingPayment {
+                    txid: empty.txid(),
+                    ..genuine
+                },
+            ),
+        };
+        let db = st.wallet_mut().db_mut();
+        if let Some(stored) = stored {
+            store_mined(db, stored, height);
+        }
+        watch(db, account, 8, height + 1);
+        queue_payment(db, account, id, &candidate).unwrap();
+        let applied = apply_payment(db, account, id, &candidate, through, (through, &path));
+        if matches!(raw, Raw::Absent | Raw::Matching) {
+            assert_eq!(applied.unwrap(), PaymentApplication::Applied, "{raw:?}");
+            assert_eq!(note_txids(&st), [paid.txid()], "{raw:?}");
+        } else {
+            assert_eq!(applied.unwrap(), PaymentApplication::Rejected, "{raw:?}");
+            assert!(note_txids(&st).is_empty(), "{raw:?}");
+            assert!(pending(st.wallet().db(), account, id).is_empty(), "{raw:?}");
+            // The stored transaction keeps its location.
+            let location: (u32, u32) = st
+                .wallet()
+                .conn()
+                .query_row(
+                    "SELECT mined_height, tx_index FROM transactions WHERE txid = ?1",
+                    [candidate.txid.as_ref()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(location, (u32::from(height), 1), "{raw:?}");
+        }
+    }
+}
+
 #[test]
 fn directory_payment_imports_an_already_spent_note_without_crediting_it() {
     use zcash_keys::address::{Address, UnifiedAddress};
@@ -606,20 +728,7 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
         .conn()
         .execute("DELETE FROM ironwood_dynamic_payment_recovery", [])
         .unwrap();
-    let note = candidate.encrypted_note.to_bytes();
-    let payment = DirectoryPayment {
-        height: u32::from(candidate.height),
-        block_hash: candidate.block_hash.0,
-        txid: *candidate.txid.as_ref(),
-        tx_index: candidate.tx_index.into(),
-        action_index: candidate.action_index,
-        position: candidate.position.into(),
-        action_nullifier: note[..32].try_into().unwrap(),
-        cmx: note[32..64].try_into().unwrap(),
-        ephemeral_key: note[64..96].try_into().unwrap(),
-        ciphertext_prefix: note[96..148].try_into().unwrap(),
-    };
-    let suffix: [u8; 528] = note[148..].try_into().unwrap();
+    let (payment, note_data) = directory_answer(&candidate);
     let db = st.wallet_mut().db_mut();
 
     let deferred = |result: Result<_, SqliteClientError>| match result {
@@ -649,7 +758,6 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
             .unwrap(),
         [0]
     );
-    let note_data = BTreeMap::from([(payment.position, suffix)]);
     db.begin_dynamic_sweep_attempt(account, key, 1_700_000_000, false)
         .unwrap();
     let backoff = |conn: &rusqlite::Connection| -> (u32, i64) {
@@ -954,20 +1062,7 @@ fn a_corrected_answer_replaces_a_partially_queued_candidate() {
         .conn()
         .execute("DELETE FROM ironwood_dynamic_payment_recovery", [])
         .unwrap();
-    let note = candidate.encrypted_note.to_bytes();
-    let right = DirectoryPayment {
-        height: u32::from(candidate.height),
-        block_hash: candidate.block_hash.0,
-        txid: *candidate.txid.as_ref(),
-        tx_index: candidate.tx_index.into(),
-        action_index: candidate.action_index,
-        position: candidate.position.into(),
-        action_nullifier: note[..32].try_into().unwrap(),
-        cmx: note[32..64].try_into().unwrap(),
-        ephemeral_key: note[64..96].try_into().unwrap(),
-        ciphertext_prefix: note[96..148].try_into().unwrap(),
-    };
-    let data = BTreeMap::from([(right.position, note[148..].try_into().unwrap())]);
+    let (right, data) = directory_answer(&candidate);
     // The first answer misstates the transaction index, and another payment whose note
     // data never arrived leaves the lookup unfinished.
     let wrong = DirectoryPayment {

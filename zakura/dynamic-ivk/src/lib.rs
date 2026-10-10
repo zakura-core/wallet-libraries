@@ -3,7 +3,7 @@
 //! that lets a restore find refund keys.
 //!
 //! This implements a draft wallet convention, not a consensus key derivation.
-//! It is unpublished and must not be used to issue live addresses before review.
+//! It must not be used to issue live addresses before review.
 //! Wallets own durable index reservation, authenticated funding-note provenance,
 //! scanning coverage, and ordinary note accounting. This crate owns derivation,
 //! byte formats, and completion policy so wallets can share those rules.
