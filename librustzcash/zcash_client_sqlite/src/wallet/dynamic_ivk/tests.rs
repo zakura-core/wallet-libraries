@@ -85,17 +85,6 @@ fn clock_now() -> i64 {
     unix_now(&test_clock())
 }
 
-/// An empty seen set read from [`EARLIEST_RECEIVE_QUOTE`] through keys registered at
-/// [`clock_now`], so restored keys can be issued. Local quotes in these tests begin
-/// earlier, so it counts every one of them, as no set does.
-fn covering_seen() -> ProviderSeen<'static> {
-    ProviderSeen {
-        since: EARLIEST_RECEIVE_QUOTE,
-        until: clock_now() + SEEN_SLACK_SECONDS,
-        contains: &|receivers| vec![false; receivers.len()],
-    }
-}
-
 /// Runs `f` in one wallet transaction.
 fn tx<A>(
     db: &mut Db,
