@@ -11,8 +11,8 @@ chain. A swap provider's sets decide what happens to the key afterwards: one the
 provider was given within the wallet's restore watch keeps scanning after its sweep,
 and one it ever had is marked seen, so issuance does not hand it out again. A
 provider's recent set is trusted only if its feed read the provider within the last
-fifteen minutes and its window and feed history cover that watch; otherwise every key
-keeps scanning. A run that finds nothing to look up opens
+fifteen minutes and its window and feed history cover that watch. Unless every
+provider with sets in the publication has such a recent set, every key keeps scanning. A run that finds nothing to look up opens
 no PIR session and fetches no witnesses.
 
 Applications supply:
@@ -36,5 +36,5 @@ until they land on its `main`.
 routes and checks that a restored wallet finds and imports a payout, extends its
 lookahead past it, repeats no finished sweep, imports every payment of a key paid
 twice, makes no lookup when nothing was paid, keeps scanning only recently quoted
-addresses, keeps every address scanning when the recent set cannot vouch for the
-whole watch, and refuses a publication that is not on its chain before any lookup.
+addresses, keeps every address scanning when a recent set cannot vouch for the
+whole watch or a provider has none, and refuses a publication that is not on its chain before any lookup.

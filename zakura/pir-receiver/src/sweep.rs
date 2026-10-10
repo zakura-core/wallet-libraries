@@ -184,8 +184,9 @@ pub struct Swept<E> {
 /// [`ProviderView`]). A provider's recent set can rule a receiver out only if it is
 /// current and complete: its feed's last read began at most fifteen minutes before
 /// `now`, and its window, with the feed running throughout, covers the wallet's own
-/// restore watch, [`RESTORE_WATCH_SECS`]. If any recent set falls short, or the
-/// publication has none, every key keeps scanning.
+/// restore watch, [`RESTORE_WATCH_SECS`]. If any recent set falls short, a provider
+/// with sets has no recent set, or the publication has no provider sets, every key
+/// keeps scanning.
 ///
 /// A run that looks nothing up opens no PIR session and fetches no witnesses. New
 /// payments a lookup finds take their note data from `notes`. After each batch the
@@ -400,26 +401,31 @@ impl<'a, T: Transport> Directory<'a, T> {
                 provider: ProviderView::default(),
             })
             .collect();
-        let mut recent_complete = false;
-        let mut recent_incomplete = false;
+        // Each provider with a set, and whether its recent sets, if any, are all current
+        // and complete.
+        let mut providers = BTreeMap::<&str, Option<bool>>::new();
         for set in &self.manifest.directory.filters {
-            let kind = set.label.split_once('/').map(|(_, kind)| kind);
-            if kind == Some(RECENT) {
-                if covers_restore_watch(set, now) {
-                    recent_complete = true;
-                    for (check, hit) in checks.iter_mut().zip(matches(&set.label)) {
-                        check.provider.recent |= hit;
+            match set.label.split_once('/') {
+                Some((provider, RECENT)) => {
+                    let covers = covers_restore_watch(set, now);
+                    let complete = providers.entry(provider).or_default();
+                    *complete = Some(complete.unwrap_or(true) && covers);
+                    if covers {
+                        for (check, hit) in checks.iter_mut().zip(matches(&set.label)) {
+                            check.provider.recent |= hit;
+                        }
                     }
-                } else {
-                    recent_incomplete = true;
                 }
-            } else if kind == Some(SEEN) {
-                for (check, hit) in checks.iter_mut().zip(matches(&set.label)) {
-                    check.provider.seen |= hit;
+                Some((provider, SEEN)) => {
+                    providers.entry(provider).or_default();
+                    for (check, hit) in checks.iter_mut().zip(matches(&set.label)) {
+                        check.provider.seen |= hit;
+                    }
                 }
+                _ => {}
             }
         }
-        if recent_incomplete || !recent_complete {
+        if providers.is_empty() || providers.values().any(|&complete| complete != Some(true)) {
             for check in &mut checks {
                 check.provider.recent = true;
             }

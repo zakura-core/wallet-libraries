@@ -143,18 +143,23 @@ fn pay_restored_key(st: &mut State, index: u64, position: u64) -> (Record, [u8; 
 /// and every receiver it ever had, from a feed that started long before [`NOW`] and last
 /// read the provider a minute before it.
 fn provider(recent: &[Receiver], seen: &[Receiver]) -> Vec<ProviderSet> {
+    provider_named("near-intents", recent, seen)
+}
+
+/// [`provider`]'s sets for the provider `name`.
+fn provider_named(name: &str, recent: &[Receiver], seen: &[Receiver]) -> Vec<ProviderSet> {
     let since_unix = NOW - 2 * RESTORE_WATCH_SECS;
     let until_unix = NOW - 60;
     vec![
         ProviderSet {
-            label: "near-intents/recent".into(),
+            label: format!("{name}/recent"),
             window_secs: Some(RESTORE_WATCH_SECS.try_into().unwrap()),
             since_unix,
             until_unix,
             receivers: recent.to_vec(),
         },
         ProviderSet {
-            label: "near-intents/seen".into(),
+            label: format!("{name}/seen"),
             window_secs: None,
             since_unix,
             until_unix,
@@ -650,6 +655,55 @@ async fn every_address_keeps_scanning_when_the_recent_set_falls_short_of_the_wat
     assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
     let scanning = st.wallet().get_dynamic_scanning_keys().unwrap().len();
     assert_eq!(scanning as u64, RECEIVE_GAP_LIMIT);
+}
+
+#[tokio::test]
+async fn every_address_keeps_scanning_unless_each_provider_has_a_recent_set() {
+    for both_recent in [true, false] {
+        let mut st = ironwood_wallet();
+        let network = *st.network();
+        let account = st.test_account().unwrap().id();
+        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+        restore(&mut st, account);
+        let through = tip(&st);
+        // Provider `b` publishes only its seen set when `both_recent` is false.
+        let mut sets = provider_named("a", &[], &[]);
+        let b = provider_named("b", &[], &[]);
+        sets.extend(b.into_iter().skip(usize::from(!both_recent)));
+        let directory = Directory::new(publish(&[], &[], through, &sets));
+        let mut notes = Notes {
+            data: BTreeMap::new(),
+            requested: Vec::new(),
+        };
+        let swept = sweep(
+            st.wallet_mut().db_mut(),
+            &network,
+            &[account],
+            through,
+            GENESIS,
+            ORIGIN,
+            &directory,
+            &mut notes,
+            &NoLock,
+            NOW,
+        )
+        .await
+        .unwrap();
+        assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
+        let scanning = st.wallet().get_dynamic_scanning_keys().unwrap().len() as u64;
+        if both_recent {
+            assert_eq!(scanning, 0);
+        } else {
+            assert_eq!(scanning, RECEIVE_GAP_LIMIT);
+            // `b` may have quoted any address, so a payment after the publication is
+            // still found by scanning.
+            pay_restored_key(&mut st, 0, 0);
+            assert_eq!(
+                st.get_total_balance(account),
+                Zatoshis::const_from_u64(VALUE)
+            );
+        }
+    }
 }
 
 /// A directory whose queries fail after it accepted the session.
