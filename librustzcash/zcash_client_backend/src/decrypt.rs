@@ -49,6 +49,8 @@ pub struct DecryptedOutput<Note, AccountId> {
     account: AccountId,
     memo: MemoBytes,
     transfer_type: TransferType,
+    #[cfg(feature = "orchard")]
+    dynamic_key_id: Option<zakura_dynamic_ivk::KeyId>,
 }
 
 impl<Note, AccountId> DecryptedOutput<Note, AccountId> {
@@ -67,7 +69,22 @@ impl<Note, AccountId> DecryptedOutput<Note, AccountId> {
             account,
             memo,
             transfer_type,
+            #[cfg(feature = "orchard")]
+            dynamic_key_id: None,
         }
+    }
+
+    /// Retains the derived receiving key used for authenticated note decryption.
+    #[cfg(feature = "orchard")]
+    pub(crate) fn with_dynamic_key_id(mut self, key_id: zakura_dynamic_ivk::KeyId) -> Self {
+        self.dynamic_key_id = Some(key_id);
+        self
+    }
+
+    /// Derived receiving key, relative to the owning account.
+    #[cfg(feature = "orchard")]
+    pub fn dynamic_key_id(&self) -> Option<zakura_dynamic_ivk::KeyId> {
+        self.dynamic_key_id
     }
 
     /// The index of the output within the shielded outputs of the Sapling bundle or the actions of

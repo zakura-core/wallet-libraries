@@ -1122,6 +1122,73 @@ where
     }
 }
 
+#[cfg(feature = "orchard")]
+impl<Cache, DbT, ParamsT> TestState<Cache, DbT, ParamsT>
+where
+    Cache: TestCache,
+    <Cache::BlockSource as BlockSource>::Error: fmt::Debug,
+    ParamsT: consensus::Parameters + Send + 'static,
+    DbT: InputSource + WalletTest + super::dynamic_ivk::DynamicIvkWrite + WalletCommitmentTrees,
+    <DbT as WalletRead>::AccountId:
+        std::fmt::Debug + ConditionallySelectable + Default + Send + Sync + 'static,
+{
+    /// Invokes [`scan_cached_blocks_with_dynamic_ivks`] with the given arguments, expecting
+    /// success.
+    ///
+    /// [`scan_cached_blocks_with_dynamic_ivks`]: super::chain::scan_cached_blocks_with_dynamic_ivks
+    pub fn scan_cached_blocks_with_dynamic_ivks(
+        &mut self,
+        from_height: BlockHeight,
+        limit: usize,
+    ) -> ScanSummary {
+        let result = self.try_scan_cached_blocks_with_dynamic_ivks(from_height, limit);
+        assert_matches!(result, Ok(_));
+        result.unwrap()
+    }
+
+    /// Invokes [`scan_cached_blocks_with_dynamic_ivks`] with the given arguments.
+    ///
+    /// [`scan_cached_blocks_with_dynamic_ivks`]: super::chain::scan_cached_blocks_with_dynamic_ivks
+    pub fn try_scan_cached_blocks_with_dynamic_ivks(
+        &mut self,
+        from_height: BlockHeight,
+        limit: usize,
+    ) -> Result<
+        ScanSummary,
+        super::chain::error::Error<
+            <DbT as WalletRead>::Error,
+            <Cache::BlockSource as BlockSource>::Error,
+        >,
+    > {
+        let prior_cached_block = self
+            .latest_cached_block_below_height(from_height)
+            .cloned()
+            .unwrap_or_else(|| CachedBlock::none(from_height - 1));
+
+        super::chain::scan_cached_blocks_with_dynamic_ivks(
+            &self.network,
+            self.cache.block_source(),
+            &mut self.wallet_data,
+            from_height,
+            &prior_cached_block.chain_state,
+            limit,
+        )
+    }
+
+    /// [`Self::generate_and_scan_empty_blocks`], scanning with dynamic keys.
+    pub fn generate_and_scan_empty_blocks_with_dynamic_ivks(&mut self, n: usize) -> BlockHeight {
+        for _ in 0..n {
+            let (height, _) = self.generate_empty_block();
+            self.scan_cached_blocks_with_dynamic_ivks(height, 1);
+        }
+        self.wallet()
+            .block_fully_scanned()
+            .expect("the wallet reports its fully-scanned block")
+            .expect("the wallet is fully scanned")
+            .block_height()
+    }
+}
+
 impl<Cache, DbT, ParamsT> TestState<Cache, DbT, ParamsT>
 where
     Cache: TestCache,
