@@ -24,8 +24,9 @@ use transparent_events::{ReceiveEvent, SpendEvent, TransparentEvent, Txid};
 use transparent_filter::{Recut, ScriptBytes, SealParameters, ShardMap};
 use transparent_wallet::http::{HttpFilterSource, HttpOptions, HttpShardTransport};
 use zakura_pir_transparent::{
-    ApplyError, BatchState, Outcome, Progress, RecoveryBatch, RecoveryConfig, RecoveryError,
-    ReferenceRecovery, ShardTransport, Trust, WalletChain, WithdrawnCause,
+    ApplyAction, ApplyError, BatchState, Interrupted, Outcome, Progress, RecoveryBatch,
+    RecoveryConfig, RecoveryError, ReferenceRecovery, ShardTransport, Trust, WalletChain,
+    WithdrawnCause, WriteGate,
 };
 use zcash_client_backend::data_api::{
     Account as _, CoinbaseFilter, InputSource as _, WalletRead as _,
@@ -424,6 +425,17 @@ impl Fixture {
     ) -> Result<zakura_pir_transparent::Applied, zakura_pir_transparent::ApplyFailure> {
         let companion = self.companion.as_mut().expect("an open companion");
         companion.apply_and_acknowledge(batch, self.st.wallet_mut().db_mut(), trust)
+    }
+
+    /// Settles `batch` through `gate`, one wallet write at a time.
+    fn settle_gated(
+        &mut self,
+        batch: RecoveryBatch<AccountUuid>,
+        trust: Trust,
+        gate: &mut impl WriteGate,
+    ) -> Result<zakura_pir_transparent::Applied, zakura_pir_transparent::ApplyFailure> {
+        let companion = self.companion.as_mut().expect("an open companion");
+        companion.apply_and_acknowledge_gated(batch, self.st.wallet_mut().db_mut(), trust, gate)
     }
 
     /// Trusts the service from the next pass on: its commits qualify their
@@ -2070,6 +2082,85 @@ fn apply_and_acknowledge_keeps_the_committed_prefix_and_replays_idempotently() {
     // Nothing above promoted the account or granted authority.
     assert_eq!(f.watch().lifecycle, AccountLifecycle::Candidate);
     assert_ne!(f.authority(), TransparentAuthority::Private);
+}
+
+/// A [`WriteGate`] that runs the first `allow` wallet writes and declines the
+/// next, counting what it ran.
+struct AllowWrites {
+    allow: usize,
+    ran: usize,
+}
+
+impl WriteGate for AllowWrites {
+    fn write<T>(&mut self, write: impl FnOnce() -> T) -> Result<T, Interrupted> {
+        if self.ran == self.allow {
+            return Err(Interrupted);
+        }
+        self.ran += 1;
+        Ok(write())
+    }
+}
+
+#[test]
+fn a_gate_runs_each_wallet_write_and_can_stop_the_batch_between_them() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, _) = private_fixture();
+    let batch = f.recover().unwrap();
+    let commits = batch.commits().len();
+    assert!(commits >= 3, "the publication has three shards: {commits}");
+
+    // Declined before the second commit: the first stays applied and nothing is
+    // acknowledged.
+    let mut gate = AllowWrites { allow: 1, ran: 0 };
+    let failure = f
+        .settle_gated(batch, Trust::Trusted, &mut gate)
+        .unwrap_err();
+    assert!(
+        matches!(failure.error, ApplyError::Interrupted),
+        "{:?}",
+        failure.error
+    );
+    assert_eq!(failure.action(), ApplyAction::Interrupted);
+    assert_eq!(failure.stats.applied, 1);
+    assert_eq!(f.count("tpir_qualified_revisions"), 1);
+    assert!(f.st.wallet().db().is_autocommit());
+
+    // Declined at the acknowledgment: every commit applied, and the next pass
+    // exports the batch again.
+    let batch = f.recover().unwrap();
+    assert_eq!(batch.state(), BatchState::Ready);
+    assert_eq!(batch.commits().len(), commits);
+    let mut gate = AllowWrites {
+        allow: commits,
+        ran: 0,
+    };
+    let failure = f
+        .settle_gated(batch, Trust::Trusted, &mut gate)
+        .unwrap_err();
+    assert!(
+        matches!(failure.error, ApplyError::Interrupted),
+        "{:?}",
+        failure.error
+    );
+    assert_eq!(failure.stats.applied, commits);
+    assert!(f.st.wallet().db().is_autocommit());
+
+    // A gate that runs everything sees one write per commit and one for the
+    // acknowledgment, and settles exactly as the ungated operation replays.
+    let batch = f.recover().unwrap();
+    assert_eq!(batch.commits().len(), commits);
+    let mut gate = AllowWrites {
+        allow: usize::MAX,
+        ran: 0,
+    };
+    let applied = f.settle_gated(batch, Trust::Trusted, &mut gate).unwrap();
+    assert_eq!(gate.ran, commits + 1);
+    assert_eq!(applied.stats.applied, commits);
+    assert_eq!(f.count("tpir_qualified_revisions"), 3);
+    let settled = f.dump(true);
+    let batch = f.recover().unwrap();
+    f.settle(batch, Trust::Trusted).unwrap();
+    assert_eq!(f.dump(true), settled);
 }
 
 #[test]

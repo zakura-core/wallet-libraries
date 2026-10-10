@@ -6,6 +6,11 @@
 //! companion is acknowledged afterwards, in its own database. Nothing makes the two databases
 //! atomic: a failure or crash between them leaves the batch unacknowledged, and the next pass
 //! exports the same revisions again, whose replay changes nothing the wallet already holds.
+//!
+//! [`ReferenceRecovery::apply_and_acknowledge_gated`] runs each of those wallet writes
+//! through a [`WriteGate`], so an application that serializes its wallet writes holds its
+//! serialization for one write at a time, not the whole batch, and can stop the batch
+//! between writes.
 
 use rusqlite::Connection;
 use zcash_client_backend::data_api::transparent_ledger::{
@@ -57,6 +62,33 @@ pub struct Applied {
     pub retired: usize,
 }
 
+/// Runs the wallet writes of [`ReferenceRecovery::apply_and_acknowledge_gated`] one at a
+/// time: each commit's wallet transaction, then the acknowledgment's short immediate read
+/// transaction.
+///
+/// An application with its own wallet write serialization takes it inside
+/// [`WriteGate::write`], so other writers and cancellation wait at most one commit rather
+/// than the whole batch.
+pub trait WriteGate {
+    /// Runs `write` and returns its result, or returns [`Interrupted`] without running it,
+    /// which stops the batch there.
+    fn write<T>(&mut self, write: impl FnOnce() -> T) -> Result<T, Interrupted>;
+}
+
+/// A [`WriteGate`] declined the batch's next wallet write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Interrupted;
+
+/// The [`WriteGate`] of [`ReferenceRecovery::apply_and_acknowledge`]: every write runs.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Ungated;
+
+impl WriteGate for Ungated {
+    fn write<T>(&mut self, write: impl FnOnce() -> T) -> Result<T, Interrupted> {
+        Ok(write())
+    }
+}
+
 /// Why a batch was not acknowledged.
 ///
 /// Messages name only the variant: the wallet's and the companion's errors can quote
@@ -97,6 +129,10 @@ pub enum ApplyError {
     /// Every commit applied, but the companion did not record the acknowledgment.
     #[error("transparent PIR apply: acknowledgment failed")]
     Acknowledge(RecoveryError),
+    /// The [`WriteGate`] declined a wallet write: a commit, or the acknowledgment once
+    /// every commit applied. Commits before it stay applied.
+    #[error("transparent PIR apply: interrupted between wallet writes")]
+    Interrupted,
 }
 
 /// A batch that was not acknowledged, with what the wallet applied of it first.
@@ -129,6 +165,9 @@ pub enum ApplyAction {
     NotEnabled,
     /// The wallet failed, or its connection was inside a transaction: report it.
     Fail,
+    /// The caller's [`WriteGate`] stopped the batch between wallet writes: the caller
+    /// decides whether to pass again now or leave the account to a later run.
+    Interrupted,
 }
 
 impl ApplyFailure {
@@ -147,6 +186,7 @@ impl ApplyFailure {
             | ApplyError::StaleReceipt => ApplyAction::Skip,
             ApplyError::NotEnabled => ApplyAction::NotEnabled,
             ApplyError::OuterTransaction | ApplyError::Wallet(_) => ApplyAction::Fail,
+            ApplyError::Interrupted => ApplyAction::Interrupted,
         }
     }
 }
@@ -209,12 +249,29 @@ impl ReferenceRecovery {
     /// already durable. Companion lock waits do not hold a wallet SQL reservation.
     ///
     /// No network request is made here; run it under the wallet's write serialization if the
-    /// application has one. It never promotes an account or authorizes spending.
+    /// application has one, or use [`Self::apply_and_acknowledge_gated`] to hold it for one
+    /// write at a time. It never promotes an account or authorizes spending.
     pub fn apply_and_acknowledge<P: consensus::Parameters, CL, R>(
         &mut self,
         batch: RecoveryBatch<AccountUuid>,
         wallet: &mut WalletDb<Connection, P, CL, R>,
         trust: Trust,
+    ) -> Result<Applied, ApplyFailure> {
+        self.apply_and_acknowledge_gated(batch, wallet, trust, &mut Ungated)
+    }
+
+    /// [`Self::apply_and_acknowledge`], running each wallet write through `gate`: every
+    /// commit's wallet transaction, then the acknowledgment's immediate read transaction.
+    ///
+    /// When `gate` declines a write, the batch stops there with [`ApplyError::Interrupted`]
+    /// and is not acknowledged. The commits before it stay applied, and the account's next
+    /// pass exports the batch again, whose replay changes nothing they made durable.
+    pub fn apply_and_acknowledge_gated<P: consensus::Parameters, CL, R>(
+        &mut self,
+        batch: RecoveryBatch<AccountUuid>,
+        wallet: &mut WalletDb<Connection, P, CL, R>,
+        trust: Trust,
+        gate: &mut impl WriteGate,
     ) -> Result<Applied, ApplyFailure> {
         let progress = batch.progress();
         let failure = |error, stats| ApplyFailure {
@@ -228,11 +285,11 @@ impl ReferenceRecovery {
         // Once the commits start, the receipt is spent: a failed batch is replayed by a
         // new pass.
         let (stats, replaced, expected_generation) =
-            apply_commits(batch, wallet, trust, || self.clear_pending_export())?;
+            apply_commits(batch, wallet, trust, gate, || self.clear_pending_export())?;
         let acknowledgment = catalog::acknowledgment_transaction(&mut self.catalog)
             .map_err(|error| failure(ApplyError::Acknowledge(error), stats))?;
-        wallet
-            .with_immediate_read_transaction(|snapshot| {
+        gate.write(|| {
+            wallet.with_immediate_read_transaction(|snapshot| {
                 if let Some(expected) = expected_generation {
                     snapshot
                         .check_transparent_policy_generation(expected)
@@ -244,7 +301,9 @@ impl ReferenceRecovery {
                     .commit()
                     .map_err(|error| ApplyError::Acknowledge(crate::recovery::failure(error)))
             })
-            .map_err(|error| failure(error, stats))?;
+        })
+        .map_err(|Interrupted| failure(ApplyError::Interrupted, stats))?
+        .map_err(|error| failure(error, stats))?;
         Ok(Applied {
             stats,
             progress,
@@ -254,13 +313,15 @@ impl ReferenceRecovery {
 }
 
 /// Applies a ready batch's commits to `wallet` in order, each in its own wallet
-/// transaction, after the checks [`ReferenceRecovery::apply_and_acknowledge`] makes of
-/// any batch; `start` runs once they pass, before the first commit. Returns what applied,
-/// the batch's retirements and the policy generation its commits were built under.
+/// transaction run through `gate`, after the checks
+/// [`ReferenceRecovery::apply_and_acknowledge`] makes of any batch; `start` runs once they
+/// pass, before the first commit. Returns what applied, the batch's retirements and the
+/// policy generation its commits were built under.
 pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(
     batch: RecoveryBatch<AccountUuid>,
     wallet: &mut WalletDb<Connection, P, CL, R>,
     trust: Trust,
+    gate: &mut impl WriteGate,
     start: impl FnOnce(),
 ) -> Result<(ApplyStats, Vec<RecoveryRevision>, Option<u64>), ApplyFailure> {
     let progress = batch.progress();
@@ -285,10 +346,12 @@ pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(
     }
     start();
     for (index, commit) in commits.into_iter().enumerate() {
-        let applied = match trust {
-            Trust::Observed => wallet.apply_transparent_ledger_commit(commit),
-            Trust::Trusted => wallet.qualify_and_apply_transparent_ledger_commit(commit),
-        };
+        let applied = gate
+            .write(|| match trust {
+                Trust::Observed => wallet.apply_transparent_ledger_commit(commit),
+                Trust::Trusted => wallet.qualify_and_apply_transparent_ledger_commit(commit),
+            })
+            .map_err(|Interrupted| failure(ApplyError::Interrupted, stats))?;
         match applied {
             Ok(outcome) => {
                 stats.applied += 1;
@@ -366,6 +429,7 @@ mod tests {
                 ApplyError::Wallet(SqliteClientError::AccountUnknown),
                 A::Fail,
             ),
+            (ApplyError::Interrupted, A::Interrupted),
         ] {
             let name = error.to_string();
             assert_eq!(action(error), expected, "{name}");

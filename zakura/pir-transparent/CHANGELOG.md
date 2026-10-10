@@ -4,6 +4,14 @@
 
 ### Added
 
+- `ReferenceRecovery::apply_and_acknowledge_gated` runs each wallet write of a
+  settlement (every commit's transaction, then the acknowledgment's) through a
+  `WriteGate`. An application that serializes its wallet writes holds that
+  serialization for one commit instead of the whole batch, and can stop the
+  batch between commits: the gate returns `Interrupted`, the batch fails with
+  `ApplyError::Interrupted` (`ApplyAction::Interrupted`), the applied commits
+  stay, and the next pass replays the batch. `apply_and_acknowledge` is
+  unchanged and runs through `Ungated`.
 - Private queries go at 44 dithered bits when the shard service advertises the
   dithered schemes (`directory_scheme_dq44`, `pages_scheme_dq44`) and they
   reproduce locally, and at 49 bits otherwise, so older services keep working.

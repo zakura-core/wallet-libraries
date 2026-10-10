@@ -18,7 +18,10 @@ pub mod testing;
 #[cfg(feature = "wallet")]
 mod txid;
 #[cfg(feature = "sqlite")]
-pub use apply::{Applied, ApplyAction, ApplyError, ApplyFailure, ApplyStats, Trust};
+pub use apply::{
+    Applied, ApplyAction, ApplyError, ApplyFailure, ApplyStats, Interrupted, Trust, Ungated,
+    WriteGate,
+};
 #[cfg(feature = "wallet")]
 pub use catalog::{BatchState, WithdrawnCause};
 #[cfg(feature = "wallet")]
