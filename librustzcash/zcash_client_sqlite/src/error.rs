@@ -84,8 +84,7 @@ pub enum SqliteClientError {
 
     /// Blocks or a transaction were processed without the wallet's open dynamic IVKs.
     /// Scan with `scan_cached_blocks_with_dynamic_ivks` and decrypt with
-    /// `decrypt_and_store_transaction_with_dynamic_ivks`.
-    #[cfg(feature = "orchard")]
+    /// `decrypt_and_store_transaction_with_dynamic_ivks`, which need `orchard`.
     DynamicIvksNotUsed,
 
     /// A dynamic IVK call's input was invalid, such as a passed deadline, a deposit address
@@ -384,7 +383,6 @@ impl fmt::Display for SqliteClientError {
                 f,
                 "Enhancement mode is not configured; call set_enhancement_mode before enumerating enhancement work"
             ),
-            #[cfg(feature = "orchard")]
             SqliteClientError::DynamicIvksNotUsed => write!(
                 f,
                 "This wallet has open dynamic IVKs; scan and decrypt with the dynamic IVK entry points"

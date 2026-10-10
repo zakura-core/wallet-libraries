@@ -193,9 +193,11 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::EnhancementModeNotConfigured => {
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
+        SqliteClientError::DynamicIvksNotUsed => {
+            unreachable!("migrations do not use dynamic IVKs")
+        }
         #[cfg(feature = "orchard")]
-        SqliteClientError::DynamicIvksNotUsed
-        | SqliteClientError::InvalidDynamicIvkInput(_)
+        SqliteClientError::InvalidDynamicIvkInput(_)
         | SqliteClientError::DynamicIvkIndexExhausted => {
             unreachable!("migrations do not use dynamic IVKs")
         }

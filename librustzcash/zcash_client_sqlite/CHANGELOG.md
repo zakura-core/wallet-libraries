@@ -132,7 +132,8 @@ workspace.
   with their registered key, but only a full transaction stores their memo, which
   nothing else binds to the chain. While a dynamic key is open, blocks and transactions
   processed without the dynamic keys are refused
-  (`SqliteClientError::DynamicIvksNotUsed`). Invalid input to these calls is
+  (`SqliteClientError::DynamicIvksNotUsed`, which builds without `orchard` also return for
+  blocks). Invalid input to these calls is
   `SqliteClientError::InvalidDynamicIvkInput`, and a call that must wait returns its
   `ReservationPolicy` or `SweepDeferral` as an `Ok` value.
 - Issuance: `WalletDb::reserve_refund_key` and `prepare_receive_reservation`, which require

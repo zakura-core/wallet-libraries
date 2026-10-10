@@ -765,16 +765,6 @@ pub(crate) fn rescan_missed_keys(
     Ok(())
 }
 
-/// Whether a dynamic key is open, so that blocks scanned without it must not be stored.
-pub(crate) fn key_open(conn: &Connection) -> Result<bool, SqliteClientError> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys
-         WHERE active_from IS NOT NULL AND closed_at IS NULL)",
-        [],
-        |row| row.get(0),
-    )?)
-}
-
 /// Seconds since the Unix epoch on the wallet clock, or 0 before it.
 pub(crate) fn unix_now(clock: &impl Clock) -> i64 {
     clock

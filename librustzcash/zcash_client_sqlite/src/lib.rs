@@ -3145,8 +3145,10 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
         blocks: Vec<ScannedBlock<AccountUuid>>,
         #[cfg(feature = "orchard")] dynamic_keys: Option<&[(AccountUuid, KeyId)]>,
     ) -> Result<(), SqliteClientError> {
-        #[cfg(feature = "orchard")]
-        if dynamic_keys.is_none() && wallet::dynamic_ivk::key_open(self.conn.0)? {
+        // Without `orchard`, no block is scanned with dynamic keys.
+        #[cfg(not(feature = "orchard"))]
+        let dynamic_keys = None::<()>;
+        if dynamic_keys.is_none() && wallet::dynamic_key_open(self.conn.0)? {
             return Err(SqliteClientError::DynamicIvksNotUsed);
         }
         // Once the NU6.3 (Ironwood) activation height is reached, checkpoints on the anchor
@@ -3486,7 +3488,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         // As with scanned blocks, a transaction decrypted without the open dynamic keys
         // would store their payments as someone else's.
         #[cfg(feature = "orchard")]
-        if !d_tx.dynamic_ivks_applied() && wallet::dynamic_ivk::key_open(self.conn.0)? {
+        if !d_tx.dynamic_ivks_applied() && wallet::dynamic_key_open(self.conn.0)? {
             return Err(SqliteClientError::DynamicIvksNotUsed);
         }
         let chain_tip = wallet::chain_tip_height(self.conn.borrow())?
