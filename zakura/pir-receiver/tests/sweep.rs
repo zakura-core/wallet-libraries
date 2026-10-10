@@ -479,7 +479,8 @@ async fn a_long_history_takes_its_note_data_in_batches() {
     );
 }
 
-/// Note data keyed by the position after each requested one.
+/// Note data keyed by the position after each requested one, counting the requests
+/// that need some.
 struct Mislabeled {
     data: [u8; 528],
     calls: usize,
@@ -491,6 +492,9 @@ impl<W: DynamicIvkRead> NoteSource<W> for Mislabeled {
         _: &W,
         positions: Vec<u64>,
     ) -> Result<BTreeMap<u64, [u8; 528]>, Error<W::Error>> {
+        if positions.is_empty() {
+            return Ok(BTreeMap::new());
+        }
         self.calls += 1;
         assert!(self.calls <= 3, "the sweep keeps asking for {positions:?}");
         Ok(positions.into_iter().map(|p| (p + 1, self.data)).collect())
