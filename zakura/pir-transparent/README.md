@@ -280,7 +280,10 @@ while let Step::Pass | Step::Refresh | Step::Wait(_) = step {
    `take_latest` takes it for a caller that settles without `sqlite`. A
    `PassError` names only its variant: `Outage` for any failure while the
    transports saw one, otherwise `Invalid`, `Failure` or, when the change was
-   found again or while stopping, `PublicationChanged`.
+   found again or while stopping, `PublicationChanged`. `PassError::classify`
+   is that rule, for a wallet to classify `discover_active_addresses` failures
+   (with its `TransparentPirHttp`'s `outage()`) and `OpenError::Recovery` from
+   `Companion::open` (which makes no request) the same way.
 5. Choose observed or trusted settlement explicitly. With `sqlite`,
    `settle_latest` takes the held batch and settles it through
    `apply_and_acknowledge_gated`, returning `Ok(None)` when the pass held
@@ -293,10 +296,12 @@ while let Step::Pass | Step::Refresh | Step::Wait(_) = step {
 | --- | --- |
 | The watch set has no target | `Done(None)` |
 | `Withdrawn(cause)` | `Hold(HoldCause::Withdrawn(cause))`: a timer would read the same contradiction |
-| `ApplyAction::Refresh` | `Refresh`, uncounted, with the fresh watch set; `Skip` after `stale_refreshes` (3) |
+| `ApplyAction::Refresh` (a stale commit) | `Refresh`, uncounted, with the fresh watch set; `Skip` after `stale_refreshes` (3) |
 | `ApplyAction::Reconcile` | `Hold(HoldCause::Unreconciled)`: only trusted settlement resolves the retirements |
 | `ApplyAction::Skip`, or a ready batch nobody settled | `Skip` |
-| `ApplyAction::NotEnabled`, `Interrupted` | `Stop(StopCause::NotEnabled)`, `Stop(StopCause::Interrupted)` |
+| `ApplyAction::Interrupted` | `Skip`: the gate stopped the account's settlement; the caller checks its own cancellation before the next pass |
+| `ApplyAction::NotEnabled` | `Stop(StopCause::NotEnabled)` |
+| `ApplyAction::PolicyChanged` | `Stop(StopCause::PolicyChanged)`: no further private pass under the policy the run captured; the next run captures it again |
 | `ApplyAction::Fail` | `Fail`: report the `ApplyFailure` |
 | `passes` (8) counted passes | `Done(Some(retry))` |
 | `Retry::More` | `Pass`: the companion resumes |
@@ -367,10 +372,13 @@ does not hold financial recovery open.
 `DetailRun` drives one run of the wallet's txid detail work through the
 service: which lookups to make (receipts the caller prefers first), when to
 check the display map, and which wallet write each result makes. It records a
-map check before fetching, so a failed or abandoned check is bounded too, and
-writes nothing for a cancelled lookup. It holds no lock, thread or budget; the
-caller looks up between steps with no wallet lock held and applies each write
-under its own.
+map check before fetching, so a failed or abandoned check is bounded too. A
+lookup the caller's run budget stopped is `DetailAnswer::TimedOut`: an attempt,
+deferred as `Unavailable` so it backs off (30 seconds, doubling up to an hour)
+instead of staying first in every listing. A lookup stopped because the caller
+is exiting is `DetailAnswer::Cancelled` and writes nothing. It holds no lock,
+thread or budget; the caller looks up between steps with no wallet lock held
+and applies each write under its own.
 
 ## Transport and failure contracts
 

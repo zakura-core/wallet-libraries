@@ -66,9 +66,8 @@ impl Default for PassLimits {
 pub enum Step {
     /// Pass again now, with [`PassPlan::watch`].
     Pass,
-    /// Pass again now, with [`PassPlan::watch`]: the settlement was stale for the
-    /// watch set the pass ran with (a stale commit or a changed policy generation).
-    /// It does not count as a pass.
+    /// Pass again now, with [`PassPlan::watch`]: a commit of the settlement was stale
+    /// for the watch set the pass ran with. It does not count as a pass.
     Refresh,
     /// Pass again after the wait: the publication ends below the target, or the
     /// service refused for capacity.
@@ -77,8 +76,14 @@ pub enum Step {
     /// it, without traffic, for longer than a run.
     Hold(HoldCause),
     /// This run cannot progress the account: the wallet refused a commit, the
-    /// acknowledgment failed, a ready batch went unsettled, or its commits stayed
-    /// stale. A later run passes it again.
+    /// acknowledgment failed, a ready batch went unsettled, its commits stayed stale, or
+    /// the caller's [`WriteGate`] stopped the settlement between wallet writes. What
+    /// applied stays, and a later run passes the account again and replays the rest.
+    ///
+    /// A gate stops a settlement when the account's own time budget ran out as well as
+    /// when the whole run is cancelled; the plan cannot tell which, so it skips only the
+    /// account. A caller that checks its own cancellation before the next account's pass
+    /// still stops a cancelled run.
     Skip,
     /// Stop the whole run.
     Stop(StopCause),
@@ -107,9 +112,10 @@ pub enum HoldCause {
 pub enum StopCause {
     /// The handle or the durable policy does not permit this recovery.
     NotEnabled,
-    /// The caller's [`WriteGate`] stopped a settlement between wallet writes. What
-    /// applied stays; the next pass replays the rest.
-    Interrupted,
+    /// The wallet's policy generation changed after the run read it, perhaps because
+    /// private queries were turned off: no further private pass may run under the policy
+    /// the run captured. The next run captures the policy again.
+    PolicyChanged,
 }
 
 /// The decision table for one account's passes in one run: after each pass and its
@@ -215,8 +221,8 @@ impl<A> PassPlan<A> {
     ///    target), and [`Step::Skip`] once more than
     ///    [`PassLimits::stale_refreshes`] were needed, since a watch set that keeps
     ///    going stale will not settle this run; `Reconcile` is
-    ///    [`HoldCause::Unreconciled`]; `Skip` is [`Step::Skip`]; `NotEnabled` and
-    ///    `Interrupted` stop the run; `Fail` is [`Step::Fail`].
+    ///    [`HoldCause::Unreconciled`]; `Skip` and `Interrupted` are [`Step::Skip`];
+    ///    `NotEnabled` and `PolicyChanged` stop the run; `Fail` is [`Step::Fail`].
     /// 3. A ready pass with nothing settled is [`Step::Skip`]: its batch was taken
     ///    elsewhere, and acknowledging it is not this plan's to know.
     /// 4. The pass counts. With no target in `fresh` there is nothing left to pass:
@@ -273,9 +279,11 @@ impl<A> PassPlan<A> {
                 }
             }
             ApplyAction::Reconcile => Step::Hold(HoldCause::Unreconciled),
-            ApplyAction::Skip => Step::Skip,
+            // An account's budget, or the run's cancellation, which the caller checks
+            // before the next pass.
+            ApplyAction::Skip | ApplyAction::Interrupted => Step::Skip,
             ApplyAction::NotEnabled => Step::Stop(StopCause::NotEnabled),
-            ApplyAction::Interrupted => Step::Stop(StopCause::Interrupted),
+            ApplyAction::PolicyChanged => Step::Stop(StopCause::PolicyChanged),
             ApplyAction::Fail => Step::Fail,
         }
     }

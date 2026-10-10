@@ -33,9 +33,9 @@ use crate::http::HttpExchange;
 /// the whole run.
 ///
 /// ```no_run
-/// use std::time::SystemTime;
+/// use std::time::{Instant, SystemTime};
 /// use zakura_pir_transparent::{
-///     DetailAnswer, DetailRun, DetailStep, HttpExchange, TxidDisplayService,
+///     DetailAnswer, DetailRun, DetailStep, HttpExchange, TxidDisplayService, TxidError,
 /// };
 /// use zcash_client_backend::data_api::transparent_ledger::TransparentDetailWrite;
 /// use zcash_primitives::transaction::TxId;
@@ -47,6 +47,8 @@ use crate::http::HttpExchange;
 ///     exchange: &impl HttpExchange,
 ///     expected_generation: u64,
 ///     opened_receipts: &[TxId],
+///     exiting: &dyn Fn() -> bool,
+///     deadline: Instant,
 /// ) -> Result<(), W::Error> {
 ///     let now = SystemTime::now();
 ///     let mut run = DetailRun::plan(wallet, Some(service), now, 8, opened_receipts)?;
@@ -54,7 +56,8 @@ use crate::http::HttpExchange;
 ///     if run.policy_generation() != expected_generation || run.public_transport() {
 ///         return Ok(());
 ///     }
-///     let cancel = || false;
+///     let out_of_time = || Instant::now() >= deadline;
+///     let cancel = || exiting() || out_of_time();
 ///     while let Some(step) = run.next() {
 ///         match step {
 ///             // The check is already recorded; a failed fetch leaves nothing to do.
@@ -70,12 +73,21 @@ use crate::http::HttpExchange;
 ///                     u32::from(request.mined_height).into(),
 ///                     &cancel,
 ///                 );
+///                 let answer = match found.found {
+///                     Err(TxidError::Cancelled) if exiting() => DetailAnswer::Cancelled,
+///                     // The run's budget, not the service: an attempt, deferred.
+///                     Err(TxidError::Cancelled) => DetailAnswer::TimedOut,
+///                     _ => DetailAnswer::Display(found),
+///                 };
 ///                 // `()`: this caller never fetches publicly.
-///                 if let Some(write) = run.record::<()>(&request, DetailAnswer::Display(found)) {
+///                 if let Some(write) = run.record::<()>(&request, answer) {
 ///                     // Under the caller's write lock.
 ///                     write.apply(wallet, SystemTime::now())?;
 ///                 }
 ///             }
+///         }
+///         if cancel() {
+///             break;
 ///         }
 ///     }
 ///     Ok(())
@@ -158,8 +170,21 @@ pub enum DetailAnswer<R> {
     /// (`Absent` for a transaction the server does not have, `Unavailable` for an outage,
     /// `Protocol` for an unusable answer).
     Public(Result<R, TransparentDetailOutcome>),
-    /// The caller stopped the lookup before it completed, by any route, including a transport
-    /// failure its own cancellation caused. Not an attempt: nothing is written.
+    /// The caller's run budget stopped the lookup before it completed: its time limit ran out
+    /// while the lookup was in flight, by any route, including a transport failure the budget
+    /// caused. An attempt: it is deferred as
+    /// [`Unavailable`](TransparentDetailOutcome::Unavailable), so the lookup backs off like an
+    /// unreachable service (30 seconds, doubling up to an hour) and other due lookups come
+    /// first in the next runs. A lookup that always outlasts the budget would otherwise stay
+    /// due, listed first, and take every run.
+    TimedOut,
+    /// The caller stopped the lookup because it is exiting: shutting down, cancelled or
+    /// leaving the run for a reason that says nothing about the lookup, by any route,
+    /// including a transport failure its own cancellation caused. Not an attempt: nothing is
+    /// written, and the lookup stays due for the next run.
+    ///
+    /// A [`DisplayLookup`] that failed with [`TxidError::Cancelled`] records the same; a caller
+    /// whose cancellation was its run budget hands [`DetailAnswer::TimedOut`] instead.
     Cancelled,
 }
 
@@ -318,7 +343,8 @@ impl<'a> DetailRun<'a> {
     }
 
     /// What `answer`, the result of looking up `request`, writes; `None` for a cancelled
-    /// lookup, which writes nothing.
+    /// lookup, which writes nothing. A timed-out lookup is deferred as
+    /// [`Unavailable`](TransparentDetailOutcome::Unavailable) without a map.
     ///
     /// Found display facts are translated ([`display_facts`]) and stored under the run's
     /// policy generation; facts that cannot be translated, and every other display result, are
@@ -367,6 +393,10 @@ impl<'a> DetailRun<'a> {
             }
             DetailAnswer::Public(Ok(_)) => Some(defer(TransparentDetailOutcome::Protocol, None)),
             DetailAnswer::Public(Err(outcome)) => Some(defer(outcome, None)),
+            DetailAnswer::TimedOut => Some(defer(
+                TransparentDetailOutcome::Unavailable { retry_after: None },
+                None,
+            )),
         }
     }
 }

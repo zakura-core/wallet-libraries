@@ -79,6 +79,32 @@ pub enum PassError {
     PublicationChanged,
 }
 
+impl PassError {
+    /// Classifies `error`, a failure of any operation that sent its requests through a
+    /// [`TransparentPirHttp`], given whether that transport saw an outage
+    /// ([`TransparentPirHttp::outage`]): the rule [`TransparentHistoryRecovery::pass`]
+    /// applies, for wallets to apply to their other operations alike.
+    ///
+    /// Any failure while the transport saw an outage is [`PassError::Outage`], whatever it
+    /// was: the service failed every account alike, so stop visiting accounts until a later
+    /// run. Otherwise the variant of `error` carries over.
+    ///
+    /// - [`discover_active_addresses`](crate::discover_active_addresses): pass
+    ///   `http.outage()` of the `TransparentPirHttp` whose
+    ///   [`split`](TransparentPirHttp::split) supplied its filters and shards.
+    /// - [`Companion::open`](crate::Companion::open): its
+    ///   [`OpenError::Recovery`](crate::OpenError::Recovery) makes no request, so `outage`
+    ///   is false. Its other variants are the companion directory's, not the service's.
+    pub fn classify(error: RecoveryError, outage: bool) -> Self {
+        match error {
+            _ if outage => PassError::Outage,
+            RecoveryError::Invalid(message) => PassError::Invalid(message),
+            RecoveryError::Failure(message) => PassError::Failure(message),
+            RecoveryError::PublicationChanged => PassError::PublicationChanged,
+        }
+    }
+}
+
 impl TransparentHistoryRecovery {
     /// One pass over `watch` through the caller's `exchange`, accepting
     /// successful bodies of at most `limit` bytes: the entry point for wallets.
@@ -93,8 +119,8 @@ impl TransparentHistoryRecovery {
     ///
     /// A [`BatchState::Ready`] batch is held for [`Self::settle_latest`] (feature
     /// `sqlite`), or for [`Self::take_latest`]. Pending and withdrawn batches have
-    /// nothing to hold. Any failure while the transports saw an outage is
-    /// [`PassError::Outage`].
+    /// nothing to hold. A failure is classified by [`PassError::classify`]: any
+    /// failure while the transports saw an outage is [`PassError::Outage`].
     ///
     /// `should_stop` only declines the retry: cancelling requests in flight is the
     /// exchange's. A caller that stopped discards whatever the pass returned.
@@ -120,7 +146,7 @@ impl TransparentHistoryRecovery {
             },
             should_stop,
         );
-        let batch = result.map_err(|error| pass_error(error, http.outage()))?;
+        let batch = result.map_err(|error| PassError::classify(error, http.outage()))?;
         let report = PassReport::of(&batch, changed);
         if report.settleable() {
             self.latest = Some(Box::new(batch));
@@ -159,16 +185,6 @@ fn retry_publication_change<T>(
         Err(RecoveryError::PublicationChanged) if !should_stop() => (attempt(), true),
         Err(RecoveryError::PublicationChanged) => (Err(RecoveryError::PublicationChanged), true),
         result => (result, false),
-    }
-}
-
-/// The pass error for `error`, given whether the transports saw an outage.
-fn pass_error(error: RecoveryError, outage: bool) -> PassError {
-    match error {
-        _ if outage => PassError::Outage,
-        RecoveryError::Invalid(message) => PassError::Invalid(message),
-        RecoveryError::Failure(message) => PassError::Failure(message),
-        RecoveryError::PublicationChanged => PassError::PublicationChanged,
     }
 }
 
@@ -250,7 +266,7 @@ mod tests {
                     expected
                 };
                 assert_eq!(
-                    pass_error(error, outage).to_string(),
+                    PassError::classify(error, outage).to_string(),
                     format!("transparent PIR pass: {expected}")
                 );
             }

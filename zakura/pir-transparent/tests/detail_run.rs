@@ -284,6 +284,9 @@ fn not_covering_then_covering(height: u32) -> Service {
 
 const NOT_COVERED: i64 = 2;
 const ABSENT: i64 = 1;
+const UNAVAILABLE: i64 = 0;
+/// Past a first `Unavailable` deferral's backoff of 30 seconds and up to a quarter.
+const PAST_UNAVAILABLE: Duration = Duration::from_secs(40);
 
 /// Holds `txid` as not covered under publication 0's map at `t0`, and returns when it is past
 /// its backoff.
@@ -580,6 +583,73 @@ fn cancelled_lookup_writes_nothing() {
     assert_eq!(f.view(txid), Some(TransparentDisplayView::Pending));
     let mut again = f.plan(&service, t0(), 8, &[]);
     assert!(matches!(again.next(), Some(DetailStep::Lookup(r)) if r.txid == txid));
+}
+
+/// A lookup the run's budget stopped is an attempt: it is deferred as `Unavailable`, so it
+/// backs off instead of staying first in the listing and taking every run, preferred or not.
+#[test]
+fn a_timed_out_lookup_is_deferred() {
+    let mut f = wallet();
+    let older = f.receipt(0x4b, f.height);
+    let newer = f.receipt(0x4c, f.height + 1);
+    let exchange = not_covering_then_covering(f.height);
+    exchange.serve(1);
+    let service = TxidDisplayService::new();
+    let first = |f: &Fixture, at, prefer: &[TxId]| match f.plan(&service, at, 1, prefer).next() {
+        Some(DetailStep::Lookup(request)) => request.txid,
+        step => panic!("a lookup, not {step:?}"),
+    };
+    // Newest first in the wallet's order.
+    assert_eq!(first(&f, t0(), &[]), newer);
+
+    // The budget runs out during the lookup.
+    let mut run = f.plan(&service, t0(), 1, &[newer]);
+    let Some(DetailStep::Lookup(request)) = run.next() else {
+        panic!("a lookup");
+    };
+    assert_eq!(request.txid, newer);
+    let found = service.lookup(
+        &exchange,
+        *request.txid.as_ref(),
+        u32::from(request.mined_height).into(),
+        &|| true,
+    );
+    assert_eq!(found.found, Err(TxidError::Cancelled));
+    let write = run
+        .record::<()>(&request, DetailAnswer::TimedOut)
+        .expect("a timed-out lookup is written");
+    assert!(matches!(
+        &write,
+        DetailWrite::Defer {
+            outcome: TransparentDetailOutcome::Unavailable { retry_after: None },
+            map_sha256: None,
+            ..
+        }
+    ));
+    assert_eq!(
+        write.apply(f.st.wallet_mut().db_mut(), t0()).unwrap(),
+        DetailApplied::Deferred(TransparentDetailOutcome::Unavailable { retry_after: None })
+    );
+    assert_eq!(f.work_row(newer), Some((1, Some(UNAVAILABLE), None)));
+    assert_eq!(f.view(newer), Some(TransparentDisplayView::Unavailable));
+
+    // The next run starts with the other lookup, preferred or not.
+    let soon = t0() + Duration::from_secs(1);
+    assert_eq!(first(&f, soon, &[]), older);
+    assert_eq!(first(&f, soon, &[newer]), older);
+
+    // Once its backoff passes it is due again: first when preferred, and otherwise after
+    // never-attempted work.
+    let later = t0() + PAST_UNAVAILABLE;
+    assert_eq!(first(&f, later, &[newer]), newer);
+    let lookups: Vec<TxId> = f
+        .plan(&service, later, 8, &[])
+        .map(|step| match step {
+            DetailStep::Lookup(request) => request.txid,
+            DetailStep::RefreshMap(_) => panic!("work is due"),
+        })
+        .collect();
+    assert_eq!(lookups, [older, newer]);
 }
 
 /// Found facts are stored under the listing's generation, and resolve the work.
