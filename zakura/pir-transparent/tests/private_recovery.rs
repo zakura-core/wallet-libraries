@@ -2112,7 +2112,9 @@ fn a_gate_runs_each_wallet_write_and_can_stop_the_batch_between_them() {
     // Declined before the second commit: the first stays applied and nothing is
     // acknowledged.
     let mut gate = AllowWrites { allow: 1, ran: 0 };
-    let failure = f.settle_gated(batch, Trust::Trusted, &mut gate).unwrap_err();
+    let failure = f
+        .settle_gated(batch, Trust::Trusted, &mut gate)
+        .unwrap_err();
     assert!(
         matches!(failure.error, ApplyError::Interrupted),
         "{:?}",
@@ -2132,7 +2134,9 @@ fn a_gate_runs_each_wallet_write_and_can_stop_the_batch_between_them() {
         allow: commits,
         ran: 0,
     };
-    let failure = f.settle_gated(batch, Trust::Trusted, &mut gate).unwrap_err();
+    let failure = f
+        .settle_gated(batch, Trust::Trusted, &mut gate)
+        .unwrap_err();
     assert!(
         matches!(failure.error, ApplyError::Interrupted),
         "{:?}",
