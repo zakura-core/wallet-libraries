@@ -1,10 +1,10 @@
-use super::commit_builder::Facts;
-use super::page_completion::{page_id, spans};
-use super::preflight::{entries, required_floor};
-use super::sync_inputs::{BelowFloor, sync_target};
+use super::commit_builder::CommitBuilder;
+use super::page_completion::{page_continuation_id, ranges_cover};
+use super::preflight::{limited_map_entries, watch_floor};
+use super::sync_inputs::{FloorAcceptingChain, sync_target};
 use super::*;
-use crate::convert::{block, block_hash, metadata};
-use crate::progress::{Retry, progress};
+use crate::convert::{block_hash_from_display, block_height, ledger_metadata};
+use crate::progress::Retry;
 use crate::test_support::{CountingFilters, CountingShards, MAP};
 use sha2::{Digest, Sha256};
 use transparent::address::TransparentAddress;
@@ -54,13 +54,13 @@ fn watch() -> TransparentWatchSet<u32> {
         lifecycle: AccountLifecycle::Candidate,
         policy_generation: 0,
         target: Some(ChainPoint {
-            height: block(last.end_height).unwrap(),
-            hash: block_hash(&last.terminal_block_hash).unwrap(),
+            height: block_height(last.end_height).unwrap(),
+            hash: block_hash_from_display(&last.terminal_block_hash).unwrap(),
         }),
         addresses: vec![WatchedAddress {
             address: TransparentAddress::PublicKeyHash([7; 20]),
             origin: WatchOrigin::Standalone,
-            required_from: block(map.start_height).unwrap(),
+            required_from: block_height(map.start_height).unwrap(),
         }],
         pending_pages: vec![],
     }
@@ -453,8 +453,8 @@ fn watching(map: &ShardMap) -> TransparentWatchSet<u32> {
     let last = map.shards.last().unwrap();
     TransparentWatchSet {
         target: Some(ChainPoint {
-            height: block(last.end_height).unwrap(),
-            hash: block_hash(&last.terminal_block_hash).unwrap(),
+            height: block_height(last.end_height).unwrap(),
+            hash: block_hash_from_display(&last.terminal_block_hash).unwrap(),
         }),
         ..watch()
     }

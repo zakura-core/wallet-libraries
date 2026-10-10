@@ -256,7 +256,7 @@ fn a_shard_id_reused_for_other_content_gets_a_new_source() {
     after.shards[1].parent_block_hash = moved;
     after.shards[1].manifest_digest = "a1".repeat(32);
     let config = config();
-    let binding = catalog::binding([
+    let binding = catalog::companion_binding([
         &config.source,
         &config.account_binding,
         config.origin.as_bytes(),
@@ -264,7 +264,7 @@ fn a_shard_id_reused_for_other_content_gets_a_new_source() {
     ]);
     let source = |map: &ShardMap, entry: &ShardMapEntry| {
         let set = SetIdentity::of_schema(map, SCHEMA);
-        catalog::source(&binding, &set, &entry.geometry, entry.start_height).unwrap()
+        catalog::source_identity(&binding, &set, &entry.geometry, entry.start_height).unwrap()
     };
     assert_ne!(
         source(&before, &before.shards[1]),

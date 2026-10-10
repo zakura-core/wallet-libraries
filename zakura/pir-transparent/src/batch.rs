@@ -98,8 +98,8 @@ pub struct RecoveryBatch<AccountId> {
     pub(crate) state: BatchState,
     /// The retired revisions this batch's commits resolve, as its pass recorded
     /// them. Acknowledging the batch forgets them.
-    pub(crate) replaced: Vec<RecoveryRevision>,
-    pub(crate) token: [u8; 32],
+    pub(crate) retired_revisions: Vec<RecoveryRevision>,
+    pub(crate) receipt: [u8; 32],
 }
 
 impl<A> RecoveryBatch<A> {
@@ -158,13 +158,13 @@ impl<A> RecoveryBatch<A> {
     /// no longer names, which no successor can resolve, and the wallet keeps
     /// their provisional evidence.
     pub fn retired_revisions(&self) -> &[RecoveryRevision] {
-        &self.replaced
+        &self.retired_revisions
     }
 
     /// The commits and recorded retirements, for the adapter's own settlement.
     #[cfg(feature = "sqlite")]
     pub(crate) fn into_parts(self) -> (Vec<TransparentLedgerCommit<A>>, Vec<RecoveryRevision>) {
-        (self.commits, self.replaced)
+        (self.commits, self.retired_revisions)
     }
 
     /// A batch no companion issued, for [`crate::testing`].
@@ -173,35 +173,35 @@ impl<A> RecoveryBatch<A> {
         commits: Vec<TransparentLedgerCommit<A>>,
         progress: Progress,
         state: BatchState,
-        replaced: Vec<RecoveryRevision>,
+        retired_revisions: Vec<RecoveryRevision>,
     ) -> Self {
         Self {
             commits,
             progress,
             state,
-            replaced,
-            token: [0; 32],
+            retired_revisions,
+            receipt: [0; 32],
         }
     }
 }
 
 /// A batch that is not [`BatchState::Ready`]: no commits, and nothing to
 /// acknowledge.
-pub(crate) fn unready<A>(state: BatchState, progress: Progress) -> RecoveryBatch<A> {
+pub(crate) fn unready_batch<A>(state: BatchState, progress: Progress) -> RecoveryBatch<A> {
     RecoveryBatch {
         commits: vec![],
         progress,
         state,
-        replaced: vec![],
-        token: [0; 32],
+        retired_revisions: vec![],
+        receipt: [0; 32],
     }
 }
 
 /// A [`BatchState::Pending`] batch for a pass that read nothing from a
 /// publication it must wait for. Like the reference client stopping before it
 /// reads anything, it claims no coverage.
-pub(crate) fn behind_unread<A>() -> RecoveryBatch<A> {
-    unready(
+pub(crate) fn behind_unread_batch<A>() -> RecoveryBatch<A> {
+    unready_batch(
         BatchState::Pending,
         Progress {
             covered_through: 0,

@@ -8,10 +8,10 @@ fn below_floor_view_is_lenient_only_below_the_floor() {
     let chain = StaticChain {
         hashes: BTreeMap::from([(floor, held.clone())]),
     };
-    let view = BelowFloor {
+    let view = FloorAcceptingChain {
         chain: &chain,
-        below: floor,
-        genesis: MAINNET_GENESIS_DISPLAY,
+        floor,
+        genesis_hash: MAINNET_GENESIS_DISPLAY,
     };
     // Below the floor every block is accepted, and only block 0 has a hash.
     for height in [0, 1, floor - 1] {
@@ -28,10 +28,10 @@ fn below_floor_view_is_lenient_only_below_the_floor() {
     assert_eq!(view.hash_at(floor + 1), None);
     assert_eq!(view.tip(), chain.tip());
     // A floor of 0, when nothing is watched, is never lenient.
-    let strict = BelowFloor {
+    let strict = FloorAcceptingChain {
         chain: &chain,
-        below: 0,
-        genesis: MAINNET_GENESIS_DISPLAY,
+        floor: 0,
+        genesis_hash: MAINNET_GENESIS_DISPLAY,
     };
     assert_eq!(
         strict.is_accepted(0, MAINNET_GENESIS_DISPLAY),
@@ -44,13 +44,13 @@ fn below_floor_view_is_lenient_only_below_the_floor() {
     let lowest = u64::from(u32::from(watch.addresses[0].required_from));
     watch.addresses.push(WatchedAddress {
         address: TransparentAddress::PublicKeyHash([8; 20]),
-        required_from: block(lowest + 10).unwrap(),
+        required_from: block_height(lowest + 10).unwrap(),
         ..watch.addresses[0]
     });
-    assert_eq!(required_floor(&watch, u64::MAX), lowest);
-    assert_eq!(required_floor(&watch, lowest - 1), lowest - 1);
+    assert_eq!(watch_floor(&watch, u64::MAX), lowest);
+    assert_eq!(watch_floor(&watch, lowest - 1), lowest - 1);
     watch.addresses.clear();
-    assert_eq!(required_floor(&watch, u64::MAX), 0);
+    assert_eq!(watch_floor(&watch, u64::MAX), 0);
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn shards_ending_below_the_required_start_are_neither_exported_nor_cataloged() {
     }
 
     // The wallet's chain starts at the floor, so it has no hash for the low shard.
-    watch.addresses[0].required_from = block(high.start_height).unwrap();
+    watch.addresses[0].required_from = block_height(high.start_height).unwrap();
     let chain = StaticChain {
         hashes: BTreeMap::from([(high.end_height, high.terminal_block_hash.clone())]),
     };
@@ -90,21 +90,21 @@ fn shards_ending_below_the_required_start_are_neither_exported_nor_cataloged() {
         .unwrap();
     assert_eq!(batch.commits.len(), 1);
     let commit = &batch.commits[0];
-    assert_eq!(commit.anchor.height, block(high.end_height).unwrap());
+    assert_eq!(commit.anchor.height, block_height(high.end_height).unwrap());
     assert!(commit.receives.is_empty());
     assert_eq!(
         commit.coverage,
         vec![AddressRange {
             address,
-            from: block(high.start_height).unwrap(),
-            through: block(high.end_height).unwrap(),
+            from: block_height(high.start_height).unwrap(),
+            through: block_height(high.end_height).unwrap(),
         }]
     );
     assert_eq!(cataloged(&adapter), 1);
 
     // With the floor at the map's start, the same companion exports and
     // catalogs both shards, the receive included.
-    watch.addresses[0].required_from = block(map.start_height).unwrap();
+    watch.addresses[0].required_from = block_height(map.start_height).unwrap();
     let batch = adapter
         .normalize(&watch, map.clone(), MORE, &StaticChain::from_map(&map))
         .unwrap();
@@ -122,7 +122,7 @@ fn a_pass_watching_nothing_sends_no_request() {
     let target = u64::from(u32::from(watch.target.unwrap().height));
     // The wallet holds only its target, far above block 0, the floor of an
     // empty watch set.
-    assert_eq!(required_floor(&watch, target), 0);
+    assert_eq!(watch_floor(&watch, target), 0);
     let chain = StaticChain {
         hashes: BTreeMap::from([(last.end_height, last.terminal_block_hash.clone())]),
     };
@@ -233,7 +233,7 @@ fn a_pass_behind_the_publication_syncs_to_its_accepted_end() {
     let t = last.end_height;
     let mut watch = watch();
     let wallet_target = ChainPoint {
-        height: block(t + 10).unwrap(),
+        height: block_height(t + 10).unwrap(),
         hash: BlockHash([9; 32]),
     };
     watch.target = Some(wallet_target);
@@ -246,7 +246,7 @@ fn a_pass_behind_the_publication_syncs_to_its_accepted_end() {
     let dir = tempfile::tempdir().unwrap();
     let mut young = ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
     let mut born = watch.clone();
-    born.addresses[0].required_from = block(t + 1).unwrap();
+    born.addresses[0].required_from = block_height(t + 1).unwrap();
     let mut filters = CountingFilters::default();
     let mut shards = CountingShards::serving(SCHEMA);
     let batch = young
@@ -295,16 +295,16 @@ fn a_pass_behind_the_publication_syncs_to_its_accepted_end() {
         assert_eq!(
             commit.anchor,
             ChainPoint {
-                height: block(entry.end_height).unwrap(),
-                hash: block_hash(&entry.terminal_block_hash).unwrap(),
+                height: block_height(entry.end_height).unwrap(),
+                hash: block_hash_from_display(&entry.terminal_block_hash).unwrap(),
             }
         );
         assert_eq!(
             commit.coverage,
             vec![AddressRange {
                 address,
-                from: block(entry.start_height).unwrap(),
-                through: block(entry.end_height).unwrap(),
+                from: block_height(entry.start_height).unwrap(),
+                through: block_height(entry.end_height).unwrap(),
             }]
         );
     }
@@ -340,7 +340,7 @@ fn a_replaced_tail_rolls_back_below_the_floor_without_a_wallet_hash() {
     };
     for (required_from, lenient) in [(tail.start_height, true), (map.start_height, false)] {
         let mut watch = watch();
-        watch.addresses[0].required_from = block(required_from).unwrap();
+        watch.addresses[0].required_from = block_height(required_from).unwrap();
         let script = address_script(watch.addresses[0].address);
         let dir = tempfile::tempdir().unwrap();
         let mut adapter = seeded(&dir, &script, required_from);

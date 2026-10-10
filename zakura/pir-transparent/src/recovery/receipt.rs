@@ -10,12 +10,12 @@ use zcash_client_backend::data_api::transparent_ledger::{
 use super::ReferenceRecovery;
 use crate::batch::{BatchState, RecoveryBatch};
 use crate::catalog;
-use crate::error::{RecoveryError, failure, require};
+use crate::error::{RecoveryError, ensure_valid, failure};
 use crate::progress::Progress;
 
 /// What an acknowledgment must present: the batch's binding, store position,
 /// commits and replaced revisions.
-fn export_token<A>(
+fn receipt_token<A>(
     binding: &[u8; 32],
     last_commit: u64,
     commits: &[TransparentLedgerCommit<A>],
@@ -38,22 +38,22 @@ fn export_token<A>(
 }
 
 impl ReferenceRecovery {
-    /// A ready batch, whose token the next acknowledgment must present.
-    pub(crate) fn ready<A>(
+    /// A ready batch, whose receipt the next acknowledgment must present.
+    pub(crate) fn issue_ready_batch<A>(
         &mut self,
         commits: Vec<TransparentLedgerCommit<A>>,
-        replaced: Vec<RecoveryRevision>,
+        retired_revisions: Vec<RecoveryRevision>,
         progress: Progress,
     ) -> Result<RecoveryBatch<A>, RecoveryError> {
         let last_commit = self.store.last_commit().map_err(failure)?;
-        let token = export_token(&self.binding, last_commit, &commits, &replaced);
-        self.pending_export = Some(token);
+        let receipt = receipt_token(&self.binding, last_commit, &commits, &retired_revisions);
+        self.outstanding_receipt = Some(receipt);
         Ok(RecoveryBatch {
             commits,
             progress,
             state: BatchState::Ready,
-            replaced,
-            token,
+            retired_revisions,
+            receipt,
         })
     }
 
@@ -67,13 +67,16 @@ impl ReferenceRecovery {
     /// nothing. The one exception is [`RecoveryError::PublicationChanged`],
     /// which forgets those of sources the new map no longer names.
     pub(super) fn acknowledge<A>(&mut self, batch: &RecoveryBatch<A>) -> Result<(), RecoveryError> {
-        require(
+        ensure_valid(
             batch.state == BatchState::Ready,
             "only a ready batch is acknowledged",
         )?;
-        require(self.is_pending_export(batch), "export receipt is stale")?;
-        catalog::acknowledge(&mut self.catalog, &batch.replaced)?;
-        self.pending_export = None;
+        ensure_valid(
+            self.is_outstanding_receipt(batch),
+            "export receipt is stale",
+        )?;
+        catalog::acknowledge(&mut self.catalog, &batch.retired_revisions)?;
+        self.outstanding_receipt = None;
         Ok(())
     }
 
@@ -87,13 +90,13 @@ impl ReferenceRecovery {
     }
 
     /// Whether `batch` is this companion's latest unacknowledged pass.
-    pub(crate) fn is_pending_export<A>(&self, batch: &RecoveryBatch<A>) -> bool {
-        self.pending_export == Some(batch.token)
+    pub(crate) fn is_outstanding_receipt<A>(&self, batch: &RecoveryBatch<A>) -> bool {
+        self.outstanding_receipt == Some(batch.receipt)
     }
 
     /// Spends the latest pass's receipt.
     #[cfg(feature = "sqlite")]
-    pub(crate) fn clear_pending_export(&mut self) {
-        self.pending_export = None;
+    pub(crate) fn spend_outstanding_receipt(&mut self) {
+        self.outstanding_receipt = None;
     }
 }

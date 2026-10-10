@@ -181,7 +181,7 @@ fn retired_revisions_survive_until_reconciled_and_replay_identically() {
         assert_eq!(batch.state, BatchState::Ready);
         assert_eq!(batch.commits, ready.commits);
         assert_eq!(batch.retired_revisions(), ready.retired_revisions());
-        assert_eq!(batch.token, ready.token);
+        assert_eq!(batch.receipt, ready.receipt);
     }
     assert_eq!(catalog_rows(&adapter), recorded);
     // Without trusted reconciliation the batch stays unacknowledged.
@@ -216,7 +216,7 @@ fn retired_revisions_survive_until_reconciled_and_replay_identically() {
     assert_eq!(settled.commits, newer.commits);
     assert!(settled.retired_revisions().is_empty());
     assert!(again.retired_revisions().is_empty());
-    assert_eq!(again.token, settled.token);
+    assert_eq!(again.receipt, settled.receipt);
     assert_eq!(catalog_rows(&adapter), recorded);
     adapter.acknowledge_applied(&again).unwrap();
     // A batch without retirements may also be acknowledged as reconciled.

@@ -60,7 +60,7 @@ fn exported_rows_are_classified_by_the_first_matching_rule() {
         .collect();
     assert_eq!(published[0].revision.source, revisions(&first)[0].source);
     let committed = BTreeMap::from([(published[0].revision.source.as_slice(), 2)]);
-    let mut settling = catalog::Pass::begin(&mut adapter.catalog, &published, &[]).unwrap();
+    let mut settling = catalog::CatalogPass::begin(&mut adapter.catalog, &published, &[]).unwrap();
     assert!(settling.settle(&published, &committed).unwrap().is_empty());
     assert_eq!(
         settling.state(),
@@ -99,7 +99,8 @@ fn exported_rows_are_classified_by_the_first_matching_rule() {
             .iter()
             .map(|entry| Published::of(&adapter.binding, &set, entry).unwrap())
             .collect();
-        let mut settling = catalog::Pass::begin(&mut adapter.catalog, &published, &[]).unwrap();
+        let mut settling =
+            catalog::CatalogPass::begin(&mut adapter.catalog, &published, &[]).unwrap();
         settling.settle(&published, &BTreeMap::new()).unwrap();
         settling.state()
     };
@@ -208,7 +209,7 @@ fn a_version_one_companion_is_refused() {
     .unwrap();
     v1.execute(
         "INSERT INTO pir_bridge_binding VALUES ('account-source', ?1)",
-        [catalog::binding([
+        [catalog::companion_binding([
             &config.source,
             &config.account_binding,
             config.origin.as_bytes(),

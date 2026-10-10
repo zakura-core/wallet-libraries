@@ -38,7 +38,7 @@ pub(crate) fn failure(error: impl std::fmt::Display) -> RecoveryError {
     RecoveryError::Failure(error.to_string())
 }
 
-pub(crate) fn require(ok: bool, message: &str) -> Result<(), RecoveryError> {
+pub(crate) fn ensure_valid(ok: bool, message: &str) -> Result<(), RecoveryError> {
     if ok {
         Ok(())
     } else {

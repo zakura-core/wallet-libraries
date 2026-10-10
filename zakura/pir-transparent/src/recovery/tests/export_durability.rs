@@ -76,7 +76,10 @@ fn normalized_events_preserve_attribution_and_local_shard_anchor_after_reopen() 
     assert_eq!(first.state, BatchState::Ready);
     assert_eq!(first.commits.len(), 1);
     let commit = &first.commits[0];
-    assert_eq!(commit.anchor.height, block(entry.end_height).unwrap());
+    assert_eq!(
+        commit.anchor.height,
+        block_height(entry.end_height).unwrap()
+    );
     assert!(commit.anchor.height < commit.context.target.height);
     assert_eq!(
         commit.receives[0].metadata.unwrap().fee,
@@ -226,12 +229,12 @@ fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
     publication.shards.truncate(1);
     publication.shards[0].sealed = false;
     let start = publication.start_height;
-    let parent = block_hash(&publication.shards[0].parent_block_hash).unwrap();
+    let parent = block_hash_from_display(&publication.shards[0].parent_block_hash).unwrap();
     let mut wallet = TestBuilder::new()
         .with_data_store_factory(TestDbFactory::file_backed())
         .with_block_cache(BlockCache::new())
         .with_initial_chain_state(|_, _| InitialChainState {
-            chain_state: ChainState::empty(block(start - 1).unwrap(), parent),
+            chain_state: ChainState::empty(block_height(start - 1).unwrap(), parent),
             prior_sapling_roots: vec![],
             prior_orchard_roots: vec![],
         })

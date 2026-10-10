@@ -41,7 +41,10 @@ const STORE_TABLES: [&str; 8] = [
 /// already listed and nobody acknowledged; the wallet keeps their evidence as
 /// it is, and a later batch completes its pages under them once it covers
 /// their ranges.
-pub(crate) fn reset(conn: &mut Connection, named: &[Published]) -> Result<(), RecoveryError> {
+pub(crate) fn reset_store_keep_catalog(
+    conn: &mut Connection,
+    named: &[Published],
+) -> Result<(), RecoveryError> {
     let named: BTreeSet<&[u8]> = named
         .iter()
         .map(|entry| entry.revision.source.as_slice())

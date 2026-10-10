@@ -8,8 +8,8 @@ use zcash_client_backend::data_api::transparent_ledger::{
 };
 
 use crate::catalog::{self, Published};
-use crate::convert::{block, block_hash};
-use crate::error::{RecoveryError, require};
+use crate::convert::{block_hash_from_display, block_height};
+use crate::error::{RecoveryError, ensure_valid};
 
 /// The commits of one pass, and the revisions its stored facts may name.
 ///
@@ -18,7 +18,7 @@ use crate::error::{RecoveryError, require};
 /// re-cut declares superseded, sealed, names a commit under that revision's own
 /// identity, which the wallet already holds; it is admitted on its first fact.
 /// Any other digest defers the batch.
-pub(super) struct Facts<'p, A> {
+pub(super) struct CommitBuilder<'p, A> {
     pub(super) commits: BTreeMap<(u64, String), TransparentLedgerCommit<A>>,
     pub(super) published: BTreeMap<&'p str, &'p Published>,
     declared: BTreeMap<&'p str, &'p Published>,
@@ -35,7 +35,7 @@ pub(super) struct Facts<'p, A> {
     context: TransparentRecoveryContext<A>,
 }
 
-impl<'p, A: Copy> Facts<'p, A> {
+impl<'p, A: Copy> CommitBuilder<'p, A> {
     pub(super) fn new(
         published: &'p [Published],
         declared: &'p [Published],
@@ -60,7 +60,7 @@ impl<'p, A: Copy> Facts<'p, A> {
     }
 
     /// An empty commit for `entry`, anchored at `anchor`.
-    pub(super) fn open(&mut self, entry: &Published, anchor: ChainPoint) {
+    pub(super) fn open_commit(&mut self, entry: &Published, anchor: ChainPoint) {
         self.commits.insert(
             entry.key(),
             TransparentLedgerCommit {
@@ -87,9 +87,9 @@ impl<'p, A: Copy> Facts<'p, A> {
     /// A fact naming another shard id than its revision's, a declared revision
     /// whose range does not hold it or whose end the wallet's chain does not
     /// hold, or any other digest defers the batch.
-    pub(super) fn place(
+    pub(super) fn commit_for(
         &mut self,
-        pass: &mut catalog::Pass<'_>,
+        pass: &mut catalog::CatalogPass<'_>,
         chain: &impl ChainView,
         shard_id: u64,
         digest: &str,
@@ -100,7 +100,7 @@ impl<'p, A: Copy> Facts<'p, A> {
                 pass.defer();
                 return Ok(None);
             }
-            self.saw(entry);
+            self.note_published(entry);
             return Ok(self.commits.get_mut(&entry.key()));
         }
         let Some((digest, entry)) = self.declared.get_key_value(digest) else {
@@ -116,7 +116,7 @@ impl<'p, A: Copy> Facts<'p, A> {
         let admitted = match self.admitted.get(digest) {
             Some(admitted) => *admitted,
             None => {
-                let admitted = self.admit(pass, chain, entry)?;
+                let admitted = self.open_declared(pass, chain, entry)?;
                 self.admitted.insert(digest, admitted);
                 admitted
             }
@@ -129,7 +129,7 @@ impl<'p, A: Copy> Facts<'p, A> {
     }
 
     /// Notes a stored fact under the published revision `entry`.
-    pub(super) fn saw(&mut self, entry: &Published) {
+    pub(super) fn note_published(&mut self, entry: &Published) {
         if self
             .recut_from
             .is_some_and(|from| entry.start_height >= from)
@@ -141,9 +141,9 @@ impl<'p, A: Copy> Facts<'p, A> {
     /// Opens a commit under a declared revision on its first stored fact, if
     /// the wallet's chain still holds the block it ends on and the catalog
     /// agrees with the declaration.
-    fn admit(
+    fn open_declared(
         &mut self,
-        pass: &mut catalog::Pass<'_>,
+        pass: &mut catalog::CatalogPass<'_>,
         chain: &impl ChainView,
         entry: &Published,
     ) -> Result<bool, RecoveryError> {
@@ -152,7 +152,7 @@ impl<'p, A: Copy> Facts<'p, A> {
         let hash = chain
             .hash_at(height)
             .ok_or_else(|| RecoveryError::Invalid("missing independent shard anchor".into()))?;
-        require(
+        ensure_valid(
             chain.is_accepted(height, &hash) == Acceptance::Accepted,
             "shard anchor is not independently accepted",
         )?;
@@ -165,10 +165,10 @@ impl<'p, A: Copy> Facts<'p, A> {
             return Ok(false);
         }
         let anchor = ChainPoint {
-            height: block(height)?,
-            hash: block_hash(&hash)?,
+            height: block_height(height)?,
+            hash: block_hash_from_display(&hash)?,
         };
-        self.open(entry, anchor);
+        self.open_commit(entry, anchor);
         Ok(true)
     }
 }

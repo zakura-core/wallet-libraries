@@ -6,11 +6,11 @@ use transparent_wallet::transport::ShardTransport;
 use zcash_client_backend::data_api::transparent_ledger::TransparentWatchSet;
 
 use super::SCHEMA;
-use crate::error::{RecoveryError, failure, require};
+use crate::error::{RecoveryError, ensure_valid, failure};
 
 /// The lowest height a pass needs the wallet's chain for: the lowest required
 /// height in `watch`, capped at `target`, or 0 when nothing is watched.
-pub(super) fn required_floor<A>(watch: &TransparentWatchSet<A>, target: u64) -> u64 {
+pub(super) fn watch_floor<A>(watch: &TransparentWatchSet<A>, target: u64) -> u64 {
     watch
         .addresses
         .iter()
@@ -23,8 +23,8 @@ pub(super) fn required_floor<A>(watch: &TransparentWatchSet<A>, target: u64) -> 
 /// the map publishes, and every revision its re-cuts declare superseded that
 /// ends at or above the floor. Declarations are never dropped, so those wholly
 /// below every watched script's required height, which no stored fact can
-/// name, do not count against the limit; [`declarations`] bounds them.
-pub(super) fn entries(map: &ShardMap, floor: u64) -> usize {
+/// name, do not count against the limit; [`declaration_count`] bounds them.
+pub(super) fn limited_map_entries(map: &ShardMap, floor: u64) -> usize {
     map.shards.len()
         + map
             .recuts
@@ -42,7 +42,7 @@ pub(super) fn entries(map: &ShardMap, floor: u64) -> usize {
 /// earlier pass whose floor was lower. So the floor does not bound this work;
 /// the total is held to [`MAX_SUPERSEDED`], the most the map's own shape check
 /// accepts, before anything is retrieved.
-fn declarations(map: &ShardMap) -> usize {
+fn declaration_count(map: &ShardMap) -> usize {
     map.recuts.iter().map(|recut| recut.superseded.len()).sum()
 }
 
@@ -53,12 +53,12 @@ pub(crate) fn check_publication_limits(
     floor: u64,
     shards: usize,
 ) -> Result<(), RecoveryError> {
-    require(
-        entries(map, floor) <= shards,
+    ensure_valid(
+        limited_map_entries(map, floor) <= shards,
         "publication shard limit exceeded",
     )?;
-    require(
-        declarations(map) <= MAX_SUPERSEDED,
+    ensure_valid(
+        declaration_count(map) <= MAX_SUPERSEDED,
         "publication declaration limit exceeded",
     )
 }
@@ -70,7 +70,7 @@ pub(crate) fn service_geometry(
 ) -> Result<ServiceGeometry, RecoveryError> {
     let (raw_init, _) = transport.init().map_err(failure)?;
     let geometry = transparent_wallet::parse_init(&raw_init).map_err(failure)?;
-    require(
+    ensure_valid(
         geometry.schema == SCHEMA,
         "service serves an unsupported shard schema",
     )?;

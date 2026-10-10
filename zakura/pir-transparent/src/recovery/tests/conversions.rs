@@ -32,7 +32,7 @@ fn report_outcomes_map_to_progress() {
         let mut report = report(completion);
         report.covered_through = 77;
         assert_eq!(
-            progress(&report, false),
+            Progress::from_sync_report(&report, false),
             Progress {
                 covered_through: 77,
                 outcome,
@@ -46,7 +46,7 @@ fn report_outcomes_map_to_progress() {
             outcome
         };
         assert_eq!(
-            progress(&report, true),
+            Progress::from_sync_report(&report, true),
             Progress {
                 covered_through: 77,
                 outcome: clamped,
@@ -62,7 +62,7 @@ fn metadata_conversion_preserves_exact_zero_unknown_and_coinbase() {
         FeeState::Unknown,
         FeeState::NotApplicable,
     ] {
-        let converted = metadata(Some(transparent_events::TransactionMetadata {
+        let converted = ledger_metadata(Some(transparent_events::TransactionMetadata {
             fee,
             transparent_input_count: 0,
             has_shielded_components: true,
@@ -80,9 +80,9 @@ fn metadata_conversion_preserves_exact_zero_unknown_and_coinbase() {
             }
         }
     }
-    assert_eq!(metadata(None).unwrap(), None);
+    assert_eq!(ledger_metadata(None).unwrap(), None);
     assert!(
-        metadata(Some(transparent_events::TransactionMetadata {
+        ledger_metadata(Some(transparent_events::TransactionMetadata {
             fee: FeeState::Exact(u64::MAX),
             transparent_input_count: 1,
             has_shielded_components: false

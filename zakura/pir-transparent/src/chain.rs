@@ -5,7 +5,7 @@ use zcash_client_backend::data_api::{WalletRead, transparent_ledger::ChainPoint}
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::BlockHeight;
 
-use crate::convert::block_hash;
+use crate::convert::block_hash_from_display;
 
 /// A [`ChainView`] over the blocks a wallet scanned, answering only through `target`.
 ///
@@ -41,7 +41,10 @@ impl<W: WalletRead + ?Sized> ChainView for WalletChain<'_, W> {
     fn is_accepted(&self, height: u64, hash_display_hex: &str) -> Acceptance {
         match self.held(height) {
             None => Acceptance::Unknown,
-            Some(held) if block_hash(hash_display_hex).is_ok_and(|offered| offered == held) => {
+            Some(held)
+                if block_hash_from_display(hash_display_hex)
+                    .is_ok_and(|offered| offered == held) =>
+            {
                 Acceptance::Accepted
             }
             Some(_) => Acceptance::Rejected,

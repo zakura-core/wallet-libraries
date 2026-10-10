@@ -97,8 +97,8 @@ fn a_page_under_a_source_the_map_no_longer_names_is_completed_once_covered() {
             context: opening.context,
             revision: opening.revision.clone(),
             anchor: ChainPoint {
-                height: block(tail.end_height).unwrap(),
-                hash: block_hash(&tail.terminal_block_hash).unwrap(),
+                height: block_height(tail.end_height).unwrap(),
+                hash: block_hash_from_display(&tail.terminal_block_hash).unwrap(),
             },
             receives: vec![],
             spends: vec![],
@@ -150,8 +150,8 @@ fn a_page_under_a_source_the_map_names_is_left_to_its_revisions() {
         request: PageRequest {
             page: vec![1],
             addresses: vec![holding.addresses[0].address],
-            from: block(tail.start_height).unwrap(),
-            through: block(tail.end_height).unwrap(),
+            from: block_height(tail.start_height).unwrap(),
+            through: block_height(tail.end_height).unwrap(),
         },
         revision: first.commits[1].revision.clone(),
         target: holding.target.unwrap(),
@@ -189,7 +189,7 @@ fn a_reset_store_that_stops_before_binding_is_pending() {
     // reference client stops before binding the store.
     let mut watch = watch();
     let target = ChainPoint {
-        height: block(t + 10).unwrap(),
+        height: block_height(t + 10).unwrap(),
         hash: BlockHash([9; 32]),
     };
     watch.target = Some(target);
@@ -284,10 +284,10 @@ fn a_revision_exported_before_a_reset_is_held_back_while_it_reopens_a_page() {
     let mut holding = watch();
     holding.pending_pages = vec![PendingPage {
         request: PageRequest {
-            page: page_id(sealed.shard_id, &sealed.manifest_digest, &script, 3),
+            page: page_continuation_id(sealed.shard_id, &sealed.manifest_digest, &script, 3),
             addresses: vec![address],
-            from: block(sealed.start_height).unwrap(),
-            through: block(sealed.end_height).unwrap(),
+            from: block_height(sealed.start_height).unwrap(),
+            through: block_height(sealed.end_height).unwrap(),
         },
         revision: sealed_revision.clone(),
         target: holding.target.unwrap(),
@@ -369,7 +369,7 @@ fn a_map_under_the_previous_set_below_the_anchor_does_not_reset_the_store() {
     // the same map is a publication change.
     let mut watch = watch();
     let target = ChainPoint {
-        height: block(t + 10).unwrap(),
+        height: block_height(t + 10).unwrap(),
         hash: BlockHash([9; 32]),
     };
     watch.target = Some(target);

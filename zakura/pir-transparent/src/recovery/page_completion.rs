@@ -13,10 +13,10 @@ use zcash_client_backend::data_api::transparent_ledger::{
 use zcash_protocol::consensus::BlockHeight;
 
 use crate::catalog::Published;
-use crate::convert::block_hash;
+use crate::convert::block_hash_from_display;
 use crate::error::RecoveryError;
 
-pub(super) fn page_id(shard: u64, digest: &str, script: &[u8], first: u32) -> Vec<u8> {
+pub(super) fn page_continuation_id(shard: u64, digest: &str, script: &[u8], first: u32) -> Vec<u8> {
     let mut hash = Sha256::new();
     hash.update(b"transparent-reference-page-v1");
     hash.update(shard.to_le_bytes());
@@ -28,7 +28,7 @@ pub(super) fn page_id(shard: u64, digest: &str, script: &[u8], first: u32) -> Ve
 
 /// Whether `ranges` of `address` together cover every height from `from`
 /// through `through`.
-pub(super) fn spans<'r>(
+pub(super) fn ranges_cover<'r>(
     ranges: impl IntoIterator<Item = &'r AddressRange>,
     address: TransparentAddress,
     from: BlockHeight,
@@ -76,7 +76,7 @@ pub(super) fn spans<'r>(
 /// completes it from its own coverage and otherwise reopens or keeps it, so no
 /// page is completed twice. A named source's provisional revisions are left to
 /// their successor, whose qualification withdraws them.
-pub(super) fn complete_stranded<A: Copy>(
+pub(super) fn stranded_page_completions<A: Copy>(
     watch: &TransparentWatchSet<A>,
     context: TransparentRecoveryContext<A>,
     published: &[Published],
@@ -90,7 +90,7 @@ pub(super) fn complete_stranded<A: Copy>(
         .collect();
     let covers = |commits: &[TransparentLedgerCommit<A>], request: &PageRequest| {
         request.addresses.iter().all(|address| {
-            spans(
+            ranges_cover(
                 commits.iter().flat_map(|commit| &commit.coverage),
                 *address,
                 request.from,
@@ -139,7 +139,7 @@ pub(super) fn complete_stranded<A: Copy>(
         if chain.is_accepted(u64::from(u32::from(height)), &hash) != Acceptance::Accepted {
             continue;
         }
-        let hash = block_hash(&hash)?;
+        let hash = block_hash_from_display(&hash)?;
         if height == publication.height && hash != publication.hash {
             continue;
         }

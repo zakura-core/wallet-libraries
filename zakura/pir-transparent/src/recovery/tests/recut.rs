@@ -241,13 +241,13 @@ fn a_successor_must_rise_above_its_declared_revision() {
         (&conflicting, WithdrawnCause::Equivocation),
     ] {
         let (published, declared) = (published(map), declared(map));
-        let mut pass = catalog::Pass::begin(&mut fresh.catalog, &published, &[]).unwrap();
+        let mut pass = catalog::CatalogPass::begin(&mut fresh.catalog, &published, &[]).unwrap();
         pass.check_declarations(&published, &declared);
         assert_eq!(pass.state(), BatchState::Withdrawn(cause));
     }
     // The well-formed declaration passes.
     let (published, declared) = (published(&after), declared(&after));
-    let mut pass = catalog::Pass::begin(&mut fresh.catalog, &published, &[]).unwrap();
+    let mut pass = catalog::CatalogPass::begin(&mut fresh.catalog, &published, &[]).unwrap();
     pass.check_declarations(&published, &declared);
     assert_eq!(pass.state(), BatchState::Ready);
 }
@@ -256,7 +256,7 @@ fn a_successor_must_rise_above_its_declared_revision() {
 fn the_source_ignores_the_shard_id() {
     let (before, after) = recut_pair();
     let config = config();
-    let binding = catalog::binding([
+    let binding = catalog::companion_binding([
         &config.source,
         &config.account_binding,
         config.origin.as_bytes(),
@@ -264,7 +264,7 @@ fn the_source_ignores_the_shard_id() {
     ]);
     let set = SetIdentity::of_schema(&after, SCHEMA);
     let source = |entry: &ShardMapEntry| {
-        catalog::source(&binding, &set, &entry.geometry, entry.start_height).unwrap()
+        catalog::source_identity(&binding, &set, &entry.geometry, entry.start_height).unwrap()
     };
     // Renumbered at the same heights: the same source.
     for (old, new) in [
@@ -433,8 +433,8 @@ fn a_page_under_a_declared_revision_is_completed_once() {
     assert_eq!(
         completion.anchor,
         ChainPoint {
-            height: block(s3.end_height).unwrap(),
-            hash: block_hash(&s3.terminal_block_hash).unwrap(),
+            height: block_height(s3.end_height).unwrap(),
+            hash: block_hash_from_display(&s3.terminal_block_hash).unwrap(),
         }
     );
     assert!(completion.coverage.is_empty());
@@ -677,8 +677,8 @@ fn a_page_under_a_declared_revision_with_saved_events_completes_once() {
     assert_eq!(
         completing[0].anchor,
         ChainPoint {
-            height: block(s3.end_height).unwrap(),
-            hash: block_hash(&s3.terminal_block_hash).unwrap(),
+            height: block_height(s3.end_height).unwrap(),
+            hash: block_hash_from_display(&s3.terminal_block_hash).unwrap(),
         }
     );
     let position = |found: &dyn Fn(&TransparentLedgerCommit<u32>) -> bool| {

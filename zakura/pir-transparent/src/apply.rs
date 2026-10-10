@@ -277,20 +277,25 @@ impl ReferenceRecovery {
         gate: &mut impl WriteGate,
     ) -> Result<Applied, ApplyFailure> {
         let progress = batch.progress();
-        let failure = |error, stats| ApplyFailure {
+        let apply_failure = |error, stats| ApplyFailure {
             error,
             stats,
             progress,
         };
-        if batch.state() == BatchState::Ready && !self.is_pending_export(&batch) {
-            return Err(failure(ApplyError::StaleReceipt, ApplyStats::default()));
+        if batch.state() == BatchState::Ready && !self.is_outstanding_receipt(&batch) {
+            return Err(apply_failure(
+                ApplyError::StaleReceipt,
+                ApplyStats::default(),
+            ));
         }
         // Once the commits start, the receipt is spent: a failed batch is replayed by a
         // new pass.
         let (stats, replaced, expected_generation) =
-            apply_commits(batch, wallet, trust, gate, || self.clear_pending_export())?;
+            apply_commits(batch, wallet, trust, gate, || {
+                self.spend_outstanding_receipt()
+            })?;
         let acknowledgment = catalog::acknowledgment_transaction(&mut self.catalog)
-            .map_err(|error| failure(ApplyError::Acknowledge(error), stats))?;
+            .map_err(|error| apply_failure(ApplyError::Acknowledge(error), stats))?;
         gate.write(|| {
             wallet.with_immediate_read_transaction(|snapshot| {
                 if let Some(expected) = expected_generation {
@@ -305,8 +310,8 @@ impl ReferenceRecovery {
                     .map_err(|error| ApplyError::Acknowledge(crate::error::failure(error)))
             })
         })
-        .map_err(|Interrupted| failure(ApplyError::Interrupted, stats))?
-        .map_err(|error| failure(error, stats))?;
+        .map_err(|Interrupted| apply_failure(ApplyError::Interrupted, stats))?
+        .map_err(|error| apply_failure(error, stats))?;
         Ok(Applied {
             stats,
             progress,
@@ -329,23 +334,23 @@ pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(
 ) -> Result<(ApplyStats, Vec<RecoveryRevision>, Option<u64>), ApplyFailure> {
     let progress = batch.progress();
     let mut stats = ApplyStats::default();
-    let failure = |error, stats| ApplyFailure {
+    let apply_failure = |error, stats| ApplyFailure {
         error,
         stats,
         progress,
     };
     if batch.state() != BatchState::Ready {
-        return Err(failure(ApplyError::NotReady(batch.state()), stats));
+        return Err(apply_failure(ApplyError::NotReady(batch.state()), stats));
     }
     if !wallet.is_autocommit() {
-        return Err(failure(ApplyError::OuterTransaction, stats));
+        return Err(apply_failure(ApplyError::OuterTransaction, stats));
     }
     let (commits, replaced) = batch.into_parts();
     let expected_generation = commits
         .first()
         .map(|commit| commit.context.policy_generation);
     if trust == Trust::Observed && !replaced.is_empty() {
-        return Err(failure(ApplyError::Unreconciled, stats));
+        return Err(apply_failure(ApplyError::Unreconciled, stats));
     }
     start();
     for (index, commit) in commits.into_iter().enumerate() {
@@ -354,7 +359,7 @@ pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(
                 Trust::Observed => wallet.apply_transparent_ledger_commit(commit),
                 Trust::Trusted => wallet.qualify_and_apply_transparent_ledger_commit(commit),
             })
-            .map_err(|Interrupted| failure(ApplyError::Interrupted, stats))?;
+            .map_err(|Interrupted| apply_failure(ApplyError::Interrupted, stats))?;
         match applied {
             Ok(outcome) => {
                 stats.applied += 1;
@@ -362,7 +367,7 @@ pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(
                 stats.window_grew |= outcome.window_grew;
             }
             Err(error) => {
-                return Err(failure(ApplyError::from_wallet(index, error), stats));
+                return Err(apply_failure(ApplyError::from_wallet(index, error), stats));
             }
         }
     }

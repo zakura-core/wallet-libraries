@@ -4,7 +4,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::recut::record_epoch;
-use crate::error::{RecoveryError, failure, require};
+use crate::error::{RecoveryError, ensure_valid, failure};
 
 /// The companion layout this build creates and reads.
 const FORMAT: &str = "transparent-reference-companion-v3";
@@ -77,11 +77,11 @@ pub(crate) fn prepare(conn: &mut Connection, binding: &[u8; 32]) -> Result<(), R
     } else {
         None
     };
-    require(
+    ensure_valid(
         !has("pir_bridge_revisions")? && (!bound || format.is_some()),
         "companion format v1; recreate",
     )?;
-    require(
+    ensure_valid(
         format
             .as_deref()
             .is_none_or(|format| format == FORMAT || format == FORMAT_V2),
@@ -105,7 +105,7 @@ pub(crate) fn prepare(conn: &mut Connection, binding: &[u8; 32]) -> Result<(), R
         )
         .optional()
         .map_err(failure)?;
-    require(
+    ensure_valid(
         prior.as_deref() == Some(binding.as_slice()),
         "companion account/source/origin/schema binding mismatch",
     )?;

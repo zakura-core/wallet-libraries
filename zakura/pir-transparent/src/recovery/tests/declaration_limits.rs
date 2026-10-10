@@ -4,11 +4,14 @@ use super::*;
 fn only_declarations_at_or_above_the_floor_count_against_the_shard_limit() {
     let (_, after) = recut_pair();
     let declared = after.recuts[0].superseded.len();
-    assert_eq!(entries(&after, 0), after.shards.len() + declared);
+    assert_eq!(
+        limited_map_entries(&after, 0),
+        after.shards.len() + declared
+    );
     // A floor above S1 and S2 leaves S3 and the tail.
     let floor = after.recuts[0].superseded[2].start_height;
-    assert_eq!(entries(&after, floor), after.shards.len() + 2);
-    assert_eq!(entries(&after, u64::MAX), after.shards.len());
+    assert_eq!(limited_map_entries(&after, floor), after.shards.len() + 2);
+    assert_eq!(limited_map_entries(&after, u64::MAX), after.shards.len());
 }
 
 /// The pairwise scan the indexed declaration check replaced, kept as its
@@ -136,13 +139,16 @@ fn a_full_declaration_set_is_checked_quickly() {
 fn declarations_below_the_floor_count_against_a_separate_limit() {
     let (before, after) = recut_pair();
     let (watch, chain) = (watching(&after), accepting(&[&before, &after]));
-    let floor = required_floor(&watch, u64::MAX);
+    let floor = watch_floor(&watch, u64::MAX);
     let at_limit = forged(MAX_SUPERSEDED);
     at_limit.check_shape().unwrap();
     let over = forged(MAX_SUPERSEDED + 1);
     // None of the forged declarations reaches the floor, so the shard
     // limit alone would admit any number of them.
-    assert_eq!(entries(&over, floor), entries(&after, floor));
+    assert_eq!(
+        limited_map_entries(&over, floor),
+        limited_map_entries(&after, floor)
+    );
     let dir = tempfile::tempdir().unwrap();
     let mut adapter =
         ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
@@ -167,6 +173,6 @@ fn declarations_below_the_floor_count_against_a_separate_limit() {
     let elapsed = started.elapsed();
     assert_eq!(batch.state, BatchState::Ready);
     assert_eq!(batch.commits, expected.commits);
-    assert_eq!(batch.replaced, expected.replaced);
+    assert_eq!(batch.retired_revisions, expected.retired_revisions);
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
 }

@@ -218,7 +218,7 @@ fn normalization_uses_the_map_the_sync_finished_with() {
     assert_eq!(batch.commits.len(), 1);
     assert_eq!(
         batch.commits[0].anchor.height,
-        block(sealed.end_height).unwrap()
+        block_height(sealed.end_height).unwrap()
     );
     assert_eq!(cataloged(&adapter), 1);
 }

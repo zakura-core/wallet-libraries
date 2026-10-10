@@ -41,14 +41,14 @@ fn source_identity_binds_account_origin_and_schema() {
     let config = config();
     let set = SetIdentity::of_schema(&map, SCHEMA);
     let schema = |schema: &str| {
-        let binding = catalog::binding([
+        let binding = catalog::companion_binding([
             &config.source,
             &config.account_binding,
             config.origin.as_bytes(),
             schema.as_bytes(),
         ]);
         let entry = &map.shards[1];
-        catalog::source(&binding, &set, &entry.geometry, entry.start_height)
+        catalog::source_identity(&binding, &set, &entry.geometry, entry.start_height)
             .unwrap()
             .to_vec()
     };
@@ -90,7 +90,7 @@ fn a_changed_seal_changes_only_its_geometrys_sources() {
     let mut resealed = map.clone();
     resealed.seal.get_mut(&recent.geometry).unwrap().max_scripts += 1;
     let config = config();
-    let binding = catalog::binding([
+    let binding = catalog::companion_binding([
         &config.source,
         &config.account_binding,
         config.origin.as_bytes(),
@@ -99,7 +99,7 @@ fn a_changed_seal_changes_only_its_geometrys_sources() {
     let set = SetIdentity::of_schema(&map, SCHEMA);
     let reset = SetIdentity::of_schema(&resealed, SCHEMA);
     let source = |set: &SetIdentity, entry: &ShardMapEntry| {
-        catalog::source(&binding, set, &entry.geometry, entry.start_height).unwrap()
+        catalog::source_identity(&binding, set, &entry.geometry, entry.start_height).unwrap()
     };
     assert_eq!(source(&set, archive), source(&reset, &resealed.shards[0]));
     assert_ne!(source(&set, recent), source(&reset, &resealed.shards[1]));
@@ -173,11 +173,11 @@ fn lineage_follows_the_published_revision() {
         assert_eq!(revision.sealed, entry.sealed);
         assert_eq!(
             revision.publication.height,
-            block(entry.end_height).unwrap()
+            block_height(entry.end_height).unwrap()
         );
         assert_eq!(
             revision.publication.hash,
-            block_hash(&entry.terminal_block_hash).unwrap()
+            block_hash_from_display(&entry.terminal_block_hash).unwrap()
         );
     }
     // A recreated companion reproduces identical triples.

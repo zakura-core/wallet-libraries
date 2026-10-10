@@ -24,13 +24,13 @@ use zcash_client_backend::data_api::transparent_ledger::TransparentWatchSet;
 
 pub(crate) use preflight::{check_publication_limits, service_geometry};
 
-use crate::batch::{BatchState, RecoveryBatch, WithdrawnCause, behind_unread, unready};
+use crate::batch::{BatchState, RecoveryBatch, WithdrawnCause, behind_unread_batch, unready_batch};
 use crate::catalog::{self, Published};
 use crate::convert::address_script;
-use crate::error::{RecoveryError, failure, require};
-use crate::progress::{Outcome, Progress, progress};
-use preflight::required_floor;
-use sync_inputs::{BelowFloor, Recorded, sync_target};
+use crate::error::{RecoveryError, ensure_valid, failure};
+use crate::progress::{Outcome, Progress};
+use preflight::watch_floor;
+use sync_inputs::{FloorAcceptingChain, RecordingFilterSource, sync_target};
 
 /// The only shard schema this adapter reads.
 ///
@@ -73,7 +73,7 @@ pub struct ReferenceRecovery {
     binding: [u8; 32],
     store: SqliteStore,
     pub(crate) catalog: Connection,
-    pending_export: Option<[u8; 32]>,
+    outstanding_receipt: Option<[u8; 32]>,
 }
 
 impl ReferenceRecovery {
@@ -86,14 +86,14 @@ impl ReferenceRecovery {
     /// format, whose lineage was a local counter no recreated companion can
     /// reproduce, is refused with `Invalid("companion format v1; recreate")`.
     pub fn open(path: impl AsRef<Path>, config: RecoveryConfig) -> Result<Self, RecoveryError> {
-        require(
+        ensure_valid(
             !config.source.is_empty()
                 && config.source.len() <= 256
                 && !config.account_binding.is_empty()
                 && config.account_binding.len() <= 256,
             "source/account binding must be nonempty and at most 256 bytes",
         )?;
-        require(
+        ensure_valid(
             config.scripts > 0
                 && config.shards > 0
                 && config.events > 0
@@ -102,7 +102,7 @@ impl ReferenceRecovery {
             "recovery bounds must be positive",
         )?;
         let url = url::Url::parse(&config.origin).map_err(failure)?;
-        require(
+        ensure_valid(
             matches!(url.scheme(), "http" | "https")
                 && url.host_str().is_some()
                 && url.username().is_empty()
@@ -116,7 +116,7 @@ impl ReferenceRecovery {
         catalog
             .busy_timeout(Duration::from_secs(5))
             .map_err(failure)?;
-        let binding = catalog::binding([
+        let binding = catalog::companion_binding([
             &config.source,
             &config.account_binding,
             config.origin.as_bytes(),
@@ -128,7 +128,7 @@ impl ReferenceRecovery {
             binding,
             store,
             catalog,
-            pending_export: None,
+            outstanding_receipt: None,
         })
     }
 
@@ -209,7 +209,7 @@ impl ReferenceRecovery {
         F: FilterSource,
         T: ShardTransport,
     {
-        self.pending_export = None;
+        self.outstanding_receipt = None;
         let context = watch
             .context()
             .ok_or_else(|| RecoveryError::Invalid("no locally accepted recovery target".into()))?;
@@ -217,7 +217,7 @@ impl ReferenceRecovery {
             height: u64::from(u32::from(context.target.height)),
             hash: context.target.hash.to_string(),
         };
-        require(
+        ensure_valid(
             chain.is_accepted(target.height, &target.hash) == Acceptance::Accepted,
             "target is not independently accepted",
         )?;
@@ -226,7 +226,7 @@ impl ReferenceRecovery {
             // wallet's hash for every shard from the map's start, since nothing
             // raises the floor, and the reference client reports a sync with no
             // scripts as unbounded discovery.
-            return self.ready(
+            return self.issue_ready_batch(
                 vec![],
                 vec![],
                 Progress {
@@ -235,7 +235,7 @@ impl ReferenceRecovery {
                 },
             );
         }
-        require(
+        ensure_valid(
             watch.addresses.len() <= self.config.scripts
                 && self.store.scripts().map_err(failure)?.len() <= self.config.scripts,
             "script limit exceeded",
@@ -245,21 +245,21 @@ impl ReferenceRecovery {
             .iter()
             .map(|entry| (address_script(entry.address), entry))
             .collect();
-        require(
+        ensure_valid(
             addresses.len() == watch.addresses.len(),
             "duplicate watch address",
         )?;
         // The parent experiment's selective child requests leak coarse activity.
-        require(
+        ensure_valid(
             !filters.uses_parents(),
             "parent filter sources are not supported",
         )?;
-        let (mut filters, map_bytes) = Recorded::fetch(filters).map_err(failure)?;
+        let (mut filters, map_bytes) = RecordingFilterSource::fetch(filters).map_err(failure)?;
         let map: ShardMap = serde_json::from_slice(filters.map()).map_err(failure)?;
-        let floor = required_floor(watch, target.height);
+        let floor = watch_floor(watch, target.height);
         self.check_limits(&map, floor)?;
         // The wallet's chain is mainnet's; another chain's map cannot cover it.
-        require(
+        ensure_valid(
             map.network == NETWORK && map.genesis_hash == MAINNET_GENESIS_DISPLAY,
             "publication is not for Zcash mainnet",
         )?;
@@ -286,11 +286,11 @@ impl ReferenceRecovery {
                     .is_none_or(|last| last.end_height < anchor.height)
                 && chain.is_accepted(anchor.height, &anchor.hash) == Acceptance::Accepted
             {
-                return Ok(behind_unread());
+                return Ok(behind_unread_batch());
             }
-            let (published, declarations) = self.revisions(&map, &set)?;
+            let (published, declarations) = self.map_revisions(&map, &set)?;
             let named: Vec<_> = published.into_iter().chain(declarations).collect();
-            catalog::reset(&mut self.catalog, &named)?;
+            catalog::reset_store_keep_catalog(&mut self.catalog, &named)?;
             return Err(RecoveryError::PublicationChanged);
         }
         let stored = self.store.anchor().map_err(failure)?;
@@ -304,10 +304,10 @@ impl ReferenceRecovery {
             .unwrap_or(0);
         let (sync_anchor, clamped) =
             sync_target(&map, &target, floor, stored.as_ref(), retained, chain);
-        let below_floor = BelowFloor {
+        let floor_accepting_chain = FloorAcceptingChain {
             chain,
-            below: floor,
-            genesis: &map.genesis_hash,
+            floor,
+            genesis_hash: &map.genesis_hash,
         };
         let mut scripts = StaticScripts(
             watch
@@ -329,7 +329,7 @@ impl ReferenceRecovery {
             &map,
             map_bytes,
             &geometry,
-            &below_floor,
+            &floor_accepting_chain,
             &mut scripts,
             &mut filters,
             transport,
@@ -356,9 +356,9 @@ impl ReferenceRecovery {
             // sync rolled back first, and the catalog is unchanged.
             Err(SyncError::SealedRewrite { .. }) => {
                 if map.recut_epoch() < catalog::recut_epoch(&self.catalog)? {
-                    return Ok(behind_unread());
+                    return Ok(behind_unread_batch());
                 }
-                return Ok(unready(
+                return Ok(unready_batch(
                     BatchState::Withdrawn(WithdrawnCause::ChangedSealed),
                     Progress {
                         covered_through: 0,
@@ -370,14 +370,19 @@ impl ReferenceRecovery {
             // mid-pass does not continue the first (another re-cut epoch, or a
             // resumed shard id moved to another start). A later pass starts
             // from the publication it then finds.
-            Err(SyncError::MapDiverged(_)) => return Ok(behind_unread()),
+            Err(SyncError::MapDiverged(_)) => return Ok(behind_unread_batch()),
             Err(other) => return Err(failure(other)),
         };
         // A stale revision may have refreshed the map mid-sync. The stored facts
         // are the ones that map described.
         let map: ShardMap = serde_json::from_slice(filters.map()).map_err(failure)?;
         self.check_limits(&map, floor)?;
-        self.normalize(watch, map, progress(&report, clamped), chain)
+        self.normalize(
+            watch,
+            map,
+            Progress::from_sync_report(&report, clamped),
+            chain,
+        )
     }
 
     /// Refuses a map with more shards and declarations at or above `floor`
@@ -389,7 +394,7 @@ impl ReferenceRecovery {
 
     /// Every revision `map`, under `set`, publishes, and every one its re-cuts
     /// declare superseded, the superseded tails included.
-    fn revisions(
+    fn map_revisions(
         &self,
         map: &ShardMap,
         set: &SetIdentity,
@@ -427,7 +432,7 @@ impl ReferenceRecovery {
         &mut self,
         batch: &RecoveryBatch<A>,
     ) -> Result<(), RecoveryError> {
-        require(
+        ensure_valid(
             batch.retired_revisions().is_empty(),
             "retired revisions require trusted wallet reconciliation",
         )?;

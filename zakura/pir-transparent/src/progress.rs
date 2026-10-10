@@ -73,27 +73,29 @@ impl Progress {
     }
 }
 
-/// Maps the reference client's report onto the adapter's narrower contract.
-///
-/// A `clamped` pass synced to the publication's end below the wallet's target,
-/// so even its completion is [`Outcome::Behind`].
-pub(crate) fn progress(report: &SyncReport, clamped: bool) -> Progress {
-    let outcome = match &report.completion {
-        Completion::Complete if clamped => Outcome::Behind,
-        Completion::Complete => Outcome::Complete,
-        Completion::Incomplete { reason, .. } => match reason {
-            IncompleteReason::QueryBudget
-            | IncompleteReason::ByteBudget
-            | IncompleteReason::PendingLimit => Outcome::More,
-            IncompleteReason::PublicationBehind { .. } => Outcome::Behind,
-            IncompleteReason::Overloaded { .. } => Outcome::Overloaded,
-            IncompleteReason::ChainUnknown { .. }
-            | IncompleteReason::UnresolvedSpends
-            | IncompleteReason::DiscoveryUnbounded => Outcome::Stalled,
-        },
-    };
-    Progress {
-        covered_through: report.covered_through,
-        outcome,
+impl Progress {
+    /// Maps the reference client's report onto the adapter's narrower contract.
+    ///
+    /// A `clamped` pass synced to the publication's end below the wallet's target,
+    /// so even its completion is [`Outcome::Behind`].
+    pub(crate) fn from_sync_report(report: &SyncReport, clamped: bool) -> Self {
+        let outcome = match &report.completion {
+            Completion::Complete if clamped => Outcome::Behind,
+            Completion::Complete => Outcome::Complete,
+            Completion::Incomplete { reason, .. } => match reason {
+                IncompleteReason::QueryBudget
+                | IncompleteReason::ByteBudget
+                | IncompleteReason::PendingLimit => Outcome::More,
+                IncompleteReason::PublicationBehind { .. } => Outcome::Behind,
+                IncompleteReason::Overloaded { .. } => Outcome::Overloaded,
+                IncompleteReason::ChainUnknown { .. }
+                | IncompleteReason::UnresolvedSpends
+                | IncompleteReason::DiscoveryUnbounded => Outcome::Stalled,
+            },
+        };
+        Self {
+            covered_through: report.covered_through,
+            outcome,
+        }
     }
 }

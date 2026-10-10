@@ -79,12 +79,12 @@ fn stale_store_facts_drop_their_shard_instead_of_failing() {
         .map(|entry| Published::of(&adapter.binding, &set, entry).unwrap())
         .collect();
     let chain = StaticChain::from_map(&replaced);
-    let mut facts = Facts::new(&published, &[], None, watch().context().unwrap());
-    facts.open(&published[0], first.commits[0].anchor);
-    let mut stale = catalog::Pass::begin(&mut adapter.catalog, &published, &[]).unwrap();
+    let mut commit_builder = CommitBuilder::new(&published, &[], None, watch().context().unwrap());
+    commit_builder.open_commit(&published[0], first.commits[0].anchor);
+    let mut stale = catalog::CatalogPass::begin(&mut adapter.catalog, &published, &[]).unwrap();
     let range = (sealed.start_height, sealed.end_height);
-    let placed = facts
-        .place(&mut stale, &chain, 0, &sealed.manifest_digest, range)
+    let placed = commit_builder
+        .commit_for(&mut stale, &chain, 0, &sealed.manifest_digest, range)
         .unwrap();
     assert_eq!(
         placed.map(|commit| &commit.revision),
@@ -93,18 +93,18 @@ fn stale_store_facts_drop_their_shard_instead_of_failing() {
     assert_eq!(stale.state(), BatchState::Ready);
     let range = (tail.start_height, tail.end_height);
     assert!(
-        facts
-            .place(&mut stale, &chain, 1, &tail.manifest_digest, range)
+        commit_builder
+            .commit_for(&mut stale, &chain, 1, &tail.manifest_digest, range)
             .unwrap()
             .is_none()
     );
     assert_eq!(stale.state(), BatchState::Pending);
     drop(stale);
-    let mut renamed = catalog::Pass::begin(&mut adapter.catalog, &published, &[]).unwrap();
+    let mut renamed = catalog::CatalogPass::begin(&mut adapter.catalog, &published, &[]).unwrap();
     let range = (sealed.start_height, sealed.end_height);
     assert!(
-        facts
-            .place(&mut renamed, &chain, 1, &sealed.manifest_digest, range)
+        commit_builder
+            .commit_for(&mut renamed, &chain, 1, &sealed.manifest_digest, range)
             .unwrap()
             .is_none()
     );

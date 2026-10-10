@@ -16,15 +16,15 @@ use super::recut::{declaration_conflict, record_epoch, recut_epoch};
 use crate::batch::{BatchState, WithdrawnCause};
 use crate::error::{RecoveryError, failure};
 
-/// One pass's catalog transaction. Dropping it without [`Pass::finish`] changes
+/// One pass's catalog transaction. Dropping it without [`CatalogPass::finish`] changes
 /// nothing.
-pub(crate) struct Pass<'c> {
+pub(crate) struct CatalogPass<'c> {
     tx: Transaction<'c>,
     withdrawn: Option<WithdrawnCause>,
     pending: bool,
 }
 
-impl<'c> Pass<'c> {
+impl<'c> CatalogPass<'c> {
     /// Begins a pass over a map publishing `published` and declaring the sealed
     /// revisions `declared` superseded, marking current every stored row that
     /// either names exactly. A re-cut's sealed revisions stay current: the
@@ -244,7 +244,7 @@ impl<'c> Pass<'c> {
     }
 
     /// Whether a batch before this pass may have handed `revision` to the
-    /// wallet. This pass's own exports are recorded only by [`Pass::export`].
+    /// wallet. This pass's own exports are recorded only by [`CatalogPass::export`].
     pub(crate) fn was_exported(&self, revision: &RecoveryRevision) -> Result<bool, RecoveryError> {
         self.tx
             .query_row(

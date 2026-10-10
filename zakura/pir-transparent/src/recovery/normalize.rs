@@ -13,14 +13,14 @@ use zcash_client_backend::data_api::transparent_ledger::{
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
-use super::commit_builder::Facts;
-use super::page_completion::{complete_stranded, page_id, spans};
-use super::preflight::required_floor;
+use super::commit_builder::CommitBuilder;
+use super::page_completion::{page_continuation_id, ranges_cover, stranded_page_completions};
+use super::preflight::watch_floor;
 use super::{ReferenceRecovery, SCHEMA};
-use crate::batch::{BatchState, RecoveryBatch, unready};
+use crate::batch::{BatchState, RecoveryBatch, unready_batch};
 use crate::catalog::{self, Published};
-use crate::convert::{address_script, block, block_hash, metadata};
-use crate::error::{RecoveryError, failure, require};
+use crate::convert::{address_script, block_hash_from_display, block_height, ledger_metadata};
+use crate::error::{RecoveryError, ensure_valid, failure};
 use crate::progress::Progress;
 
 impl ReferenceRecovery {
@@ -43,9 +43,9 @@ impl ReferenceRecovery {
             // store a publication change reset may have, and this pass read
             // nothing to check that against.
             if catalog::exported_any(&self.catalog)? {
-                return Ok(unready(BatchState::Pending, progress));
+                return Ok(unready_batch(BatchState::Pending, progress));
             }
-            return self.ready(vec![], vec![], progress);
+            return self.issue_ready_batch(vec![], vec![], progress);
         };
         map.check_shape().map_err(failure)?;
         let set = SetIdentity::of_schema(&map, SCHEMA);
@@ -54,9 +54,9 @@ impl ReferenceRecovery {
             // maps continuing the first, so this is never the map a sync ended
             // with. Defer rather than export facts read under another set; the
             // next pass's set check resets the store.
-            return Ok(unready(BatchState::Pending, progress));
+            return Ok(unready_batch(BatchState::Pending, progress));
         }
-        let (published, declarations) = self.revisions(&map, &set)?;
+        let (published, declarations) = self.map_revisions(&map, &set)?;
         // The sealed revisions a re-cut superseded stay the wallet's history.
         // A superseded tail is not: its source's renumbered tail replaces it.
         let declared: Vec<Published> = declarations
@@ -65,7 +65,7 @@ impl ReferenceRecovery {
             .cloned()
             .collect();
         let target = u64::from(u32::from(context.target.height));
-        let floor = required_floor(watch, target);
+        let floor = watch_floor(watch, target);
         // Only shards meeting [floor, target]. One ending below the floor holds
         // nothing the watch set requires, and the wallet holds no hash for it.
         let mut relevant = vec![];
@@ -78,7 +78,7 @@ impl ReferenceRecovery {
             let hash = chain
                 .hash_at(height)
                 .ok_or_else(|| RecoveryError::Invalid("missing independent shard anchor".into()))?;
-            require(
+            ensure_valid(
                 chain.is_accepted(height, &hash) == Acceptance::Accepted,
                 "shard anchor is not independently accepted",
             )?;
@@ -90,22 +90,22 @@ impl ReferenceRecovery {
                 continue;
             }
             let anchor = ChainPoint {
-                height: block(height)?,
-                hash: block_hash(&hash)?,
+                height: block_height(height)?,
+                hash: block_hash_from_display(&hash)?,
             };
             relevant.push((published, anchor));
         }
-        let mut pass = catalog::Pass::begin(&mut self.catalog, &published, &declared)?;
+        let mut pass = catalog::CatalogPass::begin(&mut self.catalog, &published, &declared)?;
         pass.check_declarations(&published, &declarations);
         if off_branch {
             pass.defer();
         }
         let recut_from = map.recuts.last().map(|recut| recut.from_height);
-        let mut facts = Facts::new(&published, &declared, recut_from, context);
+        let mut commit_builder = CommitBuilder::new(&published, &declared, recut_from, context);
         // Highest first, so a withdrawal reports the newest contradiction.
         for (published, anchor) in relevant.into_iter().rev() {
             if pass.classify(published)? {
-                facts.open(published, anchor);
+                commit_builder.open_commit(published, anchor);
             }
         }
         // Stored facts, looked up by the revision they were read under, without
@@ -116,7 +116,7 @@ impl ReferenceRecovery {
             .map(|entry| (address_script(entry.address), entry))
             .collect();
         let events = self.store.events().map_err(failure)?;
-        require(
+        ensure_valid(
             events.len() <= self.config.events,
             "candidate event export limit exceeded",
         )?;
@@ -128,7 +128,7 @@ impl ReferenceRecovery {
             if height < u64::from(u32::from(address.required_from)) || height > target {
                 continue;
             }
-            let Some(commit) = facts.place(
+            let Some(commit) = commit_builder.commit_for(
                 &mut pass,
                 chain,
                 stored.shard_id,
@@ -140,7 +140,7 @@ impl ReferenceRecovery {
             };
             match stored.event {
                 TransparentEvent::Receive(event) => commit.receives.push(ReceiveEvent {
-                    metadata: metadata(event.metadata)?,
+                    metadata: ledger_metadata(event.metadata)?,
                     outpoint: OutPoint::new(event.txid.0, event.output_index),
                     address: address.address,
                     value: Zatoshis::from_u64(event.value).map_err(failure)?,
@@ -148,7 +148,7 @@ impl ReferenceRecovery {
                     mined_height: BlockHeight::from(event.height),
                 }),
                 TransparentEvent::Spend(event) => commit.spends.push(SpendEvent {
-                    metadata: metadata(event.metadata)?,
+                    metadata: ledger_metadata(event.metadata)?,
                     spending_txid: TxId::from_bytes(event.spending_txid.0),
                     input_index: event.input_index,
                     prevout: OutPoint::new(event.spent_txid.0, event.spent_output_index),
@@ -166,7 +166,7 @@ impl ReferenceRecovery {
                 if from > through {
                     continue;
                 }
-                let Some(commit) = facts.place(
+                let Some(commit) = commit_builder.commit_for(
                     &mut pass,
                     chain,
                     range.shard_id,
@@ -178,8 +178,8 @@ impl ReferenceRecovery {
                 };
                 commit.coverage.push(AddressRange {
                     address: address.address,
-                    from: block(from)?,
-                    through: block(through)?,
+                    from: block_height(from)?,
+                    through: block_height(through)?,
                 });
             }
         }
@@ -191,7 +191,7 @@ impl ReferenceRecovery {
             let Some(address) = addresses.get(&page.script) else {
                 continue;
             };
-            let Some(entry) = facts
+            let Some(entry) = commit_builder
                 .published
                 .get(page.revision_digest.as_str())
                 .copied()
@@ -200,7 +200,7 @@ impl ReferenceRecovery {
                 pass.defer();
                 continue;
             };
-            facts.saw(entry);
+            commit_builder.note_published(entry);
             let from = entry
                 .start_height
                 .max(u64::from(u32::from(address.required_from)));
@@ -208,10 +208,10 @@ impl ReferenceRecovery {
             if from > through {
                 continue;
             }
-            let Some(commit) = facts.commits.get_mut(&entry.key()) else {
+            let Some(commit) = commit_builder.commits.get_mut(&entry.key()) else {
                 continue;
             };
-            let id = page_id(
+            let id = page_continuation_id(
                 page.shard_id,
                 &page.revision_digest,
                 &page.script,
@@ -220,19 +220,19 @@ impl ReferenceRecovery {
             commit.opened_pages.push(PageRequest {
                 page: id.clone(),
                 addresses: vec![address.address],
-                from: block(from)?,
-                through: block(through)?,
+                from: block_height(from)?,
+                through: block_height(through)?,
             });
             opened.insert(id);
         }
-        let follows_recut = facts.follows_recut;
-        let mut commits = facts.commits;
+        let follows_recut = commit_builder.follows_recut;
+        let mut commits = commit_builder.commits;
         for page in &watch.pending_pages {
             for commit in commits.values_mut() {
                 if page.revision == commit.revision && !opened.contains(&page.request.page) {
                     // Completion needs coverage, not merely absence of pending work.
                     if page.request.addresses.iter().all(|address| {
-                        spans(
+                        ranges_cover(
                             &commit.coverage,
                             *address,
                             page.request.from,
@@ -292,13 +292,14 @@ impl ReferenceRecovery {
             .collect();
         if state != BatchState::Ready {
             pass.finish(&digests, None)?;
-            return Ok(unready(state, progress));
+            return Ok(unready_batch(state, progress));
         }
         // Completions of pages no commit of their own revision settles follow
         // the commits that cover them. They carry no evidence, so they are not
         // recorded as exported: no later map could succeed their revisions.
         let mut commits = commits;
-        let stranded = complete_stranded(watch, context, &published, &declared, &commits, chain)?;
+        let stranded =
+            stranded_page_completions(watch, context, &published, &declared, &commits, chain)?;
         pass.export(commits.iter().map(|commit| &commit.revision))?;
         // Only a ready pass over a re-cut the store followed moves the epoch:
         // its facts name a revision one of the map's re-cuts superseded, or one
@@ -306,6 +307,6 @@ impl ReferenceRecovery {
         // one naming nothing the store read, cannot hold other maps behind.
         pass.finish(&digests, follows_recut.then(|| map.recut_epoch()))?;
         commits.extend(stranded);
-        self.ready(commits, replaced, progress)
+        self.issue_ready_batch(commits, replaced, progress)
     }
 }

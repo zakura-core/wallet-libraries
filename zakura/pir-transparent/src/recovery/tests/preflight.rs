@@ -31,7 +31,7 @@ fn a_companion_bound_to_another_schema_is_refused() {
             .unwrap()
             .execute(
                 "UPDATE pir_bridge_binding SET value=?1 WHERE key='account-source'",
-                [catalog::binding([
+                [catalog::companion_binding([
                     &config.source,
                     &config.account_binding,
                     config.origin.as_bytes(),

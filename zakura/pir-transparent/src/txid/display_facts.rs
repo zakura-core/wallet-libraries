@@ -10,7 +10,7 @@ use zcash_client_backend::data_api::transparent_ledger::{
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
-use crate::error::{RecoveryError, failure, require};
+use crate::error::{RecoveryError, ensure_valid, failure};
 use transparent_txid_client::{
     Address, AddressKind, DisplayEntry, OUTPUT_SLOTS, Placement, Provenance, Tag, TxidError,
     TxidLookup,
@@ -45,7 +45,7 @@ pub fn display_facts(
     provenance: &Provenance,
     looked_up_height: BlockHeight,
 ) -> Result<TransparentDisplayFacts, RecoveryError> {
-    require(
+    ensure_valid(
         entry.tag == Tag::of(&transparent_events::Txid(*txid.as_ref())),
         "display entry is not the txid's",
     )?;
@@ -57,7 +57,7 @@ pub fn display_facts(
         ),
     };
     let held = (entry.output_count as usize).min(OUTPUT_SLOTS);
-    require(
+    ensure_valid(
         entry.outputs[held..].iter().all(Option::is_none),
         "display output beyond the output count",
     )?;
@@ -92,7 +92,7 @@ pub fn display_facts(
             looked_up_height,
         },
     };
-    require(
+    ensure_valid(
         facts.is_well_formed(),
         "display entry disagrees with itself",
     )?;

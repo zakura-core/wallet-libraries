@@ -8,11 +8,16 @@ fn spans_needs_contiguous_coverage_of_the_address() {
     );
     let range = |address, from: u64, through: u64| AddressRange {
         address,
-        from: block(from).unwrap(),
-        through: block(through).unwrap(),
+        from: block_height(from).unwrap(),
+        through: block_height(through).unwrap(),
     };
     let covers = |ranges: &[AddressRange], from, through| {
-        spans(ranges, ours, block(from).unwrap(), block(through).unwrap())
+        ranges_cover(
+            ranges,
+            ours,
+            block_height(from).unwrap(),
+            block_height(through).unwrap(),
+        )
     };
     // Adjacent ranges, in any order, cover their union.
     let adjacent = [range(ours, 20, 29), range(ours, 10, 19)];
@@ -33,12 +38,12 @@ fn spans_needs_contiguous_coverage_of_the_address() {
 
 #[test]
 fn page_continuation_identity_binds_revision_script_shard_and_first_row() {
-    let first = page_id(0, "aa", &[1], 2);
+    let first = page_continuation_id(0, "aa", &[1], 2);
     for other in [
-        page_id(1, "aa", &[1], 2),
-        page_id(0, "bb", &[1], 2),
-        page_id(0, "aa", &[2], 2),
-        page_id(0, "aa", &[1], 3),
+        page_continuation_id(1, "aa", &[1], 2),
+        page_continuation_id(0, "bb", &[1], 2),
+        page_continuation_id(0, "aa", &[2], 2),
+        page_continuation_id(0, "aa", &[1], 3),
     ] {
         assert_ne!(first, other);
     }

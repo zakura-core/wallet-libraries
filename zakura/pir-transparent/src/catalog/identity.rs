@@ -6,12 +6,12 @@ use transparent_filter::{ShardMapEntry, SupersededShard};
 use transparent_wallet::SetIdentity;
 use zcash_client_backend::data_api::transparent_ledger::{PublicationAnchor, RecoveryRevision};
 
-use crate::convert::{block, block_hash};
+use crate::convert::{block_hash_from_display, block_height};
 use crate::error::{RecoveryError, failure};
 
 /// The companion's binding: length-prefixed source, account binding, origin and
 /// schema. Every source this companion derives includes it.
-pub(crate) fn binding(parts: [&[u8]; 4]) -> [u8; 32] {
+pub(crate) fn companion_binding(parts: [&[u8]; 4]) -> [u8; 32] {
     let mut hash = Sha256::new();
     for value in parts {
         length_prefixed(&mut hash, value);
@@ -95,15 +95,15 @@ impl Published {
             digest: shape.digest.to_owned(),
             terminal: shape.terminal.to_owned(),
             revision: RecoveryRevision {
-                source: source(binding, set, shape.geometry, shape.start_height)?.to_vec(),
-                revision: revision(shape.digest, shape.sealed).to_vec(),
+                source: source_identity(binding, set, shape.geometry, shape.start_height)?.to_vec(),
+                revision: revision_identity(shape.digest, shape.sealed).to_vec(),
                 // The publisher's revision number, offset so a first
                 // publication is lineage 1.
                 lineage: u64::from(shape.revision) + 1,
                 sealed: shape.sealed,
                 publication: PublicationAnchor {
-                    height: block(shape.end_height)?,
-                    hash: block_hash(shape.terminal)?,
+                    height: block_height(shape.end_height)?,
+                    hash: block_hash_from_display(shape.terminal)?,
                 },
             },
         })
@@ -147,7 +147,7 @@ struct Shape<'a> {
 /// under another geometry, gets new sources. A set growing into a new geometry
 /// tier changes no existing source, and a set-identity change `continues`
 /// refuses changes every source it affects.
-pub(crate) fn source(
+pub(crate) fn source_identity(
     binding: &[u8; 32],
     set: &SetIdentity,
     geometry: &str,
@@ -175,7 +175,7 @@ pub(crate) fn source(
 }
 
 /// A shard revision's identity: its manifest digest and whether it is sealed.
-fn revision(digest: &str, sealed: bool) -> [u8; 32] {
+fn revision_identity(digest: &str, sealed: bool) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(b"transparent-reference-revision-v2");
     hash.update(digest.as_bytes());

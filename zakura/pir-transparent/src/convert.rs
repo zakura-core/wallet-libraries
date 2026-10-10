@@ -8,7 +8,7 @@ use zcash_client_backend::data_api::transparent_ledger::{
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
-use crate::error::{RecoveryError, failure, require};
+use crate::error::{RecoveryError, ensure_valid, failure};
 
 pub(crate) fn address_script(address: TransparentAddress) -> Vec<u8> {
     match address {
@@ -21,18 +21,18 @@ pub(crate) fn address_script(address: TransparentAddress) -> Vec<u8> {
     }
 }
 
-pub(crate) fn block(height: u64) -> Result<BlockHeight, RecoveryError> {
+pub(crate) fn block_height(height: u64) -> Result<BlockHeight, RecoveryError> {
     Ok(BlockHeight::from(u32::try_from(height).map_err(failure)?))
 }
 
-pub(crate) fn block_hash(display: &str) -> Result<BlockHash, RecoveryError> {
+pub(crate) fn block_hash_from_display(display: &str) -> Result<BlockHash, RecoveryError> {
     let mut bytes = hex::decode(display).map_err(failure)?;
-    require(bytes.len() == 32, "invalid publication block hash")?;
+    ensure_valid(bytes.len() == 32, "invalid publication block hash")?;
     bytes.reverse();
     Ok(BlockHash::from_slice(&bytes))
 }
 
-pub(crate) fn metadata(
+pub(crate) fn ledger_metadata(
     meta: Option<transparent_events::TransactionMetadata>,
 ) -> Result<Option<TransactionMetadata>, RecoveryError> {
     meta.map(|meta| {

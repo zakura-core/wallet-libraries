@@ -13,12 +13,12 @@ use transparent_wallet::{Acceptance, Anchor, ChainView, WalletStore};
 /// one whose facts the sync stored. It caches no filter: prefetching, and
 /// dropping what an earlier prefetch left unused when the next one starts or
 /// the map is fetched, as [`FilterSource`] requires, stay with the inner source.
-pub(super) struct Recorded<'a, F> {
+pub(super) struct RecordingFilterSource<'a, F> {
     inner: &'a mut F,
     map: Vec<u8>,
 }
 
-impl<'a, F: FilterSource> Recorded<'a, F> {
+impl<'a, F: FilterSource> RecordingFilterSource<'a, F> {
     /// Fetches the map a pass starts from, with what it cost.
     pub(super) fn fetch(inner: &'a mut F) -> Result<(Self, u64), BoxError> {
         let (map, cost) = inner.shard_map()?;
@@ -31,7 +31,7 @@ impl<'a, F: FilterSource> Recorded<'a, F> {
     }
 }
 
-impl<F: FilterSource> FilterSource for Recorded<'_, F> {
+impl<F: FilterSource> FilterSource for RecordingFilterSource<'_, F> {
     fn uses_parents(&self) -> bool {
         self.inner.uses_parents()
     }
@@ -104,17 +104,17 @@ impl<F: FilterSource> FilterSource for Recorded<'_, F> {
 /// Nothing below the floor is exported or cataloged (see `normalize`), and the
 /// target and every shard anchor are checked against the caller's chain alone.
 /// Re-verify these call sites on every wallet-pir pin bump.
-pub(super) struct BelowFloor<'a, C> {
+pub(super) struct FloorAcceptingChain<'a, C> {
     pub(super) chain: &'a C,
     /// The floor: every block below it is accepted.
-    pub(super) below: u64,
+    pub(super) floor: u64,
     /// The map's genesis hash, already checked to be mainnet's.
-    pub(super) genesis: &'a str,
+    pub(super) genesis_hash: &'a str,
 }
 
-impl<C: ChainView> ChainView for BelowFloor<'_, C> {
+impl<C: ChainView> ChainView for FloorAcceptingChain<'_, C> {
     fn is_accepted(&self, height: u64, hash_display_hex: &str) -> Acceptance {
-        if height < self.below {
+        if height < self.floor {
             Acceptance::Accepted
         } else {
             self.chain.is_accepted(height, hash_display_hex)
@@ -126,8 +126,8 @@ impl<C: ChainView> ChainView for BelowFloor<'_, C> {
     }
 
     fn hash_at(&self, height: u64) -> Option<String> {
-        if height < self.below {
-            (height == 0).then(|| self.genesis.to_owned())
+        if height < self.floor {
+            (height == 0).then(|| self.genesis_hash.to_owned())
         } else {
             self.chain.hash_at(height)
         }

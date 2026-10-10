@@ -37,8 +37,8 @@ fn a_withdrawn_batch_waits_for_new_work() {
             outcome,
         },
         state,
-        replaced: Vec::new(),
-        token: [0; 32],
+        retired_revisions: Vec::new(),
+        receipt: [0; 32],
     };
     for outcome in [
         Outcome::Complete,
