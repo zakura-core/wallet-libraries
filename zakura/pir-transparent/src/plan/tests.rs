@@ -1,6 +1,6 @@
 use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::transparent_ledger::{
-    AccountLifecycle, ChainPoint, WatchOrigin, WatchedAddress,
+    AccountLifecycle, ChainPoint, CommitRejection, StaleCommit, WatchOrigin, WatchedAddress,
 };
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::BlockHeight;
@@ -82,6 +82,14 @@ fn applied(window_grew: bool) -> Result<Option<Applied>, ApplyFailure> {
     }))
 }
 
+/// A settlement the wallet refused as stale for the pass's watch set.
+fn stale() -> ApplyError {
+    ApplyError::Rejected {
+        index: 0,
+        rejection: CommitRejection::Stale(StaleCommit::LifecycleChanged),
+    }
+}
+
 fn failed(error: ApplyError) -> Result<Option<Applied>, ApplyFailure> {
     Err(ApplyFailure {
         error,
@@ -93,10 +101,11 @@ fn failed(error: ApplyError) -> Result<Option<Applied>, ApplyFailure> {
 /// A settlement failure of each action.
 fn failures() -> Vec<(ApplyAction, ApplyError)> {
     vec![
-        (ApplyAction::Refresh, ApplyError::PolicyChanged),
+        (ApplyAction::Refresh, stale()),
         (ApplyAction::Reconcile, ApplyError::Unreconciled),
         (ApplyAction::Skip, ApplyError::StaleReceipt),
         (ApplyAction::NotEnabled, ApplyError::NotEnabled),
+        (ApplyAction::PolicyChanged, ApplyError::PolicyChanged),
         (ApplyAction::Fail, ApplyError::OuterTransaction),
         (ApplyAction::Interrupted, ApplyError::Interrupted),
     ]
@@ -139,8 +148,9 @@ fn every_failed_settlement_has_its_step() {
             ApplyAction::Reconcile => Step::Hold(HoldCause::Unreconciled),
             ApplyAction::Skip => Step::Skip,
             ApplyAction::NotEnabled => Step::Stop(StopCause::NotEnabled),
+            ApplyAction::PolicyChanged => Step::Stop(StopCause::PolicyChanged),
             ApplyAction::Fail => Step::Fail,
-            ApplyAction::Interrupted => Step::Stop(StopCause::Interrupted),
+            ApplyAction::Interrupted => Step::Skip,
         };
         let settled = failed(error);
         assert_eq!(settled.as_ref().unwrap_err().action(), action);
@@ -162,7 +172,7 @@ fn every_failed_settlement_has_its_step() {
 #[test]
 fn stale_settlements_refresh_a_bounded_number_of_times() {
     let ready = report(BatchState::Ready, Outcome::Complete);
-    let stale = failed(ApplyError::PolicyChanged);
+    let stale = failed(stale());
     let mut plan = new_plan();
     for _ in 0..PassLimits::default().stale_refreshes {
         assert_eq!(plan.next(&ready, &stale, watch(1, false)), Step::Refresh);
@@ -187,6 +197,63 @@ fn stale_settlements_refresh_a_bounded_number_of_times() {
         Step::Pass
     );
     assert_eq!(plan.next(&ready, &stale, watch(1, false)), Step::Skip);
+}
+
+/// A settlement the caller's gate interrupted skips only the account, never the run:
+/// whichever budget ran out, the caller checks its own cancellation before the next
+/// pass. It does not count as a pass, and the next run replays the rest.
+#[test]
+fn an_interrupted_settlement_skips_only_the_account() {
+    let interrupted = failed(ApplyError::Interrupted);
+    for outcome in OUTCOMES {
+        let mut plan = new_plan();
+        let step = plan.next(
+            &report(BatchState::Ready, outcome),
+            &interrupted,
+            watch(2, false),
+        );
+        assert_eq!(step, Step::Skip, "{outcome:?}");
+        assert_eq!(plan.passes(), 0);
+    }
+}
+
+/// A changed policy generation stops the run at once, never refreshes: the policy the
+/// run captured may no longer permit private queries. It does not use up the stale
+/// refreshes, which stale commits still take.
+#[test]
+fn a_changed_policy_stops_the_run() {
+    let ready = report(BatchState::Ready, Outcome::Complete);
+    let changed = failed(ApplyError::PolicyChanged);
+    for targetless in [false, true] {
+        let mut plan = new_plan();
+        assert_eq!(
+            plan.next(&ready, &changed, watch(1, targetless)),
+            Step::Stop(StopCause::PolicyChanged)
+        );
+        assert_eq!(plan.passes(), 0);
+    }
+    // After stale refreshes too.
+    let mut plan = new_plan();
+    assert_eq!(
+        plan.next(&ready, &failed(stale()), watch(1, false)),
+        Step::Refresh
+    );
+    assert_eq!(
+        plan.next(&ready, &changed, watch(1, false)),
+        Step::Stop(StopCause::PolicyChanged)
+    );
+    // Stale commits still refresh, up to the cap.
+    let mut plan = new_plan();
+    for _ in 0..PassLimits::default().stale_refreshes {
+        assert_eq!(
+            plan.next(&ready, &failed(stale()), watch(1, false)),
+            Step::Refresh
+        );
+    }
+    assert_eq!(
+        plan.next(&ready, &failed(stale()), watch(1, false)),
+        Step::Skip
+    );
 }
 
 /// A ready batch nobody settled cannot be acknowledged by this plan.

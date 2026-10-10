@@ -220,8 +220,13 @@ what follows from the pass, its settlement and the re-read watch set: pass
 again to continue a budget, cover a grown window or changed addresses; wait for
 a lagging or busy service; hold an account whose publication contradicts the
 cache or whose replaced revisions need trusted reconciliation; skip it for this
-run; or stop. Vizor keeps the time budgets, how long a hold lasts, which
-accounts to visit, the trust decision, cancellation and activation.
+run, also when the write gate stopped its settlement because the account's time
+ran out; or stop the run, when private recovery is not enabled or the wallet's
+policy changed during the run (for example, private queries were turned off),
+since no further private pass may run until the next sync reads the policy
+again. Vizor keeps the time budgets, how long a hold lasts, which accounts to
+visit, the trust decision, cancellation and activation. Discovery and opening
+the cache classify their failures by the same outage rule as a pass.
 
 Private recovery follows foreground sync, then refreshes balances and Activity.
 Vizor visits the selected account first and rotates others. Retrieval has time
@@ -359,7 +364,9 @@ keeps only transport, scheduling, cancellation, and its write lock:
 3. Each `Lookup` runs with no wallet lock held. `record` turns its result into
    one write: display facts to validate and store, a deferral naming the map
    the lookup used, or, under public transport only, the raw transaction. A
-   cancelled lookup is not an attempt and writes nothing.
+   lookup the run's time budget cut off counts as an unavailable attempt and
+   backs off, so one slow lookup cannot take every run; a lookup cancelled
+   because the application is exiting is not an attempt and writes nothing.
 4. `DetailWrite::apply` stores or defers under the caller's write lock and hands
    a raw transaction back: the application stores it through ordinary
    transaction ingestion, re-checking its policy in the same wallet transaction.

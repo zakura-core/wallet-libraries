@@ -4,6 +4,24 @@
 
 ### Changed
 
+- `PassPlan::next` skips the account (`Step::Skip`) after a settlement the
+  caller's `WriteGate` interrupted, instead of stopping the run. A gate stops a
+  settlement when one account's time budget runs out as well as when the run is
+  cancelled; the caller checks its own cancellation before the next pass, so a
+  cancelled run still stops. `StopCause::Interrupted` is removed.
+- A changed policy generation (`ApplyError::PolicyChanged`) is its own
+  `ApplyAction::PolicyChanged` and stops the run with
+  `StopCause::PolicyChanged`, instead of refreshing like a stale commit: once
+  private queries are turned off mid-run no further private pass may run, and
+  the next run captures the policy again. Stale commits still refresh up to
+  `PassLimits::stale_refreshes`. Callers matching `ApplyAction` or `StopCause`
+  exhaustively add the new variant.
+- `DetailAnswer::TimedOut` records a txid detail lookup the caller's run budget
+  stopped as an `Unavailable` deferral, so it backs off (30 seconds, doubling up
+  to an hour) instead of staying first in every listing and taking every run.
+  `DetailAnswer::Cancelled` stays for a caller that is exiting and writes
+  nothing.
+
 - Rename the account recovery module to `transparent_history_recovery`,
   `ReferenceRecovery` to `TransparentHistoryRecovery`, and `RecoveryConfig` to
   `TransparentHistoryRecoveryConfig`. Callers still supply already-derived
@@ -18,6 +36,8 @@
   still held fails with `ForgetError::CompanionBusy` and forgets nothing; a
   wallet not public fails with `ForgetError::NotPublic` before anything is
   deleted, and also when the policy is raised after the companions went.
+- `PassError::classify` is the outage rule `pass` applies, public so wallets
+  classify `discover_active_addresses` and `Companion::open` failures alike.
 - One recovery pass driver, so wallets stop writing their own loop.
   `TransparentHistoryRecovery::pass` runs `recover` over a fresh `TransparentPirHttp` on
   the caller's `HttpExchange`, retries once after
@@ -28,7 +48,7 @@
   `apply_and_acknowledge_gated`, and `PassPlan` is the pure decision table that
   turns a pass, its settlement and the re-read watch set into the next `Step`:
   pass, refresh, wait, hold (`HoldCause::Withdrawn`, `Unreconciled`), skip,
-  stop (`StopCause::NotEnabled`, `Interrupted`), fail, or done with the last
+  stop (`StopCause::NotEnabled`, `PolicyChanged`), fail, or done with the last
   retry, within `PassLimits` (8 passes, 3 stale refreshes by default).
   `recover-activity` now requires feature `sqlite` and runs on the driver, and
   the end-to-end tests drive every pass through it.

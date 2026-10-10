@@ -2055,6 +2055,7 @@ fn a_policy_change_while_acknowledgment_waits_keeps_the_batch_unacknowledged() {
         matches!(failure.error, ApplyError::PolicyChanged),
         "{failure:?}"
     );
+    assert_eq!(failure.action(), ApplyAction::PolicyChanged);
     assert_eq!(failure.stats.qualified, commits);
     assert!(f.st.wallet().db().is_autocommit());
     let facts = f.dump(true);

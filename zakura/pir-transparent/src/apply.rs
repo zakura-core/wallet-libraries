@@ -157,8 +157,7 @@ pub struct ApplyFailure {
 /// committed prefix applied, and the account's next pass replays the batch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApplyAction {
-    /// A commit was stale, or the policy generation changed: pass again from a fresh
-    /// watch set.
+    /// A commit was stale: pass again from a fresh watch set.
     Refresh,
     /// The batch resolves retired revisions and its commits were only observed: stop
     /// passing the account until a trusted pass can reconcile them.
@@ -169,6 +168,12 @@ pub enum ApplyAction {
     Skip,
     /// The handle or the durable policy does not permit this recovery: stop recovering.
     NotEnabled,
+    /// The wallet's policy generation changed after the pass read its watch set: stop
+    /// recovering. The policy the run captured is no longer the wallet's, perhaps because
+    /// the user turned private queries off, so no further private pass may run on it; the
+    /// next run captures the policy again. Unlike [`ApplyAction::NotEnabled`], the new
+    /// policy may still permit recovery.
+    PolicyChanged,
     /// The wallet failed, or its connection was inside a transaction: report it.
     Fail,
     /// The caller's [`WriteGate`] stopped the batch between wallet writes: the caller
@@ -183,8 +188,8 @@ impl ApplyFailure {
             ApplyError::Rejected {
                 rejection: CommitRejection::Stale(_),
                 ..
-            }
-            | ApplyError::PolicyChanged => ApplyAction::Refresh,
+            } => ApplyAction::Refresh,
+            ApplyError::PolicyChanged => ApplyAction::PolicyChanged,
             ApplyError::Unreconciled => ApplyAction::Reconcile,
             ApplyError::Rejected { .. }
             | ApplyError::Acknowledge(_)
@@ -426,7 +431,7 @@ mod tests {
                 rejected(CommitRejection::Stale(StaleCommit::LifecycleChanged)),
                 A::Refresh,
             ),
-            (ApplyError::PolicyChanged, A::Refresh),
+            (ApplyError::PolicyChanged, A::PolicyChanged),
             (ApplyError::Unreconciled, A::Reconcile),
             (
                 rejected(CommitRejection::Integrity(
