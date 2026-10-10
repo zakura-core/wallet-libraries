@@ -267,20 +267,18 @@ pub(super) fn apply_payment<P: Parameters>(
     );
     let tx_ref = wallet::put_tx_meta(conn, &tx, candidate.height)?;
     let spent_in = if let SpendStatus::Spent(txid) = spent {
-        let existing: Option<i64> = conn
-            .query_row(
-                "SELECT id_tx FROM transactions WHERE txid = ?1",
-                [txid.as_ref()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let spending = match existing {
-            Some(id) => Some(crate::TxRef(id)),
-            None => wallet::query_nullifier_map(
-                conn,
-                ShieldedPool::Ironwood,
-                &recovered.nullifier().to_bytes(),
-            )?,
+        // The map also records the spend's canonical height and index on a stored row,
+        // which may be unmined. A linked spend has no map entry (see `spend_status`).
+        let nf = recovered.nullifier().to_bytes();
+        let spending = match wallet::query_nullifier_map(conn, ShieldedPool::Ironwood, &nf)? {
+            Some(id) => Some(id),
+            None => conn
+                .query_row(
+                    "SELECT id_tx FROM transactions WHERE txid = ?1",
+                    [txid.as_ref()],
+                    |r| r.get(0).map(crate::TxRef),
+                )
+                .optional()?,
         };
         Some(spending.ok_or_else(|| corrupt("verified dynamic-key spend lost its transaction"))?)
     } else {

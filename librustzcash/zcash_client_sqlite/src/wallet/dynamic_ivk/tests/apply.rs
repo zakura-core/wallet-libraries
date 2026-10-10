@@ -128,6 +128,36 @@ fn directory_payment_applies_unscanned_key_note_atomically_and_reopens() {
     );
 }
 
+/// The path of the chain's first Ironwood leaf at the cached tip.
+fn first_leaf_witness(st: &State) -> MerklePath {
+    let mut tree =
+        incrementalmerkletree::frontier::CommitmentTree::<MerkleHashOrchard, 32>::empty();
+    let mut witness = None;
+    let mut stmt = st
+        .cache()
+        .0
+        .prepare("SELECT data FROM compactblocks ORDER BY height")
+        .unwrap();
+    for block in stmt.query_map([], |r| r.get::<_, Vec<u8>>(0)).unwrap() {
+        let block = CompactBlock::decode(block.unwrap().as_slice()).unwrap();
+        for tx in block.vtx {
+            for action in tx.ironwood_actions {
+                let cmx = MerkleHashOrchard::from_cmx(&action.cmx().unwrap());
+                match &mut witness {
+                    None => {
+                        tree.append(cmx).unwrap();
+                        witness = incrementalmerkletree::witness::IncrementalWitness::from_tree(
+                            tree.clone(),
+                        );
+                    }
+                    Some(witness) => witness.append(cmx).unwrap(),
+                }
+            }
+        }
+    }
+    witness.unwrap().path().unwrap().into()
+}
+
 #[test]
 fn directory_payment_imports_an_already_spent_note_without_crediting_it() {
     use zcash_keys::address::{Address, UnifiedAddress};
@@ -152,33 +182,7 @@ fn directory_payment_imports_an_already_spent_note_without_crediting_it() {
         );
         st.scan_cached_blocks_with_dynamic_ivks(height, 1);
         let through = tip(&st);
-        let mut tree =
-            incrementalmerkletree::frontier::CommitmentTree::<MerkleHashOrchard, 32>::empty();
-        let mut witness = None;
-        let mut stmt = st
-            .cache()
-            .0
-            .prepare("SELECT data FROM compactblocks ORDER BY height")
-            .unwrap();
-        for block in stmt.query_map([], |r| r.get::<_, Vec<u8>>(0)).unwrap() {
-            let block = CompactBlock::decode(block.unwrap().as_slice()).unwrap();
-            for tx in block.vtx {
-                for action in tx.ironwood_actions {
-                    let cmx = MerkleHashOrchard::from_cmx(&action.cmx().unwrap());
-                    match &mut witness {
-                        None => {
-                            tree.append(cmx).unwrap();
-                            witness = incrementalmerkletree::witness::IncrementalWitness::from_tree(
-                                tree.clone(),
-                            );
-                        }
-                        Some(witness) => witness.append(cmx).unwrap(),
-                    }
-                }
-            }
-        }
-        drop(stmt);
-        let proof: MerklePath = witness.unwrap().path().unwrap().into();
+        let proof = first_leaf_witness(&st);
         if pruned {
             retain(st.wallet_mut().db_mut(), account);
             st.wallet()
@@ -244,6 +248,175 @@ fn directory_payment_imports_an_already_spent_note_without_crediting_it() {
                 .all(|n| n.note().nullifier(key.full_viewing_key()) != *recovered.nullifier())
         );
     }
+}
+
+/// A spending transaction stored unmined, with no output compact scanning finds, gets
+/// its canonical height and index from the nullifier map when the note is imported, so
+/// the spend does not expire with the unmined row.
+#[test]
+fn directory_payment_reconciles_an_unmined_spending_transaction() {
+    use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
+    use zcash_keys::address::{Address, UnifiedAddress};
+    let (mut st, key, candidate, _, _) = fixture();
+    let account = st.test_account().unwrap().id();
+    let recovered = candidate
+        .encrypted_note
+        .decrypt(
+            &FullViewingKey::from(st.test_account().unwrap().usk().orchard()),
+            key.key_id(),
+        )
+        .unwrap();
+    let external =
+        FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap())
+            .address_at(0u32, Scope::External);
+    let (height, _) = st.generate_next_block_spending(
+        &IronwoodFvk(key.full_viewing_key().clone()),
+        (*recovered.nullifier(), Zatoshis::const_from_u64(100_000)),
+        Address::Unified(UnifiedAddress::from_receivers(Some(external), None, None).unwrap()),
+        Zatoshis::const_from_u64(20_000),
+    );
+    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    let through = tip(&st);
+    let proof = first_leaf_witness(&st);
+    let data: Vec<u8> = st
+        .cache()
+        .0
+        .query_row(
+            "SELECT data FROM compactblocks WHERE height = ?1",
+            [u32::from(height)],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let spend = &CompactBlock::decode(data.as_slice()).unwrap().vtx[0];
+    let spend_txid = spend.txid();
+    assert!(!has_transaction(&st, spend_txid));
+    // Observed unmined, expiring at the next block.
+    let row: i64 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "INSERT INTO transactions
+                (txid, min_observed_height, expiry_height, confirmed_unmined_at_height)
+             VALUES (?1, ?2, ?3, ?2) RETURNING id_tx",
+            rusqlite::params![
+                spend_txid.as_ref(),
+                u32::from(candidate.height),
+                u32::from(height + 1)
+            ],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        apply_payment(
+            st.wallet_mut().db_mut(),
+            account,
+            key.key_id(),
+            &candidate,
+            through,
+            (through, &proof)
+        )
+        .unwrap(),
+        PaymentApplication::Applied
+    );
+    let stored: (i64, Option<u32>, Option<u32>, Option<u32>) = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT id_tx, mined_height, tx_index, confirmed_unmined_at_height
+             FROM transactions WHERE txid = ?1",
+            [spend_txid.as_ref()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        stored,
+        (
+            row,
+            Some(u32::from(height)),
+            Some(u32::try_from(spend.index).unwrap()),
+            None
+        )
+    );
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(3);
+    let summary = st.get_wallet_summary(ConfirmationsPolicy::MIN).unwrap();
+    let balance = summary.account_balances().get(&account).unwrap();
+    assert_eq!(balance.ironwood_balance().total(), Zatoshis::ZERO);
+}
+
+/// Scanning removes a known note's spend from the nullifier map, so an answer for a
+/// scanned and spent note links the stored spending transaction instead.
+#[test]
+fn directory_payment_keeps_a_scanned_spend_without_a_map_entry() {
+    use zcash_keys::address::{Address, UnifiedAddress};
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let birthday = st.sapling_activation_height();
+    let key = reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, birthday);
+    let candidate = pay_candidate(&mut st, key.key_id());
+    let nf = candidate
+        .encrypted_note
+        .decrypt(
+            &FullViewingKey::from(st.test_account().unwrap().usk().orchard()),
+            key.key_id(),
+        )
+        .unwrap()
+        .nullifier()
+        .to_bytes();
+    let external =
+        FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap())
+            .address_at(0u32, Scope::External);
+    let (height, _) = st.generate_next_block_spending(
+        &IronwoodFvk(key.full_viewing_key().clone()),
+        (
+            orchard::note::Nullifier::from_bytes(&nf).unwrap(),
+            Zatoshis::const_from_u64(100_000),
+        ),
+        Address::Unified(UnifiedAddress::from_receivers(Some(external), None, None).unwrap()),
+        Zatoshis::const_from_u64(20_000),
+    );
+    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    let mapped: u64 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM nullifier_map WHERE nf = ?1",
+            [nf],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(mapped, 0);
+    let through = tip(&st);
+    let proof = first_leaf_witness(&st);
+    let db = st.wallet_mut().db_mut();
+    queue_payment(db, account, key.key_id(), &candidate).unwrap();
+    assert_eq!(
+        apply_payment(
+            db,
+            account,
+            key.key_id(),
+            &candidate,
+            through,
+            (through, &proof)
+        )
+        .unwrap(),
+        PaymentApplication::Applied
+    );
+    let spent_at: Vec<u32> = {
+        let mut stmt = st
+            .wallet()
+            .conn()
+            .prepare(
+                "SELECT t.mined_height FROM ironwood_received_note_spends s
+                 JOIN ironwood_received_notes n ON n.id = s.ironwood_received_note_id
+                 JOIN transactions t ON t.id_tx = s.transaction_id WHERE n.nf = ?1",
+            )
+            .unwrap();
+        stmt.query_map([nf], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(spent_at, [u32::from(height)]);
 }
 
 #[test]
