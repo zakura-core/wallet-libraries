@@ -360,6 +360,12 @@ applicable filter and privately confirms matches. False positives alone never
 report a candidate as active. A receive or spend at or above the floor counts,
 including a spend of an output received earlier.
 
+A pass its private budget stops after confirming a candidate is followed by one
+over the candidates not yet confirmed, from the same map and with the filters
+already downloaded, so a heavily used address cannot spend the whole budget on
+its own history. The limits bound each pass, and there are at most as many
+passes as candidates. `More` means a pass stopped with nothing new confirmed.
+
 There is no wallet, durable companion, catalog, or independent wallet chain in
 this operation. The publication supplies its own chain view because discovery
 only proposes accounts. The caller imports those accounts and recovers them

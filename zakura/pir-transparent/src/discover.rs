@@ -67,6 +67,14 @@ pub struct Discovery {
 /// without further requests. A floor above the publication's end is
 /// [`Outcome::Behind`] with nothing found, after only the map was fetched.
 ///
+/// A pass the private budget stops after confirming a candidate is followed
+/// by one over the candidates not yet confirmed, from the same map and with the
+/// filters already downloaded, until a pass completes, confirms nothing new, or
+/// every candidate is confirmed: `limits` bound each pass, and there are at
+/// most as many passes as candidates. A heavily used address would otherwise
+/// spend the whole budget on its own history. [`Outcome::More`] means a pass
+/// stopped by its budget confirmed nothing new.
+///
 /// The requests depend on the floor and the publication, never on which
 /// candidate a filter matched, except for the private retrieval that confirms
 /// a match, which reveals the matched shard as a recovery pass does, and, from
@@ -141,74 +149,129 @@ pub fn discover_active_addresses<F: FilterSource, T: ShardTransport>(
     };
     let geometry = service_geometry(transport)?;
     let chain = PublicationChain::of(&map);
-    let mut store = MemoryStore::new();
-    let mut candidates = StaticScripts(
-        scripts
-            .iter()
-            .map(|script| ScriptEntry {
-                script: script.clone(),
-                origin: ScriptOrigin::Derived,
-                required_from: floor,
-            })
-            .collect(),
-    );
     let work = WorkLimits {
         max_queries: Some(limits.queries),
         max_private_bytes: Some(limits.private_bytes),
     };
-    let report = match transparent_wallet::sync_into(
-        &mut store,
-        &map,
-        map_bytes,
-        &geometry,
-        &chain,
-        &mut candidates,
-        filters,
-        transport,
-        &work,
-        &target,
-    ) {
-        Ok(report) => report,
-        // A map refreshed mid-pass that does not continue the first: a later
-        // discovery starts from the publication it then finds.
-        Err(SyncError::MapDiverged(_)) => {
-            return Ok(Discovery {
-                active: Vec::new(),
-                progress: Progress {
-                    covered_through: 0,
-                    outcome: Outcome::Behind,
-                },
-            });
-        }
-        Err(other) => return Err(failure(other)),
-    };
-    let progress = match report.completion {
-        // Reported only once every candidate is covered through the target with
-        // no page left: a spend of an output paid below the floor, which no
-        // candidate's history from the floor on can resolve. Its spend is the
-        // history discovery asks about.
-        Completion::Incomplete {
-            reason: IncompleteReason::UnresolvedSpends,
-            ..
-        } => Progress {
-            covered_through: report.covered_through,
-            outcome: Outcome::Complete,
-        },
-        _ => Progress::from_sync_report(&report, false),
-    };
     let range = floor..=target.height;
-    let events = store.events().map_err(failure)?;
-    let active = scripts
-        .iter()
-        .enumerate()
-        .filter(|(_, script)| {
-            events.iter().any(|stored| {
-                stored.script == **script && range.contains(&u64::from(stored.event.height()))
+    let mut found = BTreeSet::new();
+    let mut remaining: Vec<usize> = (0..scripts.len()).collect();
+    let mut previous: Option<MemoryStore> = None;
+    loop {
+        // Each pass starts from a fresh store, so only the remaining candidates
+        // are planned, but keeps the filters earlier passes downloaded: they
+        // are public and the same for every candidate.
+        let mut store = MemoryStore::new();
+        if let Some(previous) = &previous {
+            carry_filters(previous, &mut store, &map).map_err(failure)?;
+        }
+        let mut candidates = StaticScripts(
+            remaining
+                .iter()
+                .map(|&at| ScriptEntry {
+                    script: scripts[at].clone(),
+                    origin: ScriptOrigin::Derived,
+                    required_from: floor,
+                })
+                .collect(),
+        );
+        let report = match transparent_wallet::sync_into(
+            &mut store,
+            &map,
+            map_bytes,
+            &geometry,
+            &chain,
+            &mut candidates,
+            filters,
+            transport,
+            &work,
+            &target,
+        ) {
+            Ok(report) => report,
+            // A map refreshed mid-pass that does not continue the first: a later
+            // discovery starts from the publication it then finds.
+            Err(SyncError::MapDiverged(_)) => {
+                return Ok(Discovery {
+                    active: found.into_iter().collect(),
+                    progress: Progress {
+                        covered_through: 0,
+                        outcome: Outcome::Behind,
+                    },
+                });
+            }
+            Err(other) => return Err(failure(other)),
+        };
+        let progress = match report.completion {
+            // Reported only once every candidate is covered through the target
+            // with no page left: a spend of an output paid below the floor,
+            // which no candidate's history from the floor on can resolve. Its
+            // spend is the history discovery asks about.
+            Completion::Incomplete {
+                reason: IncompleteReason::UnresolvedSpends,
+                ..
+            } => Progress {
+                covered_through: report.covered_through,
+                outcome: Outcome::Complete,
+            },
+            _ => Progress::from_sync_report(&report, false),
+        };
+        let events = store.events().map_err(failure)?;
+        let confirmed: BTreeSet<usize> = remaining
+            .iter()
+            .copied()
+            .filter(|&at| {
+                events.iter().any(|stored| {
+                    stored.script == scripts[at]
+                        && range.contains(&u64::from(stored.event.height()))
+                })
             })
-        })
-        .map(|(index, _)| index)
-        .collect();
-    Ok(Discovery { active, progress })
+            .collect();
+        found.extend(&confirmed);
+        remaining.retain(|at| !confirmed.contains(at));
+        match progress.outcome {
+            // Every candidate holds history: the answer is final whatever the
+            // budget left unread.
+            Outcome::More if remaining.is_empty() => {
+                return Ok(Discovery {
+                    active: found.into_iter().collect(),
+                    progress: Progress {
+                        covered_through: progress.covered_through,
+                        outcome: Outcome::Complete,
+                    },
+                });
+            }
+            // The budget stopped a pass that confirmed a candidate, typically a
+            // heavily used address spending it on its own history: ask about
+            // the rest. Each such pass removes a candidate, so there are at
+            // most as many passes as candidates.
+            Outcome::More if !confirmed.is_empty() => previous = Some(store),
+            _ => {
+                return Ok(Discovery {
+                    active: found.into_iter().collect(),
+                    progress,
+                });
+            }
+        }
+    }
+}
+
+/// Copies into `store` every filter of `map` that `previous` holds.
+fn carry_filters(
+    previous: &MemoryStore,
+    store: &mut MemoryStore,
+    map: &ShardMap,
+) -> Result<(), transparent_wallet::StoreError> {
+    for entry in &map.shards {
+        if let Some(bytes) = previous.filter(&entry.manifest_digest, &entry.filter_hash)? {
+            store.put_filter(
+                &entry.manifest_digest,
+                &entry.filter_hash,
+                entry.sealed,
+                &bytes,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// The publication as its own chain view: accepts exactly the blocks its map

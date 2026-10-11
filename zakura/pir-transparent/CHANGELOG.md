@@ -12,6 +12,14 @@
 
 ### Changed
 
+- `discover_active_addresses` continues past a pass its private budget stopped
+  after confirming a candidate: another pass, from the same map and with the
+  filters already downloaded, asks about the candidates not yet confirmed,
+  until a pass completes or confirms nothing new. `Outcome::More` now means a
+  pass stopped with nothing new confirmed. `DiscoveryLimits` bound each pass;
+  there are at most as many passes as candidates. A caller that re-ran
+  discovery over the rest itself can drop that loop; it fetched the map and
+  every filter again each time.
 - `PassPlan::next` skips the account (`Step::Skip`) after a settlement the
   caller's `WriteGate` interrupted, instead of stopping the run. A gate stops a
   settlement when one account's time budget runs out as well as when the run is

@@ -432,23 +432,68 @@ fn a_filter_match_without_history_is_not_reported() {
 }
 
 #[test]
-fn a_pass_stopped_by_its_budget_is_incomplete_and_keeps_what_it_confirmed() {
+fn a_pass_stopped_by_its_budget_continues_over_the_rest_with_the_filters_it_has() {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
     let publication = Publication::start();
     // History in the second sealed shard and in the tail: one private query
-    // confirms the first, and the budget stops the pass before the second.
+    // confirms the first, and the budget stops that pass before the second.
     let candidates = [candidate(PAID_SEALED), candidate(PAID_TAIL)];
+    let one_query = DiscoveryLimits {
+        queries: 1,
+        ..LIMITS
+    };
+    let mut seen = 0;
+
+    let discovery = publication
+        .discover_within(&candidates, H0, &one_query)
+        .unwrap();
+
+    // The next pass asks only about the tail's candidate, and finds it.
+    assert_eq!(discovery.active, vec![0, 1]);
+    assert_eq!(discovery.progress.outcome, Outcome::Complete);
+    let requests = publication.take_requests(&mut seen);
+    // One map, and each filter once: the second pass reuses the first's.
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.path == "/v1/filters/shards")
+            .count(),
+        1
+    );
+    assert_eq!(filters_fetched(&requests), vec![0, 1, 2]);
+    assert_private(&requests, &candidates, &[]);
+}
+
+#[test]
+fn a_pass_stopped_by_its_budget_with_nothing_confirmed_is_incomplete() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let publication = Publication::start();
+    let sealed = &publication.map.shards[1];
+    let filter = std::fs::read(
+        publication
+            ._dir
+            .path()
+            .join(&sealed.manifest_digest)
+            .join("filter.bin"),
+    )
+    .unwrap();
+    // The budget's one query checks a filter match in the second sealed shard
+    // that holds no history, so the pass stops before the tail's receive.
+    let candidates = [
+        false_positive(&publication.map, 1, &filter),
+        candidate(PAID_TAIL),
+    ];
     let one_query = DiscoveryLimits {
         queries: 1,
         ..LIMITS
     };
 
     let discovery = publication
-        .discover_within(&candidates, H0, &one_query)
+        .discover_within(&candidates, H0 + 300, &one_query)
         .unwrap();
 
     assert_eq!(discovery.progress.outcome, Outcome::More);
     assert!(discovery.progress.covered_through < END);
-    // What it confirmed is real; the rest is unknown, which only the outcome says.
-    assert_eq!(discovery.active, vec![0]);
+    // Nothing is reported; the rest is unknown, which only the outcome says.
+    assert_eq!(discovery.active, Vec::<usize>::new());
 }
