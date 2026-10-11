@@ -124,8 +124,9 @@ fn completion_limit(deadline: Option<i64>, registered_at: i64) -> i64 {
         .saturating_add(COMPLETION_LIMIT_SECS)
 }
 
-/// Whether key `key`'s completion limit has passed at `now`, which counts no later than
-/// the scanned tip's block time, as in [`close_finished`].
+/// Whether key `key`'s completion limit has passed by `now` or by its closure, if later,
+/// since a status requested before closure may arrive after it. Time counts no later
+/// than the scanned tip's block time, as in [`close_finished`].
 pub(super) fn limit_passed(
     conn: &Connection,
     key: i64,
@@ -134,16 +135,22 @@ pub(super) fn limit_passed(
     let Some(tip) = wallet::fully_scanned_height(conn)? else {
         return Ok(false);
     };
-    let (registered_at, deadline, tip_time): (i64, Option<i64>, Option<i64>) = conn.query_row(
-        "SELECT k.registered_at,
+    let (registered_at, closed_at, deadline, tip_time): (
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    ) = conn.query_row(
+        "SELECT k.registered_at, k.closed_at,
             (SELECT MAX(o.deadline) FROM ironwood_dynamic_operations o
                 WHERE o.receiving_key_id = k.id),
             (SELECT b.time FROM blocks b WHERE b.height = ?2)
          FROM ironwood_receiving_keys k WHERE k.id = ?1",
         params![key, u32::from(tip)],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
-    Ok(tip_time.is_some_and(|t| now.min(t) >= completion_limit(deadline, registered_at)))
+    let at = closed_at.map_or(now, |c| now.max(c));
+    Ok(tip_time.is_some_and(|t| at.min(t) >= completion_limit(deadline, registered_at)))
 }
 
 /// Records `observation`, requested at `now`, on operation `id` unless a newer one is
