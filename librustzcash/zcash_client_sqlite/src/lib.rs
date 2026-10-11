@@ -2613,6 +2613,14 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> DynamicIv
     ) -> Result<bool, Self::Error> {
         wallet::dynamic_ivk::history_pending(self.conn.borrow(), &self.params, account, through)
     }
+
+    fn dynamic_keys_to_recheck(
+        &self,
+        account: AccountUuid,
+        height: BlockHeight,
+    ) -> Result<Vec<DiscoveryWork>, Self::Error> {
+        wallet::dynamic_ivk::keys_to_recheck(self.conn.borrow(), &self.params, account, height)
+    }
 }
 
 #[cfg(feature = "orchard")]
@@ -2682,9 +2690,21 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         key: KeyId,
         through: ChainPoint,
         publication: ChainPoint,
+        recent: bool,
         witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
     ) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
-        wallet::dynamic_ivk::apply_sweep(self, account, key, through, publication, witness)
+        wallet::dynamic_ivk::apply_sweep(self, account, key, through, publication, recent, witness)
+    }
+
+    fn record_paid_filter_check(
+        &mut self,
+        account: AccountUuid,
+        publication: ChainPoint,
+        checked: &[(KeyId, bool)],
+    ) -> Result<(), SqliteClientError> {
+        self.transactionally(|wdb| {
+            wallet::dynamic_ivk::record_paid_check(wdb.conn.0, account, publication, checked)
+        })
     }
 
     fn finish_dynamic_nullifier_recovery(

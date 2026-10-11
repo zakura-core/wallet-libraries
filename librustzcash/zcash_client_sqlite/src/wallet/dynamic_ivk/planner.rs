@@ -79,12 +79,36 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
                WHERE p.receiving_key_id = s.receiving_key_id))
          ORDER BY s.next_attempt_at, s.receiving_key_id LIMIT ?4",
     )?;
-    let mut rows = stmt.query(params![
+    let rows = stmt.query(params![
         owner.0,
         u32::from(through.height),
         now,
         limit.get()
     ])?;
+    discovery_work(rows).map(Ok)
+}
+
+/// Implements `DynamicIvkRead::dynamic_keys_to_recheck`.
+pub(crate) fn keys_to_recheck<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    account: AccountUuid,
+    height: BlockHeight,
+) -> Result<Vec<DiscoveryWork>, SqliteClientError> {
+    let (owner, _) = account_key(conn, params, account)?;
+    let mut stmt = conn.prepare(
+        "SELECT k.purpose, k.key_index, k.receiver
+         FROM ironwood_dynamic_sweeps s
+         JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
+         WHERE k.account_id = ?1 AND k.closed_at IS NOT NULL AND k.used = 0
+           AND s.done_height < ?2
+         ORDER BY s.receiving_key_id",
+    )?;
+    discovery_work(stmt.query(params![owner.0, u32::from(height)])?)
+}
+
+/// Decodes `rows` of key purpose, index and receiver.
+fn discovery_work(mut rows: rusqlite::Rows<'_>) -> Result<Vec<DiscoveryWork>, SqliteClientError> {
     let mut work = Vec::new();
     while let Some(r) = rows.next()? {
         work.push(DiscoveryWork {
@@ -95,7 +119,7 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
                 .map_err(|_| corrupt("invalid stored receiver"))?,
         });
     }
-    Ok(Ok(work))
+    Ok(work)
 }
 
 /// Implements `DynamicIvkWrite::begin_dynamic_sweep_attempt`, backing off from one

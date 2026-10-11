@@ -869,8 +869,6 @@ pub(crate) fn delete_account(
 pub(crate) fn dynamic_ivks_required(conn: &Connection) -> Result<bool, SqliteClientError> {
     #[cfg(feature = "orchard")]
     let recovery = "";
-    // Builds without orchard are best-effort here: a closed key's pending memo retrieval
-    // is not guarded.
     #[cfg(not(feature = "orchard"))]
     let recovery = "OR EXISTS(SELECT 1 FROM ironwood_dynamic_sweeps WHERE done_height IS NULL)
          OR EXISTS(SELECT 1 FROM ironwood_dynamic_payment_recovery)";
