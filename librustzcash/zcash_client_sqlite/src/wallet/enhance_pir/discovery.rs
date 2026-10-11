@@ -78,7 +78,7 @@ pub(crate) fn queue(
         named_params![":tx": tx_ref.0],
     )?;
     let expected = transparent_ledger::capture_policy_generation(conn)?;
-    transparent_ledger::ensure_policy_generation(conn, expected)?;
+    transparent_ledger::check_transparent_policy_generation(conn, expected)?;
     conn.execute(
         "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation)
          SELECT txid, :enhancement, :generation FROM transactions WHERE id_tx = :tx

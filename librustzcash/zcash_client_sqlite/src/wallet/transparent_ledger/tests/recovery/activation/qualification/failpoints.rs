@@ -52,16 +52,16 @@ fn a_full_disk_during_any_ledger_write_leaves_the_prior_state() {
     recover(&mut st, account, &chain, &fixture);
     assert_diagnostics_agree(&st, account, &chain, &owned);
 
-    // Promotion.
+    // Activation.
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
     fill_disk(&st);
     let before = full_dump(conn(&st));
-    assert_disk_full(promote(&mut st, account));
+    assert_disk_full(activate_recovered_ledger(&mut st, account));
     assert_eq!(full_dump(conn(&st)), before);
     assert_eq!(lifecycle(&st, account), AccountLifecycle::Candidate);
     free_disk(&st);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     let expected = assert_diagnostics_agree(&st, account, &chain, &owned);
     assert_authority_agrees(&st, account, &expected);
 
@@ -171,13 +171,13 @@ fn a_crash_before_commit_leaves_the_prior_state() {
     let path = st.wallet().data_file_path().to_owned();
     let before = full_dump(conn(&st));
 
-    // The process dies after promotion's writes, before its transaction commits.
+    // The process dies after activation's writes, before its transaction commits.
     conn(&st).execute_batch("BEGIN IMMEDIATE").unwrap();
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     let (_dir, crashed) = crash_copy(&path);
     assert_eq!(full_dump(&crashed), before);
 
-    // Once committed, a restart sees the promoted wallet.
+    // Once committed, a restart sees the activated wallet.
     conn(&st).execute_batch("COMMIT").unwrap();
     let after = full_dump(conn(&st));
     assert_ne!(after, before);

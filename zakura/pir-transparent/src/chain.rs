@@ -5,7 +5,7 @@ use zcash_client_backend::data_api::{WalletRead, transparent_ledger::ChainPoint}
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::BlockHeight;
 
-use crate::recovery::block_hash;
+use crate::convert::{block_hash_from_display, height_u64};
 
 /// A [`ChainView`] over the blocks a wallet scanned, answering only through `target`.
 ///
@@ -29,7 +29,7 @@ impl<'a, W: WalletRead + ?Sized> WalletChain<'a, W> {
     /// The wallet's hash at `height`, when `height` is at or below the target and
     /// the wallet holds and can read that block.
     fn held(&self, height: u64) -> Option<BlockHash> {
-        if height > u64::from(u32::from(self.target.height)) {
+        if height > height_u64(self.target.height) {
             return None;
         }
         let height = BlockHeight::from(u32::try_from(height).ok()?);
@@ -41,7 +41,10 @@ impl<W: WalletRead + ?Sized> ChainView for WalletChain<'_, W> {
     fn is_accepted(&self, height: u64, hash_display_hex: &str) -> Acceptance {
         match self.held(height) {
             None => Acceptance::Unknown,
-            Some(held) if block_hash(hash_display_hex).is_ok_and(|offered| offered == held) => {
+            Some(held)
+                if block_hash_from_display(hash_display_hex)
+                    .is_ok_and(|offered| offered == held) =>
+            {
                 Acceptance::Accepted
             }
             Some(_) => Acceptance::Rejected,
@@ -50,7 +53,7 @@ impl<W: WalletRead + ?Sized> ChainView for WalletChain<'_, W> {
 
     fn tip(&self) -> Option<Anchor> {
         Some(Anchor {
-            height: u64::from(u32::from(self.target.height)),
+            height: height_u64(self.target.height),
             hash: self.target.hash.to_string(),
         })
     }

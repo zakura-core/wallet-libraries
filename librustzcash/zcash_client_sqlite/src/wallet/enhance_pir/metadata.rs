@@ -37,7 +37,7 @@ pub(super) fn queue(
         )?;
     }
     let expected = crate::wallet::transparent_ledger::capture_policy_generation(conn)?;
-    crate::wallet::transparent_ledger::ensure_policy_generation(conn, expected)?;
+    crate::wallet::transparent_ledger::check_transparent_policy_generation(conn, expected)?;
     conn.execute(
         "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation)
         SELECT t.txid, :enhancement, :generation FROM transactions t JOIN ironwood_enhance_metadata_queue q ON q.transaction_id = t.id_tx

@@ -58,10 +58,13 @@ the per-shard public setup seed retain the established wire layout.
 `q_prime_1 = 2^22`, and every shard's public session material is 89,088 bytes
 (12,288 columns, two masks each rounded to 29 bits). A request is the header,
 one uploaded 27,648-byte `K_g` packing key and a selection dithered to 44 bits
-per row (207,988 bytes for a 32,768-row shard); a response is the header plus
+per row the shard's units can hold, rounded up to 2,048-row blocks
+(`QueryShard::query_rows`): 207,988 bytes for a full 32,768-row shard and
+129,140 bytes for one growing through 18,313 used rows. Every query to a
+session, real or cover, has that one length; a response is the header plus
 33,792 bytes of 22-bit packed columns. The server also accepts the profile's
-49-bit selection (228,468 bytes) and tells the two apart by length; a server
-that predates 44-bit requests rejects them. The `native` module exposes the profile
+49-bit selection over every row (228,468 bytes) and tells them apart by length;
+a server that predates 44-bit or prefix requests rejects them. The `native` module exposes the profile
 constants, the mask and length helpers, and `NativeSession`.
 
 This protocol is experimental. `ipir-sp`'s cryptographic gates for the native

@@ -39,6 +39,7 @@ pub enum HttpMethod {
 }
 
 impl HttpMethod {
+    /// The method's name on the wire.
     pub fn as_str(self) -> &'static str {
         match self {
             HttpMethod::Get => "GET",
@@ -53,6 +54,7 @@ impl HttpMethod {
 /// ids, revisions and private query bytes.
 #[derive(Clone, PartialEq, Eq)]
 pub struct HttpRequest {
+    /// How the route is requested.
     pub method: HttpMethod,
     /// Origin-relative, starting with `/v1/`. It names shard ids, revisions,
     /// tables and segments the public maps already name, never a script or a
@@ -74,6 +76,7 @@ pub struct HttpRequest {
 /// status means. Its `Debug` shows the status, delay and body size only.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct HttpReply {
+    /// The HTTP status code.
     pub status: u16,
     /// The raw `retry-after` header, when present.
     pub retry_after: Option<String>,
@@ -131,6 +134,7 @@ pub enum HttpFailure {
 /// [`HttpRequest::error_limit`], and logs at most the method and
 /// [`HttpRequest::template`].
 pub trait HttpExchange {
+    /// Sends `request` and returns its reply, or why none arrived.
     fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure>;
 }
 
@@ -165,6 +169,8 @@ pub struct PirShards<'t, E> {
 }
 
 impl<E: HttpExchange> TransparentPirHttp<E> {
+    /// The routes over `exchange`, accepting successful bodies of at most `limit`
+    /// bytes.
     pub fn new(exchange: E, limit: usize) -> Self {
         Self {
             exchange,
@@ -173,8 +179,8 @@ impl<E: HttpExchange> TransparentPirHttp<E> {
         }
     }
 
-    /// The filter source and shard transport a pass hands
-    /// `ReferenceRecovery::recover`.
+    /// The filter source and shard transport over these routes, as
+    /// [`discover_active_addresses`](crate::discover_active_addresses) takes them.
     pub fn split(&mut self) -> (PirFilters<'_, E>, PirShards<'_, E>) {
         let http = &*self;
         (PirFilters { http }, PirShards { http })
@@ -190,6 +196,7 @@ impl<E: HttpExchange> TransparentPirHttp<E> {
         self.outage.get()
     }
 
+    /// The exchange the routes are sent over.
     pub fn exchange(&self) -> &E {
         &self.exchange
     }
@@ -318,6 +325,7 @@ impl Route<'_> {
         }
     }
 
+    /// The origin-relative path, naming the route's identifiers.
     fn path(&self) -> String {
         match *self {
             Route::ShardMap => "/v1/filters/shards".to_owned(),
@@ -327,6 +335,7 @@ impl Route<'_> {
         }
     }
 
+    /// The path with its identifiers elided, for logs.
     fn template(&self) -> String {
         match *self {
             Route::ShardMap => "/v1/filters/shards".to_owned(),
@@ -346,6 +355,7 @@ impl Route<'_> {
         }
     }
 
+    /// A query's opaque body; empty for a read.
     fn body(&self) -> Vec<u8> {
         match self {
             Route::Shard(ShardRequest::Query { body, .. }) => body.to_vec(),
@@ -380,6 +390,7 @@ pub struct TxidHttp<E> {
 }
 
 impl<E: HttpExchange> TxidHttp<E> {
+    /// The txid display routes over `exchange`.
     pub fn new(exchange: E) -> Self {
         Self { exchange }
     }
