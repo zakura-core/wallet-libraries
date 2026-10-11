@@ -448,6 +448,46 @@ fn incoming_key_closes_only_once_paid_and_released() {
     assert!(scanning_keys(&st).is_empty());
 }
 
+/// A started incoming reservation whose last status stays active, as an underpayment's
+/// `INCOMPLETE_DEPOSIT` does, stops scanning at the limit after its deadline but stays
+/// reserved, so issuance never reissues its address.
+#[test]
+fn a_started_reservation_left_active_stops_scanning_at_the_limit() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let from = next_height(&st);
+    let now = registered_at();
+    let deadline = now + HOUR;
+    let db = st.wallet_mut().db_mut();
+    let key = prepare_from(db, account, now, from, None).unwrap().unwrap();
+    let index = key.key_id().index();
+    tx(db, |c, _| {
+        store::reservations::begin(c, account, index, "swap", deadline, now)
+    })
+    .unwrap()
+    .unwrap();
+    db.finish_receive_operation(account, "swap", &accepted("swap", None, deadline))
+        .unwrap();
+    db.start_receive_operation(account, "swap")
+        .unwrap()
+        .unwrap();
+    let status = NearStatus {
+        status: "INCOMPLETE_DEPOSIT",
+        ..Default::default()
+    };
+    let observation = near_observation(Purpose::Receive, &status);
+    db.record_operation_status(account, "swap", None, observation, true, now + HOUR)
+        .unwrap();
+    assert_eq!(close(&mut st, deadline + LIMIT - 1), 0);
+    assert_eq!(scanning_keys(&st), [key.key_id()]);
+    assert_eq!(close(&mut st, deadline + LIMIT), 1);
+    assert!(scanning_keys(&st).is_empty());
+    let from = next_height(&st);
+    let db = st.wallet_mut().db_mut();
+    let next = prepare_from(db, account, deadline + LIMIT, from, None);
+    assert_ne!(next.unwrap().unwrap().key_id(), key.key_id());
+}
+
 /// A released paid reservation keeps following its funded operation: a newer status that
 /// raises the payout reopens its closed key, which then finds the remainder. An older
 /// status leaves it closed.

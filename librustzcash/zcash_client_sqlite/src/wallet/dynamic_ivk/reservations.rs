@@ -100,7 +100,7 @@ const SEEN: &str = "(k.provider_seen = 1
           AND (o.reference IS NOT NULL OR o.begun_at < :since OR o.begun_at > :covered)))";
 
 /// SQL condition on `ironwood_receiving_keys k`: one of its quotes was started.
-const STARTED: &str = "EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
+pub(super) const STARTED: &str = "EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
     WHERE o.receiving_key_id = k.id AND o.started = 1)";
 
 /// Whether key `key` is open and scanned through the tip without a payment or candidate.
