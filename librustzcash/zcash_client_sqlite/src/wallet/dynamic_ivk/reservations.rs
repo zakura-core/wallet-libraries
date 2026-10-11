@@ -466,10 +466,12 @@ pub(super) fn record_status<P: Parameters>(
     let refund_owed = matches!(observation.status, Terminal(Positive(_) | Unknown));
     for &(id, key, startable, scan_from, closed) in &operations {
         let was_settled = closed && settled(conn, key)?;
+        // Judged before recording, which may fill in a missing deadline.
+        let past_limit = closed && limit_passed(conn, key, now)?;
         let current = record(conn, id, observation, funded, now)?;
         let unsettled = was_settled && current && !settled(conn, key)?;
         let reopen = (current && startable && refund_owed) || unsettled;
-        if reopen && !(closed && limit_passed(conn, key, now)?) {
+        if reopen && !past_limit {
             // A refund key whose restore sweep is pending starts when the sweep finishes.
             activate(conn, key, BlockHeight::from(scan_from))?;
         }
