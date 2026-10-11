@@ -3,13 +3,15 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use zcash_client_backend::data_api::transparent_ledger::{
-    TRANSPARENT_DISPLAY_MAP_RECHECK, TransactionMetadata, TransparentDetailOutcome,
-    TransparentDetailParked, TransparentDetailRead as _, TransparentDetailReasons,
-    TransparentDetailWrite as _, TransparentDisplayContradiction, TransparentDisplayDetails,
-    TransparentDisplayFacts, TransparentDisplayOmission, TransparentDisplayOutput,
-    TransparentDisplayProvenance, TransparentDisplaySender, TransparentDisplaySource,
-    TransparentDisplayStore, TransparentDisplayView, TransparentDisplayViewSender,
-    WholeTransactionFee, transparent_display_address,
+    AccountActivity, Attribution, DetailCompleteness, FeeState, ReceiptSource, SourcePool,
+    TRANSPARENT_DISPLAY_MAP_RECHECK, TransactionMetadata, TransactionReceipt,
+    TransparentDetailOutcome, TransparentDetailParked, TransparentDetailRead as _,
+    TransparentDetailReasons, TransparentDetailWrite as _, TransparentDisplayAddress,
+    TransparentDisplayContradiction, TransparentDisplayDetails, TransparentDisplayFacts,
+    TransparentDisplayOmission, TransparentDisplayOutput, TransparentDisplayProvenance,
+    TransparentDisplaySender, TransparentDisplaySource, TransparentDisplayStore,
+    TransparentDisplayView, TransparentDisplayViewSender, WholeTransactionFee,
+    transparent_display_address,
 };
 
 use super::*;
@@ -86,7 +88,7 @@ fn attempts(st: &State, txid: TxId) -> u32 {
 fn listing_at(st: &State, at: SystemTime, map: Option<[u8; 32]>) -> Vec<TxId> {
     st.wallet()
         .db()
-        .transparent_detail_work(at, 100, map)
+        .transparent_detail_work(at, 100, &[], map)
         .unwrap()
         .requests
         .into_iter()
@@ -111,9 +113,10 @@ fn mined_height(st: &State, txid: TxId) -> BlockHeight {
 
 fn defer(st: &mut State, txid: TxId, outcome: TransparentDetailOutcome, at: SystemTime) {
     let height = mined_height(st, txid);
+    let generation = generation(st);
     st.wallet_mut()
         .db_mut()
-        .defer_transparent_detail(txid, height, outcome, Some(MAP_A), at)
+        .defer_transparent_detail(txid, height, outcome, Some(MAP_A), generation, at)
         .unwrap()
 }
 
@@ -335,11 +338,11 @@ fn projection_spend_enqueues() {
 }
 
 #[test]
-fn projection_promotion_enqueues() {
+fn projection_activation_enqueues() {
     let (mut st, account, unspent, spent) = ready_wallet();
     // Candidate recovery queued nothing.
     assert_eq!(work_rows(&st), vec![]);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(
         work_rows(&st),
         vec![
@@ -374,7 +377,7 @@ fn raw_present_no_enqueue() {
     cover(&mut st, account, &fixture, vec![recovered.clone()]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(
         super::super::super::output_origins(conn(&st), &recovered.outpoint),
         vec![1, 2]
@@ -545,6 +548,7 @@ fn stale_detail_failure_after_remine_preserves_immediate_retry() {
     assert!(listing(&st).contains(&txid));
 
     // The lookup started at the original height and finished after re-mining.
+    let generation = generation(&st);
     st.wallet_mut()
         .db_mut()
         .defer_transparent_detail(
@@ -552,6 +556,7 @@ fn stale_detail_failure_after_remine_preserves_immediate_retry() {
             unspent.mined_height,
             TransparentDetailOutcome::NotCovered,
             Some(MAP_A),
+            generation,
             now(),
         )
         .unwrap();
@@ -588,6 +593,7 @@ fn stale_detail_failure_while_unmined_changes_nothing() {
     defer(&mut st, txid, unavailable(), now());
     st.truncate_to_height(unspent.mined_height - 2);
     let before = production_dump(conn(&st));
+    let generation = generation(&st);
     st.wallet_mut()
         .db_mut()
         .defer_transparent_detail(
@@ -595,6 +601,7 @@ fn stale_detail_failure_while_unmined_changes_nothing() {
             unspent.mined_height,
             TransparentDetailOutcome::NotCovered,
             Some(MAP_A),
+            generation,
             now(),
         )
         .unwrap();
@@ -613,7 +620,7 @@ fn priority_and_backoff_order() {
     assert_eq!(
         st.wallet()
             .db()
-            .transparent_detail_work(now(), 2, None)
+            .transparent_detail_work(now(), 2, &[], None)
             .unwrap()
             .requests
             .len(),
@@ -686,6 +693,41 @@ fn priority_and_backoff_order() {
 }
 
 #[test]
+fn preferred_work_lists_first_without_counting_against_the_limit() {
+    let (mut st, _, unspent) = active_wallet();
+    let unspent = txid_of(&unspent);
+    let spent = TxId::from_bytes([2; 32]);
+    let spending = TxId::from_bytes([3; 32]);
+    let list = |st: &State, limit, prefer: &[TxId]| -> Vec<TxId> {
+        st.wallet()
+            .db()
+            .transparent_detail_work(now(), limit, prefer, None)
+            .unwrap()
+            .requests
+            .into_iter()
+            .map(|r| r.txid)
+            .collect()
+    };
+    // Without a preference, the wallet's order.
+    assert_eq!(list(&st, 10, &[]), vec![spending, unspent, spent]);
+    assert_eq!(list(&st, 1, &[]), vec![spending]);
+    // The oldest transaction, outside a one-row window, is listed first and the window still
+    // holds one other row.
+    assert_eq!(list(&st, 1, &[spent]), vec![spent, spending]);
+    assert_eq!(list(&st, 0, &[spent]), vec![spent]);
+    // Preferred rows keep the caller's order; unknown txids and repeats change nothing.
+    let unknown = TxId::from_bytes([0x77; 32]);
+    assert_eq!(
+        list(&st, 1, &[unknown, spent, unspent, spent]),
+        vec![spent, unspent, spending]
+    );
+    // A preferred row is listed only when it is due.
+    defer(&mut st, spent, unavailable(), now());
+    assert_eq!(list(&st, 10, &[spent]), vec![spending, unspent]);
+    assert_eq!(list(&st, 1, &[spent]), vec![spending]);
+}
+
+#[test]
 fn public_listing_excludes_payload_owned() {
     let (mut st, _, unspent) = active_wallet();
     let txid = txid_of(&unspent);
@@ -749,6 +791,7 @@ fn held_work_due_at_ordinary_retry_under_public_authority() {
         now(),
     );
     let unsupported_height = mined_height(&st, unsupported);
+    let generation = generation(&st);
     st.wallet_mut()
         .db_mut()
         .defer_transparent_detail(
@@ -756,6 +799,7 @@ fn held_work_due_at_ordinary_retry_under_public_authority() {
             unsupported_height,
             TransparentDetailOutcome::Unsupported,
             None,
+            generation,
             now(),
         )
         .unwrap();
@@ -1100,7 +1144,7 @@ fn stale_generation_rejected() {
     let listed = st
         .wallet()
         .db()
-        .transparent_detail_work(now(), 10, None)
+        .transparent_detail_work(now(), 10, &[], None)
         .unwrap();
     assert_eq!(listed.policy_generation, generation(&st));
     set_policy(&mut st, Public);
@@ -1116,6 +1160,22 @@ fn stale_generation_rejected() {
     ));
     assert_eq!(display_rows(&st), (0, 0));
     assert_eq!(reasons(&st, txid_of(&unspent)), Some(RECEIVE));
+
+    // A failed lookup made under the old policy schedules nothing under the new one.
+    let before = production_dump(conn(&st));
+    let result = st.wallet_mut().db_mut().defer_transparent_detail(
+        txid_of(&unspent),
+        unspent.mined_height,
+        TransparentDetailOutcome::NotCovered,
+        Some(MAP_A),
+        listed.policy_generation,
+        now(),
+    );
+    assert!(matches!(
+        result,
+        Err(SqliteClientError::StaleTransparentPolicy { .. })
+    ));
+    assert_eq!(production_dump(conn(&st)), before);
 }
 
 #[test]
@@ -1124,7 +1184,7 @@ fn listing_reports_policy_snapshot() {
     let work = |st: &State| {
         st.wallet()
             .db()
-            .transparent_detail_work(now(), 10, None)
+            .transparent_detail_work(now(), 10, &[], None)
             .unwrap()
     };
     let private = work(&st);
@@ -1196,7 +1256,7 @@ fn put_tx_data_clears_work() {
     cover(&mut st, account, &fixture, vec![recovered.clone()]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(reasons(&st, txid), Some(RECEIVE));
     // The payment is funded from the shielded pool, with the fee the wallet stored.
     let fee: u64 = conn(&st)
@@ -1359,6 +1419,7 @@ fn unsupported_parked_until_any_map() {
     let (mut st, _, unspent) = active_wallet();
     let txid = txid_of(&unspent);
     // The service had no display map to offer.
+    let generation = generation(&st);
     st.wallet_mut()
         .db_mut()
         .defer_transparent_detail(
@@ -1366,6 +1427,7 @@ fn unsupported_parked_until_any_map() {
             unspent.mined_height,
             TransparentDetailOutcome::Unsupported,
             None,
+            generation,
             now(),
         )
         .unwrap();
@@ -1460,10 +1522,10 @@ fn no_requeue_after_stored() {
     // The receive is reported again by the active ledger.
     cover(&mut st, account, &revision(1, true), vec![unspent.clone()]);
     assert_eq!(reasons(&st, txid), None);
-    // Leaving and re-entering PrivateRequired promotes, and so projects, the ledger again.
+    // Leaving and re-entering PrivateRequired activates, and so projects, the ledger again.
     set_policy(&mut st, Public);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(reasons(&st, txid), None);
     assert!(!listing(&st).contains(&txid));
     // Transactions without facts are still wanted.
@@ -2159,11 +2221,11 @@ fn view_ownership_requires_current_qualified_evidence() {
         ),
         ("missing observation", "DELETE FROM tpir_spend_observations"),
         (
-            "quarantined account",
+            "account recovery suspended",
             "INSERT INTO tpir_quarantined_accounts SELECT account_id FROM tpir_active_accounts",
         ),
         (
-            "quarantined source",
+            "source recovery suspended",
             "INSERT INTO tpir_quarantined_sources SELECT DISTINCT source FROM tpir_revisions",
         ),
         (
@@ -2621,5 +2683,194 @@ fn raw_view_sender_from_unlocking_scripts() {
     assert_eq!(
         details.omissions,
         vec![O::NonStandardSender, O::ShieldedAndTransparentFunding]
+    );
+}
+
+fn receipt(st: &State, account: AccountUuid, txid: TxId) -> TransactionReceipt {
+    st.wallet()
+        .db()
+        .transaction_receipt(account, txid)
+        .unwrap()
+        .unwrap()
+}
+
+fn display_address(st: &State, address: TransparentAddress) -> TransparentDisplayAddress {
+    TransparentDisplayAddress {
+        address,
+        encoded: zcash_keys::encoding::encode_transparent_address_p(st.network(), &address),
+    }
+}
+
+/// The fixture's spending transaction (`[3; 32]`) as a transparent-only send of 24 000 to
+/// [`FOREIGN`] with a 1 000 fee, its whole fee recorded.
+fn paying_foreign(st: &State) -> TransparentDisplayFacts {
+    conn(st)
+        .execute(
+            "UPDATE transactions SET fee = 1000 WHERE txid = ?1",
+            [TxId::from_bytes([3; 32]).as_ref()],
+        )
+        .unwrap();
+    let mut facts = spend_facts(st);
+    facts.shielded_components = false;
+    facts.output_count = 1;
+    facts.outputs = vec![output(24_000, Some(FOREIGN))];
+    facts
+}
+
+#[test]
+fn receipt_names_the_only_payee_of_a_private_send() {
+    let (mut st, account, _) = active_wallet();
+    let spending = TxId::from_bytes([3; 32]);
+    let facts = paying_foreign(&st);
+    // Before the display facts arrive, the receipt is the history view alone.
+    let before = receipt(&st, account, spending);
+    assert_eq!(before.attribution.recipient, Attribution::NotEstablished);
+    assert!(!before.attribution.recipient_completes);
+
+    assert_eq!(store(&mut st, facts), TransparentDisplayStore::Stored);
+    let r = receipt(&st, account, spending);
+    assert!(matches!(
+        r.display,
+        Some(TransparentDisplayView::Available(_))
+    ));
+    assert!(r.attribution.effects_settled);
+    assert_eq!(
+        r.attribution.recipient,
+        Attribution::Established(display_address(&st, FOREIGN))
+    );
+    assert!(r.attribution.recipient_completes);
+    // The account's own address funded it, which names no source for a receipt.
+    assert_eq!(
+        r.attribution.source,
+        ReceiptSource {
+            pool: SourcePool::Unknown,
+            address: None
+        }
+    );
+    assert!(!r.attribution.receive_completes);
+    // The history view is the one read without display facts, whose conclusions never reach
+    // it: its payment details stay incomplete and its activity a provisional debit.
+    assert_eq!(r.details, before.details);
+    assert_eq!(
+        st.wallet()
+            .db()
+            .transaction_history_details(account, &[spending])
+            .unwrap(),
+        vec![r.details.clone()]
+    );
+    assert_eq!(r.details.payment_details, DetailCompleteness::Incomplete);
+    assert_eq!(r.details.fee, FeeState::Known(zat(1_000)));
+    assert_eq!(
+        r.details.activity,
+        AccountActivity::MovementDebit {
+            amount: zat(24_000)
+        }
+    );
+}
+
+#[test]
+fn shared_or_mixed_funding_keeps_receipt_attribution_incomplete() {
+    let (mut st, account, _) = active_wallet();
+    let spending = TxId::from_bytes([3; 32]);
+    let spent = spent_address(&st, spending, 0);
+    // The account funded one of two inputs; the other spends another script. Its own debit
+    // still balances against the payee and the fee, but the other input could have paid an
+    // output the account did not.
+    let mut facts = paying_foreign(&st);
+    facts.input_count = 2;
+    facts.multiple_source_scripts = true;
+    facts.sender = TransparentDisplaySender::Address(spent);
+    assert_eq!(
+        store(&mut st, facts.clone()),
+        TransparentDisplayStore::Stored
+    );
+    let r = receipt(&st, account, spending);
+    let Some(TransparentDisplayView::Available(details)) = &r.display else {
+        panic!("expected available details");
+    };
+    assert_eq!(
+        details.omissions,
+        vec![TransparentDisplayOmission::SharedFunding]
+    );
+    assert_eq!(r.attribution.recipient, Attribution::NotEstablished);
+    assert!(!r.attribution.recipient_completes);
+
+    // With one source script, every input spends the account's script: no other funder.
+    facts.multiple_source_scripts = false;
+    assert_eq!(store(&mut st, facts), TransparentDisplayStore::Stored);
+    let r = receipt(&st, account, spending);
+    assert_eq!(
+        r.attribution.recipient,
+        Attribution::Established(display_address(&st, FOREIGN))
+    );
+    assert!(r.attribution.recipient_completes);
+}
+
+#[test]
+fn receipt_source_and_accounting_of_a_receive() {
+    let (mut st, account, unspent) = active_wallet();
+    let txid = txid_of(&unspent);
+    // A receive from another wallet's address, next to an `OP_RETURN` output it does not own.
+    assert_eq!(
+        store(&mut st, facts_for(&unspent)),
+        TransparentDisplayStore::Stored
+    );
+    let r = receipt(&st, account, txid);
+    assert_eq!(
+        r.attribution.source,
+        ReceiptSource {
+            pool: SourcePool::Transparent,
+            address: Some(display_address(&st, FOREIGN)),
+        }
+    );
+    // Without a fee the account paid, no recipient is named.
+    assert_eq!(r.attribution.recipient, Attribution::NotEstablished);
+    // The rows account for a settled transparent receipt from a known source.
+    assert!(r.attribution.receive_completes);
+
+    // Outputs past the listed two leave the movement unaccounted for.
+    let mut more = facts_for(&unspent);
+    more.output_count = 4;
+    assert_eq!(store(&mut st, more), TransparentDisplayStore::Stored);
+    let r = receipt(&st, account, txid);
+    assert!(!r.attribution.receive_completes);
+
+    // Funded only from the shielded pools, by validated display facts.
+    let mut unshielding = facts_for(&unspent);
+    unshielding.input_count = 0;
+    unshielding.sender = TransparentDisplaySender::Absent;
+    unshielding.shielded_components = true;
+    unshielding.output_count = 1;
+    unshielding.outputs.truncate(1);
+    assert_eq!(store(&mut st, unshielding), TransparentDisplayStore::Stored);
+    let r = receipt(&st, account, txid);
+    assert_eq!(
+        r.attribution.source,
+        ReceiptSource {
+            pool: SourcePool::Shielded,
+            address: None,
+        }
+    );
+    assert!(r.attribution.receive_completes);
+}
+
+#[test]
+fn receipt_requires_an_entry_for_the_account() {
+    let (mut st, account, unspent) = active_wallet();
+    let unrelated = TxId::from_bytes([0xee; 32]);
+    assert_eq!(
+        st.wallet()
+            .db()
+            .transaction_receipt(account, unrelated)
+            .unwrap(),
+        None
+    );
+    let other = import_account(&mut st, 9);
+    assert_eq!(
+        st.wallet()
+            .db()
+            .transaction_receipt(other, txid_of(&unspent))
+            .unwrap(),
+        None
     );
 }

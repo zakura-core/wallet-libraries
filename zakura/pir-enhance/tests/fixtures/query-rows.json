@@ -1,0 +1,18 @@
+{
+  "comment": "Rows a native Enhance query selects over, per query domain. QueryShard::query_rows in wallet-pir enhance-pir and zakura-pir-enhance must both reproduce every case; the two copies of this file must stay identical.",
+  "quantum": 2048,
+  "cases": [
+    { "shard_id": 0, "records": 1, "logical_rows": 4096, "query_rows": 2048 },
+    { "shard_id": 0, "records": 67584, "logical_rows": 4096, "query_rows": 2048 },
+    { "shard_id": 0, "records": 67585, "logical_rows": 4096, "query_rows": 4096 },
+    { "shard_id": 0, "records": 135168, "logical_rows": 4096, "query_rows": 4096 },
+    { "shard_id": 0, "records": 135169, "logical_rows": 8192, "query_rows": 6144 },
+    { "shard_id": 0, "records": 604324, "logical_rows": 32768, "query_rows": 18432 },
+    { "shard_id": 0, "records": 1081344, "logical_rows": 32768, "query_rows": 32768 },
+    { "shard_id": 1, "records": 3300, "logical_rows": 8192, "query_rows": 8192 },
+    { "shard_id": 1, "records": 99000, "logical_rows": 8192, "query_rows": 8192 },
+    { "shard_id": 1, "records": 135168, "logical_rows": 4096, "query_rows": 4096 },
+    { "shard_id": 1, "records": 165000, "logical_rows": 8192, "query_rows": 6144 },
+    { "shard_id": 2, "records": 1081344, "logical_rows": 32768, "query_rows": 32768 }
+  ]
+}

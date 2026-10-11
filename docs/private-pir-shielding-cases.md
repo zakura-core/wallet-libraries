@@ -99,7 +99,7 @@ cannot establish them.
 
 There are two ownership-discovery paths and one enrichment path. Enhance PIR
 does not replace either discovery path. See the existing
-[ledger architecture](transparent-pir-ledger-architecture.md#how-shielded-sync-and-history-fit).
+[wallet architecture guide](transparent-pir-wallet-integration.md#5-interplay-with-the-shielded-ledger-and-enhancement).
 
 The compact format permits transparent inputs and outputs. At the inspected
 snapshot, compact scanning still has a TODO for consuming those fields as
@@ -313,7 +313,7 @@ Expected amounts and shapes must come from independently decoded transactions,
 resolved prevouts, authored ownership, and accepted chain data. A synthetic
 history row does not qualify the real publication, transport, persistence, or
 wallet presentation paths. See the existing
-[history qualification specification](transparent-pir-history-qualification.md).
+[transaction behavior reference](transparent-pir-wallet-integration.md#appendix-behavior-reference).
 
 ## Questions for refinement
 

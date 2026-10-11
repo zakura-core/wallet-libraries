@@ -1,8 +1,8 @@
 //! Adds the activation tables of the transparent ledger.
 //!
 //! Seedless and additive: it creates empty `tpir_*` tables for the account lifecycle, revision
-//! qualification, and integrity quarantine. Every account starts as a candidate, no revision is
-//! qualified, and nothing is quarantined, so the upgrade grants no private authority.
+//! qualification, and integrity recovery suspension. Every account starts as a candidate, no revision is
+//! qualified, and nothing is suspended, so the upgrade grants no private authority.
 use std::collections::HashSet;
 
 use schemerz_rusqlite::RusqliteMigration;

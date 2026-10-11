@@ -1,9 +1,9 @@
 //! History completeness: owned effects, payment details, fees, and classification.
 
 use zcash_client_backend::data_api::transparent_ledger::{
-    AggregatePayment, DetailCompleteness, EffectCompleteness, FeeState, HistoryClassification,
-    PoolEffect, PrivateTransparentDetail, TransactionHistoryDetails, TransactionMetadata,
-    WholeTransactionFee,
+    AccountActivity, ActivityOutputs, AggregatePayment, DetailCompleteness, EffectCompleteness,
+    FeeState, HistoryClassification, OutputRef, PoolEffect, PrivateTransparentDetail,
+    TransactionHistoryDetails, TransactionMetadata, WholeTransactionFee,
 };
 use zcash_protocol::PoolType;
 
@@ -33,6 +33,17 @@ fn sapling(entry: &TransactionHistoryDetails) -> PoolEffect {
 
 fn zat(value: u64) -> Zatoshis {
     Zatoshis::const_from_u64(value)
+}
+
+/// One activity row counting the transparent output at `index`.
+fn transparent_row(amount: u64, index: u32) -> Option<ActivityOutputs> {
+    Some(ActivityOutputs {
+        amount: zat(amount),
+        outputs: vec![OutputRef {
+            pool: PoolType::Transparent,
+            index,
+        }],
+    })
 }
 
 /// Covers only `address` of `account` through the target, with `receives`.
@@ -112,6 +123,13 @@ fn private_transparent_effects_follow_ledger_coverage() {
     assert_eq!(entry.payment_details, DetailCompleteness::Complete);
     assert_eq!(entry.fee, FeeState::NotApplicable);
     assert_eq!(entry.classification, HistoryClassification::Reconstructed);
+    assert_eq!(
+        entry.activity,
+        AccountActivity::Outputs {
+            sent: None,
+            received: transparent_row(40_000, unspent.outpoint.n()),
+        }
+    );
     assert_eq!(entry.pending_private_details, vec![]);
 
     // A newer receive, while another watched address is not yet covered through its height, is
@@ -129,6 +147,14 @@ fn private_transparent_effects_follow_ledger_coverage() {
     assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
     assert_eq!(entry.fee, FeeState::Unknown);
     assert_eq!(entry.classification, HistoryClassification::Provisional);
+    // An unsettled receipt is still the receive row; its provisional state is the entry's.
+    assert_eq!(
+        entry.activity,
+        AccountActivity::Outputs {
+            sent: None,
+            received: transparent_row(60_000, fresh.outpoint.n()),
+        }
+    );
 
     // Covering every address completes it, under the same transaction identity.
     cover(&mut st, account, &revision(1, true), vec![]);
@@ -175,6 +201,13 @@ fn a_debit_with_change_and_no_known_recipient_stays_visible() {
     assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
     assert_eq!(entry.fee, FeeState::Unknown);
     assert_eq!(entry.classification, HistoryClassification::Provisional);
+    // The debit is shown as a movement, never as a payment, and the change not as a receipt.
+    assert_eq!(
+        entry.activity,
+        AccountActivity::MovementDebit {
+            amount: zat(25_000)
+        }
+    );
     assert_eq!(entry.pending_private_details, vec![]);
     assert_eq!(
         st.wallet()
@@ -249,15 +282,22 @@ fn transaction_metadata_establishes_payment_only_for_complete_sole_funding() {
         assert_eq!(entry.account_movement.net(), -25_000);
         assert!(entry.account_movement.complete);
         assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
+        // Sole funding attributes the exact whole fee to the account; otherwise it stays
+        // unattributed.
+        let fee = match fee {
+            WholeTransactionFee::Exact(f) if inputs == 1 && !shielded => FeeState::Known(f),
+            WholeTransactionFee::Exact(whole) => FeeState::Unattributed { whole },
+            _ => FeeState::Unknown,
+        };
+        assert_eq!(entry.fee, fee);
         assert_eq!(
-            entry.fee,
-            if inputs == 1 && !shielded {
-                match fee {
-                    WholeTransactionFee::Exact(f) => FeeState::Known(f),
-                    _ => FeeState::Unknown,
-                }
-            } else {
-                FeeState::Unknown
+            entry.activity,
+            match expected {
+                AggregatePayment::Exact(amount) => AccountActivity::InferredPayment { amount },
+                // An unattributed fee is not subtracted from the movement.
+                _ => AccountActivity::MovementDebit {
+                    amount: zat(25_000)
+                },
             }
         );
         assert_eq!(
@@ -453,12 +493,20 @@ fn check_local_intent_survives_discovery(with_metadata: bool) {
     );
     assert_eq!(transparent(&local).received, zat(50_000));
     assert_eq!(sapling(&local).spent, zat(200_000));
+    // A self-payment to an external address is sent and received.
+    assert_eq!(
+        local.activity,
+        AccountActivity::Outputs {
+            sent: transparent_row(50_000, output_index),
+            received: transparent_row(50_000, output_index),
+        }
+    );
     assert_eq!(
         (sapling(&local).received + zat(50_000) + fee).unwrap(),
         zat(200_000)
     );
 
-    // The private ledger then recovers the output as mined, and the account is promoted.
+    // The private ledger then recovers the output as mined, and the account is activated.
     let fixture = revision(1, true);
     let ws = watch(&st, account);
     let recovered = ReceiveEvent {
@@ -476,7 +524,7 @@ fn check_local_intent_survives_discovery(with_metadata: bool) {
     cover(&mut st, account, &fixture, vec![recovered.clone()]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
 
     // The local record is kept: only the placement changed.
     let discovered = history(&st, account, txid);
@@ -516,12 +564,25 @@ fn cross_account_transfers_report_each_side() {
     assert_eq!(sent.classification, HistoryClassification::LocalIntent);
     assert!(matches!(sent.fee, FeeState::Known(_)));
     assert_eq!(transparent(&sent).received, Zatoshis::ZERO);
+    // The other account's receipt is this account's send.
+    let AccountActivity::Outputs {
+        sent: Some(row),
+        received: None,
+    } = &sent.activity
+    else {
+        panic!("expected a sent row, got {:?}", sent.activity);
+    };
+    assert_eq!(row.amount, zat(30_000));
 
     let received = history(&st, recipient, txid);
     assert_eq!(received.classification, HistoryClassification::LocalIntent);
     assert_eq!(transparent(&received).received, zat(30_000));
     assert_eq!(sapling(&received).spent, Zatoshis::ZERO);
     assert_eq!(received.fee, FeeState::NotApplicable);
+    assert!(matches!(
+        &received.activity,
+        AccountActivity::Outputs { sent: None, received: Some(row) } if row.amount == zat(30_000)
+    ));
 }
 
 #[test]
@@ -690,8 +751,14 @@ fn full_data_completes_details_only_when_every_spent_unit_is_accounted_for() {
     let entry = history(&st, account, txid);
     assert_eq!(sapling(&entry).spent, zat(200_000));
     assert_eq!(sapling(&entry).completeness, EffectCompleteness::Complete);
-    assert!(matches!(entry.fee, FeeState::Known(_)));
+    let FeeState::Known(fee) = entry.fee else {
+        panic!("expected a known fee, got {:?}", entry.fee);
+    };
     assert_eq!(entry.classification, HistoryClassification::Reconstructed);
+    assert!(matches!(
+        &entry.activity,
+        AccountActivity::Outputs { sent: Some(row), received: None } if row.amount == zat(50_000)
+    ));
 
     // An output the wallet cannot decrypt, such as one sent with the outgoing viewing key
     // discarded, leaves a payment unknown although the full transaction is stored.
@@ -707,6 +774,17 @@ fn full_data_completes_details_only_when_every_spent_unit_is_accounted_for() {
     assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
     assert!(matches!(entry.fee, FeeState::Known(_)));
     assert_eq!(entry.classification, HistoryClassification::Provisional);
+    // Only the debit less the account's fee remains.
+    assert_eq!(
+        entry.account_movement.net(),
+        -i128::from(50_000 + fee.into_u64())
+    );
+    assert_eq!(
+        entry.activity,
+        AccountActivity::MovementDebit {
+            amount: zat(50_000)
+        }
+    );
 }
 
 fn account_row(st: &State, account: AccountUuid) -> i64 {
@@ -843,10 +921,33 @@ fn a_sent_output_memo_is_known_only_from_the_same_owned_receipt() {
     assert_eq!(entry.fee, FeeState::NotApplicable);
     assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
     assert_eq!(entry.classification, HistoryClassification::Reconstructed);
+    // The account's record of sending itself the output makes it a sent and a received row.
+    assert!(matches!(
+        &entry.activity,
+        AccountActivity::Outputs {
+            sent: Some(_),
+            received: Some(_)
+        }
+    ));
     conn(&st)
         .execute("DELETE FROM sent_notes WHERE transaction_id = ?1", [tx])
         .unwrap();
-    assert_eq!(history(&st, account, txid), entry);
+    // Without the record it is only a receipt; nothing else changes.
+    let unrecorded = history(&st, account, txid);
+    assert!(matches!(
+        &unrecorded.activity,
+        AccountActivity::Outputs {
+            sent: None,
+            received: Some(_)
+        }
+    ));
+    assert_eq!(
+        TransactionHistoryDetails {
+            activity: entry.activity.clone(),
+            ..unrecorded
+        },
+        entry
+    );
     record_sent_without_memo(&st, tx, a, 2, index, 80_000);
 
     // A known empty memo is a retrieved memo.

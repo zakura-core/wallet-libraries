@@ -11,6 +11,22 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- `transparent_ledger::AccountActivity` and `TransactionHistoryDetails::activity`: the activity
+  rows private recovery reconstructs for the account (an inferred payment, a fee-only
+  self-transfer, a hidden funding step, an inferred outgoing value, a provisional debit, or the
+  outputs it links), with each row's amount and the outputs it counts (`ActivityOutputs`,
+  `OutputRef`), or `Unknown` where no rule applies. The rules reproduce Vizor's decisions for
+  privately recovered transactions, except where `docs/account-history-summaries.md` lists a
+  difference. They read the history evidence and the account's outputs, never display facts;
+  shieldings, pool migrations, labels, the fee each row shows, and grouping across transactions
+  remain the wallet's, which classifies shieldings and migrations before reading the activity.
+- `TransparentDetailRead::transaction_receipt`, returning `TransactionReceipt`: the history
+  view, the transparent detail view and their `ReceiptAttribution` (a send's recipient as an
+  `Attribution`, the `ReceiptSource` with its `SourcePool`, settled effects, and whether the
+  recipient or a transparent receipt completes the receipt) from one read, reproducing Vizor's
+  receipt rules. Shared or mixed funding blocks
+  attribution. It is a display-level conclusion, separate from `DetailCompleteness`, and never
+  changes the history view. This is a new required trait method.
 - `TransparentLedgerWrite::forget_transparent_ledger`, behind `transparent-inputs`, and its
   result `ForgottenTransparentLedger`: under `Public`, atomically removes what private recovery
   alone contributed, so a publication's facts do not outlive the policy that admitted them.
@@ -18,13 +34,15 @@ workspace.
   add it.
 - `transparent_ledger::{TransparentDetailRead, TransparentDetailWrite}` (prototype): durable
   transparent txid enhancement work (`transparent_detail_work`, returning the requests with the
-  mode and policy generation of the same snapshot as `TransparentDetailWork`;
+  mode and policy generation of the same snapshot as `TransparentDetailWork`, the due ones among
+  the caller's `prefer` first and outside its `limit`;
   `transparent_detail_parked`, reporting work that waits for a display map change under the
   caller's map as `TransparentDetailParked`, with a refresh time bounded by
   `TRANSPARENT_DISPLAY_MAP_RECHECK`), validated
   `TransparentDisplayFacts` (`store_transparent_display`, returning `TransparentDisplayStore`),
-  library-computed backoff (`defer_transparent_detail` with the request's mined height and
-  `TransparentDetailOutcome`, ignoring results for a changed placement), and the
+  library-computed backoff (`defer_transparent_detail` with the request's mined height,
+  `TransparentDetailOutcome` and the listing's policy generation, ignoring results for a
+  changed placement and failing as stale under a changed policy), and the
   detail view (`transparent_display_view`, returning `TransparentDisplayView`). Display facts
   are one fixed-size display entry: the first address-shaped sender
   (`TransparentDisplaySender`), at most two outputs (`TRANSPARENT_DISPLAY_OUTPUT_SLOTS`), and
@@ -37,7 +55,7 @@ workspace.
   own, and no shielded part in a transaction the wallet records as having one (by its raw
   bytes or, without them, by detail work, stored facts or a private-enhancement marker).
   Display facts never change balances, history classification or `details_complete`; see
-  `docs/transparent-txid-enhancement.md`.
+  [the transparent receipt enhancement guide](../../docs/transparent-pir-wallet-integration.md#transparent-receipt-enhancement).
 - `IronwoodEnhancementData::has_transparent_outputs` preserves the service's separate
   output-presence assertion for display reconstruction; note decryption authenticates the memo,
   not that assertion.
@@ -47,6 +65,16 @@ workspace.
   final while its payment and fee attribution are not.
 
 ### Changed
+- Rename prototype quarantine results to recovery suspension:
+  `RecoveryBlocker::RecoverySuspended` and
+  `RefusedCommit::{SourceRecoverySuspended, AccountRecoverySuspended}`.
+- Rename the prototype `TransparentLedgerWrite::promote_transparent_account` to
+  `activate_transparent_ledger`, matching the candidate-to-active ledger transition.
+- Rename the prototype `TransparentWatchSet` to `TransparentAddressWatchSet`.
+  Its account context, watched addresses, and pending pages are unchanged.
+- `transparent_ledger::FeeState` gains `Unattributed { whole }`: the account spent in the
+  transaction and the whole fee is exact, but its share is not established. History entries
+  report it where they reported `Unknown` with an exact `whole_fee`.
 - `TransactionHistoryDetails::inferred_outgoing` documents the Activity default that the account
   funded a recovered send and its fee unless recovered evidence identifies another contributor.
   This display assumption does not establish payment or fee attribution.

@@ -194,7 +194,7 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
         SqliteClientError::TransparentLedgerModeNotConfigured
-        | SqliteClientError::TransparentAuthorityUnavailable
+        | SqliteClientError::TransparentAuthorityUnavailable(_)
         | SqliteClientError::TransparentLedgerIncompatible { .. }
         | SqliteClientError::StaleTransparentPolicy { .. }
         | SqliteClientError::TransparentRecoveryNotEnabled
@@ -203,8 +203,8 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         }
         #[cfg(feature = "transparent-inputs")]
         SqliteClientError::TransparentLedgerCommitRejected(_)
-        | SqliteClientError::TransparentPromotionBlocked(_) => {
-            unreachable!("migrations do not recover or promote transparent ledgers")
+        | SqliteClientError::TransparentActivationBlocked(_) => {
+            unreachable!("migrations do not recover or activate transparent ledgers")
         }
         SqliteClientError::CorruptedData(e) => WalletMigrationError::CorruptedData(e),
         SqliteClientError::Protobuf(e) => WalletMigrationError::CorruptedData(e.to_string()),
@@ -925,8 +925,8 @@ mod tests {
             db::TABLE_TPIR_PENDING_PAGE_SCRIPTS,
             db::TABLE_TPIR_PENDING_PAGES,
             db::TABLE_TPIR_QUALIFIED_REVISIONS,
-            db::TABLE_TPIR_QUARANTINED_ACCOUNTS,
-            db::TABLE_TPIR_QUARANTINED_SOURCES,
+            db::TABLE_TPIR_RECOVERY_SUSPENDED_ACCOUNTS,
+            db::TABLE_TPIR_RECOVERY_SUSPENDED_SOURCES,
             db::TABLE_TPIR_RECEIVE_EVENTS,
             db::TABLE_TPIR_RECEIVE_OBSERVATIONS,
             db::TABLE_TPIR_REVISIONS,

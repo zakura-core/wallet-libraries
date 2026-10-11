@@ -1,5 +1,5 @@
 //! Seedless upgrades of representative wallets written before the ledger schema existed,
-//! followed by recovery, qualification, and promotion.
+//! followed by recovery, qualification, and activation.
 //!
 //! Each fixture is created at the migration state before the ledger schema, with real keys
 //! and addresses, and its transparent history is written the way older builds wrote it. The
@@ -288,7 +288,7 @@ impl PreLedgerWallet {
     }
 
     /// Upgrades without a seed, then recovers every account from its `events` under
-    /// `PrivateRequired`, qualifies the revision, and promotes every account.
+    /// `PrivateRequired`, qualifies the revision, and activates every account.
     fn upgrade_and_activate(
         mut self,
         events: BTreeMap<AccountUuid, (Vec<ReceiveEvent>, Vec<SpendEvent>)>,
@@ -356,7 +356,7 @@ impl PreLedgerWallet {
         db.apply_transparent_policy(PrivateRequired).unwrap();
         db.set_transparent_ledger_mode(PrivateRequired);
         for account in self.keys.keys() {
-            db.promote_transparent_account(*account).unwrap();
+            db.activate_transparent_ledger(*account).unwrap();
         }
         Upgraded {
             _file: self.file,

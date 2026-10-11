@@ -1,34 +1,5 @@
 use super::*;
 
-/// Runs `f` atomically: in a new immediate transaction, or under a savepoint inside the
-/// caller's transaction. Nothing `f` wrote survives its failure, including a failure to
-/// commit or release.
-#[cfg(feature = "transparent-inputs")]
-pub(super) fn atomically<T>(
-    conn: &rusqlite::Connection,
-    f: impl FnOnce(&rusqlite::Connection) -> Result<T, SqliteClientError>,
-) -> Result<T, SqliteClientError> {
-    if conn.is_autocommit() {
-        // The guard rolls back when dropped, including after a failed commit.
-        let tx =
-            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-        let value = f(&tx)?;
-        tx.commit()?;
-        return Ok(value);
-    }
-    conn.execute_batch("SAVEPOINT tpir_commit")?;
-    let result = f(conn).and_then(|value| {
-        conn.execute_batch("RELEASE tpir_commit")?;
-        Ok(value)
-    });
-    if result.is_err() {
-        // Undo everything since the savepoint and remove it, even when releasing it failed. If
-        // this cleanup fails too, the error still aborts the caller's enclosing transaction.
-        let _ = conn.execute_batch("ROLLBACK TO tpir_commit; RELEASE tpir_commit");
-    }
-    result
-}
-
 /// Checks everything about a commit that needs no stored state.
 #[cfg(feature = "transparent-inputs")]
 fn check_well_formed(commit: &TransparentLedgerCommit<AccountUuid>) -> Result<(), InvalidCommit> {
@@ -120,7 +91,7 @@ pub(crate) enum CommitTrust {
 /// first when `trust` is [`CommitTrust::Qualified`].
 ///
 /// An integrity failure applies none of the commit's facts and no qualification, but
-/// quarantines, in the same transaction, the commit's source, its account, and every account
+/// suspends, in the same transaction, the commit's source, its account, and every account
 /// holding evidence from the source, and removes those accounts' pending pages.
 #[cfg(feature = "transparent-inputs")]
 pub(crate) fn apply_commit<P: consensus::Parameters>(
@@ -140,23 +111,24 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
         if !grants_private_authority(conn, configured)? {
             return Err(SqliteClientError::TransparentRecoveryNotEnabled);
         }
-        ensure_policy_generation(conn, commit.context.policy_generation)?;
+        check_transparent_policy_generation(conn, commit.context.policy_generation)?;
 
         let stale = |reason| reject(CommitRejection::Stale(reason));
-        let watch = Watch::load(conn, params, gap_limits, commit.context.account)?
-            .ok_or_else(|| stale(StaleCommit::AccountUnknown))?;
-        let account_ref = watch.account.internal_id();
-        if source_quarantined(conn, &commit.revision.source)? {
+        let recovery_addresses =
+            AccountRecoveryAddresses::load(conn, params, gap_limits, commit.context.account)?
+                .ok_or_else(|| stale(StaleCommit::AccountUnknown))?;
+        let account_ref = recovery_addresses.account.internal_id();
+        if source_recovery_is_suspended(conn, &commit.revision.source)? {
             return Err(reject(CommitRejection::Refused(
-                RefusedCommit::SourceQuarantined,
+                RefusedCommit::SourceRecoverySuspended,
             )));
         }
-        if account_quarantined(conn, account_ref)? {
+        if account_recovery_is_suspended(conn, account_ref)? {
             return Err(reject(CommitRejection::Refused(
-                RefusedCommit::AccountQuarantined,
+                RefusedCommit::AccountRecoverySuspended,
             )));
         }
-        if lifecycle(conn, account_ref)? != commit.context.lifecycle {
+        if account_lifecycle(conn, account_ref)? != commit.context.lifecycle {
             return Err(stale(StaleCommit::LifecycleChanged));
         }
 
@@ -184,23 +156,23 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
                     .flat_map(|p| p.addresses.iter().copied()),
             );
         for address in named {
-            if !watch.addresses.contains_key(&address) {
+            if !recovery_addresses.addresses.contains_key(&address) {
                 return Err(stale(StaleCommit::AddressNotWatched(address)));
             }
         }
 
         // The qualification and facts apply under a nested savepoint, so an integrity failure
-        // can discard them all, including any withdrawn evidence, while its quarantine commits.
+        // can discard them all, including any withdrawn evidence, while its recovery suspension commits.
         match atomically(conn, |conn| {
             if trust == CommitTrust::Qualified {
                 qualify_in(conn, &commit.revision)?;
             }
-            apply_facts(conn, params, gap_limits, &watch, &commit)
+            apply_facts(conn, params, gap_limits, &recovery_addresses, &commit)
         }) {
             Err(SqliteClientError::TransparentLedgerCommitRejected(
                 rejection @ CommitRejection::Integrity(_),
             )) => {
-                quarantine(conn, &commit.revision.source, account_ref)?;
+                suspend_recovery(conn, &commit.revision.source, account_ref)?;
                 Ok(Err(reject(rejection)))
             }
             result => result.map(Ok),
@@ -215,11 +187,11 @@ fn apply_facts<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
     gap_limits: &GapLimits,
-    watch: &Watch,
+    recovery_addresses: &AccountRecoveryAddresses,
     commit: &TransparentLedgerCommit<AccountUuid>,
 ) -> Result<CommitOutcome, SqliteClientError> {
     let stale = |reason| reject(CommitRejection::Stale(reason));
-    let account_ref = watch.account.internal_id();
+    let account_ref = recovery_addresses.account.internal_id();
     let target = commit.context.target;
     let active = commit.context.lifecycle == AccountLifecycle::Active;
 
@@ -272,16 +244,30 @@ fn apply_facts<P: consensus::Parameters>(
     }
 
     for range in &commit.coverage {
-        record_range(conn, account_ref, revision_id, &commit.anchor, range, true)?;
+        record_range(
+            conn,
+            account_ref,
+            revision_id,
+            &commit.anchor,
+            range,
+            CoverageSupport::Supported,
+        )?;
     }
     for range in &commit.unsupported {
-        record_range(conn, account_ref, revision_id, &commit.anchor, range, false)?;
+        record_range(
+            conn,
+            account_ref,
+            revision_id,
+            &commit.anchor,
+            range,
+            CoverageSupport::Unsupported,
+        )?;
     }
 
     let window_grew = if active {
         // Read-time expansion may have found addresses beyond the wallet's gap generation.
         // Materialize that watch before projecting any receive at those addresses.
-        ownership::materialize_watch(conn, params, watch)?;
+        ownership::materialize_recovery_addresses(conn, params, recovery_addresses)?;
         // Events join the wallet's outputs and spends, where the wallet's own gap-limit
         // generation extends its address window.
         for receive in &commit.receives {
@@ -290,17 +276,18 @@ fn apply_facts<P: consensus::Parameters>(
         for spend in &commit.spends {
             projection::project_spend(conn, params, gap_limits, spend)?;
         }
-        let after = Watch::load(conn, params, gap_limits, commit.context.account)?
-            .ok_or(SqliteClientError::AccountUnknown)?;
-        after.production_end != watch.production_end
+        let after =
+            AccountRecoveryAddresses::load(conn, params, gap_limits, commit.context.account)?
+                .ok_or(SqliteClientError::AccountUnknown)?;
+        after.production_end != recovery_addresses.production_end
     } else {
         let mut window_grew = false;
-        for (slot, needed) in watch
+        for (slot, needed) in recovery_addresses
             .window_needs(conn, gap_limits)?
             .into_iter()
             .enumerate()
         {
-            if let Some(needed) = needed.filter(|_| watch.derivable[slot]) {
+            if let Some(needed) = needed.filter(|_| recovery_addresses.derivable[slot]) {
                 conn.execute(
                     "INSERT INTO tpir_candidate_windows (account_id, key_scope, end_index)
                      VALUES (:account_id, :key_scope, :end_index)
@@ -339,7 +326,7 @@ fn is_qualified(conn: &rusqlite::Connection, revision_id: i64) -> Result<bool, S
 
 /// Returns `account_ref`'s lifecycle.
 #[cfg(feature = "transparent-inputs")]
-pub(super) fn lifecycle(
+pub(super) fn account_lifecycle(
     conn: &rusqlite::Connection,
     account_ref: AccountRef,
 ) -> Result<AccountLifecycle, SqliteClientError> {
@@ -353,69 +340,6 @@ pub(super) fn lifecycle(
     } else {
         AccountLifecycle::Candidate
     })
-}
-
-/// Whether `source` is quarantined.
-#[cfg(feature = "transparent-inputs")]
-pub(super) fn source_quarantined(
-    conn: &rusqlite::Connection,
-    source: &[u8],
-) -> Result<bool, SqliteClientError> {
-    Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM tpir_quarantined_sources WHERE source = :source)",
-        named_params![":source": source],
-        |row| row.get(0),
-    )?)
-}
-
-/// Whether `account_ref` is quarantined.
-#[cfg(feature = "transparent-inputs")]
-pub(super) fn account_quarantined(
-    conn: &rusqlite::Connection,
-    account_ref: AccountRef,
-) -> Result<bool, SqliteClientError> {
-    Ok(conn.query_row(
-        "SELECT EXISTS (
-             SELECT 1 FROM tpir_quarantined_accounts WHERE account_id = :account_id
-         )",
-        named_params![":account_id": account_ref.0],
-        |row| row.get(0),
-    )?)
-}
-
-/// Quarantines `source`, `account_ref`, and every account holding coverage, pages, or observed
-/// events from `source`, and removes the quarantined accounts' pending pages.
-#[cfg(feature = "transparent-inputs")]
-fn quarantine(
-    conn: &rusqlite::Connection,
-    source: &[u8],
-    account_ref: AccountRef,
-) -> Result<(), SqliteClientError> {
-    conn.execute(
-        "INSERT OR IGNORE INTO tpir_quarantined_sources (source) VALUES (:source)",
-        named_params![":source": source],
-    )?;
-    conn.execute(
-        "INSERT OR IGNORE INTO tpir_quarantined_accounts (account_id)
-         SELECT :account_id
-         UNION SELECT account_id FROM tpir_coverage
-             WHERE revision_id IN (SELECT id FROM tpir_revisions WHERE source = :source)
-         UNION SELECT account_id FROM tpir_pending_pages
-             WHERE revision_id IN (SELECT id FROM tpir_revisions WHERE source = :source)
-         UNION SELECT e.account_id FROM tpir_receive_events e
-             JOIN tpir_receive_observations o ON o.receive_id = e.id
-             WHERE o.revision_id IN (SELECT id FROM tpir_revisions WHERE source = :source)
-         UNION SELECT e.account_id FROM tpir_spend_events e
-             JOIN tpir_spend_observations o ON o.spend_id = e.id
-             WHERE o.revision_id IN (SELECT id FROM tpir_revisions WHERE source = :source)",
-        named_params![":account_id": account_ref.0, ":source": source],
-    )?;
-    conn.execute(
-        "DELETE FROM tpir_pending_pages
-         WHERE account_id IN (SELECT account_id FROM tpir_quarantined_accounts)",
-        [],
-    )?;
-    super::super::require_reader_version(conn, super::super::ACTIVATION_READER_VERSION)
 }
 
 /// Authorizes a trusted revision transition, outside any commit: qualifies the exact identity

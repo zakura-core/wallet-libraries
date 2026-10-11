@@ -15,11 +15,15 @@ fn merge(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
     merged
 }
 
+/// An account's recorded coverage, by output script.
 pub(super) struct Coverage {
+    /// The checked ranges per script, inclusive, merged into disjoint, non-adjacent ranges.
     pub(super) supported: BTreeMap<Vec<u8>, Vec<(u32, u32)>>,
+    /// The ranges a revision declared it cannot index, as recorded: `(script, from, through)`.
     pub(super) unsupported: Vec<(Vec<u8>, u32, u32)>,
 }
 
+/// Reads `account_ref`'s recorded coverage.
 pub(super) fn read(
     conn: &rusqlite::Connection,
     account_ref: AccountRef,
