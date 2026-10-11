@@ -621,4 +621,67 @@ mod tests {
         );
         st.scan_cached_blocks(h3, 1);
     }
+
+    /// A build without `orchard` records no Ironwood spends, so it refuses blocks while an
+    /// unfinished restore sweep still needs that evidence, even for an inactive key.
+    #[test]
+    fn scanning_without_orchard_refuses_pending_restore_sweeps() {
+        use crate::{error::SqliteClientError, testing::db::TestDb};
+        use zcash_client_backend::data_api::{
+            WalletRead,
+            chain::error::Error,
+            testing::{AddressType, TestBuilder, TestState, pool::ShieldedPoolTester},
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(testing::db::TestDbFactory::default())
+            .with_block_cache(testing::BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let mut next_block = |st: &mut TestState<_, TestDb, _>| {
+            st.generate_next_block(
+                &fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(5),
+            )
+            .0
+        };
+        let h1 = next_block(&mut st);
+        st.scan_cached_blocks(h1, 1);
+        st.wallet()
+            .conn()
+            .execute_batch(
+                "INSERT INTO ironwood_receiving_keys
+                 (account_id, purpose, key_index, receiver, scan_from, advances_allocation)
+                 SELECT id, 1, zeroblob(8), zeroblob(43), 0, 1 FROM accounts LIMIT 1;
+                 INSERT INTO ironwood_dynamic_sweeps (receiving_key_id)
+                 SELECT id FROM ironwood_receiving_keys;",
+            )
+            .unwrap();
+        let h2 = next_block(&mut st);
+        let fully_scanned = |st: &TestState<_, TestDb, _>| {
+            st.wallet()
+                .block_fully_scanned()
+                .unwrap()
+                .map(|b| b.block_height())
+        };
+        if cfg!(feature = "orchard") {
+            st.scan_cached_blocks(h2, 1);
+            return;
+        }
+        assert!(matches!(
+            st.try_scan_cached_blocks(h2, 1),
+            Err(Error::Wallet(SqliteClientError::DynamicIvksNotUsed))
+        ));
+        assert_eq!(fully_scanned(&st), Some(h1));
+        st.wallet()
+            .conn()
+            .execute_batch("UPDATE ironwood_dynamic_sweeps SET done_height = 0")
+            .unwrap();
+        st.scan_cached_blocks(h2, 1);
+        assert_eq!(fully_scanned(&st), Some(h2));
+    }
 }

@@ -3257,8 +3257,8 @@ where
 impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P, CL, R> {
     /// Stores scanned blocks for `put_blocks` and, with `dynamic_keys`, the dynamic key
     /// snapshot that scanned them, for `put_blocks_with_dynamic_ivks`. Blocks scanned
-    /// without dynamic keys are refused while one is open: storing them would mark that
-    /// key's payments scanned without finding them.
+    /// without dynamic keys are refused while `wallet::dynamic_ivks_required`: storing
+    /// them would mark a key's payments scanned without finding them.
     fn store_scanned_blocks(
         &mut self,
         from_state: &ChainState,
@@ -3268,7 +3268,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
         // Without `orchard`, no block is scanned with dynamic keys.
         #[cfg(not(feature = "orchard"))]
         let dynamic_keys = None::<()>;
-        if dynamic_keys.is_none() && wallet::dynamic_key_open(self.conn.0)? {
+        if dynamic_keys.is_none() && wallet::dynamic_ivks_required(self.conn.0)? {
             return Err(SqliteClientError::DynamicIvksNotUsed);
         }
         // Once the NU6.3 (Ironwood) activation height is reached, checkpoints on the anchor
@@ -3612,7 +3612,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         let dynamic_ivks_applied = d_tx.dynamic_ivks_applied();
         #[cfg(not(feature = "orchard"))]
         let dynamic_ivks_applied = false;
-        if !dynamic_ivks_applied && wallet::dynamic_key_open(self.conn.0)? {
+        if !dynamic_ivks_applied && wallet::dynamic_ivks_required(self.conn.0)? {
             return Err(SqliteClientError::DynamicIvksNotUsed);
         }
         let chain_tip = wallet::chain_tip_height(self.conn.borrow())?

@@ -861,13 +861,22 @@ pub(crate) fn delete_account(
     Ok(())
 }
 
-/// Whether a dynamic key is open, so that blocks scanned or transactions decrypted
-/// without it must not be stored. It reads only the schema, so builds without `orchard`
-/// refuse them too.
-pub(crate) fn dynamic_key_open(conn: &Connection) -> Result<bool, SqliteClientError> {
+/// Whether blocks scanned or transactions decrypted without the dynamic keys must not be
+/// stored: a dynamic key is open, or, in a build without `orchard`, which records no
+/// Ironwood spends, a restore sweep or queued candidate still needs that evidence (see
+/// `dynamic_ivk::finish_nullifier_recovery`). It reads only the schema, so every build
+/// applies it.
+pub(crate) fn dynamic_ivks_required(conn: &Connection) -> Result<bool, SqliteClientError> {
+    #[cfg(feature = "orchard")]
+    let recovery = "";
+    #[cfg(not(feature = "orchard"))]
+    let recovery = "OR EXISTS(SELECT 1 FROM ironwood_dynamic_sweeps WHERE done_height IS NULL)
+         OR EXISTS(SELECT 1 FROM ironwood_dynamic_payment_recovery)";
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys
-         WHERE active_from IS NOT NULL AND closed_at IS NULL)",
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys
+             WHERE active_from IS NOT NULL AND closed_at IS NULL) {recovery}"
+        ),
         [],
         |row| row.get(0),
     )?)
