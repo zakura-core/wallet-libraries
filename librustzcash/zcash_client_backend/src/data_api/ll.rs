@@ -541,6 +541,8 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
     /// `(fully_scanned_height - pruning_depth)`, where `fully_scanned_height` is the height
     /// of the wallet's fully scanned chain state. These nullifiers are no longer needed because
     /// any notes they could have spent would have already been discovered during scanning.
+    /// A store that passes an `ironwood_nullifier_retention` height to
+    /// [`wallet::put_blocks_rows`] must keep Ironwood nullifiers recorded at or above it.
     ///
     /// # Parameters
     /// - `pruning_depth`: The number of blocks below the fully scanned height at which to

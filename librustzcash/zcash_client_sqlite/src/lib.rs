@@ -3606,9 +3606,13 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         d_tx: DecryptedTransaction<Transaction, <Self as WalletRead>::AccountId>,
     ) -> Result<(), <Self as WalletRead>::Error> {
         // As with scanned blocks, a transaction decrypted without the open dynamic keys
-        // would store their payments as someone else's.
+        // would store their payments as someone else's. Without `orchard`, no transaction
+        // is decrypted with dynamic keys.
         #[cfg(feature = "orchard")]
-        if !d_tx.dynamic_ivks_applied() && wallet::dynamic_key_open(self.conn.0)? {
+        let dynamic_ivks_applied = d_tx.dynamic_ivks_applied();
+        #[cfg(not(feature = "orchard"))]
+        let dynamic_ivks_applied = false;
+        if !dynamic_ivks_applied && wallet::dynamic_key_open(self.conn.0)? {
             return Err(SqliteClientError::DynamicIvksNotUsed);
         }
         let chain_tip = wallet::chain_tip_height(self.conn.borrow())?
@@ -5386,6 +5390,68 @@ mod tests {
             st.wallet().get_wallet_recover_until().unwrap(),
             Some(zcash_protocol::consensus::BlockHeight::from_u32(123456))
         );
+    }
+
+    /// While a dynamic key is open a decrypted transaction is refused in every build, as
+    /// scanned blocks are, so its retrieval request survives for a build that decrypts
+    /// with the dynamic keys.
+    #[test]
+    fn storing_a_transaction_refuses_open_dynamic_keys() {
+        use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
+        use zcash_primitives::transaction::{Authorized, TransactionData, TxVersion};
+        use zcash_protocol::consensus::BranchId;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let network = *st.network();
+        let height = st.wallet().get_wallet_birthday().unwrap().unwrap() + 10;
+        st.wallet_mut().update_chain_tip(height).unwrap();
+        let tx = TransactionData::<Authorized>::from_parts(
+            TxVersion::V5,
+            BranchId::for_height(&network, height),
+            0,
+            height + 100,
+            None,
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        let conn = st.wallet_mut().conn_mut().transaction().unwrap();
+        crate::wallet::queue_tx_retrieval(&conn, std::iter::once(tx.txid()), None).unwrap();
+        conn.execute_batch(
+            "INSERT INTO ironwood_receiving_keys
+             (account_id, purpose, key_index, receiver, scan_from, advances_allocation, active_from)
+             SELECT id, 1, zeroblob(8), zeroblob(43), 0, 1, 0 FROM accounts LIMIT 1;",
+        )
+        .unwrap();
+        conn.commit().unwrap();
+        let queued = |st: &TestState<_, TestDb, _>| -> bool {
+            st.wallet()
+                .conn()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue WHERE txid = ?1)",
+                    [tx.txid().as_ref()],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+
+        assert!(matches!(
+            decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, None),
+            Err(SqliteClientError::DynamicIvksNotUsed)
+        ));
+        assert!(queued(&st));
+        // Without an open key the irrelevant transaction is stored, retiring its request.
+        st.wallet()
+            .conn()
+            .execute_batch("UPDATE ironwood_receiving_keys SET active_from = NULL")
+            .unwrap();
+        decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, None).unwrap();
+        assert!(!queued(&st));
     }
 
     #[cfg(feature = "orchard")]
