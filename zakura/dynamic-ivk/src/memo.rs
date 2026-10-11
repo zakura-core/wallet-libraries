@@ -36,13 +36,8 @@ impl RefundMemo {
         bytes
     }
 
-    /// Decodes a v1 record, or returns `None` for any other memo.
-    ///
-    /// A memo that starts with [`REFUND_MEMO_MAGIC`] but has another version or
-    /// purpose is a record this release cannot read. Callers that select records by
-    /// that prefix must keep such a memo pending rather than mark their recovery work
-    /// complete. Bytes after the index are reserved and ignored, so a later revision
-    /// can add optional fields without a new version.
+    /// Decodes a v1 record, or returns `None` for any other memo. Bytes after the
+    /// index are reserved and ignored.
     pub fn decode(bytes: &[u8; 512]) -> Option<Self> {
         if bytes[..5] != REFUND_MEMO_MAGIC || bytes[5] != 1 || bytes[6] != 0 {
             return None;
