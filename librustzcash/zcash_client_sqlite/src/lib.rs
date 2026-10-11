@@ -3605,14 +3605,22 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         &mut self,
         d_tx: DecryptedTransaction<Transaction, <Self as WalletRead>::AccountId>,
     ) -> Result<(), <Self as WalletRead>::Error> {
-        // As with scanned blocks, a transaction decrypted without the open dynamic keys
-        // would store their payments as someone else's. Without `orchard`, no transaction
-        // is decrypted with dynamic keys.
+        // As with scanned blocks, a transaction decrypted without an open dynamic key,
+        // including one opened since its keys were read, would store that key's payments
+        // as someone else's; the caller retries. Without `orchard`, no transaction is
+        // decrypted with dynamic keys.
         #[cfg(feature = "orchard")]
-        let dynamic_ivks_applied = d_tx.dynamic_ivks_applied();
+        let dynamic_keys_missed = match d_tx.dynamic_ivks_applied() {
+            Some(used) => wallet::dynamic_ivk::transaction_missed_keys(
+                self.conn.0,
+                used,
+                d_tx.mined_height(),
+            )?,
+            None => wallet::dynamic_ivks_required(self.conn.0)?,
+        };
         #[cfg(not(feature = "orchard"))]
-        let dynamic_ivks_applied = false;
-        if !dynamic_ivks_applied && wallet::dynamic_ivks_required(self.conn.0)? {
+        let dynamic_keys_missed = wallet::dynamic_ivks_required(self.conn.0)?;
+        if dynamic_keys_missed {
             return Err(SqliteClientError::DynamicIvksNotUsed);
         }
         let chain_tip = wallet::chain_tip_height(self.conn.borrow())?

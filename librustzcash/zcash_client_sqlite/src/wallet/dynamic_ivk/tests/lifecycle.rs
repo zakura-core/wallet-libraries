@@ -250,6 +250,28 @@ fn a_rewind_reopens_a_closed_key_whose_receipt_it_unmines() {
     assert_eq!(close(&mut st, terminal), 1);
 }
 
+/// A rewind that keeps a closed key's receipt but leaves it short of the untrusted
+/// confirmations reopens the key, which then scans the replacement blocks; one that
+/// leaves the receipt confirmed does not.
+#[test]
+fn a_rewind_reopens_a_closed_key_whose_receipt_it_leaves_unconfirmed() {
+    let mut st = scanned_wallet();
+    let key = refund_key(&mut st);
+    let terminal = registered_at() + HOUR;
+    observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
+    let height = pay(&mut st, &key, 10_000);
+    confirm(&mut st);
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    assert_eq!(close(&mut st, terminal), 1);
+    st.truncate_to_height(height + 9);
+    assert!(scanning_keys(&st).is_empty());
+    st.truncate_to_height(height + 8);
+    assert_eq!(scanning_keys(&st), [key.key_id()]);
+    let replacement = pay(&mut st, &key, 20_000);
+    assert_eq!(replacement, height + 9);
+    assert_eq!(unspent_keys(&st, replacement), [Some(key.key_id()); 2]);
+}
+
 /// A refund key closed after a status reporting no refund reopens, and rescans what it
 /// missed, when a newer status reports one owed. A late older status or a repeated
 /// refund does not reopen it.

@@ -199,6 +199,79 @@ fn closed_key_decrypts_its_externally_funded_transaction_after_reopen() {
     assert!(!scanning_keys(&st).contains(&key.key_id()));
 }
 
+/// A transaction decrypted before another handle opens a key it pays is refused,
+/// keeping its retrieval request, and the retry stores that key's payment. This guards
+/// the store's check of `DecryptedTransaction::dynamic_ivks_applied`.
+#[test]
+fn a_key_opened_after_decryption_refuses_the_stale_transaction() {
+    use zakura_dynamic_ivk::lifecycle::{OperationStatus::Terminal, ReceiptExpectation};
+    let mut st = scanned_wallet();
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let db = st.wallet_mut().db_mut();
+    let paid = reserve_key(db, account, Purpose::Refund, tip + 1);
+    let status = Terminal(ReceiptExpectation::None);
+    observe(db, account, paid.key_id(), "swap", status, clock_now()).unwrap();
+    assert_eq!(close_at(db, account, clock_now(), tip), 1);
+    let open = reserve_key(db, account, Purpose::Refund, tip + 1);
+    let tx = external_payment(paid.receiver(), &MemoBytes::empty());
+    let conn = st.wallet_mut().conn_mut().transaction().unwrap();
+    crate::wallet::queue_tx_retrieval(&conn, std::iter::once(tx.txid()), None).unwrap();
+    conn.commit().unwrap();
+    let queued = |st: &State| -> bool {
+        st.wallet()
+            .conn()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue WHERE txid = ?1)",
+                [tx.txid().as_ref()],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+
+    let keys = st
+        .wallet()
+        .get_dynamic_transaction_keys(tx.txid(), None, &[])
+        .unwrap();
+    let ids: Vec<_> = keys.iter().map(|k| k.key_id()).collect();
+    assert_eq!(ids, [open.key_id()]);
+    let ufvks = st.wallet().get_unified_full_viewing_keys().unwrap();
+    let stale = zcash_client_backend::decrypt_transaction(&network, None, Some(tip), &tx, &ufvks)
+        .with_dynamic_ivks(keys);
+    let mut other = WalletDb::for_path(
+        st.wallet().data_file_path(),
+        network,
+        test_clock(),
+        test_rng(),
+    )
+    .unwrap();
+    activate_key(&mut other, account, paid.key_id(), tip + 1);
+    assert!(matches!(
+        st.wallet_mut().store_decrypted_tx(stale),
+        Err(SqliteClientError::DynamicIvksNotUsed)
+    ));
+    assert!(queued(&st));
+
+    decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &tx, None).unwrap();
+    assert!(!queued(&st));
+    let stored: i64 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM ironwood_received_notes rn
+             JOIN transactions t ON t.id_tx = rn.transaction_id
+             WHERE t.txid = ?1 AND rn.receiving_key_id = ?2",
+            rusqlite::params![
+                tx.txid().as_ref(),
+                key_ref(st.wallet().conn(), account, paid.key_id()).unwrap()
+            ],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, 1);
+}
+
 /// A ZeWIF import into a wallet with an open dynamic key decrypts with it, storing the
 /// memo of a payment to that key rather than refusing the import.
 #[cfg(feature = "zewif")]
