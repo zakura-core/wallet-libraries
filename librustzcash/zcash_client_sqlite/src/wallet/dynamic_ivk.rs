@@ -268,8 +268,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// close a key early nor hold it open. A refund key this wallet never funded starts
     /// at its issuance point on a refund owed or an inconclusive end, in case the deposit
     /// was paid from elsewhere. A closed refund key reopens, rescanning from its start,
-    /// when a status newly reports either, and a closed incoming key when a status of its
-    /// funded operation leaves it expecting more than it received.
+    /// when a status newly reports either, and any key that closed settled does when a
+    /// status (for an incoming key, of its funded operation) leaves it expecting more than
+    /// it received.
     pub fn record_operation_status(
         &mut self,
         account: AccountUuid,
