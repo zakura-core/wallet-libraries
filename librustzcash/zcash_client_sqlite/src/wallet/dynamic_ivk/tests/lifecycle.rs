@@ -545,6 +545,39 @@ fn statuses_after_the_limit_do_not_reopen_a_key() {
     assert_eq!(st.wallet().suggest_scan_ranges().unwrap(), queued);
 }
 
+/// A status requested before the limit but recorded after its key closed there leaves
+/// the key closed, for a refund owed and for an incoming payout correction alike.
+#[test]
+fn a_status_requested_before_a_limit_closure_does_not_reopen_the_key() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key = refund_key(&mut st).key_id();
+    observe_swap(&mut st, key, Active, registered_at() + HOUR);
+    let limit = registered_at() + LIMIT;
+    assert_eq!(close(&mut st, limit), 1);
+    let queued = st.wallet().suggest_scan_ranges().unwrap();
+    let owed = Observation {
+        status: Terminal(Positive(None)),
+        deadline: None,
+    };
+    st.wallet_mut()
+        .db_mut()
+        .record_operation_status(account, "swap", None, owed, false, limit - 1)
+        .unwrap();
+    assert!(scanning_keys(&st).is_empty());
+    assert_eq!(st.wallet().suggest_scan_ranges().unwrap(), queued);
+
+    let mut st = scanned_wallet();
+    let (_, deadline) = underpaid_reservation(&mut st);
+    let limit = deadline + LIMIT;
+    assert_eq!(close(&mut st, limit), 1);
+    let queued = st.wallet().suggest_scan_ranges().unwrap();
+    record_receive_status(&mut st, "REFUNDED", None, limit - 2);
+    record_receive_status(&mut st, "SUCCESS", Some(50_000), limit - 1);
+    assert!(scanning_keys(&st).is_empty());
+    assert_eq!(st.wallet().suggest_scan_ranges().unwrap(), queued);
+}
+
 /// Within the limit, a newer status that unsettles a key closed settled reopens it.
 #[test]
 fn an_unsettling_status_within_the_limit_reopens_a_key() {
