@@ -92,8 +92,6 @@ pub enum ReservationPolicy {
     Stale,
     /// The wallet has not scanned this address through the chain tip.
     Coverage,
-    /// A refund record cannot be read by this version, and may hold a refund index.
-    Unreadable,
 }
 
 /// A registered key, re-derived from its account's viewing key. It holds viewing

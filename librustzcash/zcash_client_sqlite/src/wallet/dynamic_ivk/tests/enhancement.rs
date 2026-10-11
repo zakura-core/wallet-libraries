@@ -337,9 +337,8 @@ fn send_with_change_memo(
     (proposal, txid, mined)
 }
 
-/// Runs refund memo recovery for `account` in its own transaction, returning the
-/// number of unreadable funding records.
-fn recover_memos(st: &mut State, account: AccountUuid) -> usize {
+/// Runs refund memo recovery for `account` in its own transaction.
+fn recover_memos(st: &mut State, account: AccountUuid) {
     tx(st.wallet_mut().db_mut(), |c, p| {
         store::recovery::recover_refund_memos(c, p, account, clock_now())
     })
@@ -409,7 +408,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     let pending =
         |st: &State| store::recovery::refund_memos_pending(st.wallet().conn(), restored).unwrap();
     // Compact scanning stores the change without its memo.
-    assert_eq!(recover_memos(&mut st, restored), 0);
+    recover_memos(&mut st, restored);
     assert!(refund_keys(&st).is_empty());
     assert!(pending(&st));
     decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &tx, Some(mined))
@@ -427,7 +426,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .unwrap();
     };
     set_scope(&st, 0);
-    assert_eq!(recover_memos(&mut st, restored), 0);
+    recover_memos(&mut st, restored);
     assert!(refund_keys(&st).is_empty());
     set_scope(&st, 1);
     let spends: Vec<(i64, i64)> = st
@@ -459,7 +458,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     };
     let unauthenticated = RefundMemo::new(0).encode();
     swap_memo(&st, memo_bytes.as_slice(), unauthenticated.as_slice());
-    assert_eq!(recover_memos(&mut st, restored), 0);
+    recover_memos(&mut st, restored);
     assert_eq!(refund_keys(&st), vec![(0, u32::from(mined), true)]);
     assert!(!pending(&st));
     let next = st
@@ -485,7 +484,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .unwrap();
     }
 
-    // Unsupported data is counted without failing recovery.
+    // A marked memo that does not decode is ignored.
     let mut invalid = memo.encode();
     invalid[5] = 0xff;
     let replace_memo = |st: &State, from: &[u8], to: &[u8]| {
@@ -498,7 +497,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .unwrap();
     };
     replace_memo(&st, memo_bytes.as_slice(), invalid.as_slice());
-    assert_eq!(recover_memos(&mut st, restored), 1);
+    recover_memos(&mut st, restored);
     assert!(refund_keys(&st).is_empty());
     replace_memo(&st, invalid.as_slice(), memo_bytes.as_slice());
 
@@ -512,7 +511,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
 
     // The wallet never scanned this key, so its history comes from a receiver-directory
     // sweep rather than trial decryption.
-    assert_eq!(recover_memos(&mut st, restored), 0);
+    recover_memos(&mut st, restored);
     let registered = vec![(7, u32::from(mined), true)];
     assert_eq!(refund_keys(&st), registered);
     assert!(!pending(&st));
@@ -549,7 +548,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     // and it widens a key that starts after its funding block.
     decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &tx, Some(mined))
         .unwrap();
-    assert_eq!(recover_memos(&mut st, restored), 0);
+    recover_memos(&mut st, restored);
     assert_eq!(refund_keys(&st), registered);
     st.wallet()
         .conn()
@@ -558,7 +557,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             [],
         )
         .unwrap();
-    assert_eq!(recover_memos(&mut st, restored), 0);
+    recover_memos(&mut st, restored);
     assert_eq!(refund_keys(&st), registered);
 }
 
@@ -650,7 +649,7 @@ fn a_refund_key_starts_scanning_when_its_funding_transaction_is_stored() {
     let (mined, _) = st.generate_next_block_including(txid);
     st.scan_cached_blocks_with_dynamic_ivks(mined, 1);
     // The key already scans from before its funding block, so recovery queues no sweep.
-    assert_eq!(recover_memos(&mut st, account), 0);
+    recover_memos(&mut st, account);
     let db = st.wallet_mut().db_mut();
     assert!(!db.dynamic_history_pending(account, mined).unwrap());
     assert_eq!(close_at(db, account, now, mined), 0);
@@ -761,7 +760,7 @@ fn reissued_refund_key_sweeps_history_before_its_scan_start() {
     let db = st.wallet_mut().db_mut();
     let key = reserve_key(db, account, Purpose::Refund, mined + 1);
     assert_eq!(key.key_id().index(), 0);
-    assert_eq!(recover_memos(&mut st, account), 0);
+    recover_memos(&mut st, account);
     assert_eq!(refund_keys(&st), [(0, u32::from(mined), true)]);
     assert!(
         st.wallet()
@@ -795,7 +794,7 @@ fn refund_memos_restore_keys_whatever_the_funding_outputs() {
         let network = *st.network();
         let payments = recipients.iter().map(|a| payment(a, &network)).collect();
         let (_, _, mined) = send_with_change_memo(&mut st, payments, &memo);
-        assert_eq!(recover_memos(&mut st, account), 0);
+        recover_memos(&mut st, account);
         assert_eq!(refund_keys(&st), [(7, u32::from(mined), true)]);
         assert!(!store::recovery::refund_memos_pending(st.wallet().conn(), account).unwrap());
     }
@@ -812,15 +811,13 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
         EnhanceTransactionMetadata, EnhancementMode, TransactionEnhancementWork,
     };
 
-    for (version, flagged) in [(1, true), (1, false), (2, false)] {
+    for flagged in [true, false] {
         let (mut st, first) = ironwood_funded_wallet();
         let network = *st.network();
         let account = st.test_account().cloned().unwrap();
         let deposit = Address::Transparent(TransparentAddress::PublicKeyHash([7; 20]))
             .to_zcash_address(&network);
-        let mut record = RefundMemo::new(7).encode();
-        record[5] = version;
-        let memo = MemoBytes::from_bytes(&record).unwrap();
+        let memo = MemoBytes::from_bytes(&RefundMemo::new(7).encode()).unwrap();
         let (_, txid, mined) = send_with_change_memo(
             &mut st,
             vec![Payment::without_memo(
@@ -911,7 +908,7 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(memo_stored, !flagged, "version={version} flagged={flagged}");
+        assert_eq!(memo_stored, !flagged, "flagged={flagged}");
         if flagged {
             assert!(
                 st.wallet()
@@ -921,8 +918,7 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
                     .iter()
                     .any(
                         |w| matches!(w, TransactionEnhancementWork::Public(p) if p.txid() == txid)
-                    ),
-                "version={version}"
+                    )
             );
             decrypt_and_store_transaction_with_dynamic_ivks(
                 &network,
@@ -932,81 +928,9 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
             )
             .unwrap();
         }
-        let unreadable = recover_memos(&mut st, restored);
-        if version == 1 {
-            assert_eq!(unreadable, 0);
-            assert_eq!(refund_keys(&st), [(7, u32::from(mined), true)]);
-        } else {
-            // A newer record cannot be read here. It may hold a refund index, so
-            // refund issuance waits for an upgrade instead of failing sync.
-            assert_eq!(unreadable, 1);
-            assert!(refund_keys(&st).is_empty());
-            assert!(matches!(
-                st.wallet_mut().db_mut().reserve_refund_key(restored, mined),
-                Ok(Err(ReservationPolicy::Unreadable))
-            ));
-        }
+        recover_memos(&mut st, restored);
+        assert_eq!(refund_keys(&st), [(7, u32::from(mined), true)]);
     }
-}
-
-/// A record this version cannot read blocks refund issuance once scanning passes its
-/// block, even when the funding inputs predate the birthday so no own-send evidence
-/// survives.
-#[test]
-fn an_unreadable_refund_memo_without_spend_evidence_blocks_issuance() {
-    use zakura_dynamic_ivk::RefundMemo;
-    use zcash_client_backend::data_api::AccountBirthday;
-    let (mut st, _) = ironwood_funded_wallet();
-    let network = *st.network();
-    let deposit =
-        Address::Transparent(TransparentAddress::PublicKeyHash([7; 20])).to_zcash_address(&network);
-    let mut record = RefundMemo::new(7).encode();
-    record[5] = 2;
-    let memo = MemoBytes::from_bytes(&record).unwrap();
-    // The restore's birthday is the funding block, after the note that funds it.
-    let prior = st.latest_cached_block().unwrap().chain_state().clone();
-    let (_, txid, mined) = send_with_change_memo(
-        &mut st,
-        vec![Payment::without_memo(
-            deposit,
-            Zatoshis::const_from_u64(985_000),
-        )],
-        &memo,
-    );
-    let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
-    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
-    let _old_wallet = st.reset();
-    let (restored, _) = st
-        .wallet_mut()
-        .create_account(
-            "restored",
-            &seed,
-            &AccountBirthday::from_parts(prior, None),
-            None,
-        )
-        .unwrap();
-    st.wallet_mut().update_chain_tip(mined).unwrap();
-    st.scan_cached_blocks_with_dynamic_ivks(mined, 1);
-    decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &tx, Some(mined))
-        .unwrap();
-    let (stored, spends): (bool, u32) = st
-        .wallet()
-        .conn()
-        .query_row(
-            "SELECT
-                EXISTS(SELECT 1 FROM ironwood_received_notes
-                    WHERE recipient_key_scope = 1 AND memo = ?1),
-                (SELECT COUNT(*) FROM v_received_output_spends)",
-            [memo.as_slice()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!((stored, spends), (true, 0));
-    assert!(!store::recovery::refund_memos_pending(st.wallet().conn(), restored).unwrap());
-    assert!(matches!(
-        st.wallet_mut().db_mut().reserve_refund_key(restored, mined),
-        Ok(Err(ReservationPolicy::Unreadable))
-    ));
 }
 
 #[test]
