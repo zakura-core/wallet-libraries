@@ -82,7 +82,8 @@ pub enum SqliteClientError {
     #[cfg(feature = "transparent-inputs")]
     TransparentActivationBlocked(Vec<RecoveryBlocker>),
 
-    /// Blocks or a transaction were processed without the wallet's open dynamic IVKs.
+    /// Blocks or a transaction were processed without the wallet's open dynamic IVKs, or,
+    /// without `orchard`, while restore recovery still needs Ironwood spend evidence.
     /// Scan with `scan_cached_blocks_with_dynamic_ivks` and decrypt with
     /// `decrypt_and_store_transaction_with_dynamic_ivks`, which need `orchard`.
     DynamicIvksNotUsed,
@@ -493,7 +494,7 @@ impl fmt::Display for SqliteClientError {
             ),
             SqliteClientError::DynamicIvksNotUsed => write!(
                 f,
-                "This wallet has open dynamic IVKs; scan and decrypt with the dynamic IVK entry points"
+                "This wallet has open dynamic IVKs or pending restore recovery; scan and decrypt with the dynamic IVK entry points"
             ),
             #[cfg(feature = "orchard")]
             SqliteClientError::InvalidDynamicIvkInput(reason) => {
