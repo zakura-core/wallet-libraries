@@ -25,6 +25,7 @@ use receiver_directory::{
 };
 use receiver_pir::{MIN_ROWS, server::Server};
 use receiver_pir_server::{Publication, Publications, router_with_publications};
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use sha2::{Digest as _, Sha256};
 use tower::ServiceExt as _;
 use zakura_dynamic_ivk::lifecycle::RESTORE_WATCH_SECS;
@@ -37,18 +38,19 @@ use zakura_pir_receiver::{
     DirectoryError, EnhanceNotes, Error, NoteSource, Transport, WriteLock, fetch_seen, sweep,
 };
 use zcash_client_backend::data_api::{
-    Account as _, WalletRead as _,
+    Account as _, WalletRead as _, WalletWrite as _,
     chain::BlockSource as _,
     dynamic_ivk::{DynamicIvkRead, DynamicIvkWrite as _, PaymentApplication},
-    testing::{AddressType, IronwoodFvk, TestBuilder, TestState},
+    testing::{AddressType, IronwoodFvk, TestBuilder, TestRng, TestState},
     transparent_ledger::ChainPoint,
 };
 use zcash_client_sqlite::{
-    AccountUuid,
+    AccountUuid, WalletDb,
     testing::{
         BlockCache,
         db::{TestDb, TestDbFactory},
     },
+    util::SystemClock,
     wallet::dynamic_ivk::{KeyId, ProviderSeen, Purpose, RECEIVE_GAP_LIMIT},
 };
 use zcash_note_encryption::{Domain as _, try_compact_note_decryption};
@@ -77,6 +79,11 @@ const VALUE: u64 = 100_000;
 
 /// A wallet with Ironwood active from its first block.
 fn ironwood_wallet() -> State {
+    ironwood_wallet_in(TestDbFactory::default())
+}
+
+/// [`ironwood_wallet`] stored as `factory` makes it.
+fn ironwood_wallet_in(factory: TestDbFactory) -> State {
     let activation = BlockHeight::from_u32(ACTIVATION);
     TestBuilder::new()
         .with_network(LocalNetwork {
@@ -86,7 +93,7 @@ fn ironwood_wallet() -> State {
             nu6_3: Some(activation),
             ..TestBuilder::<(), ()>::DEFAULT_NETWORK
         })
-        .with_data_store_factory(TestDbFactory::default())
+        .with_data_store_factory(factory)
         .with_block_cache(BlockCache::new())
         .with_account_from_sapling_activation(BlockHash([0; 32]))
         .build()
@@ -869,6 +876,111 @@ async fn a_stale_tip_releases_nothing() {
     .unwrap();
     assert!(lock.0.borrow().is_empty(), "{:?}", lock.0.borrow());
     assert!(directory.requests().is_empty());
+}
+
+/// Another handle on the wallet's file, as another writer holds.
+type OtherWriter = WalletDb<rusqlite::Connection, LocalNetwork, SystemClock, TestRng>;
+
+/// Runs `other` just before the first release, as another writer may while the sweep
+/// holds no lock, then sets `releasing` while release holds the lock.
+struct WriterBeforeRelease<F> {
+    other: RefCell<Option<F>>,
+    releasing: Arc<AtomicBool>,
+}
+
+impl<F: FnOnce()> WriteLock for WriterBeforeRelease<F> {
+    fn write<T>(&self, label: &'static str, write: impl FnOnce() -> T) -> T {
+        if label != "dynamic_sweep.release" {
+            return write();
+        }
+        if let Some(other) = self.other.borrow_mut().take() {
+            other();
+        }
+        self.releasing.store(true, Ordering::SeqCst);
+        let result = write();
+        self.releasing.store(false, Ordering::SeqCst);
+        result
+    }
+}
+
+/// Sweeps a restored wallet whose release follows `other`'s write through a second
+/// handle, and returns whether release ran, judged by its read of the retention table.
+async fn release_after(other: impl FnOnce(&mut OtherWriter, ChainPoint)) -> bool {
+    let mut st = ironwood_wallet_in(TestDbFactory::file_backed());
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(2);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let path = st.wallet().conn().path().unwrap().to_owned();
+    let mut handle =
+        OtherWriter::for_path(path, network, SystemClock, TestRng::seed_from_u64(0)).unwrap();
+    let lock = WriterBeforeRelease {
+        other: RefCell::new(Some(|| other(&mut handle, through))),
+        releasing: Arc::new(AtomicBool::new(false)),
+    };
+    let released = Arc::new(AtomicBool::new(false));
+    let (releasing, read) = (lock.releasing.clone(), released.clone());
+    st.wallet()
+        .conn()
+        .authorizer(Some(move |ctx: AuthContext<'_>| {
+            if releasing.load(Ordering::SeqCst)
+                && matches!(
+                    ctx.action,
+                    AuthAction::Read {
+                        table_name: "ironwood_dynamic_spend_retention",
+                        ..
+                    }
+                )
+            {
+                read.store(true, Ordering::SeqCst);
+            }
+            Authorization::Allow
+        }));
+    let directory = Directory::new(publish(&[], &[], through, &provider(&[])));
+    let swept = sweep(
+        st.wallet_mut().db_mut(),
+        &network,
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &directory,
+        &mut NoNotes,
+        &lock,
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert_eq!(swept.finished as u64, RECEIVE_GAP_LIMIT);
+    st.wallet()
+        .conn()
+        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    released.load(Ordering::SeqCst)
+}
+
+/// Release checks the chain point again under its lock, since another writer may move
+/// the tip while the sweep's lookups run without it.
+#[tokio::test]
+async fn a_tip_moved_before_release_releases_nothing() {
+    assert!(
+        release_after(|_, _| ()).await,
+        "release runs at an unmoved tip"
+    );
+    let advanced = release_after(|other, through| {
+        other.update_chain_tip(through.height + 1).unwrap();
+    });
+    assert!(!advanced.await, "released after the tip advanced");
+    let rewound = release_after(|other, through| {
+        other.truncate_to_height(through.height - 1).unwrap();
+    });
+    assert!(!rewound.await, "released after a reorg rewound the tip");
+    // The tip is back at `through`'s height, but its block is not scanned yet.
+    let replaced = release_after(|other, through| {
+        other.truncate_to_height(through.height - 1).unwrap();
+        other.update_chain_tip(through.height).unwrap();
+    });
+    assert!(!replaced.await, "released at a replaced block");
 }
 
 /// A repeated account sweeps its keys once: each is leased once, and a deferred key is

@@ -180,7 +180,9 @@ pub struct Swept<A, E> {
 /// [`DynamicIvkWrite::finish_dynamic_nullifier_recovery`]).
 ///
 /// `through` is the wallet's fully scanned tip, and sweeps and release run only while
-/// it is also the stored chain tip. When none is due, the run makes no request. Otherwise the
+/// it is also the stored chain tip and the block the wallet scanned there, which
+/// release checks again under its write lock. When none is due, the run makes no
+/// request. Otherwise the
 /// publication must commit to `genesis` ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS)
 /// on mainnet), cover history from Ironwood activation on `params`' network, and end at
 /// a block the wallet accepts (see [`DynamicIvkRead::directory_publication_anchor`]),
@@ -235,7 +237,7 @@ where
         deferred: Vec::new(),
         pending: false,
     };
-    let current = wallet.chain_height().map_err(Error::Wallet)? == Some(through.height);
+    let current = at_tip(wallet, through).map_err(Error::Wallet)?;
     if current {
         let work = due(wallet, accounts, through, lock, now)?;
         if !work.is_empty() {
@@ -309,8 +311,12 @@ where
     }
     for account in accounts {
         if current {
+            // Another writer may have moved the tip while the sweep held no lock.
             lock.write("dynamic_sweep.release", || {
-                wallet.finish_dynamic_nullifier_recovery(*account, through)
+                if at_tip(wallet, through)? {
+                    wallet.finish_dynamic_nullifier_recovery(*account, through)?;
+                }
+                Ok(())
             })
             .map_err(Error::Wallet)?;
         }
@@ -319,6 +325,13 @@ where
             .map_err(Error::Wallet)?;
     }
     Ok(swept)
+}
+
+/// Whether `through` is still the wallet's stored chain tip and the block it scanned
+/// there.
+fn at_tip<W: WalletRead>(wallet: &W, through: ChainPoint) -> Result<bool, W::Error> {
+    Ok(wallet.chain_height()? == Some(through.height)
+        && wallet.get_block_hash(through.height)? == Some(through.hash))
 }
 
 /// What a publication's filters say about one key's receiver.

@@ -32,6 +32,7 @@ hex.workspace = true
 orchard.workspace = true
 receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "9d2cbda0b4336258cfce76ca8ee77b095daa7fd7", features = ["server"] }
 receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", rev = "9d2cbda0b4336258cfce76ca8ee77b095daa7fd7" }
+rusqlite = { workspace = true, features = ["hooks"] }
 serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

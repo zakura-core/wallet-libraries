@@ -8235,6 +8235,7 @@ dependencies = [
  "receiver-directory",
  "receiver-pir",
  "receiver-pir-server",
+ "rusqlite",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
