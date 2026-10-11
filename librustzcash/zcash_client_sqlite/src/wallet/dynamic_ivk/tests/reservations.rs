@@ -953,7 +953,7 @@ fn issuance_skips_restored_addresses_the_provider_saw() {
         db.begin_dynamic_sweep_attempt(account, key, NOW, index < 3)
             .unwrap();
         queue_lookup(db, account, key, swept_at, &[]).unwrap();
-        db.apply_dynamic_sweep(account, key, swept_at, swept_at, |_, _| None)
+        db.apply_dynamic_sweep(account, key, swept_at, swept_at, WATCHED, |_, _| None)
             .unwrap()
             .unwrap();
     }

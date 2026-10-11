@@ -247,8 +247,18 @@ fn apply_payment(
     through: ChainPoint,
     (anchor, path): (ChainPoint, &MerklePath),
 ) -> Result<PaymentApplication, SqliteClientError> {
-    db.transactionally(|db| {
-        store::apply::apply_payment(db, account, key, candidate, through, (anchor, path))
+    let configured = db.transparent_ledger_mode;
+    tx(db, |c, p| {
+        store::apply::apply_payment(
+            c,
+            p,
+            configured,
+            account,
+            key,
+            candidate,
+            through,
+            (anchor, path),
+        )
     })
     .map(|applied| applied.expect("the payment's blocks are on the wallet's chain"))
 }
@@ -256,7 +266,7 @@ fn apply_payment(
 /// Finishes `key`'s sweep after an empty lookup at `anchor`.
 fn finish_sweep(db: &mut Db, account: AccountUuid, key: KeyId, anchor: ChainPoint) {
     queue_lookup(db, account, key, anchor, &[]).unwrap();
-    let applied = db.apply_dynamic_sweep(account, key, anchor, anchor, |_, _| None);
+    let applied = db.apply_dynamic_sweep(account, key, anchor, anchor, WATCHED, |_, _| None);
     assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
 }
 
@@ -380,6 +390,10 @@ fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>> {
         .map(|n| n.dynamic_key_id())
         .collect()
 }
+
+/// A sweep's `recent` flag for a receiver a swap may still pay, so its key keeps
+/// scanning.
+const WATCHED: bool = true;
 
 /// Keys the scanner trial-decrypts with.
 fn scanning_keys(st: &State) -> Vec<KeyId> {
