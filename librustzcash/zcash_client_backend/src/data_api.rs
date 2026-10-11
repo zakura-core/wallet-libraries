@@ -2982,7 +2982,7 @@ pub struct DecryptedTransaction<'a, Tx: DecryptableTransaction<AccountId>, Accou
     #[cfg(feature = "orchard")]
     ironwood_outputs: Vec<Tx::DecryptedOrchardOutput>,
     #[cfg(feature = "orchard")]
-    dynamic_ivks_applied: bool,
+    dynamic_ivks_applied: Option<Vec<(AccountId, zakura_dynamic_ivk::KeyId)>>,
 }
 
 #[cfg(feature = "orchard")]
@@ -2994,7 +2994,9 @@ impl<AccountId: Copy + Eq> DecryptedTransaction<'_, Transaction, AccountId> {
         mut self,
         keys: impl IntoIterator<Item = DynamicScanningKey<AccountId>>,
     ) -> Self {
+        let mut applied = Vec::new();
         for key in keys {
+            applied.push((*key.account_id(), key.key_id()));
             for output in key.decrypt_outputs(self.tx) {
                 self.ironwood_outputs.retain(|existing| {
                     existing.index() != output.index() || existing.account() != output.account()
@@ -3002,7 +3004,7 @@ impl<AccountId: Copy + Eq> DecryptedTransaction<'_, Transaction, AccountId> {
                 self.ironwood_outputs.push(output);
             }
         }
-        self.dynamic_ivks_applied = true;
+        self.dynamic_ivks_applied = Some(applied);
         self
     }
 }
@@ -3028,7 +3030,7 @@ impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<
             #[cfg(feature = "orchard")]
             ironwood_outputs,
             #[cfg(feature = "orchard")]
-            dynamic_ivks_applied: false,
+            dynamic_ivks_applied: None,
         }
     }
 
@@ -3058,12 +3060,12 @@ impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<
         &self.ironwood_outputs
     }
 
-    /// Whether the wallet's dynamic keys were tried, through
-    /// [`DecryptedTransaction::with_dynamic_ivks`]. While a dynamic key is open, a
-    /// store may refuse a transaction decrypted without them.
+    /// The account and ID of each dynamic key tried, if
+    /// [`DecryptedTransaction::with_dynamic_ivks`] was applied. A store may refuse a
+    /// transaction decrypted without one of its open dynamic keys.
     #[cfg(feature = "orchard")]
-    pub fn dynamic_ivks_applied(&self) -> bool {
-        self.dynamic_ivks_applied
+    pub fn dynamic_ivks_applied(&self) -> Option<&[(AccountId, zakura_dynamic_ivk::KeyId)]> {
+        self.dynamic_ivks_applied.as_deref()
     }
 
     /// Returns whether the transaction has decrypted outputs
