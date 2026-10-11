@@ -6,7 +6,10 @@ use zakura_dynamic_ivk::lifecycle::{
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-use super::{RESERVED, RESTORED, account_key, invalid, reservations::reap};
+use super::{
+    RESERVED, RESTORED, account_key, invalid,
+    reservations::{STARTED, reap},
+};
 use crate::{
     AccountUuid, error::SqliteClientError, wallet, wallet::common::tx_unexpired_condition,
 };
@@ -57,7 +60,8 @@ pub(super) fn close_finished<P: Parameters>(
                 WHERE n.receiving_key_id = k.id AND t.mined_height <= :confirmed_below),
             (SELECT b.time FROM ironwood_dynamic_sweeps s
                 JOIN blocks b ON b.height = s.done_height
-                WHERE s.receiving_key_id = k.id)
+                WHERE s.receiving_key_id = k.id),
+            {STARTED}
          FROM ironwood_receiving_keys k
          WHERE k.account_id = :account AND k.active_from IS NOT NULL AND k.closed_at IS NULL",
         unexpired = tx_unexpired_condition("t"),
@@ -80,6 +84,7 @@ pub(super) fn close_finished<P: Parameters>(
             let expected: i64 = row.get(8)?;
             let received: i64 = row.get(9)?;
             let swept_at: Option<i64> = row.get(10)?;
+            let started: bool = row.get(11)?;
             let limit = if restored {
                 registered_at
                     .max(swept_at.unwrap_or(registered_at))
@@ -90,10 +95,14 @@ pub(super) fn close_finished<P: Parameters>(
                     .saturating_add(COMPLETION_LIMIT_SECS)
             };
             let settled = operations > 0 && unresolved == 0 && received >= expected;
-            Ok((
-                id,
-                !reserved && !pending_receipt && (settled || now >= limit),
-            ))
+            // Reclamation may never take a started reservation, so the limit alone ends
+            // its scanning. It stays reserved, keeping issuance off its address.
+            let finished = if reserved {
+                started && now >= limit
+            } else {
+                settled || now >= limit
+            };
+            Ok((id, !pending_receipt && finished))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut closed = 0;
