@@ -1,4 +1,5 @@
 //! Incoming reservations, which live on their key's row, and their quote operations.
+use orchard::keys::Scope;
 use rusqlite::{Connection, OptionalExtension, named_params, params};
 use zakura_dynamic_ivk::lifecycle::{
     Observation,
@@ -9,8 +10,9 @@ use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
-    DynamicKey, KeyId, Purpose, RESERVED, ReservationPolicy, account_key, activate, corrupt,
-    decode_index, invalid, key_by_id, lifecycle::record, next_index, register,
+    Discovery, DynamicKey, KeyId, Purpose, RESERVED, ReservationPolicy, account_key, activate,
+    corrupt, decode_index, invalid, key_by_id, lifecycle::record, next_index, register,
+    restore_start,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -449,7 +451,7 @@ pub(super) fn prepare<P: Parameters>(
     scan_from: BlockHeight,
     seen: Option<&ProviderSeen<'_>>,
 ) -> Result<Result<DynamicKey, ReservationPolicy>, SqliteClientError> {
-    let (a, _) = account_key(conn, params, account)?;
+    let (a, parent) = account_key(conn, params, account)?;
     let sweeping: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_dynamic_sweeps s
         JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
@@ -492,7 +494,7 @@ pub(super) fn prepare<P: Parameters>(
     let mut abandoned = None;
     let mut fresh = None;
     for index in 0..end {
-        let (blocked, quoted): (bool, bool) = conn
+        let row: Option<(bool, bool)> = conn
             .query_row(
                 &format!(
                     "SELECT k.used = 1 OR {SEEN} OR {RESERVED}
@@ -511,8 +513,32 @@ pub(super) fn prepare<P: Parameters>(
                 ],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .optional()?
-            .unwrap_or_default();
+            .optional()?;
+        // `record_seen` checked every registered key, so check an unregistered one here. A
+        // hit is registered for a restore sweep, since its quote may have been paid.
+        let Some((blocked, quoted)) = row else {
+            let key_id = KeyId::new(Purpose::Receive, index);
+            let receiver = key_id.derive(&parent)?.address_at(0u32, Scope::External);
+            let held =
+                seen.is_some_and(|s| (s.contains)(&[receiver.to_raw_address_bytes()]) == [true]);
+            if held {
+                let from = restore_start(conn, params, a)?;
+                let (id, _) = register(
+                    conn,
+                    params,
+                    account,
+                    key_id,
+                    from,
+                    false,
+                    Discovery::Sweep,
+                    now,
+                )?;
+                record_provider_seen(conn, id)?;
+                continue;
+            }
+            fresh = Some(index);
+            break;
+        };
         if blocked {
             continue;
         }

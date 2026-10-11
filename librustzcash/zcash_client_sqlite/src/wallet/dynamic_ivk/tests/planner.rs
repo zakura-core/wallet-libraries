@@ -332,10 +332,13 @@ fn a_newer_paid_filter_rechecks_closed_unpaid_keys() {
     db.record_paid_filter_check(account, newer, &[(missed, false), (scanned, true)])
         .unwrap();
     assert_eq!(due(&mut st, newer, NOW), [hit, scanned]);
-    // A key that received a note is not rechecked, whatever later publications hold.
+    // A key paid before the birthday is not rechecked, whatever later publications hold.
     st.wallet()
         .conn()
-        .execute("UPDATE ironwood_receiving_keys SET used = 1", [])
+        .execute(
+            "UPDATE ironwood_receiving_keys SET paid_before_birthday = 1",
+            [],
+        )
         .unwrap();
     assert!(recheck(&st, newer.height + 1).is_empty());
 }
@@ -842,4 +845,62 @@ fn recheck_sweeps_closed_keys_and_finds_a_later_refund() {
             .unwrap(),
         0
     );
+}
+
+/// A receipt that was decrypted but expired unmined is no payment: once its key closes,
+/// the paid filter backstop still rechecks it and finds a later refund.
+#[test]
+fn an_expired_receipt_leaves_a_closed_key_to_the_paid_filter() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let tip_height = tip(&st).height;
+    let db = st.wallet_mut().db_mut();
+    let key = reserve_key(db, account, Purpose::Refund, tip_height + 1);
+    pay(&mut st, key.full_viewing_key());
+    let key = key.key_id();
+    // A rewind un-mines the receipt, which then expires.
+    st.truncate_to_height(tip_height);
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE transactions SET expiry_height = ?1 WHERE mined_height IS NULL",
+            [u32::from(tip_height) + 1],
+        )
+        .unwrap();
+    let expired = advance(&mut st, 1);
+    let db = st.wallet_mut().db_mut();
+    let no_refund = OperationStatus::Terminal(ReceiptExpectation::None);
+    observe(db, account, key, "swap", no_refund, NOW).unwrap();
+    assert_eq!(close_at(db, account, NOW, expired.height), 1);
+    // A corrected refund arrives after the key closed, so scanning misses it.
+    let candidate = pay_candidate(&mut st, key);
+    let publication = tip(&st);
+    let rechecked = st
+        .wallet()
+        .dynamic_keys_to_recheck(account, publication.height)
+        .unwrap();
+    assert_eq!(rechecked.iter().map(|w| w.key).collect::<Vec<_>>(), [key]);
+    let db = st.wallet_mut().db_mut();
+    db.record_paid_filter_check(account, publication, &[(key, true)])
+        .unwrap();
+    assert_eq!(due(&mut st, publication, NOW), [key]);
+    let db = st.wallet_mut().db_mut();
+    queue_lookup(
+        db,
+        account,
+        key,
+        publication,
+        std::slice::from_ref(&candidate),
+    )
+    .unwrap();
+    let applied = db.apply_dynamic_sweep(account, key, publication, publication, false, |_, _| {
+        Some(first_leaf_path().auth_path().map(|hash| hash.to_bytes()))
+    });
+    assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
+    assert_eq!(unspent_keys(&st, publication.height), [Some(key)]);
+    // Once a payment is mined, the key is not rechecked.
+    let rechecked = st
+        .wallet()
+        .dynamic_keys_to_recheck(account, publication.height + 1);
+    assert!(rechecked.unwrap().is_empty());
 }
