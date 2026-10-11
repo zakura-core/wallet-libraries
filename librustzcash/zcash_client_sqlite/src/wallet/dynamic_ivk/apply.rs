@@ -3,13 +3,11 @@ use std::borrow::BorrowMut;
 
 use incrementalmerkletree::{Address, Position, Retention};
 use orchard::tree::{MerkleHashOrchard, MerklePath};
-use rand_core::Rng;
 use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::{
     data_api::{
         dynamic_ivk::{PaymentApplication, SweepDeferral},
-        transparent_ledger::ChainPoint,
-        wallet::decrypt_and_store_transaction_with_dynamic_ivks,
+        transparent_ledger::{ChainPoint, TransparentLedgerMode},
     },
     wallet::{WalletOrchardOutput, WalletTx},
 };
@@ -25,11 +23,11 @@ use super::{
     retention::queue_spend_history,
     sweep,
 };
-use crate::{SqlTransaction, WalletDb, error::SqliteClientError, util::Clock, wallet};
+use crate::{WalletDb, error::SqliteClientError, wallet};
 
 /// Implements `DynamicIvkWrite::apply_dynamic_sweep`, one transaction per payment.
 #[allow(clippy::type_complexity)]
-pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng>(
+pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL, R>(
     db: &mut WalletDb<C, P, CL, R>,
     account: AccountUuid,
     key: KeyId,
@@ -43,8 +41,18 @@ pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R:
         let Some(path) = path else {
             return Ok(Ok(PaymentApplication::AwaitingWitness));
         };
+        let configured = db.transparent_ledger_mode;
         let applied = db.transactionally(|db| {
-            apply_payment(db, account, key, &candidate, through, (publication, &path))
+            apply_payment(
+                db.conn.0,
+                db.params,
+                configured,
+                account,
+                key,
+                &candidate,
+                through,
+                (publication, &path),
+            )
         })?;
         match applied {
             Ok(PaymentApplication::Applied | PaymentApplication::BeforeBirthday) => {}
@@ -66,19 +74,20 @@ fn merkle_path(position: u32, siblings: [[u8; 32]; 32]) -> Option<MerklePath> {
 }
 
 /// Applies queued `candidate` with its inclusion path at an anchor on the wallet's chain,
-/// which authenticates the note and position but not its transaction ID or memo. The memo
-/// comes only from the stored raw transaction, if any (see `wallet::dynamic_ivk`).
-pub(super) fn apply_payment<P: Parameters, CL: Clock, R: Rng>(
-    db: &mut WalletDb<SqlTransaction<'_>, P, CL, R>,
+/// which authenticates the note and position but not its transaction ID. No memo is
+/// stored (see `wallet::dynamic_ivk`). `configured` is the handle's transparent ledger
+/// mode, for routing the transaction's enhancement.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_payment<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    configured: Option<TransparentLedgerMode>,
     account: AccountUuid,
     key: KeyId,
     candidate: &PendingPayment,
     through: ChainPoint,
     (anchor, path): (ChainPoint, &MerklePath),
 ) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
-    let conn = db.conn.0;
-    let params = &db.params.clone();
-    let configured = db.transparent_ledger_mode;
     if !pending_payments(conn, account, key)?
         .iter()
         .any(|p| p == candidate)
@@ -214,21 +223,21 @@ pub(super) fn apply_payment<P: Parameters, CL: Clock, R: Rng>(
     // A stored raw transaction must hold the claimed action. Without raw bytes only the label
     // is unverified (value, position and nullifier are authenticated); relabeling once raw
     // arrives could drop spend state.
-    let stored_tx = wallet::get_transaction(conn, params, candidate.txid)?.map(|(_, tx)| tx);
-    let contradicted = stored_tx.as_ref().is_some_and(|tx| {
-        let action = tx.ironwood_bundle().and_then(|b| {
-            b.actions()
-                .get(usize::try_from(candidate.action_index).ok()?)
+    let contradicted =
+        wallet::get_transaction(conn, params, candidate.txid)?.is_some_and(|(_, tx)| {
+            let action = tx.ironwood_bundle().and_then(|b| {
+                b.actions()
+                    .get(usize::try_from(candidate.action_index).ok()?)
+            });
+            !action.is_some_and(|a| {
+                candidate.encrypted_note.matches_compact(
+                    a.nullifier().to_bytes(),
+                    a.cmx().to_bytes(),
+                    a.encrypted_note().epk_bytes,
+                    a.encrypted_note().enc_ciphertext[..52].try_into().unwrap(),
+                )
+            })
         });
-        !action.is_some_and(|a| {
-            candidate.encrypted_note.matches_compact(
-                a.nullifier().to_bytes(),
-                a.cmx().to_bytes(),
-                a.encrypted_note().epk_bytes,
-                a.encrypted_note().enc_ciphertext[..52].try_into().unwrap(),
-            )
-        })
-    });
     if conflict || contradicted {
         return reject(conn, key_ref);
     }
@@ -298,6 +307,7 @@ pub(super) fn apply_payment<P: Parameters, CL: Clock, R: Rng>(
         None
     };
     let encrypted = &candidate.encrypted_note;
+    // Dynamic-key notes carry no memo the wallet reads; only internal change carries the refund marker.
     let output = WalletOrchardOutput::from_parts(
         candidate.action_index as usize,
         encrypted.ephemeral_key(),
@@ -319,9 +329,6 @@ pub(super) fn apply_payment<P: Parameters, CL: Clock, R: Rng>(
         Some(candidate.height),
         spent_in,
     )?;
-    if let Some(tx) = stored_tx {
-        decrypt_and_store_transaction_with_dynamic_ivks(params, db, &tx, Some(candidate.height))?;
-    }
     wallet::enhance_pir::finish_private_receipt(conn, configured, tx_ref, candidate.txid)?;
     dequeue()?;
     Ok(Ok(PaymentApplication::Applied))

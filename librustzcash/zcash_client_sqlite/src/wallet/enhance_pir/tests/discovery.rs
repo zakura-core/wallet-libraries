@@ -2670,9 +2670,7 @@ fn rediscovery_is_routed_privately_and_can_change_the_next_route() {
 }
 
 // A note found by a dynamic key binds its transaction's metadata with that key, never
-// the account's, but its memo is never retrieved privately: anyone who recovers the
-// note through the public zero OVK can re-encrypt it with another memo that still
-// decrypts.
+// the account's, but its memo is never retrieved privately (see `wallet::dynamic_ivk`).
 #[test]
 fn dynamic_key_notes_bind_metadata_without_private_memos_after_reopen() {
     use crate::{

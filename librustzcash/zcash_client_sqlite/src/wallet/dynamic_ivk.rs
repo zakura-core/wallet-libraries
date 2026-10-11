@@ -3,10 +3,10 @@
 //! Issued keys scan from issuance, refund keys from their stored funding transaction,
 //! until they close. Keys recovered from the seed are swept once through a receiver
 //! directory, then scanned from the block after the sweep's lookup for a restore watch
-//! (see [`WalletDb::close_finished_dynamic_keys`]). A closed key keeps its notes. A dynamic-key note's memo is stored only from its full transaction, never from
-//! a directory or private Enhance retrieval: dynamic-key payments use the public zero
-//! OVK, so anyone can re-encrypt the note with another memo under the same compact
-//! fields. A wallet drives dynamic IVKs with these calls:
+//! (see [`WalletDb::close_finished_dynamic_keys`]). A closed key keeps its notes.
+//! Dynamic-key notes carry no memo the wallet reads; only internal change carries the
+//! refund marker. So neither a directory nor private Enhance retrieval stores or fetches
+//! one. A wallet drives dynamic IVKs with these calls:
 //!
 //! - `scan_cached_blocks_with_dynamic_ivks` and
 //!   `decrypt_and_store_transaction_with_dynamic_ivks` in place of the ordinary

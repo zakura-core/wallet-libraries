@@ -167,11 +167,10 @@ fn witness_at(st: &State, position: u32) -> MerklePath {
     witness.unwrap().path().unwrap().into()
 }
 
-/// Nothing binds a directory's note data past its compact prefix to the chain: anyone who
-/// recovers the note through the public zero OVK can re-encrypt it with another memo. The
-/// sweep credits the note without a memo, and the full transaction supplies the real one.
+/// A restore sweep credits a dynamic-key note without a memo, and private memo retrieval
+/// skips it (see `wallet::dynamic_ivk`); only its full transaction stores one.
 #[test]
-fn a_substituted_directory_memo_is_never_stored() {
+fn a_restored_dynamic_note_stores_no_memo() {
     use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction_with_dynamic_ivks;
     use zcash_protocol::memo::MemoBytes;
     let mut st = ironwood_wallet();
@@ -187,7 +186,6 @@ fn a_substituted_directory_memo_is_never_stored() {
     let tx = external_payment(fvk.address_at(0u32, Scope::External), &memo);
     let (height, _) = st.generate_next_block_from_tx(1, &tx);
     st.scan_cached_blocks_with_dynamic_ivks(height, 1);
-    // The candidate carries a substituted memo under the chain's compact prefix.
     let candidate = candidate_at(&st, height, &fvk);
     let through = tip(&st);
     let path = witness_at(&st, candidate.position);
@@ -400,213 +398,6 @@ fn a_directory_payment_leaves_an_unknown_transaction_to_enhancement() {
         let protected = crate::wallet::enhance_pir::is_protected(conn, paid.txid()).unwrap();
         assert_eq!((requested, protected), (!stored, stored), "stored={stored}");
     }
-}
-
-/// A dynamic-key note's memo comes only from its full transaction, so restoring one into a
-/// privately completed transaction keeps the transaction's retrieval request, which private
-/// enhancement withholds and `Standard` dispatches.
-#[test]
-fn a_restored_dynamic_note_keeps_its_completed_transactions_retrieval() {
-    use zcash_client_backend::data_api::{
-        enhance_pir::{
-            EnhancePirRead, EnhancePirWork, EnhancePirWrite, EnhanceRecord, EnhanceRecordParts,
-            EnhanceTransactionMetadata, EnhancementMode, TransactionEnhancementWork,
-        },
-        wallet::decrypt_and_store_transaction_with_dynamic_ivks,
-    };
-    use zcash_keys::address::{Address, UnifiedAddress};
-    use zcash_protocol::memo::MemoBytes;
-    let mut st = ironwood_wallet();
-    st.wallet_mut()
-        .db_mut()
-        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
-    let account = st.test_account().unwrap().id();
-    let network = *st.network();
-    let id = KeyId::new(Purpose::Receive, 8);
-    let wallet_fvk = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
-    let fvk = id.derive(&wallet_fvk).unwrap();
-    let ordinary = Address::Unified(
-        UnifiedAddress::from_receivers(
-            Some(wallet_fvk.address_at(0u32, Scope::External)),
-            None,
-            None,
-        )
-        .unwrap(),
-    );
-    let ordinary = zip321::Payment::new(
-        ordinary.to_zcash_address(&network),
-        Some(Zatoshis::const_from_u64(30_000)),
-        Some(MemoBytes::from_bytes(b"ordinary memo").unwrap()),
-        None,
-        None,
-        vec![],
-    )
-    .unwrap();
-    let memo = MemoBytes::from_bytes(b"dynamic memo").unwrap();
-    let paid = external_payment_with(fvk.address_at(0u32, Scope::External), &memo, vec![ordinary]);
-    let (height, _) = st.generate_next_block_from_tx(1, &paid);
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
-
-    // Private enhancement recovers the ordinary output and retires the request.
-    let queries: Vec<_> = st
-        .wallet()
-        .db()
-        .transaction_enhancement_work()
-        .unwrap()
-        .into_iter()
-        .filter_map(|work| match work {
-            TransactionEnhancementWork::Private(EnhancePirWork::Query(r)) => Some(r),
-            _ => None,
-        })
-        .collect();
-    assert!(!queries.is_empty());
-    let bundle = paid.ironwood_bundle().unwrap();
-    // Ironwood funds both sides, so the bundle's value balance is the fee.
-    let fee = u64::try_from(i64::from(*bundle.value_balance())).unwrap();
-    let metadata =
-        EnhanceTransactionMetadata::new(u32::from(paid.expiry_height()), Some(fee)).unwrap();
-    let records: Vec<_> = queries
-        .iter()
-        .map(|r| {
-            let action = &bundle.actions()[r.request_id().output_index() as usize];
-            let note = action.encrypted_note();
-            let record = EnhanceRecord::from_parts(EnhanceRecordParts {
-                enc_ciphertext_suffix: note.enc_ciphertext[52..].try_into().unwrap(),
-                cv_net: action.cv_net().to_bytes(),
-                out_ciphertext: note.out_ciphertext,
-                has_transparent_inputs: false,
-                has_transparent_outputs: false,
-                metadata,
-            });
-            (*r, record)
-        })
-        .collect();
-    st.wallet_mut()
-        .db_mut()
-        .apply_ironwood_enhance_records(&records)
-        .unwrap();
-    let requested = |st: &State| -> bool {
-        st.wallet()
-            .conn()
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue
-                 WHERE txid = ?1 AND query_type = ?2)",
-                rusqlite::params![
-                    paid.txid().as_ref(),
-                    crate::wallet::TxQueryType::Enhancement.code()
-                ],
-                |r| r.get(0),
-            )
-            .unwrap()
-    };
-    assert!(!requested(&st));
-    let conn = st.wallet().conn();
-    assert!(crate::wallet::enhance_pir::is_protected(conn, paid.txid()).unwrap());
-
-    let candidate = candidate_at(&st, height, &fvk);
-    let through = tip(&st);
-    let path = witness_at(&st, candidate.position);
-    let db = st.wallet_mut().db_mut();
-    watch(db, account, 8, height + 1);
-    queue_payment(db, account, id, &candidate).unwrap();
-    assert_eq!(
-        apply_payment(db, account, id, &candidate, through, (through, &path)).unwrap(),
-        PaymentApplication::Applied
-    );
-    let public = |st: &State| -> bool {
-        st.wallet()
-            .db()
-            .transaction_enhancement_work()
-            .unwrap()
-            .iter()
-            .any(|w| matches!(w, TransactionEnhancementWork::Public(p) if p.txid() == paid.txid()))
-    };
-    assert!(requested(&st));
-    assert!(!public(&st));
-    st.wallet_mut()
-        .db_mut()
-        .set_enhancement_mode(EnhancementMode::Standard);
-    assert!(public(&st));
-
-    decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &paid, Some(height))
-        .unwrap();
-    let dynamic_memo: Option<Vec<u8>> = st
-        .wallet()
-        .conn()
-        .query_row(
-            "SELECT memo FROM ironwood_received_notes WHERE receiving_key_id IS NOT NULL",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(dynamic_memo, Some(memo.as_slice().to_vec()));
-    assert!(!requested(&st));
-}
-
-/// A restore sweep that adds a dynamic-key note to a transaction already stored in full,
-/// here for its ordinary output, takes the note's memo from the stored transaction.
-#[test]
-fn a_restored_dynamic_note_takes_its_memo_from_the_stored_transaction() {
-    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction_with_dynamic_ivks;
-    use zcash_keys::address::{Address, UnifiedAddress};
-    use zcash_protocol::memo::MemoBytes;
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    let network = *st.network();
-    let id = KeyId::new(Purpose::Receive, 8);
-    let wallet_fvk = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
-    let fvk = id.derive(&wallet_fvk).unwrap();
-    let ordinary = Address::Unified(
-        UnifiedAddress::from_receivers(
-            Some(wallet_fvk.address_at(0u32, Scope::External)),
-            None,
-            None,
-        )
-        .unwrap(),
-    );
-    let ordinary = zip321::Payment::new(
-        ordinary.to_zcash_address(&network),
-        Some(Zatoshis::const_from_u64(30_000)),
-        None,
-        None,
-        None,
-        vec![],
-    )
-    .unwrap();
-    let memo = MemoBytes::from_bytes(b"dynamic memo").unwrap();
-    let paid = external_payment_with(fvk.address_at(0u32, Scope::External), &memo, vec![ordinary]);
-    let (height, _) = st.generate_next_block_from_tx(1, &paid);
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
-    decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &paid, Some(height))
-        .unwrap();
-    let stored = |st: &State| -> (bool, i64, Option<Vec<u8>>) {
-        st.wallet()
-            .conn()
-            .query_row(
-                "SELECT t.raw IS NOT NULL,
-                    (SELECT COUNT(*) FROM tx_retrieval_queue q WHERE q.txid = t.txid)
-                    + (SELECT COUNT(*) FROM ironwood_memo_retrieval_queue),
-                    (SELECT memo FROM ironwood_received_notes
-                     WHERE transaction_id = t.id_tx AND receiving_key_id IS NOT NULL)
-                 FROM transactions t WHERE t.txid = ?1",
-                [paid.txid().as_ref()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap()
-    };
-    assert_eq!(stored(&st), (true, 0, None));
-
-    let candidate = candidate_at(&st, height, &fvk);
-    let through = tip(&st);
-    let path = witness_at(&st, candidate.position);
-    let db = st.wallet_mut().db_mut();
-    watch(db, account, 8, height + 1);
-    queue_payment(db, account, id, &candidate).unwrap();
-    assert_eq!(
-        apply_payment(db, account, id, &candidate, through, (through, &path)).unwrap(),
-        PaymentApplication::Applied
-    );
-    assert_eq!(stored(&st), (true, 0, Some(memo.as_slice().to_vec())));
 }
 
 /// A transaction decrypted before another handle applies a restore payment to it is
