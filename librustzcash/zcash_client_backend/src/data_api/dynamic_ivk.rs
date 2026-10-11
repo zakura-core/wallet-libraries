@@ -84,18 +84,14 @@ pub enum PaymentApplication {
     AwaitingWitness,
     /// Locally retained history cannot establish absence of a spend.
     AwaitingSpendHistory,
-    /// The authenticated note predates the account's birthday, so the wallet does not
-    /// track it, as with any note before the birthday. Its inclusion is still checked
-    /// against the wallet's chain; its key is then marked used, advancing and paid, so
-    /// the index is never issued again and the lookahead and issuance bound move past it.
-    BeforeBirthday,
     /// The directory's claim failed a local check: the note's block or inclusion path,
     /// or its transaction identity against stored data. The key's queued lookup is
     /// discarded.
     Rejected,
     /// Note, witness, key identity, and any known spend were committed together, or the
-    /// wallet already stored the note under another transaction. No memo is stored (see
-    /// [`EncryptedNote::decrypt`]).
+    /// wallet already stored the note under another transaction, or the note predates
+    /// the account's birthday and, as with any such note, is not tracked. No memo is
+    /// stored (see [`EncryptedNote::decrypt`]).
     ///
     /// [`EncryptedNote::decrypt`]: zakura_dynamic_ivk::recovery::EncryptedNote::decrypt
     Applied,
