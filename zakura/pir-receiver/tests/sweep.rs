@@ -35,7 +35,7 @@ use zakura_pir_enhance::{
     types,
 };
 use zakura_pir_receiver::{
-    DirectoryError, EnhanceNotes, Error, NoteSource, Transport, WriteLock, fetch_seen, sweep,
+    DirectoryError, EnhanceNotes, Error, NoteSource, Swept, Transport, WriteLock, fetch_seen, sweep,
 };
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _, WalletWrite as _,
@@ -46,11 +46,12 @@ use zcash_client_backend::data_api::{
 };
 use zcash_client_sqlite::{
     AccountUuid, WalletDb,
+    error::SqliteClientError,
     testing::{
         BlockCache,
         db::{TestDb, TestDbFactory},
     },
-    util::SystemClock,
+    util::{SystemClock, testing::FixedClock},
     wallet::dynamic_ivk::{KeyId, ProviderSeen, Purpose, RECEIVE_GAP_LIMIT},
 };
 use zcash_note_encryption::{Domain as _, try_compact_note_decryption};
@@ -65,6 +66,8 @@ use zcash_protocol::{
 mod test_support;
 
 type State = TestState<BlockCache, TestDb, LocalNetwork>;
+/// The wallet a test sweeps.
+type Wallet = WalletDb<rusqlite::Connection, LocalNetwork, FixedClock, TestRng>;
 
 /// The genesis hash the fixture's publications commit to.
 const GENESIS: [u8; 32] = [9; 32];
@@ -108,6 +111,13 @@ fn tip(st: &State) -> ChainPoint {
     }
 }
 
+/// The receiver of the test account's incoming dynamic key `index`.
+fn receiver(st: &State, index: u64) -> Receiver {
+    let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
+    let fvk = KeyId::new(Purpose::Receive, index).derive(&parent).unwrap();
+    Receiver::from_bytes(fvk.address_at(0u32, Scope::External).to_raw_address_bytes()).unwrap()
+}
+
 /// Pays incoming dynamic key `index` in a new scanned block, before any restore has
 /// registered the key, so scanning cannot find it. Returns the payment as the
 /// directory lists it and its note data. The output is the chain's Ironwood leaf at
@@ -142,9 +152,8 @@ fn pay_restored_key(st: &mut State, index: u64, position: u64) -> (Record, [u8; 
     let encryption = IronwoodNoteEncryption::new(None, note, [4; 512]);
     let ciphertext = encryption.encrypt_note_plaintext();
     assert_eq!(&ciphertext[..52], compact.ciphertext.as_slice());
-    let receiver = fvk.address_at(0u32, Scope::External).to_raw_address_bytes();
     let record = Record {
-        receiver: Receiver::from_bytes(receiver).unwrap(),
+        receiver: receiver(st, index),
         page: 0,
         total: 1,
         payment: Payment {
@@ -309,6 +318,16 @@ struct Notes {
     requested: Vec<Vec<u64>>,
 }
 
+impl Notes {
+    /// Serves `data`, keyed by position.
+    fn new(data: BTreeMap<u64, [u8; 528]>) -> Self {
+        Self {
+            data,
+            requested: Vec::new(),
+        }
+    }
+}
+
 impl<W: DynamicIvkRead> NoteSource<W> for Notes {
     async fn note_data(
         &mut self,
@@ -323,11 +342,35 @@ impl<W: DynamicIvkRead> NoteSource<W> for Notes {
     }
 }
 
+/// A note source that cannot serve the wallet's chain.
+struct NoNotes;
+
+impl<W: DynamicIvkRead> NoteSource<W> for NoNotes {
+    async fn note_data(
+        &mut self,
+        _: &W,
+        _: Vec<u64>,
+    ) -> Result<BTreeMap<u64, [u8; 528]>, Error<W::Error>> {
+        Err(Error::NotesUnavailable("no note data"))
+    }
+}
+
 /// A test needs no lock: nothing else writes to its wallet.
 struct NoLock;
 
 impl WriteLock for NoLock {
     fn write<T>(&self, _: &'static str, write: impl FnOnce() -> T) -> T {
+        write()
+    }
+}
+
+/// Records each write's label.
+#[derive(Default)]
+struct Labels(RefCell<Vec<&'static str>>);
+
+impl WriteLock for Labels {
+    fn write<T>(&self, label: &'static str, write: impl FnOnce() -> T) -> T {
+        self.0.borrow_mut().push(label);
         write()
     }
 }
@@ -340,10 +383,57 @@ fn restore(st: &mut State, account: AccountUuid) {
         .unwrap();
 }
 
+/// Runs one sweep of the test account through `through` at `now`.
+async fn run<N: NoteSource<Wallet>>(
+    st: &mut State,
+    through: ChainPoint,
+    directory: impl Transport,
+    notes: &mut N,
+    lock: &impl WriteLock,
+    now: i64,
+) -> Result<Swept<SqliteClientError>, Error<SqliteClientError>> {
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    sweep(
+        st.wallet_mut().db_mut(),
+        &network,
+        account,
+        through,
+        GENESIS,
+        ORIGIN,
+        directory,
+        notes,
+        lock,
+        now,
+    )
+    .await
+}
+
+/// Runs sweeps at [`NOW`] until none is pending, expecting no deferral, and returns how
+/// many keys they finished.
+async fn settle(
+    st: &mut State,
+    through: ChainPoint,
+    directory: &Directory,
+    notes: &mut Notes,
+) -> usize {
+    let mut finished = 0;
+    for _ in 0..20 {
+        let swept = run(st, through, directory, notes, &NoLock, NOW)
+            .await
+            .unwrap();
+        assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
+        finished += swept.finished;
+        if !swept.pending {
+            return finished;
+        }
+    }
+    panic!("sweeps are still pending after 20 runs");
+}
+
 #[tokio::test]
 async fn a_restore_sweep_finds_a_payout_and_moves_the_lookahead_past_it() {
     let mut st = ironwood_wallet();
-    let network = *st.network();
     let account = st.test_account().unwrap().id();
     let paid = 3;
     let (record, note_data) = pay_restored_key(&mut st, paid, 0);
@@ -357,11 +447,8 @@ async fn a_restore_sweep_finds_a_payout_and_moves_the_lookahead_past_it() {
         through,
         &provider(&[]),
     ));
-    let mut notes = Notes {
-        data: BTreeMap::from([(record.payment.position, note_data)]),
-        requested: Vec::new(),
-    };
-    let finished = settle(&mut st, account, through, &directory, &mut notes).await;
+    let mut notes = Notes::new(BTreeMap::from([(record.payment.position, note_data)]));
+    let finished = settle(&mut st, through, &directory, &mut notes).await;
     // The first window, then, in a later run, the keys above it that the paid index
     // brings in.
     assert_eq!(finished as u64, RECEIVE_GAP_LIMIT + paid + 1);
@@ -379,101 +466,41 @@ async fn a_restore_sweep_finds_a_payout_and_moves_the_lookahead_past_it() {
         "{:?}",
         directory.requests()
     );
-
-    // A later run finds every sweep finished and the publication already checked, so
-    // it fetches only the manifest.
-    let mut before = directory.requests();
-    before.push("GET /v1/receiver/init".into());
-    let swept = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut notes,
-        &NoLock,
-        NOW,
-    )
-    .await
-    .unwrap();
-    assert_eq!(swept.finished, 0);
-    assert!(!swept.pending);
-    assert_eq!(directory.requests(), before);
 }
 
+/// Every page of a key's lookup is imported, with note data in batches of 64. A few
+/// pages cost less over PIR than the row file, and many more.
 #[tokio::test]
-async fn a_key_paid_twice_is_imported_in_full() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    let paid = 2;
-    let (mut first, first_data) = pay_restored_key(&mut st, paid, 0);
-    let (mut second, second_data) = pay_restored_key(&mut st, paid, 1);
-    first.total = 2;
-    second.page = 1;
-    second.total = 2;
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    let directory = Directory::new(publish(
-        &[first.clone(), second.clone()],
-        &[first.payment.cmx, second.payment.cmx],
-        through,
-        &provider(&[]),
-    ));
-    let mut notes = Notes {
-        data: BTreeMap::from([(0, first_data), (1, second_data)]),
-        requested: Vec::new(),
-    };
-    settle(&mut st, account, through, &directory, &mut notes).await;
-    assert_eq!(notes.requested, [vec![0, 1]]);
-    assert_eq!(
-        st.get_total_balance(account),
-        Zatoshis::const_from_u64(2 * VALUE)
-    );
-    // Two pages cost less over PIR than the row file.
-    let requests = directory.requests();
-    assert!(
-        !requests
-            .iter()
-            .any(|r| r.starts_with("GET /v1/receiver/rows/")),
-        "{requests:?}"
-    );
-}
-
-#[tokio::test]
-async fn a_long_history_takes_its_note_data_in_batches() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    let paid = 1;
-    // One more payment than a batch of note data holds.
-    let count = 65;
-    let mut records = Vec::new();
-    let mut data = BTreeMap::new();
-    for position in 0..count {
-        let (mut record, note_data) = pay_restored_key(&mut st, paid, position);
-        record.page = position.try_into().unwrap();
-        record.total = count.try_into().unwrap();
-        records.push(record);
-        data.insert(position, note_data);
+async fn every_payment_to_a_key_is_imported_in_note_data_batches() {
+    for (count, batches, row_file) in [(2, vec![2], false), (65, vec![64, 1], true)] {
+        let mut st = ironwood_wallet();
+        let account = st.test_account().unwrap().id();
+        let mut records = Vec::new();
+        let mut data = BTreeMap::new();
+        for position in 0..count {
+            let (mut record, note_data) = pay_restored_key(&mut st, 1, position);
+            record.page = position.try_into().unwrap();
+            record.total = count.try_into().unwrap();
+            records.push(record);
+            data.insert(position, note_data);
+        }
+        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+        restore(&mut st, account);
+        let through = tip(&st);
+        let commitments: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
+        let directory = Directory::new(publish(&records, &commitments, through, &provider(&[])));
+        let mut notes = Notes::new(data);
+        settle(&mut st, through, &directory, &mut notes).await;
+        let sizes: Vec<_> = notes.requested.iter().map(Vec::len).collect();
+        assert_eq!(sizes, batches);
+        assert_eq!(
+            st.get_total_balance(account),
+            Zatoshis::const_from_u64(count * VALUE)
+        );
+        let requests = directory.requests();
+        let rows = |r: &String| r.starts_with("GET /v1/receiver/rows/");
+        assert_eq!(requests.iter().any(rows), row_file, "{requests:?}");
     }
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    let commitments: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
-    let directory = Directory::new(publish(&records, &commitments, through, &provider(&[])));
-    let mut notes = Notes {
-        data,
-        requested: Vec::new(),
-    };
-    settle(&mut st, account, through, &directory, &mut notes).await;
-    let batches: Vec<_> = notes.requested.iter().map(Vec::len).collect();
-    assert_eq!(batches, [64, 1]);
-    assert_eq!(
-        st.get_total_balance(account),
-        Zatoshis::const_from_u64(count * VALUE)
-    );
 }
 
 /// Note data keyed by the position after each requested one, counting the requests.
@@ -497,7 +524,6 @@ impl<W: DynamicIvkRead> NoteSource<W> for Mislabeled {
 #[tokio::test]
 async fn note_data_for_other_positions_is_missing_data() {
     let mut st = ironwood_wallet();
-    let network = *st.network();
     let account = st.test_account().unwrap().id();
     let paid = 1;
     let (record, note_data) = pay_restored_key(&mut st, paid, 0);
@@ -514,20 +540,9 @@ async fn note_data_for_other_positions_is_missing_data() {
         data: note_data,
         calls: 0,
     };
-    let swept = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut notes,
-        &NoLock,
-        NOW,
-    )
-    .await
-    .unwrap();
+    let swept = run(&mut st, through, &directory, &mut notes, &NoLock, NOW)
+        .await
+        .unwrap();
     assert_eq!(notes.calls, 1);
     assert!(
         matches!(
@@ -541,42 +556,17 @@ async fn note_data_for_other_positions_is_missing_data() {
     assert_eq!(st.get_total_balance(account), Zatoshis::ZERO);
 }
 
-/// A note source that fails every call.
-struct NoNotes;
-
-impl<W: DynamicIvkRead> NoteSource<W> for NoNotes {
-    async fn note_data(
-        &mut self,
-        _: &W,
-        _: Vec<u64>,
-    ) -> Result<BTreeMap<u64, [u8; 528]>, Error<W::Error>> {
-        Err(Error::Unavailable("no note data"))
-    }
-}
-
 #[tokio::test]
 async fn a_wallet_without_payments_downloads_only_the_filters() {
     let mut st = ironwood_wallet();
-    let network = *st.network();
     let account = st.test_account().unwrap().id();
     st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
     let directory = Directory::new(publish(&[], &[], through, &provider(&[])));
-    let swept = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut NoNotes,
-        &NoLock,
-        NOW,
-    )
-    .await
-    .unwrap();
+    let swept = run(&mut st, through, &directory, &mut NoNotes, &NoLock, NOW)
+        .await
+        .unwrap();
     assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
     assert_eq!(swept.finished as u64, RECEIVE_GAP_LIMIT);
     assert!(!swept.pending);
@@ -584,8 +574,6 @@ async fn a_wallet_without_payments_downloads_only_the_filters() {
     let requests = directory.requests();
     assert_eq!(requests.len(), 2, "{requests:?}");
     assert!(requests[1].starts_with("GET /v1/receiver/filters/"));
-    // No swap reached these addresses recently, so none keeps scanning.
-    assert!(st.wallet().get_dynamic_scanning_keys().unwrap().is_empty());
 }
 
 /// A key closed after its sweep is checked against each newer publication's paid filter,
@@ -600,18 +588,15 @@ async fn a_newer_paid_filter_finds_a_payment_to_a_closed_key() {
     restore(&mut st, account);
     let first = tip(&st);
     let directory = Directory::new(publish(&[], &[], first, &provider(&[])));
-    let mut notes = Notes {
-        data: BTreeMap::new(),
-        requested: Vec::new(),
-    };
-    settle(&mut st, account, first, &directory, &mut notes).await;
+    let mut notes = Notes::new(BTreeMap::new());
+    settle(&mut st, first, &directory, &mut notes).await;
     assert!(st.wallet().get_dynamic_scanning_keys().unwrap().is_empty());
 
     // The closed key misses a payment, which the same publication cannot show.
     let (record, note_data) = pay_restored_key(&mut st, 0, 0);
     let through = tip(&st);
     let before = directory.requests().len();
-    let swept = run(&mut st, account, through, &directory, &mut notes, NOW).await;
+    let swept = run(&mut st, through, &directory, &mut notes, &NoLock, NOW).await;
     assert!(!swept.unwrap().pending);
     assert_eq!(directory.requests()[before..], ["GET /v1/receiver/init"]);
     assert_eq!(st.get_total_balance(account), Zatoshis::ZERO);
@@ -624,10 +609,7 @@ async fn a_newer_paid_filter_finds_a_payment_to_a_closed_key() {
     ));
     notes.data.insert(record.payment.position, note_data);
     // The paid key, then the lookahead key its index brings in.
-    assert_eq!(
-        settle(&mut st, account, through, &directory, &mut notes).await,
-        2
-    );
+    assert_eq!(settle(&mut st, through, &directory, &mut notes).await, 2);
     assert_eq!(
         st.get_total_balance(account),
         Zatoshis::const_from_u64(VALUE)
@@ -642,73 +624,51 @@ async fn a_newer_paid_filter_finds_a_payment_to_a_closed_key() {
         later,
         &provider(&[]),
     ));
-    let swept = run(&mut st, account, later, &directory, &mut notes, NOW).await;
+    let swept = run(&mut st, later, &directory, &mut notes, &NoLock, NOW).await;
     let swept = swept.unwrap();
     assert_eq!((swept.finished, swept.pending), (0, false));
     assert!(directory.requests().iter().all(|r| !r.starts_with("POST")));
 }
 
+/// After its sweep, a key keeps scanning only if a provider's recent set holds its
+/// receiver, and every key does unless each provider has a recent set.
 #[tokio::test]
 async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
-    let receiver = |key: KeyId| {
-        let address = key
-            .derive(&parent)
+    for (case, expected) in [
+        ("quoted", vec![2]),
+        ("both recent", vec![]),
+        ("one recent", (0..RECEIVE_GAP_LIMIT).collect()),
+    ] {
+        let mut st = ironwood_wallet();
+        let account = st.test_account().unwrap().id();
+        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+        restore(&mut st, account);
+        let through = tip(&st);
+        let sets = if case == "quoted" {
+            // The old device quoted addresses 0 and 2, and 2 only today.
+            let mut sets = provider(&[receiver(&st, 0), receiver(&st, 2)]);
+            sets[0].receivers = vec![receiver(&st, 2)];
+            sets
+        } else {
+            // Provider `b` publishes only its seen set in the last case.
+            let mut sets = provider_named("a", &[]);
+            let b = provider_named("b", &[]).into_iter();
+            sets.extend(b.skip(usize::from(case == "one recent")));
+            sets
+        };
+        let directory = Directory::new(publish(&[], &[], through, &sets));
+        let mut notes = Notes::new(BTreeMap::new());
+        settle(&mut st, through, &directory, &mut notes).await;
+        let mut scanning: Vec<_> = st
+            .wallet()
+            .get_dynamic_scanning_keys()
             .unwrap()
-            .address_at(0u32, Scope::External);
-        Receiver::from_bytes(address.to_raw_address_bytes()).unwrap()
-    };
-    // The old device quoted addresses 0 and 2, and 2 only today.
-    let (old, quoted) = (
-        KeyId::new(Purpose::Receive, 0),
-        KeyId::new(Purpose::Receive, 2),
-    );
-    let mut sets = provider(&[receiver(old), receiver(quoted)]);
-    sets[0].receivers = vec![receiver(quoted)];
-    let directory = Directory::new(publish(&[], &[], through, &sets));
-    let mut notes = Notes {
-        data: BTreeMap::new(),
-        requested: Vec::new(),
-    };
-    settle(&mut st, account, through, &directory, &mut notes).await;
-    let scanning: Vec<_> = st
-        .wallet()
-        .get_dynamic_scanning_keys()
-        .unwrap()
-        .iter()
-        .map(|k| k.key_id())
-        .collect();
-    assert_eq!(scanning, [quoted]);
-    // Issuance reads the same seen set, skips both, and takes the lowest address the
-    // provider never had.
-    let seen = fetch_seen(ORIGIN, &directory, GENESIS).await.unwrap();
-    assert_eq!(
-        (seen.since(), seen.until()),
-        (NOW - 2 * RESTORE_WATCH_SECS, NOW - 60)
-    );
-    let bytes = |key: KeyId| *receiver(key).as_bytes();
-    assert_eq!(
-        seen.contains(&[bytes(old), bytes(KeyId::new(Purpose::Receive, 1))]),
-        [true, false]
-    );
-    let contains = |receivers: &[[u8; 43]]| seen.contains(receivers);
-    let view = ProviderSeen {
-        since: seen.since(),
-        until: seen.until(),
-        contains: &contains,
-    };
-    let issued = st
-        .wallet_mut()
-        .db_mut()
-        .prepare_receive_reservation(account, NOW, through.height, Some(&view))
-        .unwrap()
-        .unwrap();
-    assert_eq!(issued.key_id(), KeyId::new(Purpose::Receive, 1));
+            .iter()
+            .map(|k| k.key_id().index())
+            .collect();
+        scanning.sort();
+        assert_eq!(scanning, expected, "{case}");
+    }
 }
 
 /// A seen hit counts from the attempt that observes it. When publication A's seen set
@@ -717,7 +677,6 @@ async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
 #[tokio::test]
 async fn a_seen_hit_outlives_a_rejected_payment_and_a_later_miss() {
     let mut st = ironwood_wallet();
-    let network = *st.network();
     let account = st.test_account().unwrap().id();
     let key = KeyId::new(Purpose::Receive, 0);
     let (record, note_data) = pay_restored_key(&mut st, key.index(), 0);
@@ -738,10 +697,7 @@ async fn a_seen_hit_outlives_a_rejected_payment_and_a_later_miss() {
             )
             .unwrap()
     };
-    let mut notes = Notes {
-        data: BTreeMap::from([(record.payment.position, note_data)]),
-        requested: Vec::new(),
-    };
+    let mut notes = Notes::new(BTreeMap::from([(record.payment.position, note_data)]));
     // Publication A's witnesses are over another tree, so its payment is rejected.
     let a = Directory::new(publish(
         std::slice::from_ref(&record),
@@ -749,20 +705,9 @@ async fn a_seen_hit_outlives_a_rejected_payment_and_a_later_miss() {
         through,
         &provider(&[record.receiver]),
     ));
-    let swept = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        &a,
-        &mut notes,
-        &NoLock,
-        NOW,
-    )
-    .await
-    .unwrap();
+    let swept = run(&mut st, through, &a, &mut notes, &NoLock, NOW)
+        .await
+        .unwrap();
     assert!(
         matches!(
             &swept.deferred[..],
@@ -775,20 +720,9 @@ async fn a_seen_hit_outlives_a_rejected_payment_and_a_later_miss() {
 
     let b = Directory::new(publish(&[], &commitments, through, &provider(&[])));
     let later = NOW + 3_600;
-    let swept = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        &b,
-        &mut notes,
-        &NoLock,
-        later,
-    )
-    .await
-    .unwrap();
+    let swept = run(&mut st, through, &b, &mut notes, &NoLock, later)
+        .await
+        .unwrap();
     assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
     assert!(!swept.pending);
     assert!(seen(&st));
@@ -832,7 +766,6 @@ impl WriteLock for FailFirstAttempt {
 #[tokio::test]
 async fn a_failed_attempt_write_stops_the_run() {
     let mut st = ironwood_wallet();
-    let network = *st.network();
     let account = st.test_account().unwrap().id();
     let (record, note_data) = pay_restored_key(&mut st, 0, 0);
     st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
@@ -844,10 +777,7 @@ async fn a_failed_attempt_write_stops_the_run() {
         through,
         &provider(&[]),
     ));
-    let mut notes = Notes {
-        data: BTreeMap::from([(record.payment.position, note_data)]),
-        requested: Vec::new(),
-    };
+    let mut notes = Notes::new(BTreeMap::from([(record.payment.position, note_data)]));
     let lock = FailFirstAttempt {
         fail: Arc::new(AtomicBool::new(false)),
         labels: RefCell::new(Vec::new()),
@@ -857,19 +787,7 @@ async fn a_failed_attempt_write_stops_the_run() {
     st.wallet()
         .conn()
         .commit_hook(Some(move || fail.swap(false, Ordering::SeqCst)));
-    let result = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut notes,
-        &lock,
-        NOW,
-    )
-    .await;
+    let result = run(&mut st, through, &directory, &mut notes, &lock, NOW).await;
     assert!(matches!(result, Err(Error::Wallet(_))), "{result:?}");
     assert_eq!(
         *lock.labels.borrow(),
@@ -883,54 +801,30 @@ async fn a_failed_attempt_write_stops_the_run() {
     assert!(notes.requested.is_empty());
 }
 
-/// Records each write's label.
-#[derive(Default)]
-struct Labels(RefCell<Vec<&'static str>>);
-
-impl WriteLock for Labels {
-    fn write<T>(&self, label: &'static str, write: impl FnOnce() -> T) -> T {
-        self.0.borrow_mut().push(label);
-        write()
-    }
-}
-
 /// A `through` the wallet has scanned past is not a tip to release evidence at, so a
 /// run with it writes nothing.
 #[tokio::test]
 async fn a_stale_tip_releases_nothing() {
     let mut st = ironwood_wallet();
-    let network = *st.network();
     let account = st.test_account().unwrap().id();
     st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
     st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
     let directory = Directory::new(publish(&[], &[], through, &provider(&[])));
-    let mut notes = Notes {
-        data: BTreeMap::new(),
-        requested: Vec::new(),
-    };
     let lock = Labels::default();
-    sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut notes,
-        &lock,
-        NOW,
-    )
-    .await
-    .unwrap();
+    run(&mut st, through, &directory, &mut NoNotes, &lock, NOW)
+        .await
+        .unwrap();
     assert!(lock.0.borrow().is_empty(), "{:?}", lock.0.borrow());
     assert!(directory.requests().is_empty());
 }
 
 /// Another handle on the wallet's file, as another writer holds.
 type OtherWriter = WalletDb<rusqlite::Connection, LocalNetwork, SystemClock, TestRng>;
+
+/// A write through another handle on the wallet's file at `through`.
+type OtherWrite = fn(&mut OtherWriter, ChainPoint);
 
 /// Runs `other` just before the first release, as another writer may while the sweep
 /// holds no lock, then sets `releasing` while release holds the lock.
@@ -954,101 +848,93 @@ impl<F: FnOnce()> WriteLock for WriterBeforeRelease<F> {
     }
 }
 
-/// Sweeps a restored wallet against a publication ending `behind` blocks below its tip,
-/// with release following `other`'s write through a second handle, and returns whether
-/// release ran, judged by its read of the retention table.
-async fn release_after(behind: u32, other: impl FnOnce(&mut OtherWriter, ChainPoint)) -> bool {
-    let mut st = ironwood_wallet_in(TestDbFactory::file_backed());
-    let network = *st.network();
-    let account = st.test_account().unwrap().id();
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(2);
-    restore(&mut st, account);
-    let through = tip(&st);
-    let path = st.wallet().conn().path().unwrap().to_owned();
-    let mut handle =
-        OtherWriter::for_path(path, network, SystemClock, TestRng::seed_from_u64(0)).unwrap();
-    let lock = WriterBeforeRelease {
-        other: RefCell::new(Some(|| other(&mut handle, through))),
-        releasing: Arc::new(AtomicBool::new(false)),
-    };
-    let released = Arc::new(AtomicBool::new(false));
-    let (releasing, read) = (lock.releasing.clone(), released.clone());
-    st.wallet()
-        .conn()
-        .authorizer(Some(move |ctx: AuthContext<'_>| {
-            if releasing.load(Ordering::SeqCst)
-                && matches!(
-                    ctx.action,
-                    AuthAction::Read {
-                        table_name: "ironwood_dynamic_spend_retention",
-                        ..
-                    }
-                )
-            {
-                read.store(true, Ordering::SeqCst);
-            }
-            Authorization::Allow
-        }));
-    let height = through.height - behind;
-    let end = ChainPoint {
-        height,
-        hash: st.wallet().get_block_hash(height).unwrap().unwrap(),
-    };
-    // Without a recent set, every key keeps scanning from the block after `end`.
-    let directory = Directory::new(publish(&[], &[], end, &provider(&[])[1..]));
-    let swept = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut NoNotes,
-        &lock,
-        NOW,
-    )
-    .await
-    .unwrap();
-    assert_eq!(swept.finished as u64, RECEIVE_GAP_LIMIT);
-    st.wallet()
-        .conn()
-        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
-    released.load(Ordering::SeqCst)
-}
-
 /// Release checks the chain point again under its lock, since another writer may move
-/// the tip while the sweep's lookups run without it.
+/// the tip while the sweep's lookups run without it, and waits for the fully scanned
+/// height to reach it. Each case sweeps against a publication `behind` blocks below the
+/// tip, with `other` writing through a second handle just before release, and judges
+/// whether release ran by its read of the retention table.
 #[tokio::test]
-async fn a_tip_moved_before_release_releases_nothing() {
-    assert!(
-        release_after(0, |_, _| ()).await,
-        "release runs at an unmoved tip"
-    );
-    let advanced = release_after(0, |other, through| {
-        other.update_chain_tip(through.height + 1).unwrap();
-    });
-    assert!(!advanced.await, "released after the tip advanced");
-    let rewound = release_after(0, |other, through| {
-        other.truncate_to_height(through.height - 1).unwrap();
-    });
-    assert!(!rewound.await, "released after a reorg rewound the tip");
-    // The tip is back at `through`'s height, but its block is not scanned yet.
-    let replaced = release_after(0, |other, through| {
-        other.truncate_to_height(through.height - 1).unwrap();
-        other.update_chain_tip(through.height).unwrap();
-    });
-    assert!(!replaced.await, "released at a replaced block");
-}
-
-/// Finishing keys against a publication behind `through` rescans the blocks after it,
-/// lowering the fully scanned height without moving the tip, so release waits for it.
-#[tokio::test]
-async fn a_rescan_the_sweep_queued_releases_nothing() {
-    assert!(
-        !release_after(1, |_, _| ()).await,
-        "released below the fully scanned tip"
-    );
+async fn release_runs_only_at_the_fully_scanned_tip() {
+    let cases: [(&str, u32, OtherWrite, bool); 5] = [
+        ("an unmoved tip", 0, |_, _| (), true),
+        (
+            "an advanced tip",
+            0,
+            |other, through| {
+                other.update_chain_tip(through.height + 1).unwrap();
+            },
+            false,
+        ),
+        (
+            "a reorg that rewound the tip",
+            0,
+            |other, through| {
+                other.truncate_to_height(through.height - 1).unwrap();
+            },
+            false,
+        ),
+        // The tip is back at `through`'s height, but its block is not scanned yet.
+        (
+            "a replaced block",
+            0,
+            |other, through| {
+                other.truncate_to_height(through.height - 1).unwrap();
+                other.update_chain_tip(through.height).unwrap();
+            },
+            false,
+        ),
+        // Finishing keys against a publication behind `through` rescans the blocks
+        // after it, lowering the fully scanned height without moving the tip.
+        ("a rescan the sweep queued", 1, |_, _| (), false),
+    ];
+    for (case, behind, other, expected) in cases {
+        let mut st = ironwood_wallet_in(TestDbFactory::file_backed());
+        let network = *st.network();
+        let account = st.test_account().unwrap().id();
+        st.generate_and_scan_empty_blocks_with_dynamic_ivks(2);
+        restore(&mut st, account);
+        let through = tip(&st);
+        let path = st.wallet().conn().path().unwrap().to_owned();
+        let mut handle =
+            OtherWriter::for_path(path, network, SystemClock, TestRng::seed_from_u64(0)).unwrap();
+        let lock = WriterBeforeRelease {
+            other: RefCell::new(Some(|| other(&mut handle, through))),
+            releasing: Arc::new(AtomicBool::new(false)),
+        };
+        let released = Arc::new(AtomicBool::new(false));
+        let (releasing, read) = (lock.releasing.clone(), released.clone());
+        st.wallet()
+            .conn()
+            .authorizer(Some(move |ctx: AuthContext<'_>| {
+                if releasing.load(Ordering::SeqCst)
+                    && matches!(
+                        ctx.action,
+                        AuthAction::Read {
+                            table_name: "ironwood_dynamic_spend_retention",
+                            ..
+                        }
+                    )
+                {
+                    read.store(true, Ordering::SeqCst);
+                }
+                Authorization::Allow
+            }));
+        let height = through.height - behind;
+        let end = ChainPoint {
+            height,
+            hash: st.wallet().get_block_hash(height).unwrap().unwrap(),
+        };
+        // Without a recent set, every key keeps scanning from the block after `end`.
+        let directory = Directory::new(publish(&[], &[], end, &provider(&[])[1..]));
+        let swept = run(&mut st, through, &directory, &mut NoNotes, &lock, NOW)
+            .await
+            .unwrap();
+        assert_eq!(swept.finished as u64, RECEIVE_GAP_LIMIT);
+        st.wallet()
+            .conn()
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        assert_eq!(released.load(Ordering::SeqCst), expected, "{case}");
+    }
 }
 
 /// Another network's seen sets say nothing about this network's quotes, so a
@@ -1072,210 +958,87 @@ async fn seen_sets_of_another_network_are_refused() {
     assert!(fetch_seen(ORIGIN, &directory, GENESIS).await.is_ok());
 }
 
-/// A provider with a recent set but no seen set may have had any receiver, so issuance
-/// and sweeps both refuse the publication until every provider has a dated seen set.
-/// The sets then cover the quote times they all cover, and hold what any of them holds.
+/// A publication without seen sets, or with a provider that has a recent set but no
+/// seen set, may omit any receiver, so issuance and sweeps both refuse it, before any
+/// key finishes or spend evidence is released. Once every provider has a dated seen
+/// set, the sets cover the quote times they all cover, and hold what any of them holds.
 #[tokio::test]
 async fn every_provider_with_sets_needs_a_seen_set() {
     let mut st = ironwood_wallet();
-    let network = *st.network();
     let account = st.test_account().unwrap().id();
     st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
-    let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
-    let receiver = |index| {
-        let fvk = KeyId::new(Purpose::Receive, index).derive(&parent).unwrap();
-        Receiver::from_bytes(fvk.address_at(0u32, Scope::External).to_raw_address_bytes()).unwrap()
-    };
     // Provider `a` has its seen set only if `a_seen`. `b` has only a seen set, from a
     // later feed start and a later read.
     let sets = |a_seen: bool| {
-        let mut sets = provider_named("a", &[receiver(0)]);
+        let mut sets = provider_named("a", &[receiver(&st, 0)]);
         sets.truncate(1 + usize::from(a_seen));
-        let mut b = provider_named("b", &[receiver(1)]).pop().unwrap();
+        let mut b = provider_named("b", &[receiver(&st, 1)]).pop().unwrap();
         b.since_unix = NOW - RESTORE_WATCH_SECS;
         b.until_unix = NOW - 30;
         sets.push(b);
         sets
     };
-    let directory = Directory::new(publish(&[], &[], through, &sets(false)));
-    let refused = fetch_seen(ORIGIN, &directory, GENESIS).await;
-    assert!(matches!(refused, Err(DirectoryError::Malformed)));
-    let mut notes = Notes {
-        data: BTreeMap::new(),
-        requested: Vec::new(),
-    };
-    let result = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut notes,
-        &NoLock,
-        NOW,
-    )
-    .await;
-    assert!(
-        matches!(result, Err(Error::Directory(DirectoryError::Malformed))),
-        "{result:?}"
-    );
-    // A publication without provider sets is refused too.
-    let directory = Directory::new(publish(&[], &[], through, &[]));
-    let refused = fetch_seen(ORIGIN, &directory, GENESIS).await;
-    assert!(matches!(refused, Err(DirectoryError::Malformed)));
+    let (missing, complete) = (sets(false), sets(true));
+    // The first refusal backs every due key off for a minute.
+    for (sets, now) in [(missing, NOW), (Vec::new(), NOW + 60)] {
+        let directory = Directory::new(publish(&[], &[], through, &sets));
+        let refused = fetch_seen(ORIGIN, &directory, GENESIS).await;
+        assert!(matches!(refused, Err(DirectoryError::Malformed)));
+        let lock = Labels::default();
+        let result = run(&mut st, through, &directory, &mut NoNotes, &lock, now).await;
+        assert!(
+            matches!(result, Err(Error::Directory(DirectoryError::Malformed))),
+            "{result:?}"
+        );
+        let labels = lock.0.borrow();
+        assert!(
+            labels
+                .iter()
+                .all(|l| ["dynamic_sweep.due", "dynamic_sweep.attempt"].contains(l)),
+            "{labels:?}"
+        );
+        assert!(
+            st.wallet()
+                .db()
+                .dynamic_history_pending(account, through.height)
+                .unwrap()
+        );
+    }
 
-    let directory = Directory::new(publish(&[], &[], through, &sets(true)));
+    let directory = Directory::new(publish(&[], &[], through, &complete));
     let seen = fetch_seen(ORIGIN, &directory, GENESIS).await.unwrap();
     assert_eq!(
         (seen.since(), seen.until()),
         (NOW - RESTORE_WATCH_SECS, NOW - 60)
     );
-    let held = [0, 1, 2].map(|index| *receiver(index).as_bytes());
+    let held = [0, 1, 2].map(|index| *receiver(&st, index).as_bytes());
     assert_eq!(seen.contains(&held), [true, true, false]);
 }
 
-/// A publication without provider seen sets says nothing of which addresses were
-/// quoted, so a sweep refuses it as `fetch_seen` does, before any key finishes or
-/// spend evidence is released.
-#[tokio::test]
-async fn a_publication_without_seen_sets_finishes_no_sweep() {
-    let mut st = ironwood_wallet();
-    let network = *st.network();
-    let account = st.test_account().unwrap().id();
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    let directory = Directory::new(publish(&[], &[], through, &[]));
-    let lock = Labels::default();
-    let result = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut NoNotes,
-        &lock,
-        NOW,
-    )
-    .await;
-    assert!(
-        matches!(result, Err(Error::Directory(DirectoryError::Malformed))),
-        "{result:?}"
-    );
-    let labels = lock.0.borrow();
-    assert!(
-        labels
-            .iter()
-            .all(|l| ["dynamic_sweep.due", "dynamic_sweep.attempt"].contains(l)),
-        "{labels:?}"
-    );
-    assert!(
-        st.wallet()
-            .db()
-            .dynamic_history_pending(account, through.height)
-            .unwrap()
-    );
+/// Which part of a directory fails.
+#[derive(Clone, Copy, Debug)]
+enum Fault {
+    None,
+    /// Queries fail after the session was accepted.
+    Queries,
+    /// The witness snapshot is malformed, so no session opens.
+    Witnesses,
 }
 
-#[tokio::test]
-async fn every_address_keeps_scanning_unless_each_provider_has_a_recent_set() {
-    for both_recent in [true, false] {
-        let mut st = ironwood_wallet();
-        let account = st.test_account().unwrap().id();
-        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
-        restore(&mut st, account);
-        let through = tip(&st);
-        // Provider `b` publishes only its seen set when `both_recent` is false.
-        let mut sets = provider_named("a", &[]);
-        let b = provider_named("b", &[]);
-        sets.extend(b.into_iter().skip(usize::from(!both_recent)));
-        let directory = Directory::new(publish(&[], &[], through, &sets));
-        let mut notes = Notes {
-            data: BTreeMap::new(),
-            requested: Vec::new(),
-        };
-        settle(&mut st, account, through, &directory, &mut notes).await;
-        let scanning = st.wallet().get_dynamic_scanning_keys().unwrap().len() as u64;
-        assert_eq!(scanning, if both_recent { 0 } else { RECEIVE_GAP_LIMIT });
-    }
+/// A directory with `fault`.
+struct Faulty {
+    directory: Directory,
+    fault: Fault,
 }
 
-/// A directory whose queries fail after it accepted the session.
-struct FailingQueries(Directory);
-
-impl Transport for FailingQueries {
+impl Transport for Faulty {
     async fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>, DirectoryError> {
-        self.0.get(url, limit).await
-    }
-
-    async fn post(&self, url: &str, _: Vec<u8>, _: usize) -> Result<Vec<u8>, DirectoryError> {
-        self.0.requests.lock().unwrap().push(format!("POST {url}"));
-        Err(DirectoryError::Revision)
-    }
-}
-
-#[tokio::test]
-async fn a_revoked_session_stops_the_run_before_leasing_more_keys() {
-    let mut st = ironwood_wallet();
-    let network = *st.network();
-    let account = st.test_account().unwrap().id();
-    // The first key in the batch is paid, so it needs the failing lookup.
-    let (record, _) = pay_restored_key(&mut st, 0, 0);
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    let directory = FailingQueries(Directory::new(publish(
-        std::slice::from_ref(&record),
-        &[record.payment.cmx],
-        through,
-        &provider(&[]),
-    )));
-    let mut notes = Notes {
-        data: BTreeMap::new(),
-        requested: Vec::new(),
-    };
-    let swept = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut notes,
-        &NoLock,
-        NOW,
-    )
-    .await
-    .unwrap();
-    assert_eq!(swept.finished, 0);
-    assert_eq!(swept.deferred.len(), 1);
-    assert!(swept.pending);
-    let posts = directory
-        .0
-        .requests()
-        .iter()
-        .filter(|r| r.starts_with("POST"))
-        .count();
-    assert_eq!(posts, 1);
-}
-
-/// A directory whose witness snapshot is malformed, so no session opens.
-struct MalformedWitnesses(Directory);
-
-impl Transport for MalformedWitnesses {
-    async fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>, DirectoryError> {
-        if url.contains("/v1/receiver/witness/") {
-            self.0.requests.lock().unwrap().push(format!("GET {url}"));
+        if matches!(self.fault, Fault::Witnesses) && url.contains("/v1/receiver/witness/") {
             return Ok(vec![0]);
         }
-        self.0.get(url, limit).await
+        self.directory.get(url, limit).await
     }
 
     async fn post(
@@ -1284,175 +1047,113 @@ impl Transport for MalformedWitnesses {
         body: Vec<u8>,
         limit: usize,
     ) -> Result<Vec<u8>, DirectoryError> {
-        self.0.post(url, body, limit).await
+        if matches!(self.fault, Fault::Queries) {
+            return Err(DirectoryError::Revision);
+        }
+        self.directory.post(url, body, limit).await
     }
 }
 
-/// A session that fails to open stops the run, so later paid keys are neither leased
-/// nor backed off.
+/// A revoked session, a session that fails to open, or a note source that cannot serve
+/// the wallet's chain would fail every later key the same way, so the run stops at the
+/// first paid key, and later paid keys are neither leased nor backed off.
 #[tokio::test]
-async fn a_failed_session_open_stops_the_run_before_leasing_more_keys() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    // The batch's first two keys are paid, so each needs the session.
-    let records: Vec<_> = (0..2)
-        .map(|index| pay_restored_key(&mut st, index, index).0)
-        .collect();
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    let cmxs: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
-    let directory = MalformedWitnesses(Directory::new(publish(
-        &records,
-        &cmxs,
-        through,
-        &provider(&[]),
-    )));
-    let mut notes = Notes {
-        data: BTreeMap::new(),
-        requested: Vec::new(),
-    };
-    let swept = run(&mut st, account, through, &directory, &mut notes, NOW)
-        .await
-        .unwrap();
-    assert!(
-        matches!(
-            &swept.deferred[..],
-            [(key, Error::Directory(_))] if *key == KeyId::new(Purpose::Receive, 0)
-        ),
-        "{:?}",
-        swept.deferred
-    );
-    assert_eq!(swept.finished, 0);
-    let due = st
-        .wallet_mut()
-        .db_mut()
-        .prepare_dynamic_sweeps(account, through, NOW, NonZeroU32::new(64).unwrap())
-        .unwrap()
-        .unwrap();
-    let due = |index| {
-        due.iter()
-            .any(|item| item.key == KeyId::new(Purpose::Receive, index))
-    };
-    assert!(!due(0));
-    assert!(due(1));
+async fn a_run_fatal_failure_stops_the_run_before_leasing_more_keys() {
+    for fault in [Fault::Queries, Fault::Witnesses, Fault::None] {
+        let mut st = ironwood_wallet();
+        let account = st.test_account().unwrap().id();
+        // The batch's first two keys are paid, so each needs a lookup.
+        let records: Vec<_> = (0..2)
+            .map(|index| pay_restored_key(&mut st, index, index).0)
+            .collect();
+        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+        restore(&mut st, account);
+        let through = tip(&st);
+        let cmxs: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
+        let directory = Faulty {
+            directory: Directory::new(publish(&records, &cmxs, through, &provider(&[]))),
+            fault,
+        };
+        let swept = run(&mut st, through, &directory, &mut NoNotes, &NoLock, NOW)
+            .await
+            .unwrap();
+        let [(key, e)] = &swept.deferred[..] else {
+            panic!("{fault:?}: {:?}", swept.deferred);
+        };
+        let failed = match fault {
+            Fault::Queries => matches!(e, Error::Directory(DirectoryError::Revision)),
+            Fault::Witnesses => matches!(e, Error::Directory(_)),
+            Fault::None => matches!(e, Error::NotesUnavailable(_)),
+        };
+        assert!(
+            *key == KeyId::new(Purpose::Receive, 0) && failed,
+            "{fault:?}: {e:?}"
+        );
+        assert_eq!(swept.finished, 0);
+        assert!(swept.pending);
+        let due: Vec<_> = st
+            .wallet_mut()
+            .db_mut()
+            .prepare_dynamic_sweeps(account, through, NOW, NonZeroU32::new(64).unwrap())
+            .unwrap()
+            .unwrap()
+            .iter()
+            .map(|item| item.key.index())
+            .collect();
+        assert!(!due.contains(&0) && due.contains(&1), "{fault:?}: {due:?}");
+    }
 }
 
+/// A publication off the wallet's chain, or ending at the wallet's block but short of
+/// that block's last Ironwood output, is refused before any lookup: a payment in the
+/// omitted tail would be neither looked up nor rescanned. Every due key backs off, so
+/// the directory is not asked again until a minute on.
 #[tokio::test]
 async fn a_publication_off_the_wallets_chain_is_refused_before_any_lookup() {
-    let mut st = ironwood_wallet();
-    let network = *st.network();
-    let account = st.test_account().unwrap().id();
-    let (record, note_data) = pay_restored_key(&mut st, 0, 0);
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    let other = ChainPoint {
-        hash: BlockHash([1; 32]),
-        ..through
-    };
-    let directory = Directory::new(publish(
-        std::slice::from_ref(&record),
-        &[record.payment.cmx],
-        other,
-        &provider(&[]),
-    ));
-    let mut notes = Notes {
-        data: BTreeMap::from([(record.payment.position, note_data)]),
-        requested: Vec::new(),
-    };
-    let result = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut notes,
-        &NoLock,
-        NOW,
-    )
-    .await;
-    assert!(matches!(result, Err(Error::Directory(_))), "{result:?}");
-    assert_eq!(directory.requests(), ["GET /v1/receiver/init"]);
-    assert!(notes.requested.is_empty());
-    assert!(
-        st.wallet()
-            .db()
-            .dynamic_history_pending(account, through.height)
-            .unwrap()
-    );
-    // Every due key backed off, so the directory is not asked again until a minute on.
-    for (now, requests) in [(NOW, 1), (NOW + 60, 2)] {
-        let _ = sweep(
-            st.wallet_mut().db_mut(),
-            &network,
-            account,
-            through,
-            GENESIS,
-            ORIGIN,
-            &directory,
-            &mut notes,
-            &NoLock,
-            now,
-        )
-        .await;
-        assert_eq!(directory.requests().len(), requests);
+    for off_chain in [true, false] {
+        let mut st = ironwood_wallet();
+        let account = st.test_account().unwrap().id();
+        let (record, note_data) = pay_restored_key(&mut st, 0, 0);
+        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+        restore(&mut st, account);
+        let through = tip(&st);
+        let publication = if off_chain {
+            let other = ChainPoint {
+                hash: BlockHash([1; 32]),
+                ..through
+            };
+            publish(
+                std::slice::from_ref(&record),
+                &[record.payment.cmx],
+                other,
+                &provider(&[]),
+            )
+        } else {
+            // Without the chain's one Ironwood output.
+            publish(&[], &[], through, &provider(&[]))
+        };
+        let directory = Directory::new(publication);
+        let mut notes = Notes::new(BTreeMap::from([(record.payment.position, note_data)]));
+        let result = run(&mut st, through, &directory, &mut notes, &NoLock, NOW).await;
+        let refused = match result {
+            Err(Error::Directory(_)) => off_chain,
+            Err(Error::Unavailable(_)) => !off_chain,
+            _ => false,
+        };
+        assert!(refused, "{result:?}");
+        assert_eq!(directory.requests(), ["GET /v1/receiver/init"]);
+        assert!(notes.requested.is_empty());
+        assert!(
+            st.wallet()
+                .db()
+                .dynamic_history_pending(account, through.height)
+                .unwrap()
+        );
+        for (now, requests) in [(NOW, 1), (NOW + 60, 2)] {
+            let _ = run(&mut st, through, &directory, &mut notes, &NoLock, now).await;
+            assert_eq!(directory.requests().len(), requests);
+        }
     }
-}
-
-/// A publication ending at the wallet's block but short of that block's last Ironwood
-/// output is refused before any lookup, as one off the chain is: a payment in the
-/// omitted tail would be neither looked up nor rescanned.
-#[tokio::test]
-async fn a_publication_short_of_its_anchor_blocks_outputs_is_refused() {
-    let mut st = ironwood_wallet();
-    let network = *st.network();
-    let account = st.test_account().unwrap().id();
-    pay_restored_key(&mut st, 0, 0);
-    restore(&mut st, account);
-    let through = tip(&st);
-    // Ends at the paid block, without the chain's one Ironwood output, which it holds.
-    let directory = Directory::new(publish(&[], &[], through, &provider(&[])));
-    let result = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut NoNotes,
-        &NoLock,
-        NOW,
-    )
-    .await;
-    assert!(matches!(result, Err(Error::Unavailable(_))), "{result:?}");
-    assert_eq!(directory.requests(), ["GET /v1/receiver/init"]);
-    assert!(
-        st.wallet()
-            .db()
-            .dynamic_history_pending(account, through.height)
-            .unwrap()
-    );
-}
-
-/// An Enhance transport that must not be used.
-struct NoEnhance;
-
-impl EnhanceTransport for NoEnhance {
-    async fn execute(&self, _: EnhanceRequest) -> Result<ResponseBody, ClientError> {
-        panic!("no Enhance request was needed");
-    }
-}
-
-#[tokio::test]
-async fn enhance_notes_open_no_session_until_a_payment_needs_note_data() {
-    let st = ironwood_wallet();
-    let mut notes = EnhanceNotes::new("https://enhance.test", &NoEnhance, st.network());
-    let data = notes.note_data(st.wallet().db(), Vec::new()).await.unwrap();
-    assert!(data.is_empty());
 }
 
 /// The test network's upgrades under mainnet's network type, the only one Enhance PIR
@@ -1536,22 +1237,28 @@ impl EnhanceTransport for RefusingEnhance {
     }
 }
 
+/// Enhance notes open no session until a position needs note data, accept fresh routing
+/// after a refused query, and cannot serve a wallet whose chain lacks their anchor.
 #[tokio::test]
-async fn enhance_notes_accept_fresh_routing_after_a_refused_query() {
+async fn enhance_notes_follow_the_wallets_chain_and_fresh_routing() {
+    let mut st = ironwood_wallet();
+    pay_restored_key(&mut st, 0, 0);
+    let anchor = tip(&st);
+    let records = st
+        .wallet()
+        .block_metadata(anchor.height)
+        .unwrap()
+        .unwrap()
+        .ironwood_tree_size()
+        .unwrap()
+        .into();
+    let network = EnhanceNetwork(*st.network());
     for status in [409, 410] {
-        let mut st = ironwood_wallet();
-        pay_restored_key(&mut st, 0, 0);
-        let anchor = tip(&st);
-        let records = st
-            .wallet()
-            .block_metadata(anchor.height)
-            .unwrap()
-            .unwrap()
-            .ironwood_tree_size()
-            .unwrap();
-        let enhance = RefusingEnhance::new(anchor, records.into(), status);
-        let network = EnhanceNetwork(*st.network());
+        let enhance = RefusingEnhance::new(anchor, records, status);
         let mut notes = EnhanceNotes::new("https://enhance.test", &enhance, &network);
+        let data = notes.note_data(st.wallet().db(), Vec::new()).await.unwrap();
+        assert!(data.is_empty());
+        assert_eq!(enhance.inits.get(), 0);
         let refused = notes.note_data(st.wallet().db(), vec![0]).await;
         assert!(
             matches!(refused, Err(Error::NoteData(ClientError::HttpStatus(s))) if s == status),
@@ -1562,115 +1269,19 @@ async fn enhance_notes_accept_fresh_routing_after_a_refused_query() {
         assert_eq!(data, BTreeMap::from([(0, [0; 528])]));
         assert_eq!((enhance.inits.get(), enhance.queries.get()), (2, 2));
     }
-}
-
-/// Enhance notes that cannot accept their manifest stop the run at the first paid key
-/// that needs note data, so later paid keys are neither leased nor backed off.
-#[tokio::test]
-async fn an_unusable_note_source_stops_the_run_before_leasing_more_keys() {
-    let mut st = ironwood_wallet();
-    let network = *st.network();
-    let account = st.test_account().unwrap().id();
-    let records: Vec<_> = (0..2)
-        .map(|index| pay_restored_key(&mut st, index, index).0)
-        .collect();
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    let cmxs: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
-    let directory = Directory::new(publish(&records, &cmxs, through, &provider(&[])));
     // Enhance's anchor is at the wallet's tip height but on another chain.
     let other = ChainPoint {
-        height: through.height,
         hash: BlockHash([7; 32]),
+        ..anchor
     };
-    let enhance = RefusingEnhance::new(other, 2, 409);
-    let enhance_network = EnhanceNetwork(network);
-    let mut notes = EnhanceNotes::new("https://enhance.test", &enhance, &enhance_network);
-    let swept = sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &mut notes,
-        &NoLock,
-        NOW,
-    )
-    .await
-    .unwrap();
+    let enhance = RefusingEnhance::new(other, records, 409);
+    let mut notes = EnhanceNotes::new("https://enhance.test", &enhance, &network);
+    let refused = notes.note_data(st.wallet().db(), vec![0]).await;
     assert!(
-        matches!(
-            &swept.deferred[..],
-            [(key, Error::NotesUnavailable(_))] if *key == KeyId::new(Purpose::Receive, 0)
-        ),
-        "{:?}",
-        swept.deferred
+        matches!(refused, Err(Error::NotesUnavailable(_))),
+        "{refused:?}"
     );
-    assert_eq!((swept.finished, enhance.inits.get()), (0, 1));
-    let due = st
-        .wallet_mut()
-        .db_mut()
-        .prepare_dynamic_sweeps(account, through, NOW, NonZeroU32::new(64).unwrap())
-        .unwrap()
-        .unwrap();
-    assert!(
-        due.iter()
-            .any(|item| item.key == KeyId::new(Purpose::Receive, 1))
-    );
-}
-
-/// Runs one sweep of `account` through `through` at `now`.
-async fn run(
-    st: &mut State,
-    account: AccountUuid,
-    through: ChainPoint,
-    directory: impl Transport,
-    notes: &mut Notes,
-    now: i64,
-) -> Result<
-    zakura_pir_receiver::Swept<zcash_client_sqlite::error::SqliteClientError>,
-    Error<zcash_client_sqlite::error::SqliteClientError>,
-> {
-    let network = *st.network();
-    sweep(
-        st.wallet_mut().db_mut(),
-        &network,
-        account,
-        through,
-        GENESIS,
-        ORIGIN,
-        directory,
-        notes,
-        &NoLock,
-        now,
-    )
-    .await
-}
-
-/// Runs sweeps at [`NOW`] until none is pending, expecting no deferral, and returns how
-/// many keys they finished.
-async fn settle(
-    st: &mut State,
-    account: AccountUuid,
-    through: ChainPoint,
-    directory: &Directory,
-    notes: &mut Notes,
-) -> usize {
-    let mut finished = 0;
-    for _ in 0..20 {
-        let swept = run(st, account, through, directory, notes, NOW)
-            .await
-            .unwrap();
-        assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
-        finished += swept.finished;
-        if !swept.pending {
-            return finished;
-        }
-    }
-    panic!("sweeps are still pending after 20 runs");
+    assert_eq!(enhance.queries.get(), 0);
 }
 
 /// A queued candidate that defers is replaced by each later attempt's answer from the
@@ -1725,12 +1336,9 @@ async fn a_deferred_candidate_takes_each_publications_current_answer() {
                     .unwrap();
             }
         }
-        let mut notes = Notes {
-            data: BTreeMap::from([(0, note_data)]),
-            requested: Vec::new(),
-        };
+        let mut notes = Notes::new(BTreeMap::from([(0, note_data)]));
         let a = Directory::new(publish(&[first], &commitments, through, &provider(&[])));
-        let swept = run(&mut st, account, through, &a, &mut notes, NOW)
+        let swept = run(&mut st, through, &a, &mut notes, &NoLock, NOW)
             .await
             .unwrap();
         assert!(
@@ -1758,7 +1366,7 @@ async fn a_deferred_candidate_takes_each_publications_current_answer() {
             publish(&[], &commitments, through, &provider(&[]))
         };
         let b = Directory::new(b);
-        let swept = run(&mut st, account, through, &b, &mut notes, NOW + 60)
+        let swept = run(&mut st, through, &b, &mut notes, &NoLock, NOW + 60)
             .await
             .unwrap();
         assert!(
@@ -1766,7 +1374,7 @@ async fn a_deferred_candidate_takes_each_publications_current_answer() {
             "{deferral:?}: {:?}",
             swept.deferred
         );
-        settle(&mut st, account, through, &b, &mut notes).await;
+        settle(&mut st, through, &b, &mut notes).await;
         let value = if corrected { VALUE } else { 0 };
         assert_eq!(
             st.get_total_balance(account),
@@ -1789,17 +1397,14 @@ async fn an_unchanged_answer_reuses_queued_note_data() {
         .conn()
         .execute_batch("DELETE FROM nullifier_map; DELETE FROM ironwood_nullifier_scan_blocks;")
         .unwrap();
-    let mut notes = Notes {
-        data: BTreeMap::from([(record.payment.position, note_data)]),
-        requested: Vec::new(),
-    };
+    let mut notes = Notes::new(BTreeMap::from([(record.payment.position, note_data)]));
     let directory = Directory::new(publish(
         std::slice::from_ref(&record),
         &[record.payment.cmx],
         through,
         &provider(&[]),
     ));
-    let swept = run(&mut st, account, through, &directory, &mut notes, NOW)
+    let swept = run(&mut st, through, &directory, &mut notes, &NoLock, NOW)
         .await
         .unwrap();
     assert!(
@@ -1811,7 +1416,7 @@ async fn an_unchanged_answer_reuses_queued_note_data() {
         swept.deferred
     );
     // The replay the deferral queued is still unscanned.
-    let swept = run(&mut st, account, through, &directory, &mut notes, NOW + 60)
+    let swept = run(&mut st, through, &directory, &mut notes, &NoLock, NOW + 60)
         .await
         .unwrap();
     assert!(
@@ -1831,17 +1436,9 @@ async fn an_unchanged_answer_reuses_queued_note_data() {
     assert_eq!(notes.requested, [vec![record.payment.position]]);
 }
 
-/// The receiver of `account_fvk`'s incoming dynamic key `index`.
-fn incoming_receiver(account_fvk: &FullViewingKey, index: u64) -> Receiver {
-    let fvk = KeyId::new(Purpose::Receive, index)
-        .derive(account_fvk)
-        .unwrap();
-    Receiver::from_bytes(fvk.address_at(0u32, Scope::External).to_raw_address_bytes()).unwrap()
-}
-
 /// A seen set that holds every restored receiver moves the lookahead after each batch,
-/// so a run sweeps at most one batch per account and leaves the new keys pending. Later
-/// runs progress and find a payment far past the first batch.
+/// so a run sweeps at most one batch and leaves the new keys pending. Later runs
+/// progress and find a payment far past the first batch.
 #[tokio::test]
 async fn each_run_sweeps_one_batch_and_later_runs_progress() {
     let mut st = ironwood_wallet();
@@ -1851,22 +1448,18 @@ async fn each_run_sweeps_one_batch_and_later_runs_progress() {
     st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
-    let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
     // The set is finite, so an unbounded run stops past it instead of hanging.
-    let seen: Vec<_> = (0..200).map(|i| incoming_receiver(&parent, i)).collect();
+    let seen: Vec<_> = (0..200).map(|i| receiver(&st, i)).collect();
     let directory = Directory::new(publish(
         std::slice::from_ref(&record),
         &[record.payment.cmx],
         through,
         &provider(&seen),
     ));
-    let mut notes = Notes {
-        data: BTreeMap::from([(record.payment.position, note_data)]),
-        requested: Vec::new(),
-    };
+    let mut notes = Notes::new(BTreeMap::from([(record.payment.position, note_data)]));
     let mut runs = 0;
     loop {
-        let swept = run(&mut st, account, through, &directory, &mut notes, NOW)
+        let swept = run(&mut st, through, &directory, &mut notes, &NoLock, NOW)
             .await
             .unwrap();
         runs += 1;
