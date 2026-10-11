@@ -4,7 +4,10 @@ use zcash_client_backend::data_api::transparent_ledger::{
     TransactionMetadata, WholeTransactionFee,
 };
 
-/// Candidate assertions observed at the event's current placement. These remain
+/// Candidate assertions observed at the event's current placement. History's
+/// `metadata_evidence` requires the same observation and additionally qualification;
+/// `forget_reattributed_script` deletes metadata whose revision observes no event of the
+/// account, at any placement. These remain
 /// unqualified diagnostics and never grant financial authority.
 pub(super) fn candidate_metadata(
     conn: &rusqlite::Connection,
@@ -68,6 +71,12 @@ pub(super) fn candidate_metadata(
     Ok(result)
 }
 
+/// Records `metadata` asserted by revision `revision` for `txid` at `mined_height`. Nothing is
+/// recorded for absent metadata, which asserts nothing.
+///
+/// Fee states persist as 0 (an exact fee, with its amount), 1 (unknown) and 2 (not applicable).
+/// Metadata for the transaction must agree with what any revision already asserted, at the same
+/// placement; a disagreement refuses the commit as an integrity failure.
 pub(super) fn apply_metadata(
     conn: &rusqlite::Connection,
     account: AccountRef,

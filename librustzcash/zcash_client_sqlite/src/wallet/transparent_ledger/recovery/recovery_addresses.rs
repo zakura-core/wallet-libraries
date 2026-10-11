@@ -1,3 +1,7 @@
+//! Select the transparent addresses an account must recover, extending derivation
+//! windows from recorded activity and respecting production address ownership.
+//! Build the recovery watch set with its captured wallet context and pending pages.
+
 use super::*;
 
 /// The derived scopes candidate windows extend, indexed by their `key_scope` code.
@@ -17,9 +21,10 @@ fn scope_slot(scope: TransparentKeyScope) -> Option<usize> {
     WINDOW_SCOPES.iter().position(|s| *s == scope)
 }
 
-/// An account's watched addresses, with the window bounds they were built from.
+/// An account's addresses requiring history recovery, together with the
+/// derivation-window bounds used to expand discovery.
 #[cfg(feature = "transparent-inputs")]
-pub(super) struct Watch {
+pub(super) struct AccountRecoveryAddresses {
     pub(super) account: Account,
     pub(super) required_from: BlockHeight,
     pub(super) addresses: BTreeMap<TransparentAddress, WatchOrigin>,
@@ -35,7 +40,14 @@ pub(super) struct Watch {
 }
 
 #[cfg(feature = "transparent-inputs")]
-impl Watch {
+impl AccountRecoveryAddresses {
+    /// Loads the addresses `account_uuid` must have recovered; `None` for an unknown account.
+    ///
+    /// The recovery address selection holds every address the wallet's address table assigns the account, its
+    /// legacy external address, and the candidate window's addresses beyond them. The window
+    /// is extended, without writing, until the account's mined candidate activity needs no
+    /// further gap. Addresses another account owns in production stay in the window that
+    /// drives gap expansion but are left out of the recovery address selection.
     pub(super) fn load<P: consensus::Parameters>(
         conn: &rusqlite::Connection,
         params: &P,
@@ -133,7 +145,7 @@ impl Watch {
         }
 
         let required_from = account.birthday();
-        let mut watch = Watch {
+        let mut recovery_addresses = AccountRecoveryAddresses {
             account,
             required_from,
             window_origins: addresses.clone(),
@@ -142,7 +154,7 @@ impl Watch {
             candidate_end,
             derivable,
         };
-        // Promotion retains only the indices it skipped, rather than re-deriving every address
+        // Activation retains only the indices it skipped, rather than re-deriving every address
         // below a possibly distant production_end. These origins confer no financial ownership.
         let mut stmt = conn.prepare_cached(
             "SELECT key_scope, child_index FROM tpir_shared_derivations WHERE account_id = ?1",
@@ -158,11 +170,12 @@ impl Watch {
                 NonHardenedChildIndex::from_index(row.get::<_, u32>(1)?).ok_or_else(|| {
                     SqliteClientError::CorruptedData("invalid shared derivation index".into())
                 })?;
-            let address = derive(&watch.account, scope, Some(index)).ok_or_else(|| {
-                SqliteClientError::CorruptedData("underivable shared receiver".into())
-            })?;
+            let address =
+                derive(&recovery_addresses.account, scope, Some(index)).ok_or_else(|| {
+                    SqliteClientError::CorruptedData("underivable shared receiver".into())
+                })?;
             note_origin(
-                &mut watch.window_origins,
+                &mut recovery_addresses.window_origins,
                 address,
                 WatchOrigin::CandidateWindow { scope, index },
             );
@@ -171,23 +184,26 @@ impl Watch {
         // window between commits. Derive the effective window before scheduling or checking
         // completeness; reads must not need an otherwise unnecessary commit to expose gaps.
         loop {
-            let needs = watch.window_needs(conn, gap_limits)?;
+            let needs = recovery_addresses.window_needs(conn, gap_limits)?;
             let mut grew = false;
             for (slot, needed) in needs.into_iter().enumerate() {
-                if let Some(end) = needed.filter(|_| watch.derivable[slot]) {
+                if let Some(end) = needed.filter(|_| recovery_addresses.derivable[slot]) {
                     let scope = WINDOW_SCOPES[slot];
-                    let start = watch.production_end[slot].max(watch.candidate_end[slot]);
+                    let start = recovery_addresses.production_end[slot]
+                        .max(recovery_addresses.candidate_end[slot]);
                     for index in start..end {
                         let index =
                             NonHardenedChildIndex::from_index(index).expect("below WINDOW_LIMIT");
-                        if let Some(address) = derive(&watch.account, scope, Some(index)) {
-                            watch
+                        if let Some(address) =
+                            derive(&recovery_addresses.account, scope, Some(index))
+                        {
+                            recovery_addresses
                                 .window_origins
                                 .entry(address)
                                 .or_insert(WatchOrigin::CandidateWindow { scope, index });
                         }
                     }
-                    watch.candidate_end[slot] = end;
+                    recovery_addresses.candidate_end[slot] = end;
                     grew = true;
                 }
             }
@@ -195,9 +211,9 @@ impl Watch {
                 break;
             }
         }
-        watch.addresses = watch.window_origins.clone();
-        ownership::retain_owned(conn, params, account_ref, &mut watch.addresses)?;
-        Ok(Some(watch))
+        recovery_addresses.addresses = recovery_addresses.window_origins.clone();
+        ownership::retain_owned(conn, params, account_ref, &mut recovery_addresses.addresses)?;
+        Ok(Some(recovery_addresses))
     }
 
     fn watched_addresses(&self) -> Vec<WatchedAddress> {
@@ -359,16 +375,16 @@ pub(crate) fn watch_set<P: consensus::Parameters>(
     gap_limits: &GapLimits,
     configured: Option<TransparentLedgerMode>,
     account: AccountUuid,
-) -> Result<TransparentWatchSet<AccountUuid>, SqliteClientError> {
+) -> Result<TransparentAddressWatchSet<AccountUuid>, SqliteClientError> {
     resolve_mode(conn, configured)?;
-    let watch =
-        Watch::load(conn, params, gap_limits, account)?.ok_or(SqliteClientError::AccountUnknown)?;
-    Ok(TransparentWatchSet {
+    let recovery_addresses = AccountRecoveryAddresses::load(conn, params, gap_limits, account)?
+        .ok_or(SqliteClientError::AccountUnknown)?;
+    Ok(TransparentAddressWatchSet {
         account,
-        lifecycle: lifecycle(conn, watch.account.internal_id())?,
+        lifecycle: account_lifecycle(conn, recovery_addresses.account.internal_id())?,
         policy_generation: capture_policy_generation(conn)?,
         target: local_target(conn)?,
-        addresses: watch.watched_addresses(),
-        pending_pages: pending_pages(conn, watch.account.internal_id())?,
+        addresses: recovery_addresses.watched_addresses(),
+        pending_pages: pending_pages(conn, recovery_addresses.account.internal_id())?,
     })
 }

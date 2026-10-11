@@ -122,7 +122,7 @@ fn falsely_spent_wallet() -> (State, AccountUuid, ReceiveEvent, SpendEvent) {
     apply(&mut st, c).unwrap();
     cover(&mut st, account, &fixture, vec![]);
     qualify(&mut st, &fixture);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(
         super::super::super::super::output_origins(conn(&st), &real.outpoint),
         vec![0, 2]
@@ -194,7 +194,7 @@ fn forgetting_restores_a_real_output_that_a_ledger_spend_hid() {
 #[test]
 fn forgetting_removes_ledger_only_receives_spends_and_their_transactions() {
     let (mut st, account, unspent, spent) = ready_wallet();
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     let spender = TxId::from_bytes([3; 32]);
     assert!(has_transaction(&st, &spender));
     let accounts = count(&st, "accounts");
@@ -327,7 +327,7 @@ fn forgetting_keeps_a_locked_ledger_output_until_it_is_unlocked() {
 #[test]
 fn forgetting_requires_public_on_the_handle_and_durably() {
     let (mut st, account, _, _) = ready_wallet();
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     let before = (production_dump(conn(&st)), ledger_counts(&st));
     let refused = |st: &mut State| {
         assert!(matches!(
@@ -347,7 +347,7 @@ fn forgetting_requires_public_on_the_handle_and_durably() {
 #[test]
 fn a_private_handle_over_a_public_policy_cannot_forget() {
     let (mut st, account, _, _) = ready_wallet();
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     set_policy(&mut st, Public);
     st.wallet_mut()
         .db_mut()
@@ -408,7 +408,7 @@ fn a_wallet_requiring_a_newer_reader_cannot_forget() {
 #[test]
 fn private_recovery_works_again_after_forgetting() {
     let (mut st, account, unspent, spent) = ready_wallet();
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     set_policy(&mut st, Public);
     let revisions = count(&st, "tpir_revisions");
     let qualified = count(&st, "tpir_qualified_revisions");
@@ -442,7 +442,7 @@ fn private_recovery_works_again_after_forgetting() {
     c.coverage = full_coverage(&ws);
     apply(&mut st, c).unwrap();
     cover(&mut st, account, &fixture, vec![]);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     let s = snapshot(&st, account);
     assert_eq!(s.authority, TransparentAuthority::Private);
     assert_eq!(s.authorized.unwrap().regular.total(), unspent.value);
@@ -450,7 +450,7 @@ fn private_recovery_works_again_after_forgetting() {
 }
 
 #[test]
-fn forgetting_keeps_quarantine() {
+fn forgetting_keeps_recovery_suspension() {
     let (mut st, account, _, _) = falsely_spent_wallet();
     conn(&st)
         .execute(
@@ -467,7 +467,7 @@ fn forgetting_keeps_quarantine() {
     set_policy(&mut st, Public);
     forget(&mut st).unwrap();
     assert_eq!(count(&st, "tpir_quarantined_sources"), 1);
-    assert_eq!(quarantined_accounts(&st), vec![account]);
+    assert_eq!(accounts_with_suspended_recovery(&st), vec![account]);
 }
 
 #[test]

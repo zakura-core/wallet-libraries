@@ -16,9 +16,9 @@ use zcash_client_backend::data_api::{
         FakeCompactOutput, IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
     },
     transparent_ledger::{
-        AggregatePayment, DetailCompleteness, EffectCompleteness, FeeState, HistoryClassification,
-        PoolEffect, PrivateTransparentDetail, TransactionHistoryDetails, TransactionMetadata,
-        WholeTransactionFee,
+        AccountActivity, ActivityOutputs, AggregatePayment, DetailCompleteness, EffectCompleteness,
+        FeeState, HistoryClassification, PoolEffect, PrivateTransparentDetail,
+        TransactionHistoryDetails, TransactionMetadata, WholeTransactionFee,
     },
 };
 use zcash_protocol::{PoolType, local_consensus::LocalNetwork};
@@ -70,7 +70,7 @@ struct Shielding {
     height: BlockHeight,
 }
 
-/// A promoted `PrivateRequired` account under `PrivateIronwood` enhancement whose two recovered
+/// A activated `PrivateRequired` account under `PrivateIronwood` enhancement whose two recovered
 /// transparent outputs fund `shape`'s shielding transaction: its Ironwood output to the account's
 /// internal address is compact-scanned, and private transparent recovery publishes both spends
 /// with `metadata`. Enhance PIR has not run yet.
@@ -109,7 +109,7 @@ fn padded_shielding(
     assert_eq!(recovery(&st, account).blockers, vec![]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     st.wallet_mut()
         .db_mut()
         .set_enhancement_mode(EnhancementMode::PrivateIronwood);
@@ -394,7 +394,18 @@ fn assert_reconstructed_shielding(case: &Shielding, shape: &Shape) {
         entry.transaction_metadata.as_ref().unwrap().metadata.fee,
         WholeTransactionFee::Exact(zat(FEE))
     );
-    assert_eq!(entry.fee, FeeState::Unknown);
+    assert_eq!(entry.fee, FeeState::Unattributed { whole: zat(FEE) });
+    // Recovery decides no row of a shielding: the wallet classifies it from its own records
+    // before reading the activity, which names the receipt as it would an incoming payment.
+    let AccountActivity::Outputs {
+        sent: None,
+        received: Some(ActivityOutputs { amount, outputs }),
+    } = &entry.activity
+    else {
+        panic!("a received row, not {:?}", entry.activity);
+    };
+    assert_eq!(*amount, zat(shape.shielded));
+    assert!(outputs.len() == 1 && outputs[0].pool == PoolType::IRONWOOD);
     // No exact payment is fabricated: no outgoing record exists, only the balance.
     assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
     // The full transaction remains unavailable under PrivateRequired.
@@ -468,7 +479,11 @@ fn another_transparent_funder_leaves_payment_and_fee_unattributed() {
     let entry = history(&case.st, case.account, case.txid);
     assert_eq!(entry.classification, HistoryClassification::Provisional);
     assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
-    assert_eq!(entry.fee, FeeState::Unknown);
+    assert_eq!(entry.fee, FeeState::Unattributed { whole: zat(FEE) });
+    assert_eq!(
+        entry.activity,
+        AccountActivity::MovementDebit { amount: zat(FEE) }
+    );
     assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
 }
 
@@ -487,7 +502,13 @@ fn an_external_payment_is_not_reconstructed_as_shielding() {
     assert_eq!(entry.account_movement.net(), -50_000);
     assert_eq!(entry.classification, HistoryClassification::Provisional);
     assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
-    assert_eq!(entry.fee, FeeState::Unknown);
+    assert_eq!(entry.fee, FeeState::Unattributed { whole: zat(FEE) });
+    assert_eq!(
+        entry.activity,
+        AccountActivity::MovementDebit {
+            amount: zat(50_000)
+        }
+    );
     assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
 }
 
@@ -496,9 +517,10 @@ fn an_external_payment_is_not_reconstructed_as_shielding() {
 #[test]
 fn a_fee_sized_debit_without_sole_funding_evidence_stays_ambiguous() {
     let shape = &CASES[0];
-    for (metadata, record_fee) in [
+    let unattributed = FeeState::Unattributed { whole: zat(FEE) };
+    for (metadata, record_fee, fee) in [
         // No qualified transaction metadata at all.
-        (None, Some(FEE)),
+        (None, Some(FEE), unattributed),
         // The transparent publisher could not establish the fee.
         (
             Some(TransactionMetadata {
@@ -506,14 +528,16 @@ fn a_fee_sized_debit_without_sole_funding_evidence_stays_ambiguous() {
                 ..reported_metadata()
             }),
             Some(FEE),
+            unattributed,
         ),
-        // The two private sources disagree about the fee.
+        // The two private sources disagree about the fee, so even the whole fee is unknown.
         (
             Some(TransactionMetadata {
                 fee: WholeTransactionFee::Exact(zat(15_000)),
                 ..reported_metadata()
             }),
             Some(FEE),
+            FeeState::Unknown,
         ),
     ] {
         let mut case = shielding(shape, metadata);
@@ -522,7 +546,11 @@ fn a_fee_sized_debit_without_sole_funding_evidence_stays_ambiguous() {
         assert_eq!(entry.account_movement.net(), -i128::from(FEE));
         assert_eq!(entry.classification, HistoryClassification::Provisional);
         assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
-        assert_eq!(entry.fee, FeeState::Unknown);
+        assert_eq!(entry.fee, fee);
+        assert_eq!(
+            entry.activity,
+            AccountActivity::MovementDebit { amount: zat(FEE) }
+        );
         assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
     }
 }
@@ -561,7 +589,7 @@ fn transparent_outputs_or_unknown_shape_prevent_net_reconstruction() {
         assert_eq!(entry.has_transparent_outputs, outputs);
         assert_eq!(entry.classification, HistoryClassification::Provisional);
         assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
-        assert_eq!(entry.fee, FeeState::Unknown);
+        assert_eq!(entry.fee, FeeState::Unattributed { whole: zat(FEE) });
     }
 }
 
@@ -587,7 +615,7 @@ fn enhance_output_presence_is_exposed_by_history_after_reopen() {
         assert_eq!(entry.classification, HistoryClassification::Provisional);
         assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
         assert_eq!(entry.account_movement.net(), -215_000);
-        assert_eq!(entry.fee, FeeState::Unknown);
+        assert_eq!(entry.fee, FeeState::Unattributed { whole: zat(FEE) });
         assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
         assert!(
             !stored(&case.st, case.tx_ref).3,
@@ -654,14 +682,17 @@ fn conflicting_transparent_output_shape_is_rejected_atomically() {
 /// Memo recovery must not substitute a missing fee, an input count, or a balanced account flow.
 #[test]
 fn qualified_fee_workaround_rejects_incomplete_or_ambiguous_evidence() {
-    for (metadata, shielded) in [
-        (None, 400_000),
+    // The whole fee, where any source establishes it, stays unattributed.
+    let unattributed = |fee| FeeState::Unattributed { whole: zat(fee) };
+    for (metadata, shielded, fee) in [
+        (None, 400_000, FeeState::Unknown),
         (
             Some(TransactionMetadata {
                 fee: WholeTransactionFee::Unknown,
                 ..reported_metadata()
             }),
             400_000,
+            FeeState::Unknown,
         ),
         (
             Some(TransactionMetadata {
@@ -669,6 +700,7 @@ fn qualified_fee_workaround_rejects_incomplete_or_ambiguous_evidence() {
                 ..reported_metadata()
             }),
             400_000,
+            unattributed(15_000),
         ),
         (
             Some(TransactionMetadata {
@@ -676,8 +708,9 @@ fn qualified_fee_workaround_rejects_incomplete_or_ambiguous_evidence() {
                 ..reported_metadata()
             }),
             400_000,
+            unattributed(FEE),
         ),
-        (Some(reported_metadata()), 390_000),
+        (Some(reported_metadata()), 390_000, unattributed(FEE)),
     ] {
         let shape = Shape {
             shielded,
@@ -688,7 +721,7 @@ fn qualified_fee_workaround_rejects_incomplete_or_ambiguous_evidence() {
         let entry = history(&case.st, case.account, case.txid);
         assert_eq!(entry.classification, HistoryClassification::Provisional);
         assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
-        assert_eq!(entry.fee, FeeState::Unknown);
+        assert_eq!(entry.fee, fee);
         assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
         assert_eq!(stored(&case.st, case.tx_ref).1, None);
     }
@@ -861,7 +894,7 @@ fn coverage_loss_and_reorg_reevaluate_the_classification() {
     recover_memo(&mut case, None);
     assert_reconstructed_shielding(&case, shape);
 
-    // A quarantined source no longer covers the account or qualifies its metadata.
+    // A suspended source no longer covers the account or qualifies its metadata.
     conn(&case.st)
         .execute(
             "INSERT INTO tpir_quarantined_sources (source) VALUES (?1)",
@@ -871,7 +904,7 @@ fn coverage_loss_and_reorg_reevaluate_the_classification() {
     let entry = history(&case.st, case.account, case.txid);
     assert_eq!(entry.classification, HistoryClassification::Provisional);
     assert_eq!(entry.transaction_metadata, None);
-    super::super::lift_quarantine(&case.st);
+    super::super::clear_recovery_suspension(&case.st);
     assert_reconstructed_shielding(&case, shape);
 
     // A reorg unmines the transaction: no private work is dispatched for it, its recovered memo
@@ -920,7 +953,7 @@ fn foreign_self_balanced_shielded_participation_is_indistinguishable() {
             entry.classification,
             HistoryClassification::NetReconstructed
         );
-        assert_eq!(entry.fee, FeeState::Unknown);
+        assert_eq!(entry.fee, FeeState::Unattributed { whole: zat(FEE) });
         assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
         TransactionHistoryDetails {
             txid: TxId::from_bytes([0; 32]),
@@ -985,7 +1018,7 @@ fn existing_memo_complete_wallet_recovers_shape_and_survives_reopen() {
         entry.classification,
         HistoryClassification::NetReconstructed
     );
-    assert_eq!(entry.fee, FeeState::Unknown);
+    assert_eq!(entry.fee, FeeState::Unattributed { whole: zat(FEE) });
 }
 
 /// A pending shape response cannot survive restoration of public authority. Returning to
@@ -1009,7 +1042,7 @@ fn shape_only_recovery_obeys_public_authority_transitions() {
     );
     assert_eq!(queued(&case.st, case.tx_ref), 0);
     set_policy(&mut case.st, PrivateRequired);
-    promote(&mut case.st, case.account).unwrap();
+    activate_recovered_ledger(&mut case.st, case.account).unwrap();
     assert_eq!(private_queries(&case.st), vec![request]);
     assert_eq!(
         apply_records(&mut case.st, &[(request, response)]),
@@ -1095,7 +1128,7 @@ fn deleting_the_shape_binding_account_rebinds_to_a_surviving_note() {
         HistoryClassification::NetReconstructed
     );
     assert_eq!(entry.payment_details, DetailCompleteness::Complete);
-    assert_eq!(entry.fee, FeeState::Unknown);
+    assert_eq!(entry.fee, FeeState::Unattributed { whole: zat(FEE) });
     assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
     assert!(reopened.transaction_enhancement_work().unwrap().is_empty());
 }

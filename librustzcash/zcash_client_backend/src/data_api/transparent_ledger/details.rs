@@ -2,7 +2,10 @@
 //! txid, validated display facts, and their read view.
 //!
 //! These facts are display only. They never change balances, spendability, history
-//! classification, or `details_complete`; see `docs/transparent-txid-enhancement.md`.
+//! classification, activity, or payment-detail completeness; see
+//! `docs/transparent-pir-wallet-integration.md#transparent-receipt-enhancement`. A
+//! [`TransactionReceipt`] combines them with the history view into display-level conclusions,
+//! [`ReceiptAttribution`], that are never written back.
 
 use std::time::{Duration, SystemTime};
 
@@ -10,7 +13,9 @@ use transparent::address::TransparentAddress;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
-use super::{TransactionMetadata, TransparentLedgerMode, WholeTransactionFee};
+use super::{
+    TransactionHistoryDetails, TransactionMetadata, TransparentLedgerMode, WholeTransactionFee,
+};
 
 /// Why the wallet wants a transaction's transparent details, as a set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -70,7 +75,7 @@ pub struct TransparentDetailWork {
     pub mode: TransparentLedgerMode,
     /// The durable policy generation (`0` before any policy was applied).
     pub policy_generation: u64,
-    /// The due lookups, in priority order.
+    /// The due lookups, in priority order: preferred ones first.
     pub requests: Vec<TransparentDetailRequest>,
 }
 
@@ -455,10 +460,102 @@ pub enum TransparentDisplayView {
     NotCovered,
 }
 
+/// Whether a display-level conclusion is established.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Attribution<T> {
+    /// The facts establish it.
+    Established(T),
+    /// They do not. Nothing follows from this, in particular not an absence.
+    NotEstablished,
+}
+
+/// The pool a received transaction was funded from, as far as its receipt can tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourcePool {
+    /// Neither the stored raw transaction nor display facts say.
+    Unknown,
+    /// Funded only from the shielded pools: no transparent input.
+    Shielded,
+    /// Transparent inputs exist.
+    Transparent,
+}
+
+/// Who funded a transaction, for its receipt.
+///
+/// From the stored raw transaction, when there is one: no transparent input is a shielded
+/// source, and the first input whose unlocking script ends with a compressed public key gives
+/// a P2PKH address, owned or not. A source still without an address then takes what validated
+/// display facts or the detail view's reading of the raw transaction add: a shielded source
+/// (display facts only) for an unknown pool, or the first address-shaped input's address when
+/// the account does not own it. An address names no person, wallet or sole funder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceiptSource {
+    /// The source pool.
+    pub pool: SourcePool,
+    /// The funding address, when one is known.
+    pub address: Option<TransparentDisplayAddress>,
+}
+
+/// What one account's receipt of a transaction can show from its transparent details, beyond
+/// the history view.
+///
+/// A display-level conclusion from the [`TransactionHistoryDetails`] and the
+/// [`TransparentDisplayView`] of one read. It is separate from
+/// [`TransactionHistoryDetails::payment_details`] and never changes it, the classification,
+/// the activity or any balance. Without available details only [`Self::source`] and
+/// [`Self::effects_settled`] can say anything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceiptAttribution {
+    /// Whether the account's effects are settled, the transaction is mined, and every owned
+    /// transparent output's key scope is known.
+    pub effects_settled: bool,
+    /// The recipient of a send whose wallet records name none, when the account has a fee
+    /// (attributed, or the whole fee when it spent and its share is not attributed) and the
+    /// view's rows account for its movement: the only row it does not own, or, with none, its
+    /// own address when the rows it owns have one address. Two or more rows it does not own,
+    /// or one without an address, establish no recipient.
+    ///
+    /// The rows account for the movement when the view is available and lists every
+    /// transparent output, reports no shared funding
+    /// ([`TransparentDisplayOmission::SharedFunding`]) or mixed funding
+    /// ([`TransparentDisplayOmission::ShieldedAndTransparentFunding`]), and the account's net
+    /// movement is minus its fee and the outputs it does not own, or, without a fee, the
+    /// outputs it owns. Other funders can offset unseen payments without breaking that
+    /// equality, which is why shared or mixed funding blocks it.
+    pub recipient: Attribution<TransparentDisplayAddress>,
+    /// An established recipient completes a send's receipt once [`Self::effects_settled`].
+    pub recipient_completes: bool,
+    /// Who funded the transaction.
+    pub source: ReceiptSource,
+    /// Whether the display facts complete a received row's receipt: its effects are settled,
+    /// its source is known (the shielded pools, or an address), the received row of the
+    /// activity counts at least one output and only transparent ones, which carry no memo, and
+    /// the rows account for the movement as for [`Self::recipient`].
+    pub receive_completes: bool,
+}
+
+/// One account's receipt of one transaction, from one read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransactionReceipt {
+    /// The account's history view of the transaction.
+    pub details: TransactionHistoryDetails,
+    /// Its transparent detail view; `None` when the account takes no part in the transparent
+    /// side, as for [`TransparentDetailRead::transparent_display_view`].
+    pub display: Option<TransparentDisplayView>,
+    /// What the two establish together.
+    pub attribution: ReceiptAttribution,
+}
+
 /// Reads transparent txid enhancement work and the detail view.
 pub trait TransparentDetailRead: super::TransparentLedgerRead {
-    /// Returns up to `limit` due lookups at `now`, with the mode and policy generation read
-    /// in the same snapshot.
+    /// Returns the due lookups at `now` among `prefer`, in its order, then up to `limit` other
+    /// due lookups, with the mode and policy generation read in the same snapshot.
+    ///
+    /// `prefer` names transactions the caller wants first, such as receipts a user opened. It
+    /// changes only the order and the window: a preferred transaction is listed only when it is
+    /// due, and preferred ones do not count against `limit`. The other lookups come in the
+    /// wallet's order: never-attempted and re-armed work first, then by mined height, newest
+    /// first.
     ///
     /// A transaction is due when it is mined, lacks raw bytes, is still related to the
     /// wallet, and either its mined height changed since the last attempt or its next
@@ -472,6 +569,7 @@ pub trait TransparentDetailRead: super::TransparentLedgerRead {
         &self,
         now: SystemTime,
         limit: usize,
+        prefer: &[TxId],
         map_sha256: Option<[u8; 32]>,
     ) -> Result<TransparentDetailWork, Self::Error>;
 
@@ -501,6 +599,18 @@ pub trait TransparentDetailRead: super::TransparentLedgerRead {
         account: Self::AccountId,
         txid: TxId,
     ) -> Result<Option<TransparentDisplayView>, Self::Error>;
+
+    /// Returns `account`'s receipt of `txid`: its history view, its transparent detail view, and
+    /// their [`ReceiptAttribution`], all from one read. `None` when the account has no history
+    /// entry for the transaction; see
+    /// [`TransparentLedgerRead::transaction_history_details`](super::TransparentLedgerRead::transaction_history_details).
+    ///
+    /// The handle must be configured.
+    fn transaction_receipt(
+        &self,
+        account: Self::AccountId,
+        txid: TxId,
+    ) -> Result<Option<TransactionReceipt>, Self::Error>;
 }
 
 /// Records transparent txid enhancement results.
@@ -522,12 +632,17 @@ pub trait TransparentDetailWrite: TransparentDetailRead {
     /// `map_sha256` is the display map the lookup used, when one was fetched. Unknown
     /// transactions, transactions without work, and results whose mined height has changed
     /// (including transactions that are now unmined) are ignored without changing retry state.
+    ///
+    /// Fails with a stale-policy error, changing nothing, when the durable policy generation
+    /// is no longer `expected_generation`: a lookup made under another policy schedules
+    /// nothing under this one.
     fn defer_transparent_detail(
         &mut self,
         txid: TxId,
         looked_up_height: BlockHeight,
         outcome: TransparentDetailOutcome,
         map_sha256: Option<[u8; 32]>,
+        expected_generation: u64,
         now: SystemTime,
     ) -> Result<(), Self::Error>;
 }

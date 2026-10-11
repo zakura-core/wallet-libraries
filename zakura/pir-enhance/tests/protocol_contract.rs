@@ -106,3 +106,58 @@ fn multi_boundary_blocks_and_partial_threshold_use_canonical_coordinates() {
             .is_err()
     );
 }
+
+/// The shared vector wallet-pir's server crate checks against its own copy.
+#[test]
+fn query_rows_match_the_frozen_vector() {
+    let vector: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/query-rows.json")).unwrap();
+    assert_eq!(vector["quantum"], QUERY_ROW_QUANTUM);
+    let g = Geometry::default();
+    for case in vector["cases"].as_array().unwrap() {
+        let id = case["shard_id"].as_u64().unwrap();
+        let shard = QueryShard {
+            id,
+            global_row_start: id * g.max_shard_rows,
+            records: case["records"].as_u64().unwrap(),
+            logical_rows: 0,
+            state: ShardState::Growing,
+            units: Vec::new(),
+        };
+        assert_eq!(
+            shard.expected_logical_rows(g).unwrap(),
+            case["logical_rows"],
+            "{case}"
+        );
+        assert_eq!(shard.query_rows(g).unwrap(), case["query_rows"], "{case}");
+    }
+}
+
+/// Every row a position routes to lies below its domain's query rows, so
+/// no real query falls outside the selection its session uploads.
+#[test]
+fn every_routed_row_lies_below_its_domains_query_rows() {
+    let g = Geometry::default();
+    let span = 32768 * RECORDS_PER_ROW as u64;
+    for used in (1..=32768u64)
+        .step_by(97)
+        .chain([2048, 2049, 4095, 4096, 32768])
+    {
+        for records in [
+            used * RECORDS_PER_ROW as u64,
+            span + used * RECORDS_PER_ROW as u64,
+        ] {
+            let coverage = Lifecycle::default().coverage(records, g).unwrap();
+            for route in &coverage.routes {
+                let shard = coverage
+                    .shards
+                    .iter()
+                    .find(|s| s.id == route.domain_id)
+                    .unwrap();
+                let rows = shard.query_rows(g).unwrap();
+                assert!(route.local_start + (route.global_end - route.global_start) <= rows);
+                assert!(rows <= shard.logical_rows && rows % QUERY_ROW_QUANTUM == 0);
+            }
+        }
+    }
+}

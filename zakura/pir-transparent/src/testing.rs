@@ -1,9 +1,18 @@
 //! Test support for applications, with feature `testing`: batches no companion
-//! issued, their settlement, and a fake txid display publication.
+//! issued, their settlement, a fake txid display publication, and a real shard
+//! service ([`service`]).
 //!
 //! Nothing here is for production: a batch built here carries no export receipt,
 //! so no companion acknowledges it, and the publication answers no private query
 //! with a record.
+//!
+//! The wallet-pir crates the service publishes with are re-exported, at the
+//! revision this crate builds on, so an application's tests need no wallet-pir
+//! dependency of their own to build events, scripts and maps.
+
+pub mod service;
+
+pub use {transparent_events, transparent_filter, transparent_shard};
 
 use sha2::{Digest, Sha256};
 use transparent_native::TableProfile;
@@ -16,9 +25,9 @@ use zcash_client_backend::data_api::transparent_ledger::{
     RecoveryRevision, TransparentLedgerCommit,
 };
 
-use crate::catalog::BatchState;
+use crate::batch::{BatchState, RecoveryBatch};
 use crate::http::{HttpMethod, HttpReply};
-use crate::recovery::{Progress, RecoveryBatch};
+use crate::progress::Progress;
 
 /// A batch as a pass returns it: `commits` (empty unless `state` is ready), the pass's
 /// `progress`, and the retired revisions it resolves.
@@ -35,7 +44,7 @@ pub fn batch<A>(
     RecoveryBatch::unissued(commits, progress, state, retired)
 }
 
-/// Applies `batch` through `ReferenceRecovery::apply_and_acknowledge`'s own commit loop,
+/// Applies `batch` through `TransparentHistoryRecovery::apply_and_acknowledge_gated`'s commit loop,
 /// with no companion: the same checks before any commit (a ready batch, no outer SQL
 /// transaction, trust for retirements), the same commits, each in its own wallet
 /// transaction, and the same policy-generation check after them, with the same failures.
@@ -46,17 +55,13 @@ pub fn apply<P: zcash_protocol::consensus::Parameters, CL, R>(
     wallet: &mut zcash_client_sqlite::WalletDb<rusqlite::Connection, P, CL, R>,
     trust: crate::Trust,
 ) -> Result<crate::Applied, crate::ApplyFailure> {
-    use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerRead as _;
-
     let progress = batch.progress();
     let (stats, retired, expected_generation) =
-        crate::apply::apply_commits(batch, wallet, trust, || {})?;
-    if let Some(expected) = expected_generation {
+        crate::apply::apply_commits(batch, wallet, trust, &mut crate::Ungated, || {})?;
+    if expected_generation.is_some() {
         wallet
             .with_immediate_read_transaction(|snapshot| {
-                snapshot
-                    .check_transparent_policy_generation(expected)
-                    .map_err(|error| crate::ApplyError::from_wallet(stats.applied, error))
+                crate::apply::check_policy_generation(snapshot, expected_generation, stats.applied)
             })
             .map_err(|error| crate::ApplyFailure {
                 error,
@@ -91,6 +96,7 @@ pub struct TxidPublication {
 }
 
 impl TxidPublication {
+    /// A publication of one recent shard over `start..=end` holding no record.
     pub fn new(start: u64, end: u64) -> Self {
         let directory = TableProfile::new(
             transparent_shard::SCHEMA,
@@ -291,7 +297,8 @@ mod tests {
         let service = TxidDisplayService::new();
         let publication = Serving(TxidPublication::new(3_000_000, 3_000_009));
         let found = service.lookup(&publication, [7; 32], 3_000_005, &|| false);
-        assert_eq!(found, Ok(TxidLookup::Absent));
+        assert_eq!(found.found, Ok(TxidLookup::Absent));
+        assert_eq!(found.map_sha256, Some(publication.0.map_sha256()));
         assert_eq!(service.map_sha256(), Some(publication.0.map_sha256()));
     }
 }

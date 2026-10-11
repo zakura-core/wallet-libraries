@@ -1,4 +1,4 @@
-//! Activation: quarantine, qualification, promotion, projection, and input eligibility.
+//! Activation: recovery suspension, qualification, activation, projection, and input eligibility.
 
 use zcash_client_backend::data_api::{
     AccountPurpose,
@@ -46,7 +46,7 @@ fn recovery_wallet_with(extra: u8) -> (State, Vec<AccountUuid>) {
     (st, accounts)
 }
 
-/// Returns why a commit was rejected, leaving any quarantine in place.
+/// Returns why a commit was rejected, leaving any recovery suspension in place.
 fn rejection(result: Result<CommitOutcome, SqliteClientError>) -> CommitRejection {
     match result {
         Err(SqliteClientError::TransparentLedgerCommitRejected(rejection)) => rejection,
@@ -61,7 +61,7 @@ fn source(name: &[u8], lineage: u64) -> RecoveryRevision {
     }
 }
 
-fn quarantined_accounts(st: &State) -> Vec<AccountUuid> {
+fn accounts_with_suspended_recovery(st: &State) -> Vec<AccountUuid> {
     conn(st)
         .prepare(
             "SELECT a.uuid FROM tpir_quarantined_accounts q
@@ -100,7 +100,7 @@ fn recover_one(
 }
 
 #[test]
-fn integrity_failure_quarantines_the_source_and_every_affected_account() {
+fn integrity_failure_records_recovery_suspension_for_the_source_and_every_affected_account() {
     let (mut st, accounts) = recovery_wallet_with(2);
     let [first, second, third] = accounts[..] else {
         unreachable!()
@@ -138,9 +138,9 @@ fn integrity_failure_quarantines_the_source_and_every_affected_account() {
         CommitRejection::Integrity(IntegrityFailure::ReceivePlacement(received.outpoint))
     );
 
-    // No submitted fact is applied, but the quarantine is durable.
+    // No submitted fact is applied, but the recovery suspension is durable.
     assert_eq!(count(&st, "tpir_receive_events"), before);
-    assert_eq!(quarantined_accounts(&st), vec![first, second]);
+    assert_eq!(accounts_with_suspended_recovery(&st), vec![first, second]);
     assert_eq!(count(&st, "tpir_quarantined_sources"), 1);
     assert_eq!(count(&st, "tpir_pending_pages"), 0);
     assert_eq!(reader_version(&st), 6);
@@ -151,31 +151,31 @@ fn integrity_failure_quarantines_the_source_and_every_affected_account() {
     c.revision = fixture;
     assert_eq!(
         rejection(apply(&mut st, c)),
-        CommitRejection::Refused(RefusedCommit::SourceQuarantined)
+        CommitRejection::Refused(RefusedCommit::SourceRecoverySuspended)
     );
     let ws = watch(&st, second);
     let mut c = commit(&ws);
     c.revision = source(b"other", 1);
     assert_eq!(
         rejection(apply(&mut st, c)),
-        CommitRejection::Refused(RefusedCommit::AccountQuarantined)
+        CommitRejection::Refused(RefusedCommit::AccountRecoverySuspended)
     );
     // An unrelated account and source are unaffected.
     recover_one(&mut st, third, source(b"other", 1), 4);
 
-    // Quarantine survives a rewind.
+    // Recovery suspension survives a rewind.
     let retained = watch(&st, first).target.unwrap().height - 5;
     st.truncate_to_height(retained);
-    assert_eq!(quarantined_accounts(&st), vec![first, second]);
+    assert_eq!(accounts_with_suspended_recovery(&st), vec![first, second]);
 }
 
 #[test]
-fn a_failed_quarantine_write_aborts_the_commit() {
+fn a_failed_recovery_suspension_write_aborts_the_commit() {
     let (mut st, account) = recovery_wallet();
     let received = recover_one(&mut st, account, revision(1, true), 1);
     conn(&st)
         .execute_batch(
-            "CREATE TEMP TRIGGER fail_quarantine BEFORE INSERT ON tpir_quarantined_sources
+            "CREATE TEMP TRIGGER fail_recovery_suspension BEFORE INSERT ON tpir_quarantined_sources
              BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
         )
         .unwrap();
@@ -248,7 +248,7 @@ fn private_snapshots_report_candidate_coverage_and_an_unverified_total() {
     recover_completely(&mut st, account, &fixture, 1);
     let target = watch(&st, account).target.unwrap();
 
-    // The complete but unpromoted candidate is reported, but is still no authority.
+    // The complete but unactivated candidate is reported, but is still no authority.
     let s = snapshot(&st, account);
     assert_eq!(s.authority, TransparentAuthority::Unavailable);
     assert_eq!(s.authorized, None);
@@ -365,7 +365,10 @@ fn a_mined_local_output_the_candidate_lacks_is_a_discrepancy() {
             RecoveryBlocker::LegacyDiscrepancy
         ]
     );
-    assert!(blocked(promote(&mut st, account)).contains(&RecoveryBlocker::LegacyDiscrepancy));
+    assert!(
+        blocked(activate_recovered_ledger(&mut st, account))
+            .contains(&RecoveryBlocker::LegacyDiscrepancy)
+    );
 }
 
 #[test]
@@ -448,21 +451,24 @@ fn qualification_binds_to_the_exact_revision() {
     ));
 }
 
-fn promote(st: &mut State, account: AccountUuid) -> Result<(), SqliteClientError> {
+fn activate_recovered_ledger(
+    st: &mut State,
+    account: AccountUuid,
+) -> Result<(), SqliteClientError> {
     st.wallet_mut()
         .db_mut()
-        .promote_transparent_account(account)
+        .activate_transparent_ledger(account)
 }
 
 fn blocked(result: Result<(), SqliteClientError>) -> Vec<RecoveryBlocker> {
     match result {
-        Err(SqliteClientError::TransparentPromotionBlocked(blockers)) => blockers,
-        other => panic!("expected a blocked promotion, got {other:?}"),
+        Err(SqliteClientError::TransparentActivationBlocked(blockers)) => blockers,
+        other => panic!("expected a blocked activation, got {other:?}"),
     }
 }
 
 /// The watched external address with the highest derived index.
-fn last_external(ws: &TransparentWatchSet<AccountUuid>) -> (TransparentAddress, u32) {
+fn last_external(ws: &TransparentAddressWatchSet<AccountUuid>) -> (TransparentAddress, u32) {
     ws.addresses
         .iter()
         .filter_map(|w| match w.origin {
@@ -521,13 +527,13 @@ fn ready_wallet() -> (State, AccountUuid, ReceiveEvent, ReceiveEvent) {
 }
 
 #[test]
-fn promotion_projects_the_ledger_and_grants_private_authority() {
+fn activation_projects_the_ledger_and_grants_private_authority() {
     let (mut st, account, unspent, spent) = ready_wallet();
     let windows = count(&st, "tpir_candidate_windows");
     assert!(windows > 0);
     let addresses = count(&st, "addresses");
 
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(lifecycle(&st, account), AccountLifecycle::Active);
     assert_eq!(reader_version(&st), 6);
 
@@ -572,14 +578,14 @@ fn promotion_projects_the_ledger_and_grants_private_authority() {
     );
     assert_eq!(authorized.coinbase.total(), Zatoshis::ZERO);
 
-    // Promotion is idempotent.
+    // Activation is idempotent.
     let before = production_dump(conn(&st));
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(production_dump(conn(&st)), before);
 }
 
 #[test]
-fn promotion_makes_a_legacy_receiver_without_an_address_row_the_wallets_own() {
+fn activation_makes_a_legacy_receiver_without_an_address_row_the_wallets_own() {
     let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     let (legacy, _) = crate::wallet::transparent::get_legacy_transparent_address(
@@ -610,7 +616,7 @@ fn promotion_makes_a_legacy_receiver_without_an_address_row_the_wallets_own() {
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
 
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(
         super::super::output_origins(conn(&st), &received.outpoint),
         vec![2]
@@ -622,7 +628,7 @@ fn promotion_makes_a_legacy_receiver_without_an_address_row_the_wallets_own() {
 }
 
 #[test]
-fn a_window_reaching_the_last_child_index_blocks_promotion() {
+fn a_window_reaching_the_last_child_index_blocks_activation() {
     let (mut st, account, _, _) = ready_wallet();
     let account_ref: i64 = conn(&st)
         .query_row(
@@ -658,14 +664,14 @@ fn a_window_reaching_the_last_child_index_blocks_promotion() {
         .unwrap();
     cover(&mut st, account, &revision(1, true), vec![]);
 
-    // The wallet cannot store that address, so the account is blocked rather than promoted.
+    // The wallet cannot store that address, so the account is blocked rather than activated.
     assert!(
         recovery(&st, account)
             .blockers
             .contains(&CandidateBlocker::WindowUnderivable)
     );
     assert!(
-        blocked(promote(&mut st, account)).contains(&RecoveryBlocker::Recovery(
+        blocked(activate_recovered_ledger(&mut st, account)).contains(&RecoveryBlocker::Recovery(
             CandidateBlocker::WindowUnderivable
         ))
     );
@@ -673,7 +679,7 @@ fn a_window_reaching_the_last_child_index_blocks_promotion() {
 }
 
 #[test]
-fn promotion_is_blocked_until_every_condition_holds() {
+fn activation_is_blocked_until_every_condition_holds() {
     let (mut st, account) = recovery_wallet();
     let unchanged = |st: &State, before: &Vec<(String, Vec<String>)>| {
         assert_eq!(&production_dump(conn(st)), before);
@@ -681,17 +687,17 @@ fn promotion_is_blocked_until_every_condition_holds() {
     };
     let before = production_dump(conn(&st));
 
-    // Public cannot promote.
+    // Public cannot activate.
     set_policy(&mut st, Public);
     assert!(matches!(
-        promote(&mut st, account),
+        activate_recovered_ledger(&mut st, account),
         Err(SqliteClientError::TransparentRecoveryNotEnabled)
     ));
 
     // Nothing recovered yet.
     set_policy(&mut st, PrivateRequired);
     assert_eq!(
-        blocked(promote(&mut st, account)),
+        blocked(activate_recovered_ledger(&mut st, account)),
         vec![RecoveryBlocker::Recovery(
             CandidateBlocker::IncompleteCoverage
         )]
@@ -702,13 +708,13 @@ fn promotion_is_blocked_until_every_condition_holds() {
     let fixture = revision(1, true);
     recover_completely(&mut st, account, &fixture, 1);
     assert_eq!(
-        blocked(promote(&mut st, account)),
+        blocked(activate_recovered_ledger(&mut st, account)),
         vec![RecoveryBlocker::UnqualifiedRevision]
     );
     unchanged(&st, &before);
     qualify(&mut st, &fixture);
 
-    // A quarantined account.
+    // A suspended account.
     conn(&st)
         .execute(
             "INSERT INTO tpir_quarantined_accounts SELECT id FROM accounts",
@@ -716,10 +722,10 @@ fn promotion_is_blocked_until_every_condition_holds() {
         )
         .unwrap();
     assert_eq!(
-        blocked(promote(&mut st, account)),
-        vec![RecoveryBlocker::Quarantined]
+        blocked(activate_recovered_ledger(&mut st, account)),
+        vec![RecoveryBlocker::RecoverySuspended]
     );
-    lift_quarantine(&st);
+    clear_recovery_suspension(&st);
 
     // The contiguously scanned chain is behind the known tip.
     let not_our_key = ExtendedSpendingKey::master(&[]).to_diversifiable_full_viewing_key();
@@ -728,13 +734,13 @@ fn promotion_is_blocked_until_every_condition_holds() {
     let (tip, _, _) = st.generate_next_block(&not_our_key, AddressType::DefaultExternal, value);
     st.wallet_mut().update_chain_tip(tip).unwrap();
     assert_eq!(
-        blocked(promote(&mut st, account)),
+        blocked(activate_recovered_ledger(&mut st, account)),
         vec![RecoveryBlocker::ChainBehindTip]
     );
     // Scanning to the tip needs coverage through it.
     st.scan_cached_blocks(start, 2);
     assert_eq!(
-        blocked(promote(&mut st, account)),
+        blocked(activate_recovered_ledger(&mut st, account)),
         vec![RecoveryBlocker::Recovery(
             CandidateBlocker::IncompleteCoverage
         )]
@@ -745,19 +751,19 @@ fn promotion_is_blocked_until_every_condition_holds() {
     c.coverage = full_coverage(&ws);
     apply(&mut st, c).unwrap();
 
-    // A handle weaker than the durable policy cannot promote either.
+    // A handle weaker than the durable policy cannot activate either.
     let handle = st.wallet_mut().db_mut();
     handle.set_transparent_ledger_mode(Public);
-    assert!(promote(&mut st, account).is_err());
+    assert!(activate_recovered_ledger(&mut st, account).is_err());
     st.wallet_mut()
         .db_mut()
         .set_transparent_ledger_mode(PrivateRequired);
 
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
 }
 
 #[test]
-fn a_failed_promotion_changes_nothing_across_a_reopen() {
+fn a_failed_activation_changes_nothing_across_a_reopen() {
     let (mut st, account, _, _) = ready_wallet();
     conn(&st)
         .execute_batch(
@@ -768,7 +774,7 @@ fn a_failed_promotion_changes_nothing_across_a_reopen() {
     let before = production_dump(conn(&st));
     let windows = count(&st, "tpir_candidate_windows");
     assert!(matches!(
-        promote(&mut st, account),
+        activate_recovered_ledger(&mut st, account),
         Err(SqliteClientError::DbError(_))
     ));
     assert_eq!(production_dump(conn(&st)), before);
@@ -779,7 +785,7 @@ fn a_failed_promotion_changes_nothing_across_a_reopen() {
         "trusted revision transitions require version 6"
     );
 
-    // A fresh connection sees the same pre-promotion state.
+    // A fresh connection sees the same pre-activation state.
     let reopened = crate::WalletDb::for_path(
         st.wallet().data_file_path(),
         *st.network(),
@@ -912,7 +918,7 @@ fn projection_joins_a_local_transaction_and_keeps_its_details() {
     cover(&mut st, account, &fixture, vec![recovered.clone()]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
 
     // One transaction row, its local details intact, now placed; the output has both origins.
     assert_eq!(details(&st), before);
@@ -926,9 +932,9 @@ fn projection_joins_a_local_transaction_and_keeps_its_details() {
     );
 }
 
-/// Promotes `account` after a qualified fixture recovers `receives` and `spends` completely,
-/// returning the promotion's integrity failure.
-fn promotion_integrity_failure(
+/// Activates `account` after a qualified fixture recovers `receives` and `spends` completely,
+/// returning the activation's integrity failure.
+fn activation_integrity_failure(
     st: &mut State,
     account: AccountUuid,
     receives: Vec<ReceiveEvent>,
@@ -944,7 +950,7 @@ fn promotion_integrity_failure(
     cover(st, account, &fixture, vec![]);
     qualify(st, &fixture);
     set_policy(st, PrivateRequired);
-    match promote(st, account) {
+    match activate_recovered_ledger(st, account) {
         Err(SqliteClientError::TransparentLedgerCommitRejected(CommitRejection::Integrity(
             failure,
         ))) => failure,
@@ -966,7 +972,7 @@ fn a_receive_the_stored_transaction_lacks_is_an_integrity_failure() {
         mined_height: below_target(&ws, 0),
     };
     assert_eq!(
-        promotion_integrity_failure(&mut st, account, vec![phantom.clone()], vec![]),
+        activation_integrity_failure(&mut st, account, vec![phantom.clone()], vec![]),
         IntegrityFailure::ProjectionContent(phantom.outpoint)
     );
     assert_eq!(lifecycle(&st, account), AccountLifecycle::Candidate);
@@ -994,7 +1000,7 @@ fn a_spend_the_stored_transaction_lacks_is_an_integrity_failure() {
         mined_height: below_target(&ws, 1),
     };
     assert_eq!(
-        promotion_integrity_failure(&mut st, account, vec![paid], vec![phantom]),
+        activation_integrity_failure(&mut st, account, vec![paid], vec![phantom]),
         IntegrityFailure::SpendContent {
             spending_txid: txid,
             input_index: 0,
@@ -1015,7 +1021,7 @@ fn coinbase_receives_keep_their_maturity_rule() {
     cover(&mut st, account, &fixture, vec![coinbase.clone()]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
 
     let tx_index: Option<u32> = conn(&st)
         .query_row(
@@ -1061,7 +1067,7 @@ fn unmined_legacy_outputs_do_not_enter_the_authorized_balance() {
     cover(&mut st, account, &fixture, vec![recovered]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
 
     let authorized = snapshot(&st, account).authorized.unwrap();
     assert_eq!(authorized.regular.total(), Zatoshis::const_from_u64(40_000));
@@ -1071,10 +1077,10 @@ fn unmined_legacy_outputs_do_not_enter_the_authorized_balance() {
     );
 }
 
-/// Promotes a [`ready_wallet`] and scans two more blocks, leaving coverage one commit behind.
+/// Activates a [`ready_wallet`] and scans two more blocks, leaving coverage one commit behind.
 fn active_wallet() -> (State, AccountUuid, ReceiveEvent) {
     let (mut st, account, unspent, _) = ready_wallet();
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     scan_new_blocks(&mut st, 2);
     (st, account, unspent)
 }
@@ -1190,11 +1196,11 @@ fn a_projection_conflict_is_an_integrity_failure() {
     );
     assert_eq!(production_dump(conn(&st)), before);
     assert_eq!(count(&st, "tpir_receive_events"), events);
-    assert_eq!(quarantined_accounts(&st), vec![account]);
+    assert_eq!(accounts_with_suspended_recovery(&st), vec![account]);
     assert!(
         snapshot(&st, account)
             .blockers
-            .contains(&RecoveryBlocker::Quarantined)
+            .contains(&RecoveryBlocker::RecoverySuspended)
     );
 }
 
@@ -1230,7 +1236,7 @@ fn a_spend_conflicting_with_a_mined_wallet_spend_is_an_integrity_failure() {
         ))
     );
     assert_eq!(production_dump(conn(&st)), before);
-    assert_eq!(quarantined_accounts(&st), vec![account]);
+    assert_eq!(accounts_with_suspended_recovery(&st), vec![account]);
 }
 
 #[test]
@@ -1411,7 +1417,7 @@ fn leaving_private_required_demotes_every_account() {
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
     for account in &accounts {
-        promote(&mut st, *account).unwrap();
+        activate_recovered_ledger(&mut st, *account).unwrap();
     }
     assert_eq!(count(&st, "tpir_active_accounts"), 2);
 
@@ -1426,13 +1432,13 @@ fn leaving_private_required_demotes_every_account() {
         );
     }
 
-    // Returning to PrivateRequired requires promotion again.
+    // Returning to PrivateRequired requires activation again.
     set_policy(&mut st, PrivateRequired);
     assert_eq!(
         snapshot(&st, accounts[0]).blockers,
         vec![RecoveryBlocker::NotActivated]
     );
-    promote(&mut st, accounts[0]).unwrap();
+    activate_recovered_ledger(&mut st, accounts[0]).unwrap();
     assert_eq!(
         snapshot(&st, accounts[0]).authority,
         TransparentAuthority::Private
@@ -1462,6 +1468,7 @@ mod qualification;
 mod gating {
     mod coinbase;
     mod forget;
+    mod refusal;
     mod withdrawal;
 
     use std::convert::Infallible;
@@ -1484,6 +1491,8 @@ mod gating {
     use zcash_keys::address::Address;
     use zcash_protocol::ShieldedPool;
     use zip321::{Payment, TransactionRequest};
+
+    use crate::error::{AuthorityRefusal, RefusalReason};
 
     use super::*;
 
@@ -1539,12 +1548,13 @@ mod gating {
         ]
     }
 
-    fn all_unavailable(selections: Selections) {
+    /// Asserts that every selector refuses with `refusal`.
+    fn all_unavailable(selections: Selections, refusal: AuthorityRefusal) {
         for selection in selections {
             assert!(
                 matches!(
-                    selection,
-                    Err(SqliteClientError::TransparentAuthorityUnavailable)
+                    &selection,
+                    Err(SqliteClientError::TransparentAuthorityUnavailable(r)) if *r == refusal
                 ),
                 "{selection:?}"
             );
@@ -1574,46 +1584,57 @@ mod gating {
         for selection in selections(&st, account, &[taddr], &unspent.outpoint, target) {
             assert_eq!(selection.unwrap(), vec![unspent.outpoint.clone()]);
         }
-        // Coverage through H supports only target H + 1.
-        for other in [BlockHeight::from(target) - 1, BlockHeight::from(target) + 1] {
-            all_unavailable(selections(
-                &st,
-                account,
-                &[taddr],
-                &unspent.outpoint,
-                TargetHeight::from(other),
-            ));
+        // Coverage through H supports only target H + 1: a target at the tip is stale, and one
+        // above the next block waits for the chain to reach it.
+        for (other, refusal) in [
+            (
+                BlockHeight::from(target) - 1,
+                AuthorityRefusal::Refused(RefusalReason::StaleTarget),
+            ),
+            (
+                BlockHeight::from(target) + 1,
+                AuthorityRefusal::Pending {
+                    accounts: vec![account],
+                },
+            ),
+        ] {
+            all_unavailable(
+                selections(
+                    &st,
+                    account,
+                    &[taddr],
+                    &unspent.outpoint,
+                    TargetHeight::from(other),
+                ),
+                refusal,
+            );
         }
 
         // A new block the ledger has not covered pauses authority.
         scan_new_blocks(&mut st, 1);
         let target = next_target(&st);
-        all_unavailable(selections(
-            &st,
-            account,
-            &[taddr],
-            &unspent.outpoint,
-            target,
-        ));
+        all_unavailable(
+            selections(&st, account, &[taddr], &unspent.outpoint, target),
+            AuthorityRefusal::Pending {
+                accounts: vec![account],
+            },
+        );
         cover(&mut st, account, &revision(1, true), vec![]);
         for selection in selections(&st, account, &[taddr], &unspent.outpoint, target) {
             assert_eq!(selection.unwrap(), vec![unspent.outpoint.clone()]);
         }
 
-        // Quarantine revokes it.
+        // Recovery suspension revokes it.
         conn(&st)
             .execute(
                 "INSERT INTO tpir_quarantined_accounts SELECT id FROM accounts",
                 [],
             )
             .unwrap();
-        all_unavailable(selections(
-            &st,
-            account,
-            &[taddr],
-            &unspent.outpoint,
-            target,
-        ));
+        all_unavailable(
+            selections(&st, account, &[taddr], &unspent.outpoint, target),
+            AuthorityRefusal::Refused(RefusalReason::NotAdmitted),
+        );
     }
 
     #[test]
@@ -1658,7 +1679,9 @@ mod gating {
         .unwrap();
         assert!(matches!(
             by_outpoint,
-            Err(SqliteClientError::TransparentAuthorityUnavailable)
+            Err(SqliteClientError::TransparentAuthorityUnavailable(
+                AuthorityRefusal::Refused(RefusalReason::NotInLedger)
+            ))
         ));
         assert_eq!(by_address.unwrap(), vec![]);
         assert_eq!(by_addresses.unwrap(), vec![]);
@@ -1739,7 +1762,9 @@ mod gating {
             assert!(
                 matches!(
                     result,
-                    Err(SqliteClientError::TransparentAuthorityUnavailable)
+                    Err(SqliteClientError::TransparentAuthorityUnavailable(
+                        AuthorityRefusal::Refused(RefusalReason::NotAdmitted)
+                    ))
                 ),
                 "{result:?}"
             );
@@ -1759,8 +1784,8 @@ mod gating {
         }
         qualify(&mut st, &fixture);
         set_policy(&mut st, PrivateRequired);
-        // Only the first account is promoted.
-        promote(&mut st, accounts[0]).unwrap();
+        // Only the first account is activated.
+        activate_recovered_ledger(&mut st, accounts[0]).unwrap();
         let target = next_target(&st);
         let both = [funded[0].address, funded[1].address];
 
@@ -1784,7 +1809,9 @@ mod gating {
         assert_eq!(select(&both).unwrap(), vec![funded[0].outpoint.clone()]);
         assert!(matches!(
             select(&both[1..]),
-            Err(SqliteClientError::TransparentAuthorityUnavailable)
+            Err(SqliteClientError::TransparentAuthorityUnavailable(
+                AuthorityRefusal::Refused(RefusalReason::NotAdmitted)
+            ))
         ));
     }
 
@@ -1835,7 +1862,9 @@ mod gating {
                 &stale,
             ),
             Err(zcash_client_backend::data_api::error::Error::DataSource(
-                SqliteClientError::TransparentAuthorityUnavailable
+                SqliteClientError::TransparentAuthorityUnavailable(AuthorityRefusal::Refused(
+                    RefusalReason::StaleTarget
+                ))
             ))
         ));
         assert_eq!(transactions(&st), before);
@@ -1910,7 +1939,7 @@ mod gating {
         cover(&mut st, account, &fixture, vec![coinbase.clone()]);
         qualify(&mut st, &fixture);
         set_policy(&mut st, PrivateRequired);
-        promote(&mut st, account).unwrap();
+        activate_recovered_ledger(&mut st, account).unwrap();
         let target = next_target(&st);
         let [by_outpoint, by_address, by_addresses, by_account] = <[_; 4]>::try_from(selections(
             &st,
@@ -1988,7 +2017,9 @@ mod gating {
         let db = st.wallet().db();
         assert!(matches!(
             db.get_unspent_transparent_output(&local, next_target(&st)),
-            Err(SqliteClientError::TransparentAuthorityUnavailable)
+            Err(SqliteClientError::TransparentAuthorityUnavailable(
+                AuthorityRefusal::Refused(RefusalReason::NotInLedger)
+            ))
         ));
     }
 }

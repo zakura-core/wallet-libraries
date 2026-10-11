@@ -6,7 +6,7 @@ use super::*;
 /// Coverage of `part` of `ws` through its target, from `revision`.
 fn cover_part(
     st: &mut State,
-    ws: &TransparentWatchSet<AccountUuid>,
+    ws: &TransparentAddressWatchSet<AccountUuid>,
     part: &[zcash_client_backend::data_api::transparent_ledger::WatchedAddress],
     revision: &RecoveryRevision,
 ) -> Result<CommitOutcome, SqliteClientError> {
@@ -110,8 +110,8 @@ fn deleting_an_active_account_keeps_the_other_accounts_ledger() {
     cover(&mut st, deleted, &fixture, vec![to_deleted]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, kept).unwrap();
-    promote(&mut st, deleted).unwrap();
+    activate_recovered_ledger(&mut st, kept).unwrap();
+    activate_recovered_ledger(&mut st, deleted).unwrap();
 
     let stale = watch(&st, deleted);
     let deleted_ref: i64 = conn(&st)
@@ -186,7 +186,7 @@ fn lowering_an_active_accounts_birthday_pauses_authority_until_covered() {
     cover(&mut st, account, &fixture, vec![late]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(
         snapshot(&st, account).authority,
         TransparentAuthority::Private
@@ -232,14 +232,14 @@ fn a_commit_captured_before_a_policy_round_trip_is_stale() {
         Err(SqliteClientError::StaleTransparentPolicy { .. })
     ));
 
-    // The round trip demoted the account. A fresh run recovers it as a candidate, and it must
-    // be promoted again before it holds authority.
+    // The round trip deactivated the account. A fresh run recovers it as a candidate, and it must
+    // be activated again before it holds authority.
     assert_eq!(lifecycle(&st, account), AccountLifecycle::Candidate);
     cover(&mut st, account, &revision(1, true), vec![]);
     let s = snapshot(&st, account);
     assert_eq!(s.authority, TransparentAuthority::Unavailable);
     assert_eq!(s.blockers, vec![RecoveryBlocker::NotActivated]);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(
         snapshot(&st, account).authority,
         TransparentAuthority::Private

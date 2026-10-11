@@ -5395,7 +5395,7 @@ pub(crate) fn queue_tx_retrieval(
     )?;
 
     for txid in txids {
-        transparent_ledger::ensure_policy_generation(conn, expected)?;
+        transparent_ledger::check_transparent_policy_generation(conn, expected)?;
         stmt_insert_tx.execute(named_params! {
             ":txid": txid.as_ref(),
             ":enhancement_type": TxQueryType::Enhancement.code(),
@@ -5417,7 +5417,7 @@ pub(crate) fn queue_tx_status(
     txid: TxId,
 ) -> Result<(), SqliteClientError> {
     let expected = transparent_ledger::capture_policy_generation(conn)?;
-    transparent_ledger::ensure_policy_generation(conn, expected)?;
+    transparent_ledger::check_transparent_policy_generation(conn, expected)?;
     conn.execute(
         "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation)
          VALUES (:txid, :status_type, :policy_generation)
@@ -5445,7 +5445,7 @@ pub(crate) fn queue_status_for_unobservable_transactions(
     above: Option<BlockHeight>,
 ) -> Result<(), SqliteClientError> {
     let expected = transparent_ledger::capture_policy_generation(conn)?;
-    transparent_ledger::ensure_policy_generation(conn, expected)?;
+    transparent_ledger::check_transparent_policy_generation(conn, expected)?;
     let unobservable = transaction_reconfirmation::UNOBSERVABLE_TRANSACTION;
     conn.execute(
         &format!(

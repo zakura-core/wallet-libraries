@@ -79,6 +79,12 @@ There is no `[patch.crates-io]` anywhere in this design. Package names differ
 from their upstream originals, so consumers declare these crates directly and
 every edge is explicit — the same reasoning `libraries` documents.
 
+## Wallet integration
+
+See [Transparent PIR wallet integration](docs/transparent-pir-wallet-integration.md)
+for the wallet architecture, API boundaries, data model, discovery, transaction
+cases, and public/private query behavior.
+
 ## Development
 
 See [docs/development.md](docs/development.md) for focused checks, build ownership,

@@ -295,7 +295,7 @@ fn require_lwd(
     tx_ref: crate::TxRef,
     expected_generation: u64,
 ) -> Result<(), SqliteClientError> {
-    transparent_ledger::ensure_policy_generation(conn, expected_generation)?;
+    transparent_ledger::check_transparent_policy_generation(conn, expected_generation)?;
     conn.execute(
         "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (:tx, :route)
          ON CONFLICT(transaction_id) DO UPDATE SET route = excluded.route",
@@ -401,7 +401,7 @@ fn require_transparent_details(
     tx_ref: crate::TxRef,
     expected_generation: u64,
 ) -> Result<EnhancePirStoreResult, SqliteClientError> {
-    transparent_ledger::ensure_policy_generation(conn, expected_generation)?;
+    transparent_ledger::check_transparent_policy_generation(conn, expected_generation)?;
     if transparent_ledger::retains_public_authority(conn, configured)? {
         require_lwd(conn, tx_ref, expected_generation)?;
         Ok(EnhancePirStoreResult::LwdRequired)
@@ -1223,7 +1223,7 @@ pub(crate) fn apply<P: Parameters>(
     }
     // Crucially, no routing mutation happens before the identity rechecks.
     if has_transparent || route == PRIVATE_DETAILS_UNSUPPORTED {
-        transparent_ledger::ensure_policy_generation(tx, expected_generation)?;
+        transparent_ledger::check_transparent_policy_generation(tx, expected_generation)?;
         if public_authority {
             // Only a protected transaction can be the target here.
             require_lwd(tx, tx_ref, expected_generation)?;

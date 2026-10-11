@@ -1,21 +1,28 @@
 //! Applying a ready batch to a SQLite wallet and acknowledging it, with feature `sqlite`.
 //!
-//! [`ReferenceRecovery::apply_and_acknowledge`] consumes the batch, so its commits cannot be
-//! edited or dropped before its retirements are acknowledged. Each commit applies in its own
+//! [`TransparentHistoryRecovery::apply_and_acknowledge_gated`] consumes the batch, so its commits
+//! cannot be edited or dropped before its retirements are acknowledged. Each commit applies in its own
 //! wallet transaction, exactly as the wallet's commit operations do on their own; the
 //! companion is acknowledged afterwards, in its own database. Nothing makes the two databases
 //! atomic: a failure or crash between them leaves the batch unacknowledged, and the next pass
 //! exports the same revisions again, whose replay changes nothing the wallet already holds.
+//!
+//! It runs each of those wallet writes through a [`WriteGate`], so an application that serializes its wallet writes holds its
+//! serialization for one write at a time, not the whole batch, and can stop the batch
+//! between writes.
 
 use rusqlite::Connection;
 use zcash_client_backend::data_api::transparent_ledger::{
-    CommitRejection, RecoveryRevision, TransparentLedgerRead as _, TransparentLedgerWrite as _,
+    CommitRejection, RecoveryRevision, TransparentLedgerRead, TransparentLedgerWrite as _,
 };
 use zcash_client_sqlite::{AccountUuid, WalletDb, error::SqliteClientError};
 use zcash_protocol::consensus;
 
-use crate::catalog::{self, BatchState};
-use crate::recovery::{Progress, RecoveryBatch, RecoveryError, ReferenceRecovery};
+use crate::batch::{BatchState, RecoveryBatch};
+use crate::catalog;
+use crate::error::RecoveryError;
+use crate::progress::Progress;
+use crate::transparent_history_recovery::TransparentHistoryRecovery;
 
 /// How the wallet treats the revisions of the commits it applies. The caller decides; the
 /// adapter never infers trust from the publication, the batch, or the wallet's policy.
@@ -30,7 +37,7 @@ pub enum Trust {
     /// (`TransparentLedgerWrite::qualify_and_apply_transparent_ledger_commit`), which also
     /// withdraws the older provisional evidence of its source and so reconciles the batch's
     /// retirements. The wallet requires `PrivateRequired` on the handle and durably.
-    /// Qualification grants no authority by itself: promotion and spending stay separate
+    /// Qualification grants no authority by itself: activation and spending stay separate
     /// wallet operations.
     Trusted,
 }
@@ -50,11 +57,39 @@ pub struct ApplyStats {
 /// A batch the wallet applied whole and the companion acknowledged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Applied {
+    /// What the wallet applied: every commit of the batch.
     pub stats: ApplyStats,
     /// The batch's pass progress.
     pub progress: Progress,
     /// Retired revisions the trusted commits reconciled and the acknowledgment forgot.
     pub retired: usize,
+}
+
+/// Runs the wallet writes of [`TransparentHistoryRecovery::apply_and_acknowledge_gated`] one at a
+/// time: each commit's wallet transaction, then the acknowledgment's short immediate read
+/// transaction.
+///
+/// An application with its own wallet write serialization takes it inside
+/// [`WriteGate::write`], so other writers and cancellation wait at most one commit rather
+/// than the whole batch.
+pub trait WriteGate {
+    /// Runs `write` and returns its result, or returns [`Interrupted`] without running it,
+    /// which stops the batch there.
+    fn write<T>(&mut self, write: impl FnOnce() -> T) -> Result<T, Interrupted>;
+}
+
+/// A [`WriteGate`] declined the batch's next wallet write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Interrupted;
+
+/// The [`WriteGate`] under which every write runs.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Ungated;
+
+impl WriteGate for Ungated {
+    fn write<T>(&mut self, write: impl FnOnce() -> T) -> Result<T, Interrupted> {
+        Ok(write())
+    }
 }
 
 /// Why a batch was not acknowledged.
@@ -70,7 +105,7 @@ pub enum ApplyError {
     #[error("transparent PIR apply: the export receipt is stale")]
     StaleReceipt,
     /// The wallet connection is inside an explicit SQL transaction, whose rollback would
-    /// discard what a commit made durable, including quarantine. Nothing was applied.
+    /// discard what a commit made durable, including recovery suspension. Nothing was applied.
     #[error("transparent PIR apply: the wallet connection is inside a transaction")]
     OuterTransaction,
     /// The batch lists retired revisions and the trust is [`Trust::Observed`]. Nothing was
@@ -78,10 +113,12 @@ pub enum ApplyError {
     #[error("transparent PIR apply: retired revisions require trusted reconciliation")]
     Unreconciled,
     /// The wallet refused the commit at `index`. Commits before it stay applied. An
-    /// integrity rejection's quarantine is durable.
+    /// integrity rejection's recovery suspension is durable.
     #[error("transparent PIR apply: the wallet refused a commit ({})", rejection_name(.rejection))]
     Rejected {
+        /// The refused commit's position in the batch.
         index: usize,
+        /// Why the wallet refused it.
         rejection: CommitRejection,
     },
     /// The wallet's policy generation changed after the pass read its watch set.
@@ -97,6 +134,10 @@ pub enum ApplyError {
     /// Every commit applied, but the companion did not record the acknowledgment.
     #[error("transparent PIR apply: acknowledgment failed")]
     Acknowledge(RecoveryError),
+    /// The [`WriteGate`] declined a wallet write: a commit, or the acknowledgment once
+    /// every commit applied. Commits before it stay applied.
+    #[error("transparent PIR apply: interrupted between wallet writes")]
+    Interrupted,
 }
 
 /// A batch that was not acknowledged, with what the wallet applied of it first.
@@ -115,20 +156,28 @@ pub struct ApplyFailure {
 /// committed prefix applied, and the account's next pass replays the batch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApplyAction {
-    /// A commit was stale, or the policy generation changed: pass again from a fresh
-    /// watch set.
+    /// A commit was stale: pass again from a fresh watch set.
     Refresh,
     /// The batch resolves retired revisions and its commits were only observed: stop
     /// passing the account until a trusted pass can reconcile them.
     Reconcile,
     /// The account cannot progress now: the wallet refused a commit as contradicting
-    /// stored evidence (which quarantines it), malformed or refused, the acknowledgment
+    /// stored evidence (which suspends it), malformed or refused, the acknowledgment
     /// failed, or the batch was not this companion's latest ready pass.
     Skip,
     /// The handle or the durable policy does not permit this recovery: stop recovering.
     NotEnabled,
+    /// The wallet's policy generation changed after the pass read its watch set: stop
+    /// recovering. The policy the run captured is no longer the wallet's, perhaps because
+    /// the user turned private queries off, so no further private pass may run on it; the
+    /// next run captures the policy again. Unlike [`ApplyAction::NotEnabled`], the new
+    /// policy may still permit recovery.
+    PolicyChanged,
     /// The wallet failed, or its connection was inside a transaction: report it.
     Fail,
+    /// The caller's [`WriteGate`] stopped the batch between wallet writes: the caller
+    /// decides whether to pass again now or leave the account to a later run.
+    Interrupted,
 }
 
 impl ApplyFailure {
@@ -138,8 +187,8 @@ impl ApplyFailure {
             ApplyError::Rejected {
                 rejection: CommitRejection::Stale(_),
                 ..
-            }
-            | ApplyError::PolicyChanged => ApplyAction::Refresh,
+            } => ApplyAction::Refresh,
+            ApplyError::PolicyChanged => ApplyAction::PolicyChanged,
             ApplyError::Unreconciled => ApplyAction::Reconcile,
             ApplyError::Rejected { .. }
             | ApplyError::Acknowledge(_)
@@ -147,6 +196,7 @@ impl ApplyFailure {
             | ApplyError::StaleReceipt => ApplyAction::Skip,
             ApplyError::NotEnabled => ApplyAction::NotEnabled,
             ApplyError::OuterTransaction | ApplyError::Wallet(_) => ApplyAction::Fail,
+            ApplyError::Interrupted => ApplyAction::Interrupted,
         }
     }
 }
@@ -162,6 +212,8 @@ fn rejection_name(rejection: &CommitRejection) -> &'static str {
 }
 
 impl ApplyError {
+    /// The failure of the wallet operation on the commit at `index`: a commit
+    /// rejection, a changed policy, a disabled recovery, or any other wallet error.
     pub(crate) fn from_wallet(index: usize, error: SqliteClientError) -> Self {
         match error {
             SqliteClientError::TransparentLedgerCommitRejected(rejection) => {
@@ -180,7 +232,7 @@ impl From<rusqlite::Error> for ApplyError {
     }
 }
 
-impl ReferenceRecovery {
+impl TransparentHistoryRecovery {
     /// Applies a ready batch's commits to `wallet` in order, then acknowledges the batch.
     ///
     /// The batch is consumed: whatever the outcome, the next acknowledgment needs a new pass.
@@ -189,7 +241,7 @@ impl ReferenceRecovery {
     /// and a batch with [`RecoveryBatch::retired_revisions`] needs [`Trust::Trusted`].
     ///
     /// Each commit applies in its own wallet transaction, which commits before the next
-    /// starts, so an integrity rejection's quarantine is durable when it is reported. The
+    /// starts, so an integrity rejection's recovery suspension is durable when it is reported. The
     /// first refused or failed commit stops the batch; the companion is acknowledged only
     /// once every commit's transaction committed, and forgets exactly the retirements its
     /// pass recorded. An unacknowledged batch's revisions stay exported, so the next pass,
@@ -208,43 +260,54 @@ impl ReferenceRecovery {
     /// until acknowledgment commits; it is rolled back, since all wallet facts are
     /// already durable. Companion lock waits do not hold a wallet SQL reservation.
     ///
-    /// No network request is made here; run it under the wallet's write serialization if the
-    /// application has one. It never promotes an account or authorizes spending.
-    pub fn apply_and_acknowledge<P: consensus::Parameters, CL, R>(
+    /// Each wallet write runs through `gate`: every commit's wallet transaction, then the
+    /// acknowledgment's immediate read transaction, so an application that serializes its
+    /// wallet writes holds its serialization for one write at a time ([`Ungated`] when it has
+    /// none). No network request is made here, and it never activates an account or authorizes
+    /// spending. [`Self::settle_latest`] settles the batch the latest pass held this way.
+    ///
+    /// When `gate` declines a write, the batch stops there with [`ApplyError::Interrupted`]
+    /// and is not acknowledged. The commits before it stay applied, and the account's next
+    /// pass exports the batch again, whose replay changes nothing they made durable.
+    pub fn apply_and_acknowledge_gated<P: consensus::Parameters, CL, R>(
         &mut self,
         batch: RecoveryBatch<AccountUuid>,
         wallet: &mut WalletDb<Connection, P, CL, R>,
         trust: Trust,
+        gate: &mut impl WriteGate,
     ) -> Result<Applied, ApplyFailure> {
         let progress = batch.progress();
-        let failure = |error, stats| ApplyFailure {
+        let apply_failure = |error, stats| ApplyFailure {
             error,
             stats,
             progress,
         };
-        if batch.state() == BatchState::Ready && !self.is_pending_export(&batch) {
-            return Err(failure(ApplyError::StaleReceipt, ApplyStats::default()));
+        if batch.state() == BatchState::Ready && !self.is_outstanding_receipt(&batch) {
+            return Err(apply_failure(
+                ApplyError::StaleReceipt,
+                ApplyStats::default(),
+            ));
         }
         // Once the commits start, the receipt is spent: a failed batch is replayed by a
         // new pass.
         let (stats, replaced, expected_generation) =
-            apply_commits(batch, wallet, trust, || self.clear_pending_export())?;
+            apply_commits(batch, wallet, trust, gate, || {
+                self.spend_outstanding_receipt()
+            })?;
         let acknowledgment = catalog::acknowledgment_transaction(&mut self.catalog)
-            .map_err(|error| failure(ApplyError::Acknowledge(error), stats))?;
-        wallet
-            .with_immediate_read_transaction(|snapshot| {
-                if let Some(expected) = expected_generation {
-                    snapshot
-                        .check_transparent_policy_generation(expected)
-                        .map_err(|error| ApplyError::from_wallet(stats.applied, error))?;
-                }
+            .map_err(|error| apply_failure(ApplyError::Acknowledge(error), stats))?;
+        gate.write(|| {
+            wallet.with_immediate_read_transaction(|snapshot| {
+                check_policy_generation(snapshot, expected_generation, stats.applied)?;
                 catalog::acknowledge_in_transaction(&acknowledgment, &replaced)
                     .map_err(ApplyError::Acknowledge)?;
                 acknowledgment
                     .commit()
-                    .map_err(|error| ApplyError::Acknowledge(crate::recovery::failure(error)))
+                    .map_err(|error| ApplyError::Acknowledge(crate::error::failure(error)))
             })
-            .map_err(|error| failure(error, stats))?;
+        })
+        .map_err(|Interrupted| apply_failure(ApplyError::Interrupted, stats))?
+        .map_err(|error| apply_failure(error, stats))?;
         Ok(Applied {
             stats,
             progress,
@@ -253,42 +316,62 @@ impl ReferenceRecovery {
     }
 }
 
+/// Refuses a wallet whose transparent policy generation is no longer
+/// `expected_generation`, the one a batch's commits were built under, after `applied`
+/// of them applied. A batch without commits has no generation to check.
+pub(crate) fn check_policy_generation(
+    snapshot: &impl TransparentLedgerRead<Error = SqliteClientError>,
+    expected_generation: Option<u64>,
+    applied: usize,
+) -> Result<(), ApplyError> {
+    if let Some(expected) = expected_generation {
+        snapshot
+            .check_transparent_policy_generation(expected)
+            .map_err(|error| ApplyError::from_wallet(applied, error))?;
+    }
+    Ok(())
+}
+
 /// Applies a ready batch's commits to `wallet` in order, each in its own wallet
-/// transaction, after the checks [`ReferenceRecovery::apply_and_acknowledge`] makes of
-/// any batch; `start` runs once they pass, before the first commit. Returns what applied,
-/// the batch's retirements and the policy generation its commits were built under.
+/// transaction run through `gate`, after the checks
+/// [`TransparentHistoryRecovery::apply_and_acknowledge_gated`] makes of any batch; `start` runs
+/// once they pass, before the first commit. Returns what applied, the batch's retirements and the
+/// policy generation its commits were built under.
 pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(
     batch: RecoveryBatch<AccountUuid>,
     wallet: &mut WalletDb<Connection, P, CL, R>,
     trust: Trust,
+    gate: &mut impl WriteGate,
     start: impl FnOnce(),
 ) -> Result<(ApplyStats, Vec<RecoveryRevision>, Option<u64>), ApplyFailure> {
     let progress = batch.progress();
     let mut stats = ApplyStats::default();
-    let failure = |error, stats| ApplyFailure {
+    let apply_failure = |error, stats| ApplyFailure {
         error,
         stats,
         progress,
     };
     if batch.state() != BatchState::Ready {
-        return Err(failure(ApplyError::NotReady(batch.state()), stats));
+        return Err(apply_failure(ApplyError::NotReady(batch.state()), stats));
     }
     if !wallet.is_autocommit() {
-        return Err(failure(ApplyError::OuterTransaction, stats));
+        return Err(apply_failure(ApplyError::OuterTransaction, stats));
     }
     let (commits, replaced) = batch.into_parts();
     let expected_generation = commits
         .first()
         .map(|commit| commit.context.policy_generation);
     if trust == Trust::Observed && !replaced.is_empty() {
-        return Err(failure(ApplyError::Unreconciled, stats));
+        return Err(apply_failure(ApplyError::Unreconciled, stats));
     }
     start();
     for (index, commit) in commits.into_iter().enumerate() {
-        let applied = match trust {
-            Trust::Observed => wallet.apply_transparent_ledger_commit(commit),
-            Trust::Trusted => wallet.qualify_and_apply_transparent_ledger_commit(commit),
-        };
+        let applied = gate
+            .write(|| match trust {
+                Trust::Observed => wallet.apply_transparent_ledger_commit(commit),
+                Trust::Trusted => wallet.qualify_and_apply_transparent_ledger_commit(commit),
+            })
+            .map_err(|Interrupted| apply_failure(ApplyError::Interrupted, stats))?;
         match applied {
             Ok(outcome) => {
                 stats.applied += 1;
@@ -296,7 +379,7 @@ pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(
                 stats.window_grew |= outcome.window_grew;
             }
             Err(error) => {
-                return Err(failure(ApplyError::from_wallet(index, error), stats));
+                return Err(apply_failure(ApplyError::from_wallet(index, error), stats));
             }
         }
     }
@@ -338,7 +421,7 @@ mod tests {
                 rejected(CommitRejection::Stale(StaleCommit::LifecycleChanged)),
                 A::Refresh,
             ),
-            (ApplyError::PolicyChanged, A::Refresh),
+            (ApplyError::PolicyChanged, A::PolicyChanged),
             (ApplyError::Unreconciled, A::Reconcile),
             (
                 rejected(CommitRejection::Integrity(
@@ -351,13 +434,15 @@ mod tests {
                 A::Skip,
             ),
             (
-                rejected(CommitRejection::Refused(RefusedCommit::AccountQuarantined)),
+                rejected(CommitRejection::Refused(
+                    RefusedCommit::AccountRecoverySuspended,
+                )),
                 A::Skip,
             ),
             (ApplyError::NotReady(BatchState::Pending), A::Skip),
             (ApplyError::StaleReceipt, A::Skip),
             (
-                ApplyError::Acknowledge(crate::recovery::failure("companion")),
+                ApplyError::Acknowledge(crate::error::failure("companion")),
                 A::Skip,
             ),
             (ApplyError::NotEnabled, A::NotEnabled),
@@ -366,6 +451,7 @@ mod tests {
                 ApplyError::Wallet(SqliteClientError::AccountUnknown),
                 A::Fail,
             ),
+            (ApplyError::Interrupted, A::Interrupted),
         ] {
             let name = error.to_string();
             assert_eq!(action(error), expected, "{name}");

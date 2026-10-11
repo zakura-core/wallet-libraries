@@ -53,9 +53,9 @@ pub enum SqliteClientError {
     EnhancementModeNotConfigured,
     /// Transparent ledger APIs require an explicit mode on this handle.
     TransparentLedgerModeNotConfigured,
-    /// Consuming transparent inputs requires private transparent authority, which is not
-    /// available.
-    TransparentAuthorityUnavailable,
+    /// Consuming transparent inputs requires transparent authority, which is not available.
+    /// The [`AuthorityRefusal`] says whether waiting for private recovery can change that.
+    TransparentAuthorityUnavailable(AuthorityRefusal),
     /// Public transparent discovery is forbidden by the handle's transparent ledger mode.
     PublicTransparentDiscoveryForbidden,
     /// The wallet's transparent ledger state requires a newer reader than this build.
@@ -71,16 +71,16 @@ pub enum SqliteClientError {
         /// The generation currently stored on the wallet.
         applied: u64,
     },
-    /// Recovery commits and promotion require a `PrivateRequired` policy, both durably applied
+    /// Recovery commits and activation require a `PrivateRequired` policy, both durably applied
     /// and configured on the handle.
     TransparentRecoveryNotEnabled,
     /// A candidate recovery commit was refused; none of its facts were applied.
     #[cfg(feature = "transparent-inputs")]
     TransparentLedgerCommitRejected(CommitRejection),
-    /// An account could not be promoted to private transparent authority for the listed
+    /// An account could not be activated to private transparent authority for the listed
     /// reasons; nothing was changed.
     #[cfg(feature = "transparent-inputs")]
-    TransparentPromotionBlocked(Vec<RecoveryBlocker>),
+    TransparentActivationBlocked(Vec<RecoveryBlocker>),
 
     /// Blocks or a transaction were processed without the wallet's open dynamic IVKs.
     /// Scan with `scan_cached_blocks_with_dynamic_ivks` and decrypt with
@@ -319,6 +319,114 @@ pub enum SqliteClientError {
     BackendError(BackendError),
 }
 
+/// Why transparent authority refused to admit inputs: whether waiting for private recovery can
+/// change the answer, and if not, why.
+///
+/// Neither form names an outpoint, transaction or address, so its [`Display`](fmt::Display)
+/// text is safe to log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthorityRefusal {
+    /// Private authority does not cover these accounts yet, and that alone kept the inputs
+    /// out.
+    ///
+    /// Every refused input is an output the wallet holds, owned by one of `accounts`, that
+    /// nothing but authority excludes at the target: it is unspent (and, for
+    /// `WalletDb::check_transparent_transaction_inputs`, has no competing spend), its
+    /// transaction is mined or unexpired, it is mature, and it is not withdrawn. Each of those
+    /// accounts is active and not suspended from recovery, its only blockers are
+    /// `RecoveryBlocker::Recovery(CandidateBlocker::IncompleteCoverage)` and
+    /// `RecoveryBlocker::ChainBehindTip`, and it has at least one of them unless the target is
+    /// above the block after the chain tip. Any other blocker, including open recovery pages,
+    /// unresolved spends or an unknown local chain point, is [`RefusalReason::NotAdmitted`],
+    /// even when coverage also lags.
+    ///
+    /// Retrying once the chain tip is the block before the target and private recovery covers
+    /// it may succeed; nothing else will. That is not a promise: recovery may find an input
+    /// spent or outside the ledger, and if the chain moves past the target first, the target is
+    /// stale and the transaction must be rebuilt.
+    Pending {
+        /// The accounts owning the refused inputs, each listed once, in input order.
+        accounts: Vec<AccountUuid>,
+    },
+    /// Waiting for private recovery would not change the refusal.
+    Refused(RefusalReason),
+}
+
+/// Why transparent authority refused inputs for a reason that waiting for private recovery
+/// does not resolve. A transaction refused for an input reason must be rebuilt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RefusalReason {
+    /// No chain tip is known, so no authority applies.
+    ChainUnknown,
+    /// This build cannot read transparent state, or a required-private policy applies and
+    /// the operation can establish no per-account private authority: legacy public balances,
+    /// or a build without transparent support.
+    NoAuthority,
+    /// The wallet holds no such output.
+    UnknownOutput,
+    /// Another unexpired transaction spends the output.
+    CompetingSpend,
+    /// An earlier transaction of the same batch lacks the output a later one spends.
+    ChainedOutputMissing,
+    /// The output is spent, or is a wallet-internal ephemeral output that is likely spent.
+    Spent,
+    /// The transaction that created the output expired unmined. Never an output only a
+    /// recovered receive evidences, which a rewind left unplaced: it was mined, and waits as
+    /// [`Withdrawn`](Self::Withdrawn) says.
+    Expired,
+    /// The output is coinbase that is immature at the target.
+    ImmatureCoinbase,
+    /// The output exists only through a recovered receive that was withdrawn, or that a rewind
+    /// left unplaced and the owning account's recovery, covering the tip, did not place again.
+    /// While that recovery catches up, an unplaced receive is [`AuthorityRefusal::Pending`].
+    Withdrawn,
+    /// The owning account holds private authority, but the output is not one of its ledger's
+    /// placed outputs: legacy public and local-only outputs never fund a private spend.
+    NotInLedger,
+    /// The owning account is not admitted for a reason other than recovery catching up: it
+    /// is not active, is suspended from recovery, or its ledger has a blocker other than incomplete
+    /// coverage and a local chain behind the tip, such as open pages or unresolved spends.
+    NotAdmitted,
+    /// The target is at or below the chain tip; private authority covers only the block after
+    /// it.
+    StaleTarget,
+}
+
+impl fmt::Display for RefusalReason {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(match self {
+            RefusalReason::ChainUnknown => "the chain tip is unknown",
+            RefusalReason::NoAuthority => "no transparent authority applies",
+            RefusalReason::UnknownOutput => "an input is not a wallet output",
+            RefusalReason::CompetingSpend => "another transaction spends an input",
+            RefusalReason::ChainedOutputMissing => {
+                "an earlier transaction of the batch lacks a spent output"
+            }
+            RefusalReason::Spent => "an input is spent",
+            RefusalReason::Expired => "an input's transaction expired unmined",
+            RefusalReason::ImmatureCoinbase => "an input is immature coinbase",
+            RefusalReason::Withdrawn => "an input's recovered receive was withdrawn",
+            RefusalReason::NotInLedger => "an input is not a private ledger output",
+            RefusalReason::NotAdmitted => "an input's account lacks private authority",
+            RefusalReason::StaleTarget => "the target is not the block after the chain tip",
+        })
+    }
+}
+
+impl fmt::Display for AuthorityRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            AuthorityRefusal::Pending { accounts } => write!(
+                f,
+                "private recovery has not yet covered the chain tip for {} account(s)",
+                accounts.len()
+            ),
+            AuthorityRefusal::Refused(reason) => reason.fmt(f),
+        }
+    }
+}
+
 /// A `zcash_client_backend` error carrying a variant that this crate has no translation for,
 /// as reported by [`SqliteClientError::BackendError`].
 ///
@@ -411,21 +519,20 @@ impl fmt::Display for SqliteClientError {
                 f,
                 "Transparent policy generation {expected} is stale; the wallet is now at generation {applied}"
             ),
-            SqliteClientError::TransparentAuthorityUnavailable => write!(
-                f,
-                "Transparent funds are unavailable: private transparent authority is required but not available"
-            ),
+            SqliteClientError::TransparentAuthorityUnavailable(refusal) => {
+                write!(f, "Transparent funds are unavailable: {refusal}")
+            }
             SqliteClientError::TransparentRecoveryNotEnabled => write!(
                 f,
-                "Transparent recovery is not enabled for this operation: recovery commits and promotion need PrivateRequired, both durably and on the handle"
+                "Transparent recovery is not enabled for this operation: recovery commits and activation need PrivateRequired, both durably and on the handle"
             ),
             #[cfg(feature = "transparent-inputs")]
             SqliteClientError::TransparentLedgerCommitRejected(rejection) => {
                 write!(f, "Transparent ledger commit rejected: {rejection:?}")
             }
             #[cfg(feature = "transparent-inputs")]
-            SqliteClientError::TransparentPromotionBlocked(blockers) => {
-                write!(f, "Transparent ledger promotion blocked: {blockers:?}")
+            SqliteClientError::TransparentActivationBlocked(blockers) => {
+                write!(f, "Transparent ledger activation blocked: {blockers:?}")
             }
             SqliteClientError::CorruptedData(reason) => {
                 write!(f, "Data DB is corrupted: {reason}")
