@@ -186,8 +186,8 @@ pub struct Swept<A, E> {
 /// to `genesis` ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS) on mainnet), cover
 /// history from Ironwood activation on `params`' network, and end at a block the
 /// wallet accepts (see [`DynamicIvkRead::directory_publication_anchor`]) with the
-/// wallet's Ironwood tree size there, and every swap provider with a set must have a
-/// dated seen set, as for [`fetch_seen`](crate::fetch_seen).
+/// wallet's Ironwood tree size there, and have a dated seen set for at least one swap
+/// provider and for every provider with a set, as for [`fetch_seen`](crate::fetch_seen).
 ///
 /// Each key's receiver is first tested against the publication's filters, which every
 /// wallet downloads alike: only a receiver in the paid set is looked up over PIR, and

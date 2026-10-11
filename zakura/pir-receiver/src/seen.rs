@@ -84,15 +84,12 @@ pub async fn fetch_seen<T: Transport>(
         seen.sets
             .push(filters.get(label).ok_or(DirectoryError::Malformed)?.clone());
     }
-    if seen.sets.is_empty() {
-        return Err(DirectoryError::Malformed);
-    }
     Ok(seen)
 }
 
 /// The labels and feed read times of the seen sets among a publication's filter `sets`.
-/// Fails unless every provider with a recent or seen set has a dated seen set, since
-/// receivers a provider without one had would look unseen.
+/// Fails if there are none, or unless every provider with a recent or seen set has a
+/// dated seen set, since receivers a provider without one had would look unseen.
 pub(crate) fn seen_sets(sets: &[FilterSet]) -> Result<Vec<(&str, i64, i64)>, DirectoryError> {
     let mut providers = BTreeMap::<&str, Option<(&str, i64, i64)>>::new();
     for set in sets {
@@ -108,6 +105,9 @@ pub(crate) fn seen_sets(sets: &[FilterSet]) -> Result<Vec<(&str, i64, i64)>, Dir
             }
             _ => {}
         }
+    }
+    if providers.is_empty() {
+        return Err(DirectoryError::Malformed);
     }
     providers
         .into_values()

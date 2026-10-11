@@ -11,6 +11,6 @@
   sets `paid` and each provider's `seen`. The receiver PIR client moved here from
   Vizor.
 - `fetch_seen` and `Seen`: a publication's swap provider seen sets, which a wallet
-  checks before issuing a swap address. A publication in which a provider with sets
-  lacks a dated seen set is malformed, for `fetch_seen` and `sweep` alike. They need
-  no `wallet` feature.
+  checks before issuing a swap address. A publication without seen sets, or in which
+  a provider with sets lacks a dated seen set, is malformed, for `fetch_seen` and
+  `sweep` alike. They need no `wallet` feature.

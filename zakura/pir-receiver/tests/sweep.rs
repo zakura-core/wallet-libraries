@@ -1150,6 +1150,51 @@ async fn every_provider_with_sets_needs_a_seen_set() {
     assert_eq!(seen.contains(&held), [true, true, false]);
 }
 
+/// A publication without provider seen sets says nothing of which addresses were
+/// quoted, so a sweep refuses it as `fetch_seen` does, before any key finishes or
+/// spend evidence is released.
+#[tokio::test]
+async fn a_publication_without_seen_sets_finishes_no_sweep() {
+    let mut st = ironwood_wallet();
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let directory = Directory::new(publish(&[], &[], through, &[]));
+    let lock = Labels::default();
+    let result = sweep(
+        st.wallet_mut().db_mut(),
+        &network,
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &directory,
+        &mut NoNotes,
+        &lock,
+        NOW,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(Error::Directory(DirectoryError::Malformed))),
+        "{result:?}"
+    );
+    let labels = lock.0.borrow();
+    assert!(
+        labels
+            .iter()
+            .all(|l| ["dynamic_sweep.due", "dynamic_sweep.attempt"].contains(l)),
+        "{labels:?}"
+    );
+    assert!(
+        st.wallet()
+            .db()
+            .dynamic_history_pending(account, through.height)
+            .unwrap()
+    );
+}
+
 /// A directory whose queries fail after it accepted the session.
 struct FailingQueries(Directory);
 
