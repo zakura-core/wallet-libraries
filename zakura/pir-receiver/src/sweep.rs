@@ -406,6 +406,8 @@ impl<'a, T: Transport> Directory<'a, T> {
                 "the receiver directory's tree size differs from the wallet's at its anchor",
             ));
         }
+        // Seen feeds start at `EARLIEST_RECEIVE_QUOTE`, before any dynamic address existed, so a
+        // sweep ignores their dates; issuance enforces coverage where reuse is at stake.
         let seen = seen_sets(&manifest.directory.filters)?
             .into_iter()
             .map(|(label, _, _)| label.to_owned())
