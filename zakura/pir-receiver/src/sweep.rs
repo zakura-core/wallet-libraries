@@ -237,11 +237,8 @@ where
     N: NoteSource<W>,
     L: WriteLock,
 {
-    let mut swept = Swept {
-        finished: 0,
-        deferred: Vec::new(),
-        pending: false,
-    };
+    let mut finished = 0;
+    let mut deferred = Vec::new();
     let current = at_tip(wallet, through).map_err(Error::Wallet)?;
     let mut transport = Some(transport);
     let mut directory = None;
@@ -286,7 +283,7 @@ where
                     wallet, directory, account, &item, check, lookups, through, notes, lock,
                 );
                 match swept_key.await {
-                    Ok(()) => swept.finished += 1,
+                    Ok(()) => finished += 1,
                     Err(e) => {
                         // Every later key would fail the same way and back off. A session
                         // that failed to open took the transport without replacing it.
@@ -298,7 +295,7 @@ where
                                     DirectoryError::Revision | DirectoryError::Transport(_)
                                 ) | Error::NotesUnavailable(_)
                             );
-                        swept.deferred.push((item.key, e));
+                        deferred.push((item.key, e));
                         if unavailable {
                             break;
                         }
@@ -322,54 +319,42 @@ where
         })
         .map_err(Error::Wallet)?;
     }
-    swept.pending = wallet
-        .dynamic_history_pending(account, through.height)
-        .map_err(Error::Wallet)?;
     if let (true, Some(transport)) = (current, transport) {
-        let keys = wallet.dynamic_keys_to_recheck(account, through.height + 1);
-        if !keys.map_err(Error::Wallet)?.is_empty() {
+        // Closed keys with no known payment need each newer publication's paid filter.
+        let closed = wallet.dynamic_keys_to_recheck(account, through.height + 1);
+        if !closed.map_err(Error::Wallet)?.is_empty() {
             let accepted = Directory::accept(wallet, params, through, genesis, origin, transport);
             directory = Some(accepted.await?);
         }
     }
     if let Some(directory) = &mut directory {
-        swept.pending |= recheck(wallet, directory, account, lock, now).await?;
+        // Only keys this publication has not checked, so the filters are fetched only for
+        // a newer one.
+        let keys = wallet
+            .dynamic_keys_to_recheck(account, directory.anchor.height)
+            .map_err(Error::Wallet)?;
+        if !keys.is_empty() {
+            let checks = directory.check(&keys, now).await?;
+            let checked: Vec<_> = keys
+                .iter()
+                .zip(checks)
+                .map(|(item, check)| (item.key, check.paid))
+                .collect();
+            lock.write("dynamic_sweep.recheck", || {
+                wallet.record_paid_filter_check(account, directory.anchor, &checked)
+            })
+            .map_err(Error::Wallet)?;
+        }
     }
-    Ok(swept)
-}
-
-/// Records the publication's paid filter for `account`'s keys whose sweep finished below
-/// its anchor (see [`DynamicIvkWrite::record_paid_filter_check`]), fetching the filters
-/// only if a key needs them. Returns whether any sweep was queued again.
-async fn recheck<W, T, L>(
-    wallet: &mut W,
-    directory: &mut Directory<'_, T>,
-    account: AccountId<W>,
-    lock: &L,
-    now: i64,
-) -> Result<bool, Error<AccountError<W>>>
-where
-    W: DynamicIvkWrite,
-    T: Transport,
-    L: WriteLock,
-{
-    let keys = wallet
-        .dynamic_keys_to_recheck(account, directory.anchor.height)
+    // Read last, since a paid filter hit queues its key's sweep again.
+    let pending = wallet
+        .dynamic_history_pending(account, through.height)
         .map_err(Error::Wallet)?;
-    if keys.is_empty() {
-        return Ok(false);
-    }
-    let checks = directory.check(&keys, now).await?;
-    let checked: Vec<_> = keys
-        .iter()
-        .zip(checks)
-        .map(|(item, check)| (item.key, check.paid))
-        .collect();
-    lock.write("dynamic_sweep.recheck", || {
-        wallet.record_paid_filter_check(account, directory.anchor, &checked)
+    Ok(Swept {
+        finished,
+        deferred,
+        pending,
     })
-    .map_err(Error::Wallet)?;
-    Ok(checked.iter().any(|&(_, paid)| paid))
 }
 
 /// Whether `through` is still the wallet's stored chain tip and the block it scanned
