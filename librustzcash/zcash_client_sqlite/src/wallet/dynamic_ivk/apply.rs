@@ -211,7 +211,9 @@ pub(super) fn apply_payment<P: Parameters, CL: Clock, R: Rng>(
         ],
         |r| r.get(0),
     )?;
-    // A stored raw transaction must hold the claimed action; absent bytes prove nothing.
+    // A stored raw transaction must hold the claimed action. Without raw bytes only the label
+    // is unverified (value, position and nullifier are authenticated); relabeling once raw
+    // arrives could drop spend state.
     let stored_tx = wallet::get_transaction(conn, params, candidate.txid)?.map(|(_, tx)| tx);
     let contradicted = stored_tx.as_ref().is_some_and(|tx| {
         let action = tx.ironwood_bundle().and_then(|b| {
