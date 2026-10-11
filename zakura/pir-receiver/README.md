@@ -8,11 +8,14 @@ incoming lookahead key, is first tested against the publication's filters, which
 every wallet downloads alike. Only a receiver in the paid set is looked up over PIR,
 and the payments found are imported only after the wallet checks them against its own
 chain. A receiver in a swap provider's seen set is marked seen as its sweep attempt
-starts, before any lookup, so issuance does not hand it out again. Every swept key then keeps scanning for the store's restore watch,
-from the block after the publication's end, so a payment the publication missed is
-found by scanning; the store documents how long the watch lasts (for
-`zakura-client-sqlite`, `close_finished_dynamic_keys`). A run that finds nothing to
-look up opens no PIR session and fetches no witnesses.
+starts, before any lookup, so issuance does not hand it out again. A key whose receiver
+a provider was given within the wallet's restore watch keeps scanning after its sweep,
+and any other closes. A provider's recent set is trusted only if its feed read the
+provider within the last fifteen minutes and its window and feed history cover that
+watch; unless every provider has such a set, every key keeps scanning. A closed key
+with no known payment is checked against each newer publication's paid filter, and
+swept again on a hit. A run that finds nothing to look up opens no PIR session and
+fetches no witnesses.
 
 Applications supply:
 
@@ -34,8 +37,9 @@ until they land on its `main`.
 `tests/sweep.rs` serves a directory in process through the receiver service's own
 routes and checks that a restored wallet finds and imports a payout, extends its
 lookahead past it, repeats no finished sweep, imports every payment of a key paid
-twice, makes no lookup when nothing was paid, keeps every swept address scanning and
-issues no seen one, refuses a publication that is not on its chain before any lookup,
+twice, makes no lookup when nothing was paid, keeps scanning only recently quoted
+addresses, and every address unless each provider has a recent set, issues no seen
+one, finds a payment to a closed address through a newer paid filter, refuses a publication that is not on its chain before any lookup,
 refuses one without seen sets or in which a provider lacks one, and replaces a
 deferred payment with a later publication's answer.
 Against a fake Enhance service, `EnhanceNotes` accepts fresh routing after a refused

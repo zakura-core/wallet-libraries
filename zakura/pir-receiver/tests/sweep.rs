@@ -174,9 +174,9 @@ fn pay_restored_key_of(
     (record, ciphertext[52..].try_into().unwrap())
 }
 
-/// A swap provider's sets: an empty recent set, which wallets do not read, and every
-/// receiver it ever had, from a feed that started long before [`NOW`] and last read the
-/// provider a minute before it.
+/// A swap provider's sets: an empty recent set covering the wallet's restore watch, and
+/// every receiver it ever had, from a feed that started long before [`NOW`] and last
+/// read the provider a minute before it.
 fn provider(seen: &[Receiver]) -> Vec<ProviderSet> {
     provider_named("near-intents", seen)
 }
@@ -390,8 +390,10 @@ async fn a_restore_sweep_finds_a_payout_and_moves_the_lookahead_past_it() {
         directory.requests()
     );
 
-    // A later run finds every sweep finished and asks the directory nothing.
-    let before = directory.requests();
+    // A later run finds every sweep finished and the publication already checked, so
+    // it fetches only the manifest.
+    let mut before = directory.requests();
+    before.push("GET /v1/receiver/init".into());
     let swept = sweep(
         st.wallet_mut().db_mut(),
         &network,
@@ -592,18 +594,72 @@ async fn a_wallet_without_payments_downloads_only_the_filters() {
     let requests = directory.requests();
     assert_eq!(requests.len(), 2, "{requests:?}");
     assert!(requests[1].starts_with("GET /v1/receiver/filters/"));
-    // Every swept key keeps scanning, so a payment after the publication is found.
-    let scanning = st.wallet().get_dynamic_scanning_keys().unwrap().len();
-    assert_eq!(scanning as u64, RECEIVE_GAP_LIMIT);
-    pay_restored_key(&mut st, 0, 0);
+    // No swap reached these addresses recently, so none keeps scanning.
+    assert!(st.wallet().get_dynamic_scanning_keys().unwrap().is_empty());
+}
+
+/// A key closed after its sweep is checked against each newer publication's paid filter,
+/// so a payment after the first publication's anchor is found once a publication shows
+/// it, and not before. A publication already checked costs only its manifest, and a key
+/// with a known payment is not swept again.
+#[tokio::test]
+async fn a_newer_paid_filter_finds_a_payment_to_a_closed_key() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    restore(&mut st, account);
+    let first = tip(&st);
+    let directory = Directory::new(publish(&[], &[], first, &provider(&[])));
+    let mut notes = Notes {
+        data: BTreeMap::new(),
+        requested: Vec::new(),
+    };
+    settle(&mut st, &[account], first, &directory, &mut notes).await;
+    assert!(st.wallet().get_dynamic_scanning_keys().unwrap().is_empty());
+
+    // The closed key misses a payment, which the same publication cannot show.
+    let (record, note_data) = pay_restored_key(&mut st, 0, 0);
+    let through = tip(&st);
+    let before = directory.requests().len();
+    let swept = run(&mut st, &[account], through, &directory, &mut notes, NOW).await;
+    assert!(!swept.unwrap().pending);
+    assert_eq!(directory.requests()[before..], ["GET /v1/receiver/init"]);
+    assert_eq!(st.get_total_balance(account), Zatoshis::ZERO);
+
+    let directory = Directory::new(publish(
+        std::slice::from_ref(&record),
+        &[record.payment.cmx],
+        through,
+        &provider(&[]),
+    ));
+    notes.data.insert(record.payment.position, note_data);
+    // The paid key, then the lookahead key its index brings in.
+    assert_eq!(
+        settle(&mut st, &[account], through, &directory, &mut notes).await,
+        2
+    );
     assert_eq!(
         st.get_total_balance(account),
         Zatoshis::const_from_u64(VALUE)
     );
+
+    // A later publication still holds the paid key, but it is not looked up again.
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    let later = tip(&st);
+    let directory = Directory::new(publish(
+        std::slice::from_ref(&record),
+        &[record.payment.cmx],
+        later,
+        &provider(&[]),
+    ));
+    let swept = run(&mut st, &[account], later, &directory, &mut notes, NOW).await;
+    let swept = swept.unwrap();
+    assert_eq!((swept.finished, swept.pending), (0, false));
+    assert!(directory.requests().iter().all(|r| !r.starts_with("POST")));
 }
 
 #[tokio::test]
-async fn seen_addresses_keep_scanning_and_are_never_issued_again() {
+async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
     let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
     st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
@@ -617,25 +673,27 @@ async fn seen_addresses_keep_scanning_and_are_never_issued_again() {
             .address_at(0u32, Scope::External);
         Receiver::from_bytes(address.to_raw_address_bytes()).unwrap()
     };
-    // The old device quoted addresses 0 and 2.
+    // The old device quoted addresses 0 and 2, and 2 only today.
     let (old, quoted) = (
         KeyId::new(Purpose::Receive, 0),
         KeyId::new(Purpose::Receive, 2),
     );
-    let directory = Directory::new(publish(
-        &[],
-        &[],
-        through,
-        &provider(&[receiver(old), receiver(quoted)]),
-    ));
+    let mut sets = provider(&[receiver(old), receiver(quoted)]);
+    sets[0].receivers = vec![receiver(quoted)];
+    let directory = Directory::new(publish(&[], &[], through, &sets));
     let mut notes = Notes {
         data: BTreeMap::new(),
         requested: Vec::new(),
     };
     settle(&mut st, &[account], through, &directory, &mut notes).await;
-    // The seen address 2 moves the lookahead, and every swept key keeps scanning.
-    let scanning = st.wallet().get_dynamic_scanning_keys().unwrap().len();
-    assert_eq!(scanning as u64, RECEIVE_GAP_LIMIT + 3);
+    let scanning: Vec<_> = st
+        .wallet()
+        .get_dynamic_scanning_keys()
+        .unwrap()
+        .iter()
+        .map(|k| k.key_id())
+        .collect();
+    assert_eq!(scanning, [quoted]);
     // Issuance reads the same seen set, skips both, and takes the lowest address the
     // provider never had.
     let seen = fetch_seen(ORIGIN, &directory, GENESIS).await.unwrap();
@@ -946,7 +1004,8 @@ async fn release_after(behind: u32, other: impl FnOnce(&mut OtherWriter, ChainPo
         height,
         hash: st.wallet().get_block_hash(height).unwrap().unwrap(),
     };
-    let directory = Directory::new(publish(&[], &[], end, &provider(&[])));
+    // Without a recent set, every key keeps scanning from the block after `end`.
+    let directory = Directory::new(publish(&[], &[], end, &provider(&[])[1..]));
     let swept = sweep(
         st.wallet_mut().db_mut(),
         &network,
@@ -1193,6 +1252,29 @@ async fn a_publication_without_seen_sets_finishes_no_sweep() {
             .dynamic_history_pending(account, through.height)
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn every_address_keeps_scanning_unless_each_provider_has_a_recent_set() {
+    for both_recent in [true, false] {
+        let mut st = ironwood_wallet();
+        let account = st.test_account().unwrap().id();
+        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+        restore(&mut st, account);
+        let through = tip(&st);
+        // Provider `b` publishes only its seen set when `both_recent` is false.
+        let mut sets = provider_named("a", &[]);
+        let b = provider_named("b", &[]);
+        sets.extend(b.into_iter().skip(usize::from(!both_recent)));
+        let directory = Directory::new(publish(&[], &[], through, &sets));
+        let mut notes = Notes {
+            data: BTreeMap::new(),
+            requested: Vec::new(),
+        };
+        settle(&mut st, &[account], through, &directory, &mut notes).await;
+        let scanning = st.wallet().get_dynamic_scanning_keys().unwrap().len() as u64;
+        assert_eq!(scanning, if both_recent { 0 } else { RECEIVE_GAP_LIMIT });
+    }
 }
 
 /// A directory whose queries fail after it accepted the session.

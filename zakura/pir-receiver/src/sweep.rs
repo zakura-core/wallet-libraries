@@ -5,11 +5,12 @@ use std::{collections::BTreeMap, num::NonZeroU32};
 use futures_util::StreamExt;
 use receiver_directory::{
     Receiver,
-    filter::{Filters, PAID},
+    filter::{Filters, PAID, RECENT},
+    snapshot::FilterSet,
     witness::WitnessSnapshot,
 };
 use receiver_pir::{AcceptedCoverage, transport::DirectoryClient};
-use zakura_dynamic_ivk::KeyId;
+use zakura_dynamic_ivk::{KeyId, lifecycle::RESTORE_WATCH_SECS};
 use zakura_pir_enhance::{
     ClientError, ClientResourceLimits,
     transport::{Client, PendingClient, Transport as EnhanceTransport},
@@ -40,6 +41,9 @@ const BATCH: NonZeroU32 = NonZeroU32::new(64).unwrap();
 /// Positions whose note data one request asks for. Each batch is queued as it arrives,
 /// so a long history keeps its progress when a run stops partway.
 const NOTE_BATCH: usize = 64;
+/// How long before `now` a provider's recent set may have last read its feed and still
+/// rule a receiver out. A quote made after that read is missing from the set.
+const RECENT_SET_MAX_AGE_SECS: i64 = 15 * 60;
 
 /// Why a sweep run, or one key's sweep, stopped. `E` is the wallet's error type.
 #[derive(Debug, thiserror::Error)]
@@ -192,9 +196,19 @@ pub struct Swept<A, E> {
 /// Each key's receiver is first tested against the publication's filters, which every
 /// wallet downloads alike: only a receiver in the paid set is looked up over PIR, and
 /// one in a swap provider's seen set is never issued again (see
-/// [`DynamicIvkWrite::begin_dynamic_sweep_attempt`]). Whatever the provider sets say,
-/// every swept key then keeps scanning for the wallet's restore watch (see
-/// [`DynamicIvkWrite::apply_dynamic_sweep`]).
+/// [`DynamicIvkWrite::begin_dynamic_sweep_attempt`]). A key whose receiver a provider's
+/// recent set holds keeps scanning for the wallet's restore watch, and any other closes
+/// (see [`DynamicIvkWrite::apply_dynamic_sweep`]). A recent set can rule a receiver out
+/// only if it is current and complete: its feed's last read began at most fifteen
+/// minutes before `now`, and its window, with the feed running throughout, covers
+/// [`RESTORE_WATCH_SECS`]. Unless every provider has such a set, every key keeps
+/// scanning.
+///
+/// After releasing, the run checks closed keys with no known payment against the
+/// publication's paid filter once per publication (see
+/// [`DynamicIvkWrite::record_paid_filter_check`]), so a payment the publication shows
+/// after such a key closed is swept on a later run. While any such key exists, every
+/// run fetches the manifest; it fetches the filters only for a newer publication.
 ///
 /// A run that looks nothing up opens no PIR session and fetches no witnesses. New
 /// payments a lookup finds take their note data from `notes`. A run sweeps at most one
@@ -203,7 +217,7 @@ pub struct Swept<A, E> {
 /// A key that fails is backed off and listed in [`Swept::deferred`], and the others go
 /// on, unless the directory's session or connection failed or `notes` cannot serve the
 /// wallet's chain: then the run stops before leasing more keys. A lease the wallet fails to store stops the run with its error.
-/// `now` is the caller's clock in seconds, for retry backoff.
+/// `now` is the caller's clock in seconds, for retry backoff and the recent sets.
 #[allow(clippy::too_many_arguments)]
 pub async fn sweep<W, P, T, N, L>(
     wallet: &mut W,
@@ -238,12 +252,15 @@ where
         pending: false,
     };
     let current = at_tip(wallet, through).map_err(Error::Wallet)?;
+    let mut transport = Some(transport);
+    let mut directory = None;
     if current {
         let work = due(wallet, accounts, through, lock, now)?;
         if !work.is_empty() {
+            let transport = transport.take().expect("not yet used");
             let accepted =
                 Directory::accept(wallet, params, through, genesis, origin, transport).await;
-            let mut directory = match accepted {
+            let directory = directory.insert(match accepted {
                 Ok(directory) => directory,
                 Err(e) => {
                     // No key can be swept without the directory, so each backs off as
@@ -257,8 +274,8 @@ where
                     }
                     return Err(e);
                 }
-            };
-            let checks = directory.check(&work)?;
+            });
+            let checks = directory.check(&work, now).await?;
             let lookups = checks.iter().filter(|check| check.paid).count();
             if let Some(session) = &mut directory.session {
                 session.client.use_file_for_work(lookups).await?;
@@ -270,15 +287,7 @@ where
                 })
                 .map_err(Error::Wallet)?;
                 let swept_key = sweep_key(
-                    wallet,
-                    &mut directory,
-                    account,
-                    &item,
-                    check.paid,
-                    lookups,
-                    through,
-                    notes,
-                    lock,
+                    wallet, directory, account, &item, check, lookups, through, notes, lock,
                 );
                 match swept_key.await {
                     Ok(()) => swept.finished += 1,
@@ -326,7 +335,60 @@ where
             .dynamic_history_pending(*account, through.height)
             .map_err(Error::Wallet)?;
     }
+    if let (true, Some(transport)) = (current, transport) {
+        let mut closed = false;
+        for account in accounts {
+            let keys = wallet.dynamic_keys_to_recheck(*account, through.height + 1);
+            closed |= !keys.map_err(Error::Wallet)?.is_empty();
+        }
+        if closed {
+            let accepted = Directory::accept(wallet, params, through, genesis, origin, transport);
+            directory = Some(accepted.await?);
+        }
+    }
+    if let Some(directory) = &mut directory {
+        swept.pending |= recheck(wallet, directory, accounts, lock, now).await?;
+    }
     Ok(swept)
+}
+
+/// Records the publication's paid filter for `accounts`' keys whose sweep finished below
+/// its anchor (see [`DynamicIvkWrite::record_paid_filter_check`]), fetching the filters
+/// only if a key needs them. Returns whether any sweep was queued again.
+async fn recheck<W, T, L>(
+    wallet: &mut W,
+    directory: &mut Directory<'_, T>,
+    accounts: &[AccountId<W>],
+    lock: &L,
+    now: i64,
+) -> Result<bool, Error<AccountError<W>>>
+where
+    W: DynamicIvkWrite,
+    T: Transport,
+    L: WriteLock,
+{
+    let mut queued = false;
+    for &account in accounts {
+        let keys = wallet
+            .dynamic_keys_to_recheck(account, directory.anchor.height)
+            .map_err(Error::Wallet)?;
+        if keys.is_empty() {
+            continue;
+        }
+        let work: Vec<_> = keys.into_iter().map(|item| ((), item)).collect();
+        let checks = directory.check(&work, now).await?;
+        let checked: Vec<_> = work
+            .iter()
+            .zip(checks)
+            .map(|((_, item), check)| (item.key, check.paid))
+            .collect();
+        queued |= checked.iter().any(|&(_, paid)| paid);
+        lock.write("dynamic_sweep.recheck", || {
+            wallet.record_paid_filter_check(account, directory.anchor, &checked)
+        })
+        .map_err(Error::Wallet)?;
+    }
+    Ok(queued)
 }
 
 /// Whether `through` is still the wallet's stored chain tip and the block it scanned
@@ -341,13 +403,15 @@ fn at_tip<W: WalletRead>(wallet: &W, through: ChainPoint) -> Result<bool, W::Err
 struct Check {
     /// The paid set holds it, so a lookup may find payments.
     paid: bool,
+    /// A swap may still pay it, so its key keeps scanning after its sweep.
+    recent: bool,
     /// A swap provider's seen set holds it, so it is never issued again.
     seen: bool,
 }
 
-/// A receiver-directory publication accepted at a block the wallet scanned, with its
-/// filters. Its PIR session and common witnesses are fetched only once a key needs a
-/// lookup or has payments to apply.
+/// A receiver-directory publication accepted at a block the wallet scanned. Its filters
+/// are fetched only once a key needs them, and its PIR session and common witnesses only
+/// once a key needs a lookup or has payments to apply.
 struct Directory<'a, T> {
     origin: &'a str,
     /// Moves into the session when one opens.
@@ -355,7 +419,7 @@ struct Directory<'a, T> {
     manifest: receiver_pir::Manifest,
     accepted: AcceptedCoverage,
     anchor: ChainPoint,
-    filters: Filters,
+    filters: Option<Filters>,
     /// The labels of the provider seen sets.
     seen: Vec<String>,
     session: Option<Session<T>>,
@@ -370,7 +434,7 @@ struct Session<T> {
 
 impl<'a, T: Transport> Directory<'a, T> {
     /// Accepts the publication `origin` serves, at the block of the wallet's chain it
-    /// ends at, and downloads its filters.
+    /// ends at.
     async fn accept<W: DynamicIvkRead, P: Parameters>(
         wallet: &W,
         params: &P,
@@ -412,40 +476,78 @@ impl<'a, T: Transport> Directory<'a, T> {
             .into_iter()
             .map(|(label, _, _)| label.to_owned())
             .collect();
-        let filters = DirectoryClient::fetch_filters(origin, &transport, &manifest).await?;
         Ok(Self {
             origin,
             transport: Some(transport),
             manifest,
             accepted,
             anchor,
-            filters,
+            filters: None,
             seen,
             session: None,
         })
     }
 
-    /// What the filters say about each item's receiver.
-    fn check<A>(&self, work: &[(A, DiscoveryWork)]) -> Result<Vec<Check>, DirectoryError> {
+    /// What the filters say about each item's receiver at `now`, downloading them first
+    /// if needed; see [`sweep`] for how the recent sets are read.
+    async fn check<A, E>(
+        &mut self,
+        work: &[(A, DiscoveryWork)],
+        now: i64,
+    ) -> Result<Vec<Check>, Error<E>> {
         let receivers = work
             .iter()
             .map(|(_, item)| Receiver::from_bytes(item.receiver))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DirectoryError::from)?;
+        if self.filters.is_none() {
+            let transport = self
+                .transport
+                .as_ref()
+                .ok_or(Error::Unavailable("the receiver directory session failed"))?;
+            let filters =
+                DirectoryClient::fetch_filters(self.origin, transport, &self.manifest).await?;
+            self.filters = Some(filters);
+        }
         let key = &self.manifest.directory.salt;
+        let filters = self.filters.as_ref().expect("fetched above");
         // Fetching the filters checked them against the manifest's sets.
         let matches = |label: &str| {
-            self.filters
+            filters
                 .get(label)
                 .expect("the manifest declares every set")
                 .matches(key, &receivers)
         };
         let mut checks: Vec<_> = matches(PAID)
             .into_iter()
-            .map(|paid| Check { paid, seen: false })
+            .map(|paid| Check {
+                paid,
+                recent: false,
+                seen: false,
+            })
             .collect();
+        // Every provider has a seen set (see `seen_sets`), and needs a current, complete
+        // recent set too, or any receiver may still be paid.
+        let mut complete = true;
         for label in &self.seen {
             for (check, hit) in checks.iter_mut().zip(matches(label)) {
                 check.seen |= hit;
+            }
+            let provider = label.split_once('/').map_or(label.as_str(), |(p, _)| p);
+            let recent = format!("{provider}/{RECENT}");
+            let sets = &self.manifest.directory.filters;
+            match sets.iter().find(|set| set.label == recent) {
+                Some(set) if covers_restore_watch(set, now) => {
+                    for (check, hit) in checks.iter_mut().zip(matches(&recent)) {
+                        check.recent |= hit;
+                    }
+                }
+                _ => complete = false,
+            }
+        }
+        if !complete {
+            for check in &mut checks {
+                check.recent = true;
             }
         }
         Ok(checks)
@@ -473,6 +575,22 @@ impl<'a, T: Transport> Directory<'a, T> {
     }
 }
 
+/// Whether a provider's recent set can rule a receiver out at `now`: its feed's last
+/// read began at most [`RECENT_SET_MAX_AGE_SECS`] before `now`, and its window, which
+/// reaches back from that read through the time the feed was running, covers
+/// [`RESTORE_WATCH_SECS`].
+fn covers_restore_watch(set: &FilterSet, now: i64) -> bool {
+    let window = set.window_secs.and_then(|w| i64::try_from(w).ok());
+    match (window, set.since_unix, set.until_unix) {
+        (Some(window), Some(since), Some(until)) => {
+            window >= RESTORE_WATCH_SECS
+                && since <= until.saturating_sub(window)
+                && until >= now.saturating_sub(RECENT_SET_MAX_AGE_SECS)
+        }
+        _ => false,
+    }
+}
+
 /// `accounts`' due sweeps at `through`, a bounded batch per account.
 fn due<W: DynamicIvkWrite, L: WriteLock>(
     wallet: &mut W,
@@ -494,9 +612,9 @@ fn due<W: DynamicIvkWrite, L: WriteLock>(
     Ok(work)
 }
 
-/// Sweeps one key whose attempt is leased: looks up its receiver if `paid`, the paid
-/// set holds it, queues the answer, empty on a miss, with new payments' note data in
-/// batches, and applies it with the publication's witnesses. `lookups` is the batch's
+/// Sweeps one key whose attempt is leased: looks up its receiver if `check` shows the
+/// paid set holds it, queues the answer, empty on a miss, with new payments' note data
+/// in batches, and applies it with the publication's witnesses. `lookups` is the batch's
 /// lookup count, which sizes a session that this key opens.
 #[allow(clippy::too_many_arguments)]
 async fn sweep_key<W, T, N, L>(
@@ -504,7 +622,7 @@ async fn sweep_key<W, T, N, L>(
     directory: &mut Directory<'_, T>,
     account: AccountId<W>,
     item: &DiscoveryWork,
-    paid: bool,
+    check: Check,
     lookups: usize,
     through: ChainPoint,
     notes: &mut N,
@@ -518,6 +636,7 @@ where
 {
     let key = item.key;
     let anchor = directory.anchor;
+    let paid = check.paid;
     let payments: Vec<_> = if paid {
         let receiver = Receiver::from_bytes(item.receiver).map_err(DirectoryError::from)?;
         let accepted = directory.accepted;
@@ -568,8 +687,8 @@ where
     };
     let applied = apply_queued(payments.len(), || {
         lock.write("dynamic_sweep.apply", || {
-            wallet.apply_dynamic_sweep(account, key, through, anchor, |position, cmx| {
-                witnesses.and_then(|w| w.path(position, cmx).ok())
+            wallet.apply_dynamic_sweep(account, key, through, anchor, check.recent, |p, cmx| {
+                witnesses.and_then(|w| w.path(p, cmx).ok())
             })
         })
         .map_err(Error::Wallet)?
@@ -617,6 +736,55 @@ fn directory_payment(payment: receiver_directory::Payment) -> DirectoryPayment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A recent set of `window_secs` from a feed that started at `since_unix` and last
+    /// read the provider at `until_unix`.
+    fn recent(window_secs: Option<u64>, since_unix: Option<i64>, until_unix: i64) -> FilterSet {
+        FilterSet {
+            label: "near-intents/recent".into(),
+            count: 0,
+            window_secs,
+            since_unix,
+            until_unix: Some(until_unix),
+        }
+    }
+
+    #[test]
+    fn a_recent_set_rules_receivers_out_only_when_current_across_the_whole_watch() {
+        let now = 10 * RESTORE_WATCH_SECS;
+        let watch = RESTORE_WATCH_SECS as u64;
+        let read = now - 60;
+        let started = Some(read - RESTORE_WATCH_SECS);
+        assert!(covers_restore_watch(
+            &recent(Some(watch), started, read),
+            now
+        ));
+        assert!(covers_restore_watch(
+            &recent(Some(2 * watch), Some(0), read),
+            now
+        ));
+        // A shorter window, or a feed younger than the window, can miss a quote.
+        assert!(!covers_restore_watch(
+            &recent(Some(watch - 1), started, read),
+            now
+        ));
+        assert!(!covers_restore_watch(
+            &recent(Some(watch), Some(read - 60), read),
+            now
+        ));
+        assert!(!covers_restore_watch(&recent(None, started, read), now));
+        assert!(!covers_restore_watch(&recent(Some(watch), None, read), now));
+        // So can a set whose feed stalled: quotes after its last read are missing.
+        let stalled = now - RECENT_SET_MAX_AGE_SECS - 1;
+        let started = Some(stalled - RESTORE_WATCH_SECS);
+        assert!(!covers_restore_watch(
+            &recent(Some(watch), started, stalled),
+            now
+        ));
+        let mut undated = recent(Some(watch), started, read);
+        undated.until_unix = None;
+        assert!(!covers_restore_watch(&undated, now));
+    }
 
     /// Runs [`apply_queued`] for `queued` payments over `results`, returning what it
     /// returned and how many results it took.
