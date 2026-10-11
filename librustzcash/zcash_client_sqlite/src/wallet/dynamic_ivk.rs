@@ -47,8 +47,8 @@ pub(crate) use planner::{begin_sweep_attempt, history_pending, keys_to_recheck, 
 pub(crate) use recovery::{maintain, record_paid_check};
 pub(crate) use reservations::RECEIVE_LOOKAHEAD;
 pub use reservations::{
-    EARLIEST_RECEIVE_QUOTE, OperationOutcome, ProviderSeen, RECEIVE_GAP_LIMIT,
-    RECEIVE_RECLAIM_SECONDS, ReceiveDeposit, SEEN_SLACK_SECONDS,
+    OperationOutcome, ProviderSeen, RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, ReceiveDeposit,
+    SEEN_SLACK_SECONDS,
 };
 pub(crate) use retention::finish_nullifier_recovery;
 pub(crate) use sweep::{note_data_needed, publication_anchor, queue_directory_lookup};
@@ -83,8 +83,7 @@ use crate::{AccountUuid, WalletDb, error::SqliteClientError, util::Clock};
 /// Why issuance or an incoming operation must wait. The app owns its wording.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReservationPolicy {
-    /// Recovery has not established the next safe index, for example because no seen set
-    /// covers a restored address's possible quotes (see [`ProviderSeen`]).
+    /// Recovery has not established the next safe index.
     Gap,
     /// Swaps in progress hold every incoming index the recovery gap allows.
     Limit,
@@ -183,7 +182,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// [`ProviderSeen`] for the addresses never issued and [`RECEIVE_GAP_LIMIT`] for the
     /// window. `seen` is the provider's current set, if the caller could fetch it, and
     /// `tip` the network's chain tip (see [`ISSUANCE_TIP_LAG`]). Issuance waits for the
-    /// restore lookahead's sweeps, which may reveal paid or seen indices.
+    /// restore lookahead's sweeps, which may reveal paid or seen indices, and checks the
+    /// set first, so the lookahead covers any window its hits widen.
     pub fn prepare_receive_reservation(
         &mut self,
         account: AccountUuid,
@@ -194,7 +194,6 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
         let registered_at = unix_now(&self.clock);
         self.transactionally(|db| {
             let (conn, params) = (db.conn.0, db.params);
-            // Hits advance allocation, so the lookahead then covers the window they widen.
             if let Some(seen) = seen {
                 let (account_ref, _) = account_key(conn, params, account)?;
                 reservations::record_seen(conn, account_ref.0, seen)?;
@@ -205,11 +204,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
                 Ok(from) => from,
                 Err(policy) => return Ok(Err(policy)),
             };
-            let issued = reservations::prepare(conn, params, account, now, scan_from, seen)?;
-            // In a restored account, issuance moves the lookahead (see
-            // `recovery::maintain_receive_lookahead`), so its sweep can run before the next.
-            recovery::extend_receive_lookahead(conn, params, account, registered_at)?;
-            Ok(issued)
+            reservations::prepare(conn, params, account, now, scan_from, seen)
         })
     }
 

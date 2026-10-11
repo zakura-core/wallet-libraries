@@ -213,11 +213,9 @@ pub(super) fn extend_receive_lookahead<P: Parameters>(
     maintain_receive_lookahead(conn, params, account, RECEIVE_LOOKAHEAD, start, now)
 }
 
-/// Keeps `count` swept incoming keys above the highest allocated index. In a new account
-/// it stops above a key this wallet issued, since nothing above it was handed out; in an
-/// account restored with `recover_until`, the old device may have quoted beyond the keys
-/// this wallet issues, so it always keeps going. This is bounded-gap recovery, not a
-/// completeness proof.
+/// Keeps `count` swept incoming keys above the highest allocated index, while that index
+/// is a restored one or there is none: above a key this wallet issued, it handed nothing
+/// out. This is bounded-gap recovery, not a completeness proof.
 pub(super) fn maintain_receive_lookahead<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -230,8 +228,7 @@ pub(super) fn maintain_receive_lookahead<P: Parameters>(
     let top: Option<(Vec<u8>, bool)> = conn
         .query_row(
             &format!(
-                "SELECT k.key_index, ({RESTORED}) OR a.recover_until_height IS NOT NULL
-                 FROM ironwood_receiving_keys k JOIN accounts a ON a.id = k.account_id
+                "SELECT k.key_index, ({RESTORED}) FROM ironwood_receiving_keys k
                  WHERE k.account_id = ?1 AND k.purpose = 1 AND k.advances_allocation = 1
                  ORDER BY k.key_index DESC LIMIT 1"
             ),
