@@ -96,6 +96,8 @@ impl std::error::Error for DerivationError {}
 /// FVK encoding `ak || nk || rivk` (protocol §5.6.4.4), as ZIP 32 derives an
 /// internal `rivk`.
 fn expand_rivk(fvk: &[u8; 96], domain: u8, suffix: &[u8]) -> [u8; 32] {
+    // blake2b_simd's State cannot be zeroized; wiping its outputs is best-effort
+    // hygiene, not erasure of every temporary.
     let wide = Zeroizing::new(
         *blake2b_simd::Params::new()
             .hash_length(64)
