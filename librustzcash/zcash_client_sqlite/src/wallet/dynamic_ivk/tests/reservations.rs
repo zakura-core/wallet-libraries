@@ -718,6 +718,36 @@ fn seen_hits_extend_the_lookahead_before_issuance() {
     assert_eq!(issue(&mut st, seen), Ok(window + 1));
 }
 
+/// An address past the registered lookahead is checked against the seen set before it
+/// is issued: here the old device's requests for the first window never reached the
+/// provider, but its quote for the next address did.
+#[test]
+fn issuance_checks_unregistered_addresses_against_the_seen_set() {
+    let window = RECEIVE_GAP_LIMIT;
+    let mut st = fixture();
+    assert_eq!(issue(&mut st, None), Err(ReservationPolicy::Gap));
+    sweep_pending(&mut st);
+    let held = [window];
+    let seen = Some((0, NOW + SEEN_SLACK_SECONDS, &held[..]));
+    let account = st.test_account().unwrap().id();
+    for expected in 0..window {
+        let index = issue(&mut st, seen).unwrap();
+        assert_eq!(index, expected);
+        let key = get_key(
+            st.wallet().db(),
+            account,
+            KeyId::new(Purpose::Receive, index),
+        );
+        quote(
+            &mut st,
+            &key.unwrap().unwrap(),
+            &format!("quote-{index}"),
+            true,
+        );
+    }
+    assert_eq!(issue(&mut st, seen), Ok(window + 1));
+}
+
 #[test]
 fn issuance_skips_restored_addresses_the_provider_saw() {
     let mut st = fixture();
