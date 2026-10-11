@@ -549,6 +549,8 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     ) -> Result<Self, rusqlite::Error> {
         rusqlite::Connection::open(path).and_then(move |conn| {
             rusqlite::vtab::array::load_module(&conn)?;
+            #[cfg(not(feature = "orchard"))]
+            wallet::init::refuse_dynamic_ivk_state(&conn)?;
             Ok(WalletDb {
                 conn,
                 params,
@@ -820,6 +822,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         F: FnOnce(&mut WalletDb<SqlTransaction<'_>, &P, &CL, &mut R>) -> Result<A, E>,
     {
         let tx = self.conn.borrow_mut().transaction()?;
+        #[cfg(not(feature = "orchard"))]
+        wallet::init::refuse_dynamic_ivk_state(&tx)?;
         let mut wdb = WalletDb {
             conn: SqlTransaction(&tx),
             params: &self.params,
@@ -882,6 +886,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         ) -> Result<A, E>,
     {
         let tx = self.conn.borrow_mut().transaction()?;
+        #[cfg(not(feature = "orchard"))]
+        wallet::init::refuse_dynamic_ivk_state(&tx)?;
         let mut wdb = WalletDb {
             conn: SqlTransaction(&tx),
             params: &self.params,

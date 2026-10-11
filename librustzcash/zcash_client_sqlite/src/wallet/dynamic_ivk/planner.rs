@@ -88,9 +88,10 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
     discovery_work(rows).map(Ok)
 }
 
-/// Implements `DynamicIvkRead::dynamic_keys_to_recheck`: closed keys without a known
+/// Implements `DynamicIvkRead::dynamic_keys_to_recheck`: closed keys without a mined
 /// payment whose sweep row, if any, is finished below `height`. A key scanned here has
-/// none until its first paid filter check (see `recovery::record_paid_check`).
+/// none until its first paid filter check (see `recovery::record_paid_check`). `used`
+/// is not payment evidence: it also marks a receipt that expired unmined.
 pub(crate) fn keys_to_recheck<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -102,7 +103,10 @@ pub(crate) fn keys_to_recheck<P: Parameters>(
         "SELECT k.purpose, k.key_index, k.receiver
          FROM ironwood_receiving_keys k
          LEFT JOIN ironwood_dynamic_sweeps s ON s.receiving_key_id = k.id
-         WHERE k.account_id = ?1 AND k.closed_at IS NOT NULL AND k.used = 0
+         WHERE k.account_id = ?1 AND k.closed_at IS NOT NULL AND k.paid_before_birthday = 0
+           AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n
+               JOIN transactions t ON t.id_tx = n.transaction_id
+               WHERE n.receiving_key_id = k.id AND t.mined_height IS NOT NULL)
            AND (s.receiving_key_id IS NULL OR s.done_height < ?2)
          ORDER BY k.id",
     )?;

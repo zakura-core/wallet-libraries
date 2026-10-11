@@ -170,8 +170,8 @@ workspace.
   transaction stores their memo: they carry none the wallet reads, since the refund
   marker is on internal change. While a dynamic key is open, blocks and transactions
   processed without the dynamic keys are refused (`SqliteClientError::DynamicIvksNotUsed`).
-  A build without `orchard` refuses to initialize a database holding dynamic IVK state
-  (`WalletMigrationError::DynamicIvksRequireOrchard`).
+  A build without `orchard` refuses to open or initialize a database holding dynamic IVK
+  state (`WalletMigrationError::DynamicIvksRequireOrchard`).
   Invalid input to these calls is `SqliteClientError::InvalidDynamicIvkInput`, and a call
   that must wait returns its `ReservationPolicy` or `SweepDeferral` as an `Ok` value.
 - Issuance: `WalletDb::reserve_refund_key` and `prepare_receive_reservation`, which require

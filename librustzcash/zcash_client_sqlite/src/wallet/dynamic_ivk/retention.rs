@@ -57,7 +57,8 @@ pub(crate) fn finish_nullifier_recovery<P: Parameters>(
         return Ok(false);
     }
     // Pending sweeps keep evidence from their earliest possible payment, and a queued
-    // candidate from its height. Scanned keys never need it.
+    // candidate from its height. A later sweep of a closed key whose evidence is released
+    // waits for a replay instead (see `queue_spend_history`).
     let pending: Option<u32> = conn.query_row(
         "SELECT MIN(h) FROM (
             SELECT k.scan_from AS h FROM ironwood_dynamic_sweeps s
