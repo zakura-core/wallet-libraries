@@ -792,9 +792,10 @@ fn verify_no_dynamic_ivk_state(conn: &rusqlite::Connection) -> Result<(), Wallet
     }
 }
 
-/// [`verify_no_dynamic_ivk_state`] as a rusqlite error, for `WalletDb::for_path` and the
-/// block and transaction storage every handle's writes reach, so a build without
-/// `orchard` refuses such a database even if it never migrates it.
+/// [`verify_no_dynamic_ivk_state`] as a rusqlite error, so a build without `orchard`
+/// refuses such a database even if it never migrates it: at `WalletDb::for_path`, and in
+/// the low-level writes that record scanned blocks or retire transaction retrieval, which
+/// every handle's block and transaction storage reaches.
 #[cfg(not(feature = "orchard"))]
 pub(crate) fn refuse_dynamic_ivk_state(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     verify_no_dynamic_ivk_state(conn).map_err(|e| match e {
@@ -1269,8 +1270,9 @@ mod tests {
         }
     }
 
-    /// Without `orchard`, a caller-owned transaction handle cannot store blocks or a
-    /// decrypted transaction over dynamic IVK state, however the handle was built.
+    /// Without `orchard`, a caller-owned transaction handle cannot record scanned blocks or
+    /// retire transaction retrieval over dynamic IVK state, through `WalletWrite` or the
+    /// low-level API, and the retrieval request survives.
     #[cfg(not(feature = "orchard"))]
     #[test]
     fn caller_owned_transactions_refuse_dynamic_ivk_state() {
@@ -1279,7 +1281,10 @@ mod tests {
         use super::{WalletMigrationError, WalletMigrator};
         use crate::{SqlTransaction, error::SqliteClientError};
         use zcash_client_backend::{
-            data_api::{WalletWrite, chain::ChainState},
+            data_api::{
+                WalletWrite,
+                ll::{LowLevelWalletWrite, wallet as ll},
+            },
             decrypt_transaction,
         };
         use zcash_primitives::{block::BlockHash, transaction::Authorized};
@@ -1300,6 +1305,8 @@ mod tests {
             )
             .unwrap();
         let height = BlockHeight::from(1_000_000);
+        // A tip lets `WalletWrite::store_decrypted_tx` reach its storage.
+        db.update_chain_tip(height).unwrap();
         let tx = TransactionData::<Authorized>::from_parts(
             TxVersion::V5,
             BranchId::for_height(&Network::TestNetwork, height),
@@ -1321,22 +1328,52 @@ mod tests {
             )
         };
         let owned = db.conn.transaction().unwrap();
+        crate::wallet::queue_tx_retrieval(&owned, std::iter::once(tx.txid()), None).unwrap();
         let mut handle = WalletDb::from_connection(
             SqlTransaction::new(&owned),
             Network::TestNetwork,
             test_clock(),
             test_rng(),
         );
-        let from_state = ChainState::empty(height, BlockHash([0; 32]));
-        assert!(refused(handle.put_blocks(&from_state, vec![])));
-        let decrypted = decrypt_transaction(
+        let decrypted = || {
+            decrypt_transaction(
+                &Network::TestNetwork,
+                Some(height),
+                Some(height),
+                &tx,
+                &HashMap::new(),
+            )
+        };
+        assert!(refused(handle.store_decrypted_tx(decrypted())));
+        assert!(refused(ll::store_decrypted_tx(
+            &mut handle,
             &Network::TestNetwork,
-            Some(height),
-            Some(height),
-            &tx,
-            &HashMap::new(),
-        );
-        assert!(refused(handle.store_decrypted_tx(decrypted)));
+            #[cfg(feature = "transparent-inputs")]
+            crate::GapLimits::default(),
+            height,
+            decrypted(),
+        )));
+        assert!(refused(handle.put_block_meta(
+            height,
+            BlockHash([0; 32]),
+            0,
+            0,
+            0
+        )));
+        assert!(refused(
+            handle.notify_scan_complete(height..height + 1, &[])
+        ));
+        drop(handle);
+        owned.commit().unwrap();
+        let queued: bool = db
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue WHERE txid = ?1)",
+                [tx.txid().as_ref()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(queued);
     }
 
     #[test]
