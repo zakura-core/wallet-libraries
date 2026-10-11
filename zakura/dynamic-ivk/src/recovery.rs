@@ -68,9 +68,8 @@ impl EncryptedNote {
     /// the key's address; that never shows the receiver is unused. This deliberately
     /// does not use the public zero OVK to establish ownership.
     ///
-    /// The memo is discarded because nothing binds it to the chain: anyone who can
-    /// recover the note, for example through the public zero OVK, can re-encrypt it
-    /// with another memo that still decrypts and matches every compact field.
+    /// The memo is discarded: dynamic-key notes carry no memo the wallet reads; only
+    /// internal change carries the refund marker.
     pub fn decrypt(&self, account: &FullViewingKey, key_id: KeyId) -> Option<RecoveredNote> {
         let key = key_id.derive(account).ok()?;
         let nf =
