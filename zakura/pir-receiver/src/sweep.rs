@@ -33,10 +33,8 @@ use crate::{DirectoryError, Transport, seen::seen_sets};
 type AccountId<W> = <W as WalletRead>::AccountId;
 /// A wallet's error type.
 type AccountError<W> = <W as WalletRead>::Error;
-/// Due sweeps, each with its account.
-type Work<W> = Vec<(AccountId<W>, DiscoveryWork)>;
 
-/// Due sweeps prepared per account at a time.
+/// Due sweeps prepared per run.
 const BATCH: NonZeroU32 = NonZeroU32::new(64).unwrap();
 /// Positions whose note data one request asks for. Each batch is queued as it arrives,
 /// so a long history keeps its progress when a run stops partway.
@@ -167,21 +165,21 @@ where
     }
 }
 
-/// What one [`sweep`] run did. `A` is the wallet's account identifier and `E` its error
-/// type.
+/// What one [`sweep`] run did. `E` is the wallet's error type.
 #[derive(Debug)]
-pub struct Swept<A, E> {
+pub struct Swept<E> {
     /// Keys whose sweep finished.
     pub finished: usize,
-    /// Keys left for a later run, each with its account, already backed off, with why.
-    pub deferred: Vec<(A, KeyId, Error<E>)>,
-    /// Whether any of the accounts still has unfinished sweeps or queued payments.
+    /// Keys left for a later run, already backed off, with why.
+    pub deferred: Vec<(KeyId, Error<E>)>,
+    /// Whether the account still has unfinished sweeps or queued payments.
     pub pending: bool,
 }
 
-/// Runs `accounts`' due restore sweeps against the receiver directory at `origin`,
+/// Runs `account`'s due restore sweeps against the receiver directory at `origin`,
 /// then releases Ironwood spend evidence that no sweep needs any longer (see
-/// [`DynamicIvkWrite::finish_dynamic_nullifier_recovery`]).
+/// [`DynamicIvkWrite::finish_dynamic_nullifier_recovery`]). A wallet with several
+/// accounts calls it once for each.
 ///
 /// `through` is the wallet's fully scanned tip, and sweeps and release run only while
 /// it is also the stored chain tip and the block the wallet scanned there, which
@@ -212,17 +210,18 @@ pub struct Swept<A, E> {
 ///
 /// A run that looks nothing up opens no PIR session and fetches no witnesses. New
 /// payments a lookup finds take their note data from `notes`. A run sweeps at most one
-/// batch of due keys per account, then moves the incoming lookahead past paid and seen
-/// indices; its new keys are left for a later run, and [`Swept::pending`] reports them.
-/// A key that fails is backed off and listed in [`Swept::deferred`], and the others go
-/// on, unless the directory's session or connection failed or `notes` cannot serve the
-/// wallet's chain: then the run stops before leasing more keys. A lease the wallet fails to store stops the run with its error.
-/// `now` is the caller's clock in seconds, for retry backoff and the recent sets.
+/// batch of due keys, then moves the incoming lookahead past paid and seen indices; its
+/// new keys are left for a later run, and [`Swept::pending`] reports them. A key that
+/// fails is backed off and listed in [`Swept::deferred`], and the others go on, unless
+/// the directory's session or connection failed or `notes` cannot serve the wallet's
+/// chain: then the run stops before leasing more keys. A lease the wallet fails to
+/// store stops the run with its error. `now` is the caller's clock in seconds, for
+/// retry backoff and the recent sets.
 #[allow(clippy::too_many_arguments)]
 pub async fn sweep<W, P, T, N, L>(
     wallet: &mut W,
     params: &P,
-    accounts: &[AccountId<W>],
+    account: AccountId<W>,
     through: ChainPoint,
     genesis: [u8; 32],
     origin: &str,
@@ -230,7 +229,7 @@ pub async fn sweep<W, P, T, N, L>(
     notes: &mut N,
     lock: &L,
     now: i64,
-) -> Result<Swept<AccountId<W>, AccountError<W>>, Error<AccountError<W>>>
+) -> Result<Swept<AccountError<W>>, Error<AccountError<W>>>
 where
     W: DynamicIvkWrite,
     P: Parameters,
@@ -238,14 +237,6 @@ where
     N: NoteSource<W>,
     L: WriteLock,
 {
-    // A repeated account would lease and back off each of its keys twice.
-    let mut unique = Vec::with_capacity(accounts.len());
-    for account in accounts {
-        if !unique.contains(account) {
-            unique.push(*account);
-        }
-    }
-    let accounts = &unique[..];
     let mut swept = Swept {
         finished: 0,
         deferred: Vec::new(),
@@ -255,7 +246,12 @@ where
     let mut transport = Some(transport);
     let mut directory = None;
     if current {
-        let work = due(wallet, accounts, through, lock, now)?;
+        let work = lock
+            .write("dynamic_sweep.due", || {
+                wallet.prepare_dynamic_sweeps(account, through, now, BATCH)
+            })
+            .map_err(Error::Wallet)?
+            .map_err(Error::Deferred)?;
         if !work.is_empty() {
             let transport = transport.take().expect("not yet used");
             let accepted =
@@ -266,9 +262,9 @@ where
                     // No key can be swept without the directory, so each backs off as
                     // if its own lookup had failed, and the next sync does not wait on
                     // the same directory again.
-                    for (account, item) in &work {
+                    for item in &work {
                         lock.write("dynamic_sweep.attempt", || {
-                            wallet.begin_dynamic_sweep_attempt(*account, item.key, now, false)
+                            wallet.begin_dynamic_sweep_attempt(account, item.key, now, false)
                         })
                         .map_err(Error::Wallet)?;
                     }
@@ -280,7 +276,7 @@ where
             if let Some(session) = &mut directory.session {
                 session.client.use_file_for_work(lookups).await?;
             }
-            for ((account, item), check) in work.into_iter().zip(checks) {
+            for (item, check) in work.into_iter().zip(checks) {
                 // A key whose lease is not stored would be due again at once.
                 lock.write("dynamic_sweep.attempt", || {
                     wallet.begin_dynamic_sweep_attempt(account, item.key, now, check.seen)
@@ -302,7 +298,7 @@ where
                                     DirectoryError::Revision | DirectoryError::Transport(_)
                                 ) | Error::NotesUnavailable(_)
                             );
-                        swept.deferred.push((account, item.key, e));
+                        swept.deferred.push((item.key, e));
                         if unavailable {
                             break;
                         }
@@ -311,54 +307,44 @@ where
             }
             // New lookahead keys wait for a later run, which bounds this one.
             lock.write("dynamic_sweep.lookahead", || {
-                accounts
-                    .iter()
-                    .try_for_each(|account| wallet.maintain_dynamic_ivks(*account))
+                wallet.maintain_dynamic_ivks(account)
             })
             .map_err(Error::Wallet)?;
         }
+        // Another writer may have moved the tip while the sweep held no lock, and a
+        // finished key may have queued a rescan below it.
+        lock.write("dynamic_sweep.release", || {
+            let scanned = wallet.block_fully_scanned()?.map(|b| b.block_height());
+            if at_tip(wallet, through)? && scanned == Some(through.height) {
+                wallet.finish_dynamic_nullifier_recovery(account, through)?;
+            }
+            Ok(())
+        })
+        .map_err(Error::Wallet)?;
     }
-    for account in accounts {
-        if current {
-            // Another writer may have moved the tip while the sweep held no lock, and a
-            // finished key may have queued a rescan below it.
-            lock.write("dynamic_sweep.release", || {
-                let scanned = wallet.block_fully_scanned()?.map(|b| b.block_height());
-                if at_tip(wallet, through)? && scanned == Some(through.height) {
-                    wallet.finish_dynamic_nullifier_recovery(*account, through)?;
-                }
-                Ok(())
-            })
-            .map_err(Error::Wallet)?;
-        }
-        swept.pending |= wallet
-            .dynamic_history_pending(*account, through.height)
-            .map_err(Error::Wallet)?;
-    }
+    swept.pending = wallet
+        .dynamic_history_pending(account, through.height)
+        .map_err(Error::Wallet)?;
     if let (true, Some(transport)) = (current, transport) {
-        let mut closed = false;
-        for account in accounts {
-            let keys = wallet.dynamic_keys_to_recheck(*account, through.height + 1);
-            closed |= !keys.map_err(Error::Wallet)?.is_empty();
-        }
-        if closed {
+        let keys = wallet.dynamic_keys_to_recheck(account, through.height + 1);
+        if !keys.map_err(Error::Wallet)?.is_empty() {
             let accepted = Directory::accept(wallet, params, through, genesis, origin, transport);
             directory = Some(accepted.await?);
         }
     }
     if let Some(directory) = &mut directory {
-        swept.pending |= recheck(wallet, directory, accounts, lock, now).await?;
+        swept.pending |= recheck(wallet, directory, account, lock, now).await?;
     }
     Ok(swept)
 }
 
-/// Records the publication's paid filter for `accounts`' keys whose sweep finished below
+/// Records the publication's paid filter for `account`'s keys whose sweep finished below
 /// its anchor (see [`DynamicIvkWrite::record_paid_filter_check`]), fetching the filters
 /// only if a key needs them. Returns whether any sweep was queued again.
 async fn recheck<W, T, L>(
     wallet: &mut W,
     directory: &mut Directory<'_, T>,
-    accounts: &[AccountId<W>],
+    account: AccountId<W>,
     lock: &L,
     now: i64,
 ) -> Result<bool, Error<AccountError<W>>>
@@ -367,28 +353,23 @@ where
     T: Transport,
     L: WriteLock,
 {
-    let mut queued = false;
-    for &account in accounts {
-        let keys = wallet
-            .dynamic_keys_to_recheck(account, directory.anchor.height)
-            .map_err(Error::Wallet)?;
-        if keys.is_empty() {
-            continue;
-        }
-        let work: Vec<_> = keys.into_iter().map(|item| ((), item)).collect();
-        let checks = directory.check(&work, now).await?;
-        let checked: Vec<_> = work
-            .iter()
-            .zip(checks)
-            .map(|((_, item), check)| (item.key, check.paid))
-            .collect();
-        queued |= checked.iter().any(|&(_, paid)| paid);
-        lock.write("dynamic_sweep.recheck", || {
-            wallet.record_paid_filter_check(account, directory.anchor, &checked)
-        })
+    let keys = wallet
+        .dynamic_keys_to_recheck(account, directory.anchor.height)
         .map_err(Error::Wallet)?;
+    if keys.is_empty() {
+        return Ok(false);
     }
-    Ok(queued)
+    let checks = directory.check(&keys, now).await?;
+    let checked: Vec<_> = keys
+        .iter()
+        .zip(checks)
+        .map(|(item, check)| (item.key, check.paid))
+        .collect();
+    lock.write("dynamic_sweep.recheck", || {
+        wallet.record_paid_filter_check(account, directory.anchor, &checked)
+    })
+    .map_err(Error::Wallet)?;
+    Ok(checked.iter().any(|&(_, paid)| paid))
 }
 
 /// Whether `through` is still the wallet's stored chain tip and the block it scanned
@@ -490,14 +471,10 @@ impl<'a, T: Transport> Directory<'a, T> {
 
     /// What the filters say about each item's receiver at `now`, downloading them first
     /// if needed; see [`sweep`] for how the recent sets are read.
-    async fn check<A, E>(
-        &mut self,
-        work: &[(A, DiscoveryWork)],
-        now: i64,
-    ) -> Result<Vec<Check>, Error<E>> {
+    async fn check<E>(&mut self, work: &[DiscoveryWork], now: i64) -> Result<Vec<Check>, Error<E>> {
         let receivers = work
             .iter()
-            .map(|(_, item)| Receiver::from_bytes(item.receiver))
+            .map(|item| Receiver::from_bytes(item.receiver))
             .collect::<Result<Vec<_>, _>>()
             .map_err(DirectoryError::from)?;
         if self.filters.is_none() {
@@ -589,27 +566,6 @@ fn covers_restore_watch(set: &FilterSet, now: i64) -> bool {
         }
         _ => false,
     }
-}
-
-/// `accounts`' due sweeps at `through`, a bounded batch per account.
-fn due<W: DynamicIvkWrite, L: WriteLock>(
-    wallet: &mut W,
-    accounts: &[AccountId<W>],
-    through: ChainPoint,
-    lock: &L,
-    now: i64,
-) -> Result<Work<W>, Error<AccountError<W>>> {
-    let mut work = Vec::new();
-    for &account in accounts {
-        let batch = lock
-            .write("dynamic_sweep.due", || {
-                wallet.prepare_dynamic_sweeps(account, through, now, BATCH)
-            })
-            .map_err(Error::Wallet)?
-            .map_err(Error::Deferred)?;
-        work.extend(batch.into_iter().map(|item| (account, item)));
-    }
-    Ok(work)
 }
 
 /// Sweeps one key whose attempt is leased: looks up its receiver if `check` shows the
