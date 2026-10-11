@@ -165,8 +165,8 @@ workspace.
   `scan_cached_blocks_with_dynamic_ivks` until they close, and their notes spend into
   ordinary change. Full-transaction and Enhance PIR retrieval authenticate these notes
   with their registered key, but only a full transaction stores their memo: they carry
-  none the wallet reads, since the refund marker is on internal change. While a dynamic key is open, blocks and transactions
-  processed without the dynamic keys are refused
+  none the wallet reads, since the refund marker is on internal change. While a dynamic
+  key is open, blocks and transactions processed without the dynamic keys are refused
   (`SqliteClientError::DynamicIvksNotUsed`, which builds without `orchard` also return).
   Invalid input to these calls is `SqliteClientError::InvalidDynamicIvkInput`, and a call
   that must wait returns its `ReservationPolicy` or `SweepDeferral` as an `Ok` value.
@@ -218,9 +218,12 @@ workspace.
   replaces queued candidates it no longer repeats and reopens the sweep until it is
   applied, and note data is queued in batches, so a long history keeps its progress.
   `begin_dynamic_sweep_attempt` takes whether a provider seen set holds the key's
-  receiver and stores a hit before any lookup, so a seen key is never issued,
-  and every finished key scans from the block after its lookup until its restore watch
-  closes it. A payment before the account's
+  receiver and stores a hit before any lookup, so a seen key is never issued.
+  `apply_dynamic_sweep` takes whether a current recent set holds it: such a key scans
+  from the block after its lookup until its restore watch closes it, and any other
+  closes at its lookup. `dynamic_keys_to_recheck` and `record_paid_filter_check` sweep a
+  closed key without a known payment again once a newer publication's paid filter holds
+  it. A payment before the account's
   birthday is checked for inclusion ahead of the birthday block and then raises the
   recovery bound without being tracked. Scanning that later finds the same note moves it
   to the transaction it is found in. `dynamic_history_pending` reports unfinished sweeps.

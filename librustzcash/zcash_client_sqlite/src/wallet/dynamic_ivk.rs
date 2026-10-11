@@ -2,8 +2,8 @@
 //!
 //! Issued keys scan from issuance, refund keys from their stored funding transaction,
 //! until they close. Keys recovered from the seed are swept once through a receiver
-//! directory, then scanned from the block after the sweep's lookup for a restore watch
-//! (see [`WalletDb::close_finished_dynamic_keys`]). A closed key keeps its notes.
+//! directory, then scanned for a restore watch only while a swap may still pay them (see
+//! [`WalletDb::close_finished_dynamic_keys`]). A closed key keeps its notes.
 //! Dynamic-key notes carry no memo the wallet reads; only internal change carries the
 //! refund marker. So neither a directory nor private Enhance retrieval stores or fetches
 //! one. A wallet drives dynamic IVKs with these calls:
@@ -43,8 +43,8 @@ pub(crate) use apply::apply_sweep;
 pub(crate) use funding::start_funded_refund_keys;
 pub use funding::verify_refund_funding_proposal;
 use payments::{PendingPayment, SpendStatus};
-pub(crate) use planner::{begin_sweep_attempt, history_pending, prepare_sweeps};
-pub(crate) use recovery::maintain;
+pub(crate) use planner::{begin_sweep_attempt, history_pending, keys_to_recheck, prepare_sweeps};
+pub(crate) use recovery::{maintain, record_paid_check};
 pub(crate) use reservations::RECEIVE_LOOKAHEAD;
 pub use reservations::{
     EARLIEST_RECEIVE_QUOTE, OperationOutcome, ProviderSeen, RECEIVE_GAP_LIMIT,
@@ -309,9 +309,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// and the scanned height equal `tip`, which the caller just confirmed, and closing
     /// uses the earlier of `now` and `tip`'s block time.
     ///
-    /// That watch bounds restore discovery: a payment to a restored key after it closes
-    /// is found only by [`Self::recheck_dynamic_key_history`], and an incoming index
-    /// beyond the restored lookahead is never swept.
+    /// A later payment to a closed swept key without a known payment is found once a
+    /// newer publication's paid filter holds it (see
+    /// `DynamicIvkWrite::record_paid_filter_check`); an incoming index beyond the restored
+    /// lookahead is never swept.
     pub fn close_finished_dynamic_keys(
         &mut self,
         account: AccountUuid,

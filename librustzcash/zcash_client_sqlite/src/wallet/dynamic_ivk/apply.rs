@@ -33,6 +33,7 @@ pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL, R>(
     key: KeyId,
     through: ChainPoint,
     publication: ChainPoint,
+    recent: bool,
     mut witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
 ) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
     for candidate in pending_payments(db.conn.borrow(), account, key)? {
@@ -60,7 +61,7 @@ pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL, R>(
         }
     }
     Ok(db
-        .transactionally(|db| sweep::finish(db.conn.0, account, key))?
+        .transactionally(|db| sweep::finish(db.conn.0, account, key, recent))?
         .map(|()| PaymentApplication::Applied))
 }
 

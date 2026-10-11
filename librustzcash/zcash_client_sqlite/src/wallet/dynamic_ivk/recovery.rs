@@ -3,9 +3,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use zakura_dynamic_ivk::{REFUND_MEMO_MAGIC, RefundMemo};
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
+use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
+
 use super::{
-    Discovery, DynamicKey, KeyId, Purpose, RESTORED, account_key, decode_index, next_index,
-    register, reservations::RECEIVE_LOOKAHEAD, restore_start, retention::retain_spend_history,
+    Discovery, DynamicKey, KeyId, Purpose, RESTORED, account_key, decode_index, key_ref,
+    next_index, planner::canonical, register, reservations::RECEIVE_LOOKAHEAD, restore_start,
+    retention::retain_spend_history,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -16,16 +19,53 @@ pub(super) fn recheck<P: Parameters>(
     account: AccountUuid,
 ) -> Result<usize, SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
+    requeue(conn, "account_id = ?1 AND closed_at IS NOT NULL", owner.0)
+}
+
+/// Queues a new sweep of each key `predicate` selects in `ironwood_receiving_keys`, with
+/// `?1` bound to `binding`, unless its sweep is pending. Returns how many were queued.
+fn requeue(
+    conn: &rusqlite::Transaction<'_>,
+    predicate: &str,
+    binding: i64,
+) -> Result<usize, SqliteClientError> {
     Ok(conn.execute(
-        "INSERT INTO ironwood_dynamic_sweeps (receiving_key_id)
-         SELECT id FROM ironwood_receiving_keys
-         WHERE account_id = ?1 AND closed_at IS NOT NULL
-         ON CONFLICT (receiving_key_id) DO UPDATE SET
-             lookup_height = NULL, lookup_hash = NULL, attempts = 0,
-             next_attempt_at = 0, done_height = NULL
-         WHERE done_height IS NOT NULL",
-        [owner.0],
+        &format!(
+            "INSERT INTO ironwood_dynamic_sweeps (receiving_key_id)
+             SELECT id FROM ironwood_receiving_keys WHERE {predicate}
+             ON CONFLICT (receiving_key_id) DO UPDATE SET
+                 lookup_height = NULL, lookup_hash = NULL, attempts = 0,
+                 next_attempt_at = 0, done_height = NULL
+             WHERE done_height IS NOT NULL"
+        ),
+        [binding],
     )?)
+}
+
+/// Implements `DynamicIvkWrite::record_paid_filter_check`.
+pub(crate) fn record_paid_check(
+    conn: &rusqlite::Transaction<'_>,
+    account: AccountUuid,
+    publication: ChainPoint,
+    checked: &[(KeyId, bool)],
+) -> Result<(), SqliteClientError> {
+    if canonical(conn, Some(publication))?.is_none() {
+        return Ok(());
+    }
+    for &(key, paid) in checked {
+        let id = key_ref(conn, account, key)?;
+        if paid {
+            requeue(conn, "id = ?1", id)?;
+        } else {
+            // A rewind below `publication` reruns the sweep (see `truncate_to_height`).
+            conn.execute(
+                "UPDATE ironwood_dynamic_sweeps SET done_height = ?2
+                 WHERE receiving_key_id = ?1 AND done_height < ?2",
+                params![id, u32::from(publication.height)],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Implements `DynamicIvkWrite::maintain_dynamic_ivks`, keeping
