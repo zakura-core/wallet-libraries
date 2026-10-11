@@ -333,9 +333,9 @@ fn retention_waits_for_internal_memos_until_their_blocks_are_scanned() {
         crate::wallet::ironwood_nullifier_retention_height(st.wallet().conn()).unwrap(),
         Some(through.height)
     );
-    // A marker without funding-account evidence, once scanning from the birthday covers
-    // its block, was funded before the birthday or is not this wallet's. It no longer
-    // holds back the release.
+    // A readable marker without funding-account evidence, once scanning from the
+    // birthday covers its block, was funded before the birthday or is not this wallet's.
+    // It holds back the release only until its key is swept.
     let move_memo = |st: &State, height: BlockHeight, block: Option<u32>| {
         st.wallet()
             .conn()
@@ -348,7 +348,10 @@ fn retention_waits_for_internal_memos_until_their_blocks_are_scanned() {
     };
     st.wallet()
         .conn()
-        .execute("UPDATE ironwood_received_notes SET memo=X'FF5A535750'", [])
+        .execute(
+            "UPDATE ironwood_received_notes SET memo=?1",
+            [zakura_dynamic_ivk::RefundMemo::new(7).encode()],
+        )
         .unwrap();
     let mined: u32 = st
         .wallet()
@@ -364,7 +367,53 @@ fn retention_waits_for_internal_memos_until_their_blocks_are_scanned() {
     move_memo(&st, through.height + 1, None);
     assert!(!finish_recovery(st.wallet_mut().db_mut(), account, through, 1).unwrap());
     move_memo(&st, mined.into(), Some(mined));
-    assert!(finish_recovery(st.wallet_mut().db_mut(), account, through, 1).unwrap());
+    let db = st.wallet_mut().db_mut();
+    assert!(!finish_recovery(db, account, through, 1).unwrap());
+    finish_sweeps(db, account, through);
+    assert!(finish_recovery(db, account, through, 1).unwrap());
+}
+
+/// A refund record this version cannot read may name a key whose payments need the
+/// retained evidence, so it holds the release even once every other sweep is done and
+/// the tip moves on. Once readable, its key is swept and release proceeds.
+#[test]
+fn retention_holds_for_unreadable_refund_memos() {
+    use zakura_dynamic_ivk::RefundMemo;
+    let (mut st, _, _) = swept();
+    let account = st.test_account().unwrap().id();
+    let mut record = RefundMemo::new(7).encode();
+    record[5] = 2;
+    let set_memo = |st: &State, memo: &[u8]| {
+        st.wallet()
+            .conn()
+            .execute(
+                "UPDATE ironwood_received_notes SET receiving_key_id=NULL,
+                 recipient_key_scope=1, memo=?1",
+                [memo],
+            )
+            .unwrap();
+    };
+    set_memo(&st, &record);
+    let floor = crate::wallet::ironwood_nullifier_retention_height(st.wallet().conn()).unwrap();
+    let (height, _) = st.generate_empty_block();
+    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    let tip = tip(&st);
+    let db = st.wallet_mut().db_mut();
+    assert!(!finish_recovery(db, account, tip, 1).unwrap());
+    assert_eq!(
+        crate::wallet::ironwood_nullifier_retention_height(&db.conn).unwrap(),
+        floor
+    );
+    record[5] = 1;
+    set_memo(&st, &record);
+    let db = st.wallet_mut().db_mut();
+    assert!(!finish_recovery(db, account, tip, 1).unwrap());
+    finish_sweeps(db, account, tip);
+    assert!(finish_recovery(db, account, tip, 1).unwrap());
+    assert_eq!(
+        crate::wallet::ironwood_nullifier_retention_height(&db.conn).unwrap(),
+        Some(tip.height + 1)
+    );
 }
 
 #[test]

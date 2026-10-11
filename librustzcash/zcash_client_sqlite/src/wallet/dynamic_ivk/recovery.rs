@@ -37,7 +37,8 @@ pub(crate) fn maintain<P: Parameters>(
     now: i64,
 ) -> Result<(), SqliteClientError> {
     retain_spend_history(conn, params, account)?;
-    maintain_restore_discovery(conn, params, account, RECEIVE_LOOKAHEAD, now)
+    maintain_restore_discovery(conn, params, account, RECEIVE_LOOKAHEAD, now)?;
+    Ok(())
 }
 
 /// Whether an internal funding record may still hold an unregistered refund index after
@@ -144,13 +145,14 @@ pub(super) fn recover_refund_memos<P: Parameters>(
 }
 
 /// [`maintain`] with `lookahead` incoming keys, once scanning reaches an Ironwood tip.
+/// Returns the unreadable count from [`recover_refund_memos`], zero before then.
 pub(super) fn maintain_restore_discovery<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     lookahead: u32,
     now: i64,
-) -> Result<(), SqliteClientError> {
+) -> Result<usize, SqliteClientError> {
     let tip = wallet::chain_tip_height(conn)?;
     let ready = match (tip, params.activation_height(NetworkUpgrade::Nu6_3)) {
         (Some(tip), Some(activation)) => {
@@ -159,12 +161,13 @@ pub(super) fn maintain_restore_discovery<P: Parameters>(
         _ => false,
     };
     if !ready {
-        return Ok(());
+        return Ok(0);
     }
-    recover_refund_memos(conn, params, account, now)?;
+    let unreadable = recover_refund_memos(conn, params, account, now)?;
     let (account_ref, _) = account_key(conn, params, account)?;
     let start = restore_start(conn, params, account_ref)?;
-    maintain_receive_lookahead(conn, params, account, lookahead, start, now)
+    maintain_receive_lookahead(conn, params, account, lookahead, start, now)?;
+    Ok(unreadable)
 }
 
 /// Keeps [`RECEIVE_LOOKAHEAD`] incoming keys from the account's restore start.
