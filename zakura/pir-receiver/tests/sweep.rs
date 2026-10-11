@@ -825,6 +825,52 @@ async fn a_failed_attempt_write_stops_the_run() {
     assert!(notes.requested.is_empty());
 }
 
+/// Records each write's label.
+#[derive(Default)]
+struct Labels(RefCell<Vec<&'static str>>);
+
+impl WriteLock for Labels {
+    fn write<T>(&self, label: &'static str, write: impl FnOnce() -> T) -> T {
+        self.0.borrow_mut().push(label);
+        write()
+    }
+}
+
+/// A `through` the wallet has scanned past is not a tip to release evidence at, so a
+/// run with it writes nothing.
+#[tokio::test]
+async fn a_stale_tip_releases_nothing() {
+    let mut st = ironwood_wallet();
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    let directory = Directory::new(publish(&[], &[], through, &provider(&[])));
+    let mut notes = Notes {
+        data: BTreeMap::new(),
+        requested: Vec::new(),
+    };
+    let lock = Labels::default();
+    sweep(
+        st.wallet_mut().db_mut(),
+        &network,
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &directory,
+        &mut notes,
+        &lock,
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert!(lock.0.borrow().is_empty(), "{:?}", lock.0.borrow());
+    assert!(directory.requests().is_empty());
+}
+
 /// Another network's seen sets say nothing about this network's quotes, so a
 /// publication committing to another genesis is refused as a sweep refuses it.
 #[tokio::test]

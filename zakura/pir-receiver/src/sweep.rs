@@ -179,8 +179,8 @@ pub struct Swept<A, E> {
 /// then releases Ironwood spend evidence that no sweep needs any longer (see
 /// [`DynamicIvkWrite::finish_dynamic_nullifier_recovery`]).
 ///
-/// `through` is the wallet's fully scanned tip, and sweeps run only while it is also
-/// the stored chain tip. When none is due, the run makes no request. Otherwise the
+/// `through` is the wallet's fully scanned tip, and sweeps and release run only while
+/// it is also the stored chain tip. When none is due, the run makes no request. Otherwise the
 /// publication must commit to `genesis` ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS)
 /// on mainnet), cover history from Ironwood activation on `params`' network, and end at
 /// a block the wallet accepts (see [`DynamicIvkRead::directory_publication_anchor`]),
@@ -227,8 +227,8 @@ where
         deferred: Vec::new(),
         pending: false,
     };
-    let tip = wallet.chain_height().map_err(Error::Wallet)?;
-    if tip == Some(through.height) {
+    let current = wallet.chain_height().map_err(Error::Wallet)? == Some(through.height);
+    if current {
         let work = due(wallet, accounts, through, lock, now)?;
         if !work.is_empty() {
             let accepted =
@@ -300,10 +300,12 @@ where
         }
     }
     for account in accounts {
-        lock.write("dynamic_sweep.release", || {
-            wallet.finish_dynamic_nullifier_recovery(*account, through)
-        })
-        .map_err(Error::Wallet)?;
+        if current {
+            lock.write("dynamic_sweep.release", || {
+                wallet.finish_dynamic_nullifier_recovery(*account, through)
+            })
+            .map_err(Error::Wallet)?;
+        }
         swept.pending |= wallet
             .dynamic_history_pending(*account, through.height)
             .map_err(Error::Wallet)?;
