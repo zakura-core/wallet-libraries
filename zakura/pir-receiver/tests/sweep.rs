@@ -1234,6 +1234,64 @@ async fn enhance_notes_accept_fresh_routing_after_a_refused_query() {
     }
 }
 
+/// Enhance notes that cannot accept their manifest stop the run at the first paid key
+/// that needs note data, so later paid keys are neither leased nor backed off.
+#[tokio::test]
+async fn an_unusable_note_source_stops_the_run_before_leasing_more_keys() {
+    let mut st = ironwood_wallet();
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    let records: Vec<_> = (0..2)
+        .map(|index| pay_restored_key(&mut st, index, index).0)
+        .collect();
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let cmxs: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
+    let directory = Directory::new(publish(&records, &cmxs, through, &provider(&[])));
+    // Enhance's anchor is at the wallet's tip height but on another chain.
+    let other = ChainPoint {
+        height: through.height,
+        hash: BlockHash([7; 32]),
+    };
+    let enhance = RefusingEnhance::new(other, 2, 409);
+    let enhance_network = EnhanceNetwork(network);
+    let mut notes = EnhanceNotes::new("https://enhance.test", &enhance, &enhance_network);
+    let swept = sweep(
+        st.wallet_mut().db_mut(),
+        &network,
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &directory,
+        &mut notes,
+        &NoLock,
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            &swept.deferred[..],
+            [(_, key, Error::NotesUnavailable(_))] if *key == KeyId::new(Purpose::Receive, 0)
+        ),
+        "{:?}",
+        swept.deferred
+    );
+    assert_eq!((swept.finished, enhance.inits.get()), (0, 1));
+    let due = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_dynamic_sweeps(account, through, NOW, NonZeroU32::new(64).unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(
+        due.iter()
+            .any(|item| item.key == KeyId::new(Purpose::Receive, 1))
+    );
+}
+
 /// Runs one sweep of `accounts` through `through` at `now`.
 async fn run(
     st: &mut State,

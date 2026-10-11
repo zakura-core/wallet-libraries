@@ -59,6 +59,10 @@ pub enum Error<E> {
     /// A service's publication cannot be used against the wallet's chain yet.
     #[error("{0}")]
     Unavailable(&'static str),
+    /// The note source cannot serve the wallet's chain, so no key can get note data
+    /// this run.
+    #[error("note source: {0}")]
+    NotesUnavailable(&'static str),
     /// A queued payment is waiting, for example for its witness.
     #[error("payment remains queued: {0:?}")]
     Queued(PaymentApplication),
@@ -76,7 +80,8 @@ pub trait WriteLock {
 pub trait NoteSource<W: DynamicIvkRead> {
     /// The 528 ciphertext bytes after the directory's prefix for each of `positions`,
     /// keyed by commitment tree position. `wallet` is the wallet being swept.
-    /// `positions` is never empty when a sweep calls this.
+    /// `positions` is never empty when a sweep calls this. [`Error::NotesUnavailable`]
+    /// stops the run before it leases more keys.
     async fn note_data(
         &mut self,
         wallet: &W,
@@ -132,12 +137,12 @@ where
             let accepted = match accepted {
                 Acceptance::Accepted(accepted) => accepted,
                 Acceptance::WaitingForScanning => {
-                    return Err(Error::Unavailable(
+                    return Err(Error::NotesUnavailable(
                         "the Enhance PIR anchor has not been scanned",
                     ));
                 }
                 Acceptance::Mismatch => {
-                    return Err(Error::Unavailable(
+                    return Err(Error::NotesUnavailable(
                         "the Enhance PIR anchor differs from the wallet's chain",
                     ));
                 }
@@ -194,8 +199,8 @@ pub struct Swept<A, E> {
 /// batch of due keys per account, then moves the incoming lookahead past paid and seen
 /// indices; its new keys are left for a later run, and [`Swept::pending`] reports them.
 /// A key that fails is backed off and listed in [`Swept::deferred`], and the others go
-/// on, unless the directory's session or connection failed: then the run stops before
-/// leasing more keys. A lease the wallet fails to store stops the run with its error.
+/// on, unless the directory's session or connection failed or `notes` cannot serve the
+/// wallet's chain: then the run stops before leasing more keys. A lease the wallet fails to store stops the run with its error.
 /// `now` is the caller's clock in seconds, for retry backoff.
 #[allow(clippy::too_many_arguments)]
 pub async fn sweep<W, P, T, N, L>(
@@ -276,7 +281,7 @@ where
                                 e,
                                 Error::Directory(
                                     DirectoryError::Revision | DirectoryError::Transport(_)
-                                )
+                                ) | Error::NotesUnavailable(_)
                             );
                         swept.deferred.push((account, item.key, e));
                         if unavailable {
