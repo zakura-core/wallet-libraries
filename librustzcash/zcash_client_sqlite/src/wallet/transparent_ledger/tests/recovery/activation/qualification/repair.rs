@@ -91,11 +91,11 @@ fn a_lost_projection_is_rebuilt_from_durable_evidence() {
         vec![]
     );
 
-    // Forward repair: demoting and promoting again rebuilds the projection from the ledger's
+    // Forward repair: demoting and activating again rebuilds the projection from the ledger's
     // durable evidence, exactly.
     set_policy(&mut st, Public);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(projection_state(conn(&st)), intact);
     assert_authority_agrees(&st, account, &expected);
 }
@@ -120,7 +120,7 @@ fn a_policy_alone_needs_no_newer_reader_and_nothing_lowers_the_requirement() {
     cover(&mut st, account, &fixture, vec![]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(reader_version(&st), REVISION_READER_VERSION);
     set_policy(&mut st, Public);
     assert_eq!(reader_version(&st), REVISION_READER_VERSION);
@@ -207,7 +207,7 @@ fn a_wallet_requiring_a_newer_reader_is_refused_without_changes() {
     let mut c = commit(&ws);
     c.coverage = full_coverage(&ws);
     refused("commit", db.apply_transparent_ledger_commit(c).map(|_| ()));
-    refused("promotion", db.promote_transparent_account(account));
+    refused("activation", db.activate_transparent_ledger(account));
     refused("qualification", db.qualify_transparent_revision(&fixture));
     refused("account deletion", db.delete_account(account));
     refused(

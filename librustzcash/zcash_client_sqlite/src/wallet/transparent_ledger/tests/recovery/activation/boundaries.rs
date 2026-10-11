@@ -7,7 +7,7 @@ fn active_and_candidate() -> (State, AccountUuid, AccountUuid, ReceiveEvent) {
     qualify(&mut st, &rev);
     let receive = recover_completely(&mut st, accounts[0], &rev, 51);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, accounts[0]).unwrap();
+    activate_recovered_ledger(&mut st, accounts[0]).unwrap();
     (st, accounts[0], accounts[1], receive)
 }
 

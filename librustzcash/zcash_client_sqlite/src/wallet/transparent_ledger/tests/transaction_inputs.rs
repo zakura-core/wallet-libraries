@@ -1,5 +1,6 @@
 //! Finalized input authorization uses full stored bytes and preserves competing-spend checks.
 use super::*;
+use crate::error::{AuthorityRefusal, RefusalReason, SqliteClientError};
 use zcash_client_backend::data_api::{
     InputSource as _,
     wallet::{TargetHeight, decrypt_and_store_transaction},
@@ -207,4 +208,71 @@ fn caller_owned_deletion_transaction_rolls_back_without_commit() {
         tx.rollback().unwrap();
     }
     assert!(st.wallet().get_account(account).unwrap().is_some());
+}
+
+/// Checks `outpoint` by direct lookup and as a submitted input at `target`, under public
+/// authority: both must exclude it, never fail to read it.
+fn excluded_everywhere(st: &State, outpoint: &OutPoint, target: TargetHeight) -> SqliteClientError {
+    let db = st.wallet().db();
+    assert!(
+        db.get_unspent_transparent_output(outpoint, target)
+            .unwrap()
+            .is_none()
+    );
+    db.check_transparent_transaction_inputs(&transaction(vec![outpoint.clone()], 0), &[], target)
+        .unwrap_err()
+}
+
+#[test]
+fn a_rewound_public_output_past_its_assumed_expiry_is_excluded() {
+    let (st, _, outpoint) = funded_wallet();
+    // A rewind leaves the receiving transaction unmined with unknown expiry. Once its assumed
+    // expiry passes, the expiry condition is NULL rather than false.
+    conn(&st)
+        .execute(
+            "UPDATE transactions SET mined_height = NULL, expiry_height = NULL, target_height = NULL
+             WHERE txid = ?1",
+            [outpoint.txid().as_ref()],
+        )
+        .unwrap();
+    let target = TargetHeight::from(BlockHeight::from(target(&st)) + 100);
+    assert!(matches!(
+        excluded_everywhere(&st, &outpoint, target),
+        SqliteClientError::TransparentAuthorityUnavailable(AuthorityRefusal::Refused(
+            RefusalReason::Expired
+        ))
+    ));
+}
+
+#[test]
+fn a_wallet_internal_ephemeral_output_of_unknown_expiry_is_excluded() {
+    let (mut st, taddr, outpoint) = funded_wallet();
+    // The output's transaction spends another wallet output to an ephemeral address and has no
+    // known expiry, so the likely-spent condition is NULL rather than false.
+    let other = OutPoint::new([0x77; 32], 0);
+    put_public_utxo(&mut st, &taddr, other.clone(), 50_000);
+    conn(&st)
+        .execute_batch(&format!(
+            "UPDATE transactions SET expiry_height = NULL WHERE txid = X'{funding}';
+             UPDATE addresses SET key_scope = 2, diversifier_index_be = X'0000000E00000000000000'
+             WHERE id = (
+                 SELECT u.address_id FROM transparent_received_outputs u
+                 JOIN transactions t ON t.id_tx = u.transaction_id
+                 WHERE t.txid = X'{funding}'
+             );
+             INSERT INTO transparent_received_output_spends (transparent_received_output_id, transaction_id)
+             SELECT u.id, (SELECT id_tx FROM transactions WHERE txid = X'{funding}')
+             FROM transparent_received_outputs u
+             JOIN transactions t ON t.id_tx = u.transaction_id
+             WHERE t.txid = X'{spent}';",
+            funding = hex::encode(outpoint.txid().as_ref()),
+            spent = hex::encode(other.txid().as_ref()),
+        ))
+        .unwrap();
+    assert!(matches!(
+        excluded_everywhere(&st, &outpoint, target(&st)),
+        SqliteClientError::TransparentAuthorityUnavailable(AuthorityRefusal::Refused(
+            RefusalReason::Spent
+        ))
+    ));
 }

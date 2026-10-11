@@ -10,6 +10,40 @@ workspace.
 
 ## [Unreleased]
 
+- An input known only from a recovered receive that a chain rewind left unplaced is no longer
+  refused as `Withdrawn` while its account's recovery catches up. The input check, direct
+  lookup and final storage report `AuthorityRefusal::Pending` for that account, and admit the
+  input once a later pass places the receive again. This holds however far the replacement
+  chain grows past the receive's height or its transaction's expiry: an output only such a
+  receive evidences is never `Expired`. An output public discovery or local construction also
+  evidences keeps the expiry rule, so under public authority a dead output is not spendable. A receive withdrawn by a replacement
+  revision is still `Refused(Withdrawn)`, as is an unplaced one once recovery covers the tip
+  without placing it. A suspended or otherwise unadmitted account is `NotAdmitted`.
+
+- Name the durable stop after contradictory recovery evidence "recovery suspension".
+  Move its checks and writes into `recovery_suspension`. Stored SQLite table names
+  and suspension behavior are unchanged.
+
+- Rename the prototype ledger activation method to `activate_transparent_ledger`
+  and `SqliteClientError::TransparentPromotionBlocked` to `TransparentActivationBlocked`.
+  Recovery readiness checks and the atomic candidate-to-active transition are unchanged.
+- History entries carry `TransactionHistoryDetails::activity`, and report
+  `FeeState::Unattributed` for an exact whole fee whose account share is not established.
+  Activity reads the account's outputs in the transaction (`v_tx_outputs`) and its Orchard
+  spends in the same snapshot; no display fact is read. `WalletDb`
+  implements `TransparentDetailRead::transaction_receipt` in one read snapshot. There is no
+  schema change.
+
+- `SqliteClientError::TransparentAuthorityUnavailable` carries an `AuthorityRefusal`:
+  `Pending { accounts }` when every refused input is a held, unspent, unexpired, mature and
+  unwithdrawn (possibly rewound and unplaced) output of an active account not suspended from recovery whose only blockers are
+  `Recovery(IncompleteCoverage)` and `ChainBehindTip` (with none needed when the target is
+  ahead of the chain), and `Refused(RefusalReason)` otherwise. Any other blocker, such as open
+  pages or unresolved spends, is `NotAdmitted`. Other reasons include `UnknownOutput`,
+  `CompetingSpend`, `Spent`, `ImmatureCoinbase`, `Withdrawn`, `NotInLedger` and `StaleTarget`. `check_transparent_transaction_inputs`,
+  direct lookup, selection and final storage classify within the read that refused. Messages
+  name no outpoint, transaction or address.
+
 - `WalletDb` implements `TransparentLedgerWrite::forget_transparent_ledger`. Under `Public`
   on the handle and durably, it removes in one transaction every spend link, pending spend,
   output and transaction that only the transparent ledger supports, the ledger origin of rows
@@ -48,8 +82,9 @@ workspace.
   after seven days without a display map change; under public authority nothing is parked, and
   held work is due at its ordinary retry. Failed lookups and contradictions only
   change retry state while the looked-up height still matches the transaction's mined height;
-  a change of outcome class restarts the backoff. The view shows work as pending only while the
-  listing would return it.
+  a change of outcome class restarts the backoff. The listing returns the due preferred
+  transactions in the caller's order before up to `limit` others; a preference never makes work
+  due. The view shows work as pending only while the listing would return it.
   Facts are validated against the coinbase
   position, owned outputs that financial queries count, recovered metadata, the stored fee,
   known shielded components, and known spends (input indexes and the number of distinct spent

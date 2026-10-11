@@ -2,14 +2,121 @@
 
 ## [Unreleased]
 
+### Removed
+
+- `TransparentHistoryRecovery::apply_and_acknowledge`: settle the held batch
+  with `settle_latest`, or a taken one with `apply_and_acknowledge_gated` and
+  `Ungated`. `acknowledge_applied` is no longer public: a batch is acknowledged
+  only through SQLite settlement, and one read or discarded without it is
+  exported again by the next pass. Neither had a wallet caller.
+
+### Changed
+
+- `discover_active_addresses` continues past a pass its private budget stopped
+  after confirming a candidate: another pass, from the same map and with the
+  filters already downloaded, asks about the candidates not yet confirmed,
+  until a pass completes or confirms nothing new. `Outcome::More` now means a
+  pass stopped with nothing new confirmed. `DiscoveryLimits` bound each pass;
+  there are at most as many passes as candidates. A caller that re-ran
+  discovery over the rest itself can drop that loop; it fetched the map and
+  every filter again each time.
+- `PassPlan::next` skips the account (`Step::Skip`) after a settlement the
+  caller's `WriteGate` interrupted, instead of stopping the run. A gate stops a
+  settlement when one account's time budget runs out as well as when the run is
+  cancelled; the caller checks its own cancellation before the next pass, so a
+  cancelled run still stops. `StopCause::Interrupted` is removed.
+- A changed policy generation (`ApplyError::PolicyChanged`) is its own
+  `ApplyAction::PolicyChanged` and stops the run with
+  `StopCause::PolicyChanged`, instead of refreshing like a stale commit: once
+  private queries are turned off mid-run no further private pass may run, and
+  the next run captures the policy again. Stale commits still refresh up to
+  `PassLimits::stale_refreshes`. Callers matching `ApplyAction` or `StopCause`
+  exhaustively add the new variant.
+- `DetailAnswer::TimedOut` records a txid detail lookup the caller's run budget
+  stopped as an `Unavailable` deferral, so it backs off (30 seconds, doubling up
+  to an hour) instead of staying first in every listing and taking every run.
+  `DetailAnswer::Cancelled` stays for a caller that is exiting and writes
+  nothing.
+- A display lookup that failed with `TxidError::Cancelled` is an attempt,
+  deferred as `Unavailable` like `DetailAnswer::TimedOut` (`deferral` returns
+  it too), instead of writing nothing: the lookup cannot say why it was
+  cancelled, and a caller forwarding a budget cancellation unchanged would
+  otherwise leave the lookup due and first in every run. Only an explicit
+  `DetailAnswer::Cancelled` writes nothing.
+- `DetailWrite::Defer` carries the listing's `expected_generation`, and
+  applying it fails with the wallet's stale-policy error after a policy
+  change, as a store does. A run that started under private queries therefore
+  ends at its first write after they are turned off, instead of deferring
+  every remaining lookup.
+
+- Rename the account recovery module to `transparent_history_recovery`,
+  `ReferenceRecovery` to `TransparentHistoryRecovery`, and `RecoveryConfig` to
+  `TransparentHistoryRecoveryConfig`. Callers still supply already-derived
+  addresses through a watch set; mnemonic derivation remains outside this crate.
+
 ### Added
 
+- `testing::service` (feature `testing`): wallet-pir's shard server in process
+  (`InProcess`), a publisher that writes real shards for a synthetic chain
+  (`publish`, `ShardSpec`, `superseded`), and the geometry and seal constants it
+  publishes with. `testing` re-exports `transparent_events`,
+  `transparent_filter` and `transparent_shard`, so an application's tests build
+  events and maps at this crate's wallet-pir revision without depending on
+  wallet-pir themselves.
+
+- `forget_private_recovery` (feature `sqlite`) removes what private recovery
+  contributed once the wallet's policy is `Public` on the handle and durably:
+  it deletes every companion of a `CompanionDir`, then runs
+  `forget_transparent_ledger` through the caller's `WriteGate`. A companion
+  still held fails with `ForgetError::CompanionBusy` and forgets nothing; a
+  wallet not public fails with `ForgetError::NotPublic` before anything is
+  deleted. The forget runs in one wallet transaction with a check of the
+  policy generation read before the companions went, so any policy change
+  since, even private and back to public, fails with
+  `ForgetError::PolicyChanged` and forgets nothing: a companion created
+  meanwhile would otherwise outlive the facts it records.
+- One recovery pass driver, so wallets stop writing their own loop.
+  `TransparentHistoryRecovery::pass` recovers through a fresh `TransparentPirHttp` on
+  the caller's `HttpExchange`, retries once after
+  `RecoveryError::PublicationChanged` unless the caller is stopping, maps any
+  failure during an outage to `PassError::Outage`, and returns a `PassReport`
+  while holding a `Ready` batch inside the companion (`take_latest`).
+  With feature `sqlite`, `settle_latest` settles the held batch through
+  `apply_and_acknowledge_gated`, and `PassPlan` is the pure decision table that
+  turns a pass, its settlement and the re-read watch set into the next `Step`:
+  pass, refresh, wait, hold (`HoldCause::Withdrawn`, `Unreconciled`), skip,
+  stop (`StopCause::NotEnabled`, `PolicyChanged`), fail, or done with the last
+  retry, within `PassLimits` (8 passes, 3 stale refreshes by default).
+  `recover-activity` now requires feature `sqlite` and runs on the driver, and
+  the end-to-end tests drive every pass through it.
+- `discover_active_addresses`, `Discovery` and `DiscoveryLimits`: import-time
+  discovery of which candidate addresses hold transparent history from a floor
+  on, before any wallet exists. It downloads every filter from the floor's
+  shard through the publication's end and confirms each match by private
+  retrieval over an in-memory store, so filter false positives are never
+  reported and nothing is stored.
+- `ReferenceRecovery::apply_and_acknowledge_gated` runs each wallet write of a
+  settlement (every commit's transaction, then the acknowledgment's) through a
+  `WriteGate`. An application that serializes its wallet writes holds that
+  serialization for one commit instead of the whole batch, and can stop the
+  batch between commits: the gate returns `Interrupted`, the batch fails with
+  `ApplyError::Interrupted` (`ApplyAction::Interrupted`), the applied commits
+  stay, and the next pass replays the batch. `apply_and_acknowledge` is
+  unchanged and runs through `Ungated`.
 - Private queries go at 44 dithered bits when the shard service advertises the
   dithered schemes (`directory_scheme_dq44`, `pages_scheme_dq44`) and they
   reproduce locally, and at 49 bits otherwise, so older services keep working.
   A 44-bit query is 27,648 bytes plus `rows × 44 / 8` after the binding, where
   the 49-bit one needs `rows × 49 / 8`; the end-to-end tests check that every
   query they send is the 44-bit length.
+- A pages query to a growing tail selects over only the page rows its
+  revision's manifest says it holds, rounded up to whole 2,048-row blocks,
+  instead of the whole segment (wallet-pir `9d2cbda0`). The count comes only
+  from digest-bound manifest fields every wallet shares, never from the row a
+  query selects. A `recent-8k` tail's pages query shrinks from 72,712 bytes to
+  as little as 38,920. Sealed shards, multi-segment shards and directory
+  queries keep the full length, and the service must accept prefix
+  selections (wallet-pir `0f89fbe0` or later).
 - Declared re-cuts. A sealed revision the shard map declares a re-cut
   superseded stays current, and facts stored under it are exported under the
   revision triple the wallet already holds; the renumbered shards and tail
@@ -51,6 +158,20 @@
   process: lookups take turns on the client, a waiting lookup stops at cancellation, the map
   digest and the last map check time are read without waiting, and a lookup that finds the
   display unsupported leaves only the derived native profiles, so the next lookup asks again.
+  `lookup` returns a `DisplayLookup`: the result with the digest of the map that lookup used,
+  read before another lookup or map check can change it.
+- `DetailRun`, the wallet's txid detail work protocol for one run, so callers keep only
+  transport, scheduling and their write lock: `plan` lists the due lookups (preferred ones
+  first) under the service's display map and, when nothing is due but lookups are parked and
+  their re-check time has passed, yields one `DetailStep::RefreshMap`, whose `MapCheck` is
+  recorded as started before the fetch, so failed and abandoned checks are bounded too;
+  `relist` lists again only when the fetched map differs and the policy is unchanged. `record`
+  turns a lookup's `DetailAnswer` (a boxed `DisplayLookup`, a public result, or a stopped
+  lookup) into a `DetailWrite`: display facts to store under the
+  listing's generation, a deferral with the map the lookup used, or a public transaction
+  handed back only under public transport. A cancelled lookup writes nothing.
+  `DetailWrite::apply` performs a store or deferral and returns the public transaction to the
+  caller's own policy-checked ingestion.
 - `CompanionDir`, one wallet's companions: `open` names each `{account}-{tag}.sqlite` (the
   tag binds the origin and `SCHEMA`), prunes the account's companions for other origins and
   those of accounts the caller no longer has, and holds an operating system lock on the
@@ -146,9 +267,6 @@
   this one uses are the dithered query (wallet-pir's `pir-native` and the
   transparent client and server); the `BelowFloor` call sites were re-checked
   there.
-- wallet-pir then moves to `0d6ad4aa94abbb2838d4182c869f06e1881e6c35`, the
-  revision `zakura-pir-receiver` pins, so the two share one copy of each
-  wallet-pir crate. Its transparent crates are unchanged from `06a972db`.
 - Sources are `transparent-reference-source-v3`: the shard id is no longer
   bound, only the geometry, its seal parameters and the start height, so a
   renumbered shard or tail keeps its source.
@@ -160,8 +278,9 @@
 - Stored facts are matched to commits by revision digest, and exported rows the
   map no longer publishes are classified by source and start height instead of
   shard id.
-- `ReferenceRecovery::recover` takes the caller's `FilterSource` and
-  `ShardTransport` for each pass. Before any retrieval it checks the target,
+- A pass retrieves through a `FilterSource` and a `ShardTransport`, which
+  `pass` builds over the caller's `HttpExchange`; the single attempt it makes is
+  internal. Before any retrieval it checks the target,
   the script limits, that the filter source does not use parent filters, the
   shard limit, and that the service's init names `SCHEMA`.
 - `RecoveryConfig::origin` replaces `filter_origin` and `shard_origin`. It is
@@ -177,7 +296,7 @@
   source.
 - The wallet-pir crates move to `648264bb4801ae8faf7a61f4638ea049edb167cf`,
   whose client accepts maps and manifests that carry txid display fields.
-- `recover` refuses, before the service's init, a shard map whose network or
+- A pass refuses, before the service's init, a shard map whose network or
   genesis block is not Zcash mainnet's.
 - A pass needs the chain view only from the watch set's floor, its lowest
   required height. Shards ending below it are neither exported nor cataloged,
@@ -228,7 +347,7 @@
   with a boolean or bypass the SQLite integration's apply/acknowledge ordering.
 - `transparent-shard-v10` support.
 - `RecoveryConfig::{schema, timeout, response_bytes}`, the `observer`
-  argument of `recover`, and the adapter's fixed HTTP user agent.
+  argument of a pass, and the adapter's fixed HTTP user agent.
 - `reqwest` from the normal dependency graph. Only the `recover-activity`
   example builds the reference HTTP transports.
 - The companion's `lineage` binding key, its `pir_bridge_revisions` table and

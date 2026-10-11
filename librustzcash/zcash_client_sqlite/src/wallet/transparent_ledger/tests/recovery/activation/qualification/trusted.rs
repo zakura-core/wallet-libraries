@@ -70,8 +70,8 @@ fn output_id(st: &State, outpoint: &OutPoint) -> i64 {
         .unwrap()
 }
 
-/// The sources an integrity rejection quarantined.
-fn quarantined_sources(st: &State) -> Vec<Vec<u8>> {
+/// The sources an integrity rejection suspended.
+fn sources_with_suspended_recovery(st: &State) -> Vec<Vec<u8>> {
     conn(st)
         .prepare("SELECT source FROM tpir_quarantined_sources")
         .unwrap()
@@ -81,8 +81,8 @@ fn quarantined_sources(st: &State) -> Vec<Vec<u8>> {
         .unwrap()
 }
 
-/// `dump` without the quarantine tables.
-fn unquarantined(dump: Vec<(String, Vec<String>)>) -> Vec<(String, Vec<String>)> {
+/// `dump` without the recovery suspension tables.
+fn without_recovery_suspension(dump: Vec<(String, Vec<String>)>) -> Vec<(String, Vec<String>)> {
     dump.into_iter()
         .filter(|(table, _)| !table.starts_with("tpir_quarantined_"))
         .collect()
@@ -125,7 +125,7 @@ fn trusted_commit(
 }
 
 /// A wallet under `PrivateRequired` whose account was recovered from trusted commits of the
-/// provisional revision `revision(1, false)`, with one unspent receive, and promoted.
+/// provisional revision `revision(1, false)`, with one unspent receive, and activated.
 fn trusted_wallet() -> (State, AccountUuid, ReceiveEvent) {
     let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
@@ -136,7 +136,7 @@ fn trusted_wallet() -> (State, AccountUuid, ReceiveEvent) {
         &revision(1, false),
         vec![received.clone()],
     );
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(
         snapshot(&st, account).authority,
         TransparentAuthority::Private
@@ -200,8 +200,11 @@ fn a_trusted_commit_qualifies_and_promotes_without_the_test_hook() {
     let fixture = revision(1, false);
     let received = recover_one(&mut st, account, fixture.clone(), 1);
     set_policy(&mut st, PrivateRequired);
-    // Observed evidence alone cannot support promotion.
-    assert!(blocked(promote(&mut st, account)).contains(&RecoveryBlocker::UnqualifiedRevision));
+    // Observed evidence alone cannot support activation.
+    assert!(
+        blocked(activate_recovered_ledger(&mut st, account))
+            .contains(&RecoveryBlocker::UnqualifiedRevision)
+    );
     assert!(!is_qualified(&st, &fixture));
 
     cover_trusted(&mut st, account, &fixture, vec![]);
@@ -209,7 +212,7 @@ fn a_trusted_commit_qualifies_and_promotes_without_the_test_hook() {
     assert_eq!(count(&st, "tpir_qualified_revisions"), 1);
     assert_eq!(recovery(&st, account).blockers, vec![]);
 
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(lifecycle(&st, account), AccountLifecycle::Active);
     let s = snapshot(&st, account);
     assert_eq!(s.authority, TransparentAuthority::Private);
@@ -236,7 +239,7 @@ fn trusted_replacement_withdraws_the_predecessor_in_the_same_transaction() {
         ..receive(1, external(&ws), 40_000, below_target(&ws, 3))
     };
     cover_trusted(&mut st, account, &r1, vec![shared.clone()]);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     let output = output_id(&st, &shared.outpoint);
     let [coverage, pages, receives, spends, metadata] = rows_of(&st, &r1);
     assert!(coverage > 0 && receives > 0 && metadata > 0);
@@ -317,11 +320,11 @@ fn a_trusted_commit_failing_after_qualification_rolls_back_the_replacement() {
 }
 
 #[test]
-fn an_integrity_failure_in_a_trusted_commit_quarantines_without_qualifying() {
+fn an_integrity_failure_in_a_trusted_commit_records_recovery_suspension_without_qualifying() {
     let (mut st, account, received) = trusted_wallet();
     let (a, b) = (revision(1, false), revision(2, false));
     let evidence = rows_of(&st, &a);
-    let before = unquarantined(full_dump(conn(&st)));
+    let before = without_recovery_suspension(full_dump(conn(&st)));
 
     // B contradicts itself only after qualifying it has withdrawn A's evidence.
     let ws = watch(&st, account);
@@ -337,20 +340,20 @@ fn an_integrity_failure_in_a_trusted_commit_quarantines_without_qualifying() {
         CommitRejection::Integrity(IntegrityFailure::ReceivePlacement(placed.outpoint))
     );
 
-    assert_eq!(quarantined_accounts(&st), vec![account]);
-    assert_eq!(quarantined_sources(&st), vec![b.source.clone()]);
+    assert_eq!(accounts_with_suspended_recovery(&st), vec![account]);
+    assert_eq!(sources_with_suspended_recovery(&st), vec![b.source.clone()]);
     assert!(!is_qualified(&st, &b));
     assert!(is_qualified(&st, &a));
     assert_eq!(rows_of(&st, &a), evidence);
-    assert_eq!(unquarantined(full_dump(conn(&st))), before);
+    assert_eq!(without_recovery_suspension(full_dump(conn(&st))), before);
 }
 
 #[test]
-fn a_colliding_trusted_revision_quarantines_without_qualifying() {
+fn a_colliding_trusted_revision_records_recovery_suspension_without_qualifying() {
     let (mut st, account, received) = trusted_wallet();
     let r1 = revision(1, false);
     let evidence = rows_of(&st, &r1);
-    let before = unquarantined(full_dump(conn(&st)));
+    let before = without_recovery_suspension(full_dump(conn(&st)));
 
     // A re-cut reusing R1's lineage under another identifier collides while being qualified,
     // before any of its facts apply.
@@ -364,13 +367,16 @@ fn a_colliding_trusted_revision_quarantines_without_qualifying() {
         CommitRejection::Integrity(IntegrityFailure::RevisionMismatch)
     );
 
-    assert_eq!(quarantined_accounts(&st), vec![account]);
-    assert_eq!(quarantined_sources(&st), vec![r1.source.clone()]);
+    assert_eq!(accounts_with_suspended_recovery(&st), vec![account]);
+    assert_eq!(
+        sources_with_suspended_recovery(&st),
+        vec![r1.source.clone()]
+    );
     assert!(!is_qualified(&st, &recut));
     assert!(is_qualified(&st, &r1));
     assert_eq!(rows_of(&st, &r1), evidence);
-    // The re-cut revision was not stored, and nothing but the quarantine changed.
-    assert_eq!(unquarantined(full_dump(conn(&st))), before);
+    // The re-cut revision was not stored, and nothing but the recovery suspension changed.
+    assert_eq!(without_recovery_suspension(full_dump(conn(&st))), before);
     assert_eq!(
         snapshot(&st, account).authority,
         TransparentAuthority::Unavailable

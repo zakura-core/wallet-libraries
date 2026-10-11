@@ -8,6 +8,8 @@ use zcash_client_backend::data_api::SentTransaction;
 use zcash_primitives::transaction::{Authorized, TransactionData, TxVersion};
 use zcash_protocol::consensus::BranchId;
 
+use crate::error::{AuthorityRefusal, RefusalReason};
+
 use super::*;
 
 /// Exercises storage authorization directly, as an externally finalized transaction would.
@@ -54,7 +56,7 @@ pub(super) fn store_spend(
         )])
 }
 
-fn coinbase_wallet() -> (State, AccountUuid, ReceiveEvent, RecoveryRevision) {
+pub(super) fn coinbase_wallet() -> (State, AccountUuid, ReceiveEvent, RecoveryRevision) {
     let (mut st, accounts) = recovery_wallet_with(0);
     let account = accounts[0];
     let fixture = revision(1, true);
@@ -66,7 +68,7 @@ fn coinbase_wallet() -> (State, AccountUuid, ReceiveEvent, RecoveryRevision) {
     cover(&mut st, account, &fixture, vec![coinbase.clone()]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     (st, account, coinbase, fixture)
 }
 
@@ -76,7 +78,9 @@ fn externally_finalized_immature_coinbase_is_rejected_without_writes() {
     let before = production_dump(conn(&st));
     assert!(matches!(
         store_spend(&mut st, account, &coinbase),
-        Err(SqliteClientError::TransparentAuthorityUnavailable)
+        Err(SqliteClientError::TransparentAuthorityUnavailable(
+            AuthorityRefusal::Refused(RefusalReason::ImmatureCoinbase)
+        ))
     ));
     assert_eq!(production_dump(conn(&st)), before);
 }
@@ -103,7 +107,9 @@ fn maturity_boundary_governs_every_selector_and_final_storage() {
     let before = production_dump(conn(&st));
     assert!(matches!(
         store_spend(&mut st, account, &coinbase),
-        Err(SqliteClientError::TransparentAuthorityUnavailable)
+        Err(SqliteClientError::TransparentAuthorityUnavailable(
+            AuthorityRefusal::Refused(RefusalReason::ImmatureCoinbase)
+        ))
     ));
     assert_eq!(production_dump(conn(&st)), before);
 
@@ -128,7 +134,7 @@ fn maturity_boundary_governs_every_selector_and_final_storage() {
         assert_eq!(selection.unwrap(), vec![]);
     }
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
 
     scan_new_blocks(&mut st, 1);
     cover(&mut st, account, &fixture, vec![]);

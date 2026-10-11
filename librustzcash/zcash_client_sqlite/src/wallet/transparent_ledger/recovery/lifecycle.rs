@@ -10,7 +10,7 @@ use rusqlite::OptionalExtension as _;
 /// its anchor, and that chain equals the surviving one through `floor`. Without a local hash
 /// for the floor block the coverage is deleted rather than given an invented anchor. Candidate
 /// windows never shrink.
-pub(crate) fn truncate(
+pub(crate) fn truncate_recovery(
     conn: &rusqlite::Connection,
     floor: BlockHeight,
 ) -> Result<(), SqliteClientError> {
@@ -143,11 +143,11 @@ pub(crate) fn forget_reattributed_script(
 /// would project it again. See `TransparentLedgerWrite::forget_transparent_ledger`.
 ///
 /// Requires `Public` on the handle and durably: public discovery rebuilds what this removes.
-/// Revision lineage, qualification, quarantine, candidate windows, and shared derivations stay:
+/// Revision lineage, qualification, recovery suspension, candidate windows, and shared derivations stay:
 /// they constrain what a later return to `PrivateRequired` may accept, and none of them is a
 /// wallet fact.
 #[cfg(feature = "transparent-inputs")]
-pub(crate) fn forget(
+pub(crate) fn forget_ledger(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,
 ) -> Result<
@@ -186,7 +186,7 @@ pub(crate) fn forget(
         return Ok(ForgottenTransparentLedger::default());
     }
 
-    super::commit::atomically(conn, |conn| {
+    atomically(conn, |conn| {
         public(conn)?;
 
         // Every transaction a ledger fact names, collected before those facts are removed.
@@ -206,7 +206,8 @@ pub(crate) fn forget(
             .collect::<Result<_, _>>()?;
 
         // A spend whose only origin is the ledger, for spending transaction `{tx}` and the
-        // prevout `{prevout_txid}`:`{prevout_index}`.
+        // prevout `{prevout_txid}`:`{prevout_index}`. Projection's `unproject_unobserved` builds
+        // the same test from `spend_origin`, over fixed aliases.
         let ledger_only_spend = |tx: &str, prevout_txid: &str, prevout_index: &str| {
             format!(
                 "EXISTS (
@@ -283,7 +284,8 @@ pub(crate) fn forget(
         )?;
 
         // Every output left with the ledger origin is ledger-only. Nothing searches for its
-        // spend any longer.
+        // spend any longer. Unlike projection's `ledger_only_output`, which also requires the
+        // receive to have lost its last observation, forgetting covers every ledger-only output.
         let ledger_only_output = "EXISTS (
              SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = o.id AND oo.origin = 2
          )";

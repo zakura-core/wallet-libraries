@@ -1,9 +1,9 @@
 //! Candidate recovery: watched addresses, normalized events, coverage, and resumable pages.
 //!
-//! A recovery run captures a [`TransparentWatchSet`], asks its source about the watched
+//! A recovery run captures a [`TransparentAddressWatchSet`], asks its source about the watched
 //! addresses, and submits what it learned as one [`TransparentLedgerCommit`] per account.
 //! A candidate account's state is isolated: it never changes balances, spend links, locks,
-//! address use, or transaction history. Promoting the account projects its recovered events
+//! address use, or transaction history. Activating the account projects its recovered events
 //! into the wallet, and an active account's later commits project in the same transaction.
 
 use transparent::{address::TransparentAddress, bundle::OutPoint, keys::TransparentKeyScope};
@@ -56,7 +56,7 @@ pub struct WatchedAddress {
 pub enum AccountLifecycle {
     /// Recovery is isolated from the wallet's projection.
     Candidate,
-    /// Promoted: commits also project into the wallet's outputs and spends.
+    /// Activated: commits also project into the wallet's outputs and spends.
     Active,
 }
 
@@ -77,8 +77,8 @@ pub struct TransparentRecoveryContext<AccountId> {
 
 /// One account's watched addresses, with the context a recovery run captures.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransparentWatchSet<AccountId> {
-    /// The account.
+pub struct TransparentAddressWatchSet<AccountId> {
+    /// The account the watched addresses belong to.
     pub account: AccountId,
     /// The account's lifecycle at the time of the read.
     pub lifecycle: AccountLifecycle,
@@ -94,7 +94,7 @@ pub struct TransparentWatchSet<AccountId> {
     pub pending_pages: Vec<PendingPage>,
 }
 
-impl<AccountId: Copy> TransparentWatchSet<AccountId> {
+impl<AccountId: Copy> TransparentAddressWatchSet<AccountId> {
     /// The context to recover under, or `None` while no local target exists.
     pub fn context(&self) -> Option<TransparentRecoveryContext<AccountId>> {
         self.target.map(|target| TransparentRecoveryContext {
@@ -119,8 +119,9 @@ pub struct PublicationAnchor {
 /// A source revision that supplied a commit's facts.
 ///
 /// Identifiers are opaque and compared bytewise. Within a source, each replacement revision has
-/// a strictly greater `lineage`. A provisional revision is superseded only by a trusted qualification transition
-/// to a newer revision of the same source; observing a revision does not authorize replacement; a sealed revision never is.
+/// a strictly greater `lineage`. A provisional revision is superseded only by a trusted
+/// qualification transition to a newer revision of the same source; observing a revision does not
+/// authorize replacement. A sealed revision is never superseded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryRevision {
     /// The source identifier.
@@ -129,7 +130,8 @@ pub struct RecoveryRevision {
     pub revision: Vec<u8>,
     /// Replacement order within the source; at most `i64::MAX`.
     pub lineage: u64,
-    /// Whether the revision is sealed.
+    /// Whether the revision is sealed: its content is final, and no later revision of the source
+    /// supersedes it. An unsealed revision is provisional.
     pub sealed: bool,
     /// The publisher's asserted position for this revision.
     pub publication: PublicationAnchor,
@@ -192,7 +194,8 @@ pub struct AddressRange {
 /// usually alongside the events and coverage it produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageRequest {
-    /// The page identifier within its revision.
+    /// The page identifier within its revision: opaque bytes the recovery source assigns, which a
+    /// later commit names in [`TransparentLedgerCommit::completed_pages`] to complete the page.
     pub page: Vec<u8>,
     /// The watched addresses the page answers for.
     pub addresses: Vec<TransparentAddress>,
@@ -237,7 +240,8 @@ pub struct TransparentLedgerCommit<AccountId> {
     pub unsupported: Vec<AddressRange>,
     /// Pages this commit opens.
     pub opened_pages: Vec<PageRequest>,
-    /// Pages of this revision that this commit completes.
+    /// Pages of this revision that this commit completes, by their [`PageRequest::page`]
+    /// identifiers.
     pub completed_pages: Vec<Vec<u8>>,
 }
 
@@ -277,8 +281,8 @@ pub struct CommitOutcome {
 
 /// Why a store refused a commit. None of a refused commit's facts are applied.
 ///
-/// An integrity rejection additionally quarantines, in the same transaction, the commit's
-/// source, its account, and every other account holding evidence from that source. Quarantined
+/// An integrity rejection additionally suspends, in the same transaction, the commit's
+/// source, its account, and every other account holding evidence from that source. Suspended
 /// sources and accounts accept no further commits and hold no private authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommitRejection {
@@ -295,10 +299,10 @@ pub enum CommitRejection {
 /// A commit the store will not accept whatever its content.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RefusedCommit {
-    /// The source is quarantined by an earlier integrity rejection.
-    SourceQuarantined,
-    /// The account is quarantined by an earlier integrity rejection.
-    AccountQuarantined,
+    /// The source is suspended by an earlier integrity rejection.
+    SourceRecoverySuspended,
+    /// The account is suspended by an earlier integrity rejection.
+    AccountRecoverySuspended,
     /// The account is active and the revision is not qualified to support its authority.
     UnqualifiedRevision,
 }
@@ -318,7 +322,7 @@ pub enum StaleCommit {
     UnknownPage(Vec<u8>),
     /// The provisional revision was superseded by a newer revision of its source.
     SupersededRevision,
-    /// The account was promoted or demoted since the run started.
+    /// The account was activated or deactivated since the run started.
     LifecycleChanged,
 }
 
@@ -401,7 +405,7 @@ pub enum InvalidCommit {
 /// recovered net can be above or below the real balance, and it never authorizes a spend.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CandidateRecovery<AccountId> {
-    /// The account.
+    /// The account whose candidate recovery this reports.
     pub account: AccountId,
     /// The highest contiguously scanned local block.
     pub target: Option<ChainPoint>,

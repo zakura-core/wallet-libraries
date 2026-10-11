@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn wallet_summary_composes_with_private_authority_in_one_transaction() {
     let (mut st, account, _, _) = ready_wallet();
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     let expected = snapshot(&st, account);
     st.wallet_mut()
         .db_mut()
@@ -68,7 +68,7 @@ fn per_account_balances_do_not_read_another_accounts_invalid_amounts() {
     }
     set_policy(&mut st, PrivateRequired);
     for account in &accounts {
-        promote(&mut st, *account).unwrap();
+        activate_recovered_ledger(&mut st, *account).unwrap();
     }
     let expected = snapshot(&st, accounts[0]);
     // Corruption in B proves A's read actually scopes its SQL, rather than computing
@@ -84,7 +84,7 @@ fn per_account_balances_do_not_read_another_accounts_invalid_amounts() {
 }
 
 #[test]
-fn empty_interval_promotion_grants_no_funds_and_missing_coverage_revokes_authority() {
+fn empty_interval_activation_grants_no_funds_and_missing_coverage_revokes_authority() {
     let (mut st, account) = recovery_wallet();
     let target = watch(&st, account).target.unwrap();
     conn(&st)
@@ -95,7 +95,7 @@ fn empty_interval_promotion_grants_no_funds_and_missing_coverage_revokes_authori
         .unwrap();
     set_policy(&mut st, PrivateRequired);
     assert_eq!(count(&st, "tpir_qualified_revisions"), 0);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(
         snapshot(&st, account).authority,
         TransparentAuthority::Private

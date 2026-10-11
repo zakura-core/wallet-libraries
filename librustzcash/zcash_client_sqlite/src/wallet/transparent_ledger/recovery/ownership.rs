@@ -41,7 +41,7 @@ pub(super) fn retain_owned<P: consensus::Parameters>(
 
 /// Writes `account`'s derived addresses in `range` to the address table, except receivers another
 /// account owns. The watch set excluded those receivers, so the account has no coverage for them,
-/// and transferring one here would make promotion refuse itself on every retry. The wallet's own
+/// and transferring one here would make activation refuse itself on every retry. The wallet's own
 /// address generation, including gap-limit generation after a receive is projected, may still
 /// transfer one under the existing rules; recovery then schedules it for its new owner.
 pub(super) fn generate_unowned_range<P: consensus::Parameters>(
@@ -84,26 +84,29 @@ pub(super) fn generate_unowned_range<P: consensus::Parameters>(
     store_address_range(conn, params, account_ref, key_scope, unowned)
 }
 
-/// Materializes a complete watch under production ownership rules. Shared derivations remain
-/// discovery metadata; an ownerless retained receiver can become this account's address again.
-/// Runs inside promotion or an active commit's transaction, never during candidate recovery.
-pub(super) fn materialize_watch<P: consensus::Parameters>(
+/// Adds recovered addresses to the wallet under production ownership rules. Shared derivations
+/// remain discovery metadata; an ownerless retained receiver can become this account's address again.
+/// Runs inside activation or an active commit's transaction, never during candidate recovery.
+pub(super) fn materialize_recovery_addresses<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
-    watch: &Watch,
+    recovery_addresses: &AccountRecoveryAddresses,
 ) -> Result<(), SqliteClientError> {
     for (slot, scope) in WINDOW_SCOPES.into_iter().enumerate() {
-        let (start, end) = (watch.production_end[slot], watch.candidate_end[slot]);
+        let (start, end) = (
+            recovery_addresses.production_end[slot],
+            recovery_addresses.candidate_end[slot],
+        );
         if start < end {
             let end = NonHardenedChildIndex::from_index(end).ok_or_else(|| {
-                SqliteClientError::TransparentPromotionBlocked(vec![RecoveryBlocker::Recovery(
+                SqliteClientError::TransparentActivationBlocked(vec![RecoveryBlocker::Recovery(
                     CandidateBlocker::WindowUnderivable,
                 )])
             })?;
             generate_unowned_range(
                 conn,
                 params,
-                &watch.account,
+                &recovery_addresses.account,
                 scope,
                 NonHardenedChildIndex::from_index(start).expect("start below end")..end,
             )?;
@@ -111,10 +114,10 @@ pub(super) fn materialize_watch<P: consensus::Parameters>(
     }
     // Retained shared receivers below production_end can lose their other owner (for example,
     // on account deletion). Make them projectable only once they are in this account's watch.
-    for origin in watch.addresses.values() {
+    for origin in recovery_addresses.addresses.values() {
         if let WatchOrigin::CandidateWindow { scope, index } = origin
             && index.index()
-                < watch.production_end[WINDOW_SCOPES
+                < recovery_addresses.production_end[WINDOW_SCOPES
                     .iter()
                     .position(|s| s == scope)
                     .expect("window scope")]
@@ -123,10 +126,17 @@ pub(super) fn materialize_watch<P: consensus::Parameters>(
                 .checked_add(1)
                 .and_then(NonHardenedChildIndex::from_index)
         {
-            generate_unowned_range(conn, params, &watch.account, *scope, *index..end)?;
+            generate_unowned_range(
+                conn,
+                params,
+                &recovery_addresses.account,
+                *scope,
+                *index..end,
+            )?;
         }
     }
-    if let Some((_, index)) = get_legacy_transparent_address(params, conn, watch.account.id())?
+    if let Some((_, index)) =
+        get_legacy_transparent_address(params, conn, recovery_addresses.account.id())?
         && let Some(end) = index
             .index()
             .checked_add(1)
@@ -135,7 +145,7 @@ pub(super) fn materialize_watch<P: consensus::Parameters>(
         generate_unowned_range(
             conn,
             params,
-            &watch.account,
+            &recovery_addresses.account,
             TransparentKeyScope::EXTERNAL,
             index..end,
         )?;
