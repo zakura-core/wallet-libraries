@@ -602,6 +602,10 @@ pub(super) const INDEX_IRONWOOD_RECEIVED_NOTES_ADDRESS: &str = "
 CREATE INDEX idx_ironwood_received_notes_address ON ironwood_received_notes (
     address_id ASC
 )";
+pub(super) const INDEX_IRONWOOD_RECEIVED_NOTES_RECEIVING_KEY: &str = "
+CREATE INDEX idx_ironwood_received_notes_receiving_key ON ironwood_received_notes (
+    receiving_key_id ASC
+)";
 pub(super) const INDEX_IRONWOOD_RECEIVED_NOTES_TX: &str = "
 CREATE INDEX idx_ironwood_received_notes_tx ON ironwood_received_notes (
     transaction_id ASC
