@@ -270,8 +270,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// was paid from elsewhere. A closed refund key reopens, rescanning from its start,
     /// when a status newly reports either, and any key that closed settled does when a
     /// status (for an incoming key, of its funded operation) leaves it expecting more than
-    /// it received, unless its completion limit (see
-    /// [`Self::close_finished_dynamic_keys`]) has passed.
+    /// it received. No status reopens a key past its completion limit (see
+    /// [`Self::close_finished_dynamic_keys`]).
     pub fn record_operation_status(
         &mut self,
         account: AccountUuid,
