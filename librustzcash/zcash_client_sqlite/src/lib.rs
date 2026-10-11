@@ -3287,8 +3287,6 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
         blocks: Vec<ScannedBlock<AccountUuid>>,
         #[cfg(feature = "orchard")] dynamic_keys: Option<&[(AccountUuid, KeyId)]>,
     ) -> Result<(), SqliteClientError> {
-        #[cfg(not(feature = "orchard"))]
-        wallet::init::refuse_dynamic_ivk_state(self.conn.0)?;
         #[cfg(feature = "orchard")]
         if dynamic_keys.is_none() && wallet::dynamic_key_open(self.conn.0)? {
             return Err(SqliteClientError::DynamicIvksNotUsed);
@@ -3629,8 +3627,6 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
     ) -> Result<(), <Self as WalletRead>::Error> {
         // As with scanned blocks, a transaction decrypted without the open dynamic keys
         // would store their payments as someone else's.
-        #[cfg(not(feature = "orchard"))]
-        wallet::init::refuse_dynamic_ivk_state(self.conn.0)?;
         #[cfg(feature = "orchard")]
         if !d_tx.dynamic_ivks_applied() && wallet::dynamic_key_open(self.conn.0)? {
             return Err(SqliteClientError::DynamicIvksNotUsed);
@@ -4019,6 +4015,8 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         #[cfg(feature = "orchard")] ironwood_commitment_tree_size: u32,
         #[cfg(feature = "orchard")] ironwood_action_count: u32,
     ) -> Result<(), Self::Error> {
+        #[cfg(not(feature = "orchard"))]
+        wallet::init::refuse_dynamic_ivk_state(self.conn.borrow())?;
         wallet::put_block(
             self.conn.borrow(),
             block_height,
@@ -4343,6 +4341,8 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
     }
 
     fn delete_retrieval_queue_entries(&mut self, txid: TxId) -> Result<(), Self::Error> {
+        #[cfg(not(feature = "orchard"))]
+        wallet::init::refuse_dynamic_ivk_state(self.conn.borrow())?;
         wallet::delete_retrieval_queue_entries(self.conn.borrow(), txid)
     }
 
@@ -4351,6 +4351,8 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         range: Range<BlockHeight>,
         wallet_note_positions: &[(ShieldedPool, Position)],
     ) -> Result<(), Self::Error> {
+        #[cfg(not(feature = "orchard"))]
+        wallet::init::refuse_dynamic_ivk_state(self.conn.borrow())?;
         wallet::scanning::scan_complete(
             self.conn.borrow(),
             &self.params,
