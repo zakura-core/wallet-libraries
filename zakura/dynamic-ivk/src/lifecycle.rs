@@ -69,8 +69,9 @@ pub struct Observation {
 /// the swap completes. An exact-input `SUCCESS` expects none only when it reports
 /// a zero refunded amount, since excess deposits are refunded for either swap
 /// type; without one, or with a missing or unrecognized swap type, it is
-/// [`ReceiptExpectation::Unknown`]. A refund on the source chain is not a Zcash
-/// receipt. A zero payout amount is treated as unreported.
+/// [`ReceiptExpectation::Unknown`]. 1Click refunds a `FAILED` swap's deposit like a
+/// `REFUNDED` one, and a refund on the source chain is not a Zcash receipt. A zero
+/// payout amount is treated as unreported.
 pub fn near_observation(purpose: crate::Purpose, status: &NearStatus<'_>) -> Observation {
     use crate::Purpose;
     use OperationStatus::*;
@@ -89,9 +90,8 @@ pub fn near_observation(purpose: crate::Purpose, status: &NearStatus<'_>) -> Obs
             (None, Some("EXACT_INPUT")) if refund_reported => ReceiptExpectation::None,
             (None, _) => Unknown,
         }),
-        ("REFUNDED", Purpose::Refund) => Terminal(Positive(refund)),
-        ("REFUNDED", Purpose::Receive) => Terminal(ReceiptExpectation::None),
-        ("FAILED", _) => Terminal(Unknown),
+        ("REFUNDED" | "FAILED", Purpose::Refund) => Terminal(Positive(refund)),
+        ("REFUNDED" | "FAILED", Purpose::Receive) => Terminal(ReceiptExpectation::None),
         _ => Active,
     };
     Observation {
@@ -135,9 +135,11 @@ mod tests {
             observe(Refund, status("SUCCESS")),
             Some(OperationStatus::Terminal(ReceiptExpectation::Unknown))
         );
+        // 1Click returns a failed swap's deposit to the refund address on the origin chain.
+        assert_eq!(observe(Refund, status("FAILED")), positive(None));
         assert_eq!(
-            observe(Refund, status("FAILED")),
-            Some(OperationStatus::Terminal(ReceiptExpectation::Unknown))
+            observe(Receive, status("FAILED")),
+            Some(OperationStatus::Terminal(ReceiptExpectation::None))
         );
         assert_eq!(
             observe(Refund, status("NEW_STATE")),
@@ -156,6 +158,16 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(observe(Refund, refunded), positive(Some(amount)));
+        let failed = NearStatus {
+            status: "FAILED",
+            refunded_amount: Some(amount),
+            ..Default::default()
+        };
+        assert_eq!(observe(Refund, failed), positive(Some(amount)));
+        assert_eq!(
+            observe(Receive, failed),
+            Some(OperationStatus::Terminal(ReceiptExpectation::None))
+        );
         // A source-chain refund on an incoming swap is never a Zcash receipt.
         let incoming_refund = NearStatus {
             status: "REFUNDED",
