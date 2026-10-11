@@ -48,6 +48,14 @@
 
 ### Added
 
+- `testing::service` (feature `testing`): wallet-pir's shard server in process
+  (`InProcess`), a publisher that writes real shards for a synthetic chain
+  (`publish`, `ShardSpec`, `superseded`), and the geometry and seal constants it
+  publishes with. `testing` re-exports `transparent_events`,
+  `transparent_filter` and `transparent_shard`, so an application's tests build
+  events and maps at this crate's wallet-pir revision without depending on
+  wallet-pir themselves.
+
 - `forget_private_recovery` (feature `sqlite`) removes what private recovery
   contributed once the wallet's policy is `Public` on the handle and durably:
   it deletes every companion of a `CompanionDir`, then runs

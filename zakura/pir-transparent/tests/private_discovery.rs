@@ -8,7 +8,7 @@
 //! floor.
 
 // Shared with the recovery tests, which use the re-cut helpers this file does not.
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports)]
 mod fixture;
 
 use std::sync::{Mutex, PoisonError};
@@ -130,6 +130,7 @@ fn shard(
         geometry: GEOMETRY,
         sealed,
         revision: 0,
+        supersedes: String::new(),
         events,
     }
 }

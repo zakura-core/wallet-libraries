@@ -179,6 +179,7 @@ fn sealed(start: u64, end: u64, events: Vec<(ScriptBytes, TransparentEvent)>) ->
         geometry: GEOMETRY,
         sealed: true,
         revision: 0,
+        supersedes: String::new(),
         events,
     }
 }
@@ -191,6 +192,7 @@ fn tail(end: u64, revision: u32, events: Vec<(ScriptBytes, TransparentEvent)>) -
         geometry: GEOMETRY,
         sealed: false,
         revision,
+        supersedes: String::new(),
         events,
     }
 }
@@ -1390,6 +1392,7 @@ fn before_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
             geometry: GEOMETRY,
             sealed: false,
             revision: 0,
+            supersedes: String::new(),
             events: noise(H0 + 500, RECUT_TIP, 4),
         },
     ]
@@ -1414,6 +1417,7 @@ fn after_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
             geometry: WIDE,
             sealed: true,
             revision: 0,
+            supersedes: String::new(),
             events: [s1.events, s2.events].concat(),
         },
         ShardSpec { revision: 1, ..s3 },
@@ -2479,6 +2483,7 @@ fn stale_middle_retirement_batch_preserves_reconciliation_across_reopen() {
         geometry: GEOMETRY,
         sealed: false,
         revision: 0,
+        supersedes: String::new(),
         events: noise(H0 + 1000, target, 5),
     });
     f.publish(&shards, SEAL);

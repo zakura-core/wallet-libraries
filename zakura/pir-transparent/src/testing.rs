@@ -1,9 +1,18 @@
 //! Test support for applications, with feature `testing`: batches no companion
-//! issued, their settlement, and a fake txid display publication.
+//! issued, their settlement, a fake txid display publication, and a real shard
+//! service ([`service`]).
 //!
 //! Nothing here is for production: a batch built here carries no export receipt,
 //! so no companion acknowledges it, and the publication answers no private query
 //! with a record.
+//!
+//! The wallet-pir crates the service publishes with are re-exported, at the
+//! revision this crate builds on, so an application's tests need no wallet-pir
+//! dependency of their own to build events, scripts and maps.
+
+pub mod service;
+
+pub use {transparent_events, transparent_filter, transparent_shard};
 
 use sha2::{Digest, Sha256};
 use transparent_native::TableProfile;

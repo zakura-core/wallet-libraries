@@ -15,9 +15,10 @@ default = []
 # Applying a batch to a SQLite wallet and acknowledging it in one call.
 sqlite = ["wallet", "dep:zcash_client_sqlite"]
 wallet = ["dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol", "dep:transparent", "dep:transparent-wallet", "dep:transparent-wallet-store", "dep:transparent-events", "dep:transparent-filter", "dep:transparent-txid-client", "dep:rusqlite", "dep:hex", "dep:serde_json", "dep:same-file", "dep:rustix"]
-# Test support for applications: batches no companion issued, their settlement, and a
-# fake txid display publication. Never enable it in a production build.
-testing = ["wallet", "dep:transparent-shard", "dep:transparent-native", "dep:base64"]
+# Test support for applications: batches no companion issued, their settlement, a
+# fake txid display publication, and a real shard service in process. Never enable
+# it in a production build.
+testing = ["wallet", "dep:transparent-shard", "dep:transparent-shard-server", "dep:transparent-native", "dep:base64", "dep:axum", "dep:tokio", "dep:tower"]
 
 [dependencies]
 zcash_client_backend = { workspace = true, optional = true, features = ["transparent-inputs"] }
@@ -40,6 +41,10 @@ transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "
 transparent-txid-client = { git = "https://github.com/valargroup/wallet-pir", rev = "9d2cbda0b4336258cfce76ca8ee77b095daa7fd7", optional = true }
 transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "9d2cbda0b4336258cfce76ca8ee77b095daa7fd7", optional = true }
 transparent-native = { git = "https://github.com/valargroup/wallet-pir", rev = "9d2cbda0b4336258cfce76ca8ee77b095daa7fd7", optional = true }
+transparent-shard-server = { git = "https://github.com/valargroup/wallet-pir", rev = "9d2cbda0b4336258cfce76ca8ee77b095daa7fd7", optional = true }
+axum = { version = "0.7", optional = true }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread"] }
+tower = { version = "0.5", optional = true, features = ["util"] }
 
 # Companion locks: `flock` directly, which `std` supports on Android only from Rust 1.98.
 [target.'cfg(unix)'.dependencies]
@@ -75,11 +80,11 @@ required-features = ["sqlite"]
 
 [[test]]
 name = "private_recovery"
-required-features = ["sqlite"]
+required-features = ["sqlite", "testing"]
 
 [[test]]
 name = "private_discovery"
-required-features = ["wallet"]
+required-features = ["testing"]
 
 [[test]]
 name = "detail_run"

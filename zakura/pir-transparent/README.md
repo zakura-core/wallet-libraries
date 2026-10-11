@@ -425,7 +425,7 @@ included every event or reported every value honestly.
 | No features (default) | Recovery and display APIs are disabled |
 | `wallet` | Recovery, catalog-backed companions, discovery, transports, and display lookup/translation |
 | `sqlite` | Includes `wallet`; adds SQLite settlement, explicit trust, and write gates |
-| `testing` | Includes `wallet`; supplies synthetic batches and a txid publication for application tests; keep out of production builds |
+| `testing` | Includes `wallet`; supplies synthetic batches, a txid publication and a real shard service in process (`testing::service`, with the wallet-pir crates it publishes with re-exported) for application tests; keep out of production builds |
 
 Run the relevant development configuration from the repository root:
 
@@ -434,6 +434,9 @@ python3 scripts/dev.py test --config transparent-pir
 python3 scripts/dev.py test --config transparent-pir-sqlite
 python3 scripts/dev.py test --config transparent-pir-testing
 ```
+
+The in-process end-to-end tests use `testing::service`, so they need the
+`testing` feature.
 
 The [in-process recovery tests](tests/private_recovery.rs) use real PIR and
 record requests while exercising recovery, settlement, activation, reorgs,
