@@ -1,6 +1,6 @@
 //! Private recovery end to end: a wallet recovers its transparent history from a
 //! transparent shard service running in process, over loopback HTTP and real
-//! PIR, through `ReferenceRecovery` and the wallet's trusted commit operation.
+//! PIR, through `TransparentHistoryRecovery` and the wallet's trusted commit operation.
 //!
 //! The service records every request it receives, so the tests also check what
 //! a private pass discloses: only the service's routes, no script of the
@@ -16,26 +16,28 @@ use std::{
     time::Duration,
 };
 
-use fixture::{GEOMETRY, SEAL, Server, ShardSpec, WIDE, synthetic};
+use fixture::{GEOMETRY, Loopback, SEAL, Server, ShardSpec, WIDE, synthetic};
 use regex::Regex;
 use rusqlite::{Connection, OpenFlags, types::Value};
 use transparent::{address::TransparentAddress, bundle::OutPoint, keys::TransparentKeyScope};
 use transparent_events::{ReceiveEvent, SpendEvent, TransparentEvent, Txid};
 use transparent_filter::{Recut, ScriptBytes, SealParameters, ShardMap};
-use transparent_wallet::http::{HttpFilterSource, HttpOptions, HttpShardTransport};
+use transparent_wallet::http::{HttpOptions, HttpShardTransport};
 use zakura_pir_transparent::{
-    ApplyError, BatchState, Outcome, Progress, RecoveryBatch, RecoveryConfig, RecoveryError,
-    ReferenceRecovery, ShardTransport, Trust, WalletChain, WithdrawnCause,
+    ApplyAction, ApplyError, BatchState, Companion, CompanionDir, ForgetError, HoldCause,
+    Interrupted, Outcome, PassError, PassLimits, PassPlan, PassReport, Progress, RecoveryBatch,
+    Retry, ShardTransport, Step, TransparentHistoryRecoveryConfig, Trust, Ungated, WalletChain,
+    WithdrawnCause, WriteGate, forget_private_recovery,
 };
 use zcash_client_backend::data_api::{
     Account as _, CoinbaseFilter, InputSource as _, WalletRead as _,
     chain::ChainState,
     testing::{InitialChainState, TestBuilder, TestState},
     transparent_ledger::{
-        AccountLifecycle, CommitRejection, RecoveryRevision, StaleCommit, TransparentAuthority,
-        TransparentLedgerCommit,
+        AccountLifecycle, CommitRejection, ForgottenTransparentLedger, RecoveryRevision,
+        StaleCommit, TransparentAddressWatchSet, TransparentAuthority, TransparentLedgerCommit,
         TransparentLedgerMode::{self, PrivateRequired},
-        TransparentLedgerRead as _, TransparentLedgerWrite as _, TransparentWatchSet, WatchOrigin,
+        TransparentLedgerRead as _, TransparentLedgerWrite as _, WatchOrigin,
     },
     wallet::{
         ConfirmationsPolicy, TargetHeight,
@@ -44,7 +46,7 @@ use zcash_client_backend::data_api::{
 };
 use zcash_client_sqlite::{
     AccountUuid,
-    error::SqliteClientError,
+    error::{AuthorityRefusal, SqliteClientError},
     testing::{
         BlockCache,
         db::{TestDb, TestDbFactory},
@@ -69,18 +71,24 @@ const ROUTES: &str = r"^(GET /v1/(filters/shards(/[0-9]+/filter)?|shards/init|sh
 /// The shard a request's path names: its filter, manifest, tables or queries.
 const SHARD: &str = r"^/v1/(filters/)?shards/([0-9]+)/";
 
+/// A pages query's shard and revision.
+const PAGES_QUERY: &str = r"^/v1/shards/([0-9]+)/revisions/([0-9a-f]{64})/query/pages$";
+
 /// What a pass over a map that rewrites sealed history the companion's store
 /// holds, without declaring a re-cut, returns: wallet-pir refuses it before
 /// reading anything, and no later pass repairs it.
 const UNDECLARED_REWRITE: BatchState = BatchState::Withdrawn(WithdrawnCause::ChangedSealed);
+
+/// The largest successful response body a pass accepts.
+const RESPONSE_LIMIT: usize = 64 << 20;
 
 /// Each test runs a PIR service and wallet; one at a time keeps memory and CPU
 /// bounded.
 static HEAVY: Mutex<()> = Mutex::new(());
 
 /// Vizor's per-pass limits.
-fn config(account: AccountUuid) -> RecoveryConfig {
-    RecoveryConfig {
+fn config(account: AccountUuid) -> TransparentHistoryRecoveryConfig {
+    TransparentHistoryRecoveryConfig {
         source: b"fixture/transparent-pir/v1".to_vec(),
         account_binding: account.expose_uuid().as_bytes().to_vec(),
         origin: ORIGIN.into(),
@@ -171,6 +179,7 @@ fn sealed(start: u64, end: u64, events: Vec<(ScriptBytes, TransparentEvent)>) ->
         geometry: GEOMETRY,
         sealed: true,
         revision: 0,
+        supersedes: String::new(),
         events,
     }
 }
@@ -183,6 +192,7 @@ fn tail(end: u64, revision: u32, events: Vec<(ScriptBytes, TransparentEvent)>) -
         geometry: GEOMETRY,
         sealed: false,
         revision,
+        supersedes: String::new(),
         events,
     }
 }
@@ -196,22 +206,37 @@ struct Seen {
 }
 
 impl Seen {
-    fn of(batch: &RecoveryBatch<AccountUuid>) -> Self {
-        Self {
-            state: batch.state(),
-            progress: batch.progress(),
-            commits: batch.commits().to_vec(),
-            retired: batch.retired_revisions().to_vec(),
+    /// The batch `report` describes, which the companion holds exactly when the
+    /// pass was ready.
+    fn of(report: &PassReport, held: Option<&RecoveryBatch<AccountUuid>>) -> Self {
+        assert_eq!(held.is_some(), report.state == BatchState::Ready);
+        let seen = Self {
+            state: report.state,
+            progress: report.progress,
+            commits: held.map_or(vec![], |batch| batch.commits().to_vec()),
+            retired: held.map_or(vec![], |batch| batch.retired_revisions().to_vec()),
+        };
+        assert_eq!(
+            (seen.commits.len(), seen.retired.len()),
+            (report.commits, report.retired)
+        );
+        if let Some(batch) = held {
+            assert_eq!(
+                (batch.state(), batch.progress()),
+                (report.state, report.progress)
+            );
         }
+        seen
     }
 }
 
-/// A pass's batch, and whether applying its commits grew the account's window.
+/// A pass: what it reported, its batch, whether settling it grew the account's
+/// window, and the step its plan takes next.
 struct Pass {
+    report: PassReport,
     batch: Seen,
     grew: bool,
-    /// The batch itself when the pass left it unsettled.
-    unsettled: Option<RecoveryBatch<AccountUuid>>,
+    step: Step,
 }
 
 /// A wallet with one account, the in-process service it recovers from, and the
@@ -224,10 +249,10 @@ struct Fixture {
     dir: tempfile::TempDir,
     publications: usize,
     url: Option<String>,
-    companion: Option<ReferenceRecovery>,
+    companion: Option<Companion>,
     /// The public key hash of every address any watch set named.
     watched: BTreeSet<[u8; 20]>,
-    /// Retired revisions acknowledged through trusted `apply_and_acknowledge`.
+    /// Retired revisions acknowledged through trusted settlement.
     reconciled: Vec<RecoveryRevision>,
     /// Whether passes settle batches as trusted.
     trusted: bool,
@@ -347,17 +372,38 @@ impl Fixture {
         }
     }
 
-    fn companion_path(&self) -> PathBuf {
-        self.dir.path().join("companion.sqlite")
+    /// The directory holding the wallet's companions.
+    fn companions(&self) -> CompanionDir {
+        CompanionDir::new(self.dir.path().join("companions"))
     }
 
+    /// The account's name in companion files.
+    fn account_name(&self) -> String {
+        self.account.expose_uuid().to_string()
+    }
+
+    fn companion_path(&self) -> PathBuf {
+        self.companions()
+            .companion_path(&self.account_name(), ORIGIN)
+    }
+
+    /// Opens the account's companion, holding its lock until it is closed or reopened.
     fn open(&mut self) {
         self.companion = None;
-        self.companion =
-            Some(ReferenceRecovery::open(self.companion_path(), config(self.account)).unwrap());
+        let account = self.account_name();
+        self.companion = Some(
+            self.companions()
+                .open(
+                    &account,
+                    config(self.account),
+                    || Ok(BTreeSet::from([account.clone()])),
+                    &|| false,
+                )
+                .unwrap(),
+        );
     }
 
-    fn watch(&self) -> TransparentWatchSet<AccountUuid> {
+    fn watch(&self) -> TransparentAddressWatchSet<AccountUuid> {
         self.st
             .wallet()
             .db()
@@ -394,26 +440,45 @@ impl Fixture {
             .1
     }
 
-    /// One pass, unsettled: the current watch set, the wallet's chain through
-    /// its target, and fresh HTTP transports aimed at the current server.
-    fn recover(&mut self) -> Result<RecoveryBatch<AccountUuid>, RecoveryError> {
-        let watch = self.watch();
+    /// Records every address `watch` names, for [`Fixture::assert_private`].
+    fn note_watched(&mut self, watch: &TransparentAddressWatchSet<AccountUuid>) {
         self.watched.extend(
             watch
                 .addresses
                 .iter()
                 .map(|watched| pubkey_hash(watched.address)),
         );
-        let url = self.url.as_deref().expect("a served publication");
-        let options = HttpOptions {
-            timeout: Duration::from_secs(60),
-            ..HttpOptions::default()
-        };
-        let mut filters = HttpFilterSource::new(url, &options).unwrap();
-        let mut transport = HttpShardTransport::new(url, &options).unwrap();
+    }
+
+    /// The exchange reaching the current server.
+    fn exchange(&self) -> Loopback {
+        Loopback::new(self.url.as_deref().expect("a served publication"))
+    }
+
+    /// One pass over the current watch set and the wallet's chain through its
+    /// target, its ready batch taken rather than settled.
+    fn recover(&mut self) -> Result<RecoveryBatch<AccountUuid>, PassError> {
+        let watch = self.watch();
+        self.note_watched(&watch);
+        let exchange = self.exchange();
         let companion = self.companion.as_mut().expect("an open companion");
         let chain = WalletChain::new(self.st.wallet().db(), watch.target.unwrap());
-        companion.recover(&watch, &chain, &mut filters, &mut transport)
+        let report = companion.pass(&watch, &chain, &exchange, RESPONSE_LIMIT, &|| false)?;
+        let batch = companion.take_latest::<AccountUuid>();
+        Ok(batch.unwrap_or_else(|| panic!("a ready pass, not {:?}", report.state)))
+    }
+
+    /// The library's pass alone over the current watch set, through `exchange` and with
+    /// `should_stop`, settling nothing.
+    fn bare_pass(
+        &mut self,
+        exchange: &Loopback,
+        should_stop: &dyn Fn() -> bool,
+    ) -> Result<PassReport, PassError> {
+        let watch = self.watch();
+        let companion = self.companion.as_mut().expect("an open companion");
+        let chain = WalletChain::new(self.st.wallet().db(), watch.target.unwrap());
+        companion.pass(&watch, &chain, exchange, RESPONSE_LIMIT, should_stop)
     }
 
     /// Applies `batch` to the wallet and acknowledges it with `trust`.
@@ -423,7 +488,23 @@ impl Fixture {
         trust: Trust,
     ) -> Result<zakura_pir_transparent::Applied, zakura_pir_transparent::ApplyFailure> {
         let companion = self.companion.as_mut().expect("an open companion");
-        companion.apply_and_acknowledge(batch, self.st.wallet_mut().db_mut(), trust)
+        companion.apply_and_acknowledge_gated(
+            batch,
+            self.st.wallet_mut().db_mut(),
+            trust,
+            &mut Ungated,
+        )
+    }
+
+    /// Settles `batch` through `gate`, one wallet write at a time.
+    fn settle_gated(
+        &mut self,
+        batch: RecoveryBatch<AccountUuid>,
+        trust: Trust,
+        gate: &mut impl WriteGate,
+    ) -> Result<zakura_pir_transparent::Applied, zakura_pir_transparent::ApplyFailure> {
+        let companion = self.companion.as_mut().expect("an open companion");
+        companion.apply_and_acknowledge_gated(batch, self.st.wallet_mut().db_mut(), trust, gate)
     }
 
     /// Trusts the service from the next pass on: its commits qualify their
@@ -441,58 +522,87 @@ impl Fixture {
         }
     }
 
-    /// One pass as a coordinator runs it: a ready batch is applied and
-    /// acknowledged through `apply_and_acknowledge`, trusted once the service is.
-    /// Until then a batch with retirements is left unsettled: only trusted
-    /// reconciliation resolves them.
-    fn pass(&mut self) -> Result<Pass, RecoveryError> {
-        let batch = self.recover()?;
-        let seen = Seen::of(&batch);
-        if seen.state != BatchState::Ready {
-            return Ok(Pass {
-                batch: seen,
-                grew: false,
-                unsettled: Some(batch),
-            });
+    /// One pass as a coordinator runs it, under a plan of its own.
+    fn pass(&mut self) -> Result<Pass, PassError> {
+        let mut plan = PassPlan::new(self.watch(), PassLimits::default());
+        self.pass_in(&mut plan)
+    }
+
+    /// One pass of `plan`: the library's pass over the plan's watch set, then its
+    /// held batch read and settled as `settle_latest` settles it, trusted once the
+    /// service is. A pass that held nothing is settled through `settle_latest`.
+    /// Until then a batch with retirements is refused unsettled, and the plan holds
+    /// the account: only trusted reconciliation resolves them.
+    fn pass_in(&mut self, plan: &mut PassPlan<AccountUuid>) -> Result<Pass, PassError> {
+        self.note_watched(plan.watch());
+        let (exchange, trust) = (self.exchange(), self.trust());
+        let companion = self.companion.as_mut().expect("an open companion");
+        let chain = WalletChain::new(self.st.wallet().db(), plan.watch().target.unwrap());
+        let report = companion.pass(plan.watch(), &chain, &exchange, RESPONSE_LIMIT, &|| false)?;
+        let held = companion.take_latest::<AccountUuid>();
+        let batch = Seen::of(&report, held.as_ref());
+        let wallet = self.st.wallet_mut().db_mut();
+        let settled = match held {
+            Some(held) => companion
+                .apply_and_acknowledge_gated(held, wallet, trust, &mut Ungated)
+                .map(Some),
+            None => companion.settle_latest(wallet, trust, &mut Ungated),
+        };
+        let grew = match &settled {
+            Ok(Some(applied)) => {
+                assert_eq!(applied.stats.applied, batch.commits.len());
+                assert_eq!(applied.retired, batch.retired.len());
+                self.reconciled.extend(batch.retired.iter().cloned());
+                applied.stats.window_grew
+            }
+            Ok(None) => false,
+            Err(failure) => {
+                assert_eq!(
+                    failure.action(),
+                    ApplyAction::Reconcile,
+                    "the wallet applies every commit: {}",
+                    failure.error
+                );
+                assert_eq!(failure.stats.applied, 0);
+                assert!(trust == Trust::Observed && !batch.retired.is_empty());
+                false
+            }
+        };
+        assert!(companion.take_latest::<AccountUuid>().is_none());
+        let step = plan.next(&report, &settled, self.watch());
+        if settled.is_err() {
+            assert_eq!(step, Step::Hold(HoldCause::Unreconciled));
         }
-        let trust = self.trust();
-        if trust == Trust::Observed && !seen.retired.is_empty() {
-            return Ok(Pass {
-                batch: seen,
-                grew: false,
-                unsettled: Some(batch),
-            });
-        }
-        let applied = self
-            .settle(batch, trust)
-            .expect("the wallet applies every commit");
-        assert_eq!(applied.stats.applied, seen.commits.len());
-        assert_eq!(applied.retired, seen.retired.len());
-        self.reconciled.extend(seen.retired.iter().cloned());
         Ok(Pass {
-            grew: applied.stats.window_grew,
-            batch: seen,
-            unsettled: None,
+            report,
+            batch,
+            grew,
+            step,
         })
     }
 
-    /// Passes until the account's window stops growing and no budget stops a
-    /// pass, at most eight times.
+    /// Passes as the plan says until it stops, treating a wait as the end of the
+    /// run. Panics if the plan ends on its pass limit still asking for more.
     fn drive(&mut self) -> Pass {
-        for _ in 0..8 {
-            let pass = self.pass().expect("a pass");
-            if !pass.grew && pass.batch.progress.outcome != Outcome::More {
-                return pass;
+        let mut plan = PassPlan::new(self.watch(), PassLimits::default());
+        assert_eq!(plan.first(), Step::Pass);
+        loop {
+            let pass = self.pass_in(&mut plan).expect("a pass");
+            match pass.step {
+                Step::Pass | Step::Refresh => {}
+                Step::Done(Some(Retry::More)) => {
+                    panic!("recovery did not settle within eight passes")
+                }
+                _ => return pass,
             }
         }
-        panic!("recovery did not settle within eight passes");
     }
 
-    fn promote(&mut self) {
+    fn activate(&mut self) {
         self.st
             .wallet_mut()
             .db_mut()
-            .promote_transparent_account(self.account)
+            .activate_transparent_ledger(self.account)
             .unwrap();
     }
 
@@ -683,11 +793,24 @@ impl Fixture {
         (dithered, nearest)
     }
 
+    /// The body length of a 44-bit pages query to one shard revision: the
+    /// 8-byte binding, then a selection over the rows its manifest fixes.
+    fn pages_query_len(&self, shard_id: u64, revision: &str) -> usize {
+        let url = self.url.as_deref().expect("a served publication");
+        let mut transport = HttpShardTransport::new(url, &HttpOptions::default()).unwrap();
+        let (raw, _) = transport.manifest(shard_id, revision).unwrap();
+        let manifest: transparent_shard::manifest::ShardManifest =
+            serde_json::from_slice(&raw).unwrap();
+        8 + transparent_native::request_len_bits(manifest.pages_query_rows() as usize, 44)
+    }
+
     /// Asserts that every request the service received used one of its routes
     /// with that route's method, carried none of the account's scripts in its
     /// path, query, headers or body, and named no shard in `below_floor`; and
-    /// that every query went at 44 dithered bits.
-    fn assert_private(&self, below_floor: &[u64]) {
+    /// that every query went at 44 dithered bits, a pages query selecting over
+    /// exactly the rows its revision's manifest fixes. Returns how many pages
+    /// queries selected over fewer rows than a whole segment.
+    fn assert_private(&self, below_floor: &[u64]) -> usize {
         let requests = self.server.requests();
         assert!(!requests.is_empty());
         let routes = Regex::new(ROUTES).unwrap();
@@ -726,15 +849,30 @@ impl Fixture {
             );
         }
         // The service advertises the dithered schemes, so every query uses one.
+        // A directory query selects over the whole table; a pages query over
+        // the rows its manifest fixes, fewer than a segment for a growing tail.
         let (dithered, nearest) = self.query_lengths();
         assert!(dithered.is_disjoint(&nearest));
+        let pages = Regex::new(PAGES_QUERY).unwrap();
+        let mut prefixes = 0;
         for request in requests.iter().filter(|request| request.method == "POST") {
-            assert!(
-                dithered.contains(&request.body.len()),
-                "a {}-byte query to {}",
-                request.body.len(),
-                request.path
-            );
+            match pages.captures(&request.path) {
+                Some(captures) => {
+                    assert_eq!(
+                        request.body.len(),
+                        self.pages_query_len(captures[1].parse().unwrap(), &captures[2]),
+                        "a pages query to {}",
+                        request.path
+                    );
+                    prefixes += usize::from(!dithered.contains(&request.body.len()));
+                }
+                None => assert!(
+                    dithered.contains(&request.body.len()),
+                    "a {}-byte query to {}",
+                    request.body.len(),
+                    request.path
+                ),
+            }
         }
         let probe = self.watched.first().expect("a watched address");
         assert!(carries(
@@ -758,6 +896,7 @@ impl Fixture {
                 "a below-floor shard: {line}"
             );
         }
+        prefixes
     }
 }
 
@@ -880,7 +1019,7 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     );
     assert!(catalog.iter().all(|row| row.2));
 
-    // Trusted: the same publication qualifies every revision, and promotion
+    // Trusted: the same publication qualifies every revision, and activation
     // grants private authority over exactly r2.
     f.trust_service();
     let trusted = f.drive();
@@ -888,7 +1027,7 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     let first_tail = tail_revision(&trusted.batch);
     assert_eq!(first_tail.lineage, 1);
     assert_eq!(f.count("tpir_qualified_revisions"), 3);
-    f.promote();
+    f.activate();
     assert_eq!(f.watch().lifecycle, AccountLifecycle::Active);
     assert_eq!(f.authority(), TransparentAuthority::Private);
     assert_eq!(f.spendable().unwrap(), vec![r2.clone()]);
@@ -898,7 +1037,9 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     f.scan_to(t2);
     assert!(matches!(
         f.spendable(),
-        Err(SqliteClientError::TransparentAuthorityUnavailable)
+        Err(SqliteClientError::TransparentAuthorityUnavailable(
+            AuthorityRefusal::Pending { accounts }
+        )) if accounts == vec![f.account]
     ));
     let moved_map = f.publish(&lifecycle(&owned, t2, 1, false), SEAL);
     let moved = f.drive();
@@ -933,6 +1074,8 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     let lagging = f.pass().unwrap();
     assert_eq!(lagging.batch.state, BatchState::Ready);
     assert_eq!(lagging.batch.progress.outcome, Outcome::Behind);
+    // The plan waits for the publication rather than passing again at once.
+    assert_eq!(lagging.step, Step::Wait(Retry::BEHIND));
     assert_eq!(lagging.batch.progress.covered_through, t2);
     assert!(!lagging.batch.commits.is_empty());
     assert!(
@@ -959,7 +1102,7 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     assert_eq!(f.dump(false), production);
 
     // Companion loss: a recreated companion derives the triples the wallet
-    // holds, so recovery heals without quarantine.
+    // holds, so recovery heals without recovery suspension.
     f.lose_companion();
     f.open();
     assert!(f.catalog().is_empty());
@@ -976,22 +1119,40 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
 
     // A publication change: another seal for the geometry gives every shard a
     // new source, and the publisher restarts the tail's revision numbers. The
-    // first pass resets the store, keeps the catalog and asks for a retry; the
-    // retry, with the same companion, recovers under the new sources.
+    // pass's first attempt resets the store and keeps the catalog, and the pass
+    // retries at once with the same companion, recovering under the new sources.
     let resealed = SealParameters {
         max_scripts: SEAL.max_scripts * 2,
         ..SEAL
     };
     f.publish(&lifecycle(&owned, t3, 0, false), resealed);
     let before = f.catalog();
-    assert!(matches!(f.pass(), Err(RecoveryError::PublicationChanged)));
-    let kept = f.catalog();
+    let seen = f.server.requests().len();
+    let reset = f.pass().unwrap();
+    assert!(reset.report.publication_changed);
+    assert_eq!(reset.batch.state, BatchState::Ready);
+    // Both attempts fetched the map.
+    let maps = f.server.requests()[seen..]
+        .iter()
+        .filter(|request| request.method == "GET" && request.path == "/v1/filters/shards")
+        .count();
+    assert_eq!(maps, 2);
+    // The old rows are kept, with their export marks cleared; the retry's are
+    // exported.
+    let kept: Vec<_> = f
+        .catalog()
+        .into_iter()
+        .filter(|row| !row.2)
+        .map(|row| (row.0, row.1))
+        .collect();
     assert_eq!(
-        kept.iter().map(|row| (row.0, row.1)).collect::<Vec<_>>(),
+        kept,
         before.iter().map(|row| (row.0, row.1)).collect::<Vec<_>>()
     );
-    assert!(kept.iter().all(|row| !row.2));
-    let retried = f.drive();
+    let retried = match reset.step {
+        Step::Pass => f.drive(),
+        _ => reset,
+    };
     assert_eq!(retried.batch.state, BatchState::Ready);
     assert_eq!(retried.batch.progress.outcome, Outcome::Complete);
     let new_tail = tail_revision(&retried.batch);
@@ -1026,13 +1187,18 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     let changed = f.pass().unwrap();
     assert_eq!(changed.batch.state, UNDECLARED_REWRITE);
     assert!(changed.batch.commits.is_empty());
-    assert!(matches!(
+    assert_eq!(
+        changed.step,
+        Step::Hold(HoldCause::Withdrawn(WithdrawnCause::ChangedSealed))
+    );
+    // Nothing was held to settle or acknowledge.
+    assert!(
         f.companion
             .as_mut()
             .unwrap()
-            .acknowledge_applied(changed.unsettled.as_ref().unwrap()),
-        Err(RecoveryError::Invalid(_))
-    ));
+            .take_latest::<AccountUuid>()
+            .is_none()
+    );
     assert_eq!(f.dump(true), wallet);
     f.open();
     let reopened = f.pass().unwrap();
@@ -1042,6 +1208,56 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     // Privacy, over every request of every pass: the service's routes only, no
     // watched script, and never a filter for S0, which lies below the floor.
     f.assert_private(&[0]);
+}
+
+/// Through a real pass: a caller that is stopping is not retried after a publication change,
+/// and a service that cannot be reached is an outage, before anything is retrieved.
+#[test]
+fn a_stopping_pass_is_not_retried_and_an_unreachable_service_is_an_outage() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let t1 = H0 + 649;
+    let mut f = Fixture::new(H0 + 250, t1);
+    let owned = Owned {
+        a0: f.derived(TransparentKeyScope::EXTERNAL, 0),
+        a1: f.derived(TransparentKeyScope::EXTERNAL, 1),
+        last: f.last_external(),
+    };
+    f.publish(&lifecycle(&owned, t1, 0, false), SEAL);
+    assert_eq!(f.drive().batch.state, BatchState::Ready);
+
+    // Another seal: the first attempt resets the store, and a stopping caller gets the change
+    // back instead of a retry.
+    let resealed = SealParameters {
+        max_scripts: SEAL.max_scripts * 2,
+        ..SEAL
+    };
+    f.publish(&lifecycle(&owned, t1, 0, false), resealed);
+    let seen = f.server.requests().len();
+    let exchange = f.exchange();
+    assert!(matches!(
+        f.bare_pass(&exchange, &|| true),
+        Err(PassError::PublicationChanged)
+    ));
+    let maps = f.server.requests()[seen..]
+        .iter()
+        .filter(|request| request.method == "GET" && request.path == "/v1/filters/shards")
+        .count();
+    assert_eq!(maps, 1);
+    let companion = f.companion.as_mut().unwrap();
+    assert!(companion.take_latest::<AccountUuid>().is_none());
+    // The reset store is bound to no set: the next pass binds the new one.
+    let next = f.bare_pass(&exchange, &|| false).unwrap();
+    assert!(!next.publication_changed);
+    assert_eq!(next.state, BatchState::Ready);
+
+    // Nothing listens on the discard port: the map request fails and the pass is an outage.
+    let seen = f.server.requests().len();
+    let unreachable = Loopback::new("http://127.0.0.1:9");
+    assert!(matches!(
+        f.bare_pass(&unreachable, &|| false),
+        Err(PassError::Outage)
+    ));
+    assert_eq!(f.server.requests().len(), seen);
 }
 
 #[test]
@@ -1106,12 +1322,49 @@ fn young_wallet_rolls_back_below_its_birthday() {
     assert_eq!(rewound.batch.state, BatchState::Ready);
     assert_eq!(rewound.batch.progress.outcome, Outcome::Complete);
     assert_eq!(tail_revision(&rewound.batch).lineage, 4);
-    f.promote();
+    f.activate();
     assert_eq!(f.authority(), TransparentAuthority::Private);
     assert_eq!(f.spendable().unwrap(), vec![received]);
 
     // No pass read a shard ending below the birthday.
     f.assert_private(&[0, 1, 2]);
+}
+
+/// An address with more events than its directory entry holds inline has them
+/// read from pages. The tail is unsealed and in one segment, so its pages
+/// queries select over only the page rows it holds, and recovery still finds
+/// every receive.
+#[test]
+fn growing_tail_pages_queries_select_only_its_rows() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let birthday = H0 + 610;
+    let target = H0 + 640;
+    let mut f = Fixture::new(birthday, target);
+    f.trust_service();
+    let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
+    let receives = transparent_shard::INLINE_EVENTS as u64 + 2;
+    let mut events = noise(H0 + 600, target, 3);
+    for n in 1..=receives {
+        events.push((script(a0), receive(H0 + 610 + n, txid(n), 0, 10_000 * n)));
+    }
+    f.publish(
+        &[
+            sealed(H0, H0 + 199, noise(H0, H0 + 199, 0)),
+            sealed(H0 + 200, H0 + 399, noise(H0 + 200, H0 + 399, 1)),
+            sealed(H0 + 400, H0 + 599, noise(H0 + 400, H0 + 599, 2)),
+            tail(target, 0, events),
+        ],
+        SEAL,
+    );
+    let pass = f.drive();
+    assert_eq!(pass.batch.state, BatchState::Ready);
+    assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
+    f.activate();
+    let spendable: BTreeSet<OutPoint> = f.spendable().unwrap().into_iter().collect();
+    let expected: BTreeSet<OutPoint> = (1..=receives).map(|n| outpoint(txid(n), 0)).collect();
+    assert_eq!(spendable, expected);
+
+    assert!(f.assert_private(&[0, 1, 2]) > 0);
 }
 
 /// The last height the re-cut tests publish, and the wallet's tip.
@@ -1139,6 +1392,7 @@ fn before_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
             geometry: GEOMETRY,
             sealed: false,
             revision: 0,
+            supersedes: String::new(),
             events: noise(H0 + 500, RECUT_TIP, 4),
         },
     ]
@@ -1163,6 +1417,7 @@ fn after_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
             geometry: WIDE,
             sealed: true,
             revision: 0,
+            supersedes: String::new(),
             events: [s1.events, s2.events].concat(),
         },
         ShardSpec { revision: 1, ..s3 },
@@ -1173,7 +1428,7 @@ fn after_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
     ]
 }
 
-/// A promoted account that recovered the publication before the re-cut under
+/// A activated account that recovered the publication before the re-cut under
 /// `PrivateRequired`: the fixture, the account's paid address, the map, the
 /// tail revision the wallet holds, and the outputs it can spend.
 fn recovered_before_recut() -> (
@@ -1185,7 +1440,7 @@ fn recovered_before_recut() -> (
 ) {
     let mut f = Fixture::new(H0 + 100, RECUT_TIP);
     f.set_policy(PrivateRequired);
-    // Its passes qualify their revisions, so the account can be promoted and a
+    // Its passes qualify their revisions, so the account can be activated and a
     // re-cut's retired tail is reconciled through the trusted operation.
     f.trust_service();
     let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
@@ -1194,7 +1449,7 @@ fn recovered_before_recut() -> (
     assert_eq!(first.batch.state, BatchState::Ready);
     assert_eq!(first.batch.progress.outcome, Outcome::Complete);
     let tail = tail_revision(&first.batch);
-    f.promote();
+    f.activate();
     assert_eq!(f.authority(), TransparentAuthority::Private);
     let mut received: Vec<OutPoint> = (1..=3).map(|tag| outpoint(txid(tag), 0)).collect();
     received.sort_by_key(|outpoint| (*outpoint.hash(), outpoint.n()));
@@ -1527,7 +1782,7 @@ fn private_details_end_to_end() {
         SEAL,
     );
     assert_eq!(f.drive().batch.state, BatchState::Ready);
-    f.promote();
+    f.activate();
     // Both receives are projected; spendability is unchanged by what follows.
     let spendable = f.spendable().unwrap();
     assert!(spendable.contains(&outpoint(r1, 0)), "{spendable:?}");
@@ -1539,7 +1794,7 @@ fn private_details_end_to_end() {
         let work =
             f.st.wallet()
                 .db()
-                .transparent_detail_work(at, 10, None)
+                .transparent_detail_work(at, 10, &[], None)
                 .unwrap();
         assert!(!work.public_transport());
         work.requests
@@ -1630,7 +1885,7 @@ fn private_details_end_to_end() {
         let snapshot =
             f.st.wallet()
                 .db()
-                .transparent_detail_work(at, 10, None)
+                .transparent_detail_work(at, 10, &[], None)
                 .unwrap();
         let current =
             f.st.wallet()
@@ -1663,6 +1918,7 @@ fn private_details_end_to_end() {
                         BlockHeight::from(*height as u32),
                         outcome,
                         map,
+                        current,
                         at,
                     )
                     .unwrap(),
@@ -1765,7 +2021,7 @@ fn private_details_end_to_end() {
     let public =
         f.st.wallet()
             .db()
-            .transparent_detail_work(at, 10, None)
+            .transparent_detail_work(at, 10, &[], None)
             .unwrap();
     assert!(public.public_transport());
     let work: Vec<(TxId, u64)> = public
@@ -1880,6 +2136,7 @@ fn a_policy_change_while_acknowledgment_waits_keeps_the_batch_unacknowledged() {
         matches!(failure.error, ApplyError::PolicyChanged),
         "{failure:?}"
     );
+    assert_eq!(failure.action(), ApplyAction::PolicyChanged);
     assert_eq!(failure.stats.qualified, commits);
     assert!(f.st.wallet().db().is_autocommit());
     let facts = f.dump(true);
@@ -2067,9 +2324,88 @@ fn apply_and_acknowledge_keeps_the_committed_prefix_and_replays_idempotently() {
     let replayed = f.settle(batch, Trust::Trusted).unwrap();
     assert!(!replayed.stats.window_grew);
     assert_eq!(f.dump(true), settled);
-    // Nothing above promoted the account or granted authority.
+    // Nothing above activated the account or granted authority.
     assert_eq!(f.watch().lifecycle, AccountLifecycle::Candidate);
     assert_ne!(f.authority(), TransparentAuthority::Private);
+}
+
+/// A [`WriteGate`] that runs the first `allow` wallet writes and declines the
+/// next, counting what it ran.
+struct AllowWrites {
+    allow: usize,
+    ran: usize,
+}
+
+impl WriteGate for AllowWrites {
+    fn write<T>(&mut self, write: impl FnOnce() -> T) -> Result<T, Interrupted> {
+        if self.ran == self.allow {
+            return Err(Interrupted);
+        }
+        self.ran += 1;
+        Ok(write())
+    }
+}
+
+#[test]
+fn a_gate_runs_each_wallet_write_and_can_stop_the_batch_between_them() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, _) = private_fixture();
+    let batch = f.recover().unwrap();
+    let commits = batch.commits().len();
+    assert!(commits >= 3, "the publication has three shards: {commits}");
+
+    // Declined before the second commit: the first stays applied and nothing is
+    // acknowledged.
+    let mut gate = AllowWrites { allow: 1, ran: 0 };
+    let failure = f
+        .settle_gated(batch, Trust::Trusted, &mut gate)
+        .unwrap_err();
+    assert!(
+        matches!(failure.error, ApplyError::Interrupted),
+        "{:?}",
+        failure.error
+    );
+    assert_eq!(failure.action(), ApplyAction::Interrupted);
+    assert_eq!(failure.stats.applied, 1);
+    assert_eq!(f.count("tpir_qualified_revisions"), 1);
+    assert!(f.st.wallet().db().is_autocommit());
+
+    // Declined at the acknowledgment: every commit applied, and the next pass
+    // exports the batch again.
+    let batch = f.recover().unwrap();
+    assert_eq!(batch.state(), BatchState::Ready);
+    assert_eq!(batch.commits().len(), commits);
+    let mut gate = AllowWrites {
+        allow: commits,
+        ran: 0,
+    };
+    let failure = f
+        .settle_gated(batch, Trust::Trusted, &mut gate)
+        .unwrap_err();
+    assert!(
+        matches!(failure.error, ApplyError::Interrupted),
+        "{:?}",
+        failure.error
+    );
+    assert_eq!(failure.stats.applied, commits);
+    assert!(f.st.wallet().db().is_autocommit());
+
+    // A gate that runs everything sees one write per commit and one for the
+    // acknowledgment, and settles exactly as the ungated operation replays.
+    let batch = f.recover().unwrap();
+    assert_eq!(batch.commits().len(), commits);
+    let mut gate = AllowWrites {
+        allow: usize::MAX,
+        ran: 0,
+    };
+    let applied = f.settle_gated(batch, Trust::Trusted, &mut gate).unwrap();
+    assert_eq!(gate.ran, commits + 1);
+    assert_eq!(applied.stats.applied, commits);
+    assert_eq!(f.count("tpir_qualified_revisions"), 3);
+    let settled = f.dump(true);
+    let batch = f.recover().unwrap();
+    f.settle(batch, Trust::Trusted).unwrap();
+    assert_eq!(f.dump(true), settled);
 }
 
 #[test]
@@ -2147,6 +2483,7 @@ fn stale_middle_retirement_batch_preserves_reconciliation_across_reopen() {
         geometry: GEOMETRY,
         sealed: false,
         revision: 0,
+        supersedes: String::new(),
         events: noise(H0 + 1000, target, 5),
     });
     f.publish(&shards, SEAL);
@@ -2207,7 +2544,7 @@ fn stale_middle_retirement_batch_preserves_reconciliation_across_reopen() {
 }
 
 #[test]
-fn an_integrity_rejection_quarantines_durably_without_acknowledgment() {
+fn an_integrity_rejection_records_recovery_suspension_for_durably_without_acknowledgment() {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
     let birthday = H0 + 250;
     let mut f = Fixture::new(birthday, H0 + 649);
@@ -2246,11 +2583,11 @@ fn an_integrity_rejection_quarantines_durably_without_acknowledgment() {
         "{:?}",
         failure.error
     );
-    // The quarantine committed with its commit's own transaction.
+    // The recovery suspension committed with its commit's own transaction.
     assert!(f.st.wallet().db().is_autocommit());
     assert!(f.count("tpir_quarantined_sources") >= 1);
     assert_eq!(f.count("tpir_quarantined_accounts"), 1);
-    // A later batch is refused by the durable quarantine.
+    // A later batch is refused by the durable recovery suspension.
     let batch = f.recover().unwrap();
     let failure = f.settle(batch, Trust::Observed).unwrap_err();
     assert!(
@@ -2265,4 +2602,194 @@ fn an_integrity_rejection_quarantines_durably_without_acknowledgment() {
         failure.error
     );
     assert_eq!(failure.stats.applied, 0);
+}
+
+impl Fixture {
+    /// Forgets private recovery through `gate`, waiting for no companion.
+    fn forget(
+        &mut self,
+        gate: &mut impl WriteGate,
+    ) -> Result<ForgottenTransparentLedger, ForgetError> {
+        forget_private_recovery(
+            &self.companions(),
+            self.st.wallet_mut().db_mut(),
+            gate,
+            Duration::ZERO,
+        )
+    }
+
+    /// The private ledger facts the wallet holds: recovered events and coverage.
+    fn ledger_facts(&self) -> i64 {
+        self.count("tpir_receive_events")
+            + self.count("tpir_spend_events")
+            + self.count("tpir_coverage")
+    }
+}
+
+#[test]
+fn forgetting_private_recovery_deletes_companions_before_the_facts() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, _) = private_fixture();
+    f.drive();
+    let facts = f.ledger_facts();
+    assert!(facts > 0);
+    f.companion = None;
+
+    // A wallet still recovering privately keeps its facts and its companions.
+    assert!(matches!(
+        f.forget(&mut Ungated),
+        Err(ForgetError::NotPublic)
+    ));
+    assert!(f.companion_path().exists());
+    assert_eq!(f.ledger_facts(), facts);
+
+    // A companion in use defers forgetting: the facts stay with it.
+    f.set_policy(TransparentLedgerMode::Public);
+    f.open();
+    assert!(matches!(
+        f.forget(&mut Ungated),
+        Err(ForgetError::CompanionBusy)
+    ));
+    assert!(f.companion_path().exists());
+    assert_eq!(f.ledger_facts(), facts);
+
+    // A declined write forgets nothing, but the companions are gone already.
+    f.companion = None;
+    assert!(matches!(
+        f.forget(&mut AllowWrites { allow: 0, ran: 0 }),
+        Err(ForgetError::Interrupted)
+    ));
+    assert!(!f.companion_path().exists());
+    assert_eq!(f.ledger_facts(), facts);
+
+    let forgotten = f.forget(&mut Ungated).unwrap();
+    assert!(!forgotten.removed_nothing());
+    assert_eq!(f.ledger_facts(), 0);
+    // Forgetting again finds nothing.
+    assert!(f.forget(&mut Ungated).unwrap().removed_nothing());
+
+    // A later private run starts afresh, from a new companion, and recovers the facts again.
+    f.set_policy(PrivateRequired);
+    f.open();
+    f.drive();
+    assert!(f.ledger_facts() > 0);
+}
+
+/// A [`WriteGate`] that raises the wallet's durable policy to `PrivateRequired` through
+/// another connection before running the write.
+struct RaisePolicy {
+    wallet: Connection,
+}
+
+impl WriteGate for RaisePolicy {
+    fn write<T>(&mut self, write: impl FnOnce() -> T) -> Result<T, Interrupted> {
+        self.wallet
+            .execute(
+                "UPDATE tpir_meta SET applied_mode = 2,
+                 policy_generation = policy_generation + 1",
+                [],
+            )
+            .unwrap();
+        Ok(write())
+    }
+}
+
+#[test]
+fn a_policy_raised_after_the_companions_are_deleted_forgets_nothing() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, _) = private_fixture_with_factory(TestDbFactory::file_backed());
+    f.drive();
+    let facts = f.ledger_facts();
+    assert!(facts > 0);
+    f.companion = None;
+    f.set_policy(TransparentLedgerMode::Public);
+    let wallet_path = f.st.wallet().conn().path().unwrap().to_owned();
+    let mut gate = RaisePolicy {
+        wallet: Connection::open(wallet_path).unwrap(),
+    };
+    assert!(matches!(
+        f.forget(&mut gate),
+        Err(ForgetError::PolicyChanged)
+    ));
+    assert!(!f.companion_path().exists());
+    assert_eq!(f.ledger_facts(), facts);
+    assert_eq!(
+        f.st.wallet()
+            .db()
+            .applied_transparent_policy()
+            .unwrap()
+            .mode,
+        PrivateRequired
+    );
+    // A retry finds the policy private before deleting anything.
+    assert!(matches!(
+        f.forget(&mut Ungated),
+        Err(ForgetError::NotPublic)
+    ));
+    assert_eq!(f.ledger_facts(), facts);
+}
+
+/// A [`WriteGate`] that, before running the write, takes the wallet's durable policy to
+/// `PrivateRequired` through another connection, creates the account's companion as a
+/// private pass would, and returns the policy to `Public`.
+struct PolicyRoundTrip {
+    wallet: Connection,
+    companions: CompanionDir,
+    account: AccountUuid,
+}
+
+impl WriteGate for PolicyRoundTrip {
+    fn write<T>(&mut self, write: impl FnOnce() -> T) -> Result<T, Interrupted> {
+        let set_mode = |mode: i64| {
+            self.wallet
+                .execute(
+                    "UPDATE tpir_meta SET applied_mode = ?1,
+                     policy_generation = policy_generation + 1",
+                    [mode],
+                )
+                .unwrap();
+        };
+        set_mode(2);
+        let account = self.account.expose_uuid().to_string();
+        self.companions
+            .open(
+                &account,
+                config(self.account),
+                || Ok(BTreeSet::from([account.clone()])),
+                &|| false,
+            )
+            .unwrap();
+        set_mode(0);
+        Ok(write())
+    }
+}
+
+#[test]
+fn a_policy_round_trip_after_the_companions_are_deleted_forgets_nothing() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, _) = private_fixture_with_factory(TestDbFactory::file_backed());
+    f.drive();
+    let facts = f.ledger_facts();
+    assert!(facts > 0);
+    f.companion = None;
+    f.set_policy(TransparentLedgerMode::Public);
+    let wallet_path = f.st.wallet().conn().path().unwrap().to_owned();
+    let mut gate = PolicyRoundTrip {
+        wallet: Connection::open(wallet_path).unwrap(),
+        companions: f.companions(),
+        account: f.account,
+    };
+    // The policy is public again at the write, but a companion created while it was
+    // private survives, so the facts stay with it.
+    assert!(matches!(
+        f.forget(&mut gate),
+        Err(ForgetError::PolicyChanged)
+    ));
+    assert!(f.companion_path().exists());
+    assert_eq!(f.ledger_facts(), facts);
+
+    // A retry deletes that companion before forgetting.
+    assert!(!f.forget(&mut Ungated).unwrap().removed_nothing());
+    assert!(!f.companion_path().exists());
+    assert_eq!(f.ledger_facts(), 0);
 }

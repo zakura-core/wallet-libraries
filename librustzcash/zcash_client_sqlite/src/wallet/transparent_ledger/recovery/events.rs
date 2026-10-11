@@ -6,7 +6,7 @@ use rusqlite::OptionalExtension as _;
 /// transaction, and a coinbase transaction spends no outputs. `coinbase` is the event's
 /// classification for a receive, and `None` for a spend by the transaction.
 #[cfg(feature = "transparent-inputs")]
-fn check_transaction(
+fn check_against_ledger_events(
     conn: &rusqlite::Connection,
     txid: &[u8; 32],
     mined: u32,
@@ -46,6 +46,13 @@ fn check_transaction(
     Ok(())
 }
 
+/// Records `receive` as observed in revision `revision_id`. Idempotent.
+///
+/// A receive is identified by its outpoint. A known one must agree in account, script, value
+/// and coinbase classification, and in placement unless a rewind cleared it, in which case it
+/// is placed again. It must also agree with the other events of its transaction and with every
+/// recorded spend of it: the spend names the same script and is not mined earlier. Any
+/// disagreement refuses the commit as an integrity failure.
 #[cfg(feature = "transparent-inputs")]
 pub(super) fn apply_receive(
     conn: &rusqlite::Connection,
@@ -126,7 +133,7 @@ pub(super) fn apply_receive(
             id
         }
     };
-    check_transaction(conn, outpoint.hash(), mined, Some(receive.coinbase))?;
+    check_against_ledger_events(conn, outpoint.hash(), mined, Some(receive.coinbase))?;
     let spend_names_other_script: bool = conn.query_row(
         "SELECT EXISTS (
              SELECT 1 FROM tpir_spend_events
@@ -172,6 +179,14 @@ pub(super) fn apply_receive(
     Ok(())
 }
 
+/// Records `spend` as observed in revision `revision_id`. Idempotent.
+///
+/// A spend is identified by its spending transaction and input index. A known one must agree in
+/// account, spent outpoint and spent script, and in placement unless a rewind cleared it, in
+/// which case it is placed again. It must also agree with the other events of its transaction
+/// and with the recorded receive of the outpoint it spends (same script, not mined later), and
+/// no other placed spend may consume that outpoint. Any disagreement refuses the commit as an
+/// integrity failure. The spent output need not be recovered yet.
 #[cfg(feature = "transparent-inputs")]
 pub(super) fn apply_spend(
     conn: &rusqlite::Connection,
@@ -263,7 +278,7 @@ pub(super) fn apply_spend(
             id
         }
     };
-    check_transaction(conn, spend.spending_txid.as_ref(), mined, None)?;
+    check_against_ledger_events(conn, spend.spending_txid.as_ref(), mined, None)?;
     let receive_names_other_script: bool = conn.query_row(
         "SELECT EXISTS (
              SELECT 1 FROM tpir_receive_events
@@ -326,6 +341,11 @@ pub(super) fn apply_spend(
     Ok(())
 }
 
+/// Records `page` as pending retrieval work of revision `revision_id`, for `target`.
+///
+/// Replaying an opening is a no-op; reopening the page with another range or address set
+/// refuses the commit. A page may not overlap supported coverage the revision already recorded
+/// for one of its addresses.
 #[cfg(feature = "transparent-inputs")]
 pub(super) fn open_page(
     conn: &rusqlite::Connection,
@@ -421,6 +441,20 @@ pub(super) fn open_page(
     Ok(())
 }
 
+/// Whether a coverage range is one the revision indexed (supported) or one it declares it
+/// cannot index (unsupported).
+#[cfg(feature = "transparent-inputs")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CoverageSupport {
+    Supported,
+    Unsupported,
+}
+
+/// Records that revision `revision_id`, anchored at `anchor`, checked `range` (`Supported`) or
+/// declares it cannot index it (`Unsupported`). Idempotent.
+///
+/// A range contradicting the revision's other support for the same address, or supported
+/// coverage overlapping one of the revision's pending pages, refuses the commit.
 #[cfg(feature = "transparent-inputs")]
 pub(super) fn record_range(
     conn: &rusqlite::Connection,
@@ -428,8 +462,9 @@ pub(super) fn record_range(
     revision_id: i64,
     anchor: &ChainPoint,
     range: &AddressRange,
-    supported: bool,
+    support: CoverageSupport,
 ) -> Result<(), SqliteClientError> {
+    let supported = support == CoverageSupport::Supported;
     let script = script_bytes(&range.address);
     let (from, through) = (u32::from(range.from), u32::from(range.through));
     let contradicted: bool = conn.query_row(

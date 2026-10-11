@@ -657,7 +657,7 @@ pub(super) fn recovery_oracle_wallet() -> (
     (st, account, chain, owned, legacy)
 }
 
-/// A [`recovery_oracle_wallet`] recovered, qualified, and promoted.
+/// A [`recovery_oracle_wallet`] recovered, qualified, and activated.
 pub(super) fn promoted_oracle_wallet() -> (
     State,
     AccountUuid,
@@ -670,12 +670,12 @@ pub(super) fn promoted_oracle_wallet() -> (
     recover(&mut st, account, &chain, &fixture);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     (st, account, chain, owned, fixture)
 }
 
 #[test]
-fn candidate_recovery_promotion_and_active_commits_match_the_oracle() {
+fn candidate_recovery_activation_and_active_commits_match_the_oracle() {
     let (mut st, account, mut chain, owned, legacy) = recovery_oracle_wallet();
     let b = st.test_account().unwrap().birthday().height();
     let fixture = revision(1, true);
@@ -701,11 +701,11 @@ fn candidate_recovery_promotion_and_active_commits_match_the_oracle() {
     );
     assert!(expected.receives.iter().any(|r| r.coinbase));
 
-    // Promotion projects exactly the oracle's view. The legacy output agrees with it, but the
+    // Activation projects exactly the oracle's view. The legacy output agrees with it, but the
     // oracle, not that agreement, is what the balance is checked against.
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_authority_agrees(&st, account, &expected);
     assert_eq!(
         super::super::super::super::output_origins(conn(&st), &legacy.outpoint),
@@ -713,7 +713,7 @@ fn candidate_recovery_promotion_and_active_commits_match_the_oracle() {
     );
     assert!(expected.total(false) > legacy.value);
 
-    // The chain advances: new receives, a spend of a promoted output, and more growth.
+    // The chain advances: new receives, a spend of a activated output, and more growth.
     scan_new_blocks(&mut st, 3);
     let tip = st.wallet().chain_height().unwrap().unwrap();
     assert!(tip > b + 20);

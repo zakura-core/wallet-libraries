@@ -51,7 +51,7 @@ fn import(st: &mut State, owner: AccountUuid, key: secp256k1::PublicKey) {
 }
 
 #[test]
-fn shared_activity_after_promotion_extends_discovery_across_reopen() {
+fn shared_activity_after_activation_extends_discovery_across_reopen() {
     let (mut st, accounts) = recovery_wallet_with(1);
     let (a, b) = (accounts[0], accounts[1]);
     let gap = st.wallet().db().gap_limits.external();
@@ -103,7 +103,7 @@ fn shared_activity_after_promotion_extends_discovery_across_reopen() {
     apply(&mut st, c).unwrap();
     qualify(&mut st, &revision(1, true));
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, a).unwrap();
+    activate_recovered_ledger(&mut st, a).unwrap();
     assert_eq!(reader_version(&st), 8);
     assert_eq!(snapshot(&st, a).authority, TransparentAuthority::Private);
     assert!(!watch(&st, a).addresses.iter().any(|w| w.address == shared));
@@ -273,12 +273,12 @@ fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
                 .unwrap()
         };
         let importer = owner(&st);
-        // Promotion succeeds instead of refusing and rolling back on every retry. Writing the
+        // Activation succeeds instead of refusing and rolling back on every retry. Writing the
         // window leaves the receiver with its owner; projecting A's receive at the window edge then
         // runs the wallet's gap-limit generation, which transfers the adjacent receiver under the
         // existing rule. A is active, and its watch set asks it to cover the receiver before its
         // authority returns.
-        promote(&mut st, a).unwrap();
+        activate_recovered_ledger(&mut st, a).unwrap();
         assert_ne!(owner(&st), importer);
         assert!(watch(&st, a).addresses.iter().any(|w| w.address == address));
         assert!(!watch(&st, b).addresses.iter().any(|w| w.address == address));
@@ -312,7 +312,7 @@ fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
 }
 
 #[test]
-fn import_after_candidate_recovery_discards_conflicting_work_without_quarantine() {
+fn import_after_candidate_recovery_discards_conflicting_work_without_recovery_suspension() {
     let (mut st, accounts) = recovery_wallet_with(1);
     let (a, b) = (accounts[0], accounts[1]);
     let (address, _, key, edge) = future_receiver(&st, a);
@@ -399,16 +399,16 @@ fn imported_ownership_filters_all_derivable_scopes() {
         apply(&mut st, c).unwrap();
         qualify(&mut st, &revision(1, true));
         set_policy(&mut st, PrivateRequired);
-        // Refusing metadata persistence rolls back promotion and every address it generated.
+        // Refusing metadata persistence rolls back activation and every address it generated.
         let before = production_dump(conn(&st));
         conn(&st).execute_batch("CREATE TEMP TRIGGER fail_shared_origin BEFORE INSERT ON tpir_shared_derivations BEGIN SELECT RAISE(ABORT, 'injected shared origin failure'); END;").unwrap();
-        assert!(promote(&mut st, accounts[0]).is_err());
+        assert!(activate_recovered_ledger(&mut st, accounts[0]).is_err());
         assert_eq!(production_dump(conn(&st)), before);
         assert_eq!(count(&st, "tpir_shared_derivations"), 0);
         conn(&st)
             .execute_batch("DROP TRIGGER fail_shared_origin")
             .unwrap();
-        promote(&mut st, accounts[0]).unwrap();
+        activate_recovered_ledger(&mut st, accounts[0]).unwrap();
         assert_eq!(reader_version(&st), 8);
         assert_eq!(count(&st, "tpir_shared_derivations"), 1);
         let ws = watch(&st, accounts[1]);

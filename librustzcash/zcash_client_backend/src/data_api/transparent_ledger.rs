@@ -2,8 +2,8 @@
 //!
 //! This is the preparatory surface of the private transparent ledger: explicit handle modes,
 //! durable policy transitions, an honest balance-and-authority snapshot, candidate recovery,
-//! per-account activation, and history completeness; see `docs/transparent-pir-ledger-architecture.md` and
-//! `docs/transparent-pir-ledger-design-notes.md`.
+//! per-account activation, and history completeness; see
+//! `docs/transparent-pir-wallet-integration.md`.
 
 #[cfg(feature = "test-dependencies")]
 use ambassador::delegatable_trait;
@@ -170,7 +170,7 @@ pub enum CandidateBlocker {
     WindowUnderivable,
 }
 
-/// A reason transparent financial authority is unavailable, or an account cannot be promoted.
+/// A reason transparent financial authority is unavailable, or an account cannot be activated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RecoveryBlocker {
     /// This build or configuration cannot perform private recovery.
@@ -181,10 +181,10 @@ pub enum RecoveryBlocker {
     TransparentSupportUnavailable,
     /// The account's recovered ledger is incomplete at the local target.
     Recovery(CandidateBlocker),
-    /// The account has not been promoted to private authority.
+    /// The account has not been activated to private authority.
     NotActivated,
-    /// An integrity failure quarantined the account or a source of its evidence.
-    Quarantined,
+    /// An integrity failure suspended the account or a source of its evidence.
+    RecoverySuspended,
     /// A revision that contributed the account's coverage or events is not qualified.
     UnqualifiedRevision,
     /// The wallet's own evidence, legacy public or local, disagrees with the complete candidate
@@ -273,7 +273,7 @@ pub trait TransparentLedgerRead: WalletRead {
     /// The result holds one entry, in request order, for each transaction in which the account
     /// has a recorded output or spend, including a spend its active ledger recovered before the
     /// output it consumes; other transactions are omitted. Every entry is derived from
-    /// the facts the wallet currently holds, so rewinds, promotion, account changes, and later
+    /// the facts the wallet currently holds, so rewinds, activation, account changes, and later
     /// enhancement are reflected as soon as they are stored. An incomplete effect, unknown fee, or
     /// missing payment detail is reported as such; none of them authorizes public retrieval.
     ///
@@ -293,7 +293,7 @@ pub trait TransparentLedgerRead: WalletRead {
     fn transparent_watch_set(
         &self,
         account: Self::AccountId,
-    ) -> Result<TransparentWatchSet<Self::AccountId>, Self::Error>;
+    ) -> Result<TransparentAddressWatchSet<Self::AccountId>, Self::Error>;
 
     /// Returns development diagnostics for `account`'s candidate ledger, from one read.
     ///
@@ -305,7 +305,7 @@ pub trait TransparentLedgerRead: WalletRead {
     ) -> Result<CandidateRecovery<Self::AccountId>, Self::Error>;
 }
 
-/// Writes transparent ledger policy transitions, recovery, and promotion.
+/// Writes transparent ledger policy transitions, recovery, and activation.
 ///
 /// Implementations typically also implement [`WalletWrite`](super::WalletWrite); the write trait
 /// itself only requires the read contract so associated `Error` types stay unambiguous.
@@ -335,9 +335,9 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
     ///
     /// The durable policy must still be at the captured generation and must be
     /// `PrivateRequired`, as must the handle. The account must exist with the captured lifecycle
-    /// and without quarantine, the target and anchor must still be local blocks, and every
+    /// and without recovery suspension, the target and anchor must still be local blocks, and every
     /// address the commit names must still be watched by the account. Any failure applies none
-    /// of the commit's facts; an integrity failure also quarantines the source and the accounts
+    /// of the commit's facts; an integrity failure also suspends the source and the accounts
     /// holding its evidence.
     ///
     /// A candidate account's state is isolated: its commits never change balances, spend
@@ -356,7 +356,7 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
     /// every check of [`apply_transparent_ledger_commit`], qualifies the exact revision,
     /// withdraws older provisional evidence of the same source across the wallet, and applies
     /// the commit's facts. Any failure changes nothing, except that an integrity failure
-    /// quarantines exactly as an ordinary commit does, without qualifying. Replaying a commit
+    /// suspends exactly as an ordinary commit does, without qualifying. Replaying a commit
     /// this method already applied changes nothing; resubmitting a commit applied only by
     /// [`apply_transparent_ledger_commit`] qualifies its revision and withdraws older provisional
     /// evidence as above.
@@ -370,18 +370,18 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
         commit: TransparentLedgerCommit<Self::AccountId>,
     ) -> Result<CommitOutcome, Self::Error>;
 
-    /// Atomically promotes `account` to private transparent authority.
+    /// Atomically activates `account` to private transparent authority.
     ///
-    /// Requires `PrivateRequired` both on the handle and durably. Promotion rechecks, in one
-    /// transaction, that the account is not quarantined, that its ledger is complete through a
+    /// Requires `PrivateRequired` both on the handle and durably. Activation rechecks, in one
+    /// transaction, that the account is not suspended, that its ledger is complete through a
     /// local target equal to the chain tip, that every revision contributing its coverage or
     /// events is qualified, and that its legacy public evidence agrees with the ledger. It then
     /// adds the ledger's window addresses to the wallet, projects every recovered event into the
-    /// wallet's outputs and spends, and records the account as active. Promoting an active
-    /// account does nothing. Any failure changes nothing; a blocked promotion reports its
+    /// wallet's outputs and spends, and records the account as active. Activating an active
+    /// account does nothing. Any failure changes nothing; a blocked activation reports its
     /// [`RecoveryBlocker`]s.
     #[cfg(feature = "transparent-inputs")]
-    fn promote_transparent_account(&mut self, account: Self::AccountId) -> Result<(), Self::Error>;
+    fn activate_transparent_ledger(&mut self, account: Self::AccountId) -> Result<(), Self::Error>;
 
     /// Atomically removes everything private recovery alone contributed to the wallet.
     ///
@@ -407,8 +407,8 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
     /// - removes recovered events, coverage, pending pages, and source-bound transaction facts.
     ///
     /// Outputs, spends, and transactions supported by public discovery or local construction, and
-    /// all shielded state, are kept. Revision lineage, qualification, and quarantine are kept, so
-    /// returning to `PrivateRequired` cannot accept an older publication or a quarantined
+    /// all shielded state, are kept. Revision lineage, qualification, and recovery suspension are kept, so
+    /// returning to `PrivateRequired` cannot accept an older publication or a suspended
     /// source. Forgetting a wallet without ledger facts changes nothing.
     #[cfg(feature = "transparent-inputs")]
     fn forget_transparent_ledger(&mut self) -> Result<ForgottenTransparentLedger, Self::Error>;

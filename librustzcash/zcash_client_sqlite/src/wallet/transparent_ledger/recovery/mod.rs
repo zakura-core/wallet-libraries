@@ -1,10 +1,10 @@
-//! Recovery storage: watched addresses, events, coverage, pending pages, quarantine,
-//! qualification, and promotion.
+//! Recovery storage: watched addresses, events, coverage, pending pages, recovery suspension,
+//! qualification, and activation.
 //!
 //! A candidate account's writes touch only `tpir_*` recovery tables. They never change the LRZ
 //! outputs, spends, locks, addresses, or transactions that balances, input selection,
 //! receiving-address allocation, and history read, and the ledger never reads those back as
-//! evidence. Promotion and an active account's commits also project events into those tables.
+//! evidence. Activation and an active account's commits also project events into those tables.
 //!
 //! Rewinds and policy transitions maintain recovery state in every build, because another
 //! build may have written it. A build refuses both when the wallet requires a newer reader.
@@ -17,7 +17,7 @@ use crate::error::SqliteClientError;
 #[cfg(feature = "transparent-inputs")]
 use {
     super::{
-        capture_policy_generation, durable_policy, ensure_policy_generation,
+        capture_policy_generation, check_transparent_policy_generation, durable_policy,
         grants_private_authority, projection, resolve_mode,
     },
     crate::{
@@ -40,8 +40,8 @@ use {
             CommitOutcome, CommitRejection, IntegrityFailure, InvalidCommit,
             MAX_RECOVERY_IDENTIFIER_LEN, PageRequest, PendingPage, PublicationAnchor, ReceiveEvent,
             RecoveryBlocker, RecoveryRevision, RefusedCommit, SpendEvent, StaleCommit,
-            TransparentLedgerCommit, TransparentLedgerMode, TransparentWatchSet, WatchOrigin,
-            WatchedAddress,
+            TransparentAddressWatchSet, TransparentLedgerCommit, TransparentLedgerMode,
+            WatchOrigin, WatchedAddress,
         },
     },
     zcash_keys::{
@@ -58,6 +58,8 @@ use {
 };
 
 #[cfg(feature = "transparent-inputs")]
+mod account_ledger;
+#[cfg(feature = "transparent-inputs")]
 mod commit;
 #[cfg(feature = "transparent-inputs")]
 mod coverage;
@@ -65,18 +67,24 @@ mod coverage;
 mod diagnostics;
 #[cfg(feature = "transparent-inputs")]
 mod events;
+#[cfg(feature = "transparent-inputs")]
+mod ledger_activation;
 mod lifecycle;
 #[cfg(feature = "transparent-inputs")]
 mod metadata;
 #[cfg(feature = "transparent-inputs")]
 mod ownership;
 #[cfg(feature = "transparent-inputs")]
-mod promotion;
+mod recovery_addresses;
+#[cfg(feature = "transparent-inputs")]
+mod recovery_suspension;
 #[cfg(feature = "transparent-inputs")]
 mod revisions;
-#[cfg(feature = "transparent-inputs")]
-mod watch;
 
+#[cfg(feature = "transparent-inputs")]
+use account_ledger::AccountLedger;
+#[cfg(feature = "transparent-inputs")]
+pub(crate) use account_ledger::{account_ledger, ledger_blockers};
 #[cfg(all(
     feature = "transparent-inputs",
     any(test, feature = "test-dependencies")
@@ -87,31 +95,37 @@ pub(crate) use commit::{CommitTrust, apply_commit};
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use diagnostics::candidate_recovery;
 #[cfg(feature = "transparent-inputs")]
-use diagnostics::{AccountLedger, placed_receives, placed_spends, recovery_status};
+use diagnostics::{placed_receives, placed_spends, recovery_status};
 #[cfg(feature = "transparent-inputs")]
-pub(crate) use diagnostics::{account_ledger, ledger_blockers};
-pub(crate) use lifecycle::{clear_pending_pages, truncate};
+pub(crate) use ledger_activation::activate_recovered_ledger;
+pub(crate) use lifecycle::{clear_pending_pages, truncate_recovery};
 #[cfg(feature = "transparent-inputs")]
-pub(crate) use lifecycle::{forget, forget_reattributed_script};
+pub(crate) use lifecycle::{forget_ledger, forget_reattributed_script};
 #[cfg(all(feature = "transparent-inputs", feature = "transparent-key-import"))]
 pub(crate) use ownership::forget_other_candidates;
 #[cfg(feature = "transparent-inputs")]
-pub(crate) use promotion::promote;
-#[cfg(feature = "transparent-inputs")]
-pub(crate) use watch::watch_set;
+pub(crate) use recovery_addresses::watch_set;
 
 #[cfg(feature = "transparent-inputs")]
-use commit::{account_quarantined, atomically, lifecycle};
+use super::atomically;
 #[cfg(feature = "transparent-inputs")]
-use events::{apply_receive, apply_spend, open_page, record_range};
+use commit::account_lifecycle;
 #[cfg(feature = "transparent-inputs")]
-use watch::{WINDOW_LIMIT, WINDOW_SCOPES, Watch};
+use events::{CoverageSupport, apply_receive, apply_spend, open_page, record_range};
+#[cfg(feature = "transparent-inputs")]
+use recovery_addresses::{AccountRecoveryAddresses, WINDOW_LIMIT, WINDOW_SCOPES};
+#[cfg(feature = "transparent-inputs")]
+use recovery_suspension::{
+    account_recovery_is_suspended, source_recovery_is_suspended, suspend_recovery,
+};
 
+/// The output script an address is paid to.
 #[cfg(feature = "transparent-inputs")]
 fn script_bytes(address: &TransparentAddress) -> Vec<u8> {
     transparent::address::Script::from(address.script()).0.0
 }
 
+/// The address a stored recovery script pays; anything but a standard address is corrupt.
 #[cfg(feature = "transparent-inputs")]
 fn address_from_script(bytes: Vec<u8>) -> Result<TransparentAddress, SqliteClientError> {
     script::FromChain::parse(&script::Code(bytes))
@@ -122,6 +136,7 @@ fn address_from_script(bytes: Vec<u8>) -> Result<TransparentAddress, SqliteClien
         })
 }
 
+/// The error that refuses a commit for `rejection`.
 #[cfg(feature = "transparent-inputs")]
 fn reject(rejection: CommitRejection) -> SqliteClientError {
     SqliteClientError::TransparentLedgerCommitRejected(rejection)
@@ -136,6 +151,7 @@ fn local_target(conn: &rusqlite::Connection) -> Result<Option<ChainPoint>, Sqlit
     Ok(get_block_hash(conn, height)?.map(|hash| ChainPoint { height, hash }))
 }
 
+/// Whether the wallet holds `point` as its block at that height.
 #[cfg(feature = "transparent-inputs")]
 fn is_local_block(
     conn: &rusqlite::Connection,
@@ -144,11 +160,14 @@ fn is_local_block(
     Ok(get_block_hash(conn, point.height)? == Some(point.hash))
 }
 
+/// A stored block height.
 #[cfg(feature = "transparent-inputs")]
 fn height(value: u32) -> BlockHeight {
     BlockHeight::from_u32(value)
 }
 
+/// Reads a revision from six consecutive columns starting at `offset`: `source`, `revision`,
+/// `lineage`, `sealed`, `publication_height`, `publication_hash` of `tpir_revisions`.
 #[cfg(feature = "transparent-inputs")]
 fn read_revision(
     row: &rusqlite::Row<'_>,
@@ -169,6 +188,7 @@ fn read_revision(
     })
 }
 
+/// A stored block hash, which must be 32 bytes.
 #[cfg(feature = "transparent-inputs")]
 fn read_hash(bytes: Vec<u8>) -> Result<BlockHash, SqliteClientError> {
     BlockHash::try_from_slice(&bytes)
@@ -185,8 +205,7 @@ mod tests {
     };
     use zcash_client_backend::data_api::transparent_ledger::WatchOrigin;
 
-    use super::{commit::atomically, watch::note_origin};
-    use crate::error::SqliteClientError;
+    use super::recovery_addresses::note_origin;
 
     #[test]
     fn derivation_outranks_a_standalone_import() {
@@ -205,33 +224,5 @@ mod tests {
             }
             assert_eq!(addresses[&address], derived);
         }
-    }
-
-    #[test]
-    fn failed_commit_rolls_back() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        // A deferred foreign key violation makes COMMIT itself fail.
-        conn.execute_batch(
-            "PRAGMA foreign_keys = ON;
-             CREATE TABLE written (x INTEGER);
-             CREATE TABLE parent (id INTEGER PRIMARY KEY);
-             CREATE TABLE child (
-                 parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED
-             );",
-        )
-        .unwrap();
-        let result = atomically(&conn, |conn| {
-            conn.execute_batch("INSERT INTO written VALUES (1); INSERT INTO child VALUES (42);")?;
-            Ok(())
-        });
-        assert!(matches!(result, Err(SqliteClientError::DbError(_))));
-        assert!(
-            conn.is_autocommit(),
-            "the failed transaction must not stay open"
-        );
-        let written: i64 = conn
-            .query_row("SELECT COUNT(*) FROM written", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(written, 0);
     }
 }
