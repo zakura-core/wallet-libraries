@@ -116,6 +116,9 @@ pub fn deferral(lookup: &Result<TxidLookup, TxidError>) -> Option<TransparentDet
         Ok(TxidLookup::PlacementUnknown(Placement::Below)) => {
             Some(TransparentDetailOutcome::NotCovered)
         }
+        // A recent shard too small to hide the txid is transient too: it grows as blocks
+        // arrive, and nothing is looked up publicly meanwhile.
+        Ok(TxidLookup::RecentBelowFloor) => Some(TransparentDetailOutcome::NotYetPublished),
         Ok(TxidLookup::Unsupported) => Some(TransparentDetailOutcome::Unsupported),
         Err(TxidError::Unavailable { retry_after }) => {
             Some(TransparentDetailOutcome::Unavailable {
@@ -301,6 +304,7 @@ mod tests {
                 Ok(TxidLookup::PlacementUnknown(Placement::Below)),
                 Some(O::NotCovered),
             ),
+            (Ok(TxidLookup::RecentBelowFloor), Some(O::NotYetPublished)),
             (Ok(TxidLookup::Unsupported), Some(O::Unsupported)),
             (
                 Err(TxidError::Unavailable { retry_after: retry }),
