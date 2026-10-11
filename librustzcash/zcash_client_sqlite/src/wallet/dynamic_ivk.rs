@@ -437,59 +437,28 @@ pub(crate) fn transaction_keys<P: Parameters>(
     height: Option<BlockHeight>,
     receivers: &[orchard::Address],
 ) -> Result<Vec<DynamicScanningKey<AccountUuid>>, SqliteClientError> {
-    let height = transaction_key_height(conn, height)?;
-    // Only matching keys are derived, so enhancing a closed key's note does not derive
-    // the historical registry.
-    let predicate = transaction_key_predicate(receivers);
-    keys_by_account(conn, params, |account| {
-        let bindings = rusqlite::params![account.0, txid.as_ref(), height.map(u32::from)];
-        keys_where(conn, params, account, &predicate, bindings)
-    })
-}
-
-/// SQL condition on key `k` by which [`transaction_keys`] selects it for the transaction
-/// with ID `?2` and open keys active by height `?3`, every open key when NULL.
-fn transaction_key_predicate(receivers: &[orchard::Address]) -> String {
+    let height = super::chain_tip_height(conn)?
+        .map(|h| BlockHeight::from(u32::from(h).saturating_add(1)))
+        .or(height);
     let receivers = receivers
         .iter()
         .map(|r| format!("X'{}'", hex::encode(r.to_raw_address_bytes())))
         .collect::<Vec<_>>()
         .join(",");
-    format!(
+    // Only matching keys are derived, so enhancing a closed key's note does not derive
+    // the historical registry.
+    let predicate = format!(
         "k.id IN (SELECT receiving_key_id FROM ironwood_received_notes
                 WHERE transaction_id = (SELECT id_tx FROM transactions WHERE txid = ?2)
             UNION SELECT receiving_key_id FROM ironwood_dynamic_payment_recovery
                 WHERE txid = ?2)
          OR (k.closed_at IS NULL AND k.active_from <= COALESCE(?3, k.active_from))
          OR k.receiver IN ({receivers})"
-    )
-}
-
-/// The height by which [`transaction_keys`] selects open keys: the next block, or
-/// `height` without a chain tip; `None` selects every open key.
-fn transaction_key_height(
-    conn: &Connection,
-    height: Option<BlockHeight>,
-) -> Result<Option<BlockHeight>, SqliteClientError> {
-    Ok(super::chain_tip_height(conn)?
-        .map(|h| BlockHeight::from(u32::from(h).saturating_add(1)))
-        .or(height))
-}
-
-/// Whether `used`, the snapshot that decrypted `txid` at `height`, lacks a key
-/// [`transaction_keys`] would now select without receivers, as when another connection
-/// opened one or stored a payment to one.
-pub(crate) fn transaction_missed_keys(
-    conn: &Connection,
-    used: &[(AccountUuid, KeyId)],
-    txid: zcash_primitives::transaction::TxId,
-    height: Option<BlockHeight>,
-) -> Result<bool, SqliteClientError> {
-    let height = transaction_key_height(conn, height)?;
-    // `?1` is the account in `transaction_keys`; this checks every account.
-    let bindings = rusqlite::params![rusqlite::types::Null, txid.as_ref(), height.map(u32::from)];
-    let missed = missed_keys(conn, used, &transaction_key_predicate(&[]), bindings)?;
-    Ok(!missed.is_empty())
+    );
+    keys_by_account(conn, params, |account| {
+        let bindings = rusqlite::params![account.0, txid.as_ref(), height.map(u32::from)];
+        keys_where(conn, params, account, &predicate, bindings)
+    })
 }
 
 /// The key of a registry row selecting purpose, key_index and receiver, checked.
@@ -795,36 +764,24 @@ pub(crate) fn rescan_missed_keys(
     used: &[(AccountUuid, KeyId)],
     range: Range<BlockHeight>,
 ) -> Result<(), SqliteClientError> {
-    let open = "k.closed_at IS NULL AND k.active_from < ?1";
-    let missed = missed_keys(conn, used, open, [u32::from(range.end)])?;
-    if let Some(start) = missed.into_iter().flatten().min() {
-        queue_rescan(conn, start.max(range.start)..range.end)?;
-    }
-    Ok(())
-}
-
-/// The activation height, if any, of each key matching `predicate` on `k` that `used`
-/// lacks. Predicates are library-owned SQL.
-fn missed_keys(
-    conn: &Connection,
-    used: &[(AccountUuid, KeyId)],
-    predicate: &str,
-    bindings: impl rusqlite::Params,
-) -> Result<Vec<Option<BlockHeight>>, SqliteClientError> {
     let used: HashSet<_> = used.iter().copied().collect();
-    let mut stmt = conn.prepare_cached(&format!(
+    let mut stmt = conn.prepare_cached(
         "SELECT k.purpose, k.key_index, a.uuid, k.active_from
          FROM ironwood_receiving_keys k JOIN accounts a ON a.id = k.account_id
-         WHERE {predicate}"
-    ))?;
-    let mut rows = stmt.query(bindings)?;
+         WHERE k.closed_at IS NULL AND k.active_from < ?1",
+    )?;
+    let mut rows = stmt.query([u32::from(range.end)])?;
     let mut missed = Vec::new();
     while let Some(row) = rows.next()? {
         if !used.contains(&(AccountUuid(row.get(2)?), stored_key_id(row)?)) {
-            missed.push(row.get::<_, Option<u32>>(3)?.map(BlockHeight::from));
+            missed.push(BlockHeight::from(row.get::<_, u32>(3)?).max(range.start));
         }
     }
-    Ok(missed)
+    drop(rows);
+    if let Some(start) = missed.into_iter().min() {
+        queue_rescan(conn, start..range.end)?;
+    }
+    Ok(())
 }
 
 /// Seconds since the Unix epoch on the wallet clock, or 0 before it.
