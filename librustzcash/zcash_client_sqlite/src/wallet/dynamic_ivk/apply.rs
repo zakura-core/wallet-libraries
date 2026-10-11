@@ -56,7 +56,7 @@ pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL, R>(
             )
         })?;
         match applied {
-            Ok(PaymentApplication::Applied | PaymentApplication::BeforeBirthday) => {}
+            Ok(PaymentApplication::Applied) => {}
             other => return Ok(other),
         }
     }
@@ -185,6 +185,8 @@ pub(super) fn apply_payment<P: Parameters>(
     if !recovered.verify_position(position, path, root.into()) {
         return reject(conn, key_ref);
     }
+    // Like any note before the birthday, it is not tracked; marking its key paid keeps
+    // the index from being issued again and moves the recovery bound past it.
     if before_birthday {
         conn.execute(
             "UPDATE ironwood_receiving_keys
@@ -192,7 +194,7 @@ pub(super) fn apply_payment<P: Parameters>(
             [key_ref],
         )?;
         dequeue()?;
-        return Ok(Ok(PaymentApplication::BeforeBirthday));
+        return Ok(Ok(PaymentApplication::Applied));
     }
     // An unmined transaction is one a rewind or the mempool left: its note may move to a
     // new position, but a transaction holding no such note is not this one.

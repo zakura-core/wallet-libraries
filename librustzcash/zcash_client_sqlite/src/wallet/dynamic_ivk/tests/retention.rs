@@ -551,7 +551,7 @@ fn note_before_the_birthday_is_dropped_without_queuing_replay() {
             (through, &path)
         )
         .unwrap(),
-        PaymentApplication::BeforeBirthday
+        PaymentApplication::Applied
     );
     assert!(pending(db, account, key.key_id()).is_empty());
     assert_eq!(
