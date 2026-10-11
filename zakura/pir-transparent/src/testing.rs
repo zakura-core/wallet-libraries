@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use transparent_native::TableProfile;
 use transparent_shard::display::{
     DISPLAY_SCHEMA, DisplayBucket, DisplayLayout, DisplayManifest, DisplayMap, DisplayMapEntry,
-    DisplaySealParams,
+    DisplaySealParams, TXID_2K8,
 };
 use transparent_shard::manifest::TableGeometry;
 use zcash_client_backend::data_api::transparent_ledger::{
@@ -76,14 +76,18 @@ pub fn apply<P: zcash_protocol::consensus::Parameters, CL, R>(
     })
 }
 
-/// The geometry every fake publication uses.
-const GEOMETRY: &str = "txid-2k";
-const ROWS: u64 = 2048;
-const ROW_BYTES: u32 = 4096;
+/// The entries the fake recent shard claims: the production recent window.
+const RECENT_RECORDS: u64 = 90_000;
 
-/// A txid display service publishing one recent shard over `start..=end` that holds no
-/// record. Every route of a lookup is answered well formed, so a lookup sends its whole
-/// transcript and finds nothing.
+/// The geometry every fake publication uses.
+const GEOMETRY: &str = "txid-2k8";
+const ROWS: u64 = 2048;
+const ROW_BYTES: u32 = 8192;
+
+/// A txid display service publishing one recent shard over `start..=end` whose rows hold no
+/// record. Its manifest counts [`RECENT_RECORDS`] entries, as a production recent window
+/// does, so a client queries it. Every route of a lookup is answered well formed, so a
+/// lookup sends its whole transcript and finds nothing.
 pub struct TxidPublication {
     init: Vec<u8>,
     map: Vec<u8>,
@@ -105,7 +109,7 @@ impl TxidPublication {
             ROWS,
             ROW_BYTES,
         )
-        .expect("the txid-2k directory profile");
+        .expect("the txid-2k8 directory profile");
         let init = serde_json::to_vec(&serde_json::json!({
             "schema": DISPLAY_SCHEMA,
             "codec": transparent_shard::txid::CODEC,
@@ -138,12 +142,13 @@ impl TxidPublication {
             geometry: GEOMETRY.to_owned(),
             n_buckets: 1,
             archive_target: 1,
-            layout: DisplayLayout::current(),
+            layout: DisplayLayout::of(&TXID_2K8),
             blocks: end - start + 1,
-            records: 0,
+            records: RECENT_RECORDS,
             buckets: vec![DisplayBucket {
                 bucket: 0,
-                records: 0,
+                records: RECENT_RECORDS,
+                placement_seed: 0,
                 directory_segments: vec![TableGeometry {
                     rows: ROWS,
                     row_bytes: ROW_BYTES,
@@ -161,7 +166,7 @@ impl TxidPublication {
                 n_archive: 1,
                 n_recent: 1,
                 archive_target: 1,
-                recent_floor: 1,
+                recent_window: 1,
                 reorg_margin: 1,
             },
             start_height: start,
@@ -266,7 +271,7 @@ fn not_found() -> HttpReply {
 fn setup_seed(kind: &str) -> u64 {
     let digest = Sha256::new()
         .chain_update(transparent_shard::SCHEMA.as_bytes())
-        .chain_update(b"/setup-seed\0txid-2k\0")
+        .chain_update(b"/setup-seed\0txid-2k8\0")
         .chain_update(kind.as_bytes())
         .finalize();
     u64::from_le_bytes(digest[..8].try_into().expect("eight bytes"))

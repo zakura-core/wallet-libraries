@@ -1603,10 +1603,10 @@ struct DisplayService {
 
 impl DisplayService {
     fn start(start: u64, end: u64, records: &[zakura_pir_transparent::DisplayEntry]) -> Self {
-        use transparent_shard::display::{DisplaySealParams, TXID_2K};
+        use transparent_shard::display::{DisplaySealParams, TXID_2K8};
         use transparent_shard_server::{
-            assignment::WorkerRole,
             display::{
+                DisplayRole,
                 live::{DisplayCommand, DisplayLive, DisplayPublication},
                 service::DisplayRuntime,
                 synth,
@@ -1626,7 +1626,7 @@ impl DisplayService {
                 parent_manifest_digest: String::new(),
                 n_buckets: 1,
                 archive_target: 1,
-                geometry: &TXID_2K,
+                geometry: &TXID_2K8,
             },
             records,
         )
@@ -1635,7 +1635,7 @@ impl DisplayService {
             n_archive: 1,
             n_recent: 1,
             archive_target: 1,
-            recent_floor: 1,
+            recent_window: 1,
             reorg_margin: 1,
         };
         let (directory, map_sha256) =
@@ -1654,7 +1654,7 @@ impl DisplayService {
                 },
                 None,
             ),
-            WorkerRole::RecentReplica,
+            DisplayRole::RecentReplica,
             3,
             root.path().join("recent.active.json"),
             Vec::new(),
@@ -1852,7 +1852,8 @@ fn private_details_end_to_end() {
     let service = DisplayService::start(H0 + 600, H0 + 622, &records);
     // What a public `GetTransaction` would have fetched; it must never be called.
     let public_fetches = std::cell::Cell::new(0usize);
-    let mut client = TxidDisplayClient::new();
+    // The published recent shard holds a handful of txids, below the client's own floor.
+    let mut client = TxidDisplayClient::new().with_min_recent_floor(1);
     let mut transport = DisplayTransport {
         service: &service,
         unavailable: true,
