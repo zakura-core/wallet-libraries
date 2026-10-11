@@ -2,7 +2,9 @@
 //! lists, when it checks the display map, and what each result writes.
 //!
 //! The fake publication holds no record, so a covered lookup is `Absent` and one below its
-//! shard is not covered. Found facts are built by hand.
+//! shard is not covered. Its shard is far below a wallet's recent floor, so the tests look it up
+//! through a service whose floor is 0, except the one showing that floor. Found facts are built
+//! by hand.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -284,6 +286,11 @@ fn not_covering_then_covering(height: u32) -> Service {
     ])
 }
 
+/// A display service that queries the fake publication's shard, which holds no record.
+fn service() -> TxidDisplayService {
+    TxidDisplayService::with_min_recent_floor(0)
+}
+
 const NOT_COVERED: i64 = 2;
 const ABSENT: i64 = 1;
 const UNAVAILABLE: i64 = 0;
@@ -302,6 +309,42 @@ fn hold(f: &mut Fixture, service: &TxidDisplayService, exchange: &Service, txid:
     assert_eq!(f.view(txid), Some(TransparentDisplayView::NotCovered));
 }
 
+/// A wallet's service does not query a recent shard holding too few transactions to hide the
+/// txid among them: the lookup sends nothing past the map and is held as not covered, as below
+/// the window, never absent. A new map makes it due again.
+#[test]
+fn a_recent_shard_below_the_floor_is_not_covered() {
+    let mut f = wallet();
+    let txid = f.receipt(0x71, f.height);
+    let height = u64::from(f.height);
+    let exchange = Service::new(vec![
+        TxidPublication::new(height - 5, height + 5),
+        TxidPublication::new(height - 5, height + 6),
+    ]);
+    let service = TxidDisplayService::new();
+    let run = f.plan(&service, t0(), 8, &[]);
+    assert_eq!(f.drive(run, &service, &exchange, t0()), [txid]);
+    assert_eq!(exchange.paths_since(0), ["/v1/txid/init", MAP_PATH]);
+    assert_eq!(
+        f.work_row(txid),
+        Some((1, Some(NOT_COVERED), Some(exchange.map_sha256(0))))
+    );
+    assert_eq!(f.view(txid), Some(TransparentDisplayView::NotCovered));
+
+    // The shard moves to a new map, and is still too small.
+    exchange.serve(1);
+    let t1 = t0() + PAST_BACKOFF;
+    let sent = exchange.sent();
+    let run = f.plan(&service, t1, 8, &[]);
+    assert_eq!(f.drive(run, &service, &exchange, t1), [txid]);
+    assert_eq!(exchange.paths_since(sent), [MAP_PATH]);
+    assert_eq!(
+        f.work_row(txid),
+        Some((2, Some(NOT_COVERED), Some(exchange.map_sha256(1))))
+    );
+    assert_eq!(f.view(txid), Some(TransparentDisplayView::NotCovered));
+}
+
 /// A lookup parked on the display map it saw becomes due once a refreshed map differs, within
 /// the same run.
 #[test]
@@ -309,7 +352,7 @@ fn parked_work_relists_after_map_refresh() {
     let mut f = wallet();
     let txid = f.receipt(0x70, f.height);
     let exchange = not_covering_then_covering(f.height);
-    let service = TxidDisplayService::new();
+    let service = service();
     hold(&mut f, &service, &exchange, txid);
 
     // A day later, on the same map: the map is checked, and nothing is looked up.
@@ -340,7 +383,7 @@ fn prioritized_transactions_are_served_first() {
         .map(|tag| f.receipt(0x60 + tag, f.height + u32::from(tag)))
         .collect();
     let wanted = txids[0];
-    let service = TxidDisplayService::new();
+    let service = service();
     let lookups = |run: DetailRun<'_>| -> Vec<TxId> {
         run.map(|step| match step {
             DetailStep::Lookup(request) => request.txid,
@@ -373,7 +416,7 @@ fn held_work_stays_held_while_the_map_is_unchanged() {
     let exchange = not_covering_then_covering(f.height);
     let held = Some((1, Some(NOT_COVERED), Some(exchange.map_sha256(0))));
     {
-        let service = TxidDisplayService::new();
+        let service = service();
         hold(&mut f, &service, &exchange, txid);
         let t1 = t0() + PAST_BACKOFF;
         let sent = exchange.sent();
@@ -397,7 +440,7 @@ fn held_work_stays_held_while_the_map_is_unchanged() {
         assert_eq!(exchange.paths_since(sent), [MAP_PATH]);
     }
     // A restart: a service without a map lists the work as parked and checks the map first.
-    let service = TxidDisplayService::new();
+    let service = service();
     let at = t0() + PAST_BACKOFF + Duration::from_secs(1);
     let sent = exchange.sent();
     let run = f.plan(&service, at, 8, &[]);
@@ -416,7 +459,7 @@ fn held_work_stays_held_when_the_map_cannot_be_fetched() {
     // Behind the failing map, the service covers the receipt.
     let exchange = not_covering_then_covering(f.height);
     let held = Some((1, Some(NOT_COVERED), Some(exchange.map_sha256(0))));
-    let service = TxidDisplayService::new();
+    let service = service();
     hold(&mut f, &service, &exchange, txid);
     exchange.serve(1);
     let mut at = t0() + PAST_BACKOFF;
@@ -473,7 +516,7 @@ fn a_relisting_under_another_mode_lists_nothing() {
     let mut f = wallet();
     let txid = f.receipt(0x45, f.height);
     let exchange = not_covering_then_covering(f.height);
-    let service = TxidDisplayService::new();
+    let service = service();
     let at = t0() + PAST_BACKOFF;
     let (mut run, checked) = plan_relist(&mut f, &service, &exchange, txid, at);
     let generation = run.policy_generation();
@@ -491,7 +534,7 @@ fn a_relisting_under_another_generation_of_the_same_mode_lists_nothing() {
     let mut f = wallet();
     let txid = f.receipt(0x49, f.height);
     let exchange = not_covering_then_covering(f.height);
-    let service = TxidDisplayService::new();
+    let service = service();
     let at = t0() + PAST_BACKOFF;
     let (mut run, checked) = plan_relist(&mut f, &service, &exchange, txid, at);
     // Away and back: the mode is unchanged, the generation is not.
@@ -517,7 +560,7 @@ fn a_deferral_names_the_map_its_lookup_used() {
     let mut f = wallet();
     let txid = f.receipt(0x4a, f.height);
     let exchange = not_covering_then_covering(f.height);
-    let service = TxidDisplayService::new();
+    let service = service();
     let mut run = f.plan(&service, t0(), 8, &[]);
     let Some(DetailStep::Lookup(request)) = run.next() else {
         panic!("a lookup");
@@ -563,7 +606,7 @@ fn only_an_exiting_caller_writes_nothing() {
     let txid = f.receipt(0x46, f.height);
     let exchange = not_covering_then_covering(f.height);
     exchange.serve(1);
-    let service = TxidDisplayService::new();
+    let service = service();
     let mut run = f.plan(&service, t0(), 8, &[]);
     let Some(DetailStep::Lookup(request)) = run.next() else {
         panic!("a lookup");
@@ -607,7 +650,7 @@ fn a_deferral_after_a_policy_change_is_stale() {
     let mut f = wallet();
     let txid = f.receipt(0x4d, f.height);
     let exchange = not_covering_then_covering(f.height);
-    let service = TxidDisplayService::new();
+    let service = service();
     let mut run = f.plan(&service, t0(), 8, &[]);
     let Some(DetailStep::Lookup(request)) = run.next() else {
         panic!("a lookup");
@@ -641,7 +684,7 @@ fn a_timed_out_lookup_is_deferred() {
     let newer = f.receipt(0x4c, f.height + 1);
     let exchange = not_covering_then_covering(f.height);
     exchange.serve(1);
-    let service = TxidDisplayService::new();
+    let service = service();
     let first = |f: &Fixture, at, prefer: &[TxId]| match f.plan(&service, at, 1, prefer).next() {
         Some(DetailStep::Lookup(request)) => request.txid,
         step => panic!("a lookup, not {step:?}"),
@@ -704,7 +747,7 @@ fn a_timed_out_lookup_is_deferred() {
 fn found_facts_are_stored() {
     let mut f = wallet();
     let txid = f.receipt(0x47, f.height);
-    let service = TxidDisplayService::new();
+    let service = service();
     let mut run = f.plan(&service, t0(), 8, &[]);
     let Some(DetailStep::Lookup(request)) = run.next() else {
         panic!("a lookup");
@@ -774,7 +817,7 @@ fn found_facts_are_stored() {
 fn public_answers() {
     let mut f = wallet();
     let txid = f.receipt(0x48, f.height);
-    let service = TxidDisplayService::new();
+    let service = service();
     let mut run = f.plan(&service, t0(), 8, &[]);
     assert!(!run.public_transport());
     let Some(DetailStep::Lookup(request)) = run.next() else {

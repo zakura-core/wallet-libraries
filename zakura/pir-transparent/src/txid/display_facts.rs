@@ -113,7 +113,9 @@ pub fn deferral(lookup: &Result<TxidLookup, TxidError>) -> Option<TransparentDet
         Ok(TxidLookup::PlacementUnknown(Placement::Above)) => {
             Some(TransparentDetailOutcome::NotYetPublished)
         }
-        Ok(TxidLookup::PlacementUnknown(Placement::Below)) => {
+        // Below the window, or in a recent shard too small to hide the txid among its
+        // transactions: not privately available under this map, asked again once it changes.
+        Ok(TxidLookup::PlacementUnknown(Placement::Below) | TxidLookup::RecentBelowFloor) => {
             Some(TransparentDetailOutcome::NotCovered)
         }
         Ok(TxidLookup::Unsupported) => Some(TransparentDetailOutcome::Unsupported),
@@ -301,6 +303,7 @@ mod tests {
                 Ok(TxidLookup::PlacementUnknown(Placement::Below)),
                 Some(O::NotCovered),
             ),
+            (Ok(TxidLookup::RecentBelowFloor), Some(O::NotCovered)),
             (Ok(TxidLookup::Unsupported), Some(O::Unsupported)),
             (
                 Err(TxidError::Unavailable { retry_after: retry }),

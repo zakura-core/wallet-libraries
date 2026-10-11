@@ -57,9 +57,22 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 impl TxidDisplayService {
     /// A service holding a new client and no map digest.
     pub fn new() -> Self {
+        Self::holding(TxidDisplayClient::new())
+    }
+
+    /// A service whose client queries a recent shard holding at least `floor` transactions
+    /// per bucket, rather than [`MIN_RECENT_FLOOR`](transparent_txid_client::MIN_RECENT_FLOOR),
+    /// unless the map's own floor is higher. For tests and test services, whose publications
+    /// hold a handful of transactions; a wallet uses [`Self::new`].
+    #[cfg(feature = "testing")]
+    pub fn with_min_recent_floor(floor: u64) -> Self {
+        Self::holding(TxidDisplayClient::new().with_min_recent_floor(floor))
+    }
+
+    fn holding(client: TxidDisplayClient) -> Self {
         Self {
             client: Mutex::new(Client {
-                client: TxidDisplayClient::new(),
+                client,
                 unsupported: false,
             }),
             map: Mutex::new(None),
@@ -279,7 +292,7 @@ mod tests {
             paths: Mutex::default(),
         };
         use sha2::Digest as _;
-        let service = TxidDisplayService::new();
+        let service = TxidDisplayService::with_min_recent_floor(0);
         let never = || false;
         // The first map pins the chain; the service's display is unsupported.
         service.refresh_map(&exchange, &never).unwrap();

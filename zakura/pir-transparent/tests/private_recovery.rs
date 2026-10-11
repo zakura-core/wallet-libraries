@@ -1605,8 +1605,8 @@ impl DisplayService {
     fn start(start: u64, end: u64, records: &[zakura_pir_transparent::DisplayEntry]) -> Self {
         use transparent_shard::display::{DisplaySealParams, TXID_2K};
         use transparent_shard_server::{
-            assignment::WorkerRole,
             display::{
+                DisplayRole,
                 live::{DisplayCommand, DisplayLive, DisplayPublication},
                 service::DisplayRuntime,
                 synth,
@@ -1654,7 +1654,7 @@ impl DisplayService {
                 },
                 None,
             ),
-            WorkerRole::RecentReplica,
+            DisplayRole::RecentReplica,
             3,
             root.path().join("recent.active.json"),
             Vec::new(),
@@ -1852,7 +1852,8 @@ fn private_details_end_to_end() {
     let service = DisplayService::start(H0 + 600, H0 + 622, &records);
     // What a public `GetTransaction` would have fetched; it must never be called.
     let public_fetches = std::cell::Cell::new(0usize);
-    let mut client = TxidDisplayClient::new();
+    // The fixture's recent shard holds a handful of transactions.
+    let mut client = TxidDisplayClient::new().with_min_recent_floor(1);
     let mut transport = DisplayTransport {
         service: &service,
         unavailable: true,

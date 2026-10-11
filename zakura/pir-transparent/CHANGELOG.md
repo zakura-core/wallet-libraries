@@ -12,6 +12,17 @@
 
 ### Changed
 
+- Txid display never queries a recent shard holding fewer transactions per
+  bucket than the larger of the map's `recent_floor` and the client's
+  `MIN_RECENT_FLOOR` (10,000): a query would narrow the txid to those few. The
+  lookup returns `TxidLookup::RecentBelowFloor`, sending nothing past the map,
+  and `deferral` maps it to `NotCovered`, like a height below the publication,
+  so it is held until the map changes and the receipt offers the user's public
+  load. Archive lookups are unaffected. With `testing`,
+  `TxidDisplayService::with_min_recent_floor` lowers the floor for test
+  publications, and `TxidPublication`'s empty shard is only queried through a
+  service with floor 0. Callers that match `TxidLookup` exhaustively need the
+  new arm.
 - `discover_active_addresses` continues past a pass its private budget stopped
   after confirming a candidate: another pass, from the same map and with the
   filters already downloaded, asks about the candidates not yet confirmed,

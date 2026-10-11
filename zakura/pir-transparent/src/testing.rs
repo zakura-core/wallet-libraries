@@ -84,6 +84,10 @@ const ROW_BYTES: u32 = 4096;
 /// A txid display service publishing one recent shard over `start..=end` that holds no
 /// record. Every route of a lookup is answered well formed, so a lookup sends its whole
 /// transcript and finds nothing.
+///
+/// A wallet's client never queries a recent shard this small, which would narrow its txid to
+/// the shard's few transactions; its lookups are not covered. Look the publication up through
+/// `TxidDisplayService::with_min_recent_floor(0)` to reach its shard.
 pub struct TxidPublication {
     init: Vec<u8>,
     map: Vec<u8>,
@@ -161,7 +165,9 @@ impl TxidPublication {
                 n_archive: 1,
                 n_recent: 1,
                 archive_target: 1,
-                recent_floor: 1,
+                // The shard holds no record; services looking it up lower their floor to 0
+                // (`TxidDisplayService::with_min_recent_floor`).
+                recent_floor: 0,
                 reorg_margin: 1,
             },
             start_height: start,
@@ -294,7 +300,7 @@ mod tests {
 
     #[test]
     fn a_lookup_in_the_fake_publication_finds_nothing() {
-        let service = TxidDisplayService::new();
+        let service = TxidDisplayService::with_min_recent_floor(0);
         let publication = Serving(TxidPublication::new(3_000_000, 3_000_009));
         let found = service.lookup(&publication, [7; 32], 3_000_005, &|| false);
         assert_eq!(found.found, Ok(TxidLookup::Absent));
