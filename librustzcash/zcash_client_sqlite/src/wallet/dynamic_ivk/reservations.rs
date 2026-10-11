@@ -441,15 +441,15 @@ pub(super) fn record_status<P: Parameters>(
         return Err(invalid("empty deposit address"));
     }
     // A refund key starts on a refund owed if it never started, or reopens if it closed
-    // while this operation expected no refund. A closed incoming key reopens if this
-    // observation unsettles it.
+    // while this operation expected no refund. Any key that closed settled reopens if
+    // this observation unsettles it.
     let operations = conn
         .prepare(&format!(
             "SELECT o.id, k.id,
                 k.purpose = 0 AND (k.active_from IS NULL
                     OR (k.closed_at IS NOT NULL AND o.expectation NOT IN (2, 3))),
                 COALESCE(k.active_from, k.scan_from),
-                k.purpose = 1 AND k.closed_at IS NOT NULL
+                k.closed_at IS NOT NULL
              FROM ironwood_dynamic_operations o
              JOIN ironwood_receiving_keys k ON k.id = o.receiving_key_id
              JOIN accounts a ON a.id = k.account_id
@@ -461,8 +461,8 @@ pub(super) fn record_status<P: Parameters>(
         })?
         .collect::<Result<Vec<(i64, i64, bool, u32, bool)>, _>>()?;
     let refund_owed = matches!(observation.status, Terminal(Positive(_) | Unknown));
-    for &(id, key, startable, scan_from, closed_incoming) in &operations {
-        let was_settled = closed_incoming && settled(conn, key)?;
+    for &(id, key, startable, scan_from, closed) in &operations {
+        let was_settled = closed && settled(conn, key)?;
         let current = record(conn, id, observation, funded, now)?;
         let unsettled = was_settled && current && !settled(conn, key)?;
         if (current && startable && refund_owed) || unsettled {

@@ -286,6 +286,43 @@ fn a_newly_owed_refund_reopens_a_closed_refund_key() {
     assert!(scanning_keys(&st).is_empty());
 }
 
+/// A refund key closed after receiving its expected refund reopens when a newer status
+/// raises the amount, and finds the remainder. A late older status leaves it closed.
+#[test]
+fn a_raised_refund_reopens_a_settled_refund_key() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let from = next_height(&st);
+    let key = refund_key(&mut st);
+    let refund = |value| Terminal(Positive(Some(Zatoshis::const_from_u64(value))));
+    let terminal = registered_at() + HOUR;
+    observe_swap(&mut st, key.key_id(), refund(10_000), terminal);
+    pay(&mut st, &key, 10_000);
+    confirm(&mut st);
+    assert_eq!(close(&mut st, terminal), 1);
+    let remainder = pay(&mut st, &key, 5_000);
+    let raised = |st: &mut State, at| {
+        let observation = Observation {
+            status: refund(15_000),
+            deadline: None,
+        };
+        let db = st.wallet_mut().db_mut();
+        assert!(
+            db.record_operation_status(account, "swap", None, observation, false, at)
+                .unwrap()
+        );
+    };
+    raised(&mut st, terminal - 1);
+    assert!(scanning_keys(&st).is_empty());
+    raised(&mut st, terminal + HOUR);
+    assert_eq!(scanning_keys(&st), [key.key_id()]);
+    let rescanned = usize::try_from(u32::from(remainder) - u32::from(from) + 1).unwrap();
+    st.scan_cached_blocks_with_dynamic_ivks(from, rescanned);
+    assert_eq!(unspent_keys(&st, remainder), [Some(key.key_id()); 2]);
+    confirm(&mut st);
+    assert_eq!(close(&mut st, terminal + HOUR), 1);
+}
+
 #[test]
 fn a_key_closes_once_its_last_operation_is_final() {
     let mut st = scanned_wallet();
