@@ -444,7 +444,8 @@ pub(super) fn record_status<P: Parameters>(
     }
     // A refund key starts on a refund owed if it never started, or reopens if it closed
     // while this operation expected no refund. Any key that closed settled reopens if
-    // this observation unsettles it before its completion limit.
+    // this observation unsettles it. A closed key past its completion limit never
+    // reopens.
     let operations = conn
         .prepare(&format!(
             "SELECT o.id, k.id,
@@ -466,9 +467,9 @@ pub(super) fn record_status<P: Parameters>(
     for &(id, key, startable, scan_from, closed) in &operations {
         let was_settled = closed && settled(conn, key)?;
         let current = record(conn, id, observation, funded, now)?;
-        let unsettled =
-            was_settled && current && !settled(conn, key)? && !limit_passed(conn, key, now)?;
-        if (current && startable && refund_owed) || unsettled {
+        let unsettled = was_settled && current && !settled(conn, key)?;
+        let reopen = (current && startable && refund_owed) || unsettled;
+        if reopen && !(closed && limit_passed(conn, key, now)?) {
             // A refund key whose restore sweep is pending starts when the sweep finishes.
             activate(conn, key, BlockHeight::from(scan_from))?;
         }
