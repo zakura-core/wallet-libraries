@@ -73,6 +73,10 @@ pub enum WalletMigrationError {
     /// whose meaning it does not know. External migrations must be supplied on every call.
     UnknownMigrations(Vec<Uuid>),
 
+    /// The database holds dynamic IVK state, which a build without the `orchard` feature
+    /// cannot scan with or keep consistent, so such a build refuses to open it.
+    DynamicIvksRequireOrchard,
+
     /// Some other unexpected violation of database business rules occurred
     Other(Box<SqliteClientError>),
 }
@@ -159,6 +163,10 @@ impl fmt::Display for WalletMigrationError {
                     ids.join(", ")
                 )
             }
+            WalletMigrationError::DynamicIvksRequireOrchard => write!(
+                f,
+                "The wallet database holds dynamic IVK state, which needs a build with the orchard feature"
+            ),
             WalletMigrationError::Other(err) => {
                 write!(f, "Unexpected violation of database business rules: {err}")
             }
@@ -193,11 +201,9 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::EnhancementModeNotConfigured => {
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
-        SqliteClientError::DynamicIvksNotUsed => {
-            unreachable!("migrations do not use dynamic IVKs")
-        }
         #[cfg(feature = "orchard")]
-        SqliteClientError::InvalidDynamicIvkInput(_)
+        SqliteClientError::DynamicIvksNotUsed
+        | SqliteClientError::InvalidDynamicIvkInput(_)
         | SqliteClientError::DynamicIvkIndexExhausted => {
             unreachable!("migrations do not use dynamic IVKs")
         }
@@ -697,6 +703,8 @@ fn init_wallet_db_internal<
         }
         if target_migrations.is_empty() {
             migrator.up(None)?;
+            #[cfg(not(feature = "orchard"))]
+            verify_no_dynamic_ivk_state(wdb.conn.borrow()).map_err(MigratorError::Adapter)?;
         } else {
             for target_migration in target_migrations {
                 migrator.up(Some(*target_migration))?;
@@ -753,6 +761,24 @@ fn verify_no_unknown_migrations(
     } else {
         unknown.sort();
         Err(WalletMigrationError::UnknownMigrations(unknown))
+    }
+}
+
+/// Refuses, in a build without `orchard`, a database holding dynamic IVK state: such a
+/// build would store blocks and transactions without the dynamic keys and prune the
+/// Ironwood spend evidence their recovery needs.
+#[cfg(not(feature = "orchard"))]
+fn verify_no_dynamic_ivk_state(conn: &rusqlite::Connection) -> Result<(), WalletMigrationError> {
+    let present: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys)
+            OR EXISTS(SELECT 1 FROM ironwood_dynamic_spend_retention)",
+        [],
+        |row| row.get(0),
+    )?;
+    if present {
+        Err(WalletMigrationError::DynamicIvksRequireOrchard)
+    } else {
+        Ok(())
     }
 }
 
@@ -1172,6 +1198,40 @@ mod tests {
             .with_external_migrations(vec![Box::new(External)])
             .init_or_migrate(&mut db)
             .unwrap();
+    }
+
+    /// A build without `orchard` opens a database without dynamic IVK state and refuses
+    /// one with it; an `orchard` build opens both.
+    #[test]
+    fn dynamic_ivk_state_needs_an_orchard_build() {
+        use super::{WalletMigrationError, WalletMigrator};
+        use schemerz::MigratorError;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(zcash_primitives::block::BlockHash([0; 32]))
+            .build();
+        let db = st.wallet_mut().db_mut();
+        WalletMigrator::new().init_or_migrate(db).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO ironwood_receiving_keys
+                 (account_id, purpose, key_index, receiver, scan_from, advances_allocation)
+                 SELECT id, 1, zeroblob(8), zeroblob(43), 0, 1 FROM accounts",
+                [],
+            )
+            .unwrap();
+        let opened = WalletMigrator::new().init_or_migrate(db);
+        if cfg!(feature = "orchard") {
+            opened.unwrap();
+        } else {
+            assert!(matches!(
+                opened,
+                Err(MigratorError::Adapter(
+                    WalletMigrationError::DynamicIvksRequireOrchard
+                ))
+            ));
+        }
     }
 
     #[test]

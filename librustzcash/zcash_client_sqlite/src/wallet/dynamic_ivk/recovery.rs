@@ -57,10 +57,14 @@ pub(crate) fn record_paid_check(
         if paid {
             requeue(conn, "id = ?1", id)?;
         } else {
-            // A rewind below `publication` reruns the sweep (see `truncate_to_height`).
+            // A key scanned here gets a finished sweep row, so it is listed again only for
+            // a newer publication. A rewind below `publication` reruns the sweep (see
+            // `truncate_to_height`).
             conn.execute(
-                "UPDATE ironwood_dynamic_sweeps SET done_height = ?2
-                 WHERE receiving_key_id = ?1 AND done_height < ?2",
+                "INSERT INTO ironwood_dynamic_sweeps (receiving_key_id, done_height)
+                 VALUES (?1, ?2)
+                 ON CONFLICT (receiving_key_id) DO UPDATE SET done_height = excluded.done_height
+                 WHERE done_height < excluded.done_height",
                 params![id, u32::from(publication.height)],
             )?;
         }
@@ -107,9 +111,8 @@ pub(super) fn refund_memos_pending(
 
 /// Registers, for a restore sweep, the refund key of each confirmed internal funding
 /// memo, spent and zero-value ones included, whose own-send evidence (an input of the
-/// same account) authenticates it, unless a key already covers its block. Returns how
-/// many selected records this version cannot read, with or without that evidence, as
-/// `RefundMemo::decode` requires.
+/// same account) authenticates it, unless a key already covers its block. A marked memo
+/// that does not decode is ignored.
 ///
 /// A marker still lacking that evidence once scanning passed its block was funded before
 /// the birthday or is not this wallet's: its key is swept without advancing allocation,
@@ -119,7 +122,7 @@ pub(super) fn recover_refund_memos<P: Parameters>(
     params: &P,
     account: AccountUuid,
     now: i64,
-) -> Result<usize, SqliteClientError> {
+) -> Result<(), SqliteClientError> {
     let (account_ref, _) = account_key(conn, params, account)?;
     let scanned = wallet::fully_scanned_height(conn)?.map(u32::from);
     let records = conn
@@ -140,22 +143,16 @@ pub(super) fn recover_refund_memos<P: Parameters>(
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut unreadable = 0;
     for (bytes, height, authenticated) in records {
         // SQLite omits trailing zero padding when storing MemoBytes.
         let memo = zcash_protocol::memo::MemoBytes::from_bytes(&bytes)
             .ok()
             .and_then(|bytes| RefundMemo::decode(bytes.as_array()));
-        let register_as = match memo {
-            None => {
-                unreadable += 1;
-                continue;
-            }
+        let (memo, authenticated) = match memo {
             Some(memo) if authenticated => (memo, true),
             Some(memo) if scanned.is_some_and(|scanned| height <= scanned) => (memo, false),
             _ => continue,
         };
-        let (memo, authenticated) = register_as;
         let key_id = KeyId::new(Purpose::Refund, memo.index());
         // Storing the funding transaction already started a key scanned here (see
         // `start_funded_refund_keys`), and an earlier call queued any other.
@@ -181,18 +178,17 @@ pub(super) fn recover_refund_memos<P: Parameters>(
             )?;
         }
     }
-    Ok(unreadable)
+    Ok(())
 }
 
 /// [`maintain`] with `lookahead` incoming keys, once scanning reaches an Ironwood tip.
-/// Returns the unreadable count from [`recover_refund_memos`], zero before then.
 pub(super) fn maintain_restore_discovery<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     lookahead: u32,
     now: i64,
-) -> Result<usize, SqliteClientError> {
+) -> Result<(), SqliteClientError> {
     let tip = wallet::chain_tip_height(conn)?;
     let ready = match (tip, params.activation_height(NetworkUpgrade::Nu6_3)) {
         (Some(tip), Some(activation)) => {
@@ -201,13 +197,12 @@ pub(super) fn maintain_restore_discovery<P: Parameters>(
         _ => false,
     };
     if !ready {
-        return Ok(0);
+        return Ok(());
     }
-    let unreadable = recover_refund_memos(conn, params, account, now)?;
+    recover_refund_memos(conn, params, account, now)?;
     let (account_ref, _) = account_key(conn, params, account)?;
     let start = restore_start(conn, params, account_ref)?;
-    maintain_receive_lookahead(conn, params, account, lookahead, start, now)?;
-    Ok(unreadable)
+    maintain_receive_lookahead(conn, params, account, lookahead, start, now)
 }
 
 /// Keeps [`RECEIVE_LOOKAHEAD`] incoming keys from the account's restore start.
@@ -222,11 +217,9 @@ pub(super) fn extend_receive_lookahead<P: Parameters>(
     maintain_receive_lookahead(conn, params, account, RECEIVE_LOOKAHEAD, start, now)
 }
 
-/// Keeps `count` swept incoming keys above the highest allocated index. In a new account
-/// it stops above a key this wallet issued, since nothing above it was handed out; in an
-/// account restored with `recover_until`, the old device may have quoted beyond the keys
-/// this wallet issues, so it always keeps going. This is bounded-gap recovery, not a
-/// completeness proof.
+/// Keeps `count` swept incoming keys above the highest allocated index, while that index
+/// is a restored one or there is none: above a key this wallet issued, it handed nothing
+/// out. This is bounded-gap recovery, not a completeness proof.
 pub(super) fn maintain_receive_lookahead<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -239,8 +232,7 @@ pub(super) fn maintain_receive_lookahead<P: Parameters>(
     let top: Option<(Vec<u8>, bool)> = conn
         .query_row(
             &format!(
-                "SELECT k.key_index, ({RESTORED}) OR a.recover_until_height IS NOT NULL
-                 FROM ironwood_receiving_keys k JOIN accounts a ON a.id = k.account_id
+                "SELECT k.key_index, ({RESTORED}) FROM ironwood_receiving_keys k
                  WHERE k.account_id = ?1 AND k.purpose = 1 AND k.advances_allocation = 1
                  ORDER BY k.key_index DESC LIMIT 1"
             ),

@@ -31,9 +31,7 @@ pub(super) fn reserve<P: Parameters>(
         Ok(from) => from,
         Err(policy) => return Ok(Err(policy)),
     };
-    if recovery::recover_refund_memos(conn, params, account, now)? > 0 {
-        return Ok(Err(ReservationPolicy::Unreadable));
-    }
+    recovery::recover_refund_memos(conn, params, account, now)?;
     if recovery::refund_memos_pending(conn, account)? {
         return Ok(Err(ReservationPolicy::Coverage));
     }

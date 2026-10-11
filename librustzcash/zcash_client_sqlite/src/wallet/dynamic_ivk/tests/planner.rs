@@ -290,9 +290,9 @@ fn an_unwatched_sweep_closes_only_a_key_that_was_not_scanning() {
     assert_eq!(scanning_keys(&st), [watched]);
 }
 
-/// A closed key is rechecked only against a publication newer than its sweep: a paid
-/// filter miss finishes its sweep there, and a hit queues it again. A key with a known
-/// payment is never rechecked.
+/// A closed key without a known payment, swept or scanned here, is rechecked only
+/// against a publication newer than its last check: a paid filter miss records that
+/// publication, and a hit queues a sweep. A key with a known payment is never rechecked.
 #[test]
 fn a_newer_paid_filter_rechecks_closed_unpaid_keys() {
     let mut st = scanned_wallet();
@@ -305,6 +305,11 @@ fn a_newer_paid_filter_rechecks_closed_unpaid_keys() {
         let applied = db.apply_dynamic_sweep(account, key, anchor, anchor, false, |_, _| None);
         assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
     }
+    // A refund key scanned here that closes without a refund has never been swept.
+    let scanned = reserve_key(db, account, Purpose::Refund, anchor.height + 1).key_id();
+    let no_refund = OperationStatus::Terminal(ReceiptExpectation::None);
+    observe(db, account, scanned, "swap", no_refund, 0).unwrap();
+    assert_eq!(close_at(db, account, 0, anchor.height), 1);
     let recheck = |st: &State, height| -> Vec<KeyId> {
         let keys = st
             .wallet()
@@ -312,20 +317,27 @@ fn a_newer_paid_filter_rechecks_closed_unpaid_keys() {
             .unwrap();
         keys.iter().map(|w| w.key).collect()
     };
-    assert!(recheck(&st, anchor.height).is_empty());
+    assert_eq!(recheck(&st, anchor.height), [scanned]);
     let publication = advance(&mut st, 1);
-    assert_eq!(recheck(&st, publication.height), [missed, hit]);
+    assert_eq!(recheck(&st, publication.height), [missed, hit, scanned]);
     let db = st.wallet_mut().db_mut();
-    db.record_paid_filter_check(account, publication, &[(missed, false), (hit, true)])
+    let checked = [(missed, false), (hit, true), (scanned, false)];
+    db.record_paid_filter_check(account, publication, &checked)
         .unwrap();
     assert!(recheck(&st, publication.height).is_empty());
     assert_eq!(due(&mut st, publication, NOW), [hit]);
+    let newer = advance(&mut st, 1);
+    assert_eq!(recheck(&st, newer.height), [missed, scanned]);
+    let db = st.wallet_mut().db_mut();
+    db.record_paid_filter_check(account, newer, &[(missed, false), (scanned, true)])
+        .unwrap();
+    assert_eq!(due(&mut st, newer, NOW), [hit, scanned]);
     // A key that received a note is not rechecked, whatever later publications hold.
     st.wallet()
         .conn()
         .execute("UPDATE ironwood_receiving_keys SET used = 1", [])
         .unwrap();
-    assert!(recheck(&st, publication.height + 1).is_empty());
+    assert!(recheck(&st, newer.height + 1).is_empty());
 }
 
 #[test]

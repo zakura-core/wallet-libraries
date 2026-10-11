@@ -169,8 +169,9 @@ workspace.
   retrieval authenticate these notes with their registered key, but only a full
   transaction stores their memo: they carry none the wallet reads, since the refund
   marker is on internal change. While a dynamic key is open, blocks and transactions
-  processed without the dynamic keys are refused
-  (`SqliteClientError::DynamicIvksNotUsed`, which builds without `orchard` also return).
+  processed without the dynamic keys are refused (`SqliteClientError::DynamicIvksNotUsed`).
+  A build without `orchard` refuses to initialize a database holding dynamic IVK state
+  (`WalletMigrationError::DynamicIvksRequireOrchard`).
   Invalid input to these calls is `SqliteClientError::InvalidDynamicIvkInput`, and a call
   that must wait returns its `ReservationPolicy` or `SweepDeferral` as an `Ok` value.
 - Issuance: `WalletDb::reserve_refund_key` and `prepare_receive_reservation`, which require
@@ -181,12 +182,6 @@ workspace.
   one with an accepted quote, or one with a quote the set's read does not yet cover (or
   any quote, without a set) is never issued, and a draft whose address was seen is
   abandoned. Seen addresses move the gap like paid ones, since a restore walks past them.
-  In an account restored with `AccountBirthday::recover_until`, an address without local
-  quotes is issued only when the set lacks it and covers its quotes from
-  `EARLIEST_RECEIVE_QUOTE` until the time of the `recover_until` block; otherwise
-  issuance returns `ReservationPolicy::Gap`. Such an account's restore lookahead stays
-  `RECEIVE_GAP_LIMIT` past every allocated address, including ones this wallet issues,
-  and an index waits until its key is registered and swept.
 - Operations: each quote is one provider operation. An incoming one is
   `begin_receive_operation`, `finish_receive_operation` (`OperationOutcome`) and
   `start_receive_operation`, which returns the `ReceiveDeposit` to show; an accepted
@@ -209,7 +204,8 @@ workspace.
   not while a receipt is unmined and unexpired or short of ZIP 315's untrusted
   confirmations, and only while the wallet is scanned to the chain tip, by the earlier of
   the caller's clock and the tip's block time. `recheck_dynamic_key_history` sweeps closed
-  keys again on request, and a rewind reopens a closed key whose receipt it un-mines.
+  keys again on request. A rewind reopens a closed key whose receipt it un-mines or leaves
+  unconfirmed; no provider status reopens one.
 - Recovery: `maintain_dynamic_ivks`, called at each sync start and tip, recovers funding
   memos and keeps an incoming lookahead. Each recovered key is swept once through a
   receiver directory with the trait steps `prepare_dynamic_sweeps`,
@@ -225,8 +221,8 @@ workspace.
   `apply_dynamic_sweep` takes whether a current recent set holds it: such a key scans
   from the block after its lookup until its restore watch closes it, and any other
   closes at its lookup. `dynamic_keys_to_recheck` and `record_paid_filter_check` sweep a
-  closed key without a known payment again once a newer publication's paid filter holds
-  it. A payment before the account's
+  closed key without a known payment, swept or scanned here, once a newer publication's
+  paid filter holds it. A payment before the account's
   birthday is checked for inclusion ahead of the birthday block and then raises the
   recovery bound without being tracked. Scanning that later finds the same note moves it
   to the transaction it is found in. `dynamic_history_pending` reports unfinished sweeps.

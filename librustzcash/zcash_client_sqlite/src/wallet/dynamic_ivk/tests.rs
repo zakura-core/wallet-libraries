@@ -161,6 +161,10 @@ fn prepare_from(
     seen: Option<&ProviderSeen<'_>>,
 ) -> Policy<DynamicKey> {
     tx(db, |c, p| {
+        if let Some(seen) = seen {
+            let (owner, _) = account_key(c, p, account)?;
+            store::reservations::record_seen(c, owner.0, seen)?;
+        }
         store::reservations::prepare(c, p, account, now, from, seen)
     })
 }

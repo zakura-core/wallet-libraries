@@ -10,9 +10,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
     DynamicKey, KeyId, Purpose, RESERVED, ReservationPolicy, account_key, activate, corrupt,
-    decode_index, invalid, key_by_id,
-    lifecycle::{limit_passed, record},
-    next_index, register,
+    decode_index, invalid, key_by_id, lifecycle::record, next_index, register,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -29,10 +27,6 @@ const STATUS_FRESH_SECONDS: i64 = 120;
 /// Margin for clock differences between this device and a provider's feed when deciding
 /// whether a [`ProviderSeen`] read covers a quote.
 pub const SEEN_SLACK_SECONDS: i64 = 60 * 60;
-/// The earliest time, in Unix seconds, that any incoming dynamic address can have been
-/// quoted: 2026-09-29 00:00 UTC. No dynamic address existed before it, so a seen set read
-/// from then on covers every earlier quote of a restored address.
-pub const EARLIEST_RECEIVE_QUOTE: i64 = 1_790_640_000;
 
 /// A swap provider's seen set, as a receiver directory publishes it: every receiver the
 /// provider was given between `since` and `until`.
@@ -45,13 +39,8 @@ pub const EARLIEST_RECEIVE_QUOTE: i64 = 1_790_640_000;
 /// addresses the set holds. The set's answers are kept, so a later set that lacks an
 /// address cannot make it issuable again.
 ///
-/// In an account restored from its seed, a registered address without local quotes may
-/// have been quoted by the old device. It is issued only if a set lacks it and covers
-/// every quote from [`EARLIEST_RECEIVE_QUOTE`] until [`SEEN_SLACK_SECONDS`] after the
-/// restore, the time of the account's `recover_until` block; otherwise
-/// issuance waits with [`ReservationPolicy::Gap`]. Wallets must pass
-/// `AccountBirthday::recover_until` when restoring an account from a seed, or it counts
-/// as new and this check does not apply.
+/// An address another device of the same seed quoted is known only through the set, so
+/// one quoted within the feed's read lag before a restore can still be issued again.
 pub struct ProviderSeen<'a> {
     /// When the provider's feed started, in Unix seconds. Receivers the provider was
     /// given earlier are missing.
@@ -171,23 +160,6 @@ fn release(conn: &Connection, key: i64, now: i64) -> Result<(), SqliteClientErro
         params![key, now],
     )?;
     Ok(())
-}
-
-/// Whether key `key`'s operations expect nothing its mined notes lack: the settlement
-/// `lifecycle::close_finished` closes a key on, before confirmations.
-fn settled(conn: &Connection, key: i64) -> Result<bool, SqliteClientError> {
-    Ok(conn.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM ironwood_dynamic_operations
-                WHERE receiving_key_id = ?1 AND expectation IN (0, 3, 4))
-            AND (SELECT COALESCE(SUM(COALESCE(expected_value, 1)), 0)
-                FROM ironwood_dynamic_operations
-                WHERE receiving_key_id = ?1 AND expectation = 2)
-             <= (SELECT COALESCE(SUM(n.value), 0) FROM ironwood_received_notes n
-                JOIN transactions t ON t.id_tx = n.transaction_id
-                WHERE n.receiving_key_id = ?1 AND t.mined_height IS NOT NULL)",
-        [key],
-        |r| r.get(0),
-    )?)
 }
 
 /// Releases key `key`'s reservation and stops scanning it.
@@ -442,17 +414,10 @@ pub(super) fn record_status<P: Parameters>(
     if deposit.is_empty() {
         return Err(invalid("empty deposit address"));
     }
-    // A refund key starts on a refund owed if it never started, or reopens if it closed
-    // while this operation expected no refund. Any key that closed settled reopens if
-    // this observation unsettles it. A closed key past its completion limit never
-    // reopens.
     let operations = conn
         .prepare(&format!(
             "SELECT o.id, k.id,
-                k.purpose = 0 AND (k.active_from IS NULL
-                    OR (k.closed_at IS NOT NULL AND o.expectation NOT IN (2, 3))),
-                COALESCE(k.active_from, k.scan_from),
-                k.closed_at IS NOT NULL
+                k.purpose = 0 AND k.active_from IS NULL AND k.closed_at IS NULL, k.scan_from
              FROM ironwood_dynamic_operations o
              JOIN ironwood_receiving_keys k ON k.id = o.receiving_key_id
              JOIN accounts a ON a.id = k.account_id
@@ -460,16 +425,12 @@ pub(super) fn record_status<P: Parameters>(
                AND (k.purpose = 0 OR {RESERVED} OR (k.used = 1 AND (o.funded = 1 OR ?4)))"
         ))?
         .query_map(params![account.0, deposit, memo, funded], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?
-        .collect::<Result<Vec<(i64, i64, bool, u32, bool)>, _>>()?;
+        .collect::<Result<Vec<(i64, i64, bool, u32)>, _>>()?;
     let refund_owed = matches!(observation.status, Terminal(Positive(_) | Unknown));
-    for &(id, key, startable, scan_from, closed) in &operations {
-        let was_settled = closed && settled(conn, key)?;
-        let current = record(conn, id, observation, funded, now)?;
-        let unsettled = was_settled && current && !settled(conn, key)?;
-        let reopen = (current && startable && refund_owed) || unsettled;
-        if reopen && !(closed && limit_passed(conn, key, now)?) {
+    for &(id, key, unstarted_refund, scan_from) in &operations {
+        if record(conn, id, observation, funded, now)? && unstarted_refund && refund_owed {
             // A refund key whose restore sweep is pending starts when the sweep finishes.
             activate(conn, key, BlockHeight::from(scan_from))?;
         }
@@ -499,9 +460,6 @@ pub(super) fn prepare<P: Parameters>(
     if sweeping {
         return Ok(Err(ReservationPolicy::Gap));
     }
-    if let Some(seen) = seen {
-        record_seen(conn, a.0, seen)?;
-    }
     let coverage = coverage(seen);
     let end = recovery_end(conn, a.0, coverage)?;
     // A received address is permanently excluded, even if later spent or rewound.
@@ -529,39 +487,19 @@ pub(super) fn prepare<P: Parameters>(
         Some((key, _, true)) => abandon(conn, key, now)?,
         None => {}
     }
-    // Whether a restored account's addresses without local quotes must wait for a set
-    // covering the restore (see `ProviderSeen`). A restore whose block time is not yet
-    // known is not covered.
-    let restore = conn
-        .query_row(
-            "SELECT b.time FROM accounts a
-             LEFT JOIN blocks b ON b.height = a.recover_until_height
-             WHERE a.id = ?1 AND a.recover_until_height IS NOT NULL",
-            [a.0],
-            |r| r.get::<_, Option<i64>>(0),
-        )
-        .optional()?;
-    // `EARLIEST_RECEIVE_QUOTE` is not a local time and already precedes every quote, so
-    // it meets the feed's start without slack, which would bar feeds starting there.
-    let unquoted_wait = restore.is_some_and(|restored_at| {
-        seen.is_none_or(|s| s.since > EARLIEST_RECEIVE_QUOTE)
-            || restored_at.is_none_or(|t| t > coverage.1)
-    });
     // An address the provider was given without seeing it, such as a request that never
     // reached it, is reissued only when the gap rule leaves no fresh one.
     let mut abandoned = None;
     let mut fresh = None;
     for index in 0..end {
-        let row: Option<(bool, bool, bool)> = conn
+        let (blocked, quoted): (bool, bool) = conn
             .query_row(
                 &format!(
                     "SELECT k.used = 1 OR {SEEN} OR {RESERVED}
                           OR EXISTS(SELECT 1 FROM ironwood_dynamic_payment_recovery p
                             WHERE p.receiving_key_id = k.id),
                         EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
-                            WHERE o.receiving_key_id = k.id AND o.request IS NOT NULL),
-                        NOT EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
-                            WHERE o.receiving_key_id = k.id)
+                            WHERE o.receiving_key_id = k.id AND o.request IS NOT NULL)
                      FROM ironwood_receiving_keys k
                      WHERE k.account_id = :account AND k.purpose = 1 AND k.key_index = :index"
                 ),
@@ -571,22 +509,12 @@ pub(super) fn prepare<P: Parameters>(
                     ":since": coverage.0,
                     ":covered": coverage.1,
                 ],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .optional()?;
-        // In a restored account, an index without a key is unknown history until the
-        // lookahead registers and sweeps it.
-        let Some((blocked, quoted, unquoted)) =
-            row.or_else(|| restore.is_none().then_some((false, false, false)))
-        else {
-            return Ok(Err(ReservationPolicy::Gap));
-        };
+            .optional()?
+            .unwrap_or_default();
         if blocked {
             continue;
-        }
-        // Skipping it could hand out a higher index the old device also quoted.
-        if unquoted && unquoted_wait {
-            return Ok(Err(ReservationPolicy::Gap));
         }
         if !quoted {
             fresh = Some(index);
@@ -614,8 +542,7 @@ pub(super) fn prepare<P: Parameters>(
     Ok(Ok(registered))
 }
 
-/// Records which of `account`'s unseen incoming keys, quoted here or restored, `seen`
-/// holds.
+/// Records which of `account`'s unseen incoming keys `seen` holds.
 pub(super) fn record_seen(
     conn: &Connection,
     account: i64,
