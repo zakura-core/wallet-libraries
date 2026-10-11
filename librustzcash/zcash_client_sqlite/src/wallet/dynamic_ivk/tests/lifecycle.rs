@@ -659,6 +659,69 @@ fn another_keys_rescan_does_not_reopen_a_key_closed_at_its_limit() {
     assert_eq!(scanning_keys(&st), [reopened]);
 }
 
+/// Records `observation` for the test account's refund operation `swap` at `at`.
+fn record_swap(st: &mut State, observation: Observation, at: i64) {
+    let account = st.test_account().unwrap().id();
+    st.wallet_mut()
+        .db_mut()
+        .record_operation_status(account, "swap", None, observation, false, at)
+        .unwrap();
+}
+
+/// A status never fills in a closed key's missing deadline, so a key closed at its limit
+/// stays closed on a later refund owed.
+#[test]
+fn a_status_does_not_move_a_limit_closed_keys_limit() {
+    let mut st = scanned_wallet();
+    let key = refund_key(&mut st).key_id();
+    observe_swap(&mut st, key, Active, registered_at() + HOUR);
+    let limit = registered_at() + LIMIT;
+    assert_eq!(close(&mut st, limit), 1);
+    let no_refund = Observation {
+        status: Terminal(NoReceipt),
+        deadline: Some(registered_at() + 10 * DAY),
+    };
+    record_swap(&mut st, no_refund, limit + DAY);
+    assert_eq!(operation_row(&st, "swap").3, None);
+    let owed = Observation {
+        status: Terminal(Positive(None)),
+        deadline: None,
+    };
+    record_swap(&mut st, owed, limit + 2 * DAY);
+    assert!(scanning_keys(&st).is_empty());
+}
+
+/// A correction to a key closed settled cannot move its limit by supplying a missing
+/// deadline. Past that limit it does not reopen the key, by design: no status reopens a
+/// key past its completion limit, so the shortfall it reports is not scanned for.
+#[test]
+fn a_correction_past_the_limit_leaves_a_settled_key_closed() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key = refund_key(&mut st);
+    let expect = |value| Observation {
+        status: Terminal(Positive(Some(Zatoshis::const_from_u64(value)))),
+        deadline: None,
+    };
+    let db = st.wallet_mut().db_mut();
+    let at = registered_at() + HOUR;
+    observe_with(db, account, key.key_id(), "swap", expect(10_000), at).unwrap();
+    pay(&mut st, &key, 10_000);
+    confirm(&mut st);
+    assert_eq!(close(&mut st, registered_at() + 5 * DAY), 1);
+    // The chain reaches day 31, past the limit of day 30.
+    let day_31 = registered_at() + 31 * DAY;
+    assert_eq!(close(&mut st, day_31), 0);
+    let correction = Observation {
+        deadline: Some(registered_at() + 10 * DAY),
+        ..expect(15_000)
+    };
+    record_swap(&mut st, correction, day_31);
+    record_swap(&mut st, correction, day_31 + DAY);
+    assert_eq!(operation_row(&st, "swap").3, None);
+    assert!(scanning_keys(&st).is_empty());
+}
+
 /// Within the limit, a newer status that unsettles a key closed settled reopens it.
 #[test]
 fn an_unsettling_status_within_the_limit_reopens_a_key() {
