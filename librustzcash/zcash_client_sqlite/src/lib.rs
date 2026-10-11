@@ -822,8 +822,6 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         F: FnOnce(&mut WalletDb<SqlTransaction<'_>, &P, &CL, &mut R>) -> Result<A, E>,
     {
         let tx = self.conn.borrow_mut().transaction()?;
-        #[cfg(not(feature = "orchard"))]
-        wallet::init::refuse_dynamic_ivk_state(&tx)?;
         let mut wdb = WalletDb {
             conn: SqlTransaction(&tx),
             params: &self.params,
@@ -886,8 +884,6 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         ) -> Result<A, E>,
     {
         let tx = self.conn.borrow_mut().transaction()?;
-        #[cfg(not(feature = "orchard"))]
-        wallet::init::refuse_dynamic_ivk_state(&tx)?;
         let mut wdb = WalletDb {
             conn: SqlTransaction(&tx),
             params: &self.params,
@@ -3291,6 +3287,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
         blocks: Vec<ScannedBlock<AccountUuid>>,
         #[cfg(feature = "orchard")] dynamic_keys: Option<&[(AccountUuid, KeyId)]>,
     ) -> Result<(), SqliteClientError> {
+        #[cfg(not(feature = "orchard"))]
+        wallet::init::refuse_dynamic_ivk_state(self.conn.0)?;
         #[cfg(feature = "orchard")]
         if dynamic_keys.is_none() && wallet::dynamic_key_open(self.conn.0)? {
             return Err(SqliteClientError::DynamicIvksNotUsed);
@@ -3631,6 +3629,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
     ) -> Result<(), <Self as WalletRead>::Error> {
         // As with scanned blocks, a transaction decrypted without the open dynamic keys
         // would store their payments as someone else's.
+        #[cfg(not(feature = "orchard"))]
+        wallet::init::refuse_dynamic_ivk_state(self.conn.0)?;
         #[cfg(feature = "orchard")]
         if !d_tx.dynamic_ivks_applied() && wallet::dynamic_key_open(self.conn.0)? {
             return Err(SqliteClientError::DynamicIvksNotUsed);

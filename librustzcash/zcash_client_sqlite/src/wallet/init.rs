@@ -792,8 +792,9 @@ fn verify_no_dynamic_ivk_state(conn: &rusqlite::Connection) -> Result<(), Wallet
     }
 }
 
-/// [`verify_no_dynamic_ivk_state`] for opening a handle and starting a write transaction,
-/// so a build without `orchard` refuses such a database even if it never migrates it.
+/// [`verify_no_dynamic_ivk_state`] as a rusqlite error, for `WalletDb::for_path` and the
+/// block and transaction storage every handle's writes reach, so a build without
+/// `orchard` refuses such a database even if it never migrates it.
 #[cfg(not(feature = "orchard"))]
 pub(crate) fn refuse_dynamic_ivk_state(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     verify_no_dynamic_ivk_state(conn).map_err(|e| match e {
@@ -1266,6 +1267,76 @@ mod tests {
                 ))
             ));
         }
+    }
+
+    /// Without `orchard`, a caller-owned transaction handle cannot store blocks or a
+    /// decrypted transaction over dynamic IVK state, however the handle was built.
+    #[cfg(not(feature = "orchard"))]
+    #[test]
+    fn caller_owned_transactions_refuse_dynamic_ivk_state() {
+        use std::collections::HashMap;
+
+        use super::{WalletMigrationError, WalletMigrator};
+        use crate::{SqlTransaction, error::SqliteClientError};
+        use zcash_client_backend::{
+            data_api::{WalletWrite, chain::ChainState},
+            decrypt_transaction,
+        };
+        use zcash_primitives::{block::BlockHash, transaction::Authorized};
+
+        let data_file = NamedTempFile::new().unwrap();
+        let mut db = WalletDb::for_path(
+            data_file.path(),
+            Network::TestNetwork,
+            test_clock(),
+            test_rng(),
+        )
+        .unwrap();
+        WalletMigrator::new().init_or_migrate(&mut db).unwrap();
+        db.conn
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO ironwood_dynamic_spend_retention (account_id) VALUES (1);",
+            )
+            .unwrap();
+        let height = BlockHeight::from(1_000_000);
+        let tx = TransactionData::<Authorized>::from_parts(
+            TxVersion::V5,
+            BranchId::for_height(&Network::TestNetwork, height),
+            0,
+            height + 100,
+            None,
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        let refusal = WalletMigrationError::DynamicIvksRequireOrchard.to_string();
+        let refused = |result: Result<(), SqliteClientError>| {
+            matches!(
+                result,
+                Err(SqliteClientError::DbError(rusqlite::Error::SqliteFailure(_, Some(m))))
+                    if m == refusal
+            )
+        };
+        let owned = db.conn.transaction().unwrap();
+        let mut handle = WalletDb::from_connection(
+            SqlTransaction::new(&owned),
+            Network::TestNetwork,
+            test_clock(),
+            test_rng(),
+        );
+        let from_state = ChainState::empty(height, BlockHash([0; 32]));
+        assert!(refused(handle.put_blocks(&from_state, vec![])));
+        let decrypted = decrypt_transaction(
+            &Network::TestNetwork,
+            Some(height),
+            Some(height),
+            &tx,
+            &HashMap::new(),
+        );
+        assert!(refused(handle.store_decrypted_tx(decrypted)));
     }
 
     #[test]
