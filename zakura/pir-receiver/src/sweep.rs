@@ -222,6 +222,14 @@ where
     N: NoteSource<W>,
     L: WriteLock,
 {
+    // A repeated account would lease and back off each of its keys twice.
+    let mut unique = Vec::with_capacity(accounts.len());
+    for account in accounts {
+        if !unique.contains(account) {
+            unique.push(*account);
+        }
+    }
+    let accounts = &unique[..];
     let mut swept = Swept {
         finished: 0,
         deferred: Vec::new(),

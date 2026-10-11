@@ -871,6 +871,67 @@ async fn a_stale_tip_releases_nothing() {
     assert!(directory.requests().is_empty());
 }
 
+/// A repeated account sweeps its keys once: each is leased once, and a deferred key is
+/// listed once.
+#[tokio::test]
+async fn a_repeated_account_sweeps_each_key_once() {
+    let mut st = ironwood_wallet();
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    let (record, _) = pay_restored_key(&mut st, 0, 0);
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    let due = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_dynamic_sweeps(account, through, NOW, NonZeroU32::new(64).unwrap())
+        .unwrap()
+        .unwrap()
+        .len();
+    let directory = Directory::new(publish(
+        std::slice::from_ref(&record),
+        &[record.payment.cmx],
+        through,
+        &provider(&[]),
+    ));
+    // Without note data the paid key defers.
+    let mut notes = Notes {
+        data: BTreeMap::new(),
+        requested: Vec::new(),
+    };
+    let lock = Labels::default();
+    let swept = sweep(
+        st.wallet_mut().db_mut(),
+        &network,
+        &[account, account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &directory,
+        &mut notes,
+        &lock,
+        NOW,
+    )
+    .await
+    .unwrap();
+    let attempts = lock
+        .0
+        .borrow()
+        .iter()
+        .filter(|label| **label == "dynamic_sweep.attempt")
+        .count();
+    assert_eq!(attempts, due);
+    assert!(
+        matches!(
+            &swept.deferred[..],
+            [(_, key, Error::Unavailable(_))] if *key == KeyId::new(Purpose::Receive, 0)
+        ),
+        "{:?}",
+        swept.deferred
+    );
+}
+
 /// Another network's seen sets say nothing about this network's quotes, so a
 /// publication committing to another genesis is refused as a sweep refuses it.
 #[tokio::test]
