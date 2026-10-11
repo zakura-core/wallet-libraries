@@ -291,7 +291,8 @@ pub struct PutBlocksRows {
 ///   [`PutBlocksError::NonSequentialBlocks`] will be returned if this invariant is violated.
 /// - `ironwood_nullifier_retention`: If `Some(height)`, Ironwood nullifiers from `height` are
 ///   tracked even below the floor described under "Nullifier tracking", for a store that can
-///   find Ironwood notes after scanning past them. The store must prune with the same floor.
+///   find Ironwood notes after scanning past them. See
+///   [`LowLevelWalletWrite::prune_tracked_nullifiers`] for the pruning contract.
 ///
 /// # Nullifier tracking
 ///

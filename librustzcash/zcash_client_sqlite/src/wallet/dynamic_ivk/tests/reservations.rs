@@ -1,9 +1,14 @@
 use super::*;
-use zakura_dynamic_ivk::lifecycle::{NearStatus, near_observation};
+use zakura_dynamic_ivk::lifecycle::{NearStatus, ReceiptExpectation, near_observation};
 
 /// `(observed_at, expectation, expected_value, deadline)` of an operation.
 type Operation = (i64, u8, Option<i64>, Option<i64>);
 const NOW: i64 = 1_000_000;
+/// A terminal status whose receipt is inconclusive.
+const INCONCLUSIVE: Observation = Observation {
+    status: OperationStatus::Terminal(ReceiptExpectation::Unknown),
+    deadline: None,
+};
 
 /// A file-backed wallet with Ironwood active, scanned through one block that holds an
 /// ordinary note.
@@ -82,8 +87,24 @@ fn quote(st: &mut State, key: &DynamicKey, request: &str, start: bool) {
 /// Records provider `status` for the operation with deposit address `deposit`,
 /// requested at `now`, as an app does with each status it fetches.
 fn observe_status(st: &mut State, deposit: &str, status: &NearStatus<'_>, funded: bool, now: i64) {
+    record_observation(
+        st,
+        deposit,
+        near_observation(Purpose::Receive, status),
+        funded,
+        now,
+    )
+}
+
+/// Records `observation` for the operation with deposit address `deposit` at `now`.
+fn record_observation(
+    st: &mut State,
+    deposit: &str,
+    observation: Observation,
+    funded: bool,
+    now: i64,
+) {
     let account = st.test_account().unwrap().id();
-    let observation = near_observation(Purpose::Receive, status);
     st.wallet_mut()
         .db_mut()
         .record_operation_status(account, deposit, None, observation, funded, now)
@@ -349,18 +370,19 @@ fn lost_requests_are_reused_only_once_a_seen_set_shows_them_unseen() {
 }
 
 /// A started reservation needs a fresh conclusive status: a funded swap's is a refund,
-/// since `FAILED` is inconclusive, and an older status arriving late does not replace a
-/// newer one.
+/// which `FAILED` also is, and an older status arriving late does not replace a newer one.
 #[test]
 fn a_started_reservation_needs_a_fresh_conclusive_status() {
-    let mut st = fixture();
-    let r = prepare(&mut st, NOW);
-    quote(&mut st, &r, "funded", true);
-    let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
-    observe(&mut st, "funded", "FAILED", true, now);
-    assert!(reserved(&st, &r));
-    observe(&mut st, "funded", "REFUNDED", true, now + 1);
-    assert!(!reserved(&st, &r));
+    for refund in ["REFUNDED", "FAILED"] {
+        let mut st = fixture();
+        let r = prepare(&mut st, NOW);
+        quote(&mut st, &r, "funded", true);
+        let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
+        record_observation(&mut st, "funded", INCONCLUSIVE, true, now);
+        assert!(reserved(&st, &r), "{refund}");
+        observe(&mut st, "funded", refund, true, now + 1);
+        assert!(!reserved(&st, &r), "{refund}");
+    }
 
     let mut st = fixture();
     let r = prepare(&mut st, NOW);
@@ -988,9 +1010,9 @@ fn reorg_retains_used_marker_and_seen_addresses_keep_the_bound() {
     st.truncate_to_height_retaining_cache(before_payment);
     assert_eq!(prepare(&mut st, NOW).key_id(), draft.key_id());
     begin(&mut st, &draft, "beyond").unwrap().unwrap();
-    // A funded swap reported `FAILED` is inconclusive, so it is not reclaimed.
+    // A paid swap with an inconclusive outcome is not reclaimed.
     let now = NOW + RECEIVE_RECLAIM_SECONDS + 61;
-    observe(&mut st, "first", "FAILED", false, now);
+    record_observation(&mut st, "first", INCONCLUSIVE, false, now);
     assert!(active_from(&st, first.key_id()).is_some());
 }
 
