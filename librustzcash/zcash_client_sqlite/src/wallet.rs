@@ -4323,15 +4323,19 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     )?;
     // A sweep whose lookup or completion the rewind removed runs again. Active keys
     // need no repair: the scanner rescans the truncated blocks with them. A closed key
-    // is no longer scanned, so reopen any key with a receipt the rewind un-mines; it
-    // closes again once that receipt is confirmed again.
+    // is no longer scanned, so reopen any key with a receipt the rewind leaves short of
+    // the confirmations closing requires (see `WalletDb::close_finished_dynamic_keys`);
+    // it closes again once that receipt is confirmed again.
+    let confirmed_below = u32::from(truncation_height)
+        .saturating_add(1)
+        .saturating_sub(ConfirmationsPolicy::default().untrusted().get());
     conn.execute(
         "UPDATE ironwood_receiving_keys SET closed_at = NULL
          WHERE closed_at IS NOT NULL AND id IN (
              SELECT n.receiving_key_id FROM ironwood_received_notes n
              JOIN transactions t ON t.id_tx = n.transaction_id
              WHERE t.mined_height > ?1)",
-        [u32::from(truncation_height)],
+        [confirmed_below],
     )?;
     conn.execute(
         "UPDATE ironwood_dynamic_sweeps SET done_height = NULL, next_attempt_at = 0,
