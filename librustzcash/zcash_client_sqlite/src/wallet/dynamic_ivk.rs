@@ -436,9 +436,7 @@ pub(crate) fn transaction_keys<P: Parameters>(
     height: Option<BlockHeight>,
     receivers: &[orchard::Address],
 ) -> Result<Vec<DynamicScanningKey<AccountUuid>>, SqliteClientError> {
-    let height = super::chain_tip_height(conn)?
-        .map(|h| BlockHeight::from(u32::from(h).saturating_add(1)))
-        .or(height);
+    let height = transaction_key_height(conn, height)?;
     let receivers = receivers
         .iter()
         .map(|r| format!("X'{}'", hex::encode(r.to_raw_address_bytes())))
@@ -458,6 +456,29 @@ pub(crate) fn transaction_keys<P: Parameters>(
         let bindings = rusqlite::params![account.0, txid.as_ref(), height.map(u32::from)];
         keys_where(conn, params, account, &predicate, bindings)
     })
+}
+
+/// The height by which [`transaction_keys`] selects open keys: the next block, or
+/// `height` without a chain tip; `None` selects every open key.
+fn transaction_key_height(
+    conn: &Connection,
+    height: Option<BlockHeight>,
+) -> Result<Option<BlockHeight>, SqliteClientError> {
+    Ok(super::chain_tip_height(conn)?
+        .map(|h| BlockHeight::from(u32::from(h).saturating_add(1)))
+        .or(height))
+}
+
+/// Whether `used`, the snapshot that decrypted a transaction at `height`, lacks an open
+/// key [`transaction_keys`] would now select, as when another connection opened one.
+pub(crate) fn transaction_missed_keys(
+    conn: &Connection,
+    used: &[(AccountUuid, KeyId)],
+    height: Option<BlockHeight>,
+) -> Result<bool, SqliteClientError> {
+    let end =
+        transaction_key_height(conn, height)?.map_or(u32::MAX, |h| u32::from(h).saturating_add(1));
+    Ok(!missed_keys(conn, used, end.into())?.is_empty())
 }
 
 /// The key of a registry row selecting purpose, key_index and receiver, checked.
@@ -763,24 +784,32 @@ pub(crate) fn rescan_missed_keys(
     used: &[(AccountUuid, KeyId)],
     range: Range<BlockHeight>,
 ) -> Result<(), SqliteClientError> {
+    if let Some(start) = missed_keys(conn, used, range.end)?.into_iter().min() {
+        queue_rescan(conn, start.max(range.start)..range.end)?;
+    }
+    Ok(())
+}
+
+/// The activation height of each open key active below `end` that `used` lacks.
+fn missed_keys(
+    conn: &Connection,
+    used: &[(AccountUuid, KeyId)],
+    end: BlockHeight,
+) -> Result<Vec<BlockHeight>, SqliteClientError> {
     let used: HashSet<_> = used.iter().copied().collect();
     let mut stmt = conn.prepare_cached(
         "SELECT k.purpose, k.key_index, a.uuid, k.active_from
          FROM ironwood_receiving_keys k JOIN accounts a ON a.id = k.account_id
          WHERE k.closed_at IS NULL AND k.active_from < ?1",
     )?;
-    let mut rows = stmt.query([u32::from(range.end)])?;
+    let mut rows = stmt.query([u32::from(end)])?;
     let mut missed = Vec::new();
     while let Some(row) = rows.next()? {
         if !used.contains(&(AccountUuid(row.get(2)?), stored_key_id(row)?)) {
-            missed.push(BlockHeight::from(row.get::<_, u32>(3)?).max(range.start));
+            missed.push(BlockHeight::from(row.get::<_, u32>(3)?));
         }
     }
-    drop(rows);
-    if let Some(start) = missed.into_iter().min() {
-        queue_rescan(conn, start..range.end)?;
-    }
-    Ok(())
+    Ok(missed)
 }
 
 /// Seconds since the Unix epoch on the wallet clock, or 0 before it.
