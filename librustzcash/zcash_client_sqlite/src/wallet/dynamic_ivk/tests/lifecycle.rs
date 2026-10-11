@@ -272,103 +272,6 @@ fn a_rewind_reopens_a_closed_key_whose_receipt_it_leaves_unconfirmed() {
     assert_eq!(unspent_keys(&st, replacement), [Some(key.key_id()); 2]);
 }
 
-/// A refund key closed after a status reporting no refund reopens, and rescans what it
-/// missed, when a newer status reports one owed. A late older status or a repeated
-/// refund does not reopen it.
-#[test]
-fn a_newly_owed_refund_reopens_a_closed_refund_key() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let key = refund_key(&mut st);
-    let terminal = registered_at() + HOUR;
-    observe_swap(&mut st, key.key_id(), Terminal(NoReceipt), terminal);
-    assert_eq!(close(&mut st, terminal), 1);
-    let paid = pay(&mut st, &key, 10_000);
-    assert!(unspent_keys(&st, paid).is_empty());
-    let refunded = |st: &mut State, at| {
-        let observation = Observation {
-            status: Terminal(Positive(None)),
-            deadline: None,
-        };
-        let db = st.wallet_mut().db_mut();
-        assert!(
-            db.record_operation_status(account, "swap", None, observation, false, at)
-                .unwrap()
-        );
-    };
-    refunded(&mut st, terminal - 1);
-    assert!(scanning_keys(&st).is_empty());
-    refunded(&mut st, terminal + HOUR);
-    assert_eq!(scanning_keys(&st), [key.key_id()]);
-    st.scan_cached_blocks_with_dynamic_ivks(paid, 1);
-    assert_eq!(unspent_keys(&st, paid), [Some(key.key_id())]);
-    confirm(&mut st);
-    assert_eq!(close(&mut st, terminal + HOUR), 1);
-    refunded(&mut st, terminal + 2 * HOUR);
-    assert!(scanning_keys(&st).is_empty());
-}
-
-/// A refund key closed at its limit stays closed when a newer status reports a refund
-/// owed or an inconclusive end.
-#[test]
-fn a_refund_owed_after_the_limit_does_not_reopen_a_refund_key() {
-    for status in [Terminal(Positive(None)), Terminal(Unknown)] {
-        let mut st = scanned_wallet();
-        let account = st.test_account().unwrap().id();
-        let key = refund_key(&mut st).key_id();
-        observe_swap(&mut st, key, Active, registered_at() + HOUR);
-        let limit = registered_at() + LIMIT;
-        assert_eq!(close(&mut st, limit), 1);
-        let queued = st.wallet().suggest_scan_ranges().unwrap();
-        let observation = Observation {
-            status,
-            deadline: None,
-        };
-        let db = st.wallet_mut().db_mut();
-        db.record_operation_status(account, "swap", None, observation, false, limit + HOUR)
-            .unwrap();
-        assert!(scanning_keys(&st).is_empty(), "{status:?}");
-        assert_eq!(st.wallet().suggest_scan_ranges().unwrap(), queued);
-    }
-}
-
-/// A refund key closed after receiving its expected refund reopens when a newer status
-/// raises the amount, and finds the remainder. A late older status leaves it closed.
-#[test]
-fn a_raised_refund_reopens_a_settled_refund_key() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let from = next_height(&st);
-    let key = refund_key(&mut st);
-    let refund = |value| Terminal(Positive(Some(Zatoshis::const_from_u64(value))));
-    let terminal = registered_at() + HOUR;
-    observe_swap(&mut st, key.key_id(), refund(10_000), terminal);
-    pay(&mut st, &key, 10_000);
-    confirm(&mut st);
-    assert_eq!(close(&mut st, terminal), 1);
-    let remainder = pay(&mut st, &key, 5_000);
-    let raised = |st: &mut State, at| {
-        let observation = Observation {
-            status: refund(15_000),
-            deadline: None,
-        };
-        let db = st.wallet_mut().db_mut();
-        assert!(
-            db.record_operation_status(account, "swap", None, observation, false, at)
-                .unwrap()
-        );
-    };
-    raised(&mut st, terminal - 1);
-    assert!(scanning_keys(&st).is_empty());
-    raised(&mut st, terminal + HOUR);
-    assert_eq!(scanning_keys(&st), [key.key_id()]);
-    let rescanned = usize::try_from(u32::from(remainder) - u32::from(from) + 1).unwrap();
-    st.scan_cached_blocks_with_dynamic_ivks(from, rescanned);
-    assert_eq!(unspent_keys(&st, remainder), [Some(key.key_id()); 2]);
-    confirm(&mut st);
-    assert_eq!(close(&mut st, terminal + HOUR), 1);
-}
-
 #[test]
 fn a_key_closes_once_its_last_operation_is_final() {
     let mut st = scanned_wallet();
@@ -552,135 +455,6 @@ fn a_started_reservation_left_active_stops_scanning_at_the_limit() {
     assert_ne!(next.unwrap().unwrap().key_id(), key.key_id());
 }
 
-/// A key closed at the limit stays closed whatever the provider reports later, even a
-/// correction that unsettles it after a status that settled it.
-#[test]
-fn statuses_after_the_limit_do_not_reopen_a_key() {
-    let mut st = scanned_wallet();
-    let (_, deadline) = underpaid_reservation(&mut st);
-    let limit = deadline + LIMIT;
-    assert_eq!(close(&mut st, limit), 1);
-    let queued = st.wallet().suggest_scan_ranges().unwrap();
-    record_receive_status(&mut st, "REFUNDED", None, limit + HOUR);
-    record_receive_status(&mut st, "SUCCESS", Some(50_000), limit + 2 * HOUR);
-    assert!(scanning_keys(&st).is_empty());
-    assert_eq!(st.wallet().suggest_scan_ranges().unwrap(), queued);
-}
-
-/// A status requested before the limit but recorded after its key closed there leaves
-/// the key closed, for a refund owed and for an incoming payout correction alike.
-#[test]
-fn a_status_requested_before_a_limit_closure_does_not_reopen_the_key() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let key = refund_key(&mut st).key_id();
-    observe_swap(&mut st, key, Active, registered_at() + HOUR);
-    let limit = registered_at() + LIMIT;
-    assert_eq!(close(&mut st, limit), 1);
-    let queued = st.wallet().suggest_scan_ranges().unwrap();
-    let owed = Observation {
-        status: Terminal(Positive(None)),
-        deadline: None,
-    };
-    st.wallet_mut()
-        .db_mut()
-        .record_operation_status(account, "swap", None, owed, false, limit - 1)
-        .unwrap();
-    assert!(scanning_keys(&st).is_empty());
-    assert_eq!(st.wallet().suggest_scan_ranges().unwrap(), queued);
-
-    let mut st = scanned_wallet();
-    let (_, deadline) = underpaid_reservation(&mut st);
-    let limit = deadline + LIMIT;
-    assert_eq!(close(&mut st, limit), 1);
-    let queued = st.wallet().suggest_scan_ranges().unwrap();
-    record_receive_status(&mut st, "REFUNDED", None, limit - 2);
-    record_receive_status(&mut st, "SUCCESS", Some(50_000), limit - 1);
-    assert!(scanning_keys(&st).is_empty());
-    assert_eq!(st.wallet().suggest_scan_ranges().unwrap(), queued);
-}
-
-/// Registers a refund key whose operation `settled` ends with no refund but whose limit
-/// is far off, so that a newer status reopens it after it closes.
-fn settled_refund_key(st: &mut State) -> KeyId {
-    let account = st.test_account().unwrap().id();
-    let key = refund_key(st).key_id();
-    let observation = Observation {
-        status: Terminal(NoReceipt),
-        deadline: Some(registered_at() + 2 * LIMIT),
-    };
-    let db = st.wallet_mut().db_mut();
-    observe_with(
-        db,
-        account,
-        key,
-        "settled",
-        observation,
-        registered_at() + HOUR,
-    )
-    .unwrap();
-    key
-}
-
-/// Records a refund owed for the test account's refund operation `reference` at `at`.
-fn owe_refund(st: &mut State, reference: &str, at: i64) {
-    let account = st.test_account().unwrap().id();
-    let observation = Observation {
-        status: Terminal(Positive(Some(Zatoshis::const_from_u64(50_000)))),
-        deadline: None,
-    };
-    st.wallet_mut()
-        .db_mut()
-        .record_operation_status(account, reference, None, observation, false, at)
-        .unwrap();
-}
-
-/// Another key reopening, whose historical rescan lowers the fully scanned height, does
-/// not let a status reopen a key closed at its limit, in either order.
-#[test]
-fn another_keys_rescan_does_not_reopen_a_key_closed_at_its_limit() {
-    for reopened_first in [true, false] {
-        let mut st = scanned_wallet();
-        let account = st.test_account().unwrap().id();
-        let closed = refund_key(&mut st).key_id();
-        let db = st.wallet_mut().db_mut();
-        observe(
-            db,
-            account,
-            closed,
-            "closed",
-            Active,
-            registered_at() + HOUR,
-        )
-        .unwrap();
-        let reopened = settled_refund_key(&mut st);
-        st.generate_and_scan_empty_blocks_with_dynamic_ivks(3);
-        assert_eq!(close(&mut st, registered_at() + HOUR), 1);
-        let limit = registered_at() + LIMIT;
-        assert_eq!(close(&mut st, limit), 1);
-        if reopened_first {
-            owe_refund(&mut st, "settled", limit + HOUR);
-            owe_refund(&mut st, "closed", limit + 2 * HOUR);
-        } else {
-            owe_refund(&mut st, "closed", limit + HOUR);
-            owe_refund(&mut st, "settled", limit + 2 * HOUR);
-        }
-        assert_eq!(scanning_keys(&st), [reopened], "{reopened_first}");
-    }
-
-    let mut st = scanned_wallet();
-    let reopened = settled_refund_key(&mut st);
-    let (_, deadline) = underpaid_reservation(&mut st);
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(3);
-    assert_eq!(close(&mut st, registered_at() + HOUR), 1);
-    let limit = deadline + LIMIT;
-    assert_eq!(close(&mut st, limit), 1);
-    owe_refund(&mut st, "settled", limit + HOUR);
-    record_receive_status(&mut st, "REFUNDED", None, limit + 2 * HOUR);
-    record_receive_status(&mut st, "SUCCESS", Some(50_000), limit + 3 * HOUR);
-    assert_eq!(scanning_keys(&st), [reopened]);
-}
-
 /// Records `observation` for the test account's refund operation `swap` at `at`.
 fn record_swap(st: &mut State, observation: Observation, at: i64) {
     let account = st.test_account().unwrap().id();
@@ -690,133 +464,117 @@ fn record_swap(st: &mut State, observation: Observation, at: i64) {
         .unwrap();
 }
 
-/// A status never fills in a closed key's missing deadline, so a key closed at its limit
-/// stays closed on a later refund owed.
-#[test]
-fn a_status_does_not_move_a_limit_closed_keys_limit() {
-    let mut st = scanned_wallet();
-    let key = refund_key(&mut st).key_id();
-    observe_swap(&mut st, key, Active, registered_at() + HOUR);
-    let limit = registered_at() + LIMIT;
-    assert_eq!(close(&mut st, limit), 1);
-    let no_refund = Observation {
-        status: Terminal(NoReceipt),
-        deadline: Some(registered_at() + 10 * DAY),
-    };
-    record_swap(&mut st, no_refund, limit + DAY);
-    assert_eq!(operation_row(&st, "swap").3, None);
-    let owed = Observation {
-        status: Terminal(Positive(None)),
+/// A refund owed, with the expected amount if any.
+fn owed(value: Option<u64>) -> Observation {
+    Observation {
+        status: Terminal(Positive(value.map(Zatoshis::const_from_u64))),
         deadline: None,
-    };
-    record_swap(&mut st, owed, limit + 2 * DAY);
-    assert!(scanning_keys(&st).is_empty());
+    }
 }
 
-/// A correction to a key closed settled cannot move its limit by supplying a missing
-/// deadline. Past that limit it does not reopen the key, by design: no status reopens a
-/// key past its completion limit, so the shortfall it reports is not scanned for.
-#[test]
-fn a_correction_past_the_limit_leaves_a_settled_key_closed() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let key = refund_key(&mut st);
-    let expect = |value| Observation {
-        status: Terminal(Positive(Some(Zatoshis::const_from_u64(value)))),
-        deadline: None,
-    };
-    let db = st.wallet_mut().db_mut();
+/// Closes a refund key whose operation `swap` reported no refund, returning when.
+fn closed_without_refund(st: &mut State) -> i64 {
+    let key = refund_key(st).key_id();
     let at = registered_at() + HOUR;
-    observe_with(db, account, key.key_id(), "swap", expect(10_000), at).unwrap();
-    pay(&mut st, &key, 10_000);
-    confirm(&mut st);
-    assert_eq!(close(&mut st, registered_at() + 5 * DAY), 1);
-    // The chain reaches day 31, past the limit of day 30.
-    let day_31 = registered_at() + 31 * DAY;
-    assert_eq!(close(&mut st, day_31), 0);
-    let correction = Observation {
-        deadline: Some(registered_at() + 10 * DAY),
-        ..expect(15_000)
-    };
-    record_swap(&mut st, correction, day_31);
-    record_swap(&mut st, correction, day_31 + DAY);
-    assert_eq!(operation_row(&st, "swap").3, None);
-    assert!(scanning_keys(&st).is_empty());
+    observe_swap(st, key, Terminal(NoReceipt), at);
+    assert_eq!(close(st, at), 1);
+    at
 }
 
-/// Within the limit, a newer status that unsettles a key closed settled reopens it.
-#[test]
-fn an_unsettling_status_within_the_limit_reopens_a_key() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let key = refund_key(&mut st).key_id();
-    let settled = registered_at() + HOUR;
-    observe_swap(&mut st, key, Terminal(NoReceipt), settled);
-    assert_eq!(close(&mut st, settled), 1);
-    let observation = Observation {
-        status: Terminal(Positive(Some(Zatoshis::const_from_u64(50_000)))),
-        deadline: None,
+/// Closes a key once its operation `swap` settled with a payment of 50,000, returning
+/// when: a refund key, or a started incoming reservation that is then released.
+fn closed_settled(st: &mut State, incoming: bool) -> i64 {
+    let at = registered_at() + 2 * HOUR;
+    let key = if incoming {
+        let (key, _) = underpaid_reservation(st);
+        pay(st, &key, 50_000);
+        confirm(st);
+        record_receive_status(st, "SUCCESS", Some(50_000), at);
+        key
+    } else {
+        let key = refund_key(st);
+        observe_swap(st, key.key_id(), owed(Some(50_000)).status, at);
+        pay(st, &key, 50_000);
+        confirm(st);
+        key
     };
-    st.wallet_mut()
-        .db_mut()
-        .record_operation_status(account, "swap", None, observation, false, settled + HOUR)
-        .unwrap();
-    assert_eq!(scanning_keys(&st), [key]);
+    assert_eq!(close(st, at), 1, "{:?}", key.key_id());
+    at
 }
 
-/// A released paid reservation keeps following its funded operation: a newer status that
-/// raises the payout reopens its closed key, which then finds the remainder. An older
-/// status leaves it closed.
-#[test]
-fn a_corrected_payout_reopens_a_released_incoming_key() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let from = next_height(&st);
-    let now = registered_at();
-    let deadline = now + HOUR;
-    let db = st.wallet_mut().db_mut();
-    let key = prepare_from(db, account, now, from, None).unwrap().unwrap();
-    let index = key.key_id().index();
-    tx(db, |c, _| {
-        store::reservations::begin(c, account, index, "swap", deadline, now)
-    })
-    .unwrap()
-    .unwrap();
-    db.finish_receive_operation(account, "swap", &accepted("swap", None, deadline))
-        .unwrap();
-    db.start_receive_operation(account, "swap")
-        .unwrap()
-        .unwrap();
-    pay(&mut st, &key, 50_000);
-    confirm(&mut st);
-    let success = |st: &mut State, amount_out: u64, at: i64| {
-        let status = NearStatus {
-            status: "SUCCESS",
-            amount_out: Some(Zatoshis::const_from_u64(amount_out)),
-            deadline: Some(deadline),
-            ..Default::default()
-        };
-        let observation = near_observation(Purpose::Receive, &status);
-        st.wallet_mut()
-            .db_mut()
-            .record_operation_status(account, "swap", None, observation, true, at)
-            .unwrap();
+/// Closes a key at its completion limit while its operation `swap` is still active,
+/// returning when: a refund key, or a started incoming reservation.
+fn closed_at_the_limit(st: &mut State, incoming: bool) -> i64 {
+    let limit = if incoming {
+        underpaid_reservation(st).1 + LIMIT
+    } else {
+        let key = refund_key(st).key_id();
+        observe_swap(st, key, Active, registered_at() + HOUR);
+        registered_at() + LIMIT
     };
-    let first = now + 2 * HOUR;
-    success(&mut st, 50_000, first);
-    assert_eq!(close(&mut st, first), 1);
-    let remainder = pay(&mut st, &key, 50_000);
-    success(&mut st, 100_000, first - 1);
-    assert!(scanning_keys(&st).is_empty());
-    success(&mut st, 100_000, first + HOUR);
-    assert_eq!(scanning_keys(&st), [key.key_id()]);
-    // The reopened key rescans from its start.
-    let rescanned = usize::try_from(u32::from(remainder) - u32::from(from) + 1).unwrap();
-    st.scan_cached_blocks_with_dynamic_ivks(from, rescanned);
-    assert_eq!(unspent_keys(&st, remainder), [Some(key.key_id()); 2]);
-    assert_eq!(close(&mut st, first + HOUR), 0);
-    confirm(&mut st);
-    assert_eq!(close(&mut st, first + HOUR), 1);
+    assert_eq!(close(st, limit), 1);
+    limit
+}
+
+/// No provider status reopens a closed key, however it closed and whatever the status
+/// reports; the status is still recorded. A payment it implies is found by the paid
+/// filter or a history recheck instead (see `close_finished_dynamic_keys`).
+#[test]
+fn statuses_never_reopen_a_closed_key() {
+    type Close = fn(&mut State) -> i64;
+    type Update = fn(&mut State, i64);
+    let cases: [(&str, Close, Update); 6] = [
+        ("refund owed after none", closed_without_refund, |st, at| {
+            record_swap(st, owed(None), at)
+        }),
+        (
+            "inconclusive after none",
+            closed_without_refund,
+            |st, at| {
+                let status = Terminal(Unknown);
+                record_swap(
+                    st,
+                    Observation {
+                        status,
+                        deadline: None,
+                    },
+                    at,
+                )
+            },
+        ),
+        (
+            "raised refund",
+            |st| closed_settled(st, false),
+            |st, at| record_swap(st, owed(Some(80_000)), at),
+        ),
+        (
+            "corrected payout",
+            |st| closed_settled(st, true),
+            |st, at| record_receive_status(st, "SUCCESS", Some(80_000), at),
+        ),
+        (
+            "refund owed past the limit",
+            |st| closed_at_the_limit(st, false),
+            |st, at| record_swap(st, owed(None), at),
+        ),
+        (
+            "payout past the limit",
+            |st| closed_at_the_limit(st, true),
+            |st, at| {
+                record_receive_status(st, "REFUNDED", None, at);
+                record_receive_status(st, "SUCCESS", Some(50_000), at + 1);
+            },
+        ),
+    ];
+    for (case, close_key, update) in cases {
+        let mut st = scanned_wallet();
+        let closed_at = close_key(&mut st);
+        let queued = st.wallet().suggest_scan_ranges().unwrap();
+        update(&mut st, closed_at + HOUR);
+        assert!(scanning_keys(&st).is_empty(), "{case}");
+        assert_eq!(st.wallet().suggest_scan_ranges().unwrap(), queued, "{case}");
+        assert!(operation_row(&st, "swap").0 >= closed_at + HOUR, "{case}");
+    }
 }
 
 #[test]

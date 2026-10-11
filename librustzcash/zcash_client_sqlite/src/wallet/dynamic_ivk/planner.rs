@@ -88,7 +88,9 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
     discovery_work(rows).map(Ok)
 }
 
-/// Implements `DynamicIvkRead::dynamic_keys_to_recheck`.
+/// Implements `DynamicIvkRead::dynamic_keys_to_recheck`: closed keys without a known
+/// payment whose sweep row, if any, is finished below `height`. A key scanned here has
+/// none until its first paid filter check (see `recovery::record_paid_check`).
 pub(crate) fn keys_to_recheck<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -98,11 +100,11 @@ pub(crate) fn keys_to_recheck<P: Parameters>(
     let (owner, _) = account_key(conn, params, account)?;
     let mut stmt = conn.prepare(
         "SELECT k.purpose, k.key_index, k.receiver
-         FROM ironwood_dynamic_sweeps s
-         JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
+         FROM ironwood_receiving_keys k
+         LEFT JOIN ironwood_dynamic_sweeps s ON s.receiving_key_id = k.id
          WHERE k.account_id = ?1 AND k.closed_at IS NOT NULL AND k.used = 0
-           AND s.done_height < ?2
-         ORDER BY s.receiving_key_id",
+           AND (s.receiving_key_id IS NULL OR s.done_height < ?2)
+         ORDER BY k.id",
     )?;
     discovery_work(stmt.query(params![owner.0, u32::from(height)])?)
 }

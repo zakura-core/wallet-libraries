@@ -257,14 +257,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// matched. `funded`, sticky, says a deposit was seen.
     ///
     /// An observation older than the stored one is ignored, except that its `funded` still
-    /// sticks. A deadline only fills a missing one, and only while its key is open, so a
-    /// status can neither close a key early, hold it open, nor move a closed key's limit.
-    /// A refund key this wallet never funded starts at its issuance point on a refund
-    /// owed or an inconclusive end, in case the deposit was paid from elsewhere. A
-    /// closed refund key reopens, rescanning from its start, when a status newly reports
-    /// either, and any key that closed settled does when a status (for an incoming key,
-    /// of its funded operation) leaves it expecting more than it received. No status
-    /// reopens a key past its completion limit (see
+    /// sticks. A deadline only fills a missing one. A refund key this wallet never funded
+    /// starts at its issuance point on a refund owed or an inconclusive end, in case the
+    /// deposit was paid from elsewhere; a closed key stays closed (see
     /// [`Self::close_finished_dynamic_keys`]).
     pub fn record_operation_status(
         &mut self,
@@ -302,9 +297,12 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// and the scanned height equal `tip`, which the caller just confirmed, and closing
     /// uses the earlier of `now` and `tip`'s block time.
     ///
-    /// A later payment to a closed swept key without a known payment is found once a
-    /// newer publication's paid filter holds it (see
-    /// `DynamicIvkWrite::record_paid_filter_check`); an incoming index beyond the restored
+    /// No provider status reopens a closed key; a rewind does, when it un-mines a receipt
+    /// or leaves it short of those confirmations. A later payment to a closed key without
+    /// a known payment is found once a newer publication's paid filter holds it (see
+    /// `DynamicIvkWrite::record_paid_filter_check`). One to a closed key that was already
+    /// paid, such as a corrected larger payout, is found only by
+    /// [`Self::recheck_dynamic_key_history`], and an incoming index beyond the restored
     /// lookahead is never swept.
     pub fn close_finished_dynamic_keys(
         &mut self,

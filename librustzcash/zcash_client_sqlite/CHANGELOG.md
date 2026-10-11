@@ -200,7 +200,8 @@ workspace.
   not while a receipt is unmined and unexpired or short of ZIP 315's untrusted
   confirmations, and only while the wallet is scanned to the chain tip, by the earlier of
   the caller's clock and the tip's block time. `recheck_dynamic_key_history` sweeps closed
-  keys again on request, and a rewind reopens a closed key whose receipt it un-mines.
+  keys again on request. A rewind reopens a closed key whose receipt it un-mines or leaves
+  unconfirmed; no provider status reopens one.
 - Recovery: `maintain_dynamic_ivks`, called at each sync start and tip, recovers funding
   memos and keeps an incoming lookahead. Each recovered key is swept once through a
   receiver directory with the trait steps `prepare_dynamic_sweeps`,
@@ -216,8 +217,8 @@ workspace.
   `apply_dynamic_sweep` takes whether a current recent set holds it: such a key scans
   from the block after its lookup until its restore watch closes it, and any other
   closes at its lookup. `dynamic_keys_to_recheck` and `record_paid_filter_check` sweep a
-  closed key without a known payment again once a newer publication's paid filter holds
-  it. A payment before the account's
+  closed key without a known payment, swept or scanned here, once a newer publication's
+  paid filter holds it. A payment before the account's
   birthday is checked for inclusion ahead of the birthday block and then raises the
   recovery bound without being tracked. Scanning that later finds the same note moves it
   to the transaction it is found in. `dynamic_history_pending` reports unfinished sweeps.

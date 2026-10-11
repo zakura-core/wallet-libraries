@@ -57,10 +57,14 @@ pub(crate) fn record_paid_check(
         if paid {
             requeue(conn, "id = ?1", id)?;
         } else {
-            // A rewind below `publication` reruns the sweep (see `truncate_to_height`).
+            // A key scanned here gets a finished sweep row, so it is listed again only for
+            // a newer publication. A rewind below `publication` reruns the sweep (see
+            // `truncate_to_height`).
             conn.execute(
-                "UPDATE ironwood_dynamic_sweeps SET done_height = ?2
-                 WHERE receiving_key_id = ?1 AND done_height < ?2",
+                "INSERT INTO ironwood_dynamic_sweeps (receiving_key_id, done_height)
+                 VALUES (?1, ?2)
+                 ON CONFLICT (receiving_key_id) DO UPDATE SET done_height = excluded.done_height
+                 WHERE done_height < excluded.done_height",
                 params![id, u32::from(publication.height)],
             )?;
         }

@@ -90,7 +90,9 @@ pub(super) fn close_finished<P: Parameters>(
                     .max(swept_at.unwrap_or(registered_at))
                     .saturating_add(RESTORE_WATCH_SECS)
             } else {
-                completion_limit(deadline, registered_at)
+                deadline
+                    .unwrap_or(registered_at)
+                    .saturating_add(COMPLETION_LIMIT_SECS)
             };
             let settled = operations > 0 && unresolved == 0 && received >= expected;
             // Reclamation may never take a started reservation, so the limit alone ends
@@ -114,47 +116,6 @@ pub(super) fn close_finished<P: Parameters>(
         }
     }
     Ok(closed)
-}
-
-/// When a key not found by a restore sweep alone stops scanning: `COMPLETION_LIMIT_SECS`
-/// after its latest `deadline`, or after `registered_at` without one.
-fn completion_limit(deadline: Option<i64>, registered_at: i64) -> i64 {
-    deadline
-        .unwrap_or(registered_at)
-        .saturating_add(COMPLETION_LIMIT_SECS)
-}
-
-/// Whether key `key`'s completion limit has passed: it closed at or after the limit,
-/// or `now` has reached it, counting no later than the scanned tip's block time as in
-/// [`close_finished`]. A closure time needs no cap, since closing already capped it.
-pub(super) fn limit_passed(
-    conn: &Connection,
-    key: i64,
-    now: i64,
-) -> Result<bool, SqliteClientError> {
-    let (registered_at, closed_at, deadline): (i64, Option<i64>, Option<i64>) = conn.query_row(
-        "SELECT k.registered_at, k.closed_at,
-            (SELECT MAX(o.deadline) FROM ironwood_dynamic_operations o
-                WHERE o.receiving_key_id = k.id)
-         FROM ironwood_receiving_keys k WHERE k.id = ?1",
-        [key],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
-    let limit = completion_limit(deadline, registered_at);
-    if closed_at.is_some_and(|closed| closed >= limit) {
-        return Ok(true);
-    }
-    let Some(tip) = wallet::fully_scanned_height(conn)? else {
-        return Ok(false);
-    };
-    let tip_time: Option<i64> = conn
-        .query_row(
-            "SELECT time FROM blocks WHERE height = ?1",
-            [u32::from(tip)],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(tip_time.is_some_and(|t| now.min(t) >= limit))
 }
 
 /// Records `observation`, requested at `now`, on operation `id` unless a newer one is
@@ -190,9 +151,7 @@ pub(super) fn record(
     let current = conn.execute(
         "UPDATE ironwood_dynamic_operations SET
             observed_at = ?2, expectation = ?3, expected_value = ?4,
-            deadline = CASE WHEN (SELECT closed_at FROM ironwood_receiving_keys
-                    WHERE id = receiving_key_id) IS NULL
-                THEN COALESCE(deadline, ?5) ELSE deadline END
+            deadline = COALESCE(deadline, ?5)
          WHERE id = ?1 AND observed_at <= ?2",
         params![id, now, expectation, amount, observation.deadline],
     )?;
