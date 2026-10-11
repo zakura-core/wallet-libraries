@@ -65,11 +65,11 @@ pub struct Observation {
 /// status counts as active, so it neither releases an address nor ends scanning.
 ///
 /// A refund key expects ZEC whenever the provider reports a positive refunded
-/// amount, and after an exact-output `SUCCESS`, which returns unused input once
-/// the swap completes. An exact-input `SUCCESS` expects none only when it reports
-/// a zero refunded amount, since excess deposits are refunded for either swap
-/// type; without one, or with a missing or unrecognized swap type, it is
-/// [`ReceiptExpectation::Unknown`]. 1Click refunds a `FAILED` swap's deposit like a
+/// amount. A `SUCCESS` of a recognized swap type that reports a zero refunded
+/// amount expects none. Without a reported amount, an exact-output `SUCCESS`
+/// still expects one, since it returns unused input once the swap completes,
+/// while an exact-input one (excess deposits are refunded for either type) or a
+/// missing or unrecognized swap type is [`ReceiptExpectation::Unknown`]. 1Click refunds a `FAILED` swap's deposit like a
 /// `REFUNDED` one, and a refund on the source chain is not a Zcash receipt. A zero
 /// payout amount is treated as unreported.
 pub fn near_observation(purpose: crate::Purpose, status: &NearStatus<'_>) -> Observation {
@@ -86,8 +86,10 @@ pub fn near_observation(purpose: crate::Purpose, status: &NearStatus<'_>) -> Obs
         }
         ("SUCCESS", Purpose::Refund) => Terminal(match (refund, status.swap_type) {
             (Some(value), _) => Positive(Some(value)),
+            (None, Some("EXACT_INPUT" | "EXACT_OUTPUT")) if refund_reported => {
+                ReceiptExpectation::None
+            }
             (None, Some("EXACT_OUTPUT")) => Positive(None),
-            (None, Some("EXACT_INPUT")) if refund_reported => ReceiptExpectation::None,
             (None, _) => Unknown,
         }),
         ("REFUNDED" | "FAILED", Purpose::Refund) => Terminal(Positive(refund)),
@@ -210,7 +212,8 @@ mod tests {
             (Some("FLEX_INPUT"), Unknown, Unknown),
             // Exact-input swaps also refund excess deposits.
             (Some("EXACT_INPUT"), Unknown, NoReceipt),
-            (Some("EXACT_OUTPUT"), Positive(None), Positive(None)),
+            // A reported zero is the exact-output refund, so none is expected.
+            (Some("EXACT_OUTPUT"), Positive(None), NoReceipt),
         ];
         for (swap_type, absent, zero) in cases {
             for (refunded_amount, expected) in [(None, absent), (Some(Zatoshis::ZERO), zero)] {
