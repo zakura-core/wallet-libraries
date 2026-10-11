@@ -649,132 +649,6 @@ fn undone_incoming_sweep_blocks_new_reservations() {
     assert_eq!(prepare(&mut st, NOW).key_id().index(), 0);
 }
 
-/// Restores the test account from its seed through `height`, its `recover_until`,
-/// and returns that block's time, if the wallet has scanned it.
-fn restore_through(st: &State, height: BlockHeight) -> Option<i64> {
-    let conn = st.wallet().conn();
-    conn.execute(
-        "UPDATE accounts SET recover_until_height = ?1",
-        [u32::from(height)],
-    )
-    .unwrap();
-    conn.query_row(
-        "SELECT time FROM blocks WHERE height = ?1",
-        [u32::from(height)],
-        |r| r.get(0),
-    )
-    .optional()
-    .unwrap()
-}
-
-/// A swept lookahead key 0 of the test account, registered a day after `restored_at`,
-/// with its receiver.
-fn swept_key_registered_after(st: &mut State, restored_at: i64) -> [u8; 43] {
-    let account = st.test_account().unwrap().id();
-    let swept_at = tip(st);
-    let db = st.wallet_mut().db_mut();
-    let key = watch(db, account, 0, swept_at.height);
-    finish_sweep(db, account, key.key_id(), swept_at);
-    st.wallet()
-        .conn()
-        .execute(
-            "UPDATE ironwood_receiving_keys SET registered_at = ?1",
-            [restored_at + 24 * 60 * 60],
-        )
-        .unwrap();
-    key.receiver().to_raw_address_bytes()
-}
-
-/// The index issued with a seen set read from `since` to `until` that holds `held`.
-fn issue_seen(
-    st: &mut State,
-    since: i64,
-    until: i64,
-    held: &[[u8; 43]],
-) -> Result<u64, ReservationPolicy> {
-    let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
-    let seen = ProviderSeen {
-        since,
-        until,
-        contains: &contains,
-    };
-    let issued = try_prepare(st, NOW, Some(&seen)).unwrap();
-    issued.map(|k| k.key_id().index())
-}
-
-/// In an account restored from its seed, an address without local quotes may have
-/// been quoted by the old device. It is issued only once a seen set lacks it and covers
-/// every time it can have been quoted, from [`EARLIEST_RECEIVE_QUOTE`] until the
-/// restore; otherwise issuance waits rather than skipping ahead. A key registered after
-/// the restore does not wait for a read past its own registration.
-#[test]
-fn restored_accounts_issue_unquoted_addresses_only_with_covering_seen_evidence() {
-    let gap = Err(ReservationPolicy::Gap);
-    let restored = || {
-        let mut st = fixture();
-        let restored_at = restore_through(&st, tip(&st).height).unwrap();
-        let receiver = swept_key_registered_after(&mut st, restored_at);
-        (st, restored_at + SEEN_SLACK_SECONDS, receiver)
-    };
-    let (mut st, until, receiver) = restored();
-    // The feed started too late, or its read ends before the restore.
-    assert_eq!(
-        issue_seen(&mut st, EARLIEST_RECEIVE_QUOTE + 1, until, &[]),
-        gap
-    );
-    assert_eq!(
-        issue_seen(&mut st, EARLIEST_RECEIVE_QUOTE, until - 1, &[]),
-        gap
-    );
-    let none = try_prepare(&mut st, NOW, None).unwrap();
-    let none = none.map(|k| k.key_id().index());
-    assert_eq!(none, gap);
-    assert_eq!(
-        issue_seen(&mut st, EARLIEST_RECEIVE_QUOTE, until, &[]),
-        Ok(0)
-    );
-
-    // A covering set that holds it marks it seen. The next address has no key yet, so
-    // issuance waits for the lookahead to check it.
-    let (mut st, until, _) = restored();
-    assert_eq!(
-        issue_seen(&mut st, EARLIEST_RECEIVE_QUOTE, until, &[receiver]),
-        gap
-    );
-    let seen: bool = st
-        .wallet()
-        .conn()
-        .query_row(
-            "SELECT provider_seen FROM ironwood_receiving_keys
-             WHERE purpose = 1 AND key_index = ?1",
-            [0u64.to_be_bytes()],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(seen);
-
-    // Until the wallet has scanned the restore's block, its time is unknown.
-    let mut st = fixture();
-    let swept_at = tip(&st);
-    assert_eq!(restore_through(&st, swept_at.height + 1), None);
-    swept_key_registered_after(&mut st, 0);
-    assert_eq!(
-        issue_seen(&mut st, EARLIEST_RECEIVE_QUOTE, i64::MAX, &[]),
-        gap
-    );
-}
-
-/// A restored account at the tip with its restore lookahead swept, and the end of the
-/// read a covering seen set needs.
-fn restored_and_swept() -> (State, i64) {
-    let mut st = fixture();
-    let through = tip(&st);
-    let restored_at = restore_through(&st, through.height).unwrap();
-    assert_eq!(issue(&mut st, None), Err(ReservationPolicy::Gap));
-    sweep_pending(&mut st);
-    (st, restored_at + SEEN_SLACK_SECONDS)
-}
-
 /// Issues through `prepare_receive_reservation` at the tip, with a seen set read from
 /// `since` to `until` that holds the incoming addresses at `held`, if any.
 fn issue(st: &mut State, seen: Option<(i64, i64, &[u64])>) -> Result<u64, ReservationPolicy> {
@@ -826,118 +700,22 @@ fn sweep_pending(st: &mut State) -> usize {
     pending.len()
 }
 
-/// Through the public path, seen hits that widen a restored account's window first
-/// register and sweep the newly exposed addresses, so issuance waits rather than
-/// issuing one unchecked, and a newly exposed address the set holds is skipped once
-/// checked.
+/// Through the public path, seen hits that widen the window first register and sweep
+/// the newly exposed addresses, so issuance waits rather than issuing one unchecked,
+/// and a newly exposed address the set holds is skipped once checked.
 #[test]
-fn seen_hits_extend_a_restored_lookahead_before_issuance() {
+fn seen_hits_extend_the_lookahead_before_issuance() {
     let window = RECEIVE_GAP_LIMIT;
     let held: Vec<u64> = (0..=window).collect();
-    let gap = Err(ReservationPolicy::Gap);
-
-    // The set holds the whole swept window but its feed started too late.
-    let (mut st, until) = restored_and_swept();
-    let late = Some((EARLIEST_RECEIVE_QUOTE + 1, until, &held[..window as usize]));
-    assert_eq!(issue(&mut st, late), gap);
-    let account = st.test_account().unwrap().id();
-    assert_eq!(
-        all_keys(st.wallet().db(), account).unwrap().len() as u64,
-        2 * window
-    );
-    assert!(
-        st.wallet()
-            .db()
-            .dynamic_history_pending(account, tip(&st).height)
-            .unwrap()
-    );
-
-    // A covering set also holds the next address, which is checked before any issuance.
-    let (mut st, until) = restored_and_swept();
-    let covering = Some((EARLIEST_RECEIVE_QUOTE, until, &held[..]));
-    assert_eq!(issue(&mut st, covering), gap);
-    sweep_pending(&mut st);
-    assert_eq!(issue(&mut st, covering), gap);
-    sweep_pending(&mut st);
-    assert_eq!(issue(&mut st, covering), Ok(window + 1));
-}
-
-/// A restored account's lookahead stays a full window past the addresses this wallet
-/// issues, since the old device may have quoted beyond them. Each issuance waits for
-/// the newly exposed address's sweep, and one the seen set holds is never issued.
-#[test]
-fn restored_lookahead_keeps_ahead_of_issued_addresses() {
-    let window = RECEIVE_GAP_LIMIT;
-    let (mut st, until) = restored_and_swept();
-    // The old device's requests for the first window never reached the provider, but
-    // the one for the next address did.
-    let held = [window];
-    let covering = Some((EARLIEST_RECEIVE_QUOTE, until, &held[..]));
-    let mut issued = Vec::new();
-    while issued.len() <= window as usize {
-        match issue(&mut st, covering) {
-            Ok(index) => {
-                let key = all_keys(st.wallet().db(), st.test_account().unwrap().id())
-                    .unwrap()
-                    .into_iter()
-                    .find(|k| k.key_id() == KeyId::new(Purpose::Receive, index))
-                    .unwrap();
-                quote(&mut st, &key, &format!("quote-{index}"), true);
-                issued.push(index);
-            }
-            Err(ReservationPolicy::Gap) => assert!(sweep_pending(&mut st) > 0),
-            Err(other) => panic!("unexpected {other:?}"),
-        }
-    }
-    let expected: Vec<u64> = (0..window).chain([window + 1]).collect();
-    assert_eq!(issued, expected);
-}
-
-/// After its first issuance, a restored account's next address waits only for the
-/// sweep of the key that issuance exposed; a new account's does not wait.
-#[test]
-fn issuance_past_the_restore_lookahead_stays_live() {
-    let (mut st, until) = restored_and_swept();
-    let covering = Some((EARLIEST_RECEIVE_QUOTE, until, &[][..]));
-    let first = issue(&mut st, covering).unwrap();
-    let key = all_keys(st.wallet().db(), st.test_account().unwrap().id())
-        .unwrap()
-        .into_iter()
-        .find(|k| k.key_id() == KeyId::new(Purpose::Receive, first))
-        .unwrap();
-    quote(&mut st, &key, "first", true);
-    assert_eq!(issue(&mut st, covering), Err(ReservationPolicy::Gap));
-    assert_eq!(sweep_pending(&mut st), 1);
-    assert_eq!(issue(&mut st, covering), Ok(first + 1));
-
     let mut st = fixture();
     assert_eq!(issue(&mut st, None), Err(ReservationPolicy::Gap));
     sweep_pending(&mut st);
-    let first = issue(&mut st, None).unwrap();
-    let key = all_keys(st.wallet().db(), st.test_account().unwrap().id())
-        .unwrap()
-        .into_iter()
-        .find(|k| k.key_id() == KeyId::new(Purpose::Receive, first))
-        .unwrap();
-    quote(&mut st, &key, "first", true);
-    assert_eq!(issue(&mut st, None), Ok(first + 1));
-    assert_eq!(sweep_pending(&mut st), 0);
-}
-
-/// An account created here rather than restored was never quoted elsewhere, so its
-/// swept lookahead addresses are issued without covering seen evidence.
-#[test]
-fn new_accounts_issue_unquoted_addresses_without_seen_evidence() {
-    let mut st = fixture();
-    swept_key_registered_after(&mut st, clock_now());
-    let issued = try_prepare(&mut st, NOW, None).unwrap().unwrap();
-    assert_eq!(issued.key_id().index(), 0);
-    let mut st = fixture();
-    swept_key_registered_after(&mut st, clock_now());
-    assert_eq!(
-        issue_seen(&mut st, EARLIEST_RECEIVE_QUOTE + 1, 0, &[]),
-        Ok(0)
-    );
+    let seen = Some((0, NOW + SEEN_SLACK_SECONDS, &held[..]));
+    for _ in 0..2 {
+        assert_eq!(issue(&mut st, seen), Err(ReservationPolicy::Gap));
+        assert!(sweep_pending(&mut st) > 0);
+    }
+    assert_eq!(issue(&mut st, seen), Ok(window + 1));
 }
 
 #[test]

@@ -70,9 +70,8 @@ The memo does not store the deposit address. A restored refund key needs none: i
 is swept once and, if the provider was given its address in the last day, scans for
 another 24 hours, with no provider lookups. Incoming indices are
 recovered through lookahead, not this memo. `RefundMemo::decode` returns `None`
-for any memo that is not a v1 record. A wallet that selects records by their
-`REFUND_MEMO_MAGIC` prefix keeps one it cannot decode pending, without failing,
-and refund issuance waits for it, since it may hold a refund index.
+for any memo that is not a v1 record, and a wallet ignores such a memo even when it
+starts with `REFUND_MEMO_MAGIC`.
 
 ## Validation
 

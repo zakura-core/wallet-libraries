@@ -42,11 +42,12 @@ workspace.
   so a store can rescan blocks that a key activated mid-batch missed, and
   `wallet::decrypt_and_store_transaction_with_dynamic_ivks` also decrypts with
   `get_dynamic_transaction_keys`, which `DecryptedTransaction::dynamic_ivks_applied`
-  records, so a store can refuse transactions decrypted without them. The traits' restore
+  records, so a store can refuse transactions decrypted without them; no dynamic key
+  may open between that decryption and storage. The traits' restore
   sweep steps look keys recovered from the seed up in a receiver directory; a step that
   must wait returns a `SweepDeferral`. `dynamic_keys_to_recheck` and
-  `record_paid_filter_check` sweep a closed key again when a newer publication's paid
-  filter holds it. Transaction construction spends a dynamic-key note
+  `record_paid_filter_check` sweep a closed key without a known payment when a newer
+  publication's paid filter holds it. Transaction construction spends a dynamic-key note
   with its derived viewing key and sends change to the ordinary account key.
 - `transparent_ledger::{TransparentDetailRead, TransparentDetailWrite}` (prototype): durable
   transparent txid enhancement work (`transparent_detail_work`, returning the requests with the

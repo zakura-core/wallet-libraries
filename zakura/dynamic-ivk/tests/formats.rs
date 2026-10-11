@@ -55,13 +55,12 @@ fn reserved_bytes_are_ignored() {
 }
 
 #[test]
-fn malformed_and_future_memos_cannot_look_like_completed_recovery() {
+fn memos_other_than_v1_records_do_not_decode() {
     let valid = RefundMemo::new(0).encode();
     assert_eq!(RefundMemo::decode(&[0; 512]), None);
     let mut unrelated = valid;
     unrelated[0] = b'Z';
     assert_eq!(RefundMemo::decode(&unrelated), None);
-    // Callers keep a marked record they cannot decode pending.
     for (offset, value) in [(5, 0), (5, 2), (6, 1)] {
         let mut bytes = valid;
         bytes[offset] = value;

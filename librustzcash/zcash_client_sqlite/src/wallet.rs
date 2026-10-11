@@ -861,22 +861,13 @@ pub(crate) fn delete_account(
     Ok(())
 }
 
-/// Whether blocks scanned or transactions decrypted without the dynamic keys must not be
-/// stored: a dynamic key is open, or, in a build without `orchard`, which records no
-/// Ironwood spends, a restore sweep or queued candidate still needs that evidence (see
-/// `dynamic_ivk::finish_nullifier_recovery`). It reads only the schema, so every build
-/// applies it.
-pub(crate) fn dynamic_ivks_required(conn: &Connection) -> Result<bool, SqliteClientError> {
-    #[cfg(feature = "orchard")]
-    let recovery = "";
-    #[cfg(not(feature = "orchard"))]
-    let recovery = "OR EXISTS(SELECT 1 FROM ironwood_dynamic_sweeps WHERE done_height IS NULL)
-         OR EXISTS(SELECT 1 FROM ironwood_dynamic_payment_recovery)";
+/// Whether a dynamic key is open, so that blocks scanned or transactions decrypted
+/// without it must not be stored.
+#[cfg(feature = "orchard")]
+pub(crate) fn dynamic_key_open(conn: &Connection) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
-        &format!(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys
-             WHERE active_from IS NOT NULL AND closed_at IS NULL) {recovery}"
-        ),
+        "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys
+         WHERE active_from IS NOT NULL AND closed_at IS NULL)",
         [],
         |row| row.get(0),
     )?)
@@ -6095,8 +6086,7 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
 
 /// The height from which Ironwood nullifiers stay tracked for dynamic IVK restore
 /// sweeps. Shared retention uses the oldest unfinished account, so a completed account
-/// cannot release another account's spend evidence. It reads only the schema, so
-/// builds without `orchard` keep that evidence too.
+/// cannot release another account's spend evidence.
 pub(crate) fn ironwood_nullifier_retention_height(
     conn: &Connection,
 ) -> Result<Option<BlockHeight>, SqliteClientError> {
@@ -8244,7 +8234,7 @@ mod tests {
     }
 
     /// Pruning keeps Ironwood spend evidence at or above the durable restore retention
-    /// floor in every build, so reopening with `orchard` still finds it.
+    /// floor.
     #[test]
     fn nullifier_pruning_keeps_the_dynamic_retention_floor() {
         use zcash_protocol::PoolType;

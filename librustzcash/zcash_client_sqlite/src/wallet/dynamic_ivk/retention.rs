@@ -52,9 +52,8 @@ pub(crate) fn finish_nullifier_recovery<P: Parameters>(
     {
         return Ok(false);
     }
-    // An unreadable refund record may name a key whose payments need this evidence.
-    let unreadable = recovery::maintain_restore_discovery(conn, params, account, lookahead, now)?;
-    if unreadable > 0 || recovery::refund_memos_pending(conn, account)? {
+    recovery::maintain_restore_discovery(conn, params, account, lookahead, now)?;
+    if recovery::refund_memos_pending(conn, account)? {
         return Ok(false);
     }
     // Pending sweeps keep evidence from their earliest possible payment, and a queued

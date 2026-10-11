@@ -270,6 +270,10 @@ where
 /// (see [`DynamicIvkRead::get_dynamic_transaction_keys`]). A wallet with open dynamic
 /// keys must decrypt with this function rather than [`decrypt_and_store_transaction`].
 ///
+/// The keys are read before decryption and not checked again when storing, so the
+/// caller must not open a dynamic key between the two, for example by holding its
+/// wallet write lock across this call.
+///
 /// [`DynamicIvkRead::get_dynamic_transaction_keys`]: super::dynamic_ivk::DynamicIvkRead::get_dynamic_transaction_keys
 #[cfg(feature = "orchard")]
 pub fn decrypt_and_store_transaction_with_dynamic_ivks<ParamsT, DbT>(
