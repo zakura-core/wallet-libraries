@@ -3614,6 +3614,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             Some(used) => wallet::dynamic_ivk::transaction_missed_keys(
                 self.conn.0,
                 used,
+                d_tx.tx().txid(),
                 d_tx.mined_height(),
             )?,
             None => wallet::dynamic_ivks_required(self.conn.0)?,
