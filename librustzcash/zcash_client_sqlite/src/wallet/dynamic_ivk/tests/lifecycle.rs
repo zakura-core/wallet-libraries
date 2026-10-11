@@ -286,6 +286,30 @@ fn a_newly_owed_refund_reopens_a_closed_refund_key() {
     assert!(scanning_keys(&st).is_empty());
 }
 
+/// A refund key closed at its limit stays closed when a newer status reports a refund
+/// owed or an inconclusive end.
+#[test]
+fn a_refund_owed_after_the_limit_does_not_reopen_a_refund_key() {
+    for status in [Terminal(Positive(None)), Terminal(Unknown)] {
+        let mut st = scanned_wallet();
+        let account = st.test_account().unwrap().id();
+        let key = refund_key(&mut st).key_id();
+        observe_swap(&mut st, key, Active, registered_at() + HOUR);
+        let limit = registered_at() + LIMIT;
+        assert_eq!(close(&mut st, limit), 1);
+        let queued = st.wallet().suggest_scan_ranges().unwrap();
+        let observation = Observation {
+            status,
+            deadline: None,
+        };
+        let db = st.wallet_mut().db_mut();
+        db.record_operation_status(account, "swap", None, observation, false, limit + HOUR)
+            .unwrap();
+        assert!(scanning_keys(&st).is_empty(), "{status:?}");
+        assert_eq!(st.wallet().suggest_scan_ranges().unwrap(), queued);
+    }
+}
+
 /// A refund key closed after receiving its expected refund reopens when a newer status
 /// raises the amount, and finds the remainder. A late older status leaves it closed.
 #[test]
