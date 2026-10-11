@@ -199,6 +199,54 @@ fn closed_key_decrypts_its_externally_funded_transaction_after_reopen() {
     assert!(!scanning_keys(&st).contains(&key.key_id()));
 }
 
+/// A ZeWIF import into a wallet with an open dynamic key decrypts with it, storing the
+/// memo of a payment to that key rather than refusing the import.
+#[cfg(feature = "zewif")]
+#[test]
+fn zewif_import_decrypts_with_open_dynamic_keys() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let from = st.wallet().chain_height().unwrap().unwrap() + 1;
+    let key = reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, from);
+    let memo = MemoBytes::from_bytes(b"refund").unwrap();
+    let tx = external_payment(key.receiver(), &memo);
+    let (height, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    let stored = |st: &State| -> (bool, Option<Vec<u8>>) {
+        st.wallet()
+            .conn()
+            .query_row(
+                "SELECT t.raw IS NOT NULL, rn.memo FROM ironwood_received_notes rn
+                 JOIN transactions t ON t.id_tx = rn.transaction_id WHERE t.txid = ?1",
+                [tx.txid().as_ref()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(stored(&st), (false, None));
+
+    let mut raw = vec![];
+    tx.write(&mut raw).unwrap();
+    let mut imported = ::zewif::Transaction::new(::zewif::TxId::from_bytes(*tx.txid().as_ref()));
+    imported.set_tx_data(::zewif::TransactionData::Raw(::zewif::RawTxData::new(
+        ::zewif::Data::from_bytes(&raw),
+    )));
+    imported.set_mined_height(::zewif::BlockHeight::from(u32::from(height)));
+    let mut doc = ::zewif::Zewif::new(
+        ::zewif::BlockHeight::from(u32::from(height)),
+        ::zewif::BlockHash::from_bytes([0; 32]),
+    );
+    doc.add_transaction(imported.txid(), imported);
+    let report = crate::zewif::import_wallet(
+        st.wallet_mut().db_mut(),
+        &doc,
+        &mut crate::zewif::DiscardSecrets,
+    )
+    .unwrap();
+    assert_eq!(report.transactions_stored, 1);
+    assert_eq!(stored(&st), (true, Some(memo.as_slice().to_vec())));
+}
+
 /// Builds a wallet whose test account holds one confirmed 1,000,000 zatoshi
 /// Ironwood note, returning the height of the block that paid it.
 fn ironwood_funded_wallet() -> (State, BlockHeight) {

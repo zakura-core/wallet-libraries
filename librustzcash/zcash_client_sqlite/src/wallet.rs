@@ -861,8 +861,9 @@ pub(crate) fn delete_account(
     Ok(())
 }
 
-/// Whether a dynamic key is open, so that blocks scanned without it must not be stored.
-/// It reads only the schema, so builds without `orchard` refuse such blocks too.
+/// Whether a dynamic key is open, so that blocks scanned or transactions decrypted
+/// without it must not be stored. It reads only the schema, so builds without `orchard`
+/// refuse them too.
 pub(crate) fn dynamic_key_open(conn: &Connection) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys
