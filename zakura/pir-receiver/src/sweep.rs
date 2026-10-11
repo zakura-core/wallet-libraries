@@ -436,8 +436,7 @@ impl<'a, T: Transport> Directory<'a, T> {
                 "the receiver directory's tree size differs from the wallet's at its anchor",
             ));
         }
-        // Seen feeds start at `EARLIEST_RECEIVE_QUOTE`, before any dynamic address existed, so a
-        // sweep ignores their dates; issuance enforces coverage where reuse is at stake.
+        // Sweeps use only seen-set membership; issuance checks the sets' dates as it issues.
         let seen = seen_sets(&manifest.directory.filters)?
             .into_iter()
             .map(|(label, _, _)| label.to_owned())
@@ -537,10 +536,7 @@ impl<'a, T: Transport> Directory<'a, T> {
     }
 }
 
-/// Whether a provider's recent set can rule a receiver out at `now`: its feed's last
-/// read began at most [`RECENT_SET_MAX_AGE_SECS`] before `now`, and its window, which
-/// reaches back from that read through the time the feed was running, covers
-/// [`RESTORE_WATCH_SECS`].
+/// Whether a provider's recent set can rule a receiver out at `now` (see [`sweep`]).
 fn covers_restore_watch(set: &FilterSet, now: i64) -> bool {
     let window = set.window_secs.and_then(|w| i64::try_from(w).ok());
     match (window, set.since_unix, set.until_unix) {

@@ -1,21 +1,13 @@
 # Receiver directory restore sweeps
 
-With the `wallet` feature, `sweep` runs a restored wallet's sweeps of its dynamic keys
-for any wallet store that implements the backend's dynamic IVK traits
-(`zcash_client_backend::data_api::dynamic_ivk`), such as `zakura-client-sqlite`.
-Each dynamic key recovered from the seed, a refund key from its funding memo or an
-incoming lookahead key, is first tested against the publication's filters, which
-every wallet downloads alike. Only a receiver in the paid set is looked up over PIR,
-and the payments found are imported only after the wallet checks them against its own
-chain. A receiver in a swap provider's seen set is marked seen as its sweep attempt
-starts, before any lookup, so issuance does not hand it out again. A key whose receiver
-a provider was given within the wallet's restore watch keeps scanning after its sweep,
-and any other closes. A provider's recent set is trusted only if its feed read the
-provider within the last fifteen minutes and its window and feed history cover that
-watch; unless every provider has such a set, every key keeps scanning. A closed key
-with no known payment is checked against each newer publication's paid filter, and
-swept again on a hit. A run that finds nothing to look up opens no PIR session and
-fetches no witnesses.
+A restored wallet finds payments to its dynamic keys by looking each one up in a
+receiver directory over PIR. `fetch_seen` downloads the swap provider seen sets that
+a wallet checks before issuing a swap address. With the `wallet` feature, `sweep`
+runs one account's restore sweeps for any wallet store that implements the backend's
+dynamic IVK traits (`zcash_client_backend::data_api::dynamic_ivk`), such as
+`zakura-client-sqlite`. Its rustdoc states which publications a run accepts, when it
+sends requests, which keys keep scanning or are checked again, and how failures are
+retried.
 
 Applications supply:
 
@@ -28,19 +20,5 @@ Applications supply:
 - the wallet's consensus parameters, the network's genesis hash (`MAINNET_GENESIS` on
   mainnet) and the clock.
 
-See the `sweep` rustdoc for when a run sends requests, which publications it
-accepts, and how failures are retried.
-
-The receiver crates are pinned to a commit of wallet-pir's open receiver stack
-until they land on its `main`.
-
 `tests/sweep.rs` serves a directory in process through the receiver service's own
-routes and checks that a restored wallet finds and imports a payout, extends its
-lookahead past it, repeats no finished sweep, imports every payment of a key paid
-twice, makes no lookup when nothing was paid, keeps scanning only recently quoted
-addresses, and every address unless each provider has a recent set, issues no seen
-one, finds a payment to a closed address through a newer paid filter, refuses a publication that is not on its chain before any lookup,
-refuses one without seen sets or in which a provider lacks one, and replaces a
-deferred payment with a later publication's answer.
-Against a fake Enhance service, `EnhanceNotes` accepts fresh routing after a refused
-query.
+routes and real PIR, and checks each of those rules against restored SQLite wallets.

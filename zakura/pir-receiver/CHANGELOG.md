@@ -4,14 +4,10 @@
 
 ### Added
 
-- `sweep`, behind the `wallet` feature, which runs a restored wallet's
-  receiver-directory sweeps of its dynamic keys for any store implementing the
-  backend's `DynamicIvkWrite`, with `Transport`, `NoteSource`, `EnhanceNotes`, `WriteLock`,
-  `Swept`, `Error` and `MAINNET_GENESIS`. It reads a publication's labeled filter
-  sets `paid` and each provider's `recent` and `seen`, trusting a recent set only while
-  its feed is current, and rechecks closed keys against each newer paid filter. The
-  receiver PIR client moved here from Vizor.
+- `sweep`, behind the `wallet` feature, which runs one account's receiver-directory
+  restore sweeps of its dynamic keys for any store implementing the backend's
+  `DynamicIvkWrite`, with `Transport`, `NoteSource`, `EnhanceNotes`, `WriteLock`,
+  `Swept`, `Error` and `MAINNET_GENESIS`. The receiver PIR client moved here from
+  Vizor.
 - `fetch_seen` and `Seen`: a publication's swap provider seen sets, which a wallet
-  checks before issuing a swap address. A publication without seen sets, or in which
-  a provider with sets lacks a dated seen set, is malformed, for `fetch_seen` and
-  `sweep` alike. They need no `wallet` feature.
+  checks before issuing a swap address. They need no `wallet` feature.

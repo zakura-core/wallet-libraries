@@ -58,8 +58,9 @@ impl Seen {
 /// Downloads the seen sets of the publication `origin` serves, which must commit to
 /// the network's `genesis` ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS) on mainnet), as
 /// for `sweep`, since another network's sets say nothing of this one's quotes. Fails if
-/// it declares none, or if any provider with a set lacks a seen set with its feed's read
-/// times (see [`seen_sets`]).
+/// it declares no seen sets, or unless every provider with a recent or seen set has a
+/// seen set dated with its feed's read times, since receivers a provider without one had
+/// would look unseen.
 pub async fn fetch_seen<T: Transport>(
     origin: &str,
     transport: &T,
@@ -87,9 +88,8 @@ pub async fn fetch_seen<T: Transport>(
     Ok(seen)
 }
 
-/// The labels and feed read times of the seen sets among a publication's filter `sets`.
-/// Fails if there are none, or unless every provider with a recent or seen set has a
-/// dated seen set, since receivers a provider without one had would look unseen.
+/// The labels and feed read times of the seen sets among a publication's filter `sets`,
+/// failing as [`fetch_seen`] does.
 pub(crate) fn seen_sets(sets: &[FilterSet]) -> Result<Vec<(&str, i64, i64)>, DirectoryError> {
     let mut providers = BTreeMap::<&str, Option<(&str, i64, i64)>>::new();
     for set in sets {
