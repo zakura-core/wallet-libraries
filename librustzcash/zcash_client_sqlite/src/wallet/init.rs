@@ -319,7 +319,8 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
 /// the database structure required by the current version of this library, and should be invoked
 /// at least once any time a client program upgrades to a new version of this library.  The
 /// operation of this procedure is idempotent, so it is safe (though not required) to invoke this
-/// operation every time the wallet is opened.
+/// operation every time the wallet is opened (see [`WalletMigrator`] for builds without
+/// `orchard`).
 ///
 /// In order to correctly apply migrations to accounts derived from a seed, sometimes the
 /// optional `seed` argument is required. This function should first be invoked with
@@ -419,7 +420,9 @@ pub fn init_wallet_db<
 /// database to the database structure required by the current version of this library,
 /// and should be invoked at least once any time a client program upgrades to a new
 /// version of this library. The operation of this procedure is idempotent, so it is safe
-/// (though not required) to invoke this operation every time the wallet is opened.
+/// (though not required) to invoke this operation every time the wallet is opened. A build
+/// without `orchard` refuses a database holding dynamic IVK state whether or not this runs
+/// (see [`WalletMigrationError::DynamicIvksRequireOrchard`]).
 ///
 /// In order to correctly apply migrations to accounts derived from a seed, sometimes the
 /// seed is required. The migrator should first be used without calling [`Self::with_seed`];
@@ -766,20 +769,40 @@ fn verify_no_unknown_migrations(
 
 /// Refuses, in a build without `orchard`, a database holding dynamic IVK state: such a
 /// build would store blocks and transactions without the dynamic keys and prune the
-/// Ironwood spend evidence their recovery needs.
+/// Ironwood spend evidence their recovery needs. A database not yet migrated holds none.
 #[cfg(not(feature = "orchard"))]
 fn verify_no_dynamic_ivk_state(conn: &rusqlite::Connection) -> Result<(), WalletMigrationError> {
-    let present: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys)
-            OR EXISTS(SELECT 1 FROM ironwood_dynamic_spend_retention)",
+    let migrated: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+         WHERE type = 'table' AND name = 'ironwood_dynamic_spend_retention')",
         [],
         |row| row.get(0),
     )?;
+    let present = migrated
+        && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys)
+                OR EXISTS(SELECT 1 FROM ironwood_dynamic_spend_retention)",
+            [],
+            |row| row.get(0),
+        )?;
     if present {
         Err(WalletMigrationError::DynamicIvksRequireOrchard)
     } else {
         Ok(())
     }
+}
+
+/// [`verify_no_dynamic_ivk_state`] for opening a handle and starting a write transaction,
+/// so a build without `orchard` refuses such a database even if it never migrates it.
+#[cfg(not(feature = "orchard"))]
+pub(crate) fn refuse_dynamic_ivk_state(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    verify_no_dynamic_ivk_state(conn).map_err(|e| match e {
+        WalletMigrationError::DbError(e) => e,
+        e => rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+            Some(e.to_string()),
+        ),
+    })
 }
 
 /// Verify that the sqlite version in use supports the features required by this library.
@@ -1201,32 +1224,43 @@ mod tests {
     }
 
     /// A build without `orchard` opens a database without dynamic IVK state and refuses
-    /// one with it; an `orchard` build opens both.
+    /// one with it, whether opened by path or migrated; an `orchard` build opens both.
     #[test]
     fn dynamic_ivk_state_needs_an_orchard_build() {
         use super::{WalletMigrationError, WalletMigrator};
         use schemerz::MigratorError;
 
-        let mut st = TestBuilder::new()
-            .with_data_store_factory(TestDbFactory::default())
-            .with_account_from_sapling_activation(zcash_primitives::block::BlockHash([0; 32]))
-            .build();
-        let db = st.wallet_mut().db_mut();
-        WalletMigrator::new().init_or_migrate(db).unwrap();
+        let data_file = NamedTempFile::new().unwrap();
+        let open = || {
+            WalletDb::for_path(
+                data_file.path(),
+                Network::TestNetwork,
+                test_clock(),
+                test_rng(),
+            )
+        };
+        let mut db = open().unwrap();
+        WalletMigrator::new().init_or_migrate(&mut db).unwrap();
+        open().unwrap();
         db.conn
-            .execute(
-                "INSERT INTO ironwood_receiving_keys
-                 (account_id, purpose, key_index, receiver, scan_from, advances_allocation)
-                 SELECT id, 1, zeroblob(8), zeroblob(43), 0, 1 FROM accounts",
-                [],
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO ironwood_dynamic_spend_retention (account_id) VALUES (1);",
             )
             .unwrap();
-        let opened = WalletMigrator::new().init_or_migrate(db);
+        let reopened = open();
+        let migrated = WalletMigrator::new().init_or_migrate(&mut db);
         if cfg!(feature = "orchard") {
-            opened.unwrap();
+            reopened.unwrap();
+            migrated.unwrap();
         } else {
+            let refusal = WalletMigrationError::DynamicIvksRequireOrchard.to_string();
             assert!(matches!(
-                opened,
+                reopened,
+                Err(rusqlite::Error::SqliteFailure(_, Some(message))) if message == refusal
+            ));
+            assert!(matches!(
+                migrated,
                 Err(MigratorError::Adapter(
                     WalletMigrationError::DynamicIvksRequireOrchard
                 ))
