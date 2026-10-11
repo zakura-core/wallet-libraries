@@ -673,6 +673,9 @@ async fn a_seen_hit_outlives_a_rejected_payment_and_a_later_miss() {
     let account = st.test_account().unwrap().id();
     let key = KeyId::new(Purpose::Receive, 0);
     let (record, note_data) = pay_restored_key(&mut st, key.index(), 0);
+    // A later output, which publication A's tree replaces.
+    let (later_output, _) = pay_restored_key(&mut st, 1000, 1);
+    let commitments = [record.payment.cmx, later_output.payment.cmx];
     st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
@@ -722,7 +725,7 @@ async fn a_seen_hit_outlives_a_rejected_payment_and_a_later_miss() {
     );
     assert!(seen(&st));
 
-    let b = Directory::new(publish(&[], &[], through, &provider(&[])));
+    let b = Directory::new(publish(&[], &commitments, through, &provider(&[])));
     let later = NOW + 3_600;
     let swept = sweep(
         st.wallet_mut().db_mut(),
@@ -1327,6 +1330,42 @@ async fn a_publication_off_the_wallets_chain_is_refused_before_any_lookup() {
     }
 }
 
+/// A publication ending at the wallet's block but short of that block's last Ironwood
+/// output is refused before any lookup, as one off the chain is: a payment in the
+/// omitted tail would be neither looked up nor rescanned.
+#[tokio::test]
+async fn a_publication_short_of_its_anchor_blocks_outputs_is_refused() {
+    let mut st = ironwood_wallet();
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    pay_restored_key(&mut st, 0, 0);
+    restore(&mut st, account);
+    let through = tip(&st);
+    // Ends at the paid block, without the chain's one Ironwood output, which it holds.
+    let directory = Directory::new(publish(&[], &[], through, &provider(&[])));
+    let result = sweep(
+        st.wallet_mut().db_mut(),
+        &network,
+        &[account],
+        through,
+        GENESIS,
+        ORIGIN,
+        &directory,
+        &mut NoNotes,
+        &NoLock,
+        NOW,
+    )
+    .await;
+    assert!(matches!(result, Err(Error::Unavailable(_))), "{result:?}");
+    assert_eq!(directory.requests(), ["GET /v1/receiver/init"]);
+    assert!(
+        st.wallet()
+            .db()
+            .dynamic_history_pending(account, through.height)
+            .unwrap()
+    );
+}
+
 /// An Enhance transport that must not be used.
 struct NoEnhance;
 
@@ -1582,7 +1621,7 @@ async fn a_deferred_candidate_takes_each_publications_current_answer() {
         restore(&mut st, account);
         let mut through = tip(&st);
         let mut first = record.clone();
-        let mut commitments = vec![record.payment.cmx];
+        let commitments = [record.payment.cmx];
         match deferral {
             // A block below the tip is not scanned yet.
             AwaitingScan => {
@@ -1595,9 +1634,8 @@ async fn a_deferred_candidate_takes_each_publications_current_answer() {
                     hash: block.block_hash(),
                 };
                 if corrected {
-                    // Publication A misplaces the payment in another tree.
-                    first.payment.position = 1;
-                    commitments.insert(0, [1; 32]);
+                    // Publication A misstates the payment's transaction.
+                    first.payment.tx_index += 1;
                 }
             }
             AwaitingWitness => {
@@ -1616,7 +1654,7 @@ async fn a_deferred_candidate_takes_each_publications_current_answer() {
             }
         }
         let mut notes = Notes {
-            data: BTreeMap::from([(0, note_data), (1, note_data)]),
+            data: BTreeMap::from([(0, note_data)]),
             requested: Vec::new(),
         };
         let a = Directory::new(publish(&[first], &commitments, through, &provider(&[])));
@@ -1645,7 +1683,7 @@ async fn a_deferred_candidate_takes_each_publications_current_answer() {
                 &provider(&[]),
             )
         } else {
-            publish(&[], &[], through, &provider(&[]))
+            publish(&[], &commitments, through, &provider(&[]))
         };
         let b = Directory::new(b);
         let swept = run(&mut st, &[account], through, &b, &mut notes, NOW + 60)

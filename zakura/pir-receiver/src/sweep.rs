@@ -182,12 +182,12 @@ pub struct Swept<A, E> {
 /// `through` is the wallet's fully scanned tip, and sweeps and release run only while
 /// it is also the stored chain tip and the block the wallet scanned there, which
 /// release checks again under its write lock. When none is due, the run makes no
-/// request. Otherwise the
-/// publication must commit to `genesis` ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS)
-/// on mainnet), cover history from Ironwood activation on `params`' network, and end at
-/// a block the wallet accepts (see [`DynamicIvkRead::directory_publication_anchor`]),
-/// and every swap provider with a set must have a dated seen set, as for
-/// [`fetch_seen`](crate::fetch_seen).
+/// request. Otherwise the publication must commit to `genesis`
+/// ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS) on mainnet), cover history from
+/// Ironwood activation on `params`' network, and end at a block the wallet accepts
+/// (see [`DynamicIvkRead::directory_publication_anchor`]) with the wallet's Ironwood
+/// tree size there, and every swap provider with a set must have a dated seen set, as
+/// for [`fetch_seen`](crate::fetch_seen).
 ///
 /// Each key's receiver is first tested against the publication's filters, which every
 /// wallet downloads alike: only a receiver in the paid set is looked up over PIR, and
@@ -393,6 +393,17 @@ impl<'a, T: Transport> Directory<'a, T> {
             hash: anchor.hash.0,
         };
         accepted.check(&manifest.directory)?;
+        // Height and hash alone accept a publication that stops partway through the
+        // anchor block, whose omitted payments no lookup or scan from `anchor + 1` finds.
+        let tree_size = wallet
+            .block_metadata(anchor.height)
+            .map_err(Error::Wallet)?
+            .and_then(|block| block.ironwood_tree_size());
+        if tree_size.map(u64::from) != Some(manifest.directory.end_position) {
+            return Err(Error::Unavailable(
+                "the receiver directory's tree size differs from the wallet's at its anchor",
+            ));
+        }
         let seen = seen_sets(&manifest.directory.filters)?
             .into_iter()
             .map(|(label, _, _)| label.to_owned())
