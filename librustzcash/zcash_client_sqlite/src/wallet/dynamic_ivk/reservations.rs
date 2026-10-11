@@ -10,7 +10,9 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
     DynamicKey, KeyId, Purpose, RESERVED, ReservationPolicy, account_key, activate, corrupt,
-    decode_index, invalid, key_by_id, lifecycle::record, next_index, register,
+    decode_index, invalid, key_by_id,
+    lifecycle::{limit_passed, record},
+    next_index, register,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -442,7 +444,7 @@ pub(super) fn record_status<P: Parameters>(
     }
     // A refund key starts on a refund owed if it never started, or reopens if it closed
     // while this operation expected no refund. Any key that closed settled reopens if
-    // this observation unsettles it.
+    // this observation unsettles it before its completion limit.
     let operations = conn
         .prepare(&format!(
             "SELECT o.id, k.id,
@@ -464,7 +466,8 @@ pub(super) fn record_status<P: Parameters>(
     for &(id, key, startable, scan_from, closed) in &operations {
         let was_settled = closed && settled(conn, key)?;
         let current = record(conn, id, observation, funded, now)?;
-        let unsettled = was_settled && current && !settled(conn, key)?;
+        let unsettled =
+            was_settled && current && !settled(conn, key)? && !limit_passed(conn, key, now)?;
         if (current && startable && refund_owed) || unsettled {
             // A refund key whose restore sweep is pending starts when the sweep finishes.
             activate(conn, key, BlockHeight::from(scan_from))?;

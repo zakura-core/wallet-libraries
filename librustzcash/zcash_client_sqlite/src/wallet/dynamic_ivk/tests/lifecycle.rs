@@ -448,14 +448,11 @@ fn incoming_key_closes_only_once_paid_and_released() {
     assert!(scanning_keys(&st).is_empty());
 }
 
-/// A started incoming reservation whose last status stays active, as an underpayment's
-/// `INCOMPLETE_DEPOSIT` does, stops scanning at the limit after its deadline but stays
-/// reserved, so issuance never reissues its address.
-#[test]
-fn a_started_reservation_left_active_stops_scanning_at_the_limit() {
-    let mut st = scanned_wallet();
+/// Starts an incoming reservation with deadline `registered_at() + HOUR` and records an
+/// underpayment's `INCOMPLETE_DEPOSIT` for it. Returns its key and deadline.
+fn underpaid_reservation(st: &mut State) -> (DynamicKey, i64) {
     let account = st.test_account().unwrap().id();
-    let from = next_height(&st);
+    let from = next_height(st);
     let now = registered_at();
     let deadline = now + HOUR;
     let db = st.wallet_mut().db_mut();
@@ -471,13 +468,34 @@ fn a_started_reservation_left_active_stops_scanning_at_the_limit() {
     db.start_receive_operation(account, "swap")
         .unwrap()
         .unwrap();
+    record_receive_status(st, "INCOMPLETE_DEPOSIT", None, now + HOUR);
+    (key, deadline)
+}
+
+/// Records 1Click `status`, with payout `amount_out`, for the test account's funded
+/// incoming operation `swap` at `at`.
+fn record_receive_status(st: &mut State, status: &str, amount_out: Option<u64>, at: i64) {
+    let account = st.test_account().unwrap().id();
     let status = NearStatus {
-        status: "INCOMPLETE_DEPOSIT",
+        status,
+        amount_out: amount_out.map(Zatoshis::const_from_u64),
         ..Default::default()
     };
     let observation = near_observation(Purpose::Receive, &status);
-    db.record_operation_status(account, "swap", None, observation, true, now + HOUR)
+    st.wallet_mut()
+        .db_mut()
+        .record_operation_status(account, "swap", None, observation, true, at)
         .unwrap();
+}
+
+/// A started incoming reservation whose last status stays active, as an underpayment's
+/// `INCOMPLETE_DEPOSIT` does, stops scanning at the limit after its deadline but stays
+/// reserved, so issuance never reissues its address.
+#[test]
+fn a_started_reservation_left_active_stops_scanning_at_the_limit() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let (key, deadline) = underpaid_reservation(&mut st);
     assert_eq!(close(&mut st, deadline + LIMIT - 1), 0);
     assert_eq!(scanning_keys(&st), [key.key_id()]);
     assert_eq!(close(&mut st, deadline + LIMIT), 1);
@@ -486,6 +504,41 @@ fn a_started_reservation_left_active_stops_scanning_at_the_limit() {
     let db = st.wallet_mut().db_mut();
     let next = prepare_from(db, account, deadline + LIMIT, from, None);
     assert_ne!(next.unwrap().unwrap().key_id(), key.key_id());
+}
+
+/// A key closed at the limit stays closed whatever the provider reports later, even a
+/// correction that unsettles it after a status that settled it.
+#[test]
+fn statuses_after_the_limit_do_not_reopen_a_key() {
+    let mut st = scanned_wallet();
+    let (_, deadline) = underpaid_reservation(&mut st);
+    let limit = deadline + LIMIT;
+    assert_eq!(close(&mut st, limit), 1);
+    let queued = st.wallet().suggest_scan_ranges().unwrap();
+    record_receive_status(&mut st, "REFUNDED", None, limit + HOUR);
+    record_receive_status(&mut st, "SUCCESS", Some(50_000), limit + 2 * HOUR);
+    assert!(scanning_keys(&st).is_empty());
+    assert_eq!(st.wallet().suggest_scan_ranges().unwrap(), queued);
+}
+
+/// Within the limit, a newer status that unsettles a key closed settled reopens it.
+#[test]
+fn an_unsettling_status_within_the_limit_reopens_a_key() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key = refund_key(&mut st).key_id();
+    let settled = registered_at() + HOUR;
+    observe_swap(&mut st, key, Terminal(NoReceipt), settled);
+    assert_eq!(close(&mut st, settled), 1);
+    let observation = Observation {
+        status: Terminal(Positive(Some(Zatoshis::const_from_u64(50_000)))),
+        deadline: None,
+    };
+    st.wallet_mut()
+        .db_mut()
+        .record_operation_status(account, "swap", None, observation, false, settled + HOUR)
+        .unwrap();
+    assert_eq!(scanning_keys(&st), [key]);
 }
 
 /// A released paid reservation keeps following its funded operation: a newer status that
