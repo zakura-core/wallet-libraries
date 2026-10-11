@@ -807,6 +807,8 @@ where
          FROM eligible
          ORDER BY lock_tier {tier_direction}, value DESC, commitment_tree_position, id"
         ),
+        // Dynamic-key notes come first; one that changes the change shape ends slot filling
+        // (an optional consolidation is missed, the proposal itself is unaffected).
         ValueSelection::SmallestFirst { .. } => format!(
             "SELECT {result_columns}
          FROM eligible WHERE lock_tier = :selected_lock_tier
