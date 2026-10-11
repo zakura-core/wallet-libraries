@@ -60,6 +60,9 @@ impl RusqliteMigration for Migration {
                 ON ironwood_receiving_keys(closed_at, active_from);
             ALTER TABLE ironwood_received_notes ADD COLUMN receiving_key_id INTEGER
                 REFERENCES ironwood_receiving_keys(id);
+            CREATE INDEX idx_ironwood_received_notes_receiving_key ON ironwood_received_notes (
+                receiving_key_id ASC
+            );
             CREATE TABLE ironwood_dynamic_operations (
                 id INTEGER PRIMARY KEY,
                 receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
