@@ -94,8 +94,8 @@ pub enum PaymentApplication {
     /// discarded.
     Rejected,
     /// Note, witness, key identity, and any known spend were committed together, or the
-    /// wallet already stored the note under another transaction. The retrieved memo is
-    /// untrusted (see [`EncryptedNote::decrypt`]).
+    /// wallet already stored the note under another transaction. No memo is stored (see
+    /// [`EncryptedNote::decrypt`]).
     ///
     /// [`EncryptedNote::decrypt`]: zakura_dynamic_ivk::recovery::EncryptedNote::decrypt
     Applied,
@@ -149,6 +149,14 @@ pub trait DynamicIvkRead: WalletRead {
         account: Self::AccountId,
         through: BlockHeight,
     ) -> Result<bool, Self::Error>;
+
+    /// `account`'s swept keys that are closed with no known payment and whose sweep
+    /// finished below `height`, for [`DynamicIvkWrite::record_paid_filter_check`].
+    fn dynamic_keys_to_recheck(
+        &self,
+        account: Self::AccountId,
+        height: BlockHeight,
+    ) -> Result<Vec<DiscoveryWork>, Self::Error>;
 }
 
 /// Dynamic IVK writes: storing blocks scanned with dynamic keys, and restore sweeps.
@@ -244,17 +252,33 @@ pub trait DynamicIvkWrite: WalletWrite + DynamicIvkRead {
     /// wait or was rejected; payments applied before it stay applied. A lookup a reorg
     /// removed defers the sweep to run again.
     ///
-    /// The finished key then scans from the block after the lookup, rescanning blocks
-    /// scanned without it, until the store's restore watch closes it, so a payment after
-    /// the lookup is found by scanning.
+    /// `recent` is whether a current, complete swap provider recent set holds the key's
+    /// receiver, so a swap may still pay it. A recent key then scans from the block after
+    /// the lookup, rescanning blocks scanned without it, until the store's restore watch
+    /// closes it. Any other key that was not already scanning closes at the lookup; a
+    /// later payment to it is found by [`Self::record_paid_filter_check`].
     fn apply_dynamic_sweep(
         &mut self,
         account: <Self as WalletRead>::AccountId,
         key: KeyId,
         through: ChainPoint,
         publication: ChainPoint,
+        recent: bool,
         witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
     ) -> Result<Result<PaymentApplication, SweepDeferral>, <Self as WalletRead>::Error>;
+
+    /// Records a newer publication's paid filter against keys from
+    /// [`DynamicIvkRead::dynamic_keys_to_recheck`]: `checked` pairs each key with whether
+    /// the filter holds its receiver. A key it holds may have been paid since its sweep,
+    /// so its sweep is queued again; any other has none through `publication`, which its
+    /// sweep then counts as finished at, so the same publication is not checked again.
+    /// Does nothing unless `publication` is on the wallet's chain.
+    fn record_paid_filter_check(
+        &mut self,
+        account: <Self as WalletRead>::AccountId,
+        publication: ChainPoint,
+        checked: &[(KeyId, bool)],
+    ) -> Result<(), <Self as WalletRead>::Error>;
 
     /// Releases retained Ironwood nullifiers at `through`, a canonical scanned tip, once
     /// no restore sweep needs them. Missing memos, pending sweeps and queued payments
