@@ -146,8 +146,8 @@ pub trait DynamicIvkRead: WalletRead {
         through: BlockHeight,
     ) -> Result<bool, Self::Error>;
 
-    /// `account`'s swept keys that are closed with no known payment and whose sweep
-    /// finished below `height`, for [`DynamicIvkWrite::record_paid_filter_check`].
+    /// `account`'s closed keys with no known payment that no paid filter at or above
+    /// `height` has checked, for [`DynamicIvkWrite::record_paid_filter_check`].
     fn dynamic_keys_to_recheck(
         &self,
         account: Self::AccountId,
@@ -265,9 +265,9 @@ pub trait DynamicIvkWrite: WalletWrite + DynamicIvkRead {
 
     /// Records a newer publication's paid filter against keys from
     /// [`DynamicIvkRead::dynamic_keys_to_recheck`]: `checked` pairs each key with whether
-    /// the filter holds its receiver. A key it holds may have been paid since its sweep,
-    /// so its sweep is queued again; any other has none through `publication`, which its
-    /// sweep then counts as finished at, so the same publication is not checked again.
+    /// the filter holds its receiver. A key it holds may have been paid after it stopped
+    /// scanning, so a sweep of it is queued; any other has no payment through
+    /// `publication`, which is recorded so the same publication is not checked again.
     /// Does nothing unless `publication` is on the wallet's chain.
     fn record_paid_filter_check(
         &mut self,
