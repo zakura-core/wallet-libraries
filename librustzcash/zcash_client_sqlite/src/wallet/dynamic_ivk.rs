@@ -300,11 +300,12 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// receipts cover what the provider promised, or `COMPLETION_LIMIT_SECS` after its
     /// latest deadline (registration without one); a key only a restore sweep found
     /// closes `RESTORE_WATCH_SECS` after its sweep's lookup block, or registration if
-    /// later. It stays open while its reservation is, or while a receipt is unmined and
-    /// unexpired or short of the default untrusted confirmations, so a reorg cannot
-    /// strand one. Nothing closes unless the stored tip and the scanned height equal
-    /// `tip`, which the caller just confirmed, and closing uses the earlier of `now` and
-    /// `tip`'s block time.
+    /// later. An open reservation holds its key open, once started only until that limit:
+    /// the address then stays reserved, so it is never reissued. A key stays open while
+    /// a receipt is unmined and unexpired or short of the default untrusted
+    /// confirmations, so a reorg cannot strand one. Nothing closes unless the stored tip
+    /// and the scanned height equal `tip`, which the caller just confirmed, and closing
+    /// uses the earlier of `now` and `tip`'s block time.
     ///
     /// That watch bounds restore discovery: a payment to a restored key after it closes
     /// is found only by [`Self::recheck_dynamic_key_history`], and an incoming index

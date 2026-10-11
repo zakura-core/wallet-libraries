@@ -80,7 +80,8 @@ pub fn near_observation(purpose: crate::Purpose, status: &NearStatus<'_>) -> Obs
     let refund_reported = status.refunded_amount.is_some();
     let outcome = match (status.status, purpose) {
         ("PENDING_DEPOSIT", _) => AwaitingDeposit,
-        // INCOMPLETE_DEPOSIT is not final: 1Click moves it to REFUNDED, which settles by direction.
+        // INCOMPLETE_DEPOSIT is not final: an underpayment is refunded around the deadline,
+        // and the completion limit bounds the wait.
         ("KNOWN_DEPOSIT_TX" | "INCOMPLETE_DEPOSIT" | "PROCESSING", _) => Active,
         ("SUCCESS", Purpose::Receive) => {
             Terminal(Positive(status.amount_out.filter(|v| !v.is_zero())))
