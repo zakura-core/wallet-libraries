@@ -20,7 +20,8 @@ an SQLite database.
 With the `orchard` feature, `WalletDb` keeps dynamic IVKs: a durable registry of
 derived refund and incoming keys, their scanning, seed recovery through
 receiver-directory sweeps, and spending. The migration creates its tables in every
-build, so a build without `orchard` preserves existing reservations. `WalletDb`
+build, but a build without `orchard` refuses to open a database holding any of this
+state. `WalletDb`
 implements the backend's `DynamicIvkRead` and `DynamicIvkWrite`, so a wallet scans with
 `scan_cached_blocks_with_dynamic_ivks`. Compact scanning and software spending retain
 each note's derived key; change uses ordinary account keys. The `wallet::dynamic_ivk`
