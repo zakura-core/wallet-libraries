@@ -906,9 +906,10 @@ impl<F: FnOnce()> WriteLock for WriterBeforeRelease<F> {
     }
 }
 
-/// Sweeps a restored wallet whose release follows `other`'s write through a second
-/// handle, and returns whether release ran, judged by its read of the retention table.
-async fn release_after(other: impl FnOnce(&mut OtherWriter, ChainPoint)) -> bool {
+/// Sweeps a restored wallet against a publication ending `behind` blocks below its tip,
+/// with release following `other`'s write through a second handle, and returns whether
+/// release ran, judged by its read of the retention table.
+async fn release_after(behind: u32, other: impl FnOnce(&mut OtherWriter, ChainPoint)) -> bool {
     let mut st = ironwood_wallet_in(TestDbFactory::file_backed());
     let network = *st.network();
     let account = st.test_account().unwrap().id();
@@ -940,7 +941,12 @@ async fn release_after(other: impl FnOnce(&mut OtherWriter, ChainPoint)) -> bool
             }
             Authorization::Allow
         }));
-    let directory = Directory::new(publish(&[], &[], through, &provider(&[])));
+    let height = through.height - behind;
+    let end = ChainPoint {
+        height,
+        hash: st.wallet().get_block_hash(height).unwrap().unwrap(),
+    };
+    let directory = Directory::new(publish(&[], &[], end, &provider(&[])));
     let swept = sweep(
         st.wallet_mut().db_mut(),
         &network,
@@ -967,23 +973,33 @@ async fn release_after(other: impl FnOnce(&mut OtherWriter, ChainPoint)) -> bool
 #[tokio::test]
 async fn a_tip_moved_before_release_releases_nothing() {
     assert!(
-        release_after(|_, _| ()).await,
+        release_after(0, |_, _| ()).await,
         "release runs at an unmoved tip"
     );
-    let advanced = release_after(|other, through| {
+    let advanced = release_after(0, |other, through| {
         other.update_chain_tip(through.height + 1).unwrap();
     });
     assert!(!advanced.await, "released after the tip advanced");
-    let rewound = release_after(|other, through| {
+    let rewound = release_after(0, |other, through| {
         other.truncate_to_height(through.height - 1).unwrap();
     });
     assert!(!rewound.await, "released after a reorg rewound the tip");
     // The tip is back at `through`'s height, but its block is not scanned yet.
-    let replaced = release_after(|other, through| {
+    let replaced = release_after(0, |other, through| {
         other.truncate_to_height(through.height - 1).unwrap();
         other.update_chain_tip(through.height).unwrap();
     });
     assert!(!replaced.await, "released at a replaced block");
+}
+
+/// Finishing keys against a publication behind `through` rescans the blocks after it,
+/// lowering the fully scanned height without moving the tip, so release waits for it.
+#[tokio::test]
+async fn a_rescan_the_sweep_queued_releases_nothing() {
+    assert!(
+        !release_after(1, |_, _| ()).await,
+        "released below the fully scanned tip"
+    );
 }
 
 /// A repeated account sweeps its keys once: each is leased once, and a deferred key is

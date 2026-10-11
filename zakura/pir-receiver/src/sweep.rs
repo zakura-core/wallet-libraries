@@ -181,13 +181,13 @@ pub struct Swept<A, E> {
 ///
 /// `through` is the wallet's fully scanned tip, and sweeps and release run only while
 /// it is also the stored chain tip and the block the wallet scanned there, which
-/// release checks again under its write lock. When none is due, the run makes no
-/// request. Otherwise the publication must commit to `genesis`
-/// ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS) on mainnet), cover history from
-/// Ironwood activation on `params`' network, and end at a block the wallet accepts
-/// (see [`DynamicIvkRead::directory_publication_anchor`]) with the wallet's Ironwood
-/// tree size there, and every swap provider with a set must have a dated seen set, as
-/// for [`fetch_seen`](crate::fetch_seen).
+/// release checks again under its write lock along with the fully scanned height.
+/// When none is due, the run makes no request. Otherwise the publication must commit
+/// to `genesis` ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS) on mainnet), cover
+/// history from Ironwood activation on `params`' network, and end at a block the
+/// wallet accepts (see [`DynamicIvkRead::directory_publication_anchor`]) with the
+/// wallet's Ironwood tree size there, and every swap provider with a set must have a
+/// dated seen set, as for [`fetch_seen`](crate::fetch_seen).
 ///
 /// Each key's receiver is first tested against the publication's filters, which every
 /// wallet downloads alike: only a receiver in the paid set is looked up over PIR, and
@@ -311,9 +311,11 @@ where
     }
     for account in accounts {
         if current {
-            // Another writer may have moved the tip while the sweep held no lock.
+            // Another writer may have moved the tip while the sweep held no lock, and a
+            // finished key may have queued a rescan below it.
             lock.write("dynamic_sweep.release", || {
-                if at_tip(wallet, through)? {
+                let scanned = wallet.block_fully_scanned()?.map(|b| b.block_height());
+                if at_tip(wallet, through)? && scanned == Some(through.height) {
                     wallet.finish_dynamic_nullifier_recovery(*account, through)?;
                 }
                 Ok(())
