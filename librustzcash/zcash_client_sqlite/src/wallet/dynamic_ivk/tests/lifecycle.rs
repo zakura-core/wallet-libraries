@@ -578,6 +578,87 @@ fn a_status_requested_before_a_limit_closure_does_not_reopen_the_key() {
     assert_eq!(st.wallet().suggest_scan_ranges().unwrap(), queued);
 }
 
+/// Registers a refund key whose operation `settled` ends with no refund but whose limit
+/// is far off, so that a newer status reopens it after it closes.
+fn settled_refund_key(st: &mut State) -> KeyId {
+    let account = st.test_account().unwrap().id();
+    let key = refund_key(st).key_id();
+    let observation = Observation {
+        status: Terminal(NoReceipt),
+        deadline: Some(registered_at() + 2 * LIMIT),
+    };
+    let db = st.wallet_mut().db_mut();
+    observe_with(
+        db,
+        account,
+        key,
+        "settled",
+        observation,
+        registered_at() + HOUR,
+    )
+    .unwrap();
+    key
+}
+
+/// Records a refund owed for the test account's refund operation `reference` at `at`.
+fn owe_refund(st: &mut State, reference: &str, at: i64) {
+    let account = st.test_account().unwrap().id();
+    let observation = Observation {
+        status: Terminal(Positive(Some(Zatoshis::const_from_u64(50_000)))),
+        deadline: None,
+    };
+    st.wallet_mut()
+        .db_mut()
+        .record_operation_status(account, reference, None, observation, false, at)
+        .unwrap();
+}
+
+/// Another key reopening, whose historical rescan lowers the fully scanned height, does
+/// not let a status reopen a key closed at its limit, in either order.
+#[test]
+fn another_keys_rescan_does_not_reopen_a_key_closed_at_its_limit() {
+    for reopened_first in [true, false] {
+        let mut st = scanned_wallet();
+        let account = st.test_account().unwrap().id();
+        let closed = refund_key(&mut st).key_id();
+        let db = st.wallet_mut().db_mut();
+        observe(
+            db,
+            account,
+            closed,
+            "closed",
+            Active,
+            registered_at() + HOUR,
+        )
+        .unwrap();
+        let reopened = settled_refund_key(&mut st);
+        st.generate_and_scan_empty_blocks_with_dynamic_ivks(3);
+        assert_eq!(close(&mut st, registered_at() + HOUR), 1);
+        let limit = registered_at() + LIMIT;
+        assert_eq!(close(&mut st, limit), 1);
+        if reopened_first {
+            owe_refund(&mut st, "settled", limit + HOUR);
+            owe_refund(&mut st, "closed", limit + 2 * HOUR);
+        } else {
+            owe_refund(&mut st, "closed", limit + HOUR);
+            owe_refund(&mut st, "settled", limit + 2 * HOUR);
+        }
+        assert_eq!(scanning_keys(&st), [reopened], "{reopened_first}");
+    }
+
+    let mut st = scanned_wallet();
+    let reopened = settled_refund_key(&mut st);
+    let (_, deadline) = underpaid_reservation(&mut st);
+    st.generate_and_scan_empty_blocks_with_dynamic_ivks(3);
+    assert_eq!(close(&mut st, registered_at() + HOUR), 1);
+    let limit = deadline + LIMIT;
+    assert_eq!(close(&mut st, limit), 1);
+    owe_refund(&mut st, "settled", limit + HOUR);
+    record_receive_status(&mut st, "REFUNDED", None, limit + 2 * HOUR);
+    record_receive_status(&mut st, "SUCCESS", Some(50_000), limit + 3 * HOUR);
+    assert_eq!(scanning_keys(&st), [reopened]);
+}
+
 /// Within the limit, a newer status that unsettles a key closed settled reopens it.
 #[test]
 fn an_unsettling_status_within_the_limit_reopens_a_key() {
