@@ -190,7 +190,9 @@ pub(super) fn record(
     let current = conn.execute(
         "UPDATE ironwood_dynamic_operations SET
             observed_at = ?2, expectation = ?3, expected_value = ?4,
-            deadline = COALESCE(deadline, ?5)
+            deadline = CASE WHEN (SELECT closed_at FROM ironwood_receiving_keys
+                    WHERE id = receiving_key_id) IS NULL
+                THEN COALESCE(deadline, ?5) ELSE deadline END
          WHERE id = ?1 AND observed_at <= ?2",
         params![id, now, expectation, amount, observation.deadline],
     )?;
