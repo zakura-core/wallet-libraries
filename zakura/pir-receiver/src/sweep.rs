@@ -685,36 +685,18 @@ where
     } else {
         None
     };
-    let applied = apply_queued(payments.len(), || {
-        lock.write("dynamic_sweep.apply", || {
+    let applied = lock
+        .write("dynamic_sweep.apply", || {
             wallet.apply_dynamic_sweep(account, key, through, anchor, check.recent, |p, cmx| {
                 witnesses.and_then(|w| w.path(p, cmx).ok())
             })
         })
         .map_err(Error::Wallet)?
-        .map_err(Error::Deferred)
-    })?;
+        .map_err(Error::Deferred)?;
     match applied {
         PaymentApplication::Applied => Ok(()),
         waiting => Err(Error::Queued(waiting)),
     }
-}
-
-/// Runs `apply`, one `apply_dynamic_sweep` call, again after each
-/// [`PaymentApplication::BeforeBirthday`], which reports a payment processed rather than
-/// waiting. Each of the at most `queued` payments can report it once.
-fn apply_queued<E>(
-    queued: usize,
-    mut apply: impl FnMut() -> Result<PaymentApplication, E>,
-) -> Result<PaymentApplication, E> {
-    let mut applied = apply()?;
-    for _ in 0..queued {
-        if applied != PaymentApplication::BeforeBirthday {
-            break;
-        }
-        applied = apply()?;
-    }
-    Ok(applied)
 }
 
 /// A directory payment as the wallet takes it.
@@ -784,32 +766,5 @@ mod tests {
         let mut undated = recent(Some(watch), started, read);
         undated.until_unix = None;
         assert!(!covers_restore_watch(&undated, now));
-    }
-
-    /// Runs [`apply_queued`] for `queued` payments over `results`, returning what it
-    /// returned and how many results it took.
-    fn run(queued: usize, results: &[PaymentApplication]) -> (PaymentApplication, usize) {
-        let mut results = results.iter().copied();
-        let mut calls = 0;
-        let applied = apply_queued::<()>(queued, || {
-            calls += 1;
-            Ok(results.next().expect("called too often"))
-        });
-        (applied.unwrap(), calls)
-    }
-
-    /// A before-birthday payment was processed, so applying goes on to finish the
-    /// sweep, but a backend reporting it more often than it has payments is waiting.
-    #[test]
-    fn before_birthday_payments_continue_applying() {
-        use PaymentApplication::*;
-        let finished = [BeforeBirthday, BeforeBirthday, Applied];
-        assert_eq!(run(2, &finished), (Applied, 3));
-        assert_eq!(
-            run(2, &[BeforeBirthday, AwaitingWitness]),
-            (AwaitingWitness, 2)
-        );
-        assert_eq!(run(1, &[BeforeBirthday; 3]), (BeforeBirthday, 2));
-        assert_eq!(run(0, &[Applied]), (Applied, 1));
     }
 }
