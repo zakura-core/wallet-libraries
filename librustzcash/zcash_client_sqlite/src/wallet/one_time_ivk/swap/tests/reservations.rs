@@ -630,9 +630,8 @@ fn reorg_retains_used_marker_and_seen_addresses_keep_the_bound() {
     assert!(active_from(&st, first.key_id()).is_some());
 }
 
-/// Maintenance and issuance register restore discovery only at the scanned tip, as
-/// lookahead keys that wait for their sweeps without advancing allocation or scanning.
-/// Issuance refuses a tip too far ahead of the scanned one and, since a wallet cannot
+/// Maintenance registers restore discovery only at the scanned tip, as lookahead keys
+/// that wait for their sweeps without advancing allocation or scanning. Issuance refuses a tip too far ahead of the scanned one and, since a wallet cannot
 /// tell a fresh seed from a restore, waits for the sweeps. It then takes the lowest
 /// address never quoted, scanned from above the scanned tip, while a refund key starts
 /// scanning only once its funding transaction is stored.
@@ -648,16 +647,17 @@ fn issuance_starts_after_the_scanned_tip_once_the_restore_lookahead_is_swept() {
     st.scan_cached_blocks_with_one_time_ivks(h, 1);
     let through = tip(&st);
     let db = st.wallet_mut().db_mut();
-    let behind = through.height + ISSUANCE_TIP_LAG + 1;
-    let issued = db.prepare_receive_reservation(account, NOW, behind, None);
-    assert_eq!(refusal(issued), Some(Coverage));
-    let refund = db.reserve_refund_key(account, behind);
-    assert_eq!(refusal(refund), Some(Coverage));
     db.maintain_one_time_ivks(account).unwrap();
     let lookahead = all_keys(db, account).unwrap();
     assert_eq!(lookahead.len() as u64, RECEIVE_GAP_LIMIT);
     assert!(lookahead.iter().all(|k| !key_state(db, k.key_id()).1));
     assert!(scanning_keys(&st).is_empty());
+    let db = st.wallet_mut().db_mut();
+    let behind = through.height + ISSUANCE_TIP_LAG + 1;
+    let issued = db.prepare_receive_reservation(account, NOW, behind, None);
+    assert_eq!(refusal(issued), Some(Coverage));
+    let refund = db.reserve_refund_key(account, behind);
+    assert_eq!(refusal(refund), Some(Coverage));
     let near = through.height + ISSUANCE_TIP_LAG;
     let db = st.wallet_mut().db_mut();
     let issued = db.prepare_receive_reservation(account, NOW, near, None);
@@ -687,7 +687,9 @@ fn deposit_instructions_bind_one_operation_and_cannot_change() {
     // Both quotes share a deposit address and differ only by memo.
     let first = prepare(&mut st, NOW);
     begin(&mut st, &first, "first").unwrap().unwrap();
-    finish(&mut st, "first", &shared(Some("memo-1"), NOW + 60)).unwrap();
+    for _ in 0..2 {
+        finish(&mut st, "first", &shared(Some("memo-1"), NOW + 60)).unwrap();
+    }
     begin(&mut st, &first, "retry").unwrap().unwrap();
     let shown = start(&mut st, "first").unwrap().unwrap();
     let shown = OperationOutcome::Accepted(shown);
@@ -695,6 +697,9 @@ fn deposit_instructions_bind_one_operation_and_cannot_change() {
     let second = prepare(&mut st, NOW);
     assert_ne!(second.key_id(), first.key_id());
     begin(&mut st, &second, "second").unwrap().unwrap();
+    // Another reservation's unaccepted operation cannot take the started identity.
+    let taken = finish(&mut st, "second", &shared(Some("memo-1"), NOW + 60));
+    assert!(rejected_input(taken));
     finish(&mut st, "second", &shared(None, NOW + 60)).unwrap();
     for (request, memo) in [
         ("first", Some("memo-2")),
