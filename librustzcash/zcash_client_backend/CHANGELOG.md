@@ -38,6 +38,13 @@ workspace.
   (with `one-time-ivk`): `put_blocks` and `put_blocks_rows` with a height from which Ironwood
   nullifiers stay tracked, for a store that finds Ironwood notes after scanning past them.
 
+### Changed
+
+- `enhance_pir::storage::PendingIronwoodMemo` carries the incoming key that detected the
+  note, `ivk`, in place of `scope`. Storage resolves it, so a note a one-time key found
+  binds its transaction's metadata with that key. `PendingIronwoodMetadata::Incoming`
+  boxes it.
+
 ## [0.1.0-rc8] - PLANNED
 
 Breaking release for explicit transparent disclosure policy, private recovery,

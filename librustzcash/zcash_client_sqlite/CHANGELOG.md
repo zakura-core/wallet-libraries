@@ -10,6 +10,19 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+
+- One-time IVKs (feature `one-time-ivk`, which enables `orchard`): per-swap Ironwood
+  refund and incoming addresses derived with `zakura-one-time-ivk` and recoverable from
+  the seed. `wallet::one_time_ivk` holds the key registry, scanning, spending and restore
+  sweeps, and its rustdoc lists the calls a wallet makes; `wallet::one_time_ivk::swap`
+  holds issuance, provider operations, refund funding and closing. `WalletDb` implements
+  the backend's `OneTimeIvkRead`, `OneTimeIvkWrite`, `OneTimeIvkRestoreRead` and
+  `OneTimeIvkRestoreWrite`. New errors are `SqliteClientError::OneTimeIvksNotUsed` and
+  `SqliteClientError::InvalidOneTimeIvkInput`. The one-time IVK migration creates its
+  tables in every build, and a build without `one-time-ivk` refuses a database holding
+  one-time IVK state (`WalletMigrationError::OneTimeIvksNotEnabled`).
+
 ## [0.1.0-rc8] - PLANNED
 
 ### Packaging

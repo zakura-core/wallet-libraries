@@ -73,6 +73,10 @@ pub enum WalletMigrationError {
     /// whose meaning it does not know. External migrations must be supplied on every call.
     UnknownMigrations(Vec<Uuid>),
 
+    /// The database holds one-time IVK state, which a build without the `one-time-ivk`
+    /// feature cannot scan with or keep consistent, so such a build refuses to open it.
+    OneTimeIvksNotEnabled,
+
     /// Some other unexpected violation of database business rules occurred
     Other(Box<SqliteClientError>),
 }
@@ -159,6 +163,10 @@ impl fmt::Display for WalletMigrationError {
                     ids.join(", ")
                 )
             }
+            WalletMigrationError::OneTimeIvksNotEnabled => write!(
+                f,
+                "The wallet database holds one-time IVK state, which needs a build with the one-time-ivk feature"
+            ),
             WalletMigrationError::Other(err) => {
                 write!(f, "Unexpected violation of database business rules: {err}")
             }
@@ -192,6 +200,10 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         #[cfg(feature = "orchard")]
         SqliteClientError::EnhancementModeNotConfigured => {
             unreachable!("we don't enumerate enhancement requests in migrations")
+        }
+        #[cfg(feature = "one-time-ivk")]
+        SqliteClientError::OneTimeIvksNotUsed | SqliteClientError::InvalidOneTimeIvkInput(_) => {
+            unreachable!("migrations do not use one-time IVKs")
         }
         SqliteClientError::TransparentLedgerModeNotConfigured
         | SqliteClientError::TransparentAuthorityUnavailable(_)
@@ -305,7 +317,8 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
 /// the database structure required by the current version of this library, and should be invoked
 /// at least once any time a client program upgrades to a new version of this library.  The
 /// operation of this procedure is idempotent, so it is safe (though not required) to invoke this
-/// operation every time the wallet is opened.
+/// operation every time the wallet is opened (see [`WalletMigrator`] for builds without
+/// `one-time-ivk`).
 ///
 /// In order to correctly apply migrations to accounts derived from a seed, sometimes the
 /// optional `seed` argument is required. This function should first be invoked with
@@ -405,7 +418,9 @@ pub fn init_wallet_db<
 /// database to the database structure required by the current version of this library,
 /// and should be invoked at least once any time a client program upgrades to a new
 /// version of this library. The operation of this procedure is idempotent, so it is safe
-/// (though not required) to invoke this operation every time the wallet is opened.
+/// (though not required) to invoke this operation every time the wallet is opened. A build
+/// without `one-time-ivk` refuses a database holding one-time IVK state whether or not this
+/// runs (see [`WalletMigrationError::OneTimeIvksNotEnabled`]).
 ///
 /// In order to correctly apply migrations to accounts derived from a seed, sometimes the
 /// seed is required. The migrator should first be used without calling [`Self::with_seed`];
@@ -689,6 +704,8 @@ fn init_wallet_db_internal<
         }
         if target_migrations.is_empty() {
             migrator.up(None)?;
+            #[cfg(not(feature = "one-time-ivk"))]
+            verify_no_one_time_ivk_state(wdb.conn.borrow()).map_err(MigratorError::Adapter)?;
         } else {
             for target_migration in target_migrations {
                 migrator.up(Some(*target_migration))?;
@@ -746,6 +763,39 @@ fn verify_no_unknown_migrations(
         unknown.sort();
         Err(WalletMigrationError::UnknownMigrations(unknown))
     }
+}
+
+/// Refuses, in a build without `one-time-ivk`, a database holding one-time IVK state: such
+/// a build would store blocks and transactions without the one-time keys and prune the
+/// Ironwood spend evidence their recovery needs. A database not yet migrated holds none.
+#[cfg(not(feature = "one-time-ivk"))]
+fn verify_no_one_time_ivk_state(conn: &rusqlite::Connection) -> Result<(), WalletMigrationError> {
+    let migrated: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+         WHERE type = 'table' AND name = 'ironwood_one_time_spend_retention')",
+        [],
+        |row| row.get(0),
+    )?;
+    if migrated && super::holds_one_time_ivk_state(conn)? {
+        Err(WalletMigrationError::OneTimeIvksNotEnabled)
+    } else {
+        Ok(())
+    }
+}
+
+/// [`verify_no_one_time_ivk_state`] as a rusqlite error, so a build without `one-time-ivk`
+/// refuses such a database even if it never migrates it: at `WalletDb::for_path`, and in
+/// the low-level writes that record scanned blocks, prune tracked nullifiers or retire
+/// transaction retrieval, which every handle's block and transaction storage reaches.
+#[cfg(not(feature = "one-time-ivk"))]
+pub(crate) fn refuse_one_time_ivk_state(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    verify_no_one_time_ivk_state(conn).map_err(|e| match e {
+        WalletMigrationError::DbError(e) => e,
+        e => rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+            Some(e.to_string()),
+        ),
+    })
 }
 
 /// Verify that the sqlite version in use supports the features required by this library.
@@ -891,8 +941,15 @@ mod tests {
             db::TABLE_IRONWOOD_ENHANCE_OUTGOING_QUEUE,
             db::TABLE_IRONWOOD_ENHANCE_ROUTING,
             db::TABLE_IRONWOOD_MEMO_RETRIEVAL_QUEUE,
+            db::TABLE_IRONWOOD_NULLIFIER_SCAN_BLOCKS,
+            db::TABLE_IRONWOOD_ONE_TIME_FRESH_ACCOUNTS,
+            db::TABLE_IRONWOOD_ONE_TIME_OPERATIONS,
+            db::TABLE_IRONWOOD_ONE_TIME_PAYMENT_RECOVERY,
+            db::TABLE_IRONWOOD_ONE_TIME_SPEND_RETENTION,
+            db::TABLE_IRONWOOD_ONE_TIME_SWEEPS,
             db::TABLE_IRONWOOD_RECEIVED_NOTE_SPENDS,
             db::TABLE_IRONWOOD_RECEIVED_NOTES,
+            db::TABLE_IRONWOOD_RECEIVING_KEYS,
             db::TABLE_IRONWOOD_TREE_CAP,
             db::TABLE_IRONWOOD_TREE_CHECKPOINT_MARKS_REMOVED,
             db::TABLE_IRONWOOD_TREE_CHECKPOINTS,
@@ -968,12 +1025,17 @@ mod tests {
             db::INDEX_ADDRESSES_INDICES,
             db::INDEX_ADDRESSES_PUBKEYS,
             db::INDEX_ADDRESSES_T_INDICES,
+            db::INDEX_IRONWOOD_ONE_TIME_OPERATIONS_KEY,
+            db::INDEX_IRONWOOD_ONE_TIME_SWEEPS_DUE,
             db::INDEX_IRONWOOD_RNS_NOTE,
             db::INDEX_IRONWOOD_RNS_TX,
             db::INDEX_IRONWOOD_RECEIVED_NOTES_ACCOUNT,
             db::INDEX_IRONWOOD_RECEIVED_NOTES_ADDRESS,
+            db::INDEX_IRONWOOD_RECEIVED_NOTES_RECEIVING_KEY,
             db::INDEX_IRONWOOD_RECEIVED_NOTES_TX,
             db::INDEX_IRONWOOD_RECEIVED_NOTES_WITNESS_STABILIZED,
+            db::INDEX_IRONWOOD_RECEIVING_KEYS_ACCOUNT_RECEIVER,
+            db::INDEX_IRONWOOD_RECEIVING_KEYS_SCANNING,
             db::INDEX_NF_MAP_LOCATOR_IDX,
             db::INDEX_ORCHARD_RNS_NOTE,
             db::INDEX_ORCHARD_RNS_TX,
@@ -1153,6 +1215,166 @@ mod tests {
             .with_external_migrations(vec![Box::new(External)])
             .init_or_migrate(&mut db)
             .unwrap();
+    }
+
+    /// A build without `one-time-ivk` opens a database without one-time IVK state and
+    /// refuses one with it, whether opened by path or migrated; a `one-time-ivk` build opens
+    /// both.
+    #[test]
+    fn one_time_ivk_state_needs_a_one_time_ivk_build() {
+        use super::{WalletMigrationError, WalletMigrator};
+        use schemerz::MigratorError;
+
+        let data_file = NamedTempFile::new().unwrap();
+        let open = || {
+            WalletDb::for_path(
+                data_file.path(),
+                Network::TestNetwork,
+                test_clock(),
+                test_rng(),
+            )
+        };
+        let mut db = open().unwrap();
+        WalletMigrator::new().init_or_migrate(&mut db).unwrap();
+        open().unwrap();
+        db.conn
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO ironwood_one_time_spend_retention (account_id) VALUES (1);",
+            )
+            .unwrap();
+        let reopened = open();
+        let migrated = WalletMigrator::new().init_or_migrate(&mut db);
+        if cfg!(feature = "one-time-ivk") {
+            reopened.unwrap();
+            migrated.unwrap();
+        } else {
+            let refusal = WalletMigrationError::OneTimeIvksNotEnabled.to_string();
+            assert!(matches!(
+                reopened,
+                Err(rusqlite::Error::SqliteFailure(_, Some(message))) if message == refusal
+            ));
+            assert!(matches!(
+                migrated,
+                Err(MigratorError::Adapter(
+                    WalletMigrationError::OneTimeIvksNotEnabled
+                ))
+            ));
+        }
+    }
+
+    /// Without `one-time-ivk`, a caller-owned transaction handle cannot record scanned
+    /// blocks or retire transaction retrieval over one-time IVK state, through `WalletWrite`
+    /// or the low-level API, and the retrieval request survives.
+    #[cfg(not(feature = "one-time-ivk"))]
+    #[test]
+    fn caller_owned_transactions_refuse_one_time_ivk_state() {
+        use std::collections::HashMap;
+
+        use super::{WalletMigrationError, WalletMigrator};
+        use crate::{SqlTransaction, error::SqliteClientError};
+        use zcash_client_backend::{
+            data_api::{
+                WalletWrite,
+                ll::{LowLevelWalletWrite, wallet as ll},
+            },
+            decrypt_transaction,
+        };
+        use zcash_primitives::{block::BlockHash, transaction::Authorized};
+
+        let data_file = NamedTempFile::new().unwrap();
+        let mut db = WalletDb::for_path(
+            data_file.path(),
+            Network::TestNetwork,
+            test_clock(),
+            test_rng(),
+        )
+        .unwrap();
+        WalletMigrator::new().init_or_migrate(&mut db).unwrap();
+        db.conn
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO ironwood_one_time_spend_retention (account_id) VALUES (1);",
+            )
+            .unwrap();
+        let height = BlockHeight::from(1_000_000);
+        // A tip lets `WalletWrite::store_decrypted_tx` reach its storage.
+        db.update_chain_tip(height).unwrap();
+        let tx = TransactionData::<Authorized>::from_parts(
+            TxVersion::V5,
+            BranchId::for_height(&Network::TestNetwork, height),
+            0,
+            height + 100,
+            None,
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        let refusal = WalletMigrationError::OneTimeIvksNotEnabled.to_string();
+        let refused = |result: Result<(), SqliteClientError>| {
+            matches!(
+                result,
+                Err(SqliteClientError::DbError(rusqlite::Error::SqliteFailure(_, Some(m))))
+                    if m == refusal
+            )
+        };
+        let owned = db.conn.transaction().unwrap();
+        crate::wallet::queue_tx_retrieval(&owned, std::iter::once(tx.txid()), None).unwrap();
+        let mut handle = WalletDb::from_connection(
+            SqlTransaction::new(&owned),
+            Network::TestNetwork,
+            test_clock(),
+            test_rng(),
+        );
+        let decrypted = || {
+            decrypt_transaction(
+                &Network::TestNetwork,
+                Some(height),
+                Some(height),
+                &tx,
+                &HashMap::new(),
+            )
+        };
+        assert!(refused(handle.store_decrypted_tx(decrypted())));
+        assert!(refused(ll::store_decrypted_tx(
+            &mut handle,
+            &Network::TestNetwork,
+            #[cfg(feature = "transparent-inputs")]
+            crate::GapLimits::default(),
+            height,
+            decrypted(),
+        )));
+        assert!(refused(handle.put_block_meta(
+            height,
+            BlockHash([0; 32]),
+            0,
+            0,
+            0,
+            #[cfg(feature = "orchard")]
+            0,
+            #[cfg(feature = "orchard")]
+            0,
+            #[cfg(feature = "orchard")]
+            0,
+            #[cfg(feature = "orchard")]
+            0,
+        )));
+        assert!(refused(
+            handle.notify_scan_complete(height..height + 1, &[])
+        ));
+        drop(handle);
+        owned.commit().unwrap();
+        let queued: bool = db
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue WHERE txid = ?1)",
+                [tx.txid().as_ref()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(queued);
     }
 
     #[test]

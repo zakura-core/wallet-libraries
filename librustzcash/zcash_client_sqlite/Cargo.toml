@@ -70,6 +70,7 @@ static_assertions.workspace = true
 # - Shielded protocols
 orchard = { workspace = true, optional = true }
 sapling.workspace = true
+zakura-one-time-ivk = { version = "=0.0.1-rc0", path = "../../zakura/one-time-ivk", optional = true }
 
 # - Transparent protocol
 secp256k1 = { workspace = true, optional = true }
@@ -94,6 +95,7 @@ pczt.workspace = true
 rand_core.workspace = true
 rand_distr.workspace = true
 rand.workspace = true
+zcash_note_encryption = { workspace = true, optional = true }
 
 ambassador = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
@@ -144,6 +146,17 @@ orchard = [
     "pczt/io-finalizer",
     "pczt/spend-finalizer",
     "pczt/tx-extractor",
+]
+
+## Enables one-time IVKs, derived Ironwood receiving keys (see `wallet::one_time_ivk`).
+##
+## The schema is the same in every build. A build without this feature refuses a database
+## holding one-time IVK state (`WalletMigrationError::OneTimeIvksNotEnabled`).
+one-time-ivk = [
+    "orchard",
+    "dep:zakura-one-time-ivk",
+    "dep:zcash_note_encryption",
+    "zcash_client_backend/one-time-ivk",
 ]
 
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.

@@ -11,4 +11,5 @@
   for restored keys) and `COMPLETION_LIMIT_SECS` (30 days), and the
   provider-neutral `Observation`, `OperationStatus`, and `ReceiptExpectation`
   that an app's provider adapter produces. Scheduling and receipt accounting
-  are left to the wallet's store.
+  are left to the wallet's store, such as `zakura-client-sqlite` with
+  `one-time-ivk`.

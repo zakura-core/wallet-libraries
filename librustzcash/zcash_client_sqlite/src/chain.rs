@@ -548,4 +548,126 @@ mod tests {
     fn scan_cached_blocks_detects_spends_out_of_order_orchard() {
         testing::pool::scan_cached_blocks_detects_spends_out_of_order::<OrchardPoolTester>()
     }
+
+    /// A build without `one-time-ivk` refuses to record scanned blocks over one-time IVK
+    /// state, leaving the scanned chain unchanged.
+    #[test]
+    #[cfg(not(feature = "one-time-ivk"))]
+    fn scanning_without_the_feature_refuses_one_time_ivk_state() {
+        use crate::error::SqliteClientError;
+        use zcash_client_backend::data_api::{
+            WalletRead,
+            chain::error::Error,
+            testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(testing::db::TestDbFactory::default())
+            .with_block_cache(testing::BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let (h1, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(5),
+        );
+        st.scan_cached_blocks(h1, 1);
+        st.wallet()
+            .conn()
+            .execute_batch(
+                "INSERT INTO ironwood_one_time_spend_retention (account_id)
+                 SELECT id FROM accounts",
+            )
+            .unwrap();
+        let (h2, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(5),
+        );
+        assert!(matches!(
+            st.try_scan_cached_blocks(h2, 1),
+            Err(Error::Wallet(SqliteClientError::DbError(
+                rusqlite::Error::SqliteFailure(_, Some(_))
+            )))
+        ));
+        let scanned = st.wallet().block_fully_scanned().unwrap();
+        assert_eq!(scanned.map(|b| b.block_height()), Some(h1));
+    }
+
+    /// Blocks scanned without the wallet's open one-time keys are refused, leaving the
+    /// scanned chain unchanged. Inactive and closed keys do not block them.
+    #[test]
+    #[cfg(feature = "one-time-ivk")]
+    fn scanning_without_one_time_ivks_refuses_open_one_time_keys() {
+        use crate::{error::SqliteClientError, testing::db::TestDb};
+        use zcash_client_backend::data_api::{
+            WalletRead,
+            chain::error::Error,
+            testing::{AddressType, TestBuilder, TestState, pool::ShieldedPoolTester},
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(testing::db::TestDbFactory::default())
+            .with_block_cache(testing::BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let (h1, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(5),
+        );
+        st.scan_cached_blocks(h1, 1);
+        st.wallet()
+            .conn()
+            .execute_batch(
+                "INSERT INTO ironwood_receiving_keys
+                 (account_id, purpose, key_index, receiver, scan_from, advances_allocation, active_from)
+                 SELECT id, 1, zeroblob(8), zeroblob(43), 0, 1, 0 FROM accounts LIMIT 1;",
+            )
+            .unwrap();
+        let (h2, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(5),
+        );
+        let scanned = |st: &TestState<_, TestDb, _>| {
+            let blocks: i64 = st
+                .wallet()
+                .conn()
+                .query_row("SELECT COUNT(*) FROM blocks", [], |r| r.get(0))
+                .unwrap();
+            let fully_scanned = st.wallet().block_fully_scanned().unwrap();
+            (
+                blocks,
+                fully_scanned.map(|b| (b.block_height(), b.block_hash())),
+            )
+        };
+        let before = scanned(&st);
+        assert!(matches!(
+            st.try_scan_cached_blocks(h2, 1),
+            Err(Error::Wallet(SqliteClientError::OneTimeIvksNotUsed))
+        ));
+        assert_eq!(scanned(&st), before);
+        st.wallet()
+            .conn()
+            .execute_batch("UPDATE ironwood_receiving_keys SET active_from = NULL")
+            .unwrap();
+        st.scan_cached_blocks(h2, 1);
+        st.wallet()
+            .conn()
+            .execute_batch("UPDATE ironwood_receiving_keys SET active_from = 0, closed_at = 1")
+            .unwrap();
+        let (h3, _, _) = st.generate_next_block(
+            &fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(5),
+        );
+        st.scan_cached_blocks(h3, 1);
+    }
 }

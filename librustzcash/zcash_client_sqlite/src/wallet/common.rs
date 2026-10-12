@@ -78,6 +78,9 @@ const IRONWOOD_TABLE_CONSTANTS: TableConstants = TableConstants {
     table_prefix: IRONWOOD_TABLES_PREFIX,
     output_index_col: "action_index",
     output_count_col: "ironwood_action_count",
+    #[cfg(feature = "one-time-ivk")]
+    note_reconstruction_cols: "rho, rseed, note_version, receiving_key_id",
+    #[cfg(not(feature = "one-time-ivk"))]
     note_reconstruction_cols: "rho, rseed, note_version",
     shard_height: IRONWOOD_SHARD_HEIGHT,
 };

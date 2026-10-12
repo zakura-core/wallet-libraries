@@ -2073,7 +2073,7 @@ fn scan_persists_compact_fields_and_rescan_preserves_them() {
         incoming.position(),
         None,
         after.account_id,
-        Some(after.scope),
+        Some(zip32::Scope::External),
     );
     let tx = st.wallet().conn().unchecked_transaction().unwrap();
     super::super::orchard::put_received_note(

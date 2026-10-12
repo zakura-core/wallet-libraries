@@ -22,7 +22,7 @@ python3 scripts/dev.py verify
 | `orchard` | Backend + SQLite; `orchard,test-dependencies` |
 | `transparent` | Backend + SQLite; `orchard,transparent-inputs,test-dependencies,unstable` |
 | `transparent-import` | Backend + SQLite; transparent features plus `transparent-key-import` |
-| `one-time-ivk` | Backend; `one-time-ivk,test-dependencies` |
+| `one-time-ivk` | Backend + SQLite; `one-time-ivk,test-dependencies` |
 | `sqlite` | SQLite; `test-dependencies`, without Orchard |
 | `enhance-wallet` | Enhance PIR; `wallet` |
 | `enhance` | Enhance PIR; default features |

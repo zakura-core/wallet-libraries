@@ -71,10 +71,15 @@ use secrecy::{ExposeSecret, SecretVec};
 use zcash_client_backend::{
     data_api::{
         Account as _, AccountBirthday, AccountPurpose, WalletRead, WalletWrite, Zip32Derivation,
-        chain::ChainState, wallet::decrypt_and_store_transaction,
+        chain::ChainState,
     },
     wallet::{Exposure, TransparentAddressMetadata},
 };
+// The keys `import_transactions` trial-decrypts with beyond the account viewing keys.
+#[cfg(not(feature = "one-time-ivk"))]
+use zcash_client_backend::data_api::WalletRead as TransactionKeys;
+#[cfg(feature = "one-time-ivk")]
+use zcash_client_backend::data_api::one_time_ivk::OneTimeIvkRead as TransactionKeys;
 use zcash_keys::{
     encoding::AddressCodec,
     keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
@@ -1289,14 +1294,15 @@ where
 /// transactions, at its expiry height when known, and otherwise at a height
 /// just past the highest mined height in the document, falling back to the
 /// document's export height), verified against its recorded transaction id,
-/// and trial-decrypted against the wallet's tracked viewing keys.
+/// and trial-decrypted against the wallet's tracked viewing keys, including its
+/// one-time keys with `one-time-ivk`, which an initialized database may already
+/// hold.
 ///
-/// [`decrypt_and_store_transaction`] stores a transaction only when trial
-/// decryption or transparent-output matching shows wallet involvement, so the
-/// count of stored transactions is determined by querying for each transaction
-/// id after the attempt. Storage additionally requires a known chain tip, which
-/// only an imported account establishes; if none was imported, every
-/// transaction is deferred to the post-import rescan.
+/// A transaction is stored only when trial decryption or transparent-output
+/// matching shows wallet involvement, so the count of stored transactions is
+/// determined by querying for each transaction id after the attempt. Storage additionally requires a
+/// known chain tip, which only an imported account establishes; if none was
+/// imported, every transaction is deferred to the post-import rescan.
 fn import_transactions<DbT, P, S>(
     wdb: &mut DbT,
     params: &P,
@@ -1304,7 +1310,9 @@ fn import_transactions<DbT, P, S>(
     report: &mut ZewifImportReport,
 ) -> Result<(), ZewifImportError<S>>
 where
-    DbT: WalletRead<AccountId = AccountUuid, Error = SqliteClientError> + WalletWrite,
+    DbT: WalletRead<AccountId = AccountUuid, Error = SqliteClientError>
+        + WalletWrite
+        + TransactionKeys,
     P: consensus::Parameters,
     S: std::error::Error,
 {
@@ -1372,12 +1380,25 @@ where
             });
         }
 
-        decrypt_and_store_transaction(params, wdb, &parsed, mined_height)
-            .map_err(ZewifImportError::Wallet)?;
+        #[cfg(feature = "one-time-ivk")]
+        zcash_client_backend::data_api::wallet::decrypt_and_store_transaction_with_one_time_ivks(
+            params,
+            wdb,
+            &parsed,
+            mined_height,
+        )
+        .map_err(ZewifImportError::Wallet)?;
+        #[cfg(not(feature = "one-time-ivk"))]
+        zcash_client_backend::data_api::wallet::decrypt_and_store_transaction(
+            params,
+            wdb,
+            &parsed,
+            mined_height,
+        )
+        .map_err(ZewifImportError::Wallet)?;
 
-        // `decrypt_and_store_transaction` persists the transaction only when it
-        // is relevant to the wallet, so its presence afterward determines the
-        // stored/deferred tally.
+        // The transaction is persisted only when it is relevant to the wallet,
+        // so its presence afterward determines the stored/deferred tally.
         let stored = wdb
             .get_transaction(recorded_txid)
             .map_err(ZewifImportError::Wallet)?

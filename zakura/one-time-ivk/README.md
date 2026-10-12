@@ -23,6 +23,10 @@ issuing live addresses.
 The wallet owns reservation, persistence, coverage, lifecycle, and note selection.
 There is no alternate balance store in this crate.
 
+The SQLite backend implements this contract with its `orchard` feature: durable
+key registration, scanning, completion, and restore sweeps. Its rustdoc, starting
+at `zcash_client_sqlite::wallet::one_time_ivk`, documents the calls a wallet makes.
+
 Software PCZT signing of one-time-key notes works through the same builder.
 Hardware signers need firmware qualification before one-time keys are enabled for
 hardware accounts.
@@ -81,6 +85,7 @@ From the workspace root:
 
 ```sh
 python3 scripts/dev.py test --config default -p zakura-one-time-ivk
+python3 scripts/dev.py test --config one-time-ivk -p zakura-client-sqlite one_time_ivk
 ```
 
 Regenerate the KDF vectors from this directory with
