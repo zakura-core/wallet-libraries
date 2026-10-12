@@ -15,7 +15,7 @@ pub(super) fn retain_spend_history<P: Parameters>(
 ) -> Result<(), SqliteClientError> {
     let (id, _) = account_key(conn, params, account)?;
     conn.execute(
-        "INSERT OR IGNORE INTO ironwood_dynamic_spend_retention
+        "INSERT OR IGNORE INTO ironwood_one_time_spend_retention
             (account_id, nullifier_retention_height)
          SELECT id, MAX(birthday_height, ?2) FROM accounts WHERE id = ?1",
         params![
@@ -29,7 +29,7 @@ pub(super) fn retain_spend_history<P: Parameters>(
     Ok(())
 }
 
-/// Implements `DynamicIvkWrite::finish_dynamic_nullifier_recovery` with `lookahead`
+/// Implements `OneTimeIvkWrite::finish_one_time_nullifier_recovery` with `lookahead`
 /// incoming keys.
 pub(crate) fn finish_nullifier_recovery<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
@@ -41,7 +41,7 @@ pub(crate) fn finish_nullifier_recovery<P: Parameters>(
 ) -> Result<bool, SqliteClientError> {
     let (id, _) = account_key(conn, params, account)?;
     let enabled: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_dynamic_spend_retention WHERE account_id = ?1)",
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_spend_retention WHERE account_id = ?1)",
         [id.0],
         |r| r.get(0),
     )?;
@@ -61,10 +61,10 @@ pub(crate) fn finish_nullifier_recovery<P: Parameters>(
     // waits for a replay instead (see `queue_spend_history`).
     let pending: Option<u32> = conn.query_row(
         "SELECT MIN(h) FROM (
-            SELECT k.scan_from AS h FROM ironwood_dynamic_sweeps s
+            SELECT k.scan_from AS h FROM ironwood_one_time_sweeps s
                 JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
                 WHERE k.account_id = ?1 AND s.done_height IS NULL
-            UNION ALL SELECT p.height FROM ironwood_dynamic_payment_recovery p
+            UNION ALL SELECT p.height FROM ironwood_one_time_payment_recovery p
                 JOIN ironwood_receiving_keys k ON k.id = p.receiving_key_id
                 WHERE k.account_id = ?1)",
         [id.0],
@@ -73,7 +73,7 @@ pub(crate) fn finish_nullifier_recovery<P: Parameters>(
     let next = pending.unwrap_or(u32::from(through.height).saturating_add(1));
     // Raising the floor ends any replay below it.
     conn.execute(
-        "UPDATE ironwood_dynamic_spend_retention SET nullifier_retention_height = ?2,
+        "UPDATE ironwood_one_time_spend_retention SET nullifier_retention_height = ?2,
             replay_through = CASE WHEN ?2 > nullifier_retention_height
                 THEN NULL ELSE replay_through END
          WHERE account_id = ?1",
@@ -101,14 +101,14 @@ pub(super) fn queue_spend_history<P: Parameters>(
         return Err(corrupt("empty spend recovery interval"));
     }
     conn.execute(
-        "INSERT INTO ironwood_dynamic_spend_retention (account_id, nullifier_retention_height)
+        "INSERT INTO ironwood_one_time_spend_retention (account_id, nullifier_retention_height)
          VALUES (?1, ?2) ON CONFLICT (account_id) DO UPDATE SET
              nullifier_retention_height =
                  MIN(nullifier_retention_height, excluded.nullifier_retention_height)",
         params![id.0, u32::from(start)],
     )?;
     let previous: Option<u32> = conn.query_row(
-        "SELECT replay_through FROM ironwood_dynamic_spend_retention WHERE account_id = ?1",
+        "SELECT replay_through FROM ironwood_one_time_spend_retention WHERE account_id = ?1",
         [id.0],
         |r| r.get(0),
     )?;
@@ -120,7 +120,7 @@ pub(super) fn queue_spend_history<P: Parameters>(
         .unwrap_or(start)
         .max(start);
     conn.execute(
-        "UPDATE ironwood_dynamic_spend_retention SET replay_through = ?2 WHERE account_id = ?1",
+        "UPDATE ironwood_one_time_spend_retention SET replay_through = ?2 WHERE account_id = ?1",
         params![id.0, u32::from(through)],
     )?;
     queue_rescan(conn, from..BlockHeight::from(end))

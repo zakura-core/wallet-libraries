@@ -5,14 +5,14 @@ use zcash_primitives::transaction::TxId;
 /// Pays receive key 8 at the tip before registering it, so scanning misses the note,
 /// then watches the key from the next block and queues the payment. Also returns the
 /// tip and the payment's path there.
-pub(super) fn fixture() -> (State, DynamicKey, PendingPayment, ChainPoint, MerklePath) {
+pub(super) fn fixture() -> (State, OneTimeKey, PendingPayment, ChainPoint, MerklePath) {
     fixture_in(ironwood_wallet())
 }
 
 /// [`fixture`] in `st`, an [`ironwood_wallet`] with no blocks.
 pub(super) fn fixture_in(
     mut st: State,
-) -> (State, DynamicKey, PendingPayment, ChainPoint, MerklePath) {
+) -> (State, OneTimeKey, PendingPayment, ChainPoint, MerklePath) {
     let account = st.test_account().unwrap().id();
     let id = KeyId::new(Purpose::Receive, 8);
     let candidate = pay_candidate(&mut st, id);
@@ -80,7 +80,7 @@ fn directory_payment_applies_unscanned_key_note_atomically_and_reopens() {
         .unwrap();
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].note().value().inner(), 100_000);
-    assert_eq!(notes[0].dynamic_key_id(), Some(key.key_id()));
+    assert_eq!(notes[0].one_time_key_id(), Some(key.key_id()));
     assert!(pending(st.wallet().db(), account, key.key_id()).is_empty());
     // Nothing binds the directory's memo to the chain, so it is not stored.
     let stored_memo: Option<Vec<u8>> = st
@@ -117,7 +117,7 @@ fn directory_payment_applies_unscanned_key_note_atomically_and_reopens() {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(40_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(later, 1);
+    st.scan_cached_blocks_with_one_time_ivks(later, 1);
     let tx = st.wallet_mut().conn_mut().transaction().unwrap();
     assert!(
         crate::ironwood_tree(&tx)
@@ -167,11 +167,11 @@ fn witness_at(st: &State, position: u32) -> MerklePath {
     witness.unwrap().path().unwrap().into()
 }
 
-/// A restore sweep credits a dynamic-key note without a memo, and private memo retrieval
-/// skips it (see `wallet::dynamic_ivk`); only its full transaction stores one.
+/// A restore sweep credits a one-time-key note without a memo, and private memo retrieval
+/// skips it (see `wallet::one_time_ivk`); only its full transaction stores one.
 #[test]
-fn a_restored_dynamic_note_stores_no_memo() {
-    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction_with_dynamic_ivks;
+fn a_restored_one_time_note_stores_no_memo() {
+    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction_with_one_time_ivks;
     use zcash_protocol::memo::MemoBytes;
     let mut st = ironwood_wallet();
     let network = *st.network();
@@ -185,7 +185,7 @@ fn a_restored_dynamic_note_stores_no_memo() {
     let memo = MemoBytes::from_bytes(b"the payment's memo").unwrap();
     let tx = external_payment(fvk.address_at(0u32, Scope::External), &memo);
     let (height, _) = st.generate_next_block_from_tx(1, &tx);
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
     let candidate = candidate_at(&st, height, &fvk);
     let through = tip(&st);
     let path = witness_at(&st, candidate.position);
@@ -216,7 +216,7 @@ fn a_restored_dynamic_note_stores_no_memo() {
         .unwrap();
     crate::wallet::enhance_pir::queue_unsupported_memos(st.wallet().conn(), None).unwrap();
     assert_eq!(stored(&st), (None, 50_000, false));
-    decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &tx, Some(height))
+    decrypt_and_store_transaction_with_one_time_ivks(&network, st.wallet_mut(), &tx, Some(height))
         .unwrap();
     assert_eq!(stored(&st), (Some(memo.as_slice().to_vec()), 50_000, false));
 }
@@ -273,7 +273,7 @@ fn a_claim_contradicting_a_stored_raw_transaction_is_rejected() {
         let memo = zcash_protocol::memo::MemoBytes::empty();
         let paid = external_payment(fvk.address_at(0u32, Scope::External), &memo);
         let (height, _) = st.generate_next_block_from_tx(1, &paid);
-        st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+        st.scan_cached_blocks_with_one_time_ivks(height, 1);
         let genuine = candidate_at(&st, height, &fvk);
         let through = tip(&st);
         let path = witness_at(&st, genuine.position);
@@ -369,7 +369,7 @@ fn a_directory_payment_leaves_an_unknown_transaction_to_enhancement() {
         let paid = external_payment_with(fvk.address_at(0u32, Scope::External), &memo, vec![mixed]);
         assert!(paid.transparent_bundle().is_some());
         let (height, _) = st.generate_next_block_from_tx(1, &paid);
-        st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+        st.scan_cached_blocks_with_one_time_ivks(height, 1);
         let candidate = candidate_at(&st, height, &fvk);
         let through = tip(&st);
         let path = witness_at(&st, candidate.position);
@@ -422,7 +422,7 @@ fn directory_payment_imports_an_already_spent_note_without_crediting_it() {
             to,
             Zatoshis::const_from_u64(20_000),
         );
-        st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+        st.scan_cached_blocks_with_one_time_ivks(height, 1);
         let through = tip(&st);
         let proof = first_leaf_witness(&st);
         if pruned {
@@ -455,7 +455,7 @@ fn directory_payment_imports_an_already_spent_note_without_crediting_it() {
             )
             .unwrap();
             *st.wallet_mut().db_mut() = reopened;
-            st.scan_cached_blocks_with_dynamic_ivks(candidate.height, 2);
+            st.scan_cached_blocks_with_one_time_ivks(candidate.height, 2);
         }
 
         assert_eq!(
@@ -517,7 +517,7 @@ fn directory_payment_reconciles_an_unmined_spending_transaction() {
         Address::Unified(UnifiedAddress::from_receivers(Some(external), None, None).unwrap()),
         Zatoshis::const_from_u64(20_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
     let through = tip(&st);
     let proof = first_leaf_witness(&st);
     let data: Vec<u8> = st
@@ -579,7 +579,7 @@ fn directory_payment_reconciles_an_unmined_spending_transaction() {
             None
         )
     );
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(3);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(3);
     let summary = st.get_wallet_summary(ConfirmationsPolicy::MIN).unwrap();
     let balance = summary.account_balances().get(&account).unwrap();
     assert_eq!(balance.ironwood_balance().total(), Zatoshis::ZERO);
@@ -616,7 +616,7 @@ fn directory_payment_keeps_a_scanned_spend_without_a_map_entry() {
         Address::Unified(UnifiedAddress::from_receivers(Some(external), None, None).unwrap()),
         Zatoshis::const_from_u64(20_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
     let mapped: u64 = st
         .wallet()
         .conn()
@@ -685,7 +685,7 @@ fn privately_imported_note_spends_into_ordinary_internal_change() {
     .unwrap();
     for _ in 0..5 {
         let (h, _) = st.generate_empty_block();
-        st.scan_cached_blocks_with_dynamic_ivks(h, 1);
+        st.scan_cached_blocks_with_one_time_ivks(h, 1);
     }
     let recipient =
         FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap())
@@ -724,14 +724,14 @@ fn privately_imported_note_spends_into_ordinary_internal_change() {
         )
         .unwrap();
     let (h, _) = st.generate_next_block_including(created[0]);
-    st.scan_cached_blocks_with_dynamic_ivks(h, 1);
+    st.scan_cached_blocks_with_one_time_ivks(h, 1);
     let notes = st
         .wallet()
         .db()
         .get_unspent_ironwood_notes_at_historical_height(account.id(), h)
         .unwrap();
     assert_eq!(notes.len(), 1);
-    assert!(notes[0].dynamic_key_id().is_none());
+    assert!(notes[0].one_time_key_id().is_none());
     assert_eq!(
         notes[0].note().recipient(),
         FullViewingKey::from(account.usk().orchard()).address_at(0u32, Scope::Internal)
@@ -747,7 +747,7 @@ fn private_payment_uses_its_witness_anchor_and_survives_a_rewind() {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(10_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
     let through = tip(&st);
     // The newer block changed the root. The supplied path belongs to the older accepted checkpoint.
     assert_eq!(
@@ -780,7 +780,7 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
     // Start from the directory's report alone, not a queued candidate.
     st.wallet()
         .conn()
-        .execute("DELETE FROM ironwood_dynamic_payment_recovery", [])
+        .execute("DELETE FROM ironwood_one_time_payment_recovery", [])
         .unwrap();
     let (payment, note_data) = directory_answer(&candidate);
     let db = st.wallet_mut().db_mut();
@@ -812,11 +812,11 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
             .unwrap(),
         [0]
     );
-    db.begin_dynamic_sweep_attempt(account, key, 1_700_000_000, false)
+    db.begin_one_time_sweep_attempt(account, key, 1_700_000_000, false)
         .unwrap();
     let backoff = |conn: &rusqlite::Connection| -> (u32, i64) {
         conn.query_row(
-            "SELECT attempts, next_attempt_at FROM ironwood_dynamic_sweeps",
+            "SELECT attempts, next_attempt_at FROM ironwood_one_time_sweeps",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -874,7 +874,7 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
     );
 
     assert_eq!(
-        db.apply_dynamic_sweep(account, key, through, anchor, WATCHED, |_, _| None)
+        db.apply_one_time_sweep(account, key, through, anchor, WATCHED, |_, _| None)
             .unwrap()
             .unwrap(),
         PaymentApplication::AwaitingWitness
@@ -884,13 +884,13 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
     let mut invalid = siblings;
     invalid[3] = [0xff; 32];
     assert_eq!(
-        db.apply_dynamic_sweep(account, key, through, anchor, WATCHED, |_, _| Some(invalid))
+        db.apply_one_time_sweep(account, key, through, anchor, WATCHED, |_, _| Some(invalid))
             .unwrap()
             .unwrap(),
         PaymentApplication::AwaitingWitness
     );
     assert_eq!(
-        db.apply_dynamic_sweep(account, key, through, anchor, WATCHED, |position, cmx| {
+        db.apply_one_time_sweep(account, key, through, anchor, WATCHED, |position, cmx| {
             (position == candidate.position && cmx == candidate.encrypted_note.commitment())
                 .then_some(siblings)
         })
@@ -904,11 +904,11 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
             .get_unspent_ironwood_notes_at_historical_height(account, through.height)
             .unwrap()
             .iter()
-            .any(|n| n.dynamic_key_id() == Some(key))
+            .any(|n| n.one_time_key_id() == Some(key))
     );
     let db = st.wallet_mut().db_mut();
     assert!(
-        !db.dynamic_history_pending(account, through.height + 1)
+        !db.one_time_history_pending(account, through.height + 1)
             .unwrap()
     );
     assert!(
@@ -978,7 +978,7 @@ fn scanning_moves_a_mislabeled_import_to_its_transaction() {
     // Rescanning the payment's block with the key finds the same nullifier, which
     // previously failed the scan on the unique constraint.
     activate_key(st.wallet_mut().db_mut(), account, id, candidate.height);
-    st.scan_cached_blocks_with_dynamic_ivks(candidate.height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(candidate.height, 1);
     assert_eq!(note_txids(&st), vec![candidate.txid]);
     assert!(!has_transaction(&st, forged.txid));
     assert_eq!(unspent_keys(&st, through.height), vec![Some(id)]);
@@ -1053,13 +1053,13 @@ fn a_seen_hit_outlives_deferred_payment_work_and_a_corrected_lookup() {
         }
         // Publication A's seen set holds the receiver, and its payment work defers.
         let db = st.wallet_mut().db_mut();
-        db.begin_dynamic_sweep_attempt(account, key, 1_700_000_000, true)
+        db.begin_one_time_sweep_attempt(account, key, 1_700_000_000, true)
             .unwrap();
         assert_eq!(seen(&st), (true, true));
         let witness = |_, _| (deferral != AwaitingWitness).then_some(siblings);
         let db = st.wallet_mut().db_mut();
         assert_eq!(
-            db.apply_dynamic_sweep(account, key, through, through, WATCHED, witness)
+            db.apply_one_time_sweep(account, key, through, through, WATCHED, witness)
                 .unwrap(),
             Ok(deferral)
         );
@@ -1073,7 +1073,7 @@ fn a_seen_hit_outlives_deferred_payment_work_and_a_corrected_lookup() {
         *st.wallet_mut().db_mut() = reopened;
         // Publication B's sets miss the receiver and its lookup drops the candidate.
         let db = st.wallet_mut().db_mut();
-        db.begin_dynamic_sweep_attempt(account, key, 1_700_000_000, false)
+        db.begin_one_time_sweep_attempt(account, key, 1_700_000_000, false)
             .unwrap();
         assert!(
             db.queue_directory_lookup(account, key, through, &[], &BTreeMap::new())
@@ -1081,7 +1081,7 @@ fn a_seen_hit_outlives_deferred_payment_work_and_a_corrected_lookup() {
                 .unwrap()
         );
         assert_eq!(
-            db.apply_dynamic_sweep(account, key, through, through, WATCHED, |_, _| None)
+            db.apply_one_time_sweep(account, key, through, through, WATCHED, |_, _| None)
                 .unwrap(),
             Ok(PaymentApplication::Applied)
         );
@@ -1090,7 +1090,7 @@ fn a_seen_hit_outlives_deferred_payment_work_and_a_corrected_lookup() {
         let db = st.wallet_mut().db_mut();
         for index in 0..key.index() {
             let lower = watch(db, account, index, through.height + 1).key_id();
-            db.begin_dynamic_sweep_attempt(account, lower, 1_700_000_000, true)
+            db.begin_one_time_sweep_attempt(account, lower, 1_700_000_000, true)
                 .unwrap();
             finish_sweep(db, account, lower, through);
         }
@@ -1114,7 +1114,7 @@ fn a_corrected_answer_replaces_a_partially_queued_candidate() {
     let key = key.key_id();
     st.wallet()
         .conn()
-        .execute("DELETE FROM ironwood_dynamic_payment_recovery", [])
+        .execute("DELETE FROM ironwood_one_time_payment_recovery", [])
         .unwrap();
     let (right, data) = directory_answer(&candidate);
     // The first answer misstates the transaction index, and another payment whose note
@@ -1139,7 +1139,7 @@ fn a_corrected_answer_replaces_a_partially_queued_candidate() {
     let sweep = |db: &Db| -> (Option<u32>, Option<Vec<u8>>, Option<u32>) {
         db.conn
             .query_row(
-                "SELECT lookup_height, lookup_hash, done_height FROM ironwood_dynamic_sweeps
+                "SELECT lookup_height, lookup_hash, done_height FROM ironwood_one_time_sweeps
                  WHERE receiving_key_id = ?1",
                 [key_ref(&db.conn, account, key).unwrap()],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -1183,7 +1183,7 @@ fn a_payment_before_the_birthday_marks_its_index_used_and_finishes_the_sweep() {
     let account = st.test_account().unwrap().id();
     let id = key.key_id();
     // The payment must precede the birthday block, which the wallet has scanned.
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     let through = tip(&st);
     st.wallet()
         .conn()
@@ -1200,21 +1200,24 @@ fn a_payment_before_the_birthday_marks_its_index_used_and_finishes_the_sweep() {
     let mut wrong = siblings;
     wrong[0] = MerkleHashOrchard::empty_root(1.into()).to_bytes();
     assert_eq!(
-        db.apply_dynamic_sweep(account, id, through, through, WATCHED, |_, _| Some(wrong))
+        db.apply_one_time_sweep(account, id, through, through, WATCHED, |_, _| Some(wrong))
             .unwrap()
             .unwrap(),
         PaymentApplication::Rejected
     );
     queue_lookup(db, account, id, through, std::slice::from_ref(&candidate)).unwrap();
     assert_eq!(
-        db.apply_dynamic_sweep(account, id, through, through, WATCHED, |_, _| Some(
+        db.apply_one_time_sweep(account, id, through, through, WATCHED, |_, _| Some(
             siblings
         ))
         .unwrap()
         .unwrap(),
         PaymentApplication::Applied
     );
-    assert!(!db.dynamic_history_pending(account, through.height).unwrap());
+    assert!(
+        !db.one_time_history_pending(account, through.height)
+            .unwrap()
+    );
     assert!(pending(db, account, id).is_empty());
     assert!(unspent_keys(&st, through.height).is_empty());
     let (used, advances, paid): (bool, bool, bool) = st
@@ -1244,7 +1247,7 @@ fn a_later_payment_claimed_before_the_birthday_is_rejected() {
         [u32::from(candidate.height)],
     )
     .unwrap();
-    conn.execute("DELETE FROM ironwood_dynamic_payment_recovery", [])
+    conn.execute("DELETE FROM ironwood_one_time_payment_recovery", [])
         .unwrap();
     let height = candidate.height - 1;
     let forged = PendingPayment {
@@ -1258,7 +1261,7 @@ fn a_later_payment_claimed_before_the_birthday_is_rejected() {
     let db = st.wallet_mut().db_mut();
     queue_lookup(db, account, id, through, std::slice::from_ref(&forged)).unwrap();
     assert_eq!(
-        db.apply_dynamic_sweep(account, id, through, through, WATCHED, |_, _| Some(
+        db.apply_one_time_sweep(account, id, through, through, WATCHED, |_, _| Some(
             siblings
         ))
         .unwrap()

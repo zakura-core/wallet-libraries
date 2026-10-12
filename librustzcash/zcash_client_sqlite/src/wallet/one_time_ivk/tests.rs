@@ -8,16 +8,16 @@ use orchard::{
 };
 use prost::Message;
 use secrecy::{ExposeSecret, SecretVec};
-use zakura_dynamic_ivk::{
+use zakura_one_time_ivk::{
     lifecycle::{Observation, OperationStatus},
     recovery::EncryptedNote,
 };
 use zcash_client_backend::{
     data_api::{
         WalletRead, WalletWrite,
-        dynamic_ivk::{
-            DirectoryPayment, DiscoveryWork, DynamicIvkRead as _, DynamicIvkWrite as _,
-            MAX_PUBLICATION_LAG, PaymentApplication, SweepDeferral,
+        one_time_ivk::{
+            DirectoryPayment, DiscoveryWork, MAX_PUBLICATION_LAG, OneTimeIvkRead as _,
+            OneTimeIvkWrite as _, PaymentApplication, SweepDeferral,
         },
         testing::{AddressType, IronwoodFvk, TestBuilder, TestRng, TestState},
         transparent_ledger::ChainPoint,
@@ -32,7 +32,7 @@ use super::*;
 use crate::testing::db::{TestDb, TestDbFactory, test_clock, test_rng};
 use crate::util::testing::FixedClock;
 /// The module under test, whose submodule names the test modules shadow.
-use crate::wallet::dynamic_ivk as store;
+use crate::wallet::one_time_ivk as store;
 
 /// A test wallet with a block cache.
 type State = TestState<crate::testing::BlockCache, TestDb, LocalNetwork>;
@@ -72,7 +72,7 @@ fn ironwood_wallet() -> State {
 /// An Ironwood wallet scanned through one empty block, so it is at its tip.
 fn scanned_wallet() -> State {
     let mut st = ironwood_wallet();
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     st
 }
 
@@ -100,7 +100,7 @@ fn reserve(
     account: AccountUuid,
     purpose: Purpose,
     from: BlockHeight,
-) -> Policy<DynamicKey> {
+) -> Policy<OneTimeKey> {
     tx(db, |c, p| {
         reserve_next(c, p, account, purpose, from, Discovery::Scan, clock_now())
     })
@@ -112,12 +112,12 @@ pub(crate) fn reserve_key(
     account: AccountUuid,
     purpose: Purpose,
     from: BlockHeight,
-) -> DynamicKey {
+) -> OneTimeKey {
     reserve(db, account, purpose, from).unwrap().unwrap()
 }
 
 /// Registers incoming lookahead key `index` for a sweep, expecting payments from `from`.
-fn watch(db: &mut Db, account: AccountUuid, index: u64, from: BlockHeight) -> DynamicKey {
+fn watch(db: &mut Db, account: AccountUuid, index: u64, from: BlockHeight) -> OneTimeKey {
     tx(db, |c, p| {
         store::recovery::watch_receive_key(c, p, account, index, from, clock_now())
     })
@@ -126,7 +126,7 @@ fn watch(db: &mut Db, account: AccountUuid, index: u64, from: BlockHeight) -> Dy
 
 /// Registers `key` as recovered evidence would, from `from`. A key this wallet never
 /// scanned is queued for a receiver-directory sweep.
-fn recover(db: &mut Db, account: AccountUuid, key: KeyId, from: BlockHeight) -> DynamicKey {
+fn recover(db: &mut Db, account: AccountUuid, key: KeyId, from: BlockHeight) -> OneTimeKey {
     tx(db, |c, p| {
         register(
             c,
@@ -159,7 +159,7 @@ fn prepare_from(
     now: i64,
     from: BlockHeight,
     seen: Option<&ProviderSeen<'_>>,
-) -> Policy<DynamicKey> {
+) -> Policy<OneTimeKey> {
     tx(db, |c, p| {
         if let Some(seen) = seen {
             let (owner, _) = account_key(c, p, account)?;
@@ -270,7 +270,7 @@ fn apply_payment(
 /// Finishes `key`'s sweep after an empty lookup at `anchor`.
 fn finish_sweep(db: &mut Db, account: AccountUuid, key: KeyId, anchor: ChainPoint) {
     queue_lookup(db, account, key, anchor, &[]).unwrap();
-    let applied = db.apply_dynamic_sweep(account, key, anchor, anchor, WATCHED, |_, _| None);
+    let applied = db.apply_one_time_sweep(account, key, anchor, anchor, WATCHED, |_, _| None);
     assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
 }
 
@@ -304,7 +304,7 @@ fn observe(
     observe_with(db, account, key, reference, observation, now)
 }
 
-/// [`WalletDb::close_finished_dynamic_keys`] with `tip`'s block time set to `now`, as
+/// [`WalletDb::close_finished_one_time_keys`] with `tip`'s block time set to `now`, as
 /// when the caller's clock agrees with the chain.
 fn close_at(db: &mut Db, account: AccountUuid, now: i64, tip: BlockHeight) -> usize {
     db.conn
@@ -313,12 +313,12 @@ fn close_at(db: &mut Db, account: AccountUuid, now: i64, tip: BlockHeight) -> us
             rusqlite::params![u32::from(tip), now],
         )
         .unwrap();
-    db.close_finished_dynamic_keys(account, now, tip).unwrap()
+    db.close_finished_one_time_keys(account, now, tip).unwrap()
 }
 
 /// Every key registered to `account` by purpose and index, each re-derived and checked
 /// against its stored receiver.
-fn all_keys(db: &Db, account: AccountUuid) -> Result<Vec<DynamicKey>, SqliteClientError> {
+fn all_keys(db: &Db, account: AccountUuid) -> Result<Vec<OneTimeKey>, SqliteClientError> {
     keys_where(&db.conn, &db.params, account, "1", [account.0])
 }
 
@@ -327,7 +327,7 @@ fn get_key(
     db: &Db,
     account: AccountUuid,
     key: KeyId,
-) -> Result<Option<DynamicKey>, SqliteClientError> {
+) -> Result<Option<OneTimeKey>, SqliteClientError> {
     let (purpose, index) = (purpose_code(key.purpose()), key.index().to_be_bytes());
     let selected = "k.purpose = ?2 AND k.key_index = ?3";
     key_matching(
@@ -357,7 +357,7 @@ fn lookup_coverage(db: &Db, account: AccountUuid, key: KeyId) -> Option<ChainPoi
     let lookup = db
         .conn
         .query_row(
-            "SELECT lookup_height, lookup_hash FROM ironwood_dynamic_sweeps
+            "SELECT lookup_height, lookup_hash FROM ironwood_one_time_sweeps
              WHERE receiving_key_id = ?1",
             [id],
             |r| Ok(store::planner::anchor(r.get(0)?, r.get(1)?)),
@@ -384,14 +384,14 @@ fn tip(st: &State) -> ChainPoint {
     }
 }
 
-/// The dynamic key of each unspent Ironwood note at `height`, `None` for ordinary notes.
+/// The one-time key of each unspent Ironwood note at `height`, `None` for ordinary notes.
 fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>> {
     st.wallet()
         .db()
         .get_unspent_ironwood_notes_at_historical_height(st.test_account().unwrap().id(), height)
         .unwrap()
         .iter()
-        .map(|n| n.dynamic_key_id())
+        .map(|n| n.one_time_key_id())
         .collect()
 }
 
@@ -401,7 +401,7 @@ const WATCHED: bool = true;
 
 /// Keys the scanner trial-decrypts with.
 fn scanning_keys(st: &State) -> Vec<KeyId> {
-    let keys = st.wallet().get_dynamic_scanning_keys().unwrap();
+    let keys = st.wallet().get_one_time_scanning_keys().unwrap();
     keys.iter().map(|k| k.key_id()).collect()
 }
 
@@ -418,7 +418,7 @@ fn pay_candidate(st: &mut State, key: KeyId) -> PendingPayment {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(100_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
     let candidate = candidate_at(st, height, &fvk);
     assert_eq!(candidate.position, 0);
     candidate
@@ -510,8 +510,8 @@ fn external_payment_with(
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(1_000_000),
     );
-    funder.scan_cached_blocks_with_dynamic_ivks(height, 1);
-    funder.generate_and_scan_empty_blocks_with_dynamic_ivks(5);
+    funder.scan_cached_blocks_with_one_time_ivks(height, 1);
+    funder.generate_and_scan_empty_blocks_with_one_time_ivks(5);
     let network = *funder.network();
     let address = Address::Unified(UnifiedAddress::from_receivers(Some(to), None, None).unwrap());
     let payment = Payment::new(
@@ -692,7 +692,7 @@ fn recovered_indices_use_full_u64_order_and_never_wrap() {
     assert_eq!(last.key_id().index(), u64::MAX);
     assert!(matches!(
         reserve(db, account, Purpose::Refund, start()),
-        Err(SqliteClientError::DynamicIvkIndexExhausted)
+        Err(SqliteClientError::OneTimeIvkIndexExhausted)
     ));
     assert_eq!(all_keys(db, account).unwrap().len(), 6);
 }

@@ -1,7 +1,7 @@
 //! Durable ownership-checked candidates. These rows never contribute to balance.
 use rusqlite::{Connection, OptionalExtension, params};
-use zakura_dynamic_ivk::recovery::{EncryptedNote, RecoveredNote};
-use zcash_client_backend::data_api::{dynamic_ivk::SweepDeferral, transparent_ledger::ChainPoint};
+use zakura_one_time_ivk::recovery::{EncryptedNote, RecoveredNote};
+use zcash_client_backend::data_api::{one_time_ivk::SweepDeferral, transparent_ledger::ChainPoint};
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::{
     PoolType,
@@ -150,7 +150,7 @@ pub(super) fn pending_payments(
     let id = key_ref(conn, account, key)?;
     let mut stmt = conn.prepare(
         "SELECT txid, action_index, height, block_hash, tx_index, position, encrypted_note
-         FROM ironwood_dynamic_payment_recovery WHERE receiving_key_id = ?1 ORDER BY position",
+         FROM ironwood_one_time_payment_recovery WHERE receiving_key_id = ?1 ORDER BY position",
     )?;
     Ok(stmt.query_map([id], payment)?.collect::<Result<_, _>>()?)
 }
@@ -175,7 +175,7 @@ pub(super) fn queue_payment<P: Parameters>(
         .query_row(
             "SELECT txid, action_index, height, block_hash, tx_index, position,
                 encrypted_note, receiving_key_id
-             FROM ironwood_dynamic_payment_recovery WHERE txid = ?1 AND action_index = ?2",
+             FROM ironwood_one_time_payment_recovery WHERE txid = ?1 AND action_index = ?2",
             params![candidate.txid.as_ref(), candidate.action_index],
             |r| Ok((payment(r)?, r.get::<_, i64>(7)?)),
         )
@@ -188,7 +188,7 @@ pub(super) fn queue_payment<P: Parameters>(
         };
     }
     conn.execute(
-        "INSERT INTO ironwood_dynamic_payment_recovery (
+        "INSERT INTO ironwood_one_time_payment_recovery (
             receiving_key_id, txid, action_index, height, block_hash,
             tx_index, position, encrypted_note
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",

@@ -1,10 +1,10 @@
-//! Restore sweep steps around an app's directory lookups (see `DynamicIvkWrite`).
+//! Restore sweep steps around an app's directory lookups (see `OneTimeIvkWrite`).
 use std::collections::BTreeMap;
 
 use rusqlite::{Connection, OptionalExtension, params};
-use zakura_dynamic_ivk::recovery::EncryptedNote;
+use zakura_one_time_ivk::recovery::EncryptedNote;
 use zcash_client_backend::data_api::{
-    dynamic_ivk::{DirectoryPayment, MAX_PUBLICATION_LAG, SweepDeferral},
+    one_time_ivk::{DirectoryPayment, MAX_PUBLICATION_LAG, SweepDeferral},
     transparent_ledger::ChainPoint,
 };
 use zcash_primitives::{block::BlockHash, transaction::TxId};
@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
-/// Implements `DynamicIvkRead::directory_publication_anchor`.
+/// Implements `OneTimeIvkRead::directory_publication_anchor`.
 pub(crate) fn publication_anchor(
     conn: &Connection,
     height: BlockHeight,
@@ -33,7 +33,7 @@ pub(crate) fn publication_anchor(
     Ok(Ok(ChainPoint { height, hash }))
 }
 
-/// Implements `DynamicIvkRead::directory_note_data_needed`.
+/// Implements `OneTimeIvkRead::directory_note_data_needed`.
 pub(crate) fn note_data_needed(
     conn: &Connection,
     account: AccountUuid,
@@ -109,7 +109,7 @@ fn sort_directory_payments<'a>(
     Ok((kept, missing))
 }
 
-/// Implements `DynamicIvkWrite::queue_directory_lookup`.
+/// Implements `OneTimeIvkWrite::queue_directory_lookup`.
 pub(crate) fn queue_directory_lookup<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -127,7 +127,7 @@ pub(crate) fn queue_directory_lookup<P: Parameters>(
     for old in pending_payments(conn, account, key)? {
         if !kept.contains(&old) {
             conn.execute(
-                "DELETE FROM ironwood_dynamic_payment_recovery
+                "DELETE FROM ironwood_one_time_payment_recovery
                  WHERE txid = ?1 AND action_index = ?2",
                 params![old.txid.as_ref(), old.action_index],
             )?;
@@ -163,7 +163,7 @@ pub(crate) fn queue_directory_lookup<P: Parameters>(
 }
 
 /// Finishes `key`'s sweep at its lookup's anchor once its candidates are applied (see
-/// `DynamicIvkWrite::apply_dynamic_sweep`).
+/// `OneTimeIvkWrite::apply_one_time_sweep`).
 pub(super) fn finish(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
@@ -172,10 +172,10 @@ pub(super) fn finish(
 ) -> Result<Result<(), SweepDeferral>, SqliteClientError> {
     let id = key_ref(conn, account, key)?;
     let (pending, lookup): (bool, Option<ChainPoint>) = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_dynamic_payment_recovery
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery
                 WHERE receiving_key_id = ?1),
             lookup_height, lookup_hash
-         FROM ironwood_dynamic_sweeps WHERE receiving_key_id = ?1",
+         FROM ironwood_one_time_sweeps WHERE receiving_key_id = ?1",
         [id],
         |r| Ok((r.get(0)?, anchor(r.get(1)?, r.get(2)?))),
     )?;
@@ -186,7 +186,7 @@ pub(super) fn finish(
         return Ok(Err(SweepDeferral::UnknownAnchor));
     };
     conn.execute(
-        "UPDATE ironwood_dynamic_sweeps SET done_height = ?2 WHERE receiving_key_id = ?1",
+        "UPDATE ironwood_one_time_sweeps SET done_height = ?2 WHERE receiving_key_id = ?1",
         params![id, u32::from(lookup.height)],
     )?;
     let scanning: bool = conn.query_row(

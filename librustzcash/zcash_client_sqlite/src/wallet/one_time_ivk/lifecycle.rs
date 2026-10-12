@@ -1,6 +1,6 @@
 //! Provider observations and the rule that ends a key's trial decryption.
 use rusqlite::{Connection, OptionalExtension, named_params, params};
-use zakura_dynamic_ivk::lifecycle::{
+use zakura_one_time_ivk::lifecycle::{
     COMPLETION_LIMIT_SECS, Observation, OperationStatus, RESTORE_WATCH_SECS, ReceiptExpectation,
 };
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
@@ -14,7 +14,7 @@ use crate::{
     AccountUuid, error::SqliteClientError, wallet, wallet::common::tx_unexpired_condition,
 };
 
-/// See `WalletDb::close_finished_dynamic_keys`.
+/// See `WalletDb::close_finished_one_time_keys`.
 pub(super) fn close_finished<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -46,19 +46,19 @@ pub(super) fn close_finished<P: Parameters>(
                   AND (t.mined_height > :confirmed_below
                        OR (t.mined_height IS NULL AND ({unexpired})))),
             ({RESTORED}),
-            (SELECT COUNT(*) FROM ironwood_dynamic_operations o
+            (SELECT COUNT(*) FROM ironwood_one_time_operations o
                 WHERE o.receiving_key_id = k.id),
-            (SELECT COUNT(*) FROM ironwood_dynamic_operations o
+            (SELECT COUNT(*) FROM ironwood_one_time_operations o
                 WHERE o.receiving_key_id = k.id AND o.expectation IN (0, 3, 4)),
-            (SELECT MAX(o.deadline) FROM ironwood_dynamic_operations o
+            (SELECT MAX(o.deadline) FROM ironwood_one_time_operations o
                 WHERE o.receiving_key_id = k.id),
             (SELECT COALESCE(SUM(COALESCE(o.expected_value, 1)), 0)
-                FROM ironwood_dynamic_operations o
+                FROM ironwood_one_time_operations o
                 WHERE o.receiving_key_id = k.id AND o.expectation = 2),
             (SELECT COALESCE(SUM(n.value), 0) FROM ironwood_received_notes n
                 JOIN transactions t ON t.id_tx = n.transaction_id
                 WHERE n.receiving_key_id = k.id AND t.mined_height <= :confirmed_below),
-            (SELECT b.time FROM ironwood_dynamic_sweeps s
+            (SELECT b.time FROM ironwood_one_time_sweeps s
                 JOIN blocks b ON b.height = s.done_height
                 WHERE s.receiving_key_id = k.id),
             {STARTED}
@@ -145,11 +145,11 @@ pub(super) fn record(
         .map(|v| v.ok_or_else(|| invalid("expected receipt must be positive")))
         .transpose()?;
     conn.execute(
-        "UPDATE ironwood_dynamic_operations SET funded = MAX(funded, ?2) WHERE id = ?1",
+        "UPDATE ironwood_one_time_operations SET funded = MAX(funded, ?2) WHERE id = ?1",
         params![id, funded],
     )?;
     let current = conn.execute(
-        "UPDATE ironwood_dynamic_operations SET
+        "UPDATE ironwood_one_time_operations SET
             observed_at = ?2, expectation = ?3, expected_value = ?4,
             deadline = COALESCE(deadline, ?5)
          WHERE id = ?1 AND observed_at <= ?2",
@@ -171,7 +171,7 @@ pub(super) fn record_refund(
     }
     let existing: Option<i64> = conn
         .query_row(
-            "SELECT id FROM ironwood_dynamic_operations
+            "SELECT id FROM ironwood_one_time_operations
              WHERE receiving_key_id = ?1 AND reference = ?2 AND request IS NULL",
             params![key, reference],
             |r| r.get(0),
@@ -180,7 +180,7 @@ pub(super) fn record_refund(
     let id = match existing {
         Some(id) => id,
         None => conn.query_row(
-            "INSERT INTO ironwood_dynamic_operations (receiving_key_id, reference, begun_at)
+            "INSERT INTO ironwood_one_time_operations (receiving_key_id, reference, begun_at)
              VALUES (?1, ?2, ?3) RETURNING id",
             params![key, reference, now],
             |r| r.get(0),

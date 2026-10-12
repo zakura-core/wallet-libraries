@@ -1,18 +1,18 @@
 //! Recovery from authenticated wallet data, independent of the discovery transport.
 use rusqlite::{Connection, OptionalExtension, params};
-use zakura_dynamic_ivk::{REFUND_MEMO_MAGIC, RefundMemo};
+use zakura_one_time_ivk::{REFUND_MEMO_MAGIC, RefundMemo};
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
 
 use super::{
-    Discovery, DynamicKey, KeyId, Purpose, RESTORED, account_key, decode_index, key_ref,
+    Discovery, KeyId, OneTimeKey, Purpose, RESTORED, account_key, decode_index, key_ref,
     next_index, planner::canonical, register, reservations::RECEIVE_LOOKAHEAD, restore_start,
     retention::retain_spend_history,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
-/// See `WalletDb::recheck_dynamic_key_history`.
+/// See `WalletDb::recheck_one_time_key_history`.
 pub(super) fn recheck<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -31,7 +31,7 @@ fn requeue(
 ) -> Result<usize, SqliteClientError> {
     Ok(conn.execute(
         &format!(
-            "INSERT INTO ironwood_dynamic_sweeps (receiving_key_id)
+            "INSERT INTO ironwood_one_time_sweeps (receiving_key_id)
              SELECT id FROM ironwood_receiving_keys WHERE {predicate}
              ON CONFLICT (receiving_key_id) DO UPDATE SET
                  lookup_height = NULL, lookup_hash = NULL, attempts = 0,
@@ -42,7 +42,7 @@ fn requeue(
     )?)
 }
 
-/// Implements `DynamicIvkWrite::record_paid_filter_check`.
+/// Implements `OneTimeIvkWrite::record_paid_filter_check`.
 pub(crate) fn record_paid_check(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
@@ -61,7 +61,7 @@ pub(crate) fn record_paid_check(
             // a newer publication. A rewind below `publication` reruns the sweep (see
             // `truncate_to_height`).
             conn.execute(
-                "INSERT INTO ironwood_dynamic_sweeps (receiving_key_id, done_height)
+                "INSERT INTO ironwood_one_time_sweeps (receiving_key_id, done_height)
                  VALUES (?1, ?2)
                  ON CONFLICT (receiving_key_id) DO UPDATE SET done_height = excluded.done_height
                  WHERE done_height < excluded.done_height",
@@ -72,7 +72,7 @@ pub(crate) fn record_paid_check(
     Ok(())
 }
 
-/// Implements `DynamicIvkWrite::maintain_dynamic_ivks`, keeping
+/// Implements `OneTimeIvkWrite::maintain_one_time_ivks`, keeping
 /// [`RECEIVE_GAP_LIMIT`](super::RECEIVE_GAP_LIMIT) incoming lookahead keys.
 pub(crate) fn maintain<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
@@ -160,7 +160,7 @@ pub(super) fn recover_refund_memos<P: Parameters>(
             "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys k
              WHERE k.account_id = ?1 AND k.purpose = 0 AND k.key_index = ?2
                AND k.scan_from <= ?3 AND (k.active_from <= ?3 OR EXISTS(
-                 SELECT 1 FROM ironwood_dynamic_sweeps s WHERE s.receiving_key_id = k.id)))",
+                 SELECT 1 FROM ironwood_one_time_sweeps s WHERE s.receiving_key_id = k.id)))",
             params![account_ref.0, key_id.index().to_be_bytes(), height],
             |row| row.get(0),
         )?;
@@ -248,7 +248,7 @@ pub(super) fn maintain_receive_lookahead<P: Parameters>(
     for offset in 0..u64::from(count) {
         let index = start
             .checked_add(offset)
-            .ok_or(SqliteClientError::DynamicIvkIndexExhausted)?;
+            .ok_or(SqliteClientError::OneTimeIvkIndexExhausted)?;
         let exists: bool = conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM ironwood_receiving_keys
              WHERE account_id = ?1 AND purpose = 1 AND key_index = ?2 AND scan_from <= ?3)",
@@ -270,7 +270,7 @@ pub(super) fn watch_receive_key<P: Parameters>(
     index: u64,
     scan_from: BlockHeight,
     now: i64,
-) -> Result<DynamicKey, SqliteClientError> {
+) -> Result<OneTimeKey, SqliteClientError> {
     let key_id = KeyId::new(Purpose::Receive, index);
     register(
         conn,

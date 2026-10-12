@@ -190,7 +190,7 @@ pub(crate) fn queue_ironwood_output_shape(
 ) -> rusqlite::Result<()> {
     // An old build may also have stranded an unknown memo with no queued work. Keep that
     // authenticated obligation instead of querying its metadata only and discarding its memo.
-    // A dynamic-key note's memo is never retrieved privately (see `wallet::dynamic_ivk`).
+    // A one-time-key note's memo is never retrieved privately (see `wallet::one_time_ivk`).
     conn.execute(
         "INSERT INTO ironwood_memo_retrieval_queue (received_note_id, commitment_tree_position)
          SELECT rn.id, rn.commitment_tree_position
@@ -208,7 +208,7 @@ pub(crate) fn queue_ironwood_output_shape(
 }
 
 /// The metadata half of [`queue_ironwood_output_shape`], for its migration, which may run
-/// before the dynamic IVK schema exists and so requeues the memos itself.
+/// before the one-time IVK schema exists and so requeues the memos itself.
 pub(crate) fn queue_output_shape_metadata(
     conn: &rusqlite::Connection,
     tx_ref: Option<crate::TxRef>,

@@ -96,7 +96,7 @@ workspace.
   funded a recovered send and its fee unless recovered evidence identifies another contributor.
   This display assumption does not establish payment or fee attribution.
 - `enhance_pir::storage::PendingIronwoodMemo` carries the incoming key that detected the
-  note, `ivk`, in place of `scope`. Storage resolves it, so a note a dynamic key found
+  note, `ivk`, in place of `scope`. Storage resolves it, so a note a one-time key found
   binds its transaction's metadata with that key. `PendingIronwoodMetadata::Incoming`
   boxes it.
 - `ll::wallet::put_blocks` and `ll::wallet::put_blocks_rows` take

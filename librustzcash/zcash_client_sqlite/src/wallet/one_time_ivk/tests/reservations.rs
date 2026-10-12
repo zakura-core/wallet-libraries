@@ -1,5 +1,5 @@
 use super::*;
-use zakura_dynamic_ivk::lifecycle::{NearStatus, ReceiptExpectation, near_observation};
+use zakura_one_time_ivk::lifecycle::{NearStatus, ReceiptExpectation, near_observation};
 
 /// `(observed_at, expectation, expected_value, deadline)` of an operation.
 type Operation = (i64, u8, Option<i64>, Option<i64>);
@@ -20,25 +20,25 @@ fn fixture() -> State {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(100_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(h, 1);
+    st.scan_cached_blocks_with_one_time_ivks(h, 1);
     st
 }
 
 /// Resumes the draft or reserves the next address, scanned from the next unscanned
 /// block, with the provider seen set `seen`.
-fn try_prepare(st: &mut State, now: i64, seen: Option<&ProviderSeen<'_>>) -> Policy<DynamicKey> {
+fn try_prepare(st: &mut State, now: i64, seen: Option<&ProviderSeen<'_>>) -> Policy<OneTimeKey> {
     let account = st.test_account().unwrap().id();
     let from = tip(st).height + 1;
     prepare_from(st.wallet_mut().db_mut(), account, now, from, seen)
 }
 
 /// [`try_prepare`] without a seen set, expecting a key.
-fn prepare(st: &mut State, now: i64) -> DynamicKey {
+fn prepare(st: &mut State, now: i64) -> OneTimeKey {
     try_prepare(st, now, None).unwrap().unwrap()
 }
 
 /// Prepares with a seen set covering quotes begun from 0 to `NOW` that holds `held`.
-fn prepare_seen(st: &mut State, now: i64, held: &[[u8; 43]]) -> DynamicKey {
+fn prepare_seen(st: &mut State, now: i64, held: &[[u8; 43]]) -> OneTimeKey {
     let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
     let seen = ProviderSeen {
         since: -SEEN_SLACK_SECONDS,
@@ -51,7 +51,7 @@ fn prepare_seen(st: &mut State, now: i64, held: &[[u8; 43]]) -> DynamicKey {
 /// Begins operation `request` on `key`'s reservation at `now` with `deadline`.
 fn begin_at(
     st: &mut State,
-    key: &DynamicKey,
+    key: &OneTimeKey,
     request: &str,
     deadline: i64,
     now: i64,
@@ -65,13 +65,13 @@ fn begin_at(
 
 /// Begins operation `request` on `key`'s reservation at `NOW` with a deadline of
 /// `NOW + 60`, before contacting the provider.
-fn begin(st: &mut State, key: &DynamicKey, request: &str) -> Policy<()> {
+fn begin(st: &mut State, key: &OneTimeKey, request: &str) -> Policy<()> {
     begin_at(st, key, request, NOW + 60, NOW)
 }
 
 /// Begins `request` and accepts it with deposit address `request` and a deadline of
 /// `NOW + 60`, then optionally starts it.
-fn quote(st: &mut State, key: &DynamicKey, request: &str, start: bool) {
+fn quote(st: &mut State, key: &OneTimeKey, request: &str, start: bool) {
     let account = st.test_account().unwrap().id();
     begin(st, key, request).unwrap().unwrap();
     let db = st.wallet_mut().db_mut();
@@ -130,7 +130,7 @@ fn reap(st: &mut State, now: i64) -> Vec<u64> {
 }
 
 /// Whether `key`'s reservation is open.
-fn reserved(st: &State, key: &DynamicKey) -> bool {
+fn reserved(st: &State, key: &OneTimeKey) -> bool {
     st.wallet()
         .conn()
         .query_row(
@@ -151,13 +151,13 @@ fn pay(st: &mut State, key: &FullViewingKey) {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(100_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(h, 1);
+    st.scan_cached_blocks_with_one_time_ivks(h, 1);
 }
 
 /// Mines and scans blocks until the latest receipt has the default untrusted
 /// confirmations, after which it raises the recovery bound.
 fn confirm(st: &mut State) {
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(
         (zcash_client_backend::data_api::wallet::ConfirmationsPolicy::default()
             .untrusted()
             .get()
@@ -192,7 +192,7 @@ fn operation(st: &State, request: &str) -> Option<Operation> {
         .conn()
         .query_row(
             "SELECT observed_at, expectation, expected_value, deadline
-             FROM ironwood_dynamic_operations WHERE request = ?1",
+             FROM ironwood_one_time_operations WHERE request = ?1",
             [request],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
@@ -215,7 +215,7 @@ fn abandon_indices(st: &mut State, indices: std::ops::Range<u64>) {
             let key = KeyId::new(Purpose::Receive, index);
             let (id, _) = register(c, p, account, key, from, true, Discovery::Scan, 0)?;
             c.execute(
-                "INSERT INTO ironwood_dynamic_operations (receiving_key_id, request, begun_at)
+                "INSERT INTO ironwood_one_time_operations (receiving_key_id, request, begun_at)
                  VALUES (?1, ?2, 0)",
                 rusqlite::params![id, format!("abandoned-{index}")],
             )?;
@@ -340,7 +340,7 @@ fn lost_requests_are_reused_only_once_a_seen_set_shows_them_unseen() {
                         st.wallet()
                             .conn()
                             .execute(
-                                "UPDATE ironwood_dynamic_operations SET begun_at = ?1",
+                                "UPDATE ironwood_one_time_operations SET begun_at = ?1",
                                 [NOW],
                             )
                             .unwrap();
@@ -408,7 +408,7 @@ fn late_funded_status_prevents_reclamation() {
         st.wallet()
             .conn()
             .query_row(
-                "SELECT funded FROM ironwood_dynamic_operations WHERE request = 'late'",
+                "SELECT funded FROM ironwood_one_time_operations WHERE request = 'late'",
                 [],
                 |row| row.get(0),
             )
@@ -500,7 +500,7 @@ fn provider_statuses_update_the_operation_or_leave_it_alone() {
     assert_eq!(operation(&st, "payout"), Some((now, 0, None, deadline)));
     // Another memo on the same deposit address is another operation.
     let finished = Observation {
-        status: OperationStatus::Terminal(zakura_dynamic_ivk::lifecycle::ReceiptExpectation::None),
+        status: OperationStatus::Terminal(zakura_one_time_ivk::lifecycle::ReceiptExpectation::None),
         deadline: None,
     };
     let db = st.wallet_mut().db_mut();
@@ -573,7 +573,7 @@ fn activation_rescan_finds_a_payment_in_already_scanned_blocks() {
         refusal(begin(&mut st, &r, "unscanned")),
         Some(ReservationPolicy::Coverage)
     );
-    st.scan_cached_blocks_with_dynamic_ivks(issued, 1);
+    st.scan_cached_blocks_with_one_time_ivks(issued, 1);
     assert!(holds_note(&st, key));
     assert_eq!(
         refusal(begin(&mut st, &r, "paid")),
@@ -593,7 +593,7 @@ fn quote_waits_for_scanning_to_reach_a_new_tip() {
         refusal(begin(&mut st, &r, "behind")),
         Some(ReservationPolicy::Coverage)
     );
-    st.scan_cached_blocks_with_dynamic_ivks(h, 1);
+    st.scan_cached_blocks_with_one_time_ivks(h, 1);
     begin(&mut st, &r, "caught-up").unwrap().unwrap();
 }
 
@@ -607,7 +607,7 @@ fn reclamation_waits_for_scanning_to_reach_the_tip() {
     let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
     observe(&mut st, "abandoned", "PENDING_DEPOSIT", false, now);
     assert!(reserved(&st, &r));
-    st.scan_cached_blocks_with_dynamic_ivks(h, 1);
+    st.scan_cached_blocks_with_one_time_ivks(h, 1);
     assert_eq!(reap(&mut st, now), [0]);
 }
 
@@ -619,7 +619,7 @@ fn queued_restore_candidate_blocks_quoting_and_reclamation() {
     st.wallet()
         .conn()
         .execute(
-            "INSERT INTO ironwood_dynamic_payment_recovery
+            "INSERT INTO ironwood_one_time_payment_recovery
              SELECT id, zeroblob(32), 0, 100000, zeroblob(32), 1, 0, zeroblob(676)
              FROM ironwood_receiving_keys WHERE purpose = 1 AND key_index = ?1",
             [r.key_id().index().to_be_bytes()],
@@ -683,7 +683,7 @@ fn sweep_pending(st: &mut State) -> usize {
         .wallet()
         .conn()
         .prepare(
-            "SELECT k.key_index FROM ironwood_dynamic_sweeps s
+            "SELECT k.key_index FROM ironwood_one_time_sweeps s
              JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
              WHERE k.purpose = 1 AND s.done_height IS NULL",
         )
@@ -758,10 +758,10 @@ fn issuance_skips_restored_addresses_the_provider_saw() {
     // The old device quoted the first three addresses.
     for index in 0..RECEIVE_GAP_LIMIT {
         let key = KeyId::new(Purpose::Receive, index);
-        db.begin_dynamic_sweep_attempt(account, key, NOW, index < 3)
+        db.begin_one_time_sweep_attempt(account, key, NOW, index < 3)
             .unwrap();
         queue_lookup(db, account, key, swept_at, &[]).unwrap();
-        db.apply_dynamic_sweep(account, key, swept_at, swept_at, WATCHED, |_, _| None)
+        db.apply_one_time_sweep(account, key, swept_at, swept_at, WATCHED, |_, _| None)
             .unwrap()
             .unwrap();
     }
@@ -914,7 +914,7 @@ fn starting_a_quote_returns_its_deposit_and_starts_only_its_reservation() {
     );
     assert!(matches!(
         db.start_receive_operation(account, "unknown"),
-        Err(SqliteClientError::InvalidDynamicIvkInput(_))
+        Err(SqliteClientError::InvalidOneTimeIvkInput(_))
     ));
 }
 
@@ -946,7 +946,7 @@ fn accepted_deposit_instructions_cannot_change() {
     ] {
         assert!(matches!(
             db.finish_receive_operation(account, request, &accepted("shared", memo, NOW + 60)),
-            Err(SqliteClientError::InvalidDynamicIvkInput(_))
+            Err(SqliteClientError::InvalidOneTimeIvkInput(_))
         ));
     }
     // An identical repeat succeeds and can only lower the deadline.
@@ -1012,7 +1012,7 @@ fn a_deposit_identity_binds_only_one_operation() {
         let db = st.wallet_mut().db_mut();
         assert!(matches!(
             db.finish_receive_operation(account, request, &deposit),
-            Err(SqliteClientError::InvalidDynamicIvkInput(_))
+            Err(SqliteClientError::InvalidOneTimeIvkInput(_))
         ));
         assert!(matches!(
             db.start_receive_operation(account, request),
@@ -1053,7 +1053,7 @@ fn begin_requires_a_future_deadline() {
     let r = prepare(&mut st, NOW);
     assert!(matches!(
         begin_at(&mut st, &r, "expired", NOW, NOW),
-        Err(SqliteClientError::InvalidDynamicIvkInput(_))
+        Err(SqliteClientError::InvalidOneTimeIvkInput(_))
     ));
     assert_eq!(operation(&st, "expired"), None);
 }
@@ -1083,11 +1083,11 @@ fn maintenance_registers_restore_discovery_only_at_the_tip() {
     let (h, _) = st.generate_empty_block();
     st.wallet_mut().update_chain_tip(h).unwrap();
     let db = st.wallet_mut().db_mut();
-    db.maintain_dynamic_ivks(account).unwrap();
+    db.maintain_one_time_ivks(account).unwrap();
     assert!(all_keys(db, account).unwrap().is_empty());
-    st.scan_cached_blocks_with_dynamic_ivks(h, 1);
+    st.scan_cached_blocks_with_one_time_ivks(h, 1);
     let db = st.wallet_mut().db_mut();
-    db.maintain_dynamic_ivks(account).unwrap();
+    db.maintain_one_time_ivks(account).unwrap();
     let keys = all_keys(db, account).unwrap();
     assert_eq!(keys.len() as u64, RECEIVE_GAP_LIMIT);
     assert!(keys.iter().all(|k| !key_state(db, k.key_id()).1));

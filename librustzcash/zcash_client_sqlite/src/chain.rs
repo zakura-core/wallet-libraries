@@ -549,11 +549,11 @@ mod tests {
         testing::pool::scan_cached_blocks_detects_spends_out_of_order::<OrchardPoolTester>()
     }
 
-    /// A build without `orchard` refuses to record scanned blocks over dynamic IVK state,
+    /// A build without `orchard` refuses to record scanned blocks over one-time IVK state,
     /// leaving the scanned chain unchanged.
     #[test]
     #[cfg(not(feature = "orchard"))]
-    fn scanning_without_orchard_refuses_dynamic_ivk_state() {
+    fn scanning_without_orchard_refuses_one_time_ivk_state() {
         use crate::error::SqliteClientError;
         use zcash_client_backend::data_api::{
             WalletRead,
@@ -578,7 +578,7 @@ mod tests {
         st.wallet()
             .conn()
             .execute_batch(
-                "INSERT INTO ironwood_dynamic_spend_retention (account_id)
+                "INSERT INTO ironwood_one_time_spend_retention (account_id)
                  SELECT id FROM accounts",
             )
             .unwrap();
@@ -597,11 +597,11 @@ mod tests {
         assert_eq!(scanned.map(|b| b.block_height()), Some(h1));
     }
 
-    /// Blocks scanned without the wallet's open dynamic keys are refused, leaving the
+    /// Blocks scanned without the wallet's open one-time keys are refused, leaving the
     /// scanned chain unchanged. Inactive and closed keys do not block them.
     #[test]
     #[cfg(feature = "orchard")]
-    fn scanning_without_dynamic_ivks_refuses_open_dynamic_keys() {
+    fn scanning_without_one_time_ivks_refuses_open_one_time_keys() {
         use crate::{error::SqliteClientError, testing::db::TestDb};
         use zcash_client_backend::data_api::{
             WalletRead,
@@ -651,7 +651,7 @@ mod tests {
         let before = scanned(&st);
         assert!(matches!(
             st.try_scan_cached_blocks(h2, 1),
-            Err(Error::Wallet(SqliteClientError::DynamicIvksNotUsed))
+            Err(Error::Wallet(SqliteClientError::OneTimeIvksNotUsed))
         ));
         assert_eq!(scanned(&st), before);
         st.wallet()

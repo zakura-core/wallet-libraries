@@ -1,6 +1,6 @@
 use super::apply::{fixture, fixture_in};
 use super::*;
-use zakura_dynamic_ivk::lifecycle::OperationStatus;
+use zakura_one_time_ivk::lifecycle::OperationStatus;
 
 /// Completes the restore sweep of every key registered to `account` at `through`.
 fn finish_sweeps(db: &mut Db, account: AccountUuid, through: ChainPoint) {
@@ -12,7 +12,7 @@ fn finish_sweeps(db: &mut Db, account: AccountUuid, through: ChainPoint) {
 /// [`fixture`] retaining spend history, with its payment applied and the sweeps
 /// finished at its tip, including those of the lookahead the import extends.
 /// Release waits for the queued payment and then for that lookahead.
-fn swept() -> (State, DynamicKey, ChainPoint) {
+fn swept() -> (State, OneTimeKey, ChainPoint) {
     let (mut st, key, candidate, through, path) = fixture();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
@@ -82,7 +82,7 @@ fn undone_sweeps_and_queued_candidates_hold_spend_evidence() {
     retain(st.wallet_mut().db_mut(), account);
     for _ in 0..2 {
         let (height, _) = st.generate_empty_block();
-        st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+        st.scan_cached_blocks_with_one_time_ivks(height, 1);
     }
     let tip = tip(&st);
     let db = st.wallet_mut().db_mut();
@@ -124,10 +124,10 @@ fn scanned_keys_never_hold_spend_evidence() {
     // A completed refund sweep scans its key from the next block.
     finish_sweep(db, account, refund.key_id(), through);
     let (height, _) = st.generate_empty_block();
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
     let tip = tip(&st);
     let db = st.wallet_mut().db_mut();
-    let scanning = db.get_dynamic_scanning_keys().unwrap();
+    let scanning = db.get_one_time_scanning_keys().unwrap();
     assert!(scanning.iter().any(|k| k.key_id() == refund.key_id()));
     assert!(finish_recovery(db, account, tip, 1).unwrap());
     assert_eq!(
@@ -153,11 +153,11 @@ fn retention_prunes_other_pools_and_respects_the_oldest_account() {
     let conn = st.wallet_mut().conn_mut();
     // Use small synthetic heights to isolate shared pruning from network activation.
     conn.execute(
-        "UPDATE ironwood_dynamic_spend_retention SET nullifier_retention_height=0",
+        "UPDATE ironwood_one_time_spend_retention SET nullifier_retention_height=0",
         [],
     )
     .unwrap();
-    conn.execute("UPDATE ironwood_dynamic_spend_retention SET nullifier_retention_height=200 WHERE account_id=(SELECT id FROM accounts WHERE uuid=?1)", [account.0]).unwrap();
+    conn.execute("UPDATE ironwood_one_time_spend_retention SET nullifier_retention_height=200 WHERE account_id=(SELECT id FROM accounts WHERE uuid=?1)", [account.0]).unwrap();
     for (pool, nf) in [
         (PoolType::SAPLING, 1u8),
         (PoolType::ORCHARD, 2),
@@ -192,7 +192,7 @@ fn retention_prunes_other_pools_and_respects_the_oldest_account() {
     );
     tx.commit().unwrap();
     conn.execute(
-        "UPDATE ironwood_dynamic_spend_retention SET nullifier_retention_height=250",
+        "UPDATE ironwood_one_time_spend_retention SET nullifier_retention_height=250",
         [],
     )
     .unwrap();
@@ -217,7 +217,7 @@ fn retention_prunes_other_pools_and_respects_the_oldest_account() {
 /// has queued a replay of that history.
 fn awaiting_spend_history(
     st: State,
-) -> (State, DynamicKey, PendingPayment, ChainPoint, MerklePath) {
+) -> (State, OneTimeKey, PendingPayment, ChainPoint, MerklePath) {
     let (mut st, key, candidate, through, path) = fixture_in(st);
     let account = st.test_account().unwrap().id();
     retain(st.wallet_mut().db_mut(), account);
@@ -228,7 +228,7 @@ fn awaiting_spend_history(
     st.wallet()
         .conn()
         .execute(
-            "UPDATE ironwood_dynamic_spend_retention SET nullifier_retention_height=?1",
+            "UPDATE ironwood_one_time_spend_retention SET nullifier_retention_height=?1",
             [u32::from(through.height + 1)],
         )
         .unwrap();
@@ -273,7 +273,7 @@ fn missing_spend_history_queues_replay_and_recovers_after_restart() {
             .unwrap()
             .is_empty()
     );
-    st.scan_cached_blocks_with_dynamic_ivks(candidate.height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(candidate.height, 1);
     assert_eq!(
         apply_payment(
             st.wallet_mut().db_mut(),
@@ -301,7 +301,7 @@ fn account_deletion_requeues_a_completed_replay() {
     let (mut st, key, candidate, through, path) = awaiting_spend_history(st);
     let account = st.test_account().unwrap().id();
     // The replay completes, but the payment stays queued.
-    st.scan_cached_blocks_with_dynamic_ivks(candidate.height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(candidate.height, 1);
     assert!(!suggests_scanning(&st, candidate.height));
     // Deleting another account discards the replay's coverage.
     st.wallet_mut().delete_account(other).unwrap();
@@ -318,7 +318,7 @@ fn account_deletion_requeues_a_completed_replay() {
     };
     assert_eq!(apply(&mut st), PaymentApplication::AwaitingSpendHistory);
     assert!(suggests_scanning(&st, candidate.height));
-    st.scan_cached_blocks_with_dynamic_ivks(candidate.height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(candidate.height, 1);
     assert_eq!(apply(&mut st), PaymentApplication::Applied);
 }
 
@@ -350,7 +350,7 @@ fn retention_waits_for_internal_memos_until_their_blocks_are_scanned() {
         .conn()
         .execute(
             "UPDATE ironwood_received_notes SET memo=?1",
-            [zakura_dynamic_ivk::RefundMemo::new(7).encode()],
+            [zakura_one_time_ivk::RefundMemo::new(7).encode()],
         )
         .unwrap();
     let mined: u32 = st
@@ -379,7 +379,7 @@ fn retention_rewinds_and_resumes_for_new_blocks() {
     let account = st.test_account().unwrap().id();
     assert!(finish_recovery(st.wallet_mut().db_mut(), account, original, 1).unwrap());
     let (height, _) = st.generate_empty_block();
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
     let tip = tip(&st);
     finish_sweeps(st.wallet_mut().db_mut(), account, tip);
     assert!(finish_recovery(st.wallet_mut().db_mut(), account, tip, 1).unwrap());
@@ -392,7 +392,7 @@ fn retention_rewinds_and_resumes_for_new_blocks() {
         crate::wallet::ironwood_nullifier_retention_height(st.wallet().conn()).unwrap(),
         Some(original.height + 1)
     );
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
     assert_eq!(
         st.wallet()
             .conn()
@@ -419,7 +419,7 @@ fn completed_recovery_retains_the_next_large_batch_until_reconciled() {
     for _ in 0..201 {
         st.generate_empty_block();
     }
-    st.scan_cached_blocks_with_dynamic_ivks(original.height + 1, 201);
+    st.scan_cached_blocks_with_one_time_ivks(original.height + 1, 201);
     let through = tip(&st);
     let count = |conn: &Connection| {
         conn.query_row(
@@ -487,7 +487,7 @@ fn note_before_the_birthday_is_dropped_without_queuing_replay() {
     let (mut st, key, candidate, _, path) = fixture();
     let account = st.test_account().unwrap().id();
     // The payment must precede the birthday block, which the wallet has scanned.
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     let through = tip(&st);
     let db = st.wallet_mut().db_mut();
     let (owner, _) = account_key(db.conn.borrow(), &db.params, account).unwrap();
@@ -515,7 +515,7 @@ fn note_before_the_birthday_is_dropped_without_queuing_replay() {
         db.conn
             .borrow()
             .query_row(
-                "SELECT COUNT(*) FROM ironwood_dynamic_spend_retention
+                "SELECT COUNT(*) FROM ironwood_one_time_spend_retention
                  WHERE replay_through IS NOT NULL",
                 [],
                 |r| r.get::<_, u32>(0)

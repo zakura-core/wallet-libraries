@@ -1,4 +1,4 @@
-//! Dynamic IVKs: the key registry with its incoming reservations, provider operations,
+//! One-time IVKs: the key registry with its incoming reservations, provider operations,
 //! restore sweeps, and their spend evidence.
 
 use std::collections::HashSet;
@@ -9,8 +9,8 @@ use uuid::Uuid;
 use super::ironwood_enhance;
 use crate::wallet::init::WalletMigrationError;
 
-/// Identifier for the dynamic IVK migration.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x8d852bae_a8c4_4c35_b574_4b01351e62c4);
+/// Identifier for the one-time IVK migration.
+pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xfd72be3e_7dc5_40b2_9279_5780c833faf2);
 
 pub(super) struct Migration;
 
@@ -24,7 +24,7 @@ impl schemerz::Migration<Uuid> for Migration {
     }
 
     fn description(&self) -> &'static str {
-        "Adds dynamic IVKs, their operations, reservations and restore sweeps."
+        "Adds one-time IVKs, their operations, reservations and restore sweeps."
     }
 }
 
@@ -63,7 +63,7 @@ impl RusqliteMigration for Migration {
             CREATE INDEX idx_ironwood_received_notes_receiving_key ON ironwood_received_notes (
                 receiving_key_id ASC
             );
-            CREATE TABLE ironwood_dynamic_operations (
+            CREATE TABLE ironwood_one_time_operations (
                 id INTEGER PRIMARY KEY,
                 receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
                 request TEXT UNIQUE,
@@ -78,9 +78,9 @@ impl RusqliteMigration for Migration {
                 expected_value INTEGER CHECK (expected_value > 0),
                 CHECK (request IS NOT NULL OR reference IS NOT NULL)
             );
-            CREATE INDEX ironwood_dynamic_operations_key
-                ON ironwood_dynamic_operations(receiving_key_id);
-            CREATE TABLE ironwood_dynamic_sweeps (
+            CREATE INDEX ironwood_one_time_operations_key
+                ON ironwood_one_time_operations(receiving_key_id);
+            CREATE TABLE ironwood_one_time_sweeps (
                 receiving_key_id INTEGER PRIMARY KEY REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
                 lookup_height INTEGER CHECK (lookup_height BETWEEN 0 AND 4294967295),
                 lookup_hash BLOB CHECK (length(lookup_hash) = 32),
@@ -88,8 +88,8 @@ impl RusqliteMigration for Migration {
                 next_attempt_at INTEGER NOT NULL DEFAULT 0,
                 done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295)
             );
-            CREATE INDEX ironwood_dynamic_sweeps_due ON ironwood_dynamic_sweeps(done_height, next_attempt_at);
-            CREATE TABLE ironwood_dynamic_payment_recovery (
+            CREATE INDEX ironwood_one_time_sweeps_due ON ironwood_one_time_sweeps(done_height, next_attempt_at);
+            CREATE TABLE ironwood_one_time_payment_recovery (
                 receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
                 txid BLOB NOT NULL CHECK (length(txid) = 32),
                 action_index INTEGER NOT NULL CHECK (action_index BETWEEN 0 AND 4294967295),
@@ -103,7 +103,7 @@ impl RusqliteMigration for Migration {
             CREATE TABLE ironwood_nullifier_scan_blocks (
                 height INTEGER PRIMARY KEY CHECK (height BETWEEN 0 AND 4294967295)
             );
-            CREATE TABLE ironwood_dynamic_spend_retention (
+            CREATE TABLE ironwood_one_time_spend_retention (
                 account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
                 nullifier_retention_height INTEGER NOT NULL DEFAULT 0
                     CHECK (nullifier_retention_height BETWEEN 0 AND 4294967295),

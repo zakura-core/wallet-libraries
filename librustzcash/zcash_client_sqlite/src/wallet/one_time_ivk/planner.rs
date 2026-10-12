@@ -1,7 +1,7 @@
 //! Restore sweep scheduling, which never derives viewing keys.
 use rusqlite::{Connection, params};
 use zcash_client_backend::data_api::{
-    dynamic_ivk::{DiscoveryWork, SweepDeferral},
+    one_time_ivk::{DiscoveryWork, SweepDeferral},
     transparent_ledger::ChainPoint,
 };
 use zcash_primitives::block::BlockHash;
@@ -32,7 +32,7 @@ pub(super) fn anchor(height: Option<u32>, hash: Option<[u8; 32]>) -> Option<Chai
     })
 }
 
-/// Implements `DynamicIvkRead::dynamic_history_pending`.
+/// Implements `OneTimeIvkRead::one_time_history_pending`.
 pub(crate) fn history_pending<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -41,10 +41,10 @@ pub(crate) fn history_pending<P: Parameters>(
 ) -> Result<bool, SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_dynamic_sweeps s
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_sweeps s
             JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
             WHERE k.account_id = ?1 AND k.scan_from <= ?2 AND s.done_height IS NULL)
-         OR EXISTS(SELECT 1 FROM ironwood_dynamic_payment_recovery p
+         OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
             JOIN ironwood_receiving_keys k ON k.id = p.receiving_key_id
             WHERE k.account_id = ?1)",
         params![owner.0, u32::from(through)],
@@ -52,7 +52,7 @@ pub(crate) fn history_pending<P: Parameters>(
     )?)
 }
 
-/// Implements `DynamicIvkWrite::prepare_dynamic_sweeps`.
+/// Implements `OneTimeIvkWrite::prepare_one_time_sweeps`.
 pub(crate) fn prepare_sweeps<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -71,11 +71,11 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
     // A finished sweep is offered again while a late lookup left candidates queued.
     let mut stmt = conn.prepare(
         "SELECT k.purpose, k.key_index, k.receiver
-         FROM ironwood_dynamic_sweeps s
+         FROM ironwood_one_time_sweeps s
          JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
          WHERE k.account_id = ?1 AND k.scan_from <= ?2 AND s.next_attempt_at <= ?3
            AND (s.done_height IS NULL OR EXISTS(
-               SELECT 1 FROM ironwood_dynamic_payment_recovery p
+               SELECT 1 FROM ironwood_one_time_payment_recovery p
                WHERE p.receiving_key_id = s.receiving_key_id))
          ORDER BY s.next_attempt_at, s.receiving_key_id LIMIT ?4",
     )?;
@@ -88,7 +88,7 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
     discovery_work(rows).map(Ok)
 }
 
-/// Implements `DynamicIvkRead::dynamic_keys_to_recheck`: closed keys without a mined
+/// Implements `OneTimeIvkRead::one_time_keys_to_recheck`: closed keys without a mined
 /// payment whose sweep row, if any, is finished below `height`. A key scanned here has
 /// none until its first paid filter check (see `recovery::record_paid_check`). `used`
 /// is not payment evidence: it also marks a receipt that expired unmined.
@@ -102,7 +102,7 @@ pub(crate) fn keys_to_recheck<P: Parameters>(
     let mut stmt = conn.prepare(
         "SELECT k.purpose, k.key_index, k.receiver
          FROM ironwood_receiving_keys k
-         LEFT JOIN ironwood_dynamic_sweeps s ON s.receiving_key_id = k.id
+         LEFT JOIN ironwood_one_time_sweeps s ON s.receiving_key_id = k.id
          WHERE k.account_id = ?1 AND k.closed_at IS NOT NULL AND k.paid_before_birthday = 0
            AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n
                JOIN transactions t ON t.id_tx = n.transaction_id
@@ -128,7 +128,7 @@ fn discovery_work(mut rows: rusqlite::Rows<'_>) -> Result<Vec<DiscoveryWork>, Sq
     Ok(work)
 }
 
-/// Implements `DynamicIvkWrite::begin_dynamic_sweep_attempt`, backing off from one
+/// Implements `OneTimeIvkWrite::begin_one_time_sweep_attempt`, backing off from one
 /// minute to twelve hours.
 pub(crate) fn begin_sweep_attempt(
     conn: &Connection,
@@ -142,13 +142,13 @@ pub(crate) fn begin_sweep_attempt(
         record_provider_seen(conn, id)?;
     }
     let attempt: u32 = conn.query_row(
-        "SELECT attempts FROM ironwood_dynamic_sweeps WHERE receiving_key_id = ?1",
+        "SELECT attempts FROM ironwood_one_time_sweeps WHERE receiving_key_id = ?1",
         [id],
         |r| r.get(0),
     )?;
     let delay = (60i64 << attempt.min(10)).min(43200);
     conn.execute(
-        "UPDATE ironwood_dynamic_sweeps
+        "UPDATE ironwood_one_time_sweeps
          SET attempts = MIN(attempts + 1, 30), next_attempt_at = ?2
          WHERE receiving_key_id = ?1",
         params![id, now.saturating_add(delay)],
@@ -180,7 +180,7 @@ pub(super) fn queue_lookup<P: Parameters>(
     }
     let coverage = complete.then_some(anchor);
     conn.execute(
-        "UPDATE ironwood_dynamic_sweeps
+        "UPDATE ironwood_one_time_sweeps
          SET lookup_height = ?2, lookup_hash = ?3, done_height = NULL
          WHERE receiving_key_id = ?1",
         params![

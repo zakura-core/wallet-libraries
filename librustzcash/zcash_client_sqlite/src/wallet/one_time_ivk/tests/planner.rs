@@ -1,13 +1,13 @@
 use super::*;
 use rusqlite::params;
 use std::{collections::BTreeMap, num::NonZeroU32};
-use zakura_dynamic_ivk::lifecycle::{OperationStatus, RESTORE_WATCH_SECS, ReceiptExpectation};
+use zakura_one_time_ivk::lifecycle::{OperationStatus, RESTORE_WATCH_SECS, ReceiptExpectation};
 
 const NOW: i64 = 1_000;
 
 /// Scans `count` new empty blocks and returns the new tip.
 fn advance(st: &mut State, count: usize) -> ChainPoint {
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(count);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(count);
     tip(st)
 }
 
@@ -16,7 +16,7 @@ fn batch(st: &mut State, through: ChainPoint, now: i64) -> Vec<DiscoveryWork> {
     let account = st.test_account().unwrap().id();
     st.wallet_mut()
         .db_mut()
-        .prepare_dynamic_sweeps(account, through, now, NonZeroU32::new(64).unwrap())
+        .prepare_one_time_sweeps(account, through, now, NonZeroU32::new(64).unwrap())
         .unwrap()
         .unwrap()
 }
@@ -66,7 +66,7 @@ fn bounded_batches_do_not_derive_ten_thousand_restored_keys() {
             insert.execute(params![owner.0, i.to_be_bytes(), u32::from(through.height)])?;
         }
         c.execute(
-            "INSERT INTO ironwood_dynamic_sweeps (receiving_key_id) SELECT id FROM ironwood_receiving_keys",
+            "INSERT INTO ironwood_one_time_sweeps (receiving_key_id) SELECT id FROM ironwood_receiving_keys",
             [],
         )?;
         Ok(())
@@ -74,17 +74,17 @@ fn bounded_batches_do_not_derive_ten_thousand_restored_keys() {
     .unwrap();
     let limit = NonZeroU32::new(64).unwrap();
     let batch = db
-        .prepare_dynamic_sweeps(account, through, NOW, limit)
+        .prepare_one_time_sweeps(account, through, NOW, limit)
         .unwrap()
         .unwrap();
     assert_eq!(batch.len(), 64);
     assert!(batch.iter().all(|w| w.receiver == [0; 43]));
     // Only the started record is leased, so a stopped batch cannot starve its tail.
     let first = batch[0].key;
-    db.begin_dynamic_sweep_attempt(account, first, NOW, false)
+    db.begin_one_time_sweep_attempt(account, first, NOW, false)
         .unwrap();
     let batch = db
-        .prepare_dynamic_sweeps(account, through, NOW, limit)
+        .prepare_one_time_sweeps(account, through, NOW, limit)
         .unwrap()
         .unwrap();
     assert_eq!(batch[0].key.index(), 1);
@@ -112,7 +112,7 @@ fn a_batch_needs_a_canonical_chain_point() {
     st.truncate_to_height(base.height);
     let replaced = advance(&mut st, 2);
     assert!(matches!(
-        st.wallet_mut().db_mut().prepare_dynamic_sweeps(
+        st.wallet_mut().db_mut().prepare_one_time_sweeps(
             account,
             removed,
             NOW,
@@ -135,7 +135,7 @@ fn attempts_back_off_from_one_minute_to_twelve_hours() {
     ] {
         st.wallet_mut()
             .db_mut()
-            .begin_dynamic_sweep_attempt(account, key, now, false)
+            .begin_one_time_sweep_attempt(account, key, now, false)
             .unwrap();
         assert!(due(&mut st, through, now + delay - 1).is_empty());
         assert_eq!(due(&mut st, through, now + delay), [key]);
@@ -213,7 +213,7 @@ fn finished_refund_sweep_scans_from_the_next_block_including_scanned_blocks() {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(70_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(refunded, 1);
+    st.scan_cached_blocks_with_one_time_ivks(refunded, 1);
     assert!(unspent_keys(&st, refunded).is_empty());
     finish_sweep(st.wallet_mut().db_mut(), account, key, anchor);
     assert_eq!(scanning_keys(&st), [key]);
@@ -224,7 +224,7 @@ fn finished_refund_sweep_scans_from_the_next_block_including_scanned_blocks() {
             ScanPriority::Historic
         )]
     );
-    st.scan_cached_blocks_with_dynamic_ivks(refunded, 1);
+    st.scan_cached_blocks_with_one_time_ivks(refunded, 1);
     assert_eq!(unspent_keys(&st, refunded), [Some(key)]);
 }
 
@@ -253,7 +253,7 @@ fn finished_incoming_sweeps_watch_paid_and_unpaid_keys() {
         .unwrap(),
         PaymentApplication::Applied
     );
-    db.apply_dynamic_sweep(account, paid, through, through, WATCHED, |_, _| None)
+    db.apply_one_time_sweep(account, paid, through, through, WATCHED, |_, _| None)
         .unwrap()
         .unwrap();
     finish_sweep(db, account, unpaid, through);
@@ -272,20 +272,20 @@ fn an_unwatched_sweep_closes_only_a_key_that_was_not_scanning() {
     let idle = watch(db, account, 0, through.height).key_id();
     let watched = watch(db, account, 1, through.height).key_id();
     queue_lookup(db, account, idle, through, &[]).unwrap();
-    let applied = db.apply_dynamic_sweep(account, idle, through, through, false, |_, _| None);
+    let applied = db.apply_one_time_sweep(account, idle, through, through, false, |_, _| None);
     assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
     finish_sweep(db, account, watched, through);
     // No recent set holds the idle key, so it closes at its lookup.
     assert_eq!(scanning_keys(&st), [watched]);
     // A rewind below the lookup runs the watched key's sweep again. Not recent now, the
     // key keeps scanning, since its watch may still need it.
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     st.truncate_to_height_retaining_cache(through.height - 1);
-    st.scan_cached_blocks_with_dynamic_ivks(through.height, 2);
+    st.scan_cached_blocks_with_one_time_ivks(through.height, 2);
     let tip = tip(&st);
     let db = st.wallet_mut().db_mut();
     queue_lookup(db, account, watched, tip, &[]).unwrap();
-    let applied = db.apply_dynamic_sweep(account, watched, tip, tip, false, |_, _| None);
+    let applied = db.apply_one_time_sweep(account, watched, tip, tip, false, |_, _| None);
     assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
     assert_eq!(scanning_keys(&st), [watched]);
 }
@@ -302,7 +302,7 @@ fn a_newer_paid_filter_rechecks_closed_unpaid_keys() {
     let [missed, hit] = [0, 1].map(|index| watch(db, account, index, anchor.height).key_id());
     for key in [missed, hit] {
         queue_lookup(db, account, key, anchor, &[]).unwrap();
-        let applied = db.apply_dynamic_sweep(account, key, anchor, anchor, false, |_, _| None);
+        let applied = db.apply_one_time_sweep(account, key, anchor, anchor, false, |_, _| None);
         assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
     }
     // A refund key scanned here that closes without a refund has never been swept.
@@ -313,7 +313,7 @@ fn a_newer_paid_filter_rechecks_closed_unpaid_keys() {
     let recheck = |st: &State, height| -> Vec<KeyId> {
         let keys = st
             .wallet()
-            .dynamic_keys_to_recheck(account, height)
+            .one_time_keys_to_recheck(account, height)
             .unwrap();
         keys.iter().map(|w| w.key).collect()
     };
@@ -358,7 +358,7 @@ fn watched_key_finds_a_payout_after_its_sweep() {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(50_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(paid, 1);
+    st.scan_cached_blocks_with_one_time_ivks(paid, 1);
     assert!(unspent_keys(&st, paid).is_empty());
     // The sweep's anchor precedes the payout, which the watch's rescan finds.
     finish_sweep(st.wallet_mut().db_mut(), account, key, anchor);
@@ -369,7 +369,7 @@ fn watched_key_finds_a_payout_after_its_sweep() {
             ScanPriority::Historic
         )]
     );
-    st.scan_cached_blocks_with_dynamic_ivks(paid, 1);
+    st.scan_cached_blocks_with_one_time_ivks(paid, 1);
     assert_eq!(unspent_keys(&st, paid), [Some(key)]);
 }
 
@@ -380,7 +380,7 @@ fn pay(st: &mut State, fvk: &FullViewingKey) {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(50_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
 }
 
 /// A recent sweep finished at a publication behind the wallet's tip watches each key,
@@ -406,10 +406,10 @@ fn a_lagging_recent_sweep_watches_its_keys() {
     assert!(unspent_keys(&st, through.height).is_empty());
     let db = st.wallet_mut().db_mut();
     for &(key, _) in &keys {
-        db.begin_dynamic_sweep_attempt(account, key, NOW, key == seen)
+        db.begin_one_time_sweep_attempt(account, key, NOW, key == seen)
             .unwrap();
         queue_lookup(db, account, key, anchor, &[]).unwrap();
-        let applied = db.apply_dynamic_sweep(account, key, through, anchor, WATCHED, |_, _| None);
+        let applied = db.apply_one_time_sweep(account, key, through, anchor, WATCHED, |_, _| None);
         assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
     }
     let ids = keys.each_ref().map(|(key, _)| *key);
@@ -427,7 +427,7 @@ fn a_lagging_recent_sweep_watches_its_keys() {
             ScanPriority::Historic
         )]
     );
-    st.scan_cached_blocks_with_dynamic_ivks(replay, keys.len() + 1);
+    st.scan_cached_blocks_with_one_time_ivks(replay, keys.len() + 1);
     let notes = |st: &State, key| {
         let keys = unspent_keys(st, tip(st).height);
         keys.iter().filter(|k| **k == Some(key)).count()
@@ -457,7 +457,7 @@ fn issuing_a_key_after_its_watch_needs_no_rescan() {
         .conn()
         .query_row(
             "SELECT MAX(k.registered_at, b.time) FROM ironwood_receiving_keys k
-             JOIN ironwood_dynamic_sweeps s ON s.receiving_key_id = k.id
+             JOIN ironwood_one_time_sweeps s ON s.receiving_key_id = k.id
              JOIN blocks b ON b.height = s.done_height WHERE k.purpose = 1",
             [],
             |r| r.get(0),
@@ -510,7 +510,7 @@ fn restored_refund_key_is_watched_for_a_day() {
         .conn()
         .query_row(
             "SELECT MAX(k.registered_at, b.time) FROM ironwood_receiving_keys k
-             JOIN ironwood_dynamic_sweeps s ON s.receiving_key_id = k.id
+             JOIN ironwood_one_time_sweeps s ON s.receiving_key_id = k.id
              JOIN blocks b ON b.height = s.done_height WHERE k.purpose = 0",
             [],
             |r| r.get(0),
@@ -550,21 +550,30 @@ fn history_is_pending_until_sweeps_finish_and_candidates_apply() {
     let before = tip(&st).height;
     let key = KeyId::new(Purpose::Receive, 8);
     let db = st.wallet_mut().db_mut();
-    assert!(!db.dynamic_history_pending(account, before).unwrap());
+    assert!(!db.one_time_history_pending(account, before).unwrap());
     watch(db, account, 8, before + 1);
-    assert!(!db.dynamic_history_pending(account, before).unwrap());
+    assert!(!db.one_time_history_pending(account, before).unwrap());
     let candidate = pay_candidate(&mut st, key);
     let through = tip(&st);
     let db = st.wallet_mut().db_mut();
-    assert!(db.dynamic_history_pending(account, through.height).unwrap());
+    assert!(
+        db.one_time_history_pending(account, through.height)
+            .unwrap()
+    );
     // Retry backoff never makes an unfinished restore appear complete.
-    db.begin_dynamic_sweep_attempt(account, key, NOW, false)
+    db.begin_one_time_sweep_attempt(account, key, NOW, false)
         .unwrap();
-    assert!(db.dynamic_history_pending(account, through.height).unwrap());
+    assert!(
+        db.one_time_history_pending(account, through.height)
+            .unwrap()
+    );
     finish_sweep(db, account, key, through);
-    assert!(!db.dynamic_history_pending(account, through.height).unwrap());
+    assert!(
+        !db.one_time_history_pending(account, through.height)
+            .unwrap()
+    );
     queue_payment(db, account, key, &candidate).unwrap();
-    assert!(db.dynamic_history_pending(account, before).unwrap());
+    assert!(db.one_time_history_pending(account, before).unwrap());
     assert_eq!(
         apply_payment(
             db,
@@ -577,7 +586,10 @@ fn history_is_pending_until_sweeps_finish_and_candidates_apply() {
         .unwrap(),
         PaymentApplication::Applied
     );
-    assert!(!db.dynamic_history_pending(account, through.height).unwrap());
+    assert!(
+        !db.one_time_history_pending(account, through.height)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -603,7 +615,7 @@ fn candidates_queued_after_finish_are_offered_again() {
     let (corrected, data) = directory_answer(&candidate);
     let corrected = std::slice::from_ref(&corrected);
     let db = st.wallet_mut().db_mut();
-    db.begin_dynamic_sweep_attempt(account, key, NOW, false)
+    db.begin_one_time_sweep_attempt(account, key, NOW, false)
         .unwrap();
     assert!(
         !db.queue_directory_lookup(account, key, through, corrected, &BTreeMap::new())
@@ -612,7 +624,10 @@ fn candidates_queued_after_finish_are_offered_again() {
     );
     reopen(&mut st);
     let db = st.wallet_mut().db_mut();
-    assert!(db.dynamic_history_pending(account, through.height).unwrap());
+    assert!(
+        db.one_time_history_pending(account, through.height)
+            .unwrap()
+    );
     assert_eq!(lookup_coverage(db, account, key), None);
     assert!(due(&mut st, through, NOW).is_empty());
     assert_eq!(due(&mut st, through, NOW + 60), [key]);
@@ -624,16 +639,22 @@ fn candidates_queued_after_finish_are_offered_again() {
     );
     // A complete replacement records its coverage but not completion.
     assert_eq!(lookup_coverage(db, account, key), Some(through));
-    assert!(db.dynamic_history_pending(account, through.height).unwrap());
+    assert!(
+        db.one_time_history_pending(account, through.height)
+            .unwrap()
+    );
     let siblings = first_leaf_path().auth_path().map(|hash| hash.to_bytes());
     assert_eq!(
-        db.apply_dynamic_sweep(account, key, through, through, WATCHED, |_, _| Some(
+        db.apply_one_time_sweep(account, key, through, through, WATCHED, |_, _| Some(
             siblings
         ))
         .unwrap(),
         Ok(PaymentApplication::Applied)
     );
-    assert!(!db.dynamic_history_pending(account, through.height).unwrap());
+    assert!(
+        !db.one_time_history_pending(account, through.height)
+            .unwrap()
+    );
     assert_eq!(unspent_keys(&st, through.height), [Some(key)]);
 }
 
@@ -653,10 +674,10 @@ fn rewind_reruns_only_sweeps_above_the_retained_chain() {
     let db = st.wallet_mut().db_mut();
     assert_eq!(lookup_coverage(db, account, early), Some(kept));
     assert_eq!(lookup_coverage(db, account, late), None);
-    assert!(db.dynamic_history_pending(account, kept.height).unwrap());
+    assert!(db.one_time_history_pending(account, kept.height).unwrap());
     // The rewound sweep needs a new lookup before it can finish.
     assert!(matches!(
-        db.apply_dynamic_sweep(account, late, kept, kept, WATCHED, |_, _| None),
+        db.apply_one_time_sweep(account, late, kept, kept, WATCHED, |_, _| None),
         Ok(Err(SweepDeferral::UnknownAnchor))
     ));
     assert_eq!(due(&mut st, kept, NOW), [late]);
@@ -670,7 +691,7 @@ fn rewound_sweep_does_not_wait_out_its_last_attempt_lease() {
     let key = watch(st.wallet_mut().db_mut(), account, 0, kept.height).key_id();
     let removed = advance(&mut st, 1);
     let db = st.wallet_mut().db_mut();
-    db.begin_dynamic_sweep_attempt(account, key, NOW, false)
+    db.begin_one_time_sweep_attempt(account, key, NOW, false)
         .unwrap();
     finish_sweep(db, account, key, removed);
     st.truncate_to_height(kept.height);
@@ -729,7 +750,7 @@ fn payout_during_the_watch_extends_the_lookahead() {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(50_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(paid, 1);
+    st.scan_cached_blocks_with_one_time_ivks(paid, 1);
     assert_eq!(unspent_keys(&st, paid), [Some(edge)]);
     let through = tip(&st);
     lookahead(st.wallet_mut().db_mut(), account, 3, through.height);
@@ -786,7 +807,7 @@ fn retained_spend_history_covers_early_spends_in_large_batches() {
             st.generate_empty_block();
         }
         let first = candidate.height + 1;
-        st.scan_cached_blocks_with_dynamic_ivks(first, 201);
+        st.scan_cached_blocks_with_one_time_ivks(first, 201);
         let through = tip(&st);
         let status = spend_status(st.wallet_mut().db_mut(), account, key, &candidate, through);
         match (retained, spent) {
@@ -815,7 +836,7 @@ fn recheck_sweeps_closed_keys_and_finds_a_later_refund() {
     let through = tip(&st);
     assert!(unspent_keys(&st, through.height).is_empty());
     let db = st.wallet_mut().db_mut();
-    assert_eq!(db.recheck_dynamic_key_history(account).unwrap(), 1);
+    assert_eq!(db.recheck_one_time_key_history(account).unwrap(), 1);
     assert_eq!(due(&mut st, through, NOW), [key]);
     let db = st.wallet_mut().db_mut();
     queue_lookup(db, account, key, through, std::slice::from_ref(&candidate)).unwrap();
@@ -831,7 +852,7 @@ fn recheck_sweeps_closed_keys_and_finds_a_later_refund() {
         .unwrap(),
         PaymentApplication::Applied
     );
-    db.apply_dynamic_sweep(account, key, through, through, WATCHED, |_, _| None)
+    db.apply_one_time_sweep(account, key, through, through, WATCHED, |_, _| None)
         .unwrap()
         .unwrap();
     assert_eq!(unspent_keys(&st, through.height), [Some(key)]);
@@ -841,7 +862,7 @@ fn recheck_sweeps_closed_keys_and_finds_a_later_refund() {
     assert_eq!(
         st.wallet_mut()
             .db_mut()
-            .recheck_dynamic_key_history(account)
+            .recheck_one_time_key_history(account)
             .unwrap(),
         0
     );
@@ -877,7 +898,7 @@ fn an_expired_receipt_leaves_a_closed_key_to_the_paid_filter() {
     let publication = tip(&st);
     let rechecked = st
         .wallet()
-        .dynamic_keys_to_recheck(account, publication.height)
+        .one_time_keys_to_recheck(account, publication.height)
         .unwrap();
     assert_eq!(rechecked.iter().map(|w| w.key).collect::<Vec<_>>(), [key]);
     let db = st.wallet_mut().db_mut();
@@ -893,7 +914,7 @@ fn an_expired_receipt_leaves_a_closed_key_to_the_paid_filter() {
         std::slice::from_ref(&candidate),
     )
     .unwrap();
-    let applied = db.apply_dynamic_sweep(account, key, publication, publication, false, |_, _| {
+    let applied = db.apply_one_time_sweep(account, key, publication, publication, false, |_, _| {
         Some(first_leaf_path().auth_path().map(|hash| hash.to_bytes()))
     });
     assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
@@ -901,6 +922,6 @@ fn an_expired_receipt_leaves_a_closed_key_to_the_paid_filter() {
     // Once a payment is mined, the key is not rechecked.
     let rechecked = st
         .wallet()
-        .dynamic_keys_to_recheck(account, publication.height + 1);
+        .one_time_keys_to_recheck(account, publication.height + 1);
     assert!(rechecked.unwrap().is_empty());
 }

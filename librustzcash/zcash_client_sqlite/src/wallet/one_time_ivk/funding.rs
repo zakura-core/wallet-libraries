@@ -1,6 +1,6 @@
 //! Refund keys, their operations, and the funding transaction's memo and shape.
 use rusqlite::{Connection, OptionalExtension, params};
-use zakura_dynamic_ivk::{
+use zakura_one_time_ivk::{
     REFUND_MEMO_MAGIC, RefundMemo,
     lifecycle::{Observation, OperationStatus},
 };
@@ -14,7 +14,7 @@ use zcash_protocol::{
 };
 
 use super::{
-    Discovery, DynamicKey, Purpose, ReservationPolicy, account_key, activate, invalid,
+    Discovery, OneTimeKey, Purpose, ReservationPolicy, account_key, activate, invalid,
     issuance_start, lifecycle::record_refund, recovery, reserve_next,
 };
 use crate::{AccountUuid, error::SqliteClientError};
@@ -26,7 +26,7 @@ pub(super) fn reserve<P: Parameters>(
     account: AccountUuid,
     tip: BlockHeight,
     now: i64,
-) -> Result<Result<DynamicKey, ReservationPolicy>, SqliteClientError> {
+) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
     let scan_from = match issuance_start(conn, tip)? {
         Ok(from) => from,
         Err(policy) => return Ok(Err(policy)),
@@ -78,11 +78,11 @@ pub(super) fn record_operation<P: Parameters>(
     }
     let key = refund_key(conn, params, account, index)?;
     let (elsewhere, recorded, rebound): (bool, bool, bool) = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_dynamic_operations
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_operations
                 WHERE reference = ?2 AND receiving_key_id <> ?1),
-            EXISTS(SELECT 1 FROM ironwood_dynamic_operations
+            EXISTS(SELECT 1 FROM ironwood_one_time_operations
                 WHERE reference = ?2 AND receiving_key_id = ?1),
-            EXISTS(SELECT 1 FROM ironwood_dynamic_operations
+            EXISTS(SELECT 1 FROM ironwood_one_time_operations
                 WHERE reference <> ?2 AND receiving_key_id = ?1)",
         params![key, deposit],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -96,7 +96,7 @@ pub(super) fn record_operation<P: Parameters>(
     // Until its funding transaction is stored, the operation expects no receipt.
     if !recorded {
         conn.execute(
-            "INSERT INTO ironwood_dynamic_operations
+            "INSERT INTO ironwood_one_time_operations
                 (receiving_key_id, reference, deadline, begun_at, expectation)
              VALUES (?1, ?2, ?3, ?4, 1)",
             params![key, deposit, deadline, now],
@@ -112,7 +112,7 @@ fn operation_recorded(
     deposit: &str,
 ) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_dynamic_operations
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_operations
          WHERE receiving_key_id = ?1 AND reference = ?2)",
         params![key, deposit],
         |r| r.get(0),

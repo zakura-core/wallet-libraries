@@ -12,7 +12,7 @@ fn state() -> State {
         .with_account_from_sapling_activation(BlockHash([0; 32]))
         .build()
 }
-fn encrypted(key: &DynamicKey) -> EncryptedNote {
+fn encrypted(key: &OneTimeKey) -> EncryptedNote {
     let rho = Rho::from_bytes(&[9; 32]).unwrap();
     let note = Note::from_parts(
         key.receiver(),
@@ -31,7 +31,7 @@ fn directory_payment_queue_authenticates_retries_and_survives_reopen_without_cre
     let account = st.test_account().unwrap().id();
     let key = watch(st.wallet_mut().db_mut(), account, 0, start());
     let (height, _) = st.generate_empty_block();
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
     // An authentic ciphertext alone is not evidence that its note is on chain.
     let candidate = PendingPayment {
         txid: TxId::from_bytes([8; 32]),
@@ -95,7 +95,7 @@ fn directory_payment_queue_authenticates_retries_and_survives_reopen_without_cre
     assert!(rollback.is_err());
     assert_eq!(pending(st.wallet().db(), account, key.key_id()).len(), 1);
     let (orphan_height, _) = st.generate_empty_block();
-    st.scan_cached_blocks_with_dynamic_ivks(orphan_height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(orphan_height, 1);
     let mut orphan = candidate.clone();
     orphan.txid = TxId::from_bytes([12; 32]);
     orphan.height = orphan_height;
@@ -117,7 +117,7 @@ fn directory_payment_absence_requires_retained_contiguous_nullifiers() {
     let key = reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, start());
     let (first, _) = st.generate_empty_block();
     let (last, _) = st.generate_empty_block();
-    st.scan_cached_blocks_with_dynamic_ivks(first, 2);
+    st.scan_cached_blocks_with_one_time_ivks(first, 2);
     let candidate = PendingPayment {
         txid: TxId::from_bytes([8; 32]),
         action_index: 0,
@@ -239,7 +239,7 @@ fn directory_payment_spentness_includes_spends_already_linked_by_scanning() {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(100_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
     let notes = st
         .wallet()
         .db()
@@ -262,7 +262,7 @@ fn directory_payment_spentness_includes_spends_already_linked_by_scanning() {
         to,
         Zatoshis::const_from_u64(20_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(spent_height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(spent_height, 1);
     // This is the scanner's real split, not a hand-built nullifier-map fixture.
     let unlinked: u64 = st
         .wallet()

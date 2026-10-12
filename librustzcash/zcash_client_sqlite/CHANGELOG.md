@@ -158,19 +158,19 @@ workspace.
   facts atomically, and promotion refuses a transfer that introduces missing coverage.
 
 ### Added
-- Dynamic IVKs (with `orchard`; module `wallet::dynamic_ivk`): per-swap Ironwood refund
-  and incoming addresses derived from the account viewing key with `zakura-dynamic-ivk`,
-  recoverable from the seed. `WalletDb` implements the backend's `DynamicIvkRead` and
-  `DynamicIvkWrite`. Keys the wallet issues are trial-decrypted in every batch of
-  `scan_cached_blocks_with_dynamic_ivks` until they close, and their notes spend into
+- One-time IVKs (with `orchard`; module `wallet::one_time_ivk`): per-swap Ironwood refund
+  and incoming addresses derived from the account viewing key with `zakura-one-time-ivk`,
+  recoverable from the seed. `WalletDb` implements the backend's `OneTimeIvkRead` and
+  `OneTimeIvkWrite`. Keys the wallet issues are trial-decrypted in every batch of
+  `scan_cached_blocks_with_one_time_ivks` until they close, and their notes spend into
   ordinary change. Full-transaction and Enhance PIR retrieval authenticate these notes
   with their registered key, but only a full transaction stores their memo: they carry
-  none the wallet reads, since the refund marker is on internal change. While a dynamic
-  key is open, blocks and transactions processed without the dynamic keys are refused
-  (`SqliteClientError::DynamicIvksNotUsed`). A build without `orchard` refuses to
-  open or initialize a database holding dynamic IVK state
-  (`WalletMigrationError::DynamicIvksRequireOrchard`).
-  Invalid input to these calls is `SqliteClientError::InvalidDynamicIvkInput`, and a call
+  none the wallet reads, since the refund marker is on internal change. While a one-time
+  key is open, blocks and transactions processed without the one-time keys are refused
+  (`SqliteClientError::OneTimeIvksNotUsed`). A build without `orchard` refuses to
+  open or initialize a database holding one-time IVK state
+  (`WalletMigrationError::OneTimeIvksRequireOrchard`).
+  Invalid input to these calls is `SqliteClientError::InvalidOneTimeIvkInput`, and a call
   that must wait returns its `ReservationPolicy` or `SweepDeferral` as an `Ok` value.
 - Issuance: `WalletDb::reserve_refund_key` and `prepare_receive_reservation`, which require
   scanning within `ISSUANCE_TIP_LAG` blocks of the network tip and hold incoming
@@ -185,7 +185,7 @@ workspace.
   `start_receive_operation`, which returns the `ReceiveDeposit` to show; an accepted
   deadline cannot exceed the requested one, and a repeated acceptance cannot change the
   deposit address or memo. `record_operation_status` takes a provider
-  status the app normalized with `zakura_dynamic_ivk::lifecycle::near_observation` for
+  status the app normalized with `zakura_one_time_ivk::lifecycle::near_observation` for
   either kind of operation, by deposit address and memo, and reclaims what it made
   reclaimable: an unstarted reservation after its latest deadline and
   `RECEIVE_RECLAIM_SECONDS`, a started one on a fresh conclusive status, and a funded one
@@ -196,35 +196,35 @@ workspace.
   refund key starts scanning when `store_transactions_to_be_sent` stores its funding
   transaction, which fails if the deposit is not recorded for that key, or when the provider reports a refund owed for a deposit paid from
   elsewhere.
-- Lifecycle: `close_finished_dynamic_keys`. A key closes once its final provider status
+- Lifecycle: `close_finished_one_time_keys`. A key closes once its final provider status
   and expected receipts are in, or 30 days after the quote deadline (a provider status can
   fill in a missing deadline but not move one), or a day after a restored key's sweep, but
   not while a receipt is unmined and unexpired or short of ZIP 315's untrusted
   confirmations, and only while the wallet is scanned to the chain tip, by the earlier of
-  the caller's clock and the tip's block time. `recheck_dynamic_key_history` sweeps closed
+  the caller's clock and the tip's block time. `recheck_one_time_key_history` sweeps closed
   keys again on request. A rewind reopens a closed key whose receipt it un-mines or leaves
   unconfirmed; no provider status reopens one.
-- Recovery: `maintain_dynamic_ivks`, called at each sync start and tip, recovers funding
+- Recovery: `maintain_one_time_ivks`, called at each sync start and tip, recovers funding
   memos and keeps an incoming lookahead. Each recovered key is swept once through a
-  receiver directory with the trait steps `prepare_dynamic_sweeps`,
-  `begin_dynamic_sweep_attempt`, `directory_publication_anchor`,
-  `directory_note_data_needed`, `queue_directory_lookup` and `apply_dynamic_sweep`, which
+  receiver directory with the trait steps `prepare_one_time_sweeps`,
+  `begin_one_time_sweep_attempt`, `directory_publication_anchor`,
+  `directory_note_data_needed`, `queue_directory_lookup` and `apply_one_time_sweep`, which
   credit a note only after verifying its inclusion and spend state locally, and then
-  `finish_dynamic_nullifier_recovery`, which releases the Ironwood spend history the
+  `finish_one_time_nullifier_recovery`, which releases the Ironwood spend history the
   sweeps needed. Every attempt looks the key up in the current publication, whose answer
   replaces queued candidates it no longer repeats and reopens the sweep until it is
   applied, and note data is queued in batches, so a long history keeps its progress.
-  `begin_dynamic_sweep_attempt` takes whether a provider seen set holds the key's
+  `begin_one_time_sweep_attempt` takes whether a provider seen set holds the key's
   receiver and stores a hit before any lookup, so a seen key is never issued.
-  `apply_dynamic_sweep` takes whether a current recent set holds it: such a key scans
+  `apply_one_time_sweep` takes whether a current recent set holds it: such a key scans
   from the block after its lookup until its restore watch closes it, and any other
-  closes at its lookup. `dynamic_keys_to_recheck` and `record_paid_filter_check` sweep a
+  closes at its lookup. `one_time_keys_to_recheck` and `record_paid_filter_check` sweep a
   closed key without a known payment, swept or scanned here, once a newer publication's
   paid filter holds it. A payment before the account's
   birthday is checked for inclusion ahead of the birthday block and then raises the
   recovery bound without being tracked. Scanning that later finds the same note moves it
-  to the transaction it is found in. `dynamic_history_pending` reports unfinished sweeps.
-- `get_dynamic_key_for_receiver` reads the dynamic key registered for a receiver.
+  to the transaction it is found in. `one_time_history_pending` reports unfinished sweeps.
+- `get_one_time_key_for_receiver` reads the one-time key registered for a receiver.
 - `WalletDb::transaction_history_summaries` returns typed account-scoped transaction
   metadata and monetary effects without reading raw transaction payloads. It shares
   the corrected accounting definition of `v_transactions`, filters account inputs

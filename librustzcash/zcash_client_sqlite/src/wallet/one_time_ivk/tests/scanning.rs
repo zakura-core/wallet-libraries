@@ -1,8 +1,8 @@
 use std::{cell::Cell, ops::Range};
 
-use zakura_dynamic_ivk::lifecycle::{OperationStatus, ReceiptExpectation};
+use zakura_one_time_ivk::lifecycle::{OperationStatus, ReceiptExpectation};
 use zcash_client_backend::data_api::chain::{
-    BlockSource, ChainState, error, scan_cached_blocks_with_dynamic_ivks,
+    BlockSource, ChainState, error, scan_cached_blocks_with_one_time_ivks,
 };
 
 use super::*;
@@ -38,17 +38,17 @@ fn close(st: &mut State, keys: &[KeyId]) {
 }
 
 #[test]
-fn dynamic_ivk_scan_reopen_and_spend_into_ordinary_change() {
+fn one_time_ivk_scan_reopen_and_spend_into_ordinary_change() {
     scan_reopen_and_spend(false);
 }
 
 #[test]
-fn closed_dynamic_keys_still_spend_into_ordinary_change() {
+fn closed_one_time_keys_still_spend_into_ordinary_change() {
     scan_reopen_and_spend(true);
 }
 
 /// Scans payments to both purposes beside an ordinary note, optionally closes the
-/// dynamic keys, then spends all three notes into ordinary change.
+/// one-time keys, then spends all three notes into ordinary change.
 fn scan_reopen_and_spend(close_keys: bool) {
     use std::convert::Infallible;
     use zcash_client_backend::{
@@ -94,14 +94,14 @@ fn scan_reopen_and_spend(close_keys: bool) {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(4_000_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(first, 3);
+    st.scan_cached_blocks_with_one_time_ivks(first, 3);
     for _ in 0..5 {
         let (h, _) = st.generate_empty_block();
-        st.scan_cached_blocks_with_dynamic_ivks(h, 1);
+        st.scan_cached_blocks_with_one_time_ivks(h, 1);
     }
 
     // Replay the same canonical outputs. The note key reference must be idempotent.
-    st.scan_cached_blocks_with_dynamic_ivks(first, 8);
+    st.scan_cached_blocks_with_one_time_ivks(first, 8);
     let path = st.wallet().data_file_path().to_owned();
     // Reopen before reconstruction and spending. No derived FVK is persisted in the DB.
     let reopened = WalletDb::for_path(path, network, test_clock(), test_rng()).unwrap();
@@ -115,7 +115,7 @@ fn scan_reopen_and_spend(close_keys: bool) {
     assert_eq!(notes.len(), 3);
     let refund_note = notes
         .iter()
-        .find(|n| n.dynamic_key_id() == Some(refund.key_id()))
+        .find(|n| n.one_time_key_id() == Some(refund.key_id()))
         .unwrap();
     assert_eq!(refund_note.note().recipient(), refund.receiver());
     assert_eq!(
@@ -124,20 +124,20 @@ fn scan_reopen_and_spend(close_keys: bool) {
     );
     let incoming_note = notes
         .iter()
-        .find(|n| n.dynamic_key_id() == Some(incoming.key_id()))
+        .find(|n| n.one_time_key_id() == Some(incoming.key_id()))
         .unwrap();
     assert_eq!(incoming_note.note().recipient(), incoming.receiver());
     assert_eq!(
         incoming_note.note().nullifier(incoming.full_viewing_key()),
         incoming_nf
     );
-    assert!(notes.iter().any(|n| n.dynamic_key_id().is_none()));
+    assert!(notes.iter().any(|n| n.one_time_key_id().is_none()));
 
     if close_keys {
         // A key closes once its receipts have ten confirmations.
-        st.generate_and_scan_empty_blocks_with_dynamic_ivks(3);
+        st.generate_and_scan_empty_blocks_with_one_time_ivks(3);
         close(&mut st, &[refund.key_id(), incoming.key_id()]);
-        assert!(st.wallet().get_dynamic_scanning_keys().unwrap().is_empty());
+        assert!(st.wallet().get_one_time_scanning_keys().unwrap().is_empty());
     }
 
     let receiver =
@@ -177,14 +177,14 @@ fn scan_reopen_and_spend(close_keys: bool) {
         )
         .unwrap();
     let (h, _) = st.generate_next_block_including(created[0]);
-    st.scan_cached_blocks_with_dynamic_ivks(h, 1);
+    st.scan_cached_blocks_with_one_time_ivks(h, 1);
     let notes = st
         .wallet()
         .db()
         .get_unspent_ironwood_notes_at_historical_height(account.id(), h)
         .unwrap();
     assert_eq!(notes.len(), 1);
-    assert_eq!(notes[0].dynamic_key_id(), None);
+    assert_eq!(notes[0].one_time_key_id(), None);
     assert_eq!(notes[0].spending_key_scope(), Scope::Internal);
     assert_eq!(
         notes[0].note().recipient(),
@@ -197,7 +197,7 @@ fn scan_reopen_and_spend(close_keys: bool) {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(70_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(late_height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(late_height, 1);
     let late = unspent_keys(&st, late_height);
     assert_eq!(late.len(), if close_keys { 1 } else { 2 });
     assert_eq!(
@@ -209,7 +209,7 @@ fn scan_reopen_and_spend(close_keys: bool) {
 }
 
 #[test]
-fn dynamic_ivk_rejects_mismatched_note_metadata() {
+fn one_time_ivk_rejects_mismatched_note_metadata() {
     use incrementalmerkletree::Position;
     use orchard::note::{Note, NoteVersion, RandomSeed, Rho};
     use zcash_client_backend::wallet::WalletOutput;
@@ -239,7 +239,7 @@ fn dynamic_ivk_rejects_mismatched_note_metadata() {
             account,
             Some(scope),
         )
-        .with_dynamic_key_id(key_id)
+        .with_one_time_key_id(key_id)
     };
     let nf = note.nullifier(key.full_viewing_key());
     let conn = st.wallet().conn();
@@ -289,7 +289,7 @@ fn dynamic_ivk_rejects_mismatched_note_metadata() {
 }
 
 #[test]
-fn dynamic_ivk_reconstructs_only_with_the_registered_account() {
+fn one_time_ivk_reconstructs_only_with_the_registered_account() {
     let mut st = wallet(false);
     let account = st.test_account().unwrap().id();
     let key = reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, start());
@@ -327,15 +327,15 @@ fn lookahead_keys_are_swept_instead_of_scanned() {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(50_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(first, 1);
+    st.scan_cached_blocks_with_one_time_ivks(first, 1);
     lookahead(st.wallet_mut().db_mut(), account, 2, first);
     // Unlike activation, registering for a sweep replays no scanned history.
     assert!(queued(&st).is_empty());
-    assert!(st.wallet().get_dynamic_scanning_keys().unwrap().is_empty());
+    assert!(st.wallet().get_one_time_scanning_keys().unwrap().is_empty());
     assert!(
         st.wallet()
             .db()
-            .dynamic_history_pending(account, first)
+            .one_time_history_pending(account, first)
             .unwrap()
     );
     let (later, _, _) = st.generate_next_block(
@@ -343,7 +343,7 @@ fn lookahead_keys_are_swept_instead_of_scanned() {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(60_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(later, 1);
+    st.scan_cached_blocks_with_one_time_ivks(later, 1);
     assert!(unspent_keys(&st, later).is_empty());
 }
 
@@ -352,7 +352,7 @@ fn active_keys_scan_whole_batches_across_their_start() {
     let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
     let (first, _) = st.generate_empty_block();
-    st.scan_cached_blocks_with_dynamic_ivks(first, 1);
+    st.scan_cached_blocks_with_one_time_ivks(first, 1);
     let key = reserve_key(
         st.wallet_mut().db_mut(),
         account,
@@ -367,7 +367,7 @@ fn active_keys_scan_whole_batches_across_their_start() {
     );
     st.generate_empty_block();
     assert_eq!(
-        st.scan_cached_blocks_with_dynamic_ivks(first + 1, 3)
+        st.scan_cached_blocks_with_one_time_ivks(first + 1, 3)
             .scanned_range(),
         first + 1..first + 4
     );
@@ -388,7 +388,7 @@ fn activation_rescans_scanned_blocks_from_its_start_and_survives_reopen() {
         Zatoshis::const_from_u64(70_000),
     );
     st.generate_empty_block();
-    st.scan_cached_blocks_with_dynamic_ivks(first, 3);
+    st.scan_cached_blocks_with_one_time_ivks(first, 3);
     assert!(unspent_keys(&st, paid + 1).is_empty());
     assert!(queued(&st).is_empty());
 
@@ -410,7 +410,7 @@ fn activation_rescans_scanned_blocks_from_its_start_and_survives_reopen() {
     )
     .unwrap();
     *st.wallet_mut().db_mut() = reopened;
-    st.scan_cached_blocks_with_dynamic_ivks(paid, 2);
+    st.scan_cached_blocks_with_one_time_ivks(paid, 2);
     assert!(queued(&st).is_empty());
     assert_eq!(unspent_keys(&st, paid + 1), vec![Some(key)]);
 }
@@ -421,7 +421,7 @@ fn reopening_a_closed_key_rescans_blocks_scanned_without_it() {
     let account = st.test_account().unwrap().id();
     let (first, _) = st.generate_empty_block();
     let key = reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, first);
-    st.scan_cached_blocks_with_dynamic_ivks(first, 1);
+    st.scan_cached_blocks_with_one_time_ivks(first, 1);
     close(&mut st, &[key.key_id()]);
     let (paid, _, _) = st.generate_next_block(
         &IronwoodFvk(key.full_viewing_key().clone()),
@@ -429,12 +429,12 @@ fn reopening_a_closed_key_rescans_blocks_scanned_without_it() {
         Zatoshis::const_from_u64(70_000),
     );
     st.generate_empty_block();
-    st.scan_cached_blocks_with_dynamic_ivks(paid, 2);
+    st.scan_cached_blocks_with_one_time_ivks(paid, 2);
     assert!(unspent_keys(&st, paid + 1).is_empty());
 
     activate_key(st.wallet_mut().db_mut(), account, key.key_id(), paid);
     assert_eq!(queued(&st), vec![paid..paid + 2]);
-    st.scan_cached_blocks_with_dynamic_ivks(paid, 2);
+    st.scan_cached_blocks_with_one_time_ivks(paid, 2);
     assert_eq!(unspent_keys(&st, paid + 1), vec![Some(key.key_id())]);
 }
 
@@ -446,7 +446,7 @@ fn reactivating_an_open_key_rescans_only_blocks_below_its_start() {
     for _ in 0..3 {
         st.generate_empty_block();
     }
-    st.scan_cached_blocks_with_dynamic_ivks(first, 4);
+    st.scan_cached_blocks_with_one_time_ivks(first, 4);
     let key = reserve_key(
         st.wallet_mut().db_mut(),
         account,
@@ -455,7 +455,7 @@ fn reactivating_an_open_key_rescans_only_blocks_below_its_start() {
     )
     .key_id();
     assert_eq!(queued(&st), vec![first + 2..first + 4]);
-    st.scan_cached_blocks_with_dynamic_ivks(first + 2, 2);
+    st.scan_cached_blocks_with_one_time_ivks(first + 2, 2);
 
     // A later start never narrows the active range.
     activate_key(st.wallet_mut().db_mut(), account, key, first + 3);
@@ -513,7 +513,7 @@ fn key_activated_mid_batch_is_requeued_for_the_blocks_it_missed() {
             reserve_key(&mut db, account, Purpose::Receive, paid);
         },
     };
-    scan_cached_blocks_with_dynamic_ivks(
+    scan_cached_blocks_with_one_time_ivks(
         &network,
         &source,
         &mut scanning_db,
@@ -525,7 +525,7 @@ fn key_activated_mid_batch_is_requeued_for_the_blocks_it_missed() {
     assert!(unspent_keys(&st, paid + 1).is_empty());
     assert_eq!(queued(&st), vec![paid..paid + 2]);
 
-    st.scan_cached_blocks_with_dynamic_ivks(paid, 2);
+    st.scan_cached_blocks_with_one_time_ivks(paid, 2);
     assert_eq!(unspent_keys(&st, paid + 1), vec![Some(key)]);
     assert!(queued(&st).is_empty());
 }

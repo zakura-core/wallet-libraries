@@ -15,18 +15,18 @@ of the following:
 This library contains APIs that collectively implement a Zcash light client in
 an SQLite database.
 
-## Dynamic IVKs
+## One-time IVKs
 
-With the `orchard` feature, `WalletDb` keeps dynamic IVKs: a durable registry of
+With the `orchard` feature, `WalletDb` keeps one-time IVKs: a durable registry of
 derived refund and incoming keys, their scanning, seed recovery through
 receiver-directory sweeps, and spending. The migration creates its tables in every
 build, but a build without `orchard` refuses to open a database holding any of this
 state. `WalletDb`
-implements the backend's `DynamicIvkRead` and `DynamicIvkWrite`, so a wallet scans with
-`scan_cached_blocks_with_dynamic_ivks`. Compact scanning and software spending retain
-each note's derived key; change uses ordinary account keys. The `wallet::dynamic_ivk`
+implements the backend's `OneTimeIvkRead` and `OneTimeIvkWrite`, so a wallet scans with
+`scan_cached_blocks_with_one_time_ivks`. Compact scanning and software spending retain
+each note's derived key; change uses ordinary account keys. The `wallet::one_time_ivk`
 rustdoc lists the calls a wallet makes, and the
-[`zakura-dynamic-ivk` README](../../zakura/dynamic-ivk/README.md) describes the key
+[`zakura-one-time-ivk` README](../../zakura/one-time-ivk/README.md) describes the key
 derivation and refund memo.
 
 A restore sweep credits a directory-reported payment only after the wallet

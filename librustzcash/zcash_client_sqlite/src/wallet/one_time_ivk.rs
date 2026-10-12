@@ -1,18 +1,18 @@
-//! Durable dynamic IVKs (see [`zakura_dynamic_ivk`]), each trial-decrypted while open.
+//! Durable one-time IVKs (see [`zakura_one_time_ivk`]), each trial-decrypted while open.
 //!
 //! Issued keys scan from issuance, refund keys from their stored funding transaction,
 //! until they close. Keys recovered from the seed are swept once through a receiver
 //! directory, then scanned for a restore watch only while a swap may still pay them (see
-//! [`WalletDb::close_finished_dynamic_keys`]). A closed key keeps its notes.
-//! Dynamic-key notes carry no memo the wallet reads; only internal change carries the
+//! [`WalletDb::close_finished_one_time_keys`]). A closed key keeps its notes.
+//! One-time-key notes carry no memo the wallet reads; only internal change carries the
 //! refund marker. So neither a directory nor private Enhance retrieval stores or fetches
-//! one. A wallet drives dynamic IVKs with these calls:
+//! one. A wallet drives one-time IVKs with these calls:
 //!
-//! - `scan_cached_blocks_with_dynamic_ivks` and
-//!   `decrypt_and_store_transaction_with_dynamic_ivks` in place of the ordinary
+//! - `scan_cached_blocks_with_one_time_ivks` and
+//!   `decrypt_and_store_transaction_with_one_time_ivks` in place of the ordinary
 //!   scanning and decryption; while a key is open, the others are refused.
-//! - [`DynamicIvkWrite::maintain_dynamic_ivks`] when each sync starts and again at the
-//!   tip, and [`WalletDb::close_finished_dynamic_keys`] once sync reaches a tip it
+//! - [`OneTimeIvkWrite::maintain_one_time_ivks`] when each sync starts and again at the
+//!   tip, and [`WalletDb::close_finished_one_time_keys`] once sync reaches a tip it
 //!   confirmed with the network.
 //! - For an outgoing swap, [`WalletDb::reserve_refund_key`], then
 //!   [`WalletDb::record_refund_operation`] when the quote arrives,
@@ -22,12 +22,12 @@
 //!   [`WalletDb::begin_receive_operation`], [`WalletDb::finish_receive_operation`] and
 //!   [`WalletDb::start_receive_operation`].
 //! - [`WalletDb::record_operation_status`] for each provider status of either.
-//! - The [`DynamicIvkWrite`] sweep steps for restore sweeps, and
-//!   [`WalletDb::recheck_dynamic_key_history`] when the user asks to recheck swaps.
+//! - The [`OneTimeIvkWrite`] sweep steps for restore sweeps, and
+//!   [`WalletDb::recheck_one_time_key_history`] when the user asks to recheck swaps.
 //!
-//! [`DynamicIvkRead`]: zcash_client_backend::data_api::dynamic_ivk::DynamicIvkRead
-//! [`DynamicIvkWrite`]: zcash_client_backend::data_api::dynamic_ivk::DynamicIvkWrite
-//! [`DynamicIvkWrite::maintain_dynamic_ivks`]: zcash_client_backend::data_api::dynamic_ivk::DynamicIvkWrite::maintain_dynamic_ivks
+//! [`OneTimeIvkRead`]: zcash_client_backend::data_api::one_time_ivk::OneTimeIvkRead
+//! [`OneTimeIvkWrite`]: zcash_client_backend::data_api::one_time_ivk::OneTimeIvkWrite
+//! [`OneTimeIvkWrite::maintain_one_time_ivks`]: zcash_client_backend::data_api::one_time_ivk::OneTimeIvkWrite::maintain_one_time_ivks
 
 mod apply;
 mod funding;
@@ -68,15 +68,15 @@ use zcash_client_backend::{
         Account as _,
         scanning::{ScanPriority, ScanRange},
     },
-    scanning::dynamic_ivk::DynamicScanningKey,
+    scanning::one_time_ivk::OneTimeScanningKey,
 };
 use zcash_protocol::{
     consensus::{BlockHeight, Parameters},
     memo::MemoBytes,
 };
 
-use zakura_dynamic_ivk::lifecycle::Observation;
-pub use zakura_dynamic_ivk::{KeyId, Purpose};
+use zakura_one_time_ivk::lifecycle::Observation;
+pub use zakura_one_time_ivk::{KeyId, Purpose};
 
 use crate::{AccountUuid, WalletDb, error::SqliteClientError, util::Clock};
 
@@ -95,11 +95,11 @@ pub enum ReservationPolicy {
 
 /// A registered key, re-derived from its account's viewing key. It holds viewing
 /// material, so it deliberately does not implement `Debug`.
-pub struct DynamicKey {
-    scanning_key: DynamicScanningKey<AccountUuid>,
+pub struct OneTimeKey {
+    scanning_key: OneTimeScanningKey<AccountUuid>,
 }
 
-impl DynamicKey {
+impl OneTimeKey {
     /// The key's purpose and index.
     pub fn key_id(&self) -> KeyId {
         self.scanning_key.key_id()
@@ -118,11 +118,11 @@ impl DynamicKey {
 
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// The key `account` registered for `receiver`, if any.
-    pub fn get_dynamic_key_for_receiver(
+    pub fn get_one_time_key_for_receiver(
         &self,
         account: AccountUuid,
         receiver: &orchard::Address,
-    ) -> Result<Option<DynamicKey>, SqliteClientError> {
+    ) -> Result<Option<OneTimeKey>, SqliteClientError> {
         key_matching(
             self.conn.borrow(),
             &self.params,
@@ -154,7 +154,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
         &mut self,
         account: AccountUuid,
         tip: BlockHeight,
-    ) -> Result<Result<DynamicKey, ReservationPolicy>, SqliteClientError> {
+    ) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
         let now = unix_now(&self.clock);
         self.transactionally(|db| funding::reserve(db.conn.0, db.params, account, tip, now))
     }
@@ -190,7 +190,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
         now: i64,
         tip: BlockHeight,
         seen: Option<&ProviderSeen<'_>>,
-    ) -> Result<Result<DynamicKey, ReservationPolicy>, SqliteClientError> {
+    ) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
         let registered_at = unix_now(&self.clock);
         self.transactionally(|db| {
             let (conn, params) = (db.conn.0, db.params);
@@ -260,7 +260,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// sticks. A deadline only fills a missing one. A refund key this wallet never funded
     /// starts at its issuance point on a refund owed or an inconclusive end, in case the
     /// deposit was paid from elsewhere; a closed key stays closed (see
-    /// [`Self::close_finished_dynamic_keys`]).
+    /// [`Self::close_finished_one_time_keys`]).
     pub fn record_operation_status(
         &mut self,
         account: AccountUuid,
@@ -300,11 +300,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// No provider status reopens a closed key; a rewind does, when it un-mines a receipt
     /// or leaves it short of those confirmations. A later payment to a closed key without
     /// a known payment is found once a newer publication's paid filter holds it (see
-    /// `DynamicIvkWrite::record_paid_filter_check`). One to a closed key that was already
+    /// `OneTimeIvkWrite::record_paid_filter_check`). One to a closed key that was already
     /// paid, such as a corrected larger payout, is found only by
-    /// [`Self::recheck_dynamic_key_history`], and an incoming index beyond the restored
+    /// [`Self::recheck_one_time_key_history`], and an incoming index beyond the restored
     /// lookahead is never swept.
-    pub fn close_finished_dynamic_keys(
+    pub fn close_finished_one_time_keys(
         &mut self,
         account: AccountUuid,
         now: i64,
@@ -317,7 +317,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
 
     /// Queues a receiver-directory sweep of each of `account`'s closed keys, as a restore
     /// does, to find a payment after its key closed, and returns how many were queued.
-    pub fn recheck_dynamic_key_history(
+    pub fn recheck_one_time_key_history(
         &mut self,
         account: AccountUuid,
     ) -> Result<usize, SqliteClientError> {
@@ -331,9 +331,9 @@ pub const ISSUANCE_TIP_LAG: u32 = 10;
 
 /// SQL condition on key `k`: swept, with no reservation or operation of this wallet's.
 const RESTORED: &str =
-    "EXISTS(SELECT 1 FROM ironwood_dynamic_sweeps s WHERE s.receiving_key_id = k.id)
+    "EXISTS(SELECT 1 FROM ironwood_one_time_sweeps s WHERE s.receiving_key_id = k.id)
     AND k.reserved_at IS NULL
-    AND NOT EXISTS(SELECT 1 FROM ironwood_dynamic_operations o WHERE o.receiving_key_id = k.id)";
+    AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.receiving_key_id = k.id)";
 
 /// SQL condition on `ironwood_receiving_keys k`: its incoming reservation is open.
 const RESERVED: &str = "(k.reserved_at IS NOT NULL AND k.released_at IS NULL)";
@@ -347,7 +347,7 @@ fn keys_where<P: Parameters>(
     account: AccountUuid,
     predicate: &str,
     bindings: impl rusqlite::Params,
-) -> Result<Vec<DynamicKey>, SqliteClientError> {
+) -> Result<Vec<OneTimeKey>, SqliteClientError> {
     let (_, parent) = account_key(conn, params, account)?;
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT k.purpose, k.key_index, k.receiver
@@ -369,7 +369,7 @@ fn key_matching<P: Parameters>(
     account: AccountUuid,
     predicate: &str,
     bindings: impl rusqlite::Params,
-) -> Result<Option<DynamicKey>, SqliteClientError> {
+) -> Result<Option<OneTimeKey>, SqliteClientError> {
     Ok(keys_where(conn, params, account, predicate, bindings)?
         .into_iter()
         .next())
@@ -381,7 +381,7 @@ fn key_by_id<P: Parameters>(
     params: &P,
     account: AccountUuid,
     id: i64,
-) -> Result<DynamicKey, SqliteClientError> {
+) -> Result<OneTimeKey, SqliteClientError> {
     key_matching(
         conn,
         params,
@@ -389,14 +389,14 @@ fn key_by_id<P: Parameters>(
         "k.id = ?2",
         rusqlite::params![account.0, id],
     )?
-    .ok_or_else(|| corrupt("missing dynamic key"))
+    .ok_or_else(|| corrupt("missing one-time key"))
 }
 
-/// Implements `DynamicIvkRead::get_dynamic_scanning_keys`, failing on a corrupt key.
+/// Implements `OneTimeIvkRead::get_one_time_scanning_keys`, failing on a corrupt key.
 pub(crate) fn scanning_keys<P: Parameters>(
     conn: &Connection,
     params: &P,
-) -> Result<Vec<DynamicScanningKey<AccountUuid>>, SqliteClientError> {
+) -> Result<Vec<OneTimeScanningKey<AccountUuid>>, SqliteClientError> {
     keys_by_account(conn, params, |account| {
         let open = "k.active_from IS NOT NULL AND k.closed_at IS NULL";
         keys_where(conn, params, account, open, [account.0])
@@ -407,8 +407,8 @@ pub(crate) fn scanning_keys<P: Parameters>(
 fn keys_by_account<P: Parameters>(
     conn: &Connection,
     params: &P,
-    keys: impl Fn(AccountUuid) -> Result<Vec<DynamicKey>, SqliteClientError>,
-) -> Result<Vec<DynamicScanningKey<AccountUuid>>, SqliteClientError> {
+    keys: impl Fn(AccountUuid) -> Result<Vec<OneTimeKey>, SqliteClientError>,
+) -> Result<Vec<OneTimeScanningKey<AccountUuid>>, SqliteClientError> {
     let mut result = Vec::new();
     for (account, ufvk) in super::get_unified_full_viewing_keys(conn, params)? {
         if ufvk.orchard().is_some() {
@@ -418,7 +418,7 @@ fn keys_by_account<P: Parameters>(
     Ok(result)
 }
 
-/// Implements `DynamicIvkRead::get_dynamic_transaction_keys`: keys that may own outputs
+/// Implements `OneTimeIvkRead::get_one_time_transaction_keys`: keys that may own outputs
 /// of `txid`, which are those its stored notes or queued payments name, open keys active
 /// by the next block (by `height` without a chain tip), and keys for `receivers`.
 pub(crate) fn transaction_keys<P: Parameters>(
@@ -427,7 +427,7 @@ pub(crate) fn transaction_keys<P: Parameters>(
     txid: zcash_primitives::transaction::TxId,
     height: Option<BlockHeight>,
     receivers: &[orchard::Address],
-) -> Result<Vec<DynamicScanningKey<AccountUuid>>, SqliteClientError> {
+) -> Result<Vec<OneTimeScanningKey<AccountUuid>>, SqliteClientError> {
     let height = super::chain_tip_height(conn)?
         .map(|h| BlockHeight::from(u32::from(h).saturating_add(1)))
         .or(height);
@@ -441,7 +441,7 @@ pub(crate) fn transaction_keys<P: Parameters>(
     let predicate = format!(
         "k.id IN (SELECT receiving_key_id FROM ironwood_received_notes
                 WHERE transaction_id = (SELECT id_tx FROM transactions WHERE txid = ?2)
-            UNION SELECT receiving_key_id FROM ironwood_dynamic_payment_recovery
+            UNION SELECT receiving_key_id FROM ironwood_one_time_payment_recovery
                 WHERE txid = ?2)
          OR (k.closed_at IS NULL AND k.active_from <= COALESCE(?3, k.active_from))
          OR k.receiver IN ({receivers})"
@@ -457,10 +457,10 @@ fn registered_key(
     row: &rusqlite::Row<'_>,
     account: AccountUuid,
     parent: &FullViewingKey,
-) -> Result<DynamicKey, SqliteClientError> {
-    let scanning_key = DynamicScanningKey::derive(account, stored_key_id(row)?, parent)?;
+) -> Result<OneTimeKey, SqliteClientError> {
+    let scanning_key = OneTimeScanningKey::derive(account, stored_key_id(row)?, parent)?;
     check_receiver(row.get(2)?, scanning_key.full_viewing_key())?;
-    Ok(DynamicKey { scanning_key })
+    Ok(OneTimeKey { scanning_key })
 }
 
 /// Checks a stored receiver against the one `fvk` derives, which also rejects a key
@@ -468,7 +468,7 @@ fn registered_key(
 fn check_receiver(stored: Vec<u8>, fvk: &FullViewingKey) -> Result<(), SqliteClientError> {
     if stored != fvk.address_at(0u32, Scope::External).to_raw_address_bytes() {
         return Err(corrupt(
-            "stored dynamic key receiver does not match its key",
+            "stored one-time key receiver does not match its key",
         ));
     }
     Ok(())
@@ -479,12 +479,12 @@ fn stored_key_id(row: &rusqlite::Row<'_>) -> Result<KeyId, SqliteClientError> {
     let purpose = match row.get::<_, u8>(0)? {
         0 => Purpose::Refund,
         1 => Purpose::Receive,
-        _ => return Err(corrupt("unsupported dynamic key purpose")),
+        _ => return Err(corrupt("unsupported one-time key purpose")),
     };
     Ok(KeyId::new(purpose, decode_index(row.get(1)?)?))
 }
 
-/// `account`'s database reference and the Orchard FVK its dynamic keys derive from.
+/// `account`'s database reference and the Orchard FVK its one-time keys derive from.
 fn account_key<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -497,7 +497,7 @@ fn account_key<P: Parameters>(
         .and_then(|key| key.orchard())
         .ok_or_else(|| {
             SqliteClientError::BadAccountData(
-                "dynamic IVKs require an Orchard full viewing key".into(),
+                "one-time IVKs require an Orchard full viewing key".into(),
             )
         })?;
     Ok((account.id, fvk.clone()))
@@ -516,7 +516,7 @@ fn key_ref(conn: &Connection, account: AccountUuid, key: KeyId) -> Result<i64, S
         |r| r.get(0),
     )
     .optional()?
-    .ok_or_else(|| invalid("unregistered dynamic key"))
+    .ok_or_else(|| invalid("unregistered one-time key"))
 }
 
 /// Where restore discovery starts: the account's birthday or Ironwood activation.
@@ -577,7 +577,7 @@ fn reserve_next<P: Parameters>(
     scan_from: BlockHeight,
     discovery: Discovery,
     now: i64,
-) -> Result<Result<DynamicKey, ReservationPolicy>, SqliteClientError> {
+) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
     let (account_ref, _) = account_key(conn, params, account)?;
     // SQLite orders fixed-width big-endian blobs numerically. Unlike INTEGER, this
     // represents the entire u64 index space, including u64::MAX.
@@ -619,7 +619,7 @@ fn sweep_pending(
 ) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys k
-         JOIN ironwood_dynamic_sweeps s ON s.receiving_key_id = k.id
+         JOIN ironwood_one_time_sweeps s ON s.receiving_key_id = k.id
          WHERE k.account_id = ?1 AND k.purpose = ?2 AND k.key_index = ?3
            AND k.active_from IS NULL AND s.done_height IS NULL)",
         rusqlite::params![
@@ -643,9 +643,9 @@ fn register<P: Parameters>(
     advances_allocation: bool,
     discovery: Discovery,
     now: i64,
-) -> Result<(i64, DynamicKey), SqliteClientError> {
+) -> Result<(i64, OneTimeKey), SqliteClientError> {
     let (account_ref, parent) = account_key(conn, params, account)?;
-    let scanning_key = DynamicScanningKey::derive(account, key_id, &parent)?;
+    let scanning_key = OneTimeScanningKey::derive(account, key_id, &parent)?;
     let receiver = scanning_key
         .full_viewing_key()
         .address_at(0u32, Scope::External)
@@ -676,7 +676,7 @@ fn register<P: Parameters>(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?
-        .ok_or_else(|| corrupt("stored dynamic key receiver does not match its key"))?;
+        .ok_or_else(|| corrupt("stored one-time key receiver does not match its key"))?;
     match discovery {
         Discovery::Scan => {
             activate(conn, id, scan_from)?;
@@ -684,13 +684,13 @@ fn register<P: Parameters>(
         // Only a key scanned from its earliest possible payment needs no directory history.
         Discovery::Sweep if active_from.is_none_or(|start| start > stored_from) => {
             conn.execute(
-                "INSERT OR IGNORE INTO ironwood_dynamic_sweeps (receiving_key_id) VALUES (?1)",
+                "INSERT OR IGNORE INTO ironwood_one_time_sweeps (receiving_key_id) VALUES (?1)",
                 [id],
             )?;
         }
         Discovery::Sweep | Discovery::Funding => {}
     }
-    Ok((id, DynamicKey { scanning_key }))
+    Ok((id, OneTimeKey { scanning_key }))
 }
 
 /// Starts or extends trial decryption of key `id` from `from`, reopening a closed key and
@@ -705,7 +705,7 @@ fn activate(
         "SELECT k.active_from, k.closed_at IS NOT NULL,
                 s.receiving_key_id IS NOT NULL AND s.done_height IS NULL
          FROM ironwood_receiving_keys k
-         LEFT JOIN ironwood_dynamic_sweeps s ON s.receiving_key_id = k.id
+         LEFT JOIN ironwood_one_time_sweeps s ON s.receiving_key_id = k.id
          WHERE k.id = ?1",
         [id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -795,14 +795,14 @@ pub(super) fn note_key(
     let mut rows = stmt.query([id])?;
     let row = rows
         .next()?
-        .ok_or_else(|| corrupt("missing dynamic note key"))?;
+        .ok_or_else(|| corrupt("missing one-time note key"))?;
     let key_id = stored_key_id(row)?;
     let fvk = key_id.derive(parent)?;
     check_receiver(row.get(2)?, &fvk)?;
     Ok((key_id, fvk))
 }
 
-/// The incoming key that decrypts queued dynamic-key note `id` for Enhance. Any other
+/// The incoming key that decrypts queued one-time-key note `id` for Enhance. Any other
 /// recipient than the key's receiver is corrupt, never a fallback to the account's key.
 pub(crate) fn queued_note_ivk(
     conn: &Connection,
@@ -814,17 +814,17 @@ pub(crate) fn queued_note_ivk(
     let parent = account
         .ufvk()
         .and_then(|key| key.orchard())
-        .ok_or_else(|| corrupt("missing dynamic note account FVK"))?;
+        .ok_or_else(|| corrupt("missing one-time note account FVK"))?;
     let (_, fvk) = note_key(conn, id, parent)?;
     let ivk = fvk.to_ivk(Scope::External);
     if scope != Scope::External || ivk.address(diversifier) != fvk.address_at(0u32, Scope::External)
     {
-        return Err(corrupt("invalid queued dynamic note recipient"));
+        return Err(corrupt("invalid queued one-time note recipient"));
     }
     Ok(ivk)
 }
 
-/// Validates an output's dynamic key before it is stored, returning its registry ID.
+/// Validates an output's one-time key before it is stored, returning its registry ID.
 pub(super) fn validate_received_key<
     P: Parameters,
     T: zcash_client_backend::data_api::ll::ReceivedOrchardOutput<AccountId = AccountUuid>,
@@ -834,7 +834,7 @@ pub(super) fn validate_received_key<
     pool: zcash_protocol::ShieldedPool,
     output: &T,
 ) -> Result<Option<i64>, SqliteClientError> {
-    let Some(key_id) = output.dynamic_key_id() else {
+    let Some(key_id) = output.one_time_key_id() else {
         return Ok(None);
     };
     let (_, parent) = account_key(conn, params, output.account_id())?;
@@ -849,7 +849,7 @@ pub(super) fn validate_received_key<
             .is_some_and(|nf| *nf != output.note().nullifier(&fvk))
     {
         return Err(corrupt(
-            "dynamic-key note does not match its registered key",
+            "one-time-key note does not match its registered key",
         ));
     }
     Ok(Some(id))
@@ -903,14 +903,14 @@ fn decode_index(bytes: Vec<u8>) -> Result<u64, SqliteClientError> {
     bytes
         .try_into()
         .map(u64::from_be_bytes)
-        .map_err(|_| corrupt("invalid dynamic key index"))
+        .map_err(|_| corrupt("invalid one-time key index"))
 }
 
 /// The index after `index`. A purpose's index space never wraps back to zero.
 fn next_index(index: u64) -> Result<u64, SqliteClientError> {
     index
         .checked_add(1)
-        .ok_or(SqliteClientError::DynamicIvkIndexExhausted)
+        .ok_or(SqliteClientError::OneTimeIvkIndexExhausted)
 }
 
 /// A corrupted-data error with `message`.
@@ -920,7 +920,7 @@ fn corrupt(message: &str) -> SqliteClientError {
 
 /// An invalid-input error with `message`.
 fn invalid(message: &'static str) -> SqliteClientError {
-    SqliteClientError::InvalidDynamicIvkInput(message)
+    SqliteClientError::InvalidOneTimeIvkInput(message)
 }
 
 #[cfg(test)]

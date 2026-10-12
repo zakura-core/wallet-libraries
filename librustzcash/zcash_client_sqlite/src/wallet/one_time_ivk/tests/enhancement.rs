@@ -4,7 +4,7 @@ use transparent::address::TransparentAddress;
 use zcash_client_backend::{
     data_api::wallet::{
         ConfirmationsPolicy, decrypt_and_store_transaction,
-        decrypt_and_store_transaction_with_dynamic_ivks, input_selection::GreedyInputSelector,
+        decrypt_and_store_transaction_with_one_time_ivks, input_selection::GreedyInputSelector,
     },
     fees::{DustOutputPolicy, StandardFeeRule, standard},
     wallet::OvkPolicy,
@@ -69,7 +69,7 @@ fn full_transaction_roundtrip(full_first: bool) {
     // must replace those records with incoming records, not duplicate them.
     let ufvks = st.wallet().get_unified_full_viewing_keys().unwrap();
     let decoded = zcash_client_backend::decrypt_transaction(&network, None, Some(h), &tx, &ufvks)
-        .with_dynamic_ivks(st.wallet().get_dynamic_scanning_keys().unwrap());
+        .with_one_time_ivks(st.wallet().get_one_time_scanning_keys().unwrap());
     for key in &keys {
         let outputs: Vec<_> = decoded
             .ironwood_outputs()
@@ -77,24 +77,24 @@ fn full_transaction_roundtrip(full_first: bool) {
             .filter(|o| o.note().0.recipient() == key.receiver())
             .collect();
         assert_eq!(outputs.len(), 1);
-        assert_eq!(outputs[0].dynamic_key_id(), Some(key.key_id()));
+        assert_eq!(outputs[0].one_time_key_id(), Some(key.key_id()));
         assert_eq!(
             outputs[0].transfer_type(),
             zcash_client_backend::TransferType::Incoming
         );
         assert_eq!(outputs[0].memo(), &memo);
     }
-    // Without the dynamic keys these payments would be stored as outgoing only.
+    // Without the one-time keys these payments would be stored as outgoing only.
     assert!(matches!(
         decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, None),
-        Err(SqliteClientError::DynamicIvksNotUsed)
+        Err(SqliteClientError::OneTimeIvksNotUsed)
     ));
     if full_first {
-        decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &tx, None)
+        decrypt_and_store_transaction_with_one_time_ivks(&network, st.wallet_mut(), &tx, None)
             .unwrap();
     }
     let (mined, _) = st.generate_next_block_including(created[0]);
-    st.scan_cached_blocks_with_dynamic_ivks(mined, 1);
+    st.scan_cached_blocks_with_one_time_ivks(mined, 1);
     // Close/reopen before fetching the full transaction, as on a resumed sync.
     let reopened = WalletDb::for_path(
         st.wallet().data_file_path(),
@@ -105,7 +105,7 @@ fn full_transaction_roundtrip(full_first: bool) {
     .unwrap();
     *st.wallet_mut().db_mut() = reopened;
     for _ in 0..2 {
-        decrypt_and_store_transaction_with_dynamic_ivks(
+        decrypt_and_store_transaction_with_one_time_ivks(
             &network,
             st.wallet_mut(),
             &tx,
@@ -113,7 +113,7 @@ fn full_transaction_roundtrip(full_first: bool) {
         )
         .unwrap();
     }
-    st.scan_cached_blocks_with_dynamic_ivks(mined, 1);
+    st.scan_cached_blocks_with_one_time_ivks(mined, 1);
     let notes = st
         .wallet()
         .db()
@@ -122,7 +122,7 @@ fn full_transaction_roundtrip(full_first: bool) {
     for key in keys {
         let note = notes
             .iter()
-            .find(|n| n.dynamic_key_id() == Some(key.key_id()))
+            .find(|n| n.one_time_key_id() == Some(key.key_id()))
             .unwrap();
         assert_eq!(note.note().recipient(), key.receiver());
         let stored: Vec<u8> = st.wallet().conn().query_row(
@@ -135,21 +135,21 @@ fn full_transaction_roundtrip(full_first: bool) {
 }
 
 #[test]
-fn dynamic_ivk_full_transaction_after_compact_scan() {
+fn one_time_ivk_full_transaction_after_compact_scan() {
     full_transaction_roundtrip(false);
 }
 
 #[test]
-fn dynamic_ivk_full_transaction_before_compact_scan() {
+fn one_time_ivk_full_transaction_before_compact_scan() {
     full_transaction_roundtrip(true);
 }
 
 /// A closed key still decrypts the transactions its stored notes came from, so fetching
 /// an externally funded payment after closure stores it instead of discarding the
-/// retrieval as irrelevant. This guards the store's `get_dynamic_transaction_keys`.
+/// retrieval as irrelevant. This guards the store's `get_one_time_transaction_keys`.
 #[test]
 fn closed_key_decrypts_its_externally_funded_transaction_after_reopen() {
-    use zakura_dynamic_ivk::lifecycle::COMPLETION_LIMIT_SECS;
+    use zakura_one_time_ivk::lifecycle::COMPLETION_LIMIT_SECS;
     let mut st = scanned_wallet();
     let network = *st.network();
     let account = st.test_account().unwrap().id();
@@ -158,8 +158,8 @@ fn closed_key_decrypts_its_externally_funded_transaction_after_reopen() {
     let memo = MemoBytes::from_bytes(b"refund").unwrap();
     let tx = external_payment(key.receiver(), &memo);
     let (height, _) = st.generate_next_block_from_tx(1, &tx);
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(9);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(9);
     let queued = |st: &State| -> u64 {
         st.wallet()
             .conn()
@@ -183,7 +183,7 @@ fn closed_key_decrypts_its_externally_funded_transaction_after_reopen() {
     )
     .unwrap();
     *st.wallet_mut().db_mut() = reopened;
-    decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &tx, Some(height))
+    decrypt_and_store_transaction_with_one_time_ivks(&network, st.wallet_mut(), &tx, Some(height))
         .unwrap();
     let stored: (bool, Option<Vec<u8>>) = st
         .wallet()
@@ -199,11 +199,11 @@ fn closed_key_decrypts_its_externally_funded_transaction_after_reopen() {
     assert!(!scanning_keys(&st).contains(&key.key_id()));
 }
 
-/// A ZeWIF import into a wallet with an open dynamic key decrypts with it, storing the
+/// A ZeWIF import into a wallet with an open one-time key decrypts with it, storing the
 /// memo of a payment to that key rather than refusing the import.
 #[cfg(feature = "zewif")]
 #[test]
-fn zewif_import_decrypts_with_open_dynamic_keys() {
+fn zewif_import_decrypts_with_open_one_time_keys() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let from = st.wallet().chain_height().unwrap().unwrap() + 1;
@@ -211,7 +211,7 @@ fn zewif_import_decrypts_with_open_dynamic_keys() {
     let memo = MemoBytes::from_bytes(b"refund").unwrap();
     let tx = external_payment(key.receiver(), &memo);
     let (height, _) = st.generate_next_block_from_tx(1, &tx);
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
     let stored = |st: &State| -> (bool, Option<Vec<u8>>) {
         st.wallet()
             .conn()
@@ -258,10 +258,10 @@ fn ironwood_funded_wallet() -> (State, BlockHeight) {
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(1_000_000),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(first, 1);
+    st.scan_cached_blocks_with_one_time_ivks(first, 1);
     for _ in 0..5 {
         let (h, _) = st.generate_empty_block();
-        st.scan_cached_blocks_with_dynamic_ivks(h, 1);
+        st.scan_cached_blocks_with_one_time_ivks(h, 1);
     }
     (st, first)
 }
@@ -333,7 +333,7 @@ fn send_with_change_memo(
 ) {
     let (proposal, txid) = create_with_change_memo(st, payments, memo);
     let (mined, _) = st.generate_next_block_including(txid);
-    st.scan_cached_blocks_with_dynamic_ivks(mined, 1);
+    st.scan_cached_blocks_with_one_time_ivks(mined, 1);
     (proposal, txid, mined)
 }
 
@@ -351,7 +351,7 @@ fn refund_keys(st: &State) -> Vec<(u64, u32, bool)> {
         .conn()
         .prepare(
             "SELECT k.key_index, k.scan_from,
-                EXISTS(SELECT 1 FROM ironwood_dynamic_sweeps s WHERE s.receiving_key_id = k.id)
+                EXISTS(SELECT 1 FROM ironwood_one_time_sweeps s WHERE s.receiving_key_id = k.id)
              FROM ironwood_receiving_keys k WHERE k.purpose = 0 ORDER BY k.key_index",
         )
         .unwrap()
@@ -370,7 +370,7 @@ fn refund_keys(st: &State) -> Vec<(u64, u32, bool)> {
 
 #[test]
 fn refund_funding_memo_recovers_from_seed_with_zero_change() {
-    use zakura_dynamic_ivk::RefundMemo;
+    use zakura_one_time_ivk::RefundMemo;
     let (mut st, first) = ironwood_funded_wallet();
     let network = *st.network();
     let account = st.test_account().cloned().unwrap();
@@ -401,7 +401,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
         .create_account("restored", &seed, account.birthday(), None)
         .unwrap();
     st.wallet_mut().update_chain_tip(mined).unwrap();
-    st.scan_cached_blocks_with_dynamic_ivks(
+    st.scan_cached_blocks_with_one_time_ivks(
         first,
         (u32::from(mined) - u32::from(first) + 1) as usize,
     );
@@ -411,7 +411,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     recover_memos(&mut st, restored);
     assert!(refund_keys(&st).is_empty());
     assert!(pending(&st));
-    decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &tx, Some(mined))
+    decrypt_and_store_transaction_with_one_time_ivks(&network, st.wallet_mut(), &tx, Some(mined))
         .unwrap();
 
     // Changing the authenticated scope, or losing own-send evidence, makes the memo
@@ -518,14 +518,14 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert!(
         st.wallet()
             .db()
-            .get_dynamic_scanning_keys()
+            .get_one_time_scanning_keys()
             .unwrap()
             .is_empty()
     );
     assert!(
         st.wallet()
             .db()
-            .dynamic_history_pending(restored, mined)
+            .one_time_history_pending(restored, mined)
             .unwrap()
     );
 
@@ -535,7 +535,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
         .wallet()
         .conn()
         .query_row(
-            "SELECT k.registered_at, (SELECT COUNT(*) FROM ironwood_dynamic_operations o
+            "SELECT k.registered_at, (SELECT COUNT(*) FROM ironwood_one_time_operations o
                 WHERE o.receiving_key_id = k.id)
              FROM ironwood_receiving_keys k WHERE k.purpose = 0",
             [],
@@ -546,7 +546,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
 
     // Repeated recovery, including after identical re-enhancement, changes nothing,
     // and it widens a key that starts after its funding block.
-    decrypt_and_store_transaction_with_dynamic_ivks(&network, st.wallet_mut(), &tx, Some(mined))
+    decrypt_and_store_transaction_with_one_time_ivks(&network, st.wallet_mut(), &tx, Some(mined))
         .unwrap();
     recover_memos(&mut st, restored);
     assert_eq!(refund_keys(&st), registered);
@@ -566,7 +566,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
 /// quote never starts its key.
 #[test]
 fn a_refund_key_starts_scanning_when_its_funding_transaction_is_stored() {
-    use zakura_dynamic_ivk::{
+    use zakura_one_time_ivk::{
         RefundMemo,
         lifecycle::{OperationStatus::Terminal, ReceiptExpectation},
     };
@@ -634,7 +634,7 @@ fn a_refund_key_starts_scanning_when_its_funding_transaction_is_stored() {
     // block is rescanned, and opens the funded quote until the provider reports.
     let row = |conn: &Connection, deposit: &str| -> (i64, u8) {
         conn.query_row(
-            "SELECT observed_at, expectation FROM ironwood_dynamic_operations
+            "SELECT observed_at, expectation FROM ironwood_one_time_operations
                  WHERE reference = ?1",
             [deposit],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -647,11 +647,11 @@ fn a_refund_key_starts_scanning_when_its_funding_transaction_is_stored() {
     assert_eq!(row(conn, &funded), (0, 0));
 
     let (mined, _) = st.generate_next_block_including(txid);
-    st.scan_cached_blocks_with_dynamic_ivks(mined, 1);
+    st.scan_cached_blocks_with_one_time_ivks(mined, 1);
     // The key already scans from before its funding block, so recovery queues no sweep.
     recover_memos(&mut st, account);
     let db = st.wallet_mut().db_mut();
-    assert!(!db.dynamic_history_pending(account, mined).unwrap());
+    assert!(!db.one_time_history_pending(account, mined).unwrap());
     assert_eq!(close_at(db, account, now, mined), 0);
     let finished = now + 7_200;
     observe(
@@ -711,7 +711,7 @@ fn a_funding_memo_must_match_its_recorded_deposit() {
             .unwrap();
         let operations = conn
             .prepare(
-                "SELECT k.key_index, o.reference FROM ironwood_dynamic_operations o
+                "SELECT k.key_index, o.reference FROM ironwood_one_time_operations o
                  JOIN ironwood_receiving_keys k ON k.id = o.receiving_key_id
                  ORDER BY k.key_index, o.reference",
             )
@@ -730,7 +730,7 @@ fn a_funding_memo_must_match_its_recorded_deposit() {
     let (_, created) = try_create_with_change_memo(&mut st, pay(1), &memos[0]);
     assert!(matches!(
         created,
-        Err(SqliteClientError::InvalidDynamicIvkInput(_))
+        Err(SqliteClientError::InvalidOneTimeIvkInput(_))
     ));
     assert_eq!(state(st.wallet().conn()), before);
 
@@ -742,7 +742,7 @@ fn a_funding_memo_must_match_its_recorded_deposit() {
 
 #[test]
 fn reissued_refund_key_sweeps_history_before_its_scan_start() {
-    use zakura_dynamic_ivk::RefundMemo;
+    use zakura_one_time_ivk::RefundMemo;
     let (mut st, _) = ironwood_funded_wallet();
     let account = st.test_account().unwrap().id();
     let network = *st.network();
@@ -765,14 +765,14 @@ fn reissued_refund_key_sweeps_history_before_its_scan_start() {
     assert!(
         st.wallet()
             .db()
-            .dynamic_history_pending(account, mined)
+            .one_time_history_pending(account, mined)
             .unwrap()
     );
 }
 
 #[test]
 fn refund_memos_restore_keys_whatever_the_funding_outputs() {
-    use zakura_dynamic_ivk::RefundMemo;
+    use zakura_one_time_ivk::RefundMemo;
     let memo = MemoBytes::from_bytes(&RefundMemo::new(7).encode()).unwrap();
     let transparent = |byte| Address::Transparent(TransparentAddress::PublicKeyHash([byte; 20]));
     let receiver = orchard::keys::FullViewingKey::from(
@@ -805,7 +805,7 @@ fn refund_memos_restore_keys_whatever_the_funding_outputs() {
 /// for its history first, as any such transaction does.
 #[test]
 fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
-    use zakura_dynamic_ivk::RefundMemo;
+    use zakura_one_time_ivk::RefundMemo;
     use zcash_client_backend::data_api::enhance_pir::{
         EnhancePirRead, EnhancePirWork, EnhancePirWrite, EnhanceRecord, EnhanceRecordParts,
         EnhanceTransactionMetadata, EnhancementMode, TransactionEnhancementWork,
@@ -848,7 +848,7 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
             .db_mut()
             .set_enhancement_mode(EnhancementMode::PrivateIronwood);
         st.wallet_mut().update_chain_tip(mined).unwrap();
-        st.scan_cached_blocks_with_dynamic_ivks(
+        st.scan_cached_blocks_with_one_time_ivks(
             first,
             (u32::from(mined) - u32::from(first) + 1) as usize,
         );
@@ -920,7 +920,7 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
                         |w| matches!(w, TransactionEnhancementWork::Public(p) if p.txid() == txid)
                     )
             );
-            decrypt_and_store_transaction_with_dynamic_ivks(
+            decrypt_and_store_transaction_with_one_time_ivks(
                 &network,
                 st.wallet_mut(),
                 &tx,
@@ -1051,7 +1051,7 @@ fn refund_quote_needs_an_open_reserved_refund_key_and_a_canonical_transparent_de
     let other = Address::Transparent(TransparentAddress::PublicKeyHash([8; 20])).encode(&network);
     assert!(matches!(
         db.record_refund_operation(account, 0, &other, now + 60, now),
-        Err(SqliteClientError::InvalidDynamicIvkInput(_))
+        Err(SqliteClientError::InvalidOneTimeIvkInput(_))
     ));
     assert!(db.refund_funding_memo(account, 0, &other).is_err());
     assert!(db.refund_funding_memo(account, 0, &p2pkh).is_ok());

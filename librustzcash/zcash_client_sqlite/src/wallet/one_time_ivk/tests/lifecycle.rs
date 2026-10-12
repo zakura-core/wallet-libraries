@@ -1,5 +1,5 @@
 use super::*;
-use zakura_dynamic_ivk::lifecycle::{
+use zakura_one_time_ivk::lifecycle::{
     COMPLETION_LIMIT_SECS as LIMIT, NearStatus, Observation,
     OperationStatus::{Active, Terminal},
     ReceiptExpectation::{None as NoReceipt, Positive, Unknown},
@@ -20,26 +20,26 @@ fn next_height(st: &State) -> BlockHeight {
 }
 
 /// Issues the next refund key, trial-decrypted from [`next_height`].
-fn refund_key(st: &mut State) -> DynamicKey {
+fn refund_key(st: &mut State) -> OneTimeKey {
     let account = st.test_account().unwrap().id();
     let from = next_height(st);
     reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, from)
 }
 
 /// Mines and scans a block paying `value` to `key`, and returns its height.
-fn pay(st: &mut State, key: &DynamicKey, value: u64) -> BlockHeight {
+fn pay(st: &mut State, key: &OneTimeKey, value: u64) -> BlockHeight {
     let (height, _, _) = st.generate_next_block(
         &IronwoodFvk(key.full_viewing_key().clone()),
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(value),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
     height
 }
 
 /// Mines blocks until the latest receipt has the untrusted confirmations closing needs.
 fn confirm(st: &mut State) {
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(9);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(9);
 }
 
 /// Closes the test account's finished keys at `now` and returns how many closed.
@@ -61,7 +61,7 @@ fn operation_row(st: &State, operation: &str) -> (i64, u8, Option<i64>, Option<i
         .conn()
         .query_row(
             "SELECT observed_at, expectation, expected_value, deadline
-             FROM ironwood_dynamic_operations WHERE reference = ?1",
+             FROM ironwood_one_time_operations WHERE reference = ?1",
             [operation],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
@@ -109,7 +109,7 @@ fn observations_are_monotonic_and_only_fill_a_missing_deadline() {
     let db = st.wallet_mut().db_mut();
     assert!(matches!(
         observe(db, account, key, "swap", expect(0), 600),
-        Err(SqliteClientError::InvalidDynamicIvkInput(_))
+        Err(SqliteClientError::InvalidOneTimeIvkInput(_))
     ));
     assert_eq!(operation_row(&st, "swap").0, 500);
 }
@@ -208,9 +208,9 @@ fn expected_receipts_keep_a_key_open_until_received_and_confirmed() {
             assert_eq!(close(&mut st, terminal), 0);
             pay(&mut st, &key, *value);
         }
-        st.generate_and_scan_empty_blocks_with_dynamic_ivks(8);
+        st.generate_and_scan_empty_blocks_with_one_time_ivks(8);
         assert_eq!(close(&mut st, terminal), 0);
-        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+        st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
         assert_eq!(close(&mut st, terminal), 1);
     }
 }
@@ -225,7 +225,7 @@ fn rewound_receipt_keeps_key_open_until_mined_again() {
     confirm(&mut st);
     st.truncate_to_height_retaining_cache(height - 1);
     assert_eq!(close(&mut st, terminal), 0);
-    st.scan_cached_blocks_with_dynamic_ivks(height, 10);
+    st.scan_cached_blocks_with_one_time_ivks(height, 10);
     assert_eq!(close(&mut st, terminal), 1);
 }
 
@@ -245,7 +245,7 @@ fn a_rewind_reopens_a_closed_key_whose_receipt_it_unmines() {
     assert_eq!(scanning_keys(&st), [key.key_id()]);
     // Past its limit, it waits for the unmined receipt, which can be mined until it expires.
     assert_eq!(close(&mut st, terminal + LIMIT), 0);
-    st.scan_cached_blocks_with_dynamic_ivks(height, 10);
+    st.scan_cached_blocks_with_one_time_ivks(height, 10);
     assert_eq!(unspent_keys(&st, height + 9), [Some(key.key_id())]);
     assert_eq!(close(&mut st, terminal), 1);
 }
@@ -261,7 +261,7 @@ fn a_rewind_reopens_a_closed_key_whose_receipt_it_leaves_unconfirmed() {
     observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
     let height = pay(&mut st, &key, 10_000);
     confirm(&mut st);
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     assert_eq!(close(&mut st, terminal), 1);
     st.truncate_to_height(height + 9);
     assert!(scanning_keys(&st).is_empty());
@@ -327,7 +327,7 @@ fn closing_uses_the_earlier_of_the_clock_and_the_tip_block_time() {
     let db = st.wallet_mut().db_mut();
     assert_eq!(close_at(db, account, limit - 1, tip), 0);
     // A clock that runs fast does not move the tip block's time.
-    let closed = db.close_finished_dynamic_keys(account, limit + year, tip);
+    let closed = db.close_finished_one_time_keys(account, limit + year, tip);
     assert_eq!(closed.unwrap(), 0);
     st.wallet()
         .conn()
@@ -338,9 +338,9 @@ fn closing_uses_the_earlier_of_the_clock_and_the_tip_block_time() {
         .unwrap();
     // One that runs slow only delays closing.
     let db = st.wallet_mut().db_mut();
-    let closed = db.close_finished_dynamic_keys(account, limit - 1, tip);
+    let closed = db.close_finished_one_time_keys(account, limit - 1, tip);
     assert_eq!(closed.unwrap(), 0);
-    let closed = db.close_finished_dynamic_keys(account, limit, tip);
+    let closed = db.close_finished_one_time_keys(account, limit, tip);
     assert_eq!(closed.unwrap(), 1);
 }
 
@@ -361,7 +361,7 @@ fn keys_stay_open_while_a_rescan_is_queued() {
             .any(|r| r.block_range().contains(&tip))
     );
     assert_eq!(close(&mut st, terminal + DAY), 0);
-    st.scan_cached_blocks_with_dynamic_ivks(tip, 1);
+    st.scan_cached_blocks_with_one_time_ivks(tip, 1);
     assert_eq!(close(&mut st, terminal + DAY), 1);
 }
 
@@ -399,7 +399,7 @@ fn incoming_key_closes_only_once_paid_and_released() {
 
 /// Starts an incoming reservation with deadline `registered_at() + HOUR` and records an
 /// underpayment's `INCOMPLETE_DEPOSIT` for it. Returns its key and deadline.
-fn underpaid_reservation(st: &mut State) -> (DynamicKey, i64) {
+fn underpaid_reservation(st: &mut State) -> (OneTimeKey, i64) {
     let account = st.test_account().unwrap().id();
     let from = next_height(st);
     let now = registered_at();
@@ -518,7 +518,7 @@ fn closed_at_the_limit(st: &mut State, incoming: bool) -> i64 {
 
 /// No provider status reopens a closed key, however it closed and whatever the status
 /// reports; the status is still recorded. A payment it implies is found by the paid
-/// filter or a history recheck instead (see `close_finished_dynamic_keys`).
+/// filter or a history recheck instead (see `close_finished_one_time_keys`).
 #[test]
 fn statuses_never_reopen_a_closed_key() {
     type Close = fn(&mut State) -> i64;
@@ -642,7 +642,7 @@ fn closed_key_stops_scanning_but_keeps_its_notes() {
         .get_unspent_ironwood_notes_at_historical_height(account, height)
         .unwrap();
     assert_eq!(notes.len(), 1);
-    assert_eq!(notes[0].dynamic_key_id(), Some(key.key_id()));
+    assert_eq!(notes[0].one_time_key_id(), Some(key.key_id()));
     assert_eq!(notes[0].note().value().inner(), 40_000);
 }
 

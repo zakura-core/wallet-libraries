@@ -1,7 +1,7 @@
 //! Incoming reservations, which live on their key's row, and their quote operations.
 use orchard::keys::Scope;
 use rusqlite::{Connection, OptionalExtension, named_params, params};
-use zakura_dynamic_ivk::lifecycle::{
+use zakura_one_time_ivk::lifecycle::{
     Observation,
     OperationStatus::Terminal,
     ReceiptExpectation::{Positive, Unknown},
@@ -10,7 +10,7 @@ use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
-    Discovery, DynamicKey, KeyId, Purpose, RESERVED, ReservationPolicy, account_key, activate,
+    Discovery, KeyId, OneTimeKey, Purpose, RESERVED, ReservationPolicy, account_key, activate,
     corrupt, decode_index, invalid, key_by_id, lifecycle::record, next_index, register,
     restore_start,
 };
@@ -88,19 +88,19 @@ fn coverage(seen: Option<&ProviderSeen<'_>>) -> (i64, i64) {
 /// Whether incoming key `k` counts as seen (see [`ProviderSeen`]), with a quote covered
 /// when begun between `:since` and `:covered`.
 const SEEN: &str = "(k.provider_seen = 1
-    OR EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
+    OR EXISTS(SELECT 1 FROM ironwood_one_time_operations o
         WHERE o.receiving_key_id = k.id AND o.request IS NOT NULL
           AND (o.reference IS NOT NULL OR o.begun_at < :since OR o.begun_at > :covered)))";
 
 /// SQL condition on `ironwood_receiving_keys k`: one of its quotes was started.
-pub(super) const STARTED: &str = "EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
+pub(super) const STARTED: &str = "EXISTS(SELECT 1 FROM ironwood_one_time_operations o
     WHERE o.receiving_key_id = k.id AND o.started = 1)";
 
 /// Whether key `key` is open and scanned through the tip without a payment or candidate.
 fn scanned_empty(conn: &Connection, key: i64) -> Result<bool, SqliteClientError> {
     let empty: bool = conn.query_row(
         "SELECT active_from IS NOT NULL AND closed_at IS NULL AND used = 0
-            AND NOT EXISTS(SELECT 1 FROM ironwood_dynamic_payment_recovery
+            AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery
                 WHERE receiving_key_id = ?1)
          FROM ironwood_receiving_keys WHERE id = ?1",
         [key],
@@ -145,7 +145,7 @@ fn recovery_end(
         .transpose()?
         .unwrap_or(0)
         .checked_add(RECEIVE_GAP_LIMIT)
-        .ok_or(SqliteClientError::DynamicIvkIndexExhausted)
+        .ok_or(SqliteClientError::OneTimeIvkIndexExhausted)
 }
 
 /// Releases key `key`'s reservation. Its operations still in progress, only expired
@@ -156,7 +156,7 @@ fn release(conn: &Connection, key: i64, now: i64) -> Result<(), SqliteClientErro
         params![key, now],
     )?;
     conn.execute(
-        "UPDATE ironwood_dynamic_operations
+        "UPDATE ironwood_one_time_operations
          SET expectation = 1, expected_value = NULL, observed_at = MAX(observed_at, ?2)
          WHERE receiving_key_id = ?1 AND request IS NOT NULL AND expectation IN (0, 4)",
         params![key, now],
@@ -182,7 +182,7 @@ fn reusable(conn: &Connection, key: i64, now: i64) -> Result<bool, SqliteClientE
     Ok(conn.query_row(
         &format!(
             "SELECT {RESERVED} AND k.reserved_at <= :now - :reclaim AND k.used = 0
-                AND NOT EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
+                AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o
                     WHERE o.receiving_key_id = k.id AND o.request IS NOT NULL AND (
                         o.deadline IS NULL OR o.deadline > :now - :reclaim
                         OR ({STARTED} AND o.reference IS NOT NULL AND NOT (
@@ -217,7 +217,7 @@ pub(super) fn reap<P: Parameters>(
         .prepare(&format!(
             "SELECT k.id FROM ironwood_receiving_keys k
              WHERE k.account_id = :account AND k.used = 1 AND {RESERVED}
-               AND NOT EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
+               AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o
                  WHERE o.receiving_key_id = k.id AND o.request IS NOT NULL AND (
                    (o.reference IS NULL AND (o.deadline IS NULL OR o.deadline > :now - :reclaim))
                    OR (o.reference IS NOT NULL AND (o.observed_at > :now OR NOT (
@@ -295,7 +295,7 @@ pub(super) fn begin(
     }
     // The provider has the address from here on, so issuance avoids it.
     conn.execute(
-        "INSERT INTO ironwood_dynamic_operations
+        "INSERT INTO ironwood_one_time_operations
             (receiving_key_id, request, deadline, begun_at, observed_at)
          VALUES (?1, ?2, ?3, ?4, ?4)",
         params![key, request, deadline, now],
@@ -310,7 +310,7 @@ fn operation(
     request: &str,
 ) -> Result<i64, SqliteClientError> {
     conn.query_row(
-        "SELECT o.id FROM ironwood_dynamic_operations o
+        "SELECT o.id FROM ironwood_one_time_operations o
          JOIN ironwood_receiving_keys k ON k.id = o.receiving_key_id
          JOIN accounts a ON a.id = k.account_id
          WHERE a.uuid = ?1 AND o.request = ?2",
@@ -336,7 +336,7 @@ pub(super) fn finish(
             }
             // Statuses find operations by address and memo alone.
             let bound: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
+                "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_operations o
                      JOIN ironwood_receiving_keys k ON k.id = o.receiving_key_id
                      JOIN accounts a ON a.id = k.account_id
                      WHERE a.uuid = ?1 AND o.id != ?2 AND o.reference = ?3 AND o.memo IS ?4)",
@@ -347,7 +347,7 @@ pub(super) fn finish(
                 return Err(invalid("deposit instructions belong to another operation"));
             }
             let changed = conn.execute(
-                "UPDATE ironwood_dynamic_operations
+                "UPDATE ironwood_one_time_operations
                  SET reference = ?2, memo = ?3, deadline = MIN(deadline, ?4)
                  WHERE id = ?1 AND (reference IS NULL OR (reference = ?2 AND memo IS ?3))",
                 params![id, deposit.address, deposit.memo, deposit.deadline],
@@ -359,7 +359,7 @@ pub(super) fn finish(
         // A provider that rejected every request never saw the address.
         OperationOutcome::Rejected => {
             conn.execute(
-                "DELETE FROM ironwood_dynamic_operations WHERE id = ?1 AND reference IS NULL",
+                "DELETE FROM ironwood_one_time_operations WHERE id = ?1 AND reference IS NULL",
                 [id],
             )?;
         }
@@ -377,7 +377,7 @@ pub(super) fn start(
     let deposit = conn
         .query_row(
             &format!(
-                "SELECT o.reference, o.memo, o.deadline FROM ironwood_dynamic_operations o
+                "SELECT o.reference, o.memo, o.deadline FROM ironwood_one_time_operations o
                  JOIN ironwood_receiving_keys k ON k.id = o.receiving_key_id
                  WHERE o.id = ?1 AND o.reference IS NOT NULL AND o.deadline IS NOT NULL
                    AND {RESERVED}"
@@ -396,7 +396,7 @@ pub(super) fn start(
         return Ok(Err(ReservationPolicy::Stale));
     };
     conn.execute(
-        "UPDATE ironwood_dynamic_operations SET started = 1 WHERE id = ?1",
+        "UPDATE ironwood_one_time_operations SET started = 1 WHERE id = ?1",
         [id],
     )?;
     Ok(Ok(deposit))
@@ -420,7 +420,7 @@ pub(super) fn record_status<P: Parameters>(
         .prepare(&format!(
             "SELECT o.id, k.id,
                 k.purpose = 0 AND k.active_from IS NULL AND k.closed_at IS NULL, k.scan_from
-             FROM ironwood_dynamic_operations o
+             FROM ironwood_one_time_operations o
              JOIN ironwood_receiving_keys k ON k.id = o.receiving_key_id
              JOIN accounts a ON a.id = k.account_id
              WHERE a.uuid = ?1 AND o.reference = ?2 AND o.memo IS ?3
@@ -450,10 +450,10 @@ pub(super) fn prepare<P: Parameters>(
     now: i64,
     scan_from: BlockHeight,
     seen: Option<&ProviderSeen<'_>>,
-) -> Result<Result<DynamicKey, ReservationPolicy>, SqliteClientError> {
+) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
     let (a, parent) = account_key(conn, params, account)?;
     let sweeping: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_dynamic_sweeps s
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_sweeps s
         JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
         WHERE k.account_id = ?1 AND k.purpose = 1 AND s.done_height IS NULL)",
         [a.0],
@@ -498,9 +498,9 @@ pub(super) fn prepare<P: Parameters>(
             .query_row(
                 &format!(
                     "SELECT k.used = 1 OR {SEEN} OR {RESERVED}
-                          OR EXISTS(SELECT 1 FROM ironwood_dynamic_payment_recovery p
+                          OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
                             WHERE p.receiving_key_id = k.id),
-                        EXISTS(SELECT 1 FROM ironwood_dynamic_operations o
+                        EXISTS(SELECT 1 FROM ironwood_one_time_operations o
                             WHERE o.receiving_key_id = k.id AND o.request IS NOT NULL)
                      FROM ironwood_receiving_keys k
                      WHERE k.account_id = :account AND k.purpose = 1 AND k.key_index = :index"

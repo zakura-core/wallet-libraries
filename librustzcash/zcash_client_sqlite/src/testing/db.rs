@@ -57,21 +57,21 @@ use crate::{
     wallet::init::WalletMigrator,
 };
 
-// The delegated dynamic IVK traits' signatures name these.
+// The delegated one-time IVK traits' signatures name these.
 #[cfg(feature = "orchard")]
 use {
     std::collections::BTreeMap,
-    zakura_dynamic_ivk::KeyId,
+    zakura_one_time_ivk::KeyId,
     zcash_client_backend::{
         data_api::{
-            dynamic_ivk::{
-                DirectoryPayment, DiscoveryWork, DynamicIvkRead, DynamicIvkWrite,
-                PaymentApplication, SweepDeferral, ambassador_impl_DynamicIvkRead,
-                ambassador_impl_DynamicIvkWrite,
+            one_time_ivk::{
+                DirectoryPayment, DiscoveryWork, OneTimeIvkRead, OneTimeIvkWrite,
+                PaymentApplication, SweepDeferral, ambassador_impl_OneTimeIvkRead,
+                ambassador_impl_OneTimeIvkWrite,
             },
             transparent_ledger::ChainPoint,
         },
-        scanning::dynamic_ivk::DynamicScanningKey,
+        scanning::one_time_ivk::OneTimeScanningKey,
     },
 };
 
@@ -109,8 +109,8 @@ pub(crate) fn test_rng() -> TestRng {
 #[delegate(TransactionStatusRead, target = "wallet_db")]
 #[cfg_attr(
     feature = "orchard",
-    delegate(DynamicIvkRead, target = "wallet_db"),
-    delegate(DynamicIvkWrite, target = "wallet_db")
+    delegate(OneTimeIvkRead, target = "wallet_db"),
+    delegate(OneTimeIvkWrite, target = "wallet_db")
 )]
 pub struct TestDb {
     wallet_db: WalletDb<Connection, LocalNetwork, FixedClock, TestRng>,

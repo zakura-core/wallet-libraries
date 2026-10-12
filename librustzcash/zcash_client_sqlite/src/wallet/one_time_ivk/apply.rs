@@ -6,7 +6,7 @@ use orchard::tree::{MerkleHashOrchard, MerklePath};
 use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::{
     data_api::{
-        dynamic_ivk::{PaymentApplication, SweepDeferral},
+        one_time_ivk::{PaymentApplication, SweepDeferral},
         transparent_ledger::{ChainPoint, TransparentLedgerMode},
     },
     wallet::{WalletOrchardOutput, WalletTx},
@@ -25,7 +25,7 @@ use super::{
 };
 use crate::{WalletDb, error::SqliteClientError, wallet};
 
-/// Implements `DynamicIvkWrite::apply_dynamic_sweep`, one transaction per payment.
+/// Implements `OneTimeIvkWrite::apply_one_time_sweep`, one transaction per payment.
 #[allow(clippy::type_complexity)]
 pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL, R>(
     db: &mut WalletDb<C, P, CL, R>,
@@ -76,7 +76,7 @@ fn merkle_path(position: u32, siblings: [[u8; 32]; 32]) -> Option<MerklePath> {
 
 /// Applies queued `candidate` with its inclusion path at an anchor on the wallet's chain,
 /// which authenticates the note and position but not its transaction ID. No memo is
-/// stored (see `wallet::dynamic_ivk`). `configured` is the handle's transparent ledger
+/// stored (see `wallet::one_time_ivk`). `configured` is the handle's transparent ledger
 /// mode, for routing the transaction's enhancement.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_payment<P: Parameters>(
@@ -93,12 +93,12 @@ pub(super) fn apply_payment<P: Parameters>(
         .iter()
         .any(|p| p == candidate)
     {
-        return Err(corrupt("dynamic-key payment is not queued or changed"));
+        return Err(corrupt("one-time-key payment is not queued or changed"));
     }
     let (key_ref, recovered) = authenticate(conn, params, account, key, candidate)?;
     let dequeue = || {
         conn.execute(
-            "DELETE FROM ironwood_dynamic_payment_recovery
+            "DELETE FROM ironwood_one_time_payment_recovery
              WHERE receiving_key_id = ?1 AND txid = ?2 AND action_index = ?3",
             params![key_ref, candidate.txid.as_ref(), candidate.action_index],
         )
@@ -275,9 +275,9 @@ pub(super) fn apply_payment<P: Parameters>(
     )?;
     let stored_path = tree
         .witness_at_checkpoint_id(Position::from(position), &checkpoint)?
-        .ok_or_else(|| corrupt("stored dynamic-key witness missing"))?;
+        .ok_or_else(|| corrupt("stored one-time-key witness missing"))?;
     if !recovered.verify_position(position, &stored_path.into(), root.into()) {
-        return Err(corrupt("stored dynamic-key witness changed"));
+        return Err(corrupt("stored one-time-key witness changed"));
     }
     let tx = WalletTx::new(
         candidate.txid,
@@ -305,12 +305,12 @@ pub(super) fn apply_payment<P: Parameters>(
                 )
                 .optional()?,
         };
-        Some(spending.ok_or_else(|| corrupt("verified dynamic-key spend lost its transaction"))?)
+        Some(spending.ok_or_else(|| corrupt("verified one-time-key spend lost its transaction"))?)
     } else {
         None
     };
     let encrypted = &candidate.encrypted_note;
-    // Dynamic-key notes carry no memo the wallet reads; only internal change carries the refund marker.
+    // One-time-key notes carry no memo the wallet reads; only internal change carries the refund marker.
     let output = WalletOrchardOutput::from_parts(
         candidate.action_index as usize,
         encrypted.ephemeral_key(),
@@ -321,7 +321,7 @@ pub(super) fn apply_payment<P: Parameters>(
         account,
         Some(zip32::Scope::External),
     )
-    .with_dynamic_key_id(Some(key))
+    .with_one_time_key_id(Some(key))
     .with_compact_ciphertext(encrypted.enc_ciphertext()[..52].try_into().unwrap());
     wallet::orchard::put_received_note(
         conn,
@@ -343,11 +343,11 @@ fn reject(
     key_ref: i64,
 ) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
     conn.execute(
-        "DELETE FROM ironwood_dynamic_payment_recovery WHERE receiving_key_id = ?1",
+        "DELETE FROM ironwood_one_time_payment_recovery WHERE receiving_key_id = ?1",
         [key_ref],
     )?;
     conn.execute(
-        "UPDATE ironwood_dynamic_sweeps SET lookup_height = NULL, lookup_hash = NULL,
+        "UPDATE ironwood_one_time_sweeps SET lookup_height = NULL, lookup_hash = NULL,
             done_height = NULL WHERE receiving_key_id = ?1",
         [key_ref],
     )?;

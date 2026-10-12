@@ -25,7 +25,7 @@ fn exact_key_access_ignores_unrelated_history_and_validates_the_requested_key() 
     .unwrap();
     for found in [
         get_key(db, account, wanted.key_id()).unwrap().unwrap(),
-        db.get_dynamic_key_for_receiver(account, &wanted.receiver())
+        db.get_one_time_key_for_receiver(account, &wanted.receiver())
             .unwrap()
             .unwrap(),
     ] {
@@ -58,7 +58,7 @@ fn exact_key_access_ignores_unrelated_history_and_validates_the_requested_key() 
         )
         .unwrap();
     assert!(
-        db.get_dynamic_key_for_receiver(account, &wanted.receiver())
+        db.get_one_time_key_for_receiver(account, &wanted.receiver())
             .is_err()
     );
 }
@@ -76,7 +76,7 @@ fn exact_key_access_keeps_accounts_and_reservations_separate() {
     let (other, _) = db.create_account("other", &seed, &birthday, None).unwrap();
     assert!(get_key(db, other, reservation.key_id()).unwrap().is_none());
     assert!(
-        db.get_dynamic_key_for_receiver(other, &reservation.receiver())
+        db.get_one_time_key_for_receiver(other, &reservation.receiver())
             .unwrap()
             .is_none()
     );
@@ -104,14 +104,14 @@ fn transaction_keys_exclude_unscanned_history_and_preserve_self_payments() {
     let active = reserve_key(db, account, Purpose::Refund, start());
     let txid = TxId::from_bytes([17; 32]);
     let keys = db
-        .get_dynamic_transaction_keys(txid, Some(start()), &[])
+        .get_one_time_transaction_keys(txid, Some(start()), &[])
         .unwrap();
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].key_id(), active.key_id());
     // An ordinary OVK can identify a self-payment before compact scanning, even
     // when the receiving key was recovered without being scanned.
     let keys = db
-        .get_dynamic_transaction_keys(txid, None, &[historical.receiver()])
+        .get_one_time_transaction_keys(txid, None, &[historical.receiver()])
         .unwrap();
     assert_eq!(keys.len(), 2);
     assert!(keys.iter().any(|k| k.key_id() == historical.key_id()));
@@ -124,7 +124,7 @@ fn transaction_keys_exclude_unscanned_history_and_preserve_self_payments() {
         )
         .unwrap();
     assert!(
-        db.get_dynamic_transaction_keys(txid, Some(start()), &[])
+        db.get_one_time_transaction_keys(txid, Some(start()), &[])
             .unwrap()
             .is_empty()
     );
@@ -135,14 +135,14 @@ fn unscanned_transaction_keys_follow_pending_and_imported_output_identity() {
     let (mut st, key, candidate, through, path) = super::apply::fixture();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
-    assert!(db.get_dynamic_scanning_keys().unwrap().is_empty());
+    assert!(db.get_one_time_scanning_keys().unwrap().is_empty());
     let known = db
-        .get_dynamic_transaction_keys(candidate.txid, Some(through.height), &[])
+        .get_one_time_transaction_keys(candidate.txid, Some(through.height), &[])
         .unwrap();
     assert_eq!(known.len(), 1);
     assert_eq!(known[0].key_id(), key.key_id());
     assert!(
-        db.get_dynamic_transaction_keys(
+        db.get_one_time_transaction_keys(
             zcash_primitives::transaction::TxId::from_bytes([45; 32]),
             Some(through.height),
             &[]
@@ -161,7 +161,7 @@ fn unscanned_transaction_keys_follow_pending_and_imported_output_identity() {
     .unwrap();
     assert!(pending(db, account, key.key_id()).is_empty());
     let known = db
-        .get_dynamic_transaction_keys(candidate.txid, Some(through.height), &[])
+        .get_one_time_transaction_keys(candidate.txid, Some(through.height), &[])
         .unwrap();
     assert_eq!(known.len(), 1);
     assert_eq!(known[0].key_id(), key.key_id());
