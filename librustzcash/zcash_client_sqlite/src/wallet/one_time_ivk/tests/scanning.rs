@@ -548,7 +548,7 @@ fn spend_evidence_is_kept_only_with_one_time_ivk_state() {
                 .collect::<Result<_, _>>()
                 .unwrap()
         };
-        let mut scan_empty_block = |st: &mut State| {
+        let scan_empty_block = |st: &mut State| {
             let (height, _) = st.generate_empty_block();
             st.scan_cached_blocks(height, 1);
             height
