@@ -64,9 +64,6 @@
 //! [`propose_shielding`]: crate::data_api::wallet::propose_shielding
 //! [`pczt`]: https://docs.rs/pczt
 
-#[cfg(feature = "one-time-ivk")]
-use crate::scanning::one_time_ivk::OneTimeScanningKey;
-
 use nonempty::NonEmpty;
 use secrecy::SecretVec;
 use std::{
@@ -2986,28 +2983,6 @@ pub struct DecryptedTransaction<'a, Tx: DecryptableTransaction<AccountId>, Accou
     one_time_ivks_applied: bool,
 }
 
-#[cfg(feature = "one-time-ivk")]
-impl<AccountId: Copy + Eq> DecryptedTransaction<'_, Transaction, AccountId> {
-    /// Adds authenticated incoming outputs from the wallet's one-time keys.
-    /// A self-payment may already have been recovered with the account OVK.
-    /// In that case, retain one incoming record carrying its receiving-key identity.
-    pub fn with_one_time_ivks(
-        mut self,
-        keys: impl IntoIterator<Item = OneTimeScanningKey<AccountId>>,
-    ) -> Self {
-        for key in keys {
-            for output in key.decrypt_outputs(self.tx) {
-                self.ironwood_outputs.retain(|existing| {
-                    existing.index() != output.index() || existing.account() != output.account()
-                });
-                self.ironwood_outputs.push(output);
-            }
-        }
-        self.one_time_ivks_applied = true;
-        self
-    }
-}
-
 impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<'a, Tx, AccountId> {
     /// Constructs a new [`DecryptedTransaction`] from its constituent parts.
     ///
@@ -3060,11 +3035,20 @@ impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<
     }
 
     /// Whether the wallet's one-time keys were tried, through
-    /// [`DecryptedTransaction::with_one_time_ivks`]. While a one-time key is open, a
+    /// [`decrypt_transaction_with_one_time_ivks`]. While a one-time key is open, a
     /// store may refuse a transaction decrypted without them.
+    ///
+    /// [`decrypt_transaction_with_one_time_ivks`]: crate::decrypt_transaction_with_one_time_ivks
     #[cfg(feature = "one-time-ivk")]
     pub fn one_time_ivks_applied(&self) -> bool {
         self.one_time_ivks_applied
+    }
+
+    /// Records that the wallet's one-time keys were tried.
+    #[cfg(feature = "one-time-ivk")]
+    pub(crate) fn with_one_time_ivks_applied(mut self) -> Self {
+        self.one_time_ivks_applied = true;
+        self
     }
 
     /// Returns whether the transaction has decrypted outputs
