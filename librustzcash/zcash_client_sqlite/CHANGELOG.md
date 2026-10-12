@@ -167,11 +167,12 @@ workspace.
   `OneTimeIvkWrite` and the restore protocol's `OneTimeIvkRestoreRead` and
   `OneTimeIvkRestoreWrite`. Keys the wallet issues are trial-decrypted in every batch of
   `scan_cached_blocks_with_one_time_ivks` until they close, and their notes spend into
-  ordinary change. With `NoteSelection::PreferConsolidation`, one-time-key notes fund a
-  payment when they cover it with no more inputs, then fill spare input slots first, so
+  ordinary change. With `NoteSelection::PreferConsolidation`, one-time-key notes replace
+  notes of the same lock tier in funding when as many notes still cover the payment, then
+  fill spare input slots first, skipping any that would change the change split, so
   ordinary sends move their value into ordinary internal change without changing the fee
-  or transaction shape. `get_account_metadata` does not count them, so change splitting
-  does not change when one is spent. Full-transaction and Enhance PIR
+  or transaction shape. `get_account_metadata` does not count them, so spending one does
+  not change the note count change splitting is based on. Full-transaction and Enhance PIR
   retrieval authenticate these notes with their registered key, but only a full
   transaction stores their memo: they carry none the wallet reads, since the refund
   marker is on internal change. While a one-time key is open, blocks and transactions

@@ -727,6 +727,7 @@ pub(super) fn retention_height(st: &State) -> Option<BlockHeight> {
 mod enhancement;
 mod key_access;
 mod scanning;
+mod selection;
 
 /// Reservations survive a reopen, and each purpose and account has its own index space,
 /// whose keys another account cannot look up.
