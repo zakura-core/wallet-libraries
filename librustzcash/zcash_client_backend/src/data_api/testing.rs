@@ -1128,28 +1128,28 @@ where
     Cache: TestCache,
     <Cache::BlockSource as BlockSource>::Error: fmt::Debug,
     ParamsT: consensus::Parameters + Send + 'static,
-    DbT: InputSource + WalletTest + super::dynamic_ivk::DynamicIvkWrite + WalletCommitmentTrees,
+    DbT: InputSource + WalletTest + super::one_time_ivk::OneTimeIvkWrite + WalletCommitmentTrees,
     <DbT as WalletRead>::AccountId:
         std::fmt::Debug + ConditionallySelectable + Default + Send + Sync + 'static,
 {
-    /// Invokes [`scan_cached_blocks_with_dynamic_ivks`] with the given arguments, expecting
+    /// Invokes [`scan_cached_blocks_with_one_time_ivks`] with the given arguments, expecting
     /// success.
     ///
-    /// [`scan_cached_blocks_with_dynamic_ivks`]: super::chain::scan_cached_blocks_with_dynamic_ivks
-    pub fn scan_cached_blocks_with_dynamic_ivks(
+    /// [`scan_cached_blocks_with_one_time_ivks`]: super::chain::scan_cached_blocks_with_one_time_ivks
+    pub fn scan_cached_blocks_with_one_time_ivks(
         &mut self,
         from_height: BlockHeight,
         limit: usize,
     ) -> ScanSummary {
-        let result = self.try_scan_cached_blocks_with_dynamic_ivks(from_height, limit);
+        let result = self.try_scan_cached_blocks_with_one_time_ivks(from_height, limit);
         assert_matches!(result, Ok(_));
         result.unwrap()
     }
 
-    /// Invokes [`scan_cached_blocks_with_dynamic_ivks`] with the given arguments.
+    /// Invokes [`scan_cached_blocks_with_one_time_ivks`] with the given arguments.
     ///
-    /// [`scan_cached_blocks_with_dynamic_ivks`]: super::chain::scan_cached_blocks_with_dynamic_ivks
-    pub fn try_scan_cached_blocks_with_dynamic_ivks(
+    /// [`scan_cached_blocks_with_one_time_ivks`]: super::chain::scan_cached_blocks_with_one_time_ivks
+    pub fn try_scan_cached_blocks_with_one_time_ivks(
         &mut self,
         from_height: BlockHeight,
         limit: usize,
@@ -1165,7 +1165,7 @@ where
             .cloned()
             .unwrap_or_else(|| CachedBlock::none(from_height - 1));
 
-        super::chain::scan_cached_blocks_with_dynamic_ivks(
+        super::chain::scan_cached_blocks_with_one_time_ivks(
             &self.network,
             self.cache.block_source(),
             &mut self.wallet_data,
@@ -1175,11 +1175,11 @@ where
         )
     }
 
-    /// [`Self::generate_and_scan_empty_blocks`], scanning with dynamic keys.
-    pub fn generate_and_scan_empty_blocks_with_dynamic_ivks(&mut self, n: usize) -> BlockHeight {
+    /// [`Self::generate_and_scan_empty_blocks`], scanning with one-time keys.
+    pub fn generate_and_scan_empty_blocks_with_one_time_ivks(&mut self, n: usize) -> BlockHeight {
         for _ in 0..n {
             let (height, _) = self.generate_empty_block();
-            self.scan_cached_blocks_with_dynamic_ivks(height, 1);
+            self.scan_cached_blocks_with_one_time_ivks(height, 1);
         }
         self.wallet()
             .block_fully_scanned()

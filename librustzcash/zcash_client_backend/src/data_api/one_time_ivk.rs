@@ -1,30 +1,30 @@
-//! Storage-neutral APIs for dynamic IVKs.
+//! Storage-neutral APIs for one-time IVKs.
 //!
-//! A dynamic key (see [`zakura_dynamic_ivk`]) keeps its account's spending authority
+//! A one-time key (see [`zakura_one_time_ivk`]) keeps its account's spending authority
 //! with its own incoming viewing key, so the wallet trial-decrypts with a set of keys
-//! that changes as keys open and close. A store that implements [`DynamicIvkWrite`] is
+//! that changes as keys open and close. A store that implements [`OneTimeIvkWrite`] is
 //! scanned with
-//! [`scan_cached_blocks_with_dynamic_ivks`](super::chain::scan_cached_blocks_with_dynamic_ivks)
-//! and [`decrypt_and_store_transaction_with_dynamic_ivks`], which try its open keys
+//! [`scan_cached_blocks_with_one_time_ivks`](super::chain::scan_cached_blocks_with_one_time_ivks)
+//! and [`decrypt_and_store_transaction_with_one_time_ivks`], which try its open keys
 //! alongside the account keys. A restored wallet cannot rescan public history for
 //! every key its seed may have used, so it looks each recovered key up once in a
 //! receiver directory instead: a restore sweep, run with the sweep steps of these
 //! traits.
 //!
-//! [`decrypt_and_store_transaction_with_dynamic_ivks`]: super::wallet::decrypt_and_store_transaction_with_dynamic_ivks
+//! [`decrypt_and_store_transaction_with_one_time_ivks`]: super::wallet::decrypt_and_store_transaction_with_one_time_ivks
 
 use std::{collections::BTreeMap, num::NonZeroU32};
 
 #[cfg(feature = "test-dependencies")]
 use ambassador::delegatable_trait;
-use zakura_dynamic_ivk::KeyId;
+use zakura_one_time_ivk::KeyId;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 
 use super::{
     ScannedBlock, WalletRead, WalletWrite, chain::ChainState, transparent_ledger::ChainPoint,
 };
-use crate::scanning::dynamic_ivk::DynamicScanningKey;
+use crate::scanning::one_time_ivk::OneTimeScanningKey;
 
 /// A directory publication more than this many blocks behind the wallet's scanned tip
 /// is stale: finishing sweeps at it would leave a long rescan behind.
@@ -74,7 +74,7 @@ pub enum SweepDeferral {
     StalePublication,
 }
 
-/// Why [`DynamicIvkWrite::apply_dynamic_sweep`] stopped. Incomplete work stays queued
+/// Why [`OneTimeIvkWrite::apply_one_time_sweep`] stopped. Incomplete work stays queued
 /// and never contributes to wallet balance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaymentApplication {
@@ -93,28 +93,28 @@ pub enum PaymentApplication {
     /// the account's birthday and, as with any such note, is not tracked. No memo is
     /// stored (see [`EncryptedNote::decrypt`]).
     ///
-    /// [`EncryptedNote::decrypt`]: zakura_dynamic_ivk::recovery::EncryptedNote::decrypt
+    /// [`EncryptedNote::decrypt`]: zakura_one_time_ivk::recovery::EncryptedNote::decrypt
     Applied,
 }
 
-/// Dynamic IVK reads: the keys to scan with, and restore sweep state.
+/// One-time IVK reads: the keys to scan with, and restore sweep state.
 #[cfg_attr(feature = "test-dependencies", delegatable_trait)]
-pub trait DynamicIvkRead: WalletRead {
-    /// Returns the dynamic keys to trial-decrypt in every scan batch.
-    fn get_dynamic_scanning_keys(
+pub trait OneTimeIvkRead: WalletRead {
+    /// Returns the one-time keys to trial-decrypt in every scan batch.
+    fn get_one_time_scanning_keys(
         &self,
-    ) -> Result<Vec<DynamicScanningKey<Self::AccountId>>, Self::Error>;
+    ) -> Result<Vec<OneTimeScanningKey<Self::AccountId>>, Self::Error>;
 
     /// Selects keys for full transaction decryption, retaining known-note ownership
     /// even after a key stops scanning. `receivers` come from ordinary authenticated
     /// decryption and preserve self-payments before compact scanning.
     /// Stores without a transaction index can conservatively return every registered key.
-    fn get_dynamic_transaction_keys(
+    fn get_one_time_transaction_keys(
         &self,
         txid: TxId,
         height: Option<BlockHeight>,
         receivers: &[orchard::Address],
-    ) -> Result<Vec<DynamicScanningKey<Self::AccountId>>, Self::Error>;
+    ) -> Result<Vec<OneTimeScanningKey<Self::AccountId>>, Self::Error>;
 
     /// The anchor of a directory publication covering blocks through `height`, as the
     /// wallet's own chain records it. `through` is the wallet's fully scanned tip. Defers
@@ -127,7 +127,7 @@ pub trait DynamicIvkRead: WalletRead {
     ) -> Result<Result<ChainPoint, SweepDeferral>, Self::Error>;
 
     /// The commitment tree positions of `payments`, the directory's lookup for `key`,
-    /// whose note data [`DynamicIvkWrite::queue_directory_lookup`] needs.
+    /// whose note data [`OneTimeIvkWrite::queue_directory_lookup`] needs.
     /// Payments already imported or queued unchanged need none. A payment that
     /// contradicts an imported output is an error; one that corrects a queued candidate
     /// needs data.
@@ -140,56 +140,56 @@ pub trait DynamicIvkRead: WalletRead {
 
     /// Whether `account` still has restore sweeps or queued payments through `through`.
     /// Retry backoff never makes an unfinished restore appear complete.
-    fn dynamic_history_pending(
+    fn one_time_history_pending(
         &self,
         account: Self::AccountId,
         through: BlockHeight,
     ) -> Result<bool, Self::Error>;
 
     /// `account`'s closed keys with no known payment that no paid filter at or above
-    /// `height` has checked, for [`DynamicIvkWrite::record_paid_filter_check`].
-    fn dynamic_keys_to_recheck(
+    /// `height` has checked, for [`OneTimeIvkWrite::record_paid_filter_check`].
+    fn one_time_keys_to_recheck(
         &self,
         account: Self::AccountId,
         height: BlockHeight,
     ) -> Result<Vec<DiscoveryWork>, Self::Error>;
 }
 
-/// Dynamic IVK writes: storing blocks scanned with dynamic keys, and restore sweeps.
+/// One-time IVK writes: storing blocks scanned with one-time keys, and restore sweeps.
 ///
 /// A restore sweep takes each due [`DiscoveryWork`] item from
-/// [`Self::prepare_dynamic_sweeps`] and leases it with
-/// [`Self::begin_dynamic_sweep_attempt`]. Every attempt looks the item's receiver up
+/// [`Self::prepare_one_time_sweeps`] and leases it with
+/// [`Self::begin_one_time_sweep_attempt`]. Every attempt looks the item's receiver up
 /// in the directory's current publication, then retrieves note data for the positions
-/// [`DynamicIvkRead::directory_note_data_needed`] returns and queues it with
+/// [`OneTimeIvkRead::directory_note_data_needed`] returns and queues it with
 /// [`Self::queue_directory_lookup`], in batches, until the lookup is done. Then it
-/// calls [`Self::apply_dynamic_sweep`]. Each step commits atomically, so a caller may
+/// calls [`Self::apply_one_time_sweep`]. Each step commits atomically, so a caller may
 /// stop between any two.
 #[cfg_attr(feature = "test-dependencies", delegatable_trait)]
-pub trait DynamicIvkWrite: WalletWrite + DynamicIvkRead {
-    /// Persists scanned blocks together with the dynamic keys that scanned them.
+pub trait OneTimeIvkWrite: WalletWrite + OneTimeIvkRead {
+    /// Persists scanned blocks together with the one-time keys that scanned them.
     ///
     /// `keys` must be the snapshot used for trial decryption, not a fresh lookup, so the
-    /// store can requeue blocks that a key activated mid-batch missed. While a dynamic
+    /// store can requeue blocks that a key activated mid-batch missed. While a one-time
     /// key is open, a store may refuse blocks from [`WalletWrite::put_blocks`], which
     /// were scanned without it.
-    fn put_blocks_with_dynamic_ivks(
+    fn put_blocks_with_one_time_ivks(
         &mut self,
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<<Self as WalletRead>::AccountId>>,
         keys: &[(<Self as WalletRead>::AccountId, KeyId)],
     ) -> Result<(), <Self as WalletRead>::Error>;
 
-    /// Keeps `account`'s dynamic key recovery current. Call when each sync starts,
+    /// Keeps `account`'s one-time key recovery current. Call when each sync starts,
     /// before planning scan work, and again once it reaches the tip.
     ///
     /// Retains Ironwood spend evidence from the account's birthday until
-    /// [`Self::finish_dynamic_nullifier_recovery`] releases it; evidence pruned before
+    /// [`Self::finish_one_time_nullifier_recovery`] releases it; evidence pruned before
     /// the first call cannot be recovered without a rescan. Once scanning reaches the
     /// chain tip at or above Ironwood activation, it also registers refund keys from
     /// confirmed funding memos and keeps incoming lookahead keys above the highest
     /// restored index, each queued for one restore sweep.
-    fn maintain_dynamic_ivks(
+    fn maintain_one_time_ivks(
         &mut self,
         account: <Self as WalletRead>::AccountId,
     ) -> Result<(), <Self as WalletRead>::Error>;
@@ -198,7 +198,7 @@ pub trait DynamicIvkWrite: WalletWrite + DynamicIvkRead {
     /// `through`, the wallet's fully scanned tip, without reconstructing historical keys.
     /// Attempts are leased separately just before I/O, so a stopped batch cannot starve
     /// its tail.
-    fn prepare_dynamic_sweeps(
+    fn prepare_one_time_sweeps(
         &mut self,
         account: <Self as WalletRead>::AccountId,
         through: ChainPoint,
@@ -215,7 +215,7 @@ pub trait DynamicIvkWrite: WalletWrite + DynamicIvkRead {
     /// issued again and restore lookahead advances past it. A hit is stored with the
     /// lease, before any lookup or payment work, and is never cleared; `false` changes
     /// nothing.
-    fn begin_dynamic_sweep_attempt(
+    fn begin_one_time_sweep_attempt(
         &mut self,
         account: <Self as WalletRead>::AccountId,
         key: KeyId,
@@ -224,7 +224,7 @@ pub trait DynamicIvkWrite: WalletWrite + DynamicIvkRead {
     ) -> Result<(), <Self as WalletRead>::Error>;
 
     /// Queues the new payments in `payments`, the directory's complete lookup of `key` at
-    /// `anchor` (from [`DynamicIvkRead::directory_publication_anchor`]), that have note
+    /// `anchor` (from [`OneTimeIvkRead::directory_publication_anchor`]), that have note
     /// data in `note_data`: the 528 ciphertext bytes after the directory's prefix, by
     /// position. Nothing is credited yet. Returns whether the lookup is done, which it is
     /// once no payment lacks note data; until then the next attempt looks the receiver
@@ -253,7 +253,7 @@ pub trait DynamicIvkWrite: WalletWrite + DynamicIvkRead {
     /// the lookup, rescanning blocks scanned without it, until the store's restore watch
     /// closes it. Any other key that was not already scanning closes at the lookup; a
     /// later payment to it is found by [`Self::record_paid_filter_check`].
-    fn apply_dynamic_sweep(
+    fn apply_one_time_sweep(
         &mut self,
         account: <Self as WalletRead>::AccountId,
         key: KeyId,
@@ -264,7 +264,7 @@ pub trait DynamicIvkWrite: WalletWrite + DynamicIvkRead {
     ) -> Result<Result<PaymentApplication, SweepDeferral>, <Self as WalletRead>::Error>;
 
     /// Records a newer publication's paid filter against keys from
-    /// [`DynamicIvkRead::dynamic_keys_to_recheck`]: `checked` pairs each key with whether
+    /// [`OneTimeIvkRead::one_time_keys_to_recheck`]: `checked` pairs each key with whether
     /// the filter holds its receiver. A key it holds may have been paid after it stopped
     /// scanning, so a sweep of it is queued; any other has no payment through
     /// `publication`, which is recorded so the same publication is not checked again.
@@ -280,9 +280,9 @@ pub trait DynamicIvkWrite: WalletWrite + DynamicIvkRead {
     /// no restore sweep needs them. Missing memos, pending sweeps and queued payments
     /// protect their evidence. Returns true when release reaches the tip.
     ///
-    /// Restore discovery (see [`Self::maintain_dynamic_ivks`]) runs first, in the same
+    /// Restore discovery (see [`Self::maintain_one_time_ivks`]) runs first, in the same
     /// transaction, so a payment at the lookahead's edge cannot race with pruning.
-    fn finish_dynamic_nullifier_recovery(
+    fn finish_one_time_nullifier_recovery(
         &mut self,
         account: <Self as WalletRead>::AccountId,
         through: ChainPoint,

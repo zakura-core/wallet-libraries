@@ -36,9 +36,9 @@ use crate::{
 use orchard::note_encryption::OrchardDomain;
 
 pub(crate) mod compact;
-#[cfg(feature = "orchard")]
-pub mod dynamic_ivk;
 pub mod full;
+#[cfg(feature = "orchard")]
+pub mod one_time_ivk;
 
 /// A key that can be used to perform trial decryption and nullifier
 /// computation for a [`CompactSaplingOutput`] or [`CompactOrchardAction`].
@@ -69,7 +69,7 @@ pub trait ScanningKeyOps<D: Domain, AccountId, Nf> {
 
     /// Derived receiving key that decrypted this output, relative to its account.
     #[cfg(feature = "orchard")]
-    fn dynamic_key_id(&self) -> Option<zakura_dynamic_ivk::KeyId> {
+    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
         None
     }
 
@@ -96,8 +96,8 @@ impl<D: Domain, AccountId, Nf, K: ScanningKeyOps<D, AccountId, Nf>> ScanningKeyO
     }
 
     #[cfg(feature = "orchard")]
-    fn dynamic_key_id(&self) -> Option<zakura_dynamic_ivk::KeyId> {
-        (*self).dynamic_key_id()
+    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
+        (*self).one_time_key_id()
     }
 
     fn nf(&self, note: &D::Note, note_position: Position) -> Option<Nf> {
@@ -121,8 +121,8 @@ impl<D: Domain, AccountId, Nf> ScanningKeyOps<D, AccountId, Nf>
     }
 
     #[cfg(feature = "orchard")]
-    fn dynamic_key_id(&self) -> Option<zakura_dynamic_ivk::KeyId> {
-        self.as_ref().dynamic_key_id()
+    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
+        self.as_ref().one_time_key_id()
     }
 
     fn nf(&self, note: &D::Note, note_position: Position) -> Option<Nf> {
@@ -146,8 +146,8 @@ impl<D: Domain, AccountId: Send + Sync, Nf> ScanningKeyOps<D, AccountId, Nf>
     }
 
     #[cfg(feature = "orchard")]
-    fn dynamic_key_id(&self) -> Option<zakura_dynamic_ivk::KeyId> {
-        self.as_ref().dynamic_key_id()
+    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
+        self.as_ref().one_time_key_id()
     }
 
     fn nf(&self, note: &D::Note, note_position: Position) -> Option<Nf> {
@@ -1020,7 +1020,7 @@ fn find_received<
                     .expect("compact ciphertext prefix"),
             );
             #[cfg(feature = "orchard")]
-            let output = output.with_dynamic_key_id(key.dynamic_key_id());
+            let output = output.with_one_time_key_id(key.one_time_key_id());
             shielded_outputs.push(output);
         }
 
