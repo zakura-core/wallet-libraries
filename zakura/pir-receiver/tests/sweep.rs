@@ -71,6 +71,15 @@ use zcash_protocol::{
 #[path = "../../pir-enhance/src/test_support.rs"]
 mod test_support;
 
+/// Asserts that a value matches a pattern, showing the value otherwise.
+macro_rules! assert_matches {
+    ($value:expr, $($pattern:tt)+) => {
+        match &$value {
+            value => assert!(matches!(value, $($pattern)+), "{value:?}"),
+        }
+    };
+}
+
 type State = TestState<BlockCache, TestDb, LocalNetwork>;
 /// The wallet a test sweeps.
 type Wallet = WalletDb<rusqlite::Connection, LocalNetwork, FixedClock, TestRng>;
@@ -86,13 +95,9 @@ const NOW: i64 = 1_700_000_000;
 /// The payout's value.
 const VALUE: u64 = 100_000;
 
-/// A wallet with Ironwood active from its first block.
-fn ironwood_wallet() -> State {
-    ironwood_wallet_in(TestDbFactory::default())
-}
-
-/// [`ironwood_wallet`] stored as `factory` makes it. Its incoming lookahead is registered
-/// before it scans, as a restore does, so scanning keeps the spend evidence sweeps need.
+/// A wallet with Ironwood active from its first block, stored as `factory` makes it. Its
+/// incoming lookahead is registered before it scans, as a restore does, so scanning keeps
+/// the spend evidence sweeps need.
 fn ironwood_wallet_in(factory: TestDbFactory) -> State {
     let activation = BlockHeight::from_u32(ACTIVATION);
     let mut st = TestBuilder::new()
@@ -183,6 +188,76 @@ fn pay_restored_key(st: &mut State, index: u64, position: u64) -> (Record, [u8; 
     (record, ciphertext[52..].try_into().unwrap())
 }
 
+/// A restored wallet at its fully scanned tip, after payments to its incoming keys.
+struct Restored {
+    st: State,
+    account: AccountUuid,
+    through: ChainPoint,
+    /// The payments as the directory lists them, in chain order.
+    records: Vec<Record>,
+    /// Their note data, by position.
+    data: BTreeMap<u64, [u8; 528]>,
+}
+
+/// Pays incoming key `paid[i]` as the chain's Ironwood output `i`, each payment a page of
+/// its key's lookup, then scans one more block and registers the restored lookahead.
+fn restored(paid: &[u64]) -> Restored {
+    let mut st = ironwood_wallet_in(TestDbFactory::default());
+    let account = st.test_account().unwrap().id();
+    let (mut records, mut data) = (Vec::new(), BTreeMap::new());
+    for (position, index) in (0..).zip(paid) {
+        let (mut record, note_data) = pay_restored_key(&mut st, *index, position);
+        let pages = |paid: &[u64]| paid.iter().filter(|i| *i == index).count();
+        record.page = pages(&paid[..records.len()]).try_into().unwrap();
+        record.total = pages(paid).try_into().unwrap();
+        records.push(record);
+        data.insert(position, note_data);
+    }
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    restore(&mut st, account);
+    let through = tip(&st);
+    Restored {
+        st,
+        account,
+        through,
+        records,
+        data,
+    }
+}
+
+impl Restored {
+    /// A note source serving every payment's note data.
+    fn notes(&self) -> Notes {
+        let data = self.data.clone();
+        Notes {
+            data,
+            ..Notes::default()
+        }
+    }
+}
+
+/// The test account's total balance in zatoshis.
+fn balance(st: &State) -> u64 {
+    st.get_total_balance(st.test_account().unwrap().id())
+        .into_u64()
+}
+
+/// Whether the test account still has sweeps or queued payments through `through`.
+fn pending(st: &State, through: ChainPoint) -> bool {
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet().db();
+    db.one_time_history_pending(account, through.height)
+        .unwrap()
+}
+
+/// The indices of the keys the wallet scans with, in order.
+fn scanning(st: &State) -> Vec<u64> {
+    let keys = st.wallet().get_one_time_scanning_keys().unwrap();
+    let mut indices: Vec<_> = keys.iter().map(|k| k.key_id().index()).collect();
+    indices.sort();
+    indices
+}
+
 /// A swap provider's sets: an empty recent set covering the wallet's restore watch, and
 /// every receiver it ever had, from a feed that started long before [`NOW`] and last
 /// read the provider a minute before it.
@@ -254,6 +329,13 @@ fn publish(
     router_with_publications(publications)
 }
 
+/// Serves a [`publish`]ed publication of `records`, the chain's only Ironwood outputs,
+/// ending at `end`, with a provider that has seen nothing.
+fn serve(records: &[Record], end: ChainPoint) -> Directory {
+    let commitments: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
+    Directory::new(publish(records, &commitments, end, &provider(&[])))
+}
+
 /// Serves a directory's routes in process and records every request.
 struct Directory {
     router: Router,
@@ -322,18 +404,33 @@ impl Transport for Directory {
     }
 }
 
-/// Note data from a fixed map, recording each request.
+/// The receiver lookups `directory` has served.
+fn lookups(directory: &Directory) -> usize {
+    let requests = directory.requests();
+    requests
+        .iter()
+        .filter(|r| *r == "POST /v1/receiver/query")
+        .count()
+}
+
+/// Note data from a fixed map, recording each request. Each answer is keyed `shift`
+/// positions after its request, and an `unavailable` source cannot serve the wallet's
+/// chain.
+#[derive(Default)]
 struct Notes {
     data: BTreeMap<u64, [u8; 528]>,
     requested: Vec<Vec<u64>>,
+    shift: u64,
+    unavailable: bool,
 }
 
 impl Notes {
-    /// Serves `data`, keyed by position.
-    fn new(data: BTreeMap<u64, [u8; 528]>) -> Self {
+    /// A source that cannot serve the wallet's chain.
+    fn unavailable() -> Self {
+        let unavailable = true;
         Self {
-            data,
-            requested: Vec::new(),
+            unavailable,
+            ..Self::default()
         }
     }
 }
@@ -344,24 +441,16 @@ impl<W: OneTimeIvkRestoreRead> NoteSource<W> for Notes {
         _: &W,
         positions: Vec<u64>,
     ) -> Result<BTreeMap<u64, [u8; 528]>, Error<W::Error>> {
+        if self.unavailable {
+            return Err(Error::NotesUnavailable("no note data"));
+        }
         self.requested.push(positions.clone());
-        Ok(positions
-            .into_iter()
-            .filter_map(|position| Some((position, *self.data.get(&position)?)))
-            .collect())
-    }
-}
-
-/// A note source that cannot serve the wallet's chain.
-struct NoNotes;
-
-impl<W: OneTimeIvkRestoreRead> NoteSource<W> for NoNotes {
-    async fn note_data(
-        &mut self,
-        _: &W,
-        _: Vec<u64>,
-    ) -> Result<BTreeMap<u64, [u8; 528]>, Error<W::Error>> {
-        Err(Error::NotesUnavailable("no note data"))
+        assert!(
+            self.requested.len() <= 3,
+            "the sweep keeps asking for {positions:?}"
+        );
+        let answer = |p| Some((p + self.shift, *self.data.get(&p)?));
+        Ok(positions.into_iter().filter_map(answer).collect())
     }
 }
 
@@ -393,6 +482,15 @@ fn restore(st: &mut State, account: AccountUuid) {
         .unwrap();
 }
 
+/// Scans every range the wallet has queued, such as a spend-history replay.
+fn scan_queued(st: &mut State) {
+    for range in st.wallet().suggest_scan_ranges().unwrap() {
+        let blocks = range.block_range();
+        let count = u32::from(blocks.end) - u32::from(blocks.start);
+        st.scan_cached_blocks_with_one_time_ivks(blocks.start, count as usize);
+    }
+}
+
 /// Runs one sweep of the test account through `through` at `now`.
 async fn run<N: NoteSource<Wallet>>(
     st: &mut State,
@@ -419,21 +517,33 @@ async fn run<N: NoteSource<Wallet>>(
     .await
 }
 
+/// [`run`]s without a lock, expecting no key deferred.
+async fn run_clean<N: NoteSource<Wallet>>(
+    st: &mut State,
+    through: ChainPoint,
+    directory: impl Transport,
+    notes: &mut N,
+    now: i64,
+) -> Swept<SqliteClientError> {
+    let swept = run(st, through, directory, notes, &NoLock, now)
+        .await
+        .unwrap();
+    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
+    swept
+}
+
 /// Runs sweeps at [`NOW`] until none is pending, expecting no deferral, and returns how
-/// many keys they finished.
+/// many keys each run finished.
 async fn settle(
     st: &mut State,
     through: ChainPoint,
     directory: &Directory,
     notes: &mut Notes,
-) -> usize {
-    let mut finished = 0;
+) -> Vec<usize> {
+    let mut finished = Vec::new();
     for _ in 0..20 {
-        let swept = run(st, through, directory, notes, &NoLock, NOW)
-            .await
-            .unwrap();
-        assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
-        finished += swept.finished;
+        let swept = run_clean(st, through, directory, notes, NOW).await;
+        finished.push(swept.finished);
         if !swept.pending {
             return finished;
         }
@@ -441,149 +551,56 @@ async fn settle(
     panic!("sweeps are still pending after 20 runs");
 }
 
+/// A restore sweep imports every payment to a key, each a page of its lookup, with note
+/// data in batches of 64, then moves the lookahead past the paid and `seen` indices, one
+/// batch per run, so later runs find a payment far past the first batch. Every request
+/// stays on the service's routes: a wallet without payments downloads only a manifest and
+/// the filters, and a few pages cost less over PIR than the row file, unlike many more.
 #[tokio::test]
-async fn a_restore_sweep_finds_a_payout_and_moves_the_lookahead_past_it() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    let paid = 3;
-    let (record, note_data) = pay_restored_key(&mut st, paid, 0);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    assert_eq!(st.get_total_balance(account), Zatoshis::ZERO);
-    let directory = Directory::new(publish(
-        std::slice::from_ref(&record),
-        &[record.payment.cmx],
-        through,
-        &provider(&[]),
-    ));
-    let mut notes = Notes::new(BTreeMap::from([(record.payment.position, note_data)]));
-    let finished = settle(&mut st, through, &directory, &mut notes).await;
-    // The first window, then, in a later run, the keys above it that the paid index
-    // brings in.
-    assert_eq!(finished as u64, RECEIVE_GAP_LIMIT + paid + 1);
-    assert_eq!(notes.requested, [vec![record.payment.position]]);
-    assert_eq!(
-        st.get_total_balance(account),
-        Zatoshis::const_from_u64(VALUE)
-    );
-    // Lookups and the common witnesses go over the service's routes only.
-    assert!(
-        directory
-            .requests()
-            .iter()
-            .all(|r| r.starts_with("GET /v1/receiver/") || r == "POST /v1/receiver/query"),
-        "{:?}",
-        directory.requests()
-    );
-}
-
-/// Every page of a key's lookup is imported, with note data in batches of 64. A few
-/// pages cost less over PIR than the row file, and many more.
-#[tokio::test]
-async fn every_payment_to_a_key_is_imported_in_note_data_batches() {
-    for (count, batches, row_file) in [(2, vec![2], false), (65, vec![64, 1], true)] {
-        let mut st = ironwood_wallet();
-        let account = st.test_account().unwrap().id();
-        let mut records = Vec::new();
-        let mut data = BTreeMap::new();
-        for position in 0..count {
-            let (mut record, note_data) = pay_restored_key(&mut st, 1, position);
-            record.page = position.try_into().unwrap();
-            record.total = count.try_into().unwrap();
-            records.push(record);
-            data.insert(position, note_data);
-        }
-        st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-        restore(&mut st, account);
-        let through = tip(&st);
-        let commitments: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
-        let directory = Directory::new(publish(&records, &commitments, through, &provider(&[])));
-        let mut notes = Notes::new(data);
-        settle(&mut st, through, &directory, &mut notes).await;
+async fn a_restore_sweep_imports_every_payment_and_moves_the_lookahead_past_it() {
+    for (paid, seen, batches, row_file) in [
+        (vec![], 0, vec![], false),
+        (vec![3], 0, vec![1], false),
+        (vec![1; 2], 0, vec![2], false),
+        (vec![1; 65], 0, vec![64, 1], true),
+        // The set is finite, so an unbounded run would stop past it instead of hanging.
+        (vec![100], 200, vec![1], false),
+    ] {
+        let mut r = restored(&paid);
+        assert_eq!(balance(&r.st), 0);
+        let seen: Vec<_> = (0..seen).map(|i| receiver(&r.st, i)).collect();
+        let commitments: Vec<_> = r.records.iter().map(|r| r.payment.cmx).collect();
+        let sets = provider(&seen);
+        let directory = Directory::new(publish(&r.records, &commitments, r.through, &sets));
+        let mut notes = r.notes();
+        let runs = settle(&mut r.st, r.through, &directory, &mut notes).await;
+        // Each run sweeps at most one batch, and later runs progress.
+        assert!(runs.iter().all(|f| (1..=64).contains(f)), "{runs:?}");
+        let finished: usize = runs.iter().sum();
+        // The first window, then, in later runs, the keys above it that the paid and seen
+        // indices bring in.
+        let past = paid
+            .last()
+            .map_or(0, |index| index + 1)
+            .max(seen.len() as u64);
+        assert_eq!(finished as u64, RECEIVE_GAP_LIMIT + past, "{paid:?}");
         let sizes: Vec<_> = notes.requested.iter().map(Vec::len).collect();
         assert_eq!(sizes, batches);
-        assert_eq!(
-            st.get_total_balance(account),
-            Zatoshis::const_from_u64(count * VALUE)
-        );
+        let positions: Vec<_> = (0..paid.len() as u64).collect();
+        assert_eq!(notes.requested.concat(), positions);
+        assert_eq!(balance(&r.st), paid.len() as u64 * VALUE);
         let requests = directory.requests();
+        let routes =
+            |r: &String| r.starts_with("GET /v1/receiver/") || r == "POST /v1/receiver/query";
+        assert!(requests.iter().all(routes), "{requests:?}");
         let rows = |r: &String| r.starts_with("GET /v1/receiver/rows/");
         assert_eq!(requests.iter().any(rows), row_file, "{requests:?}");
+        if paid.is_empty() {
+            // No PIR session, witnesses or note data, and no second run.
+            assert_eq!(requests.len(), 2, "{requests:?}");
+            assert!(requests[1].starts_with("GET /v1/receiver/filters/"));
+        }
     }
-}
-
-/// Note data keyed by the position after each requested one, counting the requests.
-struct Mislabeled {
-    data: [u8; 528],
-    calls: usize,
-}
-
-impl<W: OneTimeIvkRestoreRead> NoteSource<W> for Mislabeled {
-    async fn note_data(
-        &mut self,
-        _: &W,
-        positions: Vec<u64>,
-    ) -> Result<BTreeMap<u64, [u8; 528]>, Error<W::Error>> {
-        self.calls += 1;
-        assert!(self.calls <= 3, "the sweep keeps asking for {positions:?}");
-        Ok(positions.into_iter().map(|p| (p + 1, self.data)).collect())
-    }
-}
-
-#[tokio::test]
-async fn note_data_for_other_positions_is_missing_data() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    let paid = 1;
-    let (record, note_data) = pay_restored_key(&mut st, paid, 0);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    let directory = Directory::new(publish(
-        std::slice::from_ref(&record),
-        &[record.payment.cmx],
-        through,
-        &provider(&[]),
-    ));
-    let mut notes = Mislabeled {
-        data: note_data,
-        calls: 0,
-    };
-    let swept = run(&mut st, through, &directory, &mut notes, &NoLock, NOW)
-        .await
-        .unwrap();
-    assert_eq!(notes.calls, 1);
-    assert!(
-        matches!(
-            swept.deferred.as_slice(),
-            [(key, Error::Unavailable("note data is missing for a directory payment"))]
-                if key.index() == paid
-        ),
-        "{:?}",
-        swept.deferred
-    );
-    assert_eq!(st.get_total_balance(account), Zatoshis::ZERO);
-}
-
-#[tokio::test]
-async fn a_wallet_without_payments_downloads_only_the_filters() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    let directory = Directory::new(publish(&[], &[], through, &provider(&[])));
-    let swept = run(&mut st, through, &directory, &mut NoNotes, &NoLock, NOW)
-        .await
-        .unwrap();
-    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
-    assert_eq!(swept.finished as u64, RECEIVE_GAP_LIMIT);
-    assert!(!swept.pending);
-    // No PIR session, witnesses or note data: one manifest and one filter file.
-    let requests = directory.requests();
-    assert_eq!(requests.len(), 2, "{requests:?}");
-    assert!(requests[1].starts_with("GET /v1/receiver/filters/"));
 }
 
 /// A key closed after its sweep is checked against each newer publication's paid filter,
@@ -592,49 +609,33 @@ async fn a_wallet_without_payments_downloads_only_the_filters() {
 /// with a known payment is not swept again.
 #[tokio::test]
 async fn a_newer_paid_filter_finds_a_payment_to_a_closed_key() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    restore(&mut st, account);
-    let first = tip(&st);
-    let directory = Directory::new(publish(&[], &[], first, &provider(&[])));
-    let mut notes = Notes::new(BTreeMap::new());
-    settle(&mut st, first, &directory, &mut notes).await;
-    assert!(st.wallet().get_one_time_scanning_keys().unwrap().is_empty());
+    let mut r = restored(&[]);
+    let directory = serve(&[], r.through);
+    let mut notes = r.notes();
+    settle(&mut r.st, r.through, &directory, &mut notes).await;
+    assert!(scanning(&r.st).is_empty());
 
     // The closed key misses a payment, which the same publication cannot show.
-    let (record, note_data) = pay_restored_key(&mut st, 0, 0);
-    let through = tip(&st);
+    let (record, note_data) = pay_restored_key(&mut r.st, 0, 0);
+    let through = tip(&r.st);
     let before = directory.requests().len();
-    let swept = run(&mut st, through, &directory, &mut notes, &NoLock, NOW).await;
+    let swept = run(&mut r.st, through, &directory, &mut notes, &NoLock, NOW).await;
     assert!(!swept.unwrap().pending);
     assert_eq!(directory.requests()[before..], ["GET /v1/receiver/init"]);
-    assert_eq!(st.get_total_balance(account), Zatoshis::ZERO);
+    assert_eq!(balance(&r.st), 0);
 
-    let directory = Directory::new(publish(
-        std::slice::from_ref(&record),
-        &[record.payment.cmx],
-        through,
-        &provider(&[]),
-    ));
+    let directory = serve(std::slice::from_ref(&record), through);
     notes.data.insert(record.payment.position, note_data);
     // The paid key, then the lookahead key its index brings in.
-    assert_eq!(settle(&mut st, through, &directory, &mut notes).await, 2);
-    assert_eq!(
-        st.get_total_balance(account),
-        Zatoshis::const_from_u64(VALUE)
-    );
+    let runs = settle(&mut r.st, through, &directory, &mut notes).await;
+    assert_eq!(runs.iter().sum::<usize>(), 2);
+    assert_eq!(balance(&r.st), VALUE);
 
     // A later publication still holds the paid key, but it is not looked up again.
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let later = tip(&st);
-    let directory = Directory::new(publish(
-        std::slice::from_ref(&record),
-        &[record.payment.cmx],
-        later,
-        &provider(&[]),
-    ));
-    let swept = run(&mut st, later, &directory, &mut notes, &NoLock, NOW).await;
+    r.st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    let later = tip(&r.st);
+    let directory = serve(std::slice::from_ref(&record), later);
+    let swept = run(&mut r.st, later, &directory, &mut notes, &NoLock, NOW).await;
     let swept = swept.unwrap();
     assert_eq!((swept.finished, swept.pending), (0, false));
     assert!(directory.requests().iter().all(|r| !r.starts_with("POST")));
@@ -649,15 +650,11 @@ async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
         ("both recent", vec![]),
         ("one recent", (0..RECEIVE_GAP_LIMIT).collect()),
     ] {
-        let mut st = ironwood_wallet();
-        let account = st.test_account().unwrap().id();
-        st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-        restore(&mut st, account);
-        let through = tip(&st);
+        let mut r = restored(&[]);
         let sets = if case == "quoted" {
             // The old device quoted addresses 0 and 2, and 2 only today.
-            let mut sets = provider(&[receiver(&st, 0), receiver(&st, 2)]);
-            sets[0].receivers = vec![receiver(&st, 2)];
+            let mut sets = provider(&[receiver(&r.st, 0), receiver(&r.st, 2)]);
+            sets[0].receivers = vec![receiver(&r.st, 2)];
             sets
         } else {
             // Provider `b` publishes only its seen set in the last case.
@@ -666,18 +663,10 @@ async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
             sets.extend(b.skip(usize::from(case == "one recent")));
             sets
         };
-        let directory = Directory::new(publish(&[], &[], through, &sets));
-        let mut notes = Notes::new(BTreeMap::new());
-        settle(&mut st, through, &directory, &mut notes).await;
-        let mut scanning: Vec<_> = st
-            .wallet()
-            .get_one_time_scanning_keys()
-            .unwrap()
-            .iter()
-            .map(|k| k.key_id().index())
-            .collect();
-        scanning.sort();
-        assert_eq!(scanning, expected, "{case}");
+        let directory = Directory::new(publish(&[], &[], r.through, &sets));
+        let mut notes = r.notes();
+        settle(&mut r.st, r.through, &directory, &mut notes).await;
+        assert_eq!(scanning(&r.st), expected, "{case}");
     }
 }
 
@@ -686,16 +675,11 @@ async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
 /// misses the receiver and whose lookup finds nothing does not make it issuable.
 #[tokio::test]
 async fn a_seen_hit_outlives_a_rejected_payment_and_a_later_miss() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
+    // Key 1000's later output is one that publication A's tree replaces.
+    let mut r = restored(&[0, 1000]);
     let key = KeyId::new(Purpose::Receive, 0);
-    let (record, note_data) = pay_restored_key(&mut st, key.index(), 0);
-    // A later output, which publication A's tree replaces.
-    let (later_output, _) = pay_restored_key(&mut st, 1000, 1);
-    let commitments = [record.payment.cmx, later_output.payment.cmx];
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
+    let record = &r.records[0];
+    let commitments = [record.payment.cmx, r.records[1].payment.cmx];
     let seen = |st: &State| -> bool {
         st.wallet()
             .conn()
@@ -707,35 +691,26 @@ async fn a_seen_hit_outlives_a_rejected_payment_and_a_later_miss() {
             )
             .unwrap()
     };
-    let mut notes = Notes::new(BTreeMap::from([(record.payment.position, note_data)]));
+    let mut notes = r.notes();
     // Publication A's witnesses are over another tree, so its payment is rejected.
     let a = Directory::new(publish(
-        std::slice::from_ref(&record),
+        std::slice::from_ref(record),
         &[record.payment.cmx, [1; 32]],
-        through,
+        r.through,
         &provider(&[record.receiver]),
     ));
-    let swept = run(&mut st, through, &a, &mut notes, &NoLock, NOW)
+    let swept = run(&mut r.st, r.through, &a, &mut notes, &NoLock, NOW)
         .await
         .unwrap();
-    assert!(
-        matches!(
-            &swept.deferred[..],
-            [(deferred, Error::Queued(PaymentApplication::Rejected))] if *deferred == key
-        ),
-        "{:?}",
-        swept.deferred
-    );
-    assert!(seen(&st));
+    let rejected = PaymentApplication::Rejected;
+    assert_matches!(swept.deferred[..], [(k, Error::Queued(a))] if *k == key && *a == rejected);
+    assert!(seen(&r.st));
 
-    let b = Directory::new(publish(&[], &commitments, through, &provider(&[])));
+    let b = Directory::new(publish(&[], &commitments, r.through, &provider(&[])));
     let later = NOW + 3_600;
-    let swept = run(&mut st, through, &b, &mut notes, &NoLock, later)
-        .await
-        .unwrap();
-    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
+    let swept = run_clean(&mut r.st, r.through, &b, &mut notes, later).await;
     assert!(!swept.pending);
-    assert!(seen(&st));
+    assert!(seen(&r.st));
     let fetched = fetch_seen(ORIGIN, &b, GENESIS).await.unwrap();
     let contains = |receivers: &[[u8; 43]]| fetched.contains(receivers);
     let view = ProviderSeen {
@@ -743,12 +718,12 @@ async fn a_seen_hit_outlives_a_rejected_payment_and_a_later_miss() {
         until: fetched.until(),
         contains: &contains,
     };
-    let issued = st
-        .wallet_mut()
-        .db_mut()
-        .prepare_receive_reservation(account, later, through.height, Some(&view))
-        .unwrap()
-        .unwrap();
+    let issued =
+        r.st.wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(r.account, later, r.through.height, Some(&view))
+            .unwrap()
+            .unwrap();
     assert_eq!(issued.key_id(), KeyId::new(Purpose::Receive, 1));
 }
 
@@ -775,66 +750,68 @@ impl WriteLock for FailFirstAttempt {
 /// key's lookup and without retrying it.
 #[tokio::test]
 async fn a_failed_attempt_write_stops_the_run() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    let (record, note_data) = pay_restored_key(&mut st, 0, 0);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    let directory = Directory::new(publish(
-        std::slice::from_ref(&record),
-        &[record.payment.cmx],
-        through,
-        &provider(&[]),
-    ));
-    let mut notes = Notes::new(BTreeMap::from([(record.payment.position, note_data)]));
+    let mut r = restored(&[0]);
+    let directory = serve(&r.records, r.through);
+    let mut notes = r.notes();
     let lock = FailFirstAttempt {
         fail: Arc::new(AtomicBool::new(false)),
         labels: RefCell::new(Vec::new()),
     };
     let fail = lock.fail.clone();
     // Returning true turns the commit into a rollback, which fails the write.
-    st.wallet()
+    r.st.wallet()
         .conn()
         .commit_hook(Some(move || fail.swap(false, Ordering::SeqCst)));
-    let result = run(&mut st, through, &directory, &mut notes, &lock, NOW).await;
-    assert!(matches!(result, Err(Error::Wallet(_))), "{result:?}");
+    let result = run(&mut r.st, r.through, &directory, &mut notes, &lock, NOW).await;
+    assert_matches!(result, Err(Error::Wallet(_)));
     assert_eq!(
         *lock.labels.borrow(),
         ["one_time_sweep.due", "one_time_sweep.attempt"]
     );
-    assert!(
-        directory.requests().iter().all(|r| !r.starts_with("POST")),
-        "{:?}",
-        directory.requests()
-    );
+    assert!(directory.requests().iter().all(|r| !r.starts_with("POST")));
     assert!(notes.requested.is_empty());
 }
 
-/// A `through` the wallet has scanned past is not a tip to release evidence at, so a
-/// run with it writes nothing.
+/// A `through` the wallet's chain has moved past is not a tip to sweep or release
+/// evidence at, so a run with it writes and requests nothing. While a block below the
+/// tip is unscanned, a run prepares no sweep: it makes no request and leases no attempt,
+/// since any payment it found could only wait for scanning. Once scanning catches up,
+/// the sweep runs at once, without backoff.
 #[tokio::test]
-async fn a_stale_tip_releases_nothing() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let directory = Directory::new(publish(&[], &[], through, &provider(&[])));
-    let lock = Labels::default();
-    run(&mut st, through, &directory, &mut NoNotes, &lock, NOW)
-        .await
-        .unwrap();
-    assert!(lock.0.borrow().is_empty(), "{:?}", lock.0.borrow());
-    assert!(directory.requests().is_empty());
+async fn a_run_off_the_scanned_tip_leases_and_requests_nothing() {
+    let mut r = restored(&[0]);
+    let stale = r.through;
+    // A block below the tip is not scanned yet.
+    r.st.generate_empty_block();
+    let (top, _) = r.st.generate_empty_block();
+    r.st.scan_cached_blocks_with_one_time_ivks(top, 1);
+    let block = r.st.wallet().block_metadata(top).unwrap().unwrap();
+    let through = ChainPoint {
+        height: top,
+        hash: block.block_hash(),
+    };
+    let directory = serve(&r.records, through);
+    let mut notes = r.notes();
+    let behind = ["one_time_sweep.due", "one_time_sweep.release"];
+    for (through, labels) in [(stale, &[][..]), (through, &behind[..])] {
+        let lock = Labels::default();
+        let swept = run(&mut r.st, through, &directory, &mut notes, &lock, NOW)
+            .await
+            .unwrap();
+        assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
+        assert!(swept.pending);
+        assert_eq!(*lock.0.borrow(), labels);
+        let requests = directory.requests();
+        assert!(requests.is_empty(), "{requests:?}");
+    }
+    r.st.scan_cached_blocks_with_one_time_ivks(top - 1, 1);
+    run_clean(&mut r.st, through, &directory, &mut notes, NOW).await;
+    settle(&mut r.st, through, &directory, &mut notes).await;
+    assert_eq!(balance(&r.st), VALUE);
 }
 
 /// Another handle on the wallet's file, as another writer holds.
 type OtherWriter = WalletDb<rusqlite::Connection, LocalNetwork, SystemClock, TestRng>;
-
-/// A write through another handle on the wallet's file at `through`.
-type OtherWrite = fn(&mut OtherWriter, ChainPoint);
 
 /// Runs `other` just before the first release, as another writer may while the sweep
 /// holds no lock, then sets `releasing` while release holds the lock.
@@ -861,54 +838,43 @@ impl<F: FnOnce()> WriteLock for WriterBeforeRelease<F> {
 /// Release checks the chain point again under its lock, since another writer may move
 /// the tip while the sweep's lookups run without it, and waits for the fully scanned
 /// height to reach it. Each case sweeps against a publication `behind` blocks below the
-/// tip, with `other` writing through a second handle just before release, and judges
-/// whether release ran by its read of the retention table.
+/// tip, with another writer moving the chain through a second handle just before
+/// release, and judges whether release ran by its read of the retention table.
 #[tokio::test]
 async fn release_runs_only_at_the_fully_scanned_tip() {
-    let cases: [(&str, u32, OtherWrite, bool); 5] = [
-        ("an unmoved tip", 0, |_, _| (), true),
-        (
-            "an advanced tip",
-            0,
-            |other, through| {
-                other.update_chain_tip(through.height + 1).unwrap();
-            },
-            false,
-        ),
-        (
-            "a reorg that rewound the tip",
-            0,
-            |other, through| {
-                other.truncate_to_height(through.height - 1).unwrap();
-            },
-            false,
-        ),
+    for (case, behind, expected) in [
+        ("an unmoved tip", 0, true),
+        ("an advanced tip", 0, false),
+        ("a reorg that rewound the tip", 0, false),
         // The tip is back at `through`'s height, but its block is not scanned yet.
-        (
-            "a replaced block",
-            0,
-            |other, through| {
-                other.truncate_to_height(through.height - 1).unwrap();
-                other.update_chain_tip(through.height).unwrap();
-            },
-            false,
-        ),
+        ("a replaced block", 0, false),
         // Finishing keys against a publication behind `through` rescans the blocks
         // after it, lowering the fully scanned height without moving the tip.
-        ("a rescan the sweep queued", 1, |_, _| (), false),
-    ];
-    for (case, behind, other, expected) in cases {
+        ("a rescan the sweep queued", 1, false),
+    ] {
         let mut st = ironwood_wallet_in(TestDbFactory::file_backed());
         let network = *st.network();
-        let account = st.test_account().unwrap().id();
         st.generate_and_scan_empty_blocks_with_one_time_ivks(2);
+        let account = st.test_account().unwrap().id();
         restore(&mut st, account);
         let through = tip(&st);
         let path = st.wallet().conn().path().unwrap().to_owned();
         let mut handle =
             OtherWriter::for_path(path, network, SystemClock, TestRng::seed_from_u64(0)).unwrap();
+        let h = through.height;
+        let other = || match case {
+            "an advanced tip" => handle.update_chain_tip(h + 1).unwrap(),
+            "a reorg that rewound the tip" => {
+                handle.truncate_to_height(h - 1).unwrap();
+            }
+            "a replaced block" => {
+                handle.truncate_to_height(h - 1).unwrap();
+                handle.update_chain_tip(h).unwrap();
+            }
+            _ => {}
+        };
         let lock = WriterBeforeRelease {
-            other: RefCell::new(Some(|| other(&mut handle, through))),
+            other: RefCell::new(Some(other)),
             releasing: Arc::new(AtomicBool::new(false)),
         };
         let released = Arc::new(AtomicBool::new(false));
@@ -916,29 +882,33 @@ async fn release_runs_only_at_the_fully_scanned_tip() {
         st.wallet()
             .conn()
             .authorizer(Some(move |ctx: AuthContext<'_>| {
-                if releasing.load(Ordering::SeqCst)
-                    && matches!(
-                        ctx.action,
-                        AuthAction::Read {
-                            table_name: "ironwood_one_time_spend_retention",
-                            ..
-                        }
-                    )
-                {
+                let retention = matches!(
+                    ctx.action,
+                    AuthAction::Read {
+                        table_name: "ironwood_one_time_spend_retention",
+                        ..
+                    }
+                );
+                if releasing.load(Ordering::SeqCst) && retention {
                     read.store(true, Ordering::SeqCst);
                 }
                 Authorization::Allow
             }));
         let height = through.height - behind;
-        let end = ChainPoint {
-            height,
-            hash: st.wallet().get_block_hash(height).unwrap().unwrap(),
-        };
-        // Without a recent set, every key keeps scanning from the block after `end`.
+        let hash = st.wallet().get_block_hash(height).unwrap().unwrap();
+        // Without a recent set, every key keeps scanning from the block after the end.
+        let end = ChainPoint { height, hash };
         let directory = Directory::new(publish(&[], &[], end, &provider(&[])[1..]));
-        let swept = run(&mut st, through, &directory, &mut NoNotes, &lock, NOW)
-            .await
-            .unwrap();
+        let swept = run(
+            &mut st,
+            through,
+            &directory,
+            &mut Notes::unavailable(),
+            &lock,
+            NOW,
+        )
+        .await
+        .unwrap();
         assert_eq!(swept.finished as u64, RECEIVE_GAP_LIMIT);
         st.wallet()
             .conn()
@@ -947,94 +917,55 @@ async fn release_runs_only_at_the_fully_scanned_tip() {
     }
 }
 
-/// Another network's seen sets say nothing about this network's quotes, so a
-/// publication committing to another genesis is refused as a sweep refuses it.
+/// Seen sets must commit to the wallet's genesis, as a sweep's publication must: another
+/// network's sets say nothing about this network's quotes. A publication without seen
+/// sets, or with a provider that has a recent set but no seen set, may omit any receiver,
+/// so issuance refuses it as sweeps do. Once every provider has a dated seen set, the
+/// sets cover the quote times they all cover, and hold what any of them holds.
 #[tokio::test]
-async fn seen_sets_of_another_network_are_refused() {
-    let mut st = ironwood_wallet();
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let directory = Directory::new(publish(&[], &[], tip(&st), &provider(&[])));
-    let refused = fetch_seen(ORIGIN, &directory, [8; 32]).await;
-    assert!(
-        matches!(
-            refused,
-            Err(DirectoryError::Directory(
-                receiver_directory::Error::Coverage
-            ))
-        ),
-        "{:?}",
-        refused.err()
-    );
-    assert!(fetch_seen(ORIGIN, &directory, GENESIS).await.is_ok());
-}
-
-/// A publication without seen sets, or with a provider that has a recent set but no
-/// seen set, may omit any receiver, so issuance and sweeps both refuse it, before any
-/// key finishes or spend evidence is released. Once every provider has a dated seen
-/// set, the sets cover the quote times they all cover, and hold what any of them holds.
-#[tokio::test]
-async fn every_provider_with_sets_needs_a_seen_set() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
+async fn seen_sets_need_this_network_and_every_provider() {
+    let r = restored(&[]);
     // Provider `a` has its seen set only if `a_seen`. `b` has only a seen set, from a
     // later feed start and a later read.
     let sets = |a_seen: bool| {
-        let mut sets = provider_named("a", &[receiver(&st, 0)]);
+        let mut sets = provider_named("a", &[receiver(&r.st, 0)]);
         sets.truncate(1 + usize::from(a_seen));
-        let mut b = provider_named("b", &[receiver(&st, 1)]).pop().unwrap();
+        let mut b = provider_named("b", &[receiver(&r.st, 1)]).pop().unwrap();
         b.since_unix = NOW - RESTORE_WATCH_SECS;
         b.until_unix = NOW - 30;
         sets.push(b);
         sets
     };
-    let (missing, complete) = (sets(false), sets(true));
-    // The first refusal backs every due key off for a minute.
-    for (sets, now) in [(missing, NOW), (Vec::new(), NOW + 60)] {
-        let directory = Directory::new(publish(&[], &[], through, &sets));
+    for sets in [sets(false), Vec::new()] {
+        let directory = Directory::new(publish(&[], &[], r.through, &sets));
         let refused = fetch_seen(ORIGIN, &directory, GENESIS).await;
         assert!(matches!(refused, Err(DirectoryError::Malformed)));
-        let lock = Labels::default();
-        let result = run(&mut st, through, &directory, &mut NoNotes, &lock, now).await;
-        assert!(
-            matches!(result, Err(Error::Directory(DirectoryError::Malformed))),
-            "{result:?}"
-        );
-        let labels = lock.0.borrow();
-        assert!(
-            labels
-                .iter()
-                .all(|l| ["one_time_sweep.due", "one_time_sweep.attempt"].contains(l)),
-            "{labels:?}"
-        );
-        assert!(
-            st.wallet()
-                .db()
-                .one_time_history_pending(account, through.height)
-                .unwrap()
-        );
     }
 
-    let directory = Directory::new(publish(&[], &[], through, &complete));
+    let directory = Directory::new(publish(&[], &[], r.through, &sets(true)));
+    let refused = fetch_seen(ORIGIN, &directory, [8; 32]).await;
+    let coverage = |e: &_| matches!(e, receiver_directory::Error::Coverage);
+    assert_matches!(refused.err(), Some(DirectoryError::Directory(e)) if coverage(e));
     let seen = fetch_seen(ORIGIN, &directory, GENESIS).await.unwrap();
     assert_eq!(
         (seen.since(), seen.until()),
         (NOW - RESTORE_WATCH_SECS, NOW - 60)
     );
-    let held = [0, 1, 2].map(|index| *receiver(&st, index).as_bytes());
+    let held = [0, 1, 2].map(|index| *receiver(&r.st, index).as_bytes());
     assert_eq!(seen.contains(&held), [true, true, false]);
 }
 
-/// Which part of a directory fails.
-#[derive(Clone, Copy, Debug)]
+/// Which part of a sweep fails.
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Fault {
-    None,
     /// Queries fail after the session was accepted.
     Queries,
     /// The witness snapshot is malformed, so no session opens.
     Witnesses,
+    /// The note source cannot serve the wallet's chain.
+    Notes,
+    /// Note data comes back for other positions.
+    OtherPositions,
 }
 
 /// A directory with `fault`.
@@ -1066,102 +997,126 @@ impl Transport for Faulty {
 
 /// A revoked session, a session that fails to open, or a note source that cannot serve
 /// the wallet's chain would fail every later key the same way, so the run stops at the
-/// first paid key, and later paid keys are neither leased nor backed off.
+/// first paid key, and later paid keys are neither leased nor backed off. Note data for
+/// other positions fails only that key, without asking for it again.
 #[tokio::test]
 async fn a_run_fatal_failure_stops_the_run_before_leasing_more_keys() {
-    for fault in [Fault::Queries, Fault::Witnesses, Fault::None] {
-        let mut st = ironwood_wallet();
-        let account = st.test_account().unwrap().id();
+    for fault in [
+        Fault::Queries,
+        Fault::Witnesses,
+        Fault::Notes,
+        Fault::OtherPositions,
+    ] {
         // The batch's first two keys are paid, so each needs a lookup.
-        let records: Vec<_> = (0..2)
-            .map(|index| pay_restored_key(&mut st, index, index).0)
-            .collect();
-        st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-        restore(&mut st, account);
-        let through = tip(&st);
-        let cmxs: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
+        let mut r = restored(&[0, 1]);
         let directory = Faulty {
-            directory: Directory::new(publish(&records, &cmxs, through, &provider(&[]))),
+            directory: serve(&r.records, r.through),
             fault,
         };
-        let swept = run(&mut st, through, &directory, &mut NoNotes, &NoLock, NOW)
-            .await
-            .unwrap();
-        let [(key, e)] = &swept.deferred[..] else {
-            panic!("{fault:?}: {:?}", swept.deferred);
+        let mut notes = match fault {
+            Fault::Notes => Notes::unavailable(),
+            Fault::OtherPositions => Notes {
+                shift: 1,
+                ..r.notes()
+            },
+            _ => r.notes(),
         };
-        let failed = match fault {
-            Fault::Queries => matches!(e, Error::Directory(DirectoryError::Revision)),
-            Fault::Witnesses => matches!(e, Error::Directory(_)),
-            Fault::None => matches!(e, Error::NotesUnavailable(_)),
+        let swept = run(&mut r.st, r.through, &directory, &mut notes, &NoLock, NOW).await;
+        let swept = swept.unwrap();
+        let fatal = fault != Fault::OtherPositions;
+        let keys: Vec<_> = swept.deferred.iter().map(|(key, _)| key.index()).collect();
+        assert_eq!(keys, if fatal { &[0][..] } else { &[0, 1] }, "{fault:?}");
+        for (_, e) in &swept.deferred {
+            let failed = match fault {
+                Fault::Queries => matches!(e, Error::Directory(DirectoryError::Revision)),
+                Fault::Witnesses => matches!(e, Error::Directory(_)),
+                Fault::Notes => matches!(e, Error::NotesUnavailable(_)),
+                Fault::OtherPositions => matches!(
+                    e,
+                    Error::Unavailable("note data is missing for a directory payment")
+                ),
+            };
+            assert!(failed, "{fault:?}: {e:?}");
+        }
+        // Unless the run stopped, every unpaid key in the batch finishes.
+        let unpaid = if fatal {
+            0
+        } else {
+            RECEIVE_GAP_LIMIT as usize - 2
         };
+        assert_eq!((swept.finished, swept.pending), (unpaid, true));
+        assert_eq!(notes.requested.len(), keys.len() * usize::from(!fatal));
+        assert_eq!(balance(&r.st), 0);
+        let due: Vec<_> =
+            r.st.wallet_mut()
+                .db_mut()
+                .prepare_one_time_sweeps(r.account, r.through, NOW, NonZeroU32::new(64).unwrap())
+                .unwrap()
+                .unwrap()
+                .iter()
+                .map(|item| item.key.index())
+                .collect();
         assert!(
-            *key == KeyId::new(Purpose::Receive, 0) && failed,
-            "{fault:?}: {e:?}"
+            !due.contains(&0) && due.contains(&1) == fatal,
+            "{fault:?}: {due:?}"
         );
-        assert_eq!(swept.finished, 0);
-        assert!(swept.pending);
-        let due: Vec<_> = st
-            .wallet_mut()
-            .db_mut()
-            .prepare_one_time_sweeps(account, through, NOW, NonZeroU32::new(64).unwrap())
-            .unwrap()
-            .unwrap()
-            .iter()
-            .map(|item| item.key.index())
-            .collect();
-        assert!(!due.contains(&0) && due.contains(&1), "{fault:?}: {due:?}");
     }
 }
 
+/// How a sweep refuses an unusable publication.
+type Refusal = fn(&Error<SqliteClientError>) -> bool;
+
 /// A publication off the wallet's chain, or ending at the wallet's block but short of
-/// that block's last Ironwood output, is refused before any lookup: a payment in the
-/// omitted tail would be neither looked up nor rescanned. Every due key backs off, so
-/// the directory is not asked again until a minute on.
+/// its last Ironwood output, whose omitted payments neither a lookup nor a rescan would
+/// find, or one that may omit any seen receiver, is refused before any lookup, key finish
+/// or release. Every due key backs off, so the directory is not asked again until a
+/// minute on.
 #[tokio::test]
-async fn a_publication_off_the_wallets_chain_is_refused_before_any_lookup() {
-    for off_chain in [true, false] {
-        let mut st = ironwood_wallet();
-        let account = st.test_account().unwrap().id();
-        let (record, note_data) = pay_restored_key(&mut st, 0, 0);
-        st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-        restore(&mut st, account);
-        let through = tip(&st);
-        let publication = if off_chain {
-            let other = ChainPoint {
-                hash: BlockHash([1; 32]),
-                ..through
-            };
-            publish(
-                std::slice::from_ref(&record),
-                &[record.payment.cmx],
-                other,
-                &provider(&[]),
-            )
-        } else {
+async fn an_unusable_publication_is_refused_before_any_lookup() {
+    let malformed: Refusal = |e| matches!(e, Error::Directory(DirectoryError::Malformed));
+    let rows: [(&str, Refusal); 4] = [
+        ("off chain", |e| matches!(e, Error::Directory(_))),
+        ("short", |e| matches!(e, Error::Unavailable(_))),
+        ("unseen provider", malformed),
+        ("no seen sets", malformed),
+    ];
+    for (case, refused) in rows {
+        let mut r = restored(&[0]);
+        let (records, through) = (&r.records[..], r.through);
+        let directory = match case {
+            "off chain" => serve(
+                records,
+                ChainPoint {
+                    hash: BlockHash([1; 32]),
+                    ..through
+                },
+            ),
             // Without the chain's one Ironwood output.
-            publish(&[], &[], through, &provider(&[]))
+            "short" => serve(&[], through),
+            // A provider with a recent set but no seen set, or no provider at all.
+            _ => {
+                let mut sets = provider(&[]);
+                sets.truncate(usize::from(case == "unseen provider"));
+                let commitments = [records[0].payment.cmx];
+                Directory::new(publish(records, &commitments, through, &sets))
+            }
         };
-        let directory = Directory::new(publication);
-        let mut notes = Notes::new(BTreeMap::from([(record.payment.position, note_data)]));
-        let result = run(&mut st, through, &directory, &mut notes, &NoLock, NOW).await;
-        let refused = match result {
-            Err(Error::Directory(_)) => off_chain,
-            Err(Error::Unavailable(_)) => !off_chain,
-            _ => false,
-        };
-        assert!(refused, "{result:?}");
-        assert_eq!(directory.requests(), ["GET /v1/receiver/init"]);
-        assert!(notes.requested.is_empty());
+        let mut notes = r.notes();
+        let lock = Labels::default();
+        let result = run(&mut r.st, through, &directory, &mut notes, &lock, NOW).await;
+        assert!(result.as_ref().is_err_and(refused), "{case}: {result:?}");
+        let attempts = ["one_time_sweep.due", "one_time_sweep.attempt"];
+        let labels = lock.0.take();
         assert!(
-            st.wallet()
-                .db()
-                .one_time_history_pending(account, through.height)
-                .unwrap()
+            labels.iter().all(|l| attempts.contains(l)),
+            "{case}: {labels:?}"
         );
+        assert_eq!(directory.requests(), ["GET /v1/receiver/init"], "{case}");
+        assert!(notes.requested.is_empty());
+        assert!(pending(&r.st, through));
         for (now, requests) in [(NOW, 1), (NOW + 60, 2)] {
-            let _ = run(&mut st, through, &directory, &mut notes, &NoLock, now).await;
-            assert_eq!(directory.requests().len(), requests);
+            let _ = run(&mut r.st, through, &directory, &mut notes, &NoLock, now).await;
+            assert_eq!(directory.requests().len(), requests, "{case}");
         }
     }
 }
@@ -1251,31 +1206,21 @@ impl EnhanceTransport for RefusingEnhance {
 /// after a refused query, and cannot serve a wallet whose chain lacks their anchor.
 #[tokio::test]
 async fn enhance_notes_follow_the_wallets_chain_and_fresh_routing() {
-    let mut st = ironwood_wallet();
-    pay_restored_key(&mut st, 0, 0);
-    let anchor = tip(&st);
-    let records = st
-        .wallet()
-        .block_metadata(anchor.height)
-        .unwrap()
-        .unwrap()
-        .ironwood_tree_size()
-        .unwrap()
-        .into();
-    let network = EnhanceNetwork(*st.network());
+    let r = restored(&[0]);
+    let (anchor, db) = (r.through, r.st.wallet().db());
+    let block = db.block_metadata(anchor.height).unwrap().unwrap();
+    let records = block.ironwood_tree_size().unwrap().into();
+    let network = EnhanceNetwork(*r.st.network());
     for status in [409, 410] {
         let enhance = RefusingEnhance::new(anchor, records, status);
         let mut notes = EnhanceNotes::new("https://enhance.test", &enhance, &network);
-        let data = notes.note_data(st.wallet().db(), Vec::new()).await.unwrap();
+        let data = notes.note_data(db, Vec::new()).await.unwrap();
         assert!(data.is_empty());
         assert_eq!(enhance.inits.get(), 0);
-        let refused = notes.note_data(st.wallet().db(), vec![0]).await;
-        assert!(
-            matches!(refused, Err(Error::NoteData(ClientError::HttpStatus(s))) if s == status),
-            "{refused:?}"
-        );
+        let refused = notes.note_data(db, vec![0]).await;
+        assert_matches!(refused, Err(Error::NoteData(ClientError::HttpStatus(s))) if *s == status);
         // The same notes fetch and accept the routing again before the next batch.
-        let data = notes.note_data(st.wallet().db(), vec![0]).await.unwrap();
+        let data = notes.note_data(db, vec![0]).await.unwrap();
         assert_eq!(data, BTreeMap::from([(0, [0; 528])]));
         assert_eq!((enhance.inits.get(), enhance.queries.get()), (2, 2));
     }
@@ -1286,250 +1231,75 @@ async fn enhance_notes_follow_the_wallets_chain_and_fresh_routing() {
     };
     let enhance = RefusingEnhance::new(other, records, 409);
     let mut notes = EnhanceNotes::new("https://enhance.test", &enhance, &network);
-    let refused = notes.note_data(st.wallet().db(), vec![0]).await;
-    assert!(
-        matches!(refused, Err(Error::NotesUnavailable(_))),
-        "{refused:?}"
-    );
+    let refused = notes.note_data(db, vec![0]).await;
+    assert_matches!(refused, Err(Error::NotesUnavailable(_)));
     assert_eq!(enhance.queries.get(), 0);
 }
 
-/// The receiver lookups `directory` has served.
-fn lookups(directory: &Directory) -> usize {
-    let requests = directory.requests();
-    requests
-        .iter()
-        .filter(|r| *r == "POST /v1/receiver/query")
-        .count()
-}
-
-/// Scans every range the wallet has queued, such as a spend-history replay.
-fn scan_queued(st: &mut State) {
-    for range in st.wallet().suggest_scan_ranges().unwrap() {
-        let blocks = range.block_range();
-        let count = u32::from(blocks.end) - u32::from(blocks.start);
-        st.scan_cached_blocks_with_one_time_ivks(blocks.start, count as usize);
-    }
-}
-
-/// While a block below the wallet's chain tip is unscanned, a run prepares no sweep: it
-/// makes no request and leases no attempt, since any payment it found could only wait
-/// for scanning. Once scanning catches up, the sweep runs at once, without backoff.
-#[tokio::test]
-async fn a_run_behind_the_fully_scanned_tip_leases_and_requests_nothing() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    let (record, note_data) = pay_restored_key(&mut st, 0, 0);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    restore(&mut st, account);
-    // A block below the tip is not scanned yet.
-    st.generate_empty_block();
-    let (top, _) = st.generate_empty_block();
-    st.scan_cached_blocks_with_one_time_ivks(top, 1);
-    let block = st.wallet().block_metadata(top).unwrap().unwrap();
-    let through = ChainPoint {
-        height: top,
-        hash: block.block_hash(),
-    };
-    let mut notes = Notes::new(BTreeMap::from([(0, note_data)]));
-    let records = std::slice::from_ref(&record);
-    let directory = Directory::new(publish(
-        records,
-        &[record.payment.cmx],
-        through,
-        &provider(&[]),
-    ));
-    let swept = run(&mut st, through, &directory, &mut notes, &NoLock, NOW)
-        .await
-        .unwrap();
-    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
-    assert!(swept.pending);
-    assert!(
-        directory.requests().is_empty(),
-        "{:?}",
-        directory.requests()
-    );
-    st.scan_cached_blocks_with_one_time_ivks(top - 1, 1);
-    let swept = run(&mut st, through, &directory, &mut notes, &NoLock, NOW)
-        .await
-        .unwrap();
-    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
-    settle(&mut st, through, &directory, &mut notes).await;
-    assert_eq!(
-        st.get_total_balance(account),
-        Zatoshis::const_from_u64(VALUE)
-    );
+/// What a later publication answers for a deferred candidate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Answer {
+    /// The payment the first publication misstated.
+    Corrected,
+    /// The same payment.
+    Unchanged,
+    /// Nothing: its paid filter misses the receiver.
+    Dropped,
 }
 
 /// A queued candidate that defers is replaced by each later attempt's answer from the
-/// publication it uses: a corrected payment is recovered, and a paid-filter miss drops
-/// the candidate, whatever made it wait. A deferral that queued a replay holds the next
-/// attempt, without a request, until the replay is scanned.
+/// publication it uses, whatever made it wait: a corrected payment is recovered with
+/// fresh note data, an unchanged one reuses the queued note data, and a paid-filter miss
+/// drops the candidate. A deferral that queued a replay holds the next attempt, without
+/// a request, until the replay is scanned.
 #[tokio::test]
 async fn a_deferred_candidate_takes_each_publications_current_answer() {
     use PaymentApplication::{AwaitingSpendHistory, AwaitingWitness};
-    for (deferral, corrected) in [
-        (AwaitingSpendHistory, true),
-        (AwaitingWitness, false),
-        (AwaitingSpendHistory, false),
+    for (deferral, answer) in [
+        (AwaitingSpendHistory, Answer::Corrected),
+        (AwaitingSpendHistory, Answer::Unchanged),
+        (AwaitingSpendHistory, Answer::Dropped),
+        (AwaitingWitness, Answer::Dropped),
     ] {
-        let mut st = ironwood_wallet();
-        let account = st.test_account().unwrap().id();
-        let key = KeyId::new(Purpose::Receive, 0);
-        let (record, note_data) = pay_restored_key(&mut st, key.index(), 0);
-        st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-        restore(&mut st, account);
-        let through = tip(&st);
+        let mut r = restored(&[0]);
+        let (record, through) = (r.records[0].clone(), r.through);
         let mut first = record.clone();
-        if corrected {
+        if answer == Answer::Corrected {
             // Publication A misstates the payment's transaction.
             first.payment.tx_index += 1;
         }
-        let commitments = [record.payment.cmx];
         let wipe = match deferral {
             AwaitingWitness => "DELETE FROM ironwood_tree_checkpoints",
             _ => "DELETE FROM nullifier_map; DELETE FROM ironwood_nullifier_scan_blocks;",
         };
-        st.wallet().conn().execute_batch(wipe).unwrap();
-        let mut notes = Notes::new(BTreeMap::from([(0, note_data)]));
-        let a = Directory::new(publish(&[first], &commitments, through, &provider(&[])));
-        let swept = run(&mut st, through, &a, &mut notes, &NoLock, NOW)
+        r.st.wallet().conn().execute_batch(wipe).unwrap();
+        let mut notes = r.notes();
+        let a = serve(&[first], through);
+        let swept = run(&mut r.st, through, &a, &mut notes, &NoLock, NOW)
             .await
             .unwrap();
-        assert!(
-            matches!(
-                &swept.deferred[..],
-                [(k, Error::Queued(d))] if *k == key && *d == deferral
-            ),
-            "{deferral:?}: {:?}",
-            swept.deferred
-        );
+        assert_matches!(swept.deferred[..], [(k, Error::Queued(d))] if k.index() == 0 && *d == deferral);
         assert!(swept.pending);
 
         // Publication B, after the attempt's backoff.
-        let b = if corrected {
-            publish(
-                std::slice::from_ref(&record),
-                &commitments,
-                through,
-                &provider(&[]),
-            )
-        } else {
-            publish(&[], &commitments, through, &provider(&[]))
+        let b = match answer {
+            Answer::Dropped => {
+                Directory::new(publish(&[], &[record.payment.cmx], through, &provider(&[])))
+            }
+            _ => serve(&[record], through),
         };
-        let b = Directory::new(b);
         if deferral == AwaitingSpendHistory {
-            let swept = run(&mut st, through, &b, &mut notes, &NoLock, NOW + 60)
-                .await
-                .unwrap();
-            assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
+            run_clean(&mut r.st, through, &b, &mut notes, NOW + 60).await;
             assert_eq!(lookups(&b), 0, "{:?}", b.requests());
-            scan_queued(&mut st);
+            scan_queued(&mut r.st);
         }
-        let swept = run(&mut st, through, &b, &mut notes, &NoLock, NOW + 60)
-            .await
-            .unwrap();
-        assert!(
-            swept.deferred.is_empty(),
-            "{deferral:?}: {:?}",
-            swept.deferred
-        );
-        settle(&mut st, through, &b, &mut notes).await;
-        let value = if corrected { VALUE } else { 0 };
-        assert_eq!(
-            st.get_total_balance(account),
-            Zatoshis::const_from_u64(value),
-            "{deferral:?}"
-        );
+        run_clean(&mut r.st, through, &b, &mut notes, NOW + 60).await;
+        settle(&mut r.st, through, &b, &mut notes).await;
+        let case = format!("{deferral:?} {answer:?}");
+        let value = if answer == Answer::Dropped { 0 } else { VALUE };
+        assert_eq!(balance(&r.st), value, "{case}");
+        assert_eq!(lookups(&b) > 0, answer != Answer::Dropped, "{case}");
+        let requested = if answer == Answer::Corrected { 2 } else { 1 };
+        assert_eq!(notes.requested.len(), requested, "{case}");
     }
-}
-
-/// An unchanged answer reuses the queued candidate's note data.
-#[tokio::test]
-async fn an_unchanged_answer_reuses_queued_note_data() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    let (record, note_data) = pay_restored_key(&mut st, 0, 0);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    st.wallet()
-        .conn()
-        .execute_batch("DELETE FROM nullifier_map; DELETE FROM ironwood_nullifier_scan_blocks;")
-        .unwrap();
-    let mut notes = Notes::new(BTreeMap::from([(record.payment.position, note_data)]));
-    let directory = Directory::new(publish(
-        std::slice::from_ref(&record),
-        &[record.payment.cmx],
-        through,
-        &provider(&[]),
-    ));
-    let swept = run(&mut st, through, &directory, &mut notes, &NoLock, NOW)
-        .await
-        .unwrap();
-    assert!(
-        matches!(
-            &swept.deferred[..],
-            [(_, Error::Queued(PaymentApplication::AwaitingSpendHistory))]
-        ),
-        "{:?}",
-        swept.deferred
-    );
-    // Once the replay the deferral queued is scanned, the next attempt applies it.
-    scan_queued(&mut st);
-    let swept = run(&mut st, through, &directory, &mut notes, &NoLock, NOW + 60)
-        .await
-        .unwrap();
-    assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
-    assert_eq!(
-        st.get_total_balance(account),
-        Zatoshis::const_from_u64(VALUE)
-    );
-    assert!(lookups(&directory) >= 2, "{:?}", directory.requests());
-    assert_eq!(notes.requested, [vec![record.payment.position]]);
-}
-
-/// A seen set that holds every restored receiver moves the lookahead after each batch,
-/// so a run sweeps at most one batch and leaves the new keys pending. Later runs
-/// progress and find a payment far past the first batch.
-#[tokio::test]
-async fn each_run_sweeps_one_batch_and_later_runs_progress() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    let paid = 100;
-    let (record, note_data) = pay_restored_key(&mut st, paid, 0);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    restore(&mut st, account);
-    let through = tip(&st);
-    // The set is finite, so an unbounded run stops past it instead of hanging.
-    let seen: Vec<_> = (0..200).map(|i| receiver(&st, i)).collect();
-    let directory = Directory::new(publish(
-        std::slice::from_ref(&record),
-        &[record.payment.cmx],
-        through,
-        &provider(&seen),
-    ));
-    let mut notes = Notes::new(BTreeMap::from([(record.payment.position, note_data)]));
-    let mut runs = 0;
-    loop {
-        let swept = run(&mut st, through, &directory, &mut notes, &NoLock, NOW)
-            .await
-            .unwrap();
-        runs += 1;
-        assert!(swept.deferred.is_empty(), "{:?}", swept.deferred);
-        assert!(
-            (1..=64).contains(&swept.finished),
-            "run {runs} finished {}",
-            swept.finished
-        );
-        if !swept.pending {
-            break;
-        }
-        assert!(runs < 20);
-    }
-    assert!(runs > 1);
-    assert_eq!(
-        st.get_total_balance(account),
-        Zatoshis::const_from_u64(VALUE)
-    );
 }
