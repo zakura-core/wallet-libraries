@@ -147,17 +147,9 @@ pub(super) fn recover(
     key: KeyId,
     from: BlockHeight,
 ) -> OneTimeKey {
+    let (sweep, now) = (Discovery::Sweep, clock_now());
     tx(db, |c, p| {
-        register(
-            c,
-            p,
-            account,
-            key,
-            from,
-            true,
-            Discovery::Sweep,
-            clock_now(),
-        )
+        register(c, p, account, key, from, true, sweep, now)
     })
     .unwrap()
     .1
@@ -165,17 +157,9 @@ pub(super) fn recover(
 
 /// Keeps `count` incoming lookahead keys expecting payments from `from`.
 pub(super) fn lookahead(db: &mut Db, account: AccountUuid, count: u32, from: BlockHeight) {
-    tx(db, |c, p| {
-        store::restore::recovery::maintain_receive_lookahead(
-            c,
-            p,
-            account,
-            count,
-            from,
-            clock_now(),
-        )
-    })
-    .unwrap()
+    use store::restore::recovery::maintain_receive_lookahead as maintain;
+    let now = clock_now();
+    tx(db, |c, p| maintain(c, p, account, count, from, now)).unwrap()
 }
 
 /// Reserves like `WalletDb::prepare_receive_reservation`, scanning a new key from `from`,
@@ -253,16 +237,9 @@ pub(super) fn finish_recovery(
     through: ChainPoint,
     lookahead: u32,
 ) -> Result<bool, SqliteClientError> {
-    tx(db, |c, p| {
-        store::restore::retention::finish_nullifier_recovery(
-            c,
-            p,
-            account,
-            through,
-            lookahead,
-            clock_now(),
-        )
-    })
+    use store::restore::retention::finish_nullifier_recovery as finish;
+    let now = clock_now();
+    tx(db, |c, p| finish(c, p, account, through, lookahead, now))
 }
 
 /// Starts or extends trial decryption of `key` from `from`, as registration and
@@ -285,18 +262,10 @@ pub(super) fn apply_payment(
     through: ChainPoint,
     (anchor, path): (ChainPoint, &MerklePath),
 ) -> Result<PaymentApplication, SqliteClientError> {
-    let configured = db.transparent_ledger_mode;
+    use store::restore::apply::apply_payment as apply;
+    let (mode, anchored) = (db.transparent_ledger_mode, (anchor, path));
     tx(db, |c, p| {
-        store::restore::apply::apply_payment(
-            c,
-            p,
-            configured,
-            account,
-            key,
-            candidate,
-            through,
-            (anchor, path),
-        )
+        apply(c, p, mode, account, key, candidate, through, anchored)
     })
     .map(|applied| applied.expect("the payment's blocks are on the wallet's chain"))
 }
@@ -317,14 +286,10 @@ pub(super) fn observe_with(
     observation: Observation,
     now: i64,
 ) -> Result<(), SqliteClientError> {
+    use store::swap::lifecycle::record_refund;
     tx(db, |c, _| {
-        store::swap::lifecycle::record_refund(
-            c,
-            key_ref(c, account, key)?,
-            reference,
-            observation,
-            now,
-        )
+        let key = key_ref(c, account, key)?;
+        record_refund(c, key, reference, observation, now)
     })
 }
 
@@ -347,12 +312,8 @@ pub(super) fn observe(
 /// [`WalletDb::close_finished_one_time_keys`] with `tip`'s block time set to `now`, as
 /// when the caller's clock agrees with the chain.
 pub(super) fn close_at(db: &mut Db, account: AccountUuid, now: i64, tip: BlockHeight) -> usize {
-    db.conn
-        .execute(
-            "UPDATE blocks SET time = ?2 WHERE height = ?1",
-            rusqlite::params![u32::from(tip), now],
-        )
-        .unwrap();
+    let sql = "UPDATE blocks SET time = ?2 WHERE height = ?1";
+    exec(&db.conn, sql, rusqlite::params![u32::from(tip), now]);
     db.close_finished_one_time_keys(account, now, tip).unwrap()
 }
 
@@ -384,31 +345,21 @@ pub(super) fn get_key(
 
 /// `key`'s stored scan start and whether it advances allocation.
 pub(super) fn key_state(db: &Db, key: KeyId) -> (BlockHeight, bool) {
-    db.conn
-        .query_row(
-            "SELECT scan_from, advances_allocation FROM ironwood_receiving_keys
-             WHERE purpose = ?1 AND key_index = ?2",
-            rusqlite::params![
-                purpose_code(key.purpose()).unwrap(),
-                key.index().to_be_bytes()
-            ],
-            |r| Ok((BlockHeight::from(r.get::<_, u32>(0)?), r.get(1)?)),
-        )
-        .unwrap()
+    let sql = "SELECT scan_from, advances_allocation FROM ironwood_receiving_keys
+               WHERE purpose = ?1 AND key_index = ?2";
+    let purpose = purpose_code(key.purpose()).unwrap();
+    let params = rusqlite::params![purpose, key.index().to_be_bytes()];
+    let (from, advances): (u32, bool) = row(&db.conn, sql, params);
+    (from.into(), advances)
 }
 
 /// `key`'s last queued lookup, if it is still on the wallet's chain.
 pub(super) fn lookup_coverage(db: &Db, account: AccountUuid, key: KeyId) -> Option<ChainPoint> {
     let id = key_ref(&db.conn, account, key).unwrap();
-    let lookup = db
-        .conn
-        .query_row(
-            "SELECT lookup_height, lookup_hash FROM ironwood_one_time_sweeps
-             WHERE receiving_key_id = ?1",
-            [id],
-            |r| Ok(store::restore::planner::anchor(r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
+    let sql = "SELECT lookup_height, lookup_hash FROM ironwood_one_time_sweeps
+               WHERE receiving_key_id = ?1";
+    let (height, hash) = row(&db.conn, sql, [id]);
+    let lookup = store::restore::planner::anchor(height, hash);
     store::restore::planner::canonical(&db.conn, lookup).unwrap()
 }
 
@@ -432,13 +383,8 @@ pub(super) fn tip(st: &State) -> ChainPoint {
 
 /// The one-time key of each unspent Ironwood note at `height`, `None` for ordinary notes.
 pub(super) fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>> {
-    st.wallet()
-        .db()
-        .get_unspent_ironwood_notes_at_historical_height(st.test_account().unwrap().id(), height)
-        .unwrap()
-        .iter()
-        .map(|n| n.one_time_key_id())
-        .collect()
+    let notes = notes(st, height);
+    notes.iter().map(|n| n.one_time_key_id()).collect()
 }
 
 /// A sweep's `recent` flag for a receiver a swap may still pay, so its key keeps
@@ -468,28 +414,17 @@ pub(super) fn candidate_at(
     height: BlockHeight,
     fvk: &FullViewingKey,
 ) -> PendingPayment {
-    let data: Vec<u8> = st
-        .cache()
-        .0
-        .query_row(
-            "SELECT data FROM compactblocks WHERE height = ?1",
-            [u32::from(height)],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let sql = "SELECT data FROM compactblocks WHERE height = ?1";
+    let data: Vec<u8> = value(&st.cache().0, sql, [u32::from(height)]);
     let block = CompactBlock::decode(data.as_slice()).unwrap();
     let ivk = fvk.to_ivk(Scope::External).prepare();
-    let actions: u32 = block
-        .vtx
-        .iter()
-        .map(|tx| tx.ironwood_actions.len() as u32)
-        .sum();
-    let mut position = block
+    let actions = block.vtx.iter().map(|tx| tx.ironwood_actions.len() as u32);
+    let size = block
         .chain_metadata
         .as_ref()
         .unwrap()
-        .ironwood_commitment_tree_size
-        - actions;
+        .ironwood_commitment_tree_size;
+    let mut position = size - actions.sum::<u32>();
     for tx in &block.vtx {
         for (index, compact) in tx.ironwood_actions.iter().enumerate() {
             let action = CompactAction::try_from(compact).unwrap();
