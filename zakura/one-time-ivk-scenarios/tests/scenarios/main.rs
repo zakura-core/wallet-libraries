@@ -132,8 +132,10 @@ fn main() {
     }
 }
 
-/// Runs `scenarios` on `jobs` threads, keeping catalog order.
+/// Runs `scenarios` on `jobs` threads, keeping catalog order. Cost scenarios measure
+/// time, so they run afterwards, one at a time.
 fn run_all(scenarios: &[Scenario], jobs: usize) -> Vec<ScenarioResult> {
+    let alone = |s: &Scenario| s.group == catalog::COST;
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<Option<ScenarioResult>>> =
         Mutex::new((0..scenarios.len()).map(|_| None).collect());
@@ -142,6 +144,15 @@ fn run_all(scenarios: &[Scenario], jobs: usize) -> Vec<ScenarioResult> {
     panic::set_hook(Box::new(|info| {
         LAST_PANIC.with(|last| *last.borrow_mut() = Some(info.to_string()));
     }));
+    let report = |i: usize, result: ScenarioResult| {
+        let mark = match result.outcome {
+            Outcome::Pass => "ok",
+            Outcome::Fail => "FAIL",
+            Outcome::Error => "ERROR",
+        };
+        println!("{mark:>5}  {}  ({} ms)", scenarios[i].id, result.duration_ms);
+        results.lock().unwrap()[i] = Some(result);
+    };
     std::thread::scope(|scope| {
         for _ in 0..jobs.max(1) {
             scope.spawn(|| {
@@ -150,18 +161,20 @@ fn run_all(scenarios: &[Scenario], jobs: usize) -> Vec<ScenarioResult> {
                     let Some(scenario) = scenarios.get(i) else {
                         break;
                     };
+                    if alone(scenario) {
+                        continue;
+                    }
                     let result = run_one(scenario);
-                    let mark = match result.outcome {
-                        Outcome::Pass => "ok",
-                        Outcome::Fail => "FAIL",
-                        Outcome::Error => "ERROR",
-                    };
-                    println!("{mark:>5}  {}  ({} ms)", scenario.id, result.duration_ms);
-                    results.lock().unwrap()[i] = Some(result);
+                    report(i, result);
                 }
             });
         }
     });
+    for (i, scenario) in scenarios.iter().enumerate() {
+        if alone(scenario) {
+            report(i, run_one(scenario));
+        }
+    }
     panic::set_hook(default);
     results
         .into_inner()

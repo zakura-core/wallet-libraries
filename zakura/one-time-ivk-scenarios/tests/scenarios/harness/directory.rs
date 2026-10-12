@@ -40,6 +40,8 @@ pub struct Directory {
     router: Router,
     requests: Mutex<Vec<String>>,
     faults: Mutex<VecDeque<u16>>,
+    /// Request and response body bytes, as (sent, received).
+    bytes: Mutex<(u64, u64)>,
 }
 
 impl Directory {
@@ -111,7 +113,13 @@ impl Directory {
             router: router_with_publications(publications),
             requests: Mutex::new(Vec::new()),
             faults: Mutex::new(VecDeque::new()),
+            bytes: Mutex::new((0, 0)),
         }
+    }
+
+    /// Request and response body bytes so far, as (sent, received).
+    pub fn bytes(&self) -> (u64, u64) {
+        *self.bytes.lock().unwrap()
     }
 
     /// Answers the next `statuses.len()` requests with these HTTP statuses instead.
@@ -154,6 +162,7 @@ impl Directory {
             .lock()
             .unwrap()
             .push(format!("{method} {path}"));
+        self.bytes.lock().unwrap().0 += body.len() as u64;
         let fault = self.faults.lock().unwrap().pop_front();
         let status = match fault {
             Some(status) => status,
@@ -169,6 +178,7 @@ impl Directory {
                     .await
                     .map_err(|_| DirectoryError::Transport("response over its limit".into()))?;
                 if status == 200 {
+                    self.bytes.lock().unwrap().1 += body.len() as u64;
                     return Ok(body.to_vec());
                 }
                 status

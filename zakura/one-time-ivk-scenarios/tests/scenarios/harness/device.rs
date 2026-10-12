@@ -190,6 +190,11 @@ pub struct Device {
     pub scanned_blocks: u64,
     /// Reorgs the wallet rewound for, as (conflict height, height rewound to).
     pub rewinds: Vec<(u32, u32)>,
+    /// Row-file downloads, which replace lookups for large restores.
+    pub row_files: usize,
+    /// Directory request and response bytes across every sweep.
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
     pub reach: Reach,
 }
 
@@ -232,6 +237,9 @@ impl Device {
             sweep_runs: 0,
             scanned_blocks: 0,
             rewinds: Vec::new(),
+            row_files: 0,
+            bytes_sent: 0,
+            bytes_received: 0,
             reach: Reach::default(),
         }
     }
@@ -468,6 +476,12 @@ impl Device {
         }
         let lookups = directory.published().map_or(0, Directory::lookups);
         self.lookups += lookups;
+        if let Some(published) = directory.published() {
+            self.row_files += published.row_files();
+            let (sent, received) = published.bytes();
+            self.bytes_sent += sent;
+            self.bytes_received += received;
+        }
         (finished, lookups, problems)
     }
 

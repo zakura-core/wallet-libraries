@@ -119,6 +119,11 @@ impl Ctx {
         report
     }
 
+    /// Runs only the scanning half of `dev`'s sync, returning the blocks it scanned.
+    pub fn scan_only(&mut self, dev: Dev) -> u64 {
+        self.devices[dev.0].scan(&self.chain)
+    }
+
     /// Replaces the chain above `to`: the next mined blocks form the new branch.
     pub fn reorg(&mut self, to: BlockHeight) {
         let from = self.chain.tip();
@@ -594,6 +599,25 @@ impl Ctx {
                 value: device.scanned_blocks as f64,
                 unit: "blocks".into(),
             });
+            if device.bytes_received > 0 {
+                self.metrics.push(Metric {
+                    name: format!("{} directory bytes received", device.name),
+                    value: device.bytes_received as f64,
+                    unit: "bytes".into(),
+                });
+                self.metrics.push(Metric {
+                    name: format!("{} directory bytes sent", device.name),
+                    value: device.bytes_sent as f64,
+                    unit: "bytes".into(),
+                });
+            }
+            if device.row_files > 0 {
+                self.metrics.push(Metric {
+                    name: format!("{} row-file downloads", device.name),
+                    value: device.row_files as f64,
+                    unit: "files".into(),
+                });
+            }
         }
         self.metrics.push(Metric {
             name: "chain height".into(),
