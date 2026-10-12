@@ -12,7 +12,7 @@ use orchard::{
 };
 use rand::rng;
 use shardtree::{ShardTree, store::memory::MemoryShardStore};
-use zakura_dynamic_ivk::{KeyId, Purpose, RefundMemo};
+use zakura_one_time_ivk::{KeyId, Purpose, RefundMemo};
 
 #[test]
 fn receive_restore_and_spend_both_purposes_with_ordinary_change() {
@@ -27,7 +27,7 @@ fn receive_restore_and_spend_both_purposes_with_ordinary_change() {
     let memo = RefundMemo::new(7).encode();
 
     // Only a proven bundle and fixture output indices survive this scope. Recovery below
-    // must reconstruct the dynamic FVKs instead of retaining them from issuance.
+    // must reconstruct the one-time FVKs instead of retaining them from issuance.
     let (received, positions) = {
         let refund = KeyId::new(Purpose::Refund, 7).derive(&account).unwrap();
         let incoming = KeyId::new(Purpose::Receive, 0).derive(&account).unwrap();
@@ -166,7 +166,7 @@ fn receive_restore_and_spend_both_purposes_with_ordinary_change() {
         }
         spend.add_spend(fvk.clone(), note, path.into()).unwrap();
     }
-    // Change uses the ordinary internal key even when dynamic-key notes fund the spend.
+    // Change uses the ordinary internal key even when one-time-key notes fund the spend.
     spend
         .add_output(
             Some(account.to_ovk(Scope::Internal)),

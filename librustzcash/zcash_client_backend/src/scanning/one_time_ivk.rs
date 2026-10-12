@@ -1,4 +1,4 @@
-//! Dynamic IVKs in trial decryption. Ordinary account keys keep their existing tags.
+//! One-time IVKs in trial decryption. Ordinary account keys keep their existing tags.
 
 use std::hash::Hash;
 
@@ -8,7 +8,7 @@ use orchard::{
     note::Nullifier,
     note_encryption::IronwoodDomain,
 };
-use zakura_dynamic_ivk::KeyId;
+use zakura_one_time_ivk::KeyId;
 use zip32::Scope;
 
 use super::{ScanningKeyOps, ScanningKeys};
@@ -18,20 +18,20 @@ use super::{ScanningKeyOps, ScanningKeys};
 pub(crate) enum ReceivingKeyTag<AccountId> {
     /// An ordinary account key.
     Account(AccountId, Scope),
-    /// A dynamic key of the account.
-    Dynamic(AccountId, KeyId),
+    /// A one-time key of the account.
+    OneTime(AccountId, KeyId),
 }
 
 /// A derived FVK paired with the identity that must survive note detection.
 ///
 /// This key only scans Ironwood. Change from its spends uses ordinary account keys.
-pub struct DynamicScanningKey<AccountId> {
+pub struct OneTimeScanningKey<AccountId> {
     account: AccountId,
     key_id: KeyId,
     fvk: FullViewingKey,
 }
 
-impl<AccountId> DynamicScanningKey<AccountId> {
+impl<AccountId> OneTimeScanningKey<AccountId> {
     /// The account whose receiving sequence this key belongs to.
     pub fn account_id(&self) -> &AccountId {
         &self.account
@@ -52,7 +52,7 @@ impl<AccountId> DynamicScanningKey<AccountId> {
         account: AccountId,
         key_id: KeyId,
         account_fvk: &FullViewingKey,
-    ) -> Result<Self, zakura_dynamic_ivk::DerivationError> {
+    ) -> Result<Self, zakura_one_time_ivk::DerivationError> {
         Ok(Self {
             account,
             key_id,
@@ -61,7 +61,7 @@ impl<AccountId> DynamicScanningKey<AccountId> {
     }
 }
 
-impl<AccountId: Copy> DynamicScanningKey<AccountId> {
+impl<AccountId: Copy> OneTimeScanningKey<AccountId> {
     /// Decrypts full Ironwood ciphertexts with this registered receiving key.
     pub(crate) fn decrypt_outputs(
         &self,
@@ -91,7 +91,7 @@ impl<AccountId: Copy> DynamicScanningKey<AccountId> {
                                     .expect("memo length"),
                                 crate::decrypt::TransferType::Incoming,
                             )
-                            .with_dynamic_key_id(self.key_id)
+                            .with_one_time_key_id(self.key_id)
                         })
                     })
             })
@@ -100,7 +100,7 @@ impl<AccountId: Copy> DynamicScanningKey<AccountId> {
 }
 
 impl<AccountId> ScanningKeyOps<IronwoodDomain, AccountId, Nullifier>
-    for DynamicScanningKey<AccountId>
+    for OneTimeScanningKey<AccountId>
 {
     fn prepare(&self) -> PreparedIncomingViewingKey {
         PreparedIncomingViewingKey::new(&self.fvk.to_ivk(Scope::External))
@@ -114,7 +114,7 @@ impl<AccountId> ScanningKeyOps<IronwoodDomain, AccountId, Nullifier>
         Some(Scope::External)
     }
 
-    fn dynamic_key_id(&self) -> Option<KeyId> {
+    fn one_time_key_id(&self) -> Option<KeyId> {
         Some(self.key_id)
     }
 
@@ -126,11 +126,11 @@ impl<AccountId> ScanningKeyOps<IronwoodDomain, AccountId, Nullifier>
 impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
     ScanningKeys<AccountId, (AccountId, Scope)>
 {
-    /// Adds dynamic keys to Ironwood trial decryption, retaining ordinary keys in
+    /// Adds one-time keys to Ironwood trial decryption, retaining ordinary keys in
     /// every pool. Reload this set when registrations change and schedule missing history.
-    pub(crate) fn with_dynamic_ivks(
+    pub(crate) fn with_one_time_ivks(
         self,
-        keys: impl IntoIterator<Item = DynamicScanningKey<AccountId>>,
+        keys: impl IntoIterator<Item = OneTimeScanningKey<AccountId>>,
     ) -> ScanningKeys<AccountId, ReceivingKeyTag<AccountId>> {
         let tag = |(account, scope)| ReceivingKeyTag::Account(account, scope);
         let mut result = ScanningKeys {
@@ -144,7 +144,7 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
         };
         for key in keys {
             result.ironwood.insert(
-                ReceivingKeyTag::Dynamic(key.account, key.key_id),
+                ReceivingKeyTag::OneTime(key.account, key.key_id),
                 Box::new(key),
             );
         }

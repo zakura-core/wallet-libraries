@@ -3,7 +3,7 @@ use orchard::keys::FullViewingKey;
 use pasta_curves::pallas;
 use zeroize::Zeroizing;
 
-/// First byte of the `PRF^expand` input that derives a dynamic key's `rivk`.
+/// First byte of the `PRF^expand` input that derives a one-time key's `rivk`.
 ///
 /// Unused by the protocol specification and ZIPs when chosen; it must be reserved
 /// with the ZIP editors before any address goes live.
@@ -86,7 +86,7 @@ pub struct DerivationError;
 
 impl core::fmt::Display for DerivationError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("dynamic IVK index has no valid viewing key")
+        f.write_str("one-time IVK index has no valid viewing key")
     }
 }
 

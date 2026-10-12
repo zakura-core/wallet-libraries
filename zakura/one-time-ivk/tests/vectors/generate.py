@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print v1 dynamic key rivk vectors using Python BLAKE2b and integer reduction.
+"""Print v1 one-time key rivk vectors using Python BLAKE2b and integer reduction.
 
 The account is the first public Orchard key-component test vector shipped in
 zakura-orchard, src/test_vectors/keys.rs. No wallet secrets are used.

@@ -32,22 +32,22 @@ workspace.
   alone contributed, so a publication's facts do not outlive the policy that admitted them.
   This is a new required trait method: external implementors of `TransparentLedgerWrite` must
   add it.
-- Dynamic IVKs (with `orchard`): Ironwood receiving keys that keep an account's spending
-  authority with their own incoming viewing keys (see `zakura-dynamic-ivk`), which the
-  wallet trial-decrypts as a changing set. `scanning::dynamic_ivk::DynamicScanningKey` is
-  one such key, and received notes and outputs report theirs through `dynamic_key_id`. A
-  store implements `data_api::dynamic_ivk::{DynamicIvkRead, DynamicIvkWrite}`.
-  `chain::scan_cached_blocks_with_dynamic_ivks` also trial-decrypts every key from
-  `get_dynamic_scanning_keys` and passes that snapshot to `put_blocks_with_dynamic_ivks`,
+- One-time IVKs (with `orchard`): Ironwood receiving keys that keep an account's spending
+  authority with their own incoming viewing keys (see `zakura-one-time-ivk`), which the
+  wallet trial-decrypts as a changing set. `scanning::one_time_ivk::OneTimeScanningKey` is
+  one such key, and received notes and outputs report theirs through `one_time_key_id`. A
+  store implements `data_api::one_time_ivk::{OneTimeIvkRead, OneTimeIvkWrite}`.
+  `chain::scan_cached_blocks_with_one_time_ivks` also trial-decrypts every key from
+  `get_one_time_scanning_keys` and passes that snapshot to `put_blocks_with_one_time_ivks`,
   so a store can rescan blocks that a key activated mid-batch missed, and
-  `wallet::decrypt_and_store_transaction_with_dynamic_ivks` also decrypts with
-  `get_dynamic_transaction_keys`, which `DecryptedTransaction::dynamic_ivks_applied`
-  records, so a store can refuse transactions decrypted without them; no dynamic key
+  `wallet::decrypt_and_store_transaction_with_one_time_ivks` also decrypts with
+  `get_one_time_transaction_keys`, which `DecryptedTransaction::one_time_ivks_applied`
+  records, so a store can refuse transactions decrypted without them; no one-time key
   may open between that decryption and storage. The traits' restore
   sweep steps look keys recovered from the seed up in a receiver directory; a step that
-  must wait returns a `SweepDeferral`. `dynamic_keys_to_recheck` and
+  must wait returns a `SweepDeferral`. `one_time_keys_to_recheck` and
   `record_paid_filter_check` sweep a closed key without a known payment when a newer
-  publication's paid filter holds it. Transaction construction spends a dynamic-key note
+  publication's paid filter holds it. Transaction construction spends a one-time-key note
   with its derived viewing key and sends change to the ordinary account key.
 - `transparent_ledger::{TransparentDetailRead, TransparentDetailWrite}` (prototype): durable
   transparent txid enhancement work (`transparent_detail_work`, returning the requests with the
