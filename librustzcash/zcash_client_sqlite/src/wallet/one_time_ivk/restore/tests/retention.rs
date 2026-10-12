@@ -446,6 +446,10 @@ fn completed_recovery_retains_the_next_large_batch_until_reconciled() {
 fn completion_does_not_enable_discovery_for_an_unregistered_account() {
     let (mut st, _, _, through, _) = fixture();
     let account = st.test_account().unwrap().id();
+    st.wallet()
+        .conn()
+        .execute("DELETE FROM ironwood_one_time_spend_retention", [])
+        .unwrap();
     let before = all_keys(st.wallet().db(), account).unwrap().len();
     assert!(!finish_recovery(st.wallet_mut().db_mut(), account, through, 50).unwrap());
     assert_eq!(all_keys(st.wallet().db(), account).unwrap().len(), before);

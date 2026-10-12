@@ -2008,7 +2008,7 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_PAYMENT_RECOVERY: &str = "CREATE TABLE 
 /// One provider operation on a one-time key: an incoming quote request, identified by
 /// `request` and accepted once `reference` holds its deposit address, or a refund quote,
 /// identified by its deposit address. `expectation` is the normalized status (see
-/// `one_time_ivk::lifecycle::record`).
+/// `one_time_ivk::swap::lifecycle::record`).
 pub(super) const TABLE_IRONWOOD_ONE_TIME_OPERATIONS: &str = "CREATE TABLE ironwood_one_time_operations (
                 id INTEGER PRIMARY KEY,
                 receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,

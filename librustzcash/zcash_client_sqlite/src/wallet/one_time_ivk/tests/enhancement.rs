@@ -699,7 +699,10 @@ fn a_funding_memo_must_match_its_recorded_deposit() {
             Zatoshis::const_from_u64(100_000),
         )]
     };
-    let state = |conn: &Connection| -> (Vec<Option<u32>>, Vec<(Vec<u8>, String)>, i64) {
+    /// Refund keys' scan starts, `(key index, reference)` operations, and the stored
+    /// transaction count.
+    type Snapshot = (Vec<Option<u32>>, Vec<(Vec<u8>, String)>, i64);
+    let state = |conn: &Connection| -> Snapshot {
         let active = conn
             .prepare("SELECT active_from FROM ironwood_receiving_keys WHERE purpose = 0 ORDER BY key_index")
             .unwrap()
