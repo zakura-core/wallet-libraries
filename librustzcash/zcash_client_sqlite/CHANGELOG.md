@@ -225,6 +225,7 @@ workspace.
   extra. Every attempt looks the key up in the current publication, whose answer
   replaces queued candidates it no longer repeats and reopens the sweep until it is
   applied, and note data is queued in batches, so a long history keeps its progress.
+  `prepare_one_time_sweeps` selects none until the wallet has fully scanned its chain tip.
   `begin_one_time_sweep_attempt` takes whether a provider seen set holds the key's
   receiver and stores a hit before any lookup, so a seen key is never issued.
   `apply_one_time_sweep` takes whether a current recent set holds it: such a key scans
