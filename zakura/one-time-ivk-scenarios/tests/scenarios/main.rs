@@ -101,6 +101,8 @@ fn main() {
     let started_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
+    // Read before running, so a commit made during a long run doesn't relabel it.
+    let revisions = revisions();
     println!(
         "running {} one-time IVK scenarios on {} threads",
         scenarios.len(),
@@ -111,7 +113,7 @@ fn main() {
         meta: Meta {
             started_unix,
             duration_ms: started.elapsed().as_millis() as u64,
-            revisions: revisions(),
+            revisions,
             filter: args.filter.clone(),
             jobs: args.jobs,
         },
