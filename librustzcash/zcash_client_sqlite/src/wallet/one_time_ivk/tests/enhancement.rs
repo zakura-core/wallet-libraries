@@ -290,24 +290,20 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
 
     // Changing the authenticated scope, or losing own-send evidence, makes the memo
     // ineligible. A marker still waiting for its evidence holds back refund issuance.
-    let set_scope = "UPDATE ironwood_received_notes SET recipient_key_scope = ?1 WHERE memo = ?2";
-    exec(
-        st.wallet().conn(),
-        set_scope,
-        rusqlite::params![0, memo_bytes.as_slice()],
-    );
+    let set_scope = |st: &State, scope: u8| {
+        let sql = "UPDATE ironwood_received_notes SET recipient_key_scope = ?1 WHERE memo = ?2";
+        exec(
+            st.wallet().conn(),
+            sql,
+            rusqlite::params![scope, memo_bytes.as_slice()],
+        );
+    };
+    set_scope(&st, 0);
     recover_memos(&mut st, restored);
     assert!(refund_keys(&st).is_empty());
-    exec(
-        st.wallet().conn(),
-        set_scope,
-        rusqlite::params![1, memo_bytes.as_slice()],
-    );
-    let spends: Vec<(i64, i64)> = rows(
-        st.wallet().conn(),
-        "SELECT ironwood_received_note_id, transaction_id FROM ironwood_received_note_spends",
-        [],
-    );
+    set_scope(&st, 1);
+    let sql = "SELECT ironwood_received_note_id, transaction_id FROM ironwood_received_note_spends";
+    let spends: Vec<(i64, i64)> = rows(st.wallet().conn(), sql, []);
     exec(
         st.wallet().conn(),
         "DELETE FROM ironwood_received_note_spends",
@@ -334,13 +330,9 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
         "DELETE FROM ironwood_receiving_keys",
         [],
     );
-    for (note, transaction) in spends {
-        let sql = "INSERT INTO ironwood_received_note_spends VALUES(?1,?2)";
-        exec(
-            st.wallet().conn(),
-            sql,
-            rusqlite::params![note, transaction],
-        );
+    let sql = "INSERT INTO ironwood_received_note_spends VALUES(?1,?2)";
+    for spend in spends {
+        exec(st.wallet().conn(), sql, spend);
     }
 
     // A marked memo that does not decode is ignored.
