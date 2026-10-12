@@ -41,10 +41,10 @@ const LIMITS: DiscoveryLimits = DiscoveryLimits {
 
 /// Every route the service serves a wallet, with its method: queries are the
 /// only uploads.
-const ROUTES: &str = r"^(GET /v1/(filters/shards(/[0-9]+/filter)?|shards/init|shards/[0-9]+/revisions/[0-9a-f]{64}/(manifest|setup/(directory|pages)/[0-9]+))|POST /v1/shards/[0-9]+/revisions/[0-9a-f]{64}/query/(directory|pages))$";
+const ROUTES: &str = r"^(GET /v2/(filters/shards(/[0-9]+/filter)?|shards/init|shards/[0-9]+/revisions/[0-9a-f]{64}/(manifest|setup/(directory|pages)/[0-9]+))|POST /v2/shards/[0-9]+/revisions/[0-9a-f]{64}/query/(directory|pages))$";
 
 /// The shard a request's path names: its filter, manifest, tables or queries.
-const SHARD: &str = r"^/v1/(filters/)?shards/([0-9]+)/";
+const SHARD: &str = r"^/v2/(filters/)?shards/([0-9]+)/";
 
 /// Each test runs a PIR service; one at a time keeps memory and CPU bounded.
 static HEAVY: Mutex<()> = Mutex::new(());
@@ -364,7 +364,7 @@ fn discovery_reports_exactly_the_candidates_with_history_from_the_floor() {
     assert_eq!(discovery.progress.outcome, Outcome::Behind);
     let requests = publication.take_requests(&mut seen);
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].path, "/v1/filters/shards");
+    assert_eq!(requests[0].path, "/v2/filters/shards");
 }
 
 /// A candidate whose script the shard's filter matches although it holds no
@@ -457,7 +457,7 @@ fn a_pass_stopped_by_its_budget_continues_over_the_rest_with_the_filters_it_has(
     assert_eq!(
         requests
             .iter()
-            .filter(|request| request.path == "/v1/filters/shards")
+            .filter(|request| request.path == "/v2/filters/shards")
             .count(),
         1
     );

@@ -202,15 +202,15 @@ impl TxidPublication {
             body,
             ..HttpReply::default()
         };
-        let shard = format!("/v1/txid/recent/shards/0/revisions/{}", self.digest);
+        let shard = format!("/v2/txid/recent/shards/0/revisions/{}", self.digest);
         match (method, path) {
-            (HttpMethod::Get, "/v1/txid/init") => ok(self.init.clone()),
-            (HttpMethod::Get, "/v1/txid/map") => HttpReply {
+            (HttpMethod::Get, "/v2/txid/init") => ok(self.init.clone()),
+            (HttpMethod::Get, "/v2/txid/map") => HttpReply {
                 map_sha256: Some(self.map_hex.clone()),
                 ..ok(self.map.clone())
             },
             (HttpMethod::Get, path)
-                if path == format!("/v1/txid/shards/0/revisions/{}/manifest", self.digest) =>
+                if path == format!("/v2/txid/shards/0/revisions/{}/manifest", self.digest) =>
             {
                 ok(self.manifest.clone())
             }
