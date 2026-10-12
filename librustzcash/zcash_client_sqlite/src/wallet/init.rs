@@ -787,8 +787,8 @@ fn verify_no_one_time_ivk_state(conn: &rusqlite::Connection) -> Result<(), Walle
 
 /// [`verify_no_one_time_ivk_state`] as a rusqlite error, so a build without `one-time-ivk`
 /// refuses such a database even if it never migrates it: at `WalletDb::for_path`, and in
-/// the low-level writes that record scanned blocks or retire transaction retrieval, which
-/// every handle's block and transaction storage reaches.
+/// the low-level writes that record scanned blocks, prune tracked nullifiers or retire
+/// transaction retrieval, which every handle's block and transaction storage reaches.
 #[cfg(not(feature = "one-time-ivk"))]
 pub(crate) fn refuse_one_time_ivk_state(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     verify_no_one_time_ivk_state(conn).map_err(|e| match e {
