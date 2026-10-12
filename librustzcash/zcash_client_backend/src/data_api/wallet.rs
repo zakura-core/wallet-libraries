@@ -275,7 +275,7 @@ where
 /// wallet write lock across this call.
 ///
 /// [`OneTimeIvkRead::get_one_time_transaction_keys`]: super::one_time_ivk::OneTimeIvkRead::get_one_time_transaction_keys
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 pub fn decrypt_and_store_transaction_with_one_time_ivks<ParamsT, DbT>(
     params: &ParamsT,
     data: &mut DbT,
@@ -1825,6 +1825,7 @@ where
             .orchard()
             .cloned()
             .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?;
+        #[cfg(feature = "one-time-ivk")]
         let fvk = match selected.one_time_key_id() {
             // The spending authority is unchanged, but the proof needs the FVK
             // whose incoming key generated this particular note's recipient.

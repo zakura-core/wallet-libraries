@@ -49,7 +49,7 @@ pub struct DecryptedOutput<Note, AccountId> {
     account: AccountId,
     memo: MemoBytes,
     transfer_type: TransferType,
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     one_time_key_id: Option<zakura_one_time_ivk::KeyId>,
 }
 
@@ -69,20 +69,20 @@ impl<Note, AccountId> DecryptedOutput<Note, AccountId> {
             account,
             memo,
             transfer_type,
-            #[cfg(feature = "orchard")]
+            #[cfg(feature = "one-time-ivk")]
             one_time_key_id: None,
         }
     }
 
     /// Retains the derived receiving key used for authenticated note decryption.
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     pub(crate) fn with_one_time_key_id(mut self, key_id: zakura_one_time_ivk::KeyId) -> Self {
         self.one_time_key_id = Some(key_id);
         self
     }
 
     /// Derived receiving key, relative to the owning account.
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     pub fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
         self.one_time_key_id
     }

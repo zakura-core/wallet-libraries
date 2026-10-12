@@ -739,7 +739,7 @@ pub trait ReceivedShieldedOutput {
     fn recipient_key_scope(&self) -> Option<Scope>;
 
     /// Derived Ironwood receiving key relative to the owning account.
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
         None
     }
@@ -851,7 +851,7 @@ impl<T: ReceivedShieldedOutput<Note = ::orchard::Note, Nullifier = ::orchard::no
 
 #[cfg(feature = "orchard")]
 impl<AccountId: Copy> ReceivedShieldedOutput for WalletOrchardOutput<AccountId> {
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
         self.one_time_key_id()
     }
@@ -912,7 +912,7 @@ impl<AccountId: Copy> ReceivedShieldedOutput for WalletOrchardOutput<AccountId> 
 impl<AccountId: Copy> ReceivedShieldedOutput
     for DecryptedOutput<(::orchard::Note, ::orchard::ValuePool), AccountId>
 {
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
         self.one_time_key_id()
     }
