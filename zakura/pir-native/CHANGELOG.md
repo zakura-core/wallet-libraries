@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc1] - PLANNED
+
+### Packaging
+
+- Include the MIT and Apache license texts in the crate package.
+
 ### Added
 
 - `prepare_dithered`, `DITHERED_QUERY_BITS` (44) and `request_len_bits`: a
