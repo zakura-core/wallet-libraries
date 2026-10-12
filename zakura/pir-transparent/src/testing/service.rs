@@ -39,6 +39,9 @@ use transparent_shard_server::shardset::{DEFAULT_RETAIN_REVISIONS, ShardSet};
 
 /// A shard's usual geometry: the recent one, 2,048 directory rows and page
 /// shards of 8,192 rows, which keeps the tables a pass sets up and queries small.
+/// The range-filter profile the test service publishes under: production's.
+const PROFILE: &str = transparent_filter::RANGE_PROFILE_V2.name;
+
 pub const GEOMETRY: &Geometry = &DECOUPLED_2K_8K;
 
 /// The geometry a re-cut merges sealed shards into: the archive geometry.
@@ -151,7 +154,7 @@ pub fn publish(
             shard_id,
             geometry,
             genesis,
-            transparent_filter::RANGE_PROFILE,
+            PROFILE,
             blocks,
             &spec.page_ends(),
             &hash,
@@ -165,7 +168,7 @@ pub fn publish(
         let directory_bytes = geometry.directory_bytes_per_segment();
         let manifest = ShardManifest {
             schema: SCHEMA.to_string(),
-            profile: transparent_filter::RANGE_PROFILE.to_string(),
+            profile: PROFILE.to_string(),
             geometry: geometry.name.to_string(),
             network: transparent_filter::NETWORK.to_string(),
             genesis_hash: transparent_filter::MAINNET_GENESIS_DISPLAY.to_string(),
@@ -262,7 +265,7 @@ pub fn publish(
     let map = ShardMap {
         genesis_hash: transparent_filter::MAINNET_GENESIS_DISPLAY.to_string(),
         network: transparent_filter::NETWORK.to_string(),
-        profile: transparent_filter::RANGE_PROFILE.to_string(),
+        profile: PROFILE.to_string(),
         range_envelope_version: transparent_filter::RANGE_ENVELOPE_VERSION,
         start_height: shards[0].start,
         seal: shards
