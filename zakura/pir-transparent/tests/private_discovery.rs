@@ -131,6 +131,7 @@ fn shard(
         sealed,
         revision: 0,
         supersedes: String::new(),
+        page_span: 0,
         events,
     }
 }

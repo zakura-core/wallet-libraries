@@ -13,15 +13,25 @@ use crate::error::{RecoveryError, failure};
 // every store table. Re-verify those names, that `wallet_meta` keeps the schema
 // version under `schema_version`, and that `last_commit` reads only the highest
 // commit id, before accepting another store schema.
-const _: () = assert!(transparent_wallet_store::SCHEMA_VERSION == 4);
+//
+// Schema 5 is not a migration of 4: the store refuses a file at any other
+// version. A companion's file name commits to the shard schema (see
+// `companion`), so a schema-v12 companion never opens a file a schema-v11 build
+// wrote.
+const _: () = assert!(transparent_wallet_store::SCHEMA_VERSION == 5);
 
-/// The reference store's tables at schema version 4, besides `wallet_meta`.
-const STORE_TABLES: [&str; 8] = [
+/// The reference store's tables at schema version 5, besides `wallet_meta`.
+///
+/// `run_cache` holds verified run histories keyed by page shard identity. The
+/// store keeps it across a rollback, and pruning leaves it alone: a superseded
+/// tail's sealed page shards are the replacement's too. Only a reset empties it.
+const STORE_TABLES: [&str; 9] = [
     "scripts",
     "coverage",
     "receives",
     "spends",
     "pending_work",
+    "run_cache",
     "setup_cache",
     "filter_cache",
     "commits",
@@ -30,8 +40,9 @@ const STORE_TABLES: [&str; 8] = [
 /// Restarts the companion's store for a publication whose set identity no
 /// longer continues the one the store is bound to, in one transaction.
 ///
-/// Every store table is emptied, and `wallet_meta` keeps only the schema
-/// version, so the next sync binds the new set and retrieves from the floor.
+/// Every store table, the run cache included, is emptied, and `wallet_meta`
+/// keeps only the schema version, so the next sync binds the new set and
+/// retrieves from the floor.
 /// The recorded re-cut epoch is cleared with it: the empty store follows no
 /// map. The catalog stays: each source keeps its highest lineage, so a source
 /// the new set leaves unchanged still recognizes a restarted revision number.
@@ -80,7 +91,8 @@ pub(crate) fn reset_store_keep_catalog(
 
 /// Prunes the store's filter and setup caches to the revisions `digests` names, and
 /// its commit log to the last commit, within a pass's transaction `tx`. The store
-/// reads only the last commit id.
+/// reads only the last commit id. The run cache is not keyed by revision and is
+/// kept: a later revision of a tail reaches the runs its sealed page shards hold.
 pub(super) fn prune_store_caches(
     tx: &Transaction<'_>,
     digests: &[&str],

@@ -48,6 +48,16 @@ impl HttpMethod {
     }
 }
 
+/// A table's name with its page shard elided, for logs: `directory`, or
+/// `pages-{child}` for every page shard. Which page shards a wallet queries
+/// says roughly when its events were pushed out, so a log line never names one.
+fn table_template(table: Table) -> &'static str {
+    match table {
+        Table::Directory => "directory",
+        Table::Pages(_) => "pages-{child}",
+    }
+}
+
 /// One request to the origin an exchange is bound to.
 ///
 /// Its `Debug` shows the template and sizes only: the path and body name shard
@@ -346,11 +356,11 @@ impl Route<'_> {
             }
             Route::Shard(ShardRequest::Setup { table, .. }) => format!(
                 "/v1/shards/{{id}}/revisions/{{rev}}/setup/{}/{{segment}}",
-                table.as_str()
+                table_template(table)
             ),
             Route::Shard(ShardRequest::Query { table, .. }) => format!(
                 "/v1/shards/{{id}}/revisions/{{rev}}/query/{}",
-                table.as_str()
+                table_template(table)
             ),
         }
     }
@@ -503,7 +513,7 @@ mod tests {
             ),
             (
                 Kind::ShardBound,
-                bytes(shards.setup(SHARD, REVISION, Table::Pages, 0)),
+                bytes(shards.setup(SHARD, REVISION, Table::Pages(1), 0)),
             ),
             (
                 Kind::ShardBound,
@@ -511,7 +521,7 @@ mod tests {
             ),
             (
                 Kind::ShardBound,
-                shards.query(SHARD, REVISION, Table::Pages, QUERY),
+                shards.query(SHARD, REVISION, Table::Pages(1), QUERY),
             ),
         ]
     }
@@ -573,8 +583,8 @@ mod tests {
             ),
             (
                 HttpMethod::Get,
-                format!("{shard}/setup/pages/0"),
-                format!("{template}/setup/pages/{{segment}}"),
+                format!("{shard}/setup/pages-1/0"),
+                format!("{template}/setup/pages-{{child}}/{{segment}}"),
                 none,
             ),
             (
@@ -585,8 +595,8 @@ mod tests {
             ),
             (
                 HttpMethod::Post,
-                format!("{shard}/query/pages"),
-                format!("{template}/query/pages"),
+                format!("{shard}/query/pages-1"),
+                format!("{template}/query/pages-{{child}}"),
                 QUERY,
             ),
         ];
@@ -719,8 +729,8 @@ mod tests {
     fn debug_output_names_no_identifier() {
         let request = HttpRequest {
             method: HttpMethod::Post,
-            path: format!("/v1/shards/{SHARD}/revisions/{REVISION}/query/pages"),
-            template: "/v1/shards/{id}/revisions/{rev}/query/pages".to_owned(),
+            path: format!("/v1/shards/{SHARD}/revisions/{REVISION}/query/pages-1"),
+            template: "/v1/shards/{id}/revisions/{rev}/query/pages-{child}".to_owned(),
             body: QUERY.to_vec(),
             limit: LIMIT,
             error_limit: 0,

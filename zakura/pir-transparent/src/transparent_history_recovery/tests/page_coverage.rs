@@ -37,13 +37,12 @@ fn spans_needs_contiguous_coverage_of_the_address() {
 }
 
 #[test]
-fn page_continuation_identity_binds_revision_script_shard_and_first_row() {
-    let first = page_continuation_id(0, "aa", &[1], 2);
+fn page_continuation_identity_binds_revision_script_and_shard() {
+    let first = page_continuation_id(0, "aa", &[1]);
     for other in [
-        page_continuation_id(1, "aa", &[1], 2),
-        page_continuation_id(0, "bb", &[1], 2),
-        page_continuation_id(0, "aa", &[2], 2),
-        page_continuation_id(0, "aa", &[1], 3),
+        page_continuation_id(1, "aa", &[1]),
+        page_continuation_id(0, "bb", &[1]),
+        page_continuation_id(0, "aa", &[2]),
     ] {
         assert_ne!(first, other);
     }

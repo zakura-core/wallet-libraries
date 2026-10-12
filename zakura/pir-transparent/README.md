@@ -136,7 +136,7 @@ permission to use the recovered funds.
 | Object | Owner and lifetime | Meaning |
 | --- | --- | --- |
 | Wallet database | Wallet-libraries; durable | Account ownership, accepted chain, policy generation, candidate evidence, qualification, activation, balances, and display work/cache |
-| Companion reference store | Reference client, managed by this adapter; durable per account/service | Retrieved events, script coverage, unfinished pages, filters, setups, and publication binding |
+| Companion reference store | Reference client, managed by this adapter; durable per account/service | Retrieved events, script coverage, unfinished page walks, verified page runs, filters, setups, and publication binding |
 | Companion catalog | `catalog`; durable in the same companion file | Publication identities, revisions observed/exported, and acknowledgment bookkeeping |
 | `TransparentAddressWatchSet` | Wallet reader; snapshot for a pass | The account's addresses and history requirements, target, and context needed to reject stale results |
 | `RecoveryBatch` | Adapter; one pass's immutable result | Ordered commits, state, progress, retired revisions, and an opaque acknowledgment receipt |
@@ -161,7 +161,7 @@ The companion's catalog stores:
   so pruning working catalog rows cannot permit conflicting identity reuse.
 
 The format is `transparent-reference-companion-v3`; the supported shard schema
-is `transparent-shard-v11`. Opening a v2 companion rebuilds its catalog in place
+is `transparent-shard-v12`. Opening a v2 companion rebuilds its catalog in place
 and preserves retrieved facts. The old v1 format is refused. Resetting a
 companion after a publication change preserves catalog continuity; replacing
 it to get past a contradiction would erase useful history.

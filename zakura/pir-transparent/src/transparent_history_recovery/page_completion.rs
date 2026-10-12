@@ -18,14 +18,18 @@ use crate::convert::{block_hash_from_display, height_u64};
 use crate::error::RecoveryError;
 
 /// The wallet's identity for a page the store left unfinished: the shard id and
-/// manifest digest it was read under, its script, and its first page.
-pub(super) fn page_continuation_id(shard: u64, digest: &str, script: &[u8], first: u32) -> Vec<u8> {
+/// manifest digest it was read under, and its script.
+///
+/// A script has one directory entry per revision, so this names the store's
+/// whole chain walk for it. The walk's cursor is not part of it: the cursor
+/// moves as the walk reads older runs, while the wallet's page stays the same
+/// until the walk finishes.
+pub(super) fn page_continuation_id(shard: u64, digest: &str, script: &[u8]) -> Vec<u8> {
     let mut hash = Sha256::new();
-    hash.update(b"transparent-reference-page-v1");
+    hash.update(b"transparent-reference-page-v2");
     hash.update(shard.to_le_bytes());
     hash.update(digest.as_bytes());
     hash.update(script);
-    hash.update(first.to_le_bytes());
     hash.finalize().to_vec()
 }
 

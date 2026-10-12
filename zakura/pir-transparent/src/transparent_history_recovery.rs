@@ -40,7 +40,7 @@ use sync_inputs::{FloorAcceptingChain, RecordingFilterSource, watched_scripts};
 ///
 /// Every companion is bound to it, and a pass refuses a service whose init
 /// names another schema before requesting any manifest or private query.
-pub const SCHEMA: &str = "transparent-shard-v11";
+pub const SCHEMA: &str = "transparent-shard-v12";
 
 /// Identity and finite resource bounds for one account's recovery passes.
 ///

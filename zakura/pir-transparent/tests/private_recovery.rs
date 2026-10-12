@@ -65,14 +65,14 @@ const H0: u64 = 3_428_143;
 const ORIGIN: &str = "https://fixture.test";
 
 /// Every route the service serves a wallet, with its method: queries are the
-/// only uploads.
-const ROUTES: &str = r"^(GET /v1/(filters/shards(/[0-9]+/filter)?|shards/init|shards/[0-9]+/revisions/[0-9a-f]{64}/(manifest|setup/(directory|pages)/[0-9]+))|POST /v1/shards/[0-9]+/revisions/[0-9a-f]{64}/query/(directory|pages))$";
+/// only uploads. Page tables are named per page shard, `pages-<j>`.
+const ROUTES: &str = r"^(GET /v1/(filters/shards(/[0-9]+/filter)?|shards/init|shards/[0-9]+/revisions/[0-9a-f]{64}/(manifest|setup/(directory|pages-(0|[1-9][0-9]?))/[0-9]+))|POST /v1/shards/[0-9]+/revisions/[0-9a-f]{64}/query/(directory|pages-(0|[1-9][0-9]?)))$";
 
 /// The shard a request's path names: its filter, manifest, tables or queries.
 const SHARD: &str = r"^/v1/(filters/)?shards/([0-9]+)/";
 
-/// A pages query's shard and revision.
-const PAGES_QUERY: &str = r"^/v1/shards/([0-9]+)/revisions/([0-9a-f]{64})/query/pages$";
+/// A pages query's revision and page shard.
+const PAGES_QUERY: &str = r"^/v1/shards/[0-9]+/revisions/([0-9a-f]{64})/query/pages-([0-9]+)$";
 
 /// What a pass over a map that rewrites sealed history the companion's store
 /// holds, without declaring a re-cut, returns: wallet-pir refuses it before
@@ -180,6 +180,7 @@ fn sealed(start: u64, end: u64, events: Vec<(ScriptBytes, TransparentEvent)>) ->
         sealed: true,
         revision: 0,
         supersedes: String::new(),
+        page_span: 0,
         events,
     }
 }
@@ -193,6 +194,7 @@ fn tail(end: u64, revision: u32, events: Vec<(ScriptBytes, TransparentEvent)>) -
         sealed: false,
         revision,
         supersedes: String::new(),
+        page_span: 0,
         events,
     }
 }
@@ -793,15 +795,30 @@ impl Fixture {
         (dithered, nearest)
     }
 
-    /// The body length of a 44-bit pages query to one shard revision: the
-    /// 8-byte binding, then a selection over the rows its manifest fixes.
-    fn pages_query_len(&self, shard_id: u64, revision: &str) -> usize {
-        let url = self.url.as_deref().expect("a served publication");
-        let mut transport = HttpShardTransport::new(url, &HttpOptions::default()).unwrap();
-        let (raw, _) = transport.manifest(shard_id, revision).unwrap();
+    /// The body length of a 44-bit query to page shard `child` of one shard
+    /// revision, the 8-byte binding then a selection over the rows its
+    /// manifest fixes for that page shard, and whether those rows are fewer
+    /// than a whole segment. Read from the published manifest, which stays on
+    /// disk after a later publication stops serving the revision.
+    fn pages_query_len(&self, revision: &str, child: u32) -> (usize, bool) {
+        let raw = (1..=self.publications)
+            .map(|n| {
+                self.dir
+                    .path()
+                    .join(format!("publication-{n}"))
+                    .join(revision)
+                    .join("manifest.json")
+            })
+            .find_map(|path| std::fs::read(path).ok())
+            .expect("a published revision");
         let manifest: transparent_shard::manifest::ShardManifest =
             serde_json::from_slice(&raw).unwrap();
-        8 + transparent_native::request_len_bits(manifest.pages_query_rows() as usize, 44)
+        let child = manifest.child(child).expect("a declared page shard");
+        let rows = child.query_rows();
+        (
+            8 + transparent_native::request_len_bits(rows as usize, 44),
+            rows < child.page_segments[0].rows,
+        )
     }
 
     /// Asserts that every request the service received used one of its routes
@@ -858,13 +875,10 @@ impl Fixture {
         for request in requests.iter().filter(|request| request.method == "POST") {
             match pages.captures(&request.path) {
                 Some(captures) => {
-                    assert_eq!(
-                        request.body.len(),
-                        self.pages_query_len(captures[1].parse().unwrap(), &captures[2]),
-                        "a pages query to {}",
-                        request.path
-                    );
-                    prefixes += usize::from(!dithered.contains(&request.body.len()));
+                    let (len, prefix) =
+                        self.pages_query_len(&captures[1], captures[2].parse().unwrap());
+                    assert_eq!(request.body.len(), len, "a pages query to {}", request.path);
+                    prefixes += usize::from(prefix);
                 }
                 None => assert!(
                     dithered.contains(&request.body.len()),
@@ -1393,6 +1407,7 @@ fn before_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
             sealed: false,
             revision: 0,
             supersedes: String::new(),
+            page_span: 0,
             events: noise(H0 + 500, RECUT_TIP, 4),
         },
     ]
@@ -1418,6 +1433,7 @@ fn after_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
             sealed: true,
             revision: 0,
             supersedes: String::new(),
+            page_span: 0,
             events: [s1.events, s2.events].concat(),
         },
         ShardSpec { revision: 1, ..s3 },
@@ -2485,6 +2501,7 @@ fn stale_middle_retirement_batch_preserves_reconciliation_across_reopen() {
         sealed: false,
         revision: 0,
         supersedes: String::new(),
+        page_span: 0,
         events: noise(H0 + 1000, target, 5),
     });
     f.publish(&shards, SEAL);

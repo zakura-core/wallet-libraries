@@ -16,6 +16,7 @@ use transparent_filter::MAINNET_GENESIS_DISPLAY;
 use transparent_filter::wire::MAX_SUPERSEDED;
 use transparent_filter::{Recut, SealParameters, ShardMapEntry, SupersededShard};
 use transparent_wallet::client::Table;
+use transparent_wallet::store::RunCursor;
 use transparent_wallet::transport::BoxError;
 use transparent_wallet::{Acceptance, Anchor, ScriptEntry, ScriptOrigin};
 use transparent_wallet::{Completion, IncompleteReason, SyncReport, WalletStore};
@@ -137,6 +138,7 @@ fn covered(
         covered_scripts: vec![script.to_vec()],
         pending_upsert: vec![],
         pending_complete: vec![],
+        cached_runs: vec![],
     }
 }
 
@@ -327,20 +329,21 @@ fn revisions(batch: &RecoveryBatch<u32>) -> Vec<RecoveryRevision> {
         .collect()
 }
 
-/// Page work the store still owes for `script` on `entry`, from `first_page`.
-fn store_page(entry: &ShardMapEntry, script: &[u8], first_page: u32) -> PendingPages {
+/// Page work the store still owes for `script` on `entry`: the chain walk
+/// from the newest run, at `row` of the first page shard.
+fn store_page(entry: &ShardMapEntry, script: &[u8], row: u32) -> PendingPages {
     PendingPages {
         id: None,
         shard_id: entry.shard_id,
         revision_digest: entry.manifest_digest.clone(),
         script: script.to_vec(),
-        first_page,
-        page_count: 0,
-        inline: vec![],
-        next_ordinal: 0,
+        cursor: RunCursor {
+            child: 0,
+            row,
+            older_runs: None,
+        },
+        carried: vec![],
         attempts: 0,
-        validated_events: 0,
-        boundary: None,
         target_anchor: None,
     }
 }
@@ -357,11 +360,11 @@ fn resealing(map: &ShardMap, shard: usize) -> ShardMap {
 }
 
 /// The recent geometry the re-cut fixture's sealed shards and tail use.
-const NARROW: &str = "recent-4k";
+const NARROW: &str = "decoupled-2k-8k";
 
 /// The geometry the re-cut fixture merges into, standing in for an
 /// archive geometry.
-const WIDE: &str = "recent-8k";
+const WIDE: &str = "decoupled-32k-32k";
 
 /// The re-cut fixture's block at `height`: the fixture map's own at its
 /// archive shard's end, a synthetic one elsewhere.
@@ -411,18 +414,17 @@ fn superseded(entry: &ShardMapEntry) -> SupersededShard {
 }
 
 /// `shards` published under the fixture map's identity, with seal
-/// parameters for both re-cut geometries, declaring `recuts`.
+/// parameters for both re-cut geometries, declaring `recuts`. The fixture map
+/// already seals both, and keeps its parameters: changing them would change
+/// the publication set.
 fn recut_map(shards: Vec<ShardMapEntry>, recuts: Vec<Recut>) -> ShardMap {
     let mut map = map();
     for geometry in [NARROW, WIDE] {
-        map.seal.insert(
-            geometry.into(),
-            SealParameters {
-                max_scripts: 100,
-                max_page_rows: 10,
-                max_txids: 0,
-            },
-        );
+        map.seal.entry(geometry.into()).or_insert(SealParameters {
+            max_scripts: 100,
+            max_page_rows: 10,
+            max_txids: 0,
+        });
     }
     map.shards = shards;
     map.recuts = recuts;

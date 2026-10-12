@@ -12,6 +12,28 @@
 
 ### Changed
 
+- Transparent PIR shard schema v12, decoupled page shards (wallet-pir
+  `fb90519b`). `SCHEMA` is `transparent-shard-v12`: each shard is a directory
+  shard with up to 32 page shards of its own, queried as `pages-<j>` tables, and
+  an address's older events form a chain of runs across them that the reference
+  client walks newest first. The geometries are `decoupled-2k-8k` (recent) and
+  `decoupled-32k-32k` (archive). Companion file names commit to the schema, so a
+  v12 build opens new companions and never reads a v11 one; the reference store
+  is schema 5, which refuses older files instead of migrating them. Its pending
+  page work is now a chain-walk cursor with the events it carries, and its new
+  `run_cache` table keeps verified run histories by page shard identity: a store
+  rollback and cache pruning keep it, so a tip catch-up stops at the first run it
+  cached instead of re-reading sealed page shards. A publication reset empties
+  it with every other store table. A wallet page obligation is identified by
+  shard, revision and script (`transparent-reference-page-v2`), since the walk's
+  cursor moves while the obligation stays open. Request log templates elide the
+  page shard (`pages-{child}`).
+- `testing::service` publishes v12 shard sets: `ShardSpec::page_span` lays a
+  shard out in page shards of that many blocks, so a growing tail keeps its
+  sealed page shards; `GEOMETRY` is `decoupled-2k-8k` and `WIDE` is
+  `decoupled-32k-32k`. `ShardSpec` literals add the field.
+- The txid display client follows the one-query `txid-2k8` layout, carried
+  from #155 at the same wallet-pir pin.
 - `discover_active_addresses` continues past a pass its private budget stopped
   after confirming a candidate: another pass, from the same map and with the
   filters already downloaded, asks about the candidates not yet confirmed,

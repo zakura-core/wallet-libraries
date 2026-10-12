@@ -368,12 +368,7 @@ fn open_unfinished_pages<A: Copy>(
         let Some(commit) = commit_builder.commits.get_mut(&entry.key()) else {
             continue;
         };
-        let id = page_continuation_id(
-            page.shard_id,
-            &page.revision_digest,
-            &page.script,
-            page.first_page,
-        );
+        let id = page_continuation_id(page.shard_id, &page.revision_digest, &page.script);
         commit.opened_pages.push(PageRequest {
             page: id.clone(),
             addresses: vec![address.address],

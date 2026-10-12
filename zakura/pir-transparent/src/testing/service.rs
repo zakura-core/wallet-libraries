@@ -3,11 +3,17 @@
 //! requests in process, so a test reaches real filters and real PIR without a
 //! network.
 //!
-//! Adapted from wallet-pir's shard-server test fixtures at 648264bb
+//! Adapted from wallet-pir's shard-server test fixtures at fb90519b
 //! (`transparent-shard-server/tests/common/{mod,prepared}.rs`), through the
 //! crates' public APIs only. Unlike those, a test chooses every shard's range,
-//! geometry, seal state and revision, and the re-cuts a map declares, as a
-//! publisher would over time.
+//! geometry, seal state, revision and page shards, and the re-cuts a map
+//! declares, as a publisher would over time.
+//!
+//! Schema v12 publishes each shard as a directory shard with its own page
+//! shards: consecutive block ranges inside it, each its own `pages-<j>` table.
+//! An address keeps its two newest events in the directory; each older one is
+//! pushed into whichever page shard is open when the event two places after it
+//! arrives, so a long history is a chain of runs across page shards.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -22,21 +28,21 @@ use transparent_filter::{
     BlockHash, Recut, ScriptBytes, SealParameters, ShardMap, ShardMapEntry, SupersededShard,
     filter_hash,
 };
-use transparent_shard::build::build_shard;
-use transparent_shard::layout::{Geometry, RECENT_4K, RECENT_8K};
+use transparent_shard::build::{Block, build_directory_shard};
+use transparent_shard::layout::{DECOUPLED_2K_8K, DECOUPLED_32K_32K, Geometry, MAX_PAGE_CHILDREN};
 use transparent_shard::manifest::{
     ManifestLayout, ManifestOccupancy, ManifestSeal, SCHEMA, ShardManifest, TableGeometry,
+    pages_table,
 };
 use transparent_shard_server::service::{ServiceConfig, ServiceState, router};
 use transparent_shard_server::shardset::{DEFAULT_RETAIN_REVISIONS, ShardSet};
 
-/// A shard's usual geometry: the smallest one a build publishes, which keeps the
-/// tables a pass sets up and queries small.
-pub const GEOMETRY: &Geometry = &RECENT_4K;
+/// A shard's usual geometry: the recent one, 2,048 directory rows and page
+/// shards of 8,192 rows, which keeps the tables a pass sets up and queries small.
+pub const GEOMETRY: &Geometry = &DECOUPLED_2K_8K;
 
-/// The geometry a re-cut merges sealed shards into, standing in for an archive
-/// geometry, whose tables are far too large for a test.
-pub const WIDE: &Geometry = &RECENT_8K;
+/// The geometry a re-cut merges sealed shards into: the archive geometry.
+pub const WIDE: &Geometry = &DECOUPLED_32K_32K;
 
 /// The seal thresholds the publisher seals under.
 pub const SEAL: SealParameters = SealParameters {
@@ -54,8 +60,8 @@ pub fn synthetic(height: u64) -> BlockHash {
 }
 
 /// One shard of a publication: its range, geometry, whether it is sealed, its
-/// published revision, the manifest digest that revision supersedes, and every
-/// event in it, keyed by the script it concerns.
+/// published revision, the manifest digest that revision supersedes, its page
+/// shards, and every event in it, keyed by the script it concerns.
 pub struct ShardSpec {
     pub start: u64,
     pub end: u64,
@@ -65,11 +71,17 @@ pub struct ShardSpec {
     /// Empty for a first revision. A republished tail names the digest it
     /// replaces, as a continuous publisher does; nothing in a pass reads it.
     pub supersedes: String,
+    /// Blocks per page shard, counted from `start`; the last page shard ends
+    /// at `end` and may be shorter. Zero lays out one page shard over the
+    /// whole range. A growing tail republished with the same span keeps its
+    /// earlier page shards, sealed and byte for byte, as a publisher does.
+    pub page_span: u64,
     pub events: Vec<(ScriptBytes, TransparentEvent)>,
 }
 
 impl ShardSpec {
-    /// The first revision of a shard over `start..=end` in [`GEOMETRY`].
+    /// The first revision of a shard over `start..=end` in [`GEOMETRY`], with
+    /// one page shard.
     pub fn first(
         start: u64,
         end: u64,
@@ -83,16 +95,33 @@ impl ShardSpec {
             sealed,
             revision: 0,
             supersedes: String::new(),
+            page_span: 0,
             events,
         }
+    }
+
+    /// The heights its page shards end at, ascending, the last at `end`.
+    pub fn page_ends(&self) -> Vec<u64> {
+        if self.page_span == 0 {
+            return vec![self.end];
+        }
+        let mut ends: Vec<u64> = (self.start + self.page_span - 1..self.end)
+            .step_by(self.page_span as usize)
+            .collect();
+        ends.push(self.end);
+        assert!(
+            ends.len() <= MAX_PAGE_CHILDREN as usize,
+            "a directory shard holds at most {MAX_PAGE_CHILDREN} page shards"
+        );
+        ends
     }
 }
 
 /// Writes a publishable shard set for `shards`, numbered from zero, to `dir`,
 /// as the publisher would: one directory per manifest digest and the map in
 /// `shards.json`, declaring `recuts`. `hash` gives each shard's parent and
-/// terminal block. Every geometry a shard or a declaration names is sealed
-/// under `seal`. Returns the map.
+/// terminal block, and each page shard's terminal block. Every geometry a shard
+/// or a declaration names is sealed under `seal`. Returns the map.
 pub fn publish(
     dir: &Path,
     shards: &[ShardSpec],
@@ -106,31 +135,38 @@ pub fn publish(
     let mut parent_digest = String::new();
     for (shard_id, spec) in shards.iter().enumerate() {
         let shard_id = shard_id as u64;
-        let built = build_shard(
+        let geometry = spec.geometry;
+        let blocks: Vec<Block> = (spec.start..=spec.end)
+            .map(|height| {
+                let events = spec
+                    .events
+                    .iter()
+                    .filter(|(_, event)| u64::from(event.height()) == height)
+                    .cloned()
+                    .collect();
+                (height, events)
+            })
+            .collect();
+        let (built, children) = build_directory_shard(
             shard_id,
-            spec.start,
-            spec.end,
+            geometry,
             genesis,
-            hash(spec.end),
             transparent_filter::RANGE_PROFILE,
-            spec.geometry,
-            &spec.events,
+            blocks,
+            &spec.page_ends(),
+            &hash,
+            spec.sealed,
         )
         .expect("a buildable shard");
-        let segments = |tables: &[Vec<u8>], rows: u64, row_bytes: usize| -> Vec<TableGeometry> {
-            tables
-                .iter()
-                .map(|segment| TableGeometry {
-                    rows,
-                    row_bytes: row_bytes as u32,
-                    sha256: hex::encode(Sha256::digest(segment)),
-                })
-                .collect()
-        };
+        let page_children: Vec<_> = children
+            .iter()
+            .map(|child| child.describe(geometry))
+            .collect();
+        let directory_bytes = geometry.directory_bytes_per_segment();
         let manifest = ShardManifest {
             schema: SCHEMA.to_string(),
             profile: transparent_filter::RANGE_PROFILE.to_string(),
-            geometry: spec.geometry.name.to_string(),
+            geometry: geometry.name.to_string(),
             network: transparent_filter::NETWORK.to_string(),
             genesis_hash: transparent_filter::MAINNET_GENESIS_DISPLAY.to_string(),
             shard_id,
@@ -146,39 +182,44 @@ pub fn publish(
             seal: ManifestSeal {
                 scripts_target: seal.max_scripts,
                 scripts_capacity: seal.max_scripts * 2,
+                directory_bytes_target: directory_bytes - directory_bytes / 7,
+                directory_bytes_capacity: directory_bytes,
                 page_rows_target: seal.max_page_rows,
                 page_rows_capacity: seal.max_page_rows * 2,
+                max_page_children: MAX_PAGE_CHILDREN,
             },
-            layout: ManifestLayout {
-                max_script_bytes: transparent_shard::MAX_SCRIPT_BYTES as u32,
-                inline_events: transparent_shard::INLINE_EVENTS,
-                events_per_page: transparent_shard::EVENTS_PER_PAGE,
-                page_row_header_bytes: transparent_shard::PAGE_ROW_HEADER_BYTES as u32,
-                page_entry_header_bytes: transparent_shard::PAGE_ENTRY_HEADER_BYTES as u32,
-                directory_choices: transparent_shard::build::DIRECTORY_CHOICES as u32,
-            },
+            layout: ManifestLayout::current(),
             filter_hash: filter_hash(built.filter.as_slice()).to_display_hex(),
-            directory_segments: segments(
-                &built.directory,
-                spec.geometry.directory_rows,
-                spec.geometry.directory_row_bytes,
-            ),
-            page_segments: segments(
-                &built.pages,
-                spec.geometry.page_rows,
-                spec.geometry.page_row_bytes,
-            ),
+            directory_segments: built
+                .directory
+                .iter()
+                .map(|segment| TableGeometry {
+                    rows: geometry.directory_rows,
+                    row_bytes: geometry.directory_row_bytes as u32,
+                    sha256: hex::encode(Sha256::digest(segment)),
+                })
+                .collect(),
             occupancy: ManifestOccupancy {
                 scripts: built.scripts,
-                page_rows: built.page_rows,
-                fragments: built.fragments,
+                page_rows: page_children
+                    .iter()
+                    .map(|child| child.occupancy.page_rows)
+                    .sum(),
+                fragments: page_children
+                    .iter()
+                    .map(|child| child.occupancy.fragments)
+                    .sum(),
                 events: built.events,
                 blocks: spec.end - spec.start + 1,
                 txids: 0,
                 excluded_scripts: built.excluded_scripts,
             },
+            page_children,
             directory_choice: None,
         };
+        manifest
+            .check_children(geometry.page_rows, geometry.page_row_bytes as u32)
+            .expect("well-formed page shards");
         let digest = manifest.digest();
         let shard_dir = dir.join(&digest);
         std::fs::create_dir_all(&shard_dir).expect("a shard directory");
@@ -190,22 +231,28 @@ pub fn publish(
         for (index, segment) in built.directory.iter().enumerate() {
             write(format!("directory.{index}.bin"), segment);
         }
-        for (index, segment) in built.pages.iter().enumerate() {
-            write(format!("pages.{index}.bin"), segment);
+        for child in &children {
+            for segment in 0..child.segments {
+                write(
+                    format!("{}.{segment}.bin", pages_table(child.index)),
+                    &child.segment(geometry, segment),
+                );
+            }
         }
         entries.push(ShardMapEntry {
             shard_id,
-            geometry: spec.geometry.name.to_string(),
+            geometry: geometry.name.to_string(),
             start_height: spec.start,
             end_height: spec.end,
             parent_block_hash: manifest.parent_block_hash.clone(),
             terminal_block_hash: manifest.terminal_block_hash.clone(),
             filter_hash: manifest.filter_hash.clone(),
             scripts: built.scripts,
-            page_rows: built.page_rows,
+            page_rows: manifest.occupancy.page_rows,
             txids: 0,
             directory_segments: built.directory_segments(),
-            page_segments: built.page_segments(),
+            // Counts page shards in schema v12.
+            page_segments: manifest.page_children.len() as u32,
             manifest_digest: digest.clone(),
             revision: spec.revision,
             sealed: spec.sealed,

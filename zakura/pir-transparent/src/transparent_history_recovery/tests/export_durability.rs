@@ -68,6 +68,7 @@ fn normalized_events_preserve_attribution_and_local_shard_anchor_after_reopen() 
             covered_scripts: vec![script],
             pending_upsert: vec![],
             pending_complete: vec![],
+            cached_runs: vec![],
         })
         .unwrap();
     let first = adapter
@@ -296,6 +297,7 @@ fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
             covered_scripts: scripts.clone(),
             pending_upsert: vec![],
             pending_complete: vec![],
+            cached_runs: vec![],
         })
         .unwrap();
     let first = adapter
@@ -384,6 +386,7 @@ fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
             covered_scripts: scripts,
             pending_upsert: vec![],
             pending_complete: vec![],
+            cached_runs: vec![],
         })
         .unwrap();
     let replacement = adapter

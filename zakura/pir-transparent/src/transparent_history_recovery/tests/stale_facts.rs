@@ -38,20 +38,7 @@ fn stale_store_facts_drop_their_shard_instead_of_failing() {
         &script,
         vec![receive(tail, 2)],
     );
-    open.pending_upsert = vec![PendingPages {
-        id: None,
-        shard_id: tail.shard_id,
-        revision_digest: tail.manifest_digest.clone(),
-        script: script.clone(),
-        first_page: 3,
-        page_count: 0,
-        inline: vec![],
-        next_ordinal: 0,
-        attempts: 0,
-        validated_events: 0,
-        boundary: None,
-        target_anchor: None,
-    }];
+    open.pending_upsert = vec![store_page(tail, &script, 3)];
     adapter.store.commit_shard(open).unwrap();
     let first = pass(&mut adapter, &map);
     assert_eq!(first.state, BatchState::Ready);

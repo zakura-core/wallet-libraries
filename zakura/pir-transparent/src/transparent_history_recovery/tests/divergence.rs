@@ -121,20 +121,7 @@ fn a_publication_diverging_from_the_sync_is_pending_and_keeps_the_companion() {
     let end = (tail.end_height, tail.terminal_block_hash.as_str());
     let mut open = covered(tail, &tail.manifest_digest, end, &script, vec![]);
     open.covered_scripts.clear();
-    open.pending_upsert = vec![PendingPages {
-        id: None,
-        shard_id: tail.shard_id,
-        revision_digest: tail.manifest_digest.clone(),
-        script: script.clone(),
-        first_page: 0,
-        page_count: 0,
-        inline: vec![],
-        next_ordinal: 0,
-        attempts: 0,
-        validated_events: 0,
-        boundary: None,
-        target_anchor: None,
-    }];
+    open.pending_upsert = vec![store_page(tail, &script, 0)];
     adapter.store.commit_shard(open).unwrap();
     let catalog = (cataloged(&adapter), exported(&adapter));
     let mut behind = first.clone();

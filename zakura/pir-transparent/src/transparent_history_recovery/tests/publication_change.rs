@@ -14,7 +14,7 @@ fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
     let dir = tempfile::tempdir().unwrap();
     let mut adapter = covering(&dir.path().join("companion.sqlite"), &map);
     // Every store table holds something: a receive and its spend, a pending
-    // page, cached filter and setup, and a committed anchor.
+    // page, a cached run, cached filter and setup, and a committed anchor.
     let receive = TransparentEvent::Receive(transparent_events::ReceiveEvent {
         metadata: None,
         height: sealed.start_height as u32,
@@ -42,24 +42,16 @@ fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
         vec![receive, spend],
     );
     events.covered_scripts.clear();
+    events.cached_runs = vec![transparent_wallet::store::CachedRun {
+        child_digest: "cd".repeat(32),
+        script: script.clone(),
+        events: vec![receive],
+    }];
     adapter.store.commit_shard(events).unwrap();
     let end = (tail.end_height, tail.terminal_block_hash.as_str());
     let mut open = covered(tail, &tail.manifest_digest, end, &script, vec![]);
     open.covered_scripts.clear();
-    open.pending_upsert = vec![PendingPages {
-        id: None,
-        shard_id: tail.shard_id,
-        revision_digest: tail.manifest_digest.clone(),
-        script: script.clone(),
-        first_page: 3,
-        page_count: 0,
-        inline: vec![],
-        next_ordinal: 0,
-        attempts: 0,
-        validated_events: 0,
-        boundary: None,
-        target_anchor: None,
-    }];
+    open.pending_upsert = vec![store_page(tail, &script, 3)];
     adapter.store.commit_shard(open).unwrap();
     adapter
         .store
@@ -107,7 +99,7 @@ fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
     assert!(deferred.commits.is_empty());
     assert_eq!(exported(&adapter), vec![(ARCHIVE, 1), (TAIL, 1)]);
     let held = store_rows(&adapter);
-    assert_eq!(held.len(), 9);
+    assert_eq!(held.len(), 10);
     for (table, rows) in held {
         assert!(rows > 0, "{table}");
     }
@@ -116,7 +108,7 @@ fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
     // emptied every store table but the schema version.
     publication_change(&mut adapter, &resealed);
     let reset = store_rows(&adapter);
-    assert_eq!(reset.len(), 9);
+    assert_eq!(reset.len(), 10);
     for (table, rows) in reset {
         assert_eq!(rows, u64::from(table == "wallet_meta"), "{table}");
     }
