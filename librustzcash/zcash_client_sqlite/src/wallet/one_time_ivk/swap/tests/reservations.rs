@@ -173,7 +173,10 @@ fn active_from(st: &State, key: KeyId) -> Option<BlockHeight> {
         .query_row(
             "SELECT active_from FROM ironwood_receiving_keys
              WHERE purpose = ?1 AND key_index = ?2 AND closed_at IS NULL",
-            rusqlite::params![purpose_code(key.purpose()), key.index().to_be_bytes()],
+            rusqlite::params![
+                purpose_code(key.purpose()).unwrap(),
+                key.index().to_be_bytes()
+            ],
             |r| r.get::<_, Option<u32>>(0),
         )
         .optional()
