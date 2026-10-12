@@ -1527,6 +1527,93 @@ fn a_history_across_page_shards_recovers_and_catch_up_stops_at_the_cached_run() 
     fresh.assert_private(&[0, 1, 2]);
 }
 
+/// A real page lookup respects small query and byte budgets and resumes from
+/// SQLite after every pass, including midway through a run with many fragments.
+#[test]
+fn small_page_budgets_recover_a_long_history_across_restarts() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    for (queries, private_bytes) in [(1, 96 << 20), (256, 1)] {
+        let birthday = H0 + 600;
+        let mut f = Fixture::new(birthday, H0 + 619);
+        f.trust_service();
+        let address = f.derived(TransparentKeyScope::EXTERNAL, 0);
+        let mut shards = decoupled(address, H0 + 619, 0);
+        shards[3]
+            .events
+            .retain(|(owner, _)| *owner != script(address));
+        shards[3].events.extend((0..200).map(|index| {
+            (
+                script(address),
+                receive(birthday + 1, txid(500), index, 10_000),
+            )
+        }));
+        f.publish(&shards, SEAL);
+        // First retrieve only the directory, leaving an uncached page walk.
+        f.companion = None;
+        let mut bounded = config(f.account);
+        bounded.queries = 1;
+        let account = f.account_name();
+        f.companion = Some(
+            f.companions()
+                .open(
+                    &account,
+                    bounded,
+                    || Ok(BTreeSet::from([account.clone()])),
+                    &|| false,
+                )
+                .unwrap(),
+        );
+        f.pass().unwrap();
+        let mut complete = false;
+        let mut saved_fragments = false;
+        for _ in 0..40 {
+            f.companion = None;
+            let mut bounded = config(f.account);
+            bounded.queries = queries;
+            bounded.private_bytes = private_bytes;
+            f.companion = Some(
+                f.companions()
+                    .open(
+                        &account,
+                        bounded,
+                        || Ok(BTreeSet::from([account.clone()])),
+                        &|| false,
+                    )
+                    .unwrap(),
+            );
+            let seen = f.server.requests().len();
+            let pass = f.pass().unwrap();
+            assert!(
+                f.pages_queries(seen).len() <= 1,
+                "a one-query or one-byte pass dispatched more than one page query"
+            );
+            saved_fragments |= f
+                .companion_db()
+                .query_row(
+                    "SELECT COUNT(*) FROM pending_work WHERE length(fragments) > 0",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+                > 0;
+            if pass.batch.progress.outcome == Outcome::Complete {
+                complete = true;
+                break;
+            }
+        }
+        assert!(saved_fragments, "a partial run was saved across a restart");
+        assert!(
+            complete,
+            "small-budget passes finish rather than repeat the head"
+        );
+        f.activate();
+        let mut expected: Vec<_> = (0..200).map(|index| outpoint(txid(500), index)).collect();
+        expected.sort_by_key(|outpoint| (*outpoint.hash(), outpoint.n()));
+        assert_eq!(f.spendable().unwrap(), expected);
+        f.assert_private(&[0, 1, 2]);
+    }
+}
+
 /// The last height the re-cut tests publish, and the wallet's tip.
 const RECUT_TIP: u64 = H0 + 549;
 

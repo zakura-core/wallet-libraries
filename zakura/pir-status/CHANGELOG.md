@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc1] - PLANNED
+
+### Packaging
+
+- Include the MIT and Apache license texts in the crate package.
+
 ### Changed
 
 - Queries upload a selection dithered to 44 bits instead of rounded to nearest
@@ -9,6 +15,8 @@
   protocol `status-pir-v3-native-two-mask-m29`, the `SPN1` magic and the
   session material are unchanged. Requires a server that accepts 44-bit
   requests; earlier servers reject them by length.
+
+- Updated the native PIR dependency to `0.0.1-rc1`.
 
 ## [0.0.1-rc0] - 2026-09-27
 

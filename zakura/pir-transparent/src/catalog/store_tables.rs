@@ -14,13 +14,13 @@ use crate::error::{RecoveryError, failure};
 // version under `schema_version`, and that `last_commit` reads only the highest
 // commit id, before accepting another store schema.
 //
-// Schema 5 is not a migration of 4: the store refuses a file at any other
+// Schema 6 is a fresh format with saved run fragments: the store refuses a file at any other
 // version. A companion's file name commits to the shard schema (see
 // `companion`), so a schema-v12 companion never opens a file a schema-v11 build
 // wrote.
-const _: () = assert!(transparent_wallet_store::SCHEMA_VERSION == 5);
+const _: () = assert!(transparent_wallet_store::SCHEMA_VERSION == 6);
 
-/// The reference store's tables at schema version 5, besides `wallet_meta`.
+/// The reference store's tables at schema version 6, besides `wallet_meta`.
 ///
 /// `run_cache` holds verified run histories keyed by page shard identity. The
 /// store keeps it across a rollback, and pruning leaves it alone: a superseded

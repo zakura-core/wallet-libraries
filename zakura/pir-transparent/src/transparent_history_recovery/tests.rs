@@ -343,6 +343,7 @@ fn store_page(entry: &ShardMapEntry, script: &[u8], row: u32) -> PendingPages {
             older_runs: None,
         },
         carried: vec![],
+        fragments: vec![],
         attempts: 0,
         target_anchor: None,
     }

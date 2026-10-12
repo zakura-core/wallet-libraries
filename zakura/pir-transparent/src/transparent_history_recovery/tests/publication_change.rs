@@ -45,6 +45,8 @@ fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
     events.cached_runs = vec![transparent_wallet::store::CachedRun {
         child_digest: "cd".repeat(32),
         script: script.clone(),
+        shard_id: sealed.shard_id,
+        older: None,
         events: vec![receive],
     }];
     adapter.store.commit_shard(events).unwrap();

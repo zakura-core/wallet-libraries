@@ -4681,6 +4681,86 @@ pub(crate) fn truncate_to_chain_state<P: consensus::Parameters, CL, R>(
     Ok(())
 }
 
+/// Returns the height at or above `floor` to which [`rewind_to_chain_state`] truncates the
+/// note commitment trees of the pools with the given table prefixes: the lowest checkpoint at
+/// or above `floor` retained by any of them, skipping each height that a pool's checkpoints
+/// straddle (classified [`TreeTruncation::DivergedCheckpoints`] by [`plan_tree_truncation`])
+/// while that pool retains nothing but anchors below it. Returns `None` if no pool retains a
+/// checkpoint at or above `floor`.
+///
+/// Pools prune their oldest checkpoints independently. A scan batch prunes each pool's tree
+/// after inserting that pool's own commitments, and only then adds the checkpoints that the
+/// other pools contributed, so a pool with few commitments in the batch keeps older
+/// checkpoints than a pool with many. The lowest checkpoint retained by any pool can therefore
+/// lie below another pool's oldest ordinary checkpoint while that pool still retains ZIP 318
+/// anchors further down. Such a height is skipped. A pool that straddles a height with an
+/// ordinary checkpoint below it is missing a checkpoint inside its own window; that height is
+/// returned, and the truncation reports the pool as corrupted.
+///
+/// The search always returns a height when there is a candidate: no pool retains a checkpoint
+/// above the highest one, so no pool's checkpoints straddle it.
+fn rewind_truncation_height(
+    conn: &rusqlite::Transaction,
+    pool_table_prefixes: &[&'static str],
+    floor: BlockHeight,
+    rescan_floor: BlockHeight,
+) -> Result<Option<BlockHeight>, SqliteClientError> {
+    let mut search_floor = floor;
+    loop {
+        let mut candidate: Option<BlockHeight> = None;
+        for &table_prefix in pool_table_prefixes {
+            let pool_floor =
+                commitment_tree::min_checkpoint_id_at_or_above(conn, table_prefix, search_floor)
+                    .map_err(ShardTreeError::Storage)?;
+            candidate = candidate.into_iter().chain(pool_floor).min();
+        }
+        let Some(candidate) = candidate else {
+            return Ok(None);
+        };
+
+        let mut straddled = false;
+        for &table_prefix in pool_table_prefixes {
+            if let TreeTruncation::DivergedCheckpoints =
+                plan_tree_truncation(conn, table_prefix, candidate, rescan_floor)?
+            {
+                // A pool whose only checkpoints below the candidate are retained anchors pruned
+                // its ordinary checkpoints earlier than the pools that retain the candidate, and
+                // the height is skipped. A pool that also retains ordinary checkpoints below it
+                // is missing a checkpoint inside its window; the truncation reports that.
+                if has_ordinary_checkpoint_below(conn, table_prefix, candidate)? {
+                    return Ok(Some(candidate));
+                }
+                straddled = true;
+            }
+        }
+        if !straddled {
+            return Ok(Some(candidate));
+        }
+        search_floor = candidate + 1;
+    }
+}
+
+/// Returns whether the pool with the given table prefix retains a checkpoint below `height`
+/// that is not a retained anchor.
+fn has_ordinary_checkpoint_below(
+    conn: &rusqlite::Connection,
+    table_prefix: &str,
+    height: BlockHeight,
+) -> Result<bool, rusqlite::Error> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(
+                 SELECT 1 FROM {table_prefix}_tree_checkpoints c
+                 WHERE c.checkpoint_id < :height
+                 AND NOT EXISTS (
+                     SELECT 1 FROM {table_prefix}_tree_retained_checkpoints r
+                     WHERE r.checkpoint_id = c.checkpoint_id))"
+        ),
+        named_params![":height": u32::from(height)],
+        |row| row.get(0),
+    )
+}
+
 /// Rewinds the wallet to the specified chain state, preserving wallet data which has been
 /// confirmed beyond the pruning depth, and resetting the birthday height of specified accounts
 /// to the block following the chain state.
@@ -4691,11 +4771,14 @@ pub(crate) fn truncate_to_chain_state<P: consensus::Parameters, CL, R>(
 /// trees, transactions, transparent UTXO observations, and nullifier-map entries only as far
 /// back as the pruning floor (`chain_tip - (PRUNING_DEPTH - 1)`). Data at or below that height
 /// is preserved. Because `PRUNING_DEPTH` is a property of chain depth, the floor is derived
-/// from the wallet's view of the chain tip rather than from `MAX(blocks.height)`.
+/// from the wallet's view of the chain tip (the end of the scan queue, or `MAX(blocks.height)`
+/// if that is higher) rather than from `MAX(blocks.height)` alone. A rewind lowers
+/// `MAX(blocks.height)` but preserves the chain tip, so successive rewinds with no scan in
+/// between share one floor instead of each reaching up to `PRUNING_DEPTH - 1` blocks deeper.
 ///
 /// The floor is clamped to an actual shard-tree checkpoint at or above the pruning floor —
-/// the deepest such checkpoint retained by *any* pool (via
-/// [`commitment_tree::min_checkpoint_id_at_or_above`]) — so that
+/// the deepest such checkpoint retained by *any* pool, skipping heights that a pool straddles
+/// while retaining only anchors below them (via [`rewind_truncation_height`]) — so that
 /// [`truncate_to_height_internal`] has a real checkpoint to truncate to under non-contiguous
 /// scan orders. When no pool retains such a checkpoint, no tree holds state above the target,
 /// and the wallet is truncated at the target itself with every tree left untouched. Scanning
@@ -4705,7 +4788,9 @@ pub(crate) fn truncate_to_chain_state<P: consensus::Parameters, CL, R>(
 /// per-pool [`TreeTruncation`] classification: a tree with no checkpoint above the height is
 /// left untouched, a tree whose checkpoints all lie above it is reset to its completed
 /// subtree roots (with the requeued rescan re-creating the rest), and a tree whose
-/// checkpoints straddle it without one at it is reported as corrupted.
+/// checkpoints straddle it without one at it is reported as corrupted. Because pools prune
+/// their oldest checkpoints independently, a height that a pool straddles while retaining only
+/// anchors below it is not chosen in the first place.
 ///
 /// The scan-queue range above the rewind target is overwritten with a `Historic` rescan range
 /// extending up to the wallet's pre-rewind chain tip (computed from `MAX(block_range_end)` of
@@ -4722,7 +4807,7 @@ pub(crate) fn truncate_to_chain_state<P: consensus::Parameters, CL, R>(
 /// empty *and* every account in the wallet has a birthday greater than
 /// `chain_state.block_height() + 1`. Returns `Err(RewindError::DataSource(_))` with a
 /// `CorruptedData` payload if `reset_account_birthdays` contains any account UUID that is not
-/// present in the wallet, or if a pool's note commitment tree retains checkpoints that
+/// present in the wallet, or if a pool's note commitment tree retains ordinary checkpoints that
 /// straddle the truncation height without one at it (see [`plan_tree_truncation`]); and with
 /// a `RequestedRewindInvalid` payload if discarding a pool tree's scanned state would destroy
 /// witness data for notes below the rewind target that the requeued rescan would not
@@ -4782,7 +4867,8 @@ pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
     }
 
     // Capture the chain tip from the scan queue before any mutation; we use it as the upper
-    // bound of the rescan range we install above the rewind target.
+    // bound of the rescan range we install above the rewind target, and as the top of the
+    // pruning window.
     let chain_tip = chain_tip_height(conn).map_err(|e| RewindError::DataSource(e.into()))?;
 
     // Truncate wallet data above the pruning floor only when the target is below the wallet's
@@ -4793,19 +4879,26 @@ pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
         .map(|m| m.block_height())
         && target_height < max_scanned_height
     {
-        // Compute the floor height of the pruning window.
-        let pruning_floor = max_scanned_height.saturating_sub(PRUNING_DEPTH - 1);
+        // Compute the floor height of the pruning window from the wallet's view of the chain
+        // tip. A rewind lowers `MAX(blocks.height)` but preserves the chain tip, so a floor
+        // taken from the former would drop by up to `PRUNING_DEPTH - 1` blocks with every
+        // successive rewind that no scan separates, below the heights at which the pools'
+        // trees are guaranteed to retain the same checkpoints. The max scanned height bounds
+        // it from below, so the floor is never lower than the window of scanned blocks.
+        let window_top = chain_tip.map_or(max_scanned_height, |tip| tip.max(max_scanned_height));
+        let pruning_floor = window_top.saturating_sub(PRUNING_DEPTH - 1);
         let truncation_target = target_height.max(pruning_floor);
 
         // Determine the height to which the note commitment trees can actually be truncated:
-        // the deepest checkpoint at or above `truncation_target` retained by any pool. In a
-        // fully-scanned wallet every pool retains the same checkpoint heights, so the floors
-        // coincide; they diverge only when a pool's tree does not (yet) cover the window,
-        // e.g. because a `*_shardtree` migration recently created its tables and the requeued
-        // rescan has not caught up. `truncate_to_height_internal` classifies each pool
-        // against the chosen height individually (see [`TreeTruncation`]), so a pool whose
-        // checkpoints do not include that height is tolerated whenever the truncation leaves
-        // its tree in a consistent state.
+        // the deepest checkpoint at or above `truncation_target`, retained by any pool, that no
+        // pool straddles while retaining only anchors below it (see
+        // [`rewind_truncation_height`]). The pools' checkpoint floors differ when a pool's tree does not (yet) cover the window, e.g.
+        // because a `*_shardtree` migration recently created its tables and the requeued
+        // rescan has not caught up, and also in a fully-scanned wallet, whose pools prune
+        // their oldest checkpoints independently. `truncate_to_height_internal` classifies
+        // each pool against the chosen height individually (see [`TreeTruncation`]), so a
+        // pool whose checkpoints do not include that height is tolerated whenever the
+        // truncation leaves its tree in a consistent state.
         let pool_table_prefixes: &[&'static str] = &[
             crate::SAPLING_TABLES_PREFIX,
             #[cfg(feature = "orchard")]
@@ -4813,18 +4906,9 @@ pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
             #[cfg(feature = "orchard")]
             crate::IRONWOOD_TABLES_PREFIX,
         ];
-        let mut window_floor: Option<BlockHeight> = None;
-        for &table_prefix in pool_table_prefixes {
-            let pool_floor = commitment_tree::min_checkpoint_id_at_or_above(
-                conn,
-                table_prefix,
-                truncation_target,
-            )
-            .map_err(ShardTreeError::Storage)
-            .map_err(SqliteClientError::from)
-            .map_err(RewindError::DataSource)?;
-            window_floor = window_floor.into_iter().chain(pool_floor).min();
-        }
+        let window_floor =
+            rewind_truncation_height(conn, pool_table_prefixes, truncation_target, target_height)
+                .map_err(RewindError::DataSource)?;
 
         // When no pool retains a checkpoint at or above `truncation_target`, no tree holds
         // state above it: scanning checkpoints every block that appends a note commitment,
@@ -6280,7 +6364,7 @@ mod tests {
     use super::{
         KeyScope, ShieldedPool, TxQueryType, TxRef, account_birthday,
         flag_previously_received_change, min_shared_checkpoint_height, queue_tx_retrieval,
-        select_truncation_height,
+        rewind_truncation_height, select_truncation_height,
     };
 
     use incrementalmerkletree::frontier::Frontier;
@@ -6398,6 +6482,73 @@ mod tests {
         assert_eq!(
             select_truncation_height(&tx, BlockHeight::from_u32(10)).unwrap(),
             BlockHeight::from_u32(9),
+        );
+    }
+
+    /// The rewind counterpart of `truncation_height_rejects_straddling_ironwood_checkpoints`.
+    /// A scan batch whose last block carries only an Ironwood output leaves Sapling and Orchard
+    /// with one more old checkpoint (198) than Ironwood, whose oldest ordinary checkpoint is 199
+    /// while it still retains an anchor (80) further down. The lowest checkpoint any pool
+    /// retains at or above the floor is then straddled by Ironwood's checkpoints with only an
+    /// anchor below, so the rewind truncates at the next one, which every pool retains.
+    #[test]
+    fn rewind_truncation_height_skips_heights_a_pool_straddles() {
+        let mut conn = connection_with_checkpoint_tables();
+        conn.execute_batch(
+            "INSERT INTO sapling_tree_checkpoints (checkpoint_id) VALUES (80), (198), (199), (200);
+             INSERT INTO orchard_tree_checkpoints (checkpoint_id) VALUES (80), (198), (199), (200);
+             INSERT INTO ironwood_tree_checkpoints (checkpoint_id) VALUES (80), (199), (200);
+             CREATE TABLE sapling_tree_retained_checkpoints (checkpoint_id INTEGER PRIMARY KEY);
+             CREATE TABLE orchard_tree_retained_checkpoints (checkpoint_id INTEGER PRIMARY KEY);
+             CREATE TABLE ironwood_tree_retained_checkpoints (checkpoint_id INTEGER PRIMARY KEY);
+             INSERT INTO sapling_tree_retained_checkpoints (checkpoint_id) VALUES (80);
+             INSERT INTO orchard_tree_retained_checkpoints (checkpoint_id) VALUES (80);
+             INSERT INTO ironwood_tree_retained_checkpoints (checkpoint_id) VALUES (80);",
+        )
+        .unwrap();
+
+        let tx = conn.transaction().unwrap();
+        let pools = [
+            crate::SAPLING_TABLES_PREFIX,
+            crate::ORCHARD_TABLES_PREFIX,
+            crate::IRONWOOD_TABLES_PREFIX,
+        ];
+        let rescan_floor = BlockHeight::from_u32(9);
+        assert_eq!(
+            rewind_truncation_height(&tx, &pools, BlockHeight::from_u32(101), rescan_floor)
+                .unwrap(),
+            Some(BlockHeight::from_u32(199)),
+        );
+        // A floor at a height every pool retains selects that height, and a floor below the
+        // anchor selects the anchor, which every pool retains.
+        assert_eq!(
+            rewind_truncation_height(&tx, &pools, BlockHeight::from_u32(199), rescan_floor)
+                .unwrap(),
+            Some(BlockHeight::from_u32(199)),
+        );
+        assert_eq!(
+            rewind_truncation_height(&tx, &pools, BlockHeight::from_u32(10), rescan_floor).unwrap(),
+            Some(BlockHeight::from_u32(80)),
+        );
+        // No pool retains a checkpoint at or above the floor.
+        assert_eq!(
+            rewind_truncation_height(&tx, &pools, BlockHeight::from_u32(201), rescan_floor)
+                .unwrap(),
+            None,
+        );
+
+        // A pool that also retains an ordinary checkpoint below a height it straddles is
+        // missing a checkpoint inside its own window. That height is returned rather than
+        // skipped, so that the truncation reports the pool as corrupted.
+        tx.execute(
+            "INSERT INTO ironwood_tree_checkpoints (checkpoint_id) VALUES (150)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            rewind_truncation_height(&tx, &pools, BlockHeight::from_u32(101), rescan_floor)
+                .unwrap(),
+            Some(BlockHeight::from_u32(198)),
         );
     }
 
@@ -8134,3 +8285,6 @@ mod tests {
 
 #[cfg(test)]
 mod request_lifecycle_tests;
+
+#[cfg(test)]
+mod rewind_floor_tests;

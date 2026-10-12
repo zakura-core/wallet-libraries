@@ -10,190 +10,58 @@ workspace.
 
 ## [Unreleased]
 
-### Added
-- `transparent_ledger::AccountActivity` and `TransactionHistoryDetails::activity`: the activity
-  rows private recovery reconstructs for the account (an inferred payment, a fee-only
-  self-transfer, a hidden funding step, an inferred outgoing value, a provisional debit, or the
-  outputs it links), with each row's amount and the outputs it counts (`ActivityOutputs`,
-  `OutputRef`), or `Unknown` where no rule applies. The rules reproduce Vizor's decisions for
-  privately recovered transactions, except where `docs/account-history-summaries.md` lists a
-  difference. They read the history evidence and the account's outputs, never display facts;
-  shieldings, pool migrations, labels, the fee each row shows, and grouping across transactions
-  remain the wallet's, which classifies shieldings and migrations before reading the activity.
-- `TransparentDetailRead::transaction_receipt`, returning `TransactionReceipt`: the history
-  view, the transparent detail view and their `ReceiptAttribution` (a send's recipient as an
-  `Attribution`, the `ReceiptSource` with its `SourcePool`, settled effects, and whether the
-  recipient or a transparent receipt completes the receipt) from one read, reproducing Vizor's
-  receipt rules. Shared or mixed funding blocks
-  attribution. It is a display-level conclusion, separate from `DetailCompleteness`, and never
-  changes the history view. This is a new required trait method.
-- `TransparentLedgerWrite::forget_transparent_ledger`, behind `transparent-inputs`, and its
-  result `ForgottenTransparentLedger`: under `Public`, atomically removes what private recovery
-  alone contributed, so a publication's facts do not outlive the policy that admitted them.
-  This is a new required trait method: external implementors of `TransparentLedgerWrite` must
-  add it.
-- `transparent_ledger::{TransparentDetailRead, TransparentDetailWrite}` (prototype): durable
-  transparent txid enhancement work (`transparent_detail_work`, returning the requests with the
-  mode and policy generation of the same snapshot as `TransparentDetailWork`, the due ones among
-  the caller's `prefer` first and outside its `limit`;
-  `transparent_detail_parked`, reporting work that waits for a display map change under the
-  caller's map as `TransparentDetailParked`, with a refresh time bounded by
-  `TRANSPARENT_DISPLAY_MAP_RECHECK`), validated
-  `TransparentDisplayFacts` (`store_transparent_display`, returning `TransparentDisplayStore`),
-  library-computed backoff (`defer_transparent_detail` with the request's mined height,
-  `TransparentDetailOutcome` and the listing's policy generation, ignoring results for a
-  changed placement and failing as stale under a changed policy), and the
-  detail view (`transparent_display_view`, returning `TransparentDisplayView`). Display facts
-  are one fixed-size display entry: the first address-shaped sender
-  (`TransparentDisplaySender`), at most two outputs (`TRANSPARENT_DISPLAY_OUTPUT_SLOTS`), and
-  named omissions; `transparent_display_address` classifies a locking script the same way. The
-  view (`TransparentDisplayDetails`) shows the sender (`TransparentDisplayViewSender`), outputs
-  with encoded addresses (`TransparentDisplayAddress`), what it omits
-  (`TransparentDisplayOmission`, including shared funding, which only the wallet can see), and
-  where it came from (`TransparentDisplaySource`). The view is `None` for an account that
-  takes no part in the transaction's transparent side: no transparent output or spend of its
-  own, and no shielded part in a transaction the wallet records as having one (by its raw
-  bytes or, without them, by detail work, stored facts or a private-enhancement marker).
-  Display facts never change balances, history classification or `details_complete`; see
-  [the transparent receipt enhancement guide](../../docs/transparent-pir-wallet-integration.md#transparent-receipt-enhancement).
-- `IronwoodEnhancementData::has_transparent_outputs` preserves the service's separate
-  output-presence assertion for display reconstruction; note decryption authenticates the memo,
-  not that assertion.
-- `transparent_ledger::HistoryClassification::NetReconstructed`: the account's effects and the
-  exact whole-transaction fee balance, but the wallet lacks the full transaction and cannot
-  exclude another party's self-balanced shielded participation, so the account's movement is
-  final while its payment and fee attribution are not.
+## [0.1.0-rc8] - PLANNED
 
-### Changed
-- Rename prototype quarantine results to recovery suspension:
-  `RecoveryBlocker::RecoverySuspended` and
-  `RefusedCommit::{SourceRecoverySuspended, AccountRecoverySuspended}`.
-- Rename the prototype `TransparentLedgerWrite::promote_transparent_account` to
-  `activate_transparent_ledger`, matching the candidate-to-active ledger transition.
-- Rename the prototype `TransparentWatchSet` to `TransparentAddressWatchSet`.
-  Its account context, watched addresses, and pending pages are unchanged.
-- `transparent_ledger::FeeState` gains `Unattributed { whole }`: the account spent in the
-  transaction and the whole fee is exact, but its share is not established. History entries
-  report it where they reported `Unknown` with an exact `whole_fee`.
-- `TransactionHistoryDetails::inferred_outgoing` documents the Activity default that the account
-  funded a recovered send and its fee unless recovered evidence identifies another contributor.
-  This display assumption does not establish payment or fee attribution.
-- `enhance_pir::storage::validate_and_apply_records` captures the stored-metadata snapshot for
-  has-transparent records too, so storage can compare it before keeping such a record's
-  authenticated memo and agreeing fee without public authority. A `PrivateDetailsUnsupported`
-  result no longer skips later records of the same batch; `LwdRequired` still does.
+Breaking release for explicit transparent disclosure policy, private recovery,
+and account-scoped history and receipts. See the
+[wallet integration guide](../../docs/transparent-pir-wallet-integration.md)
+for the policy, recovery and display contracts.
 
 ### Added
-- `tor::Client::connect_lightwalletd_channel` returns the Tor-routed `tonic` channel that
-  `connect_to_lightwalletd` wraps, so callers can layer `tower` services over it.
-- `data_api::transparent_ledger`: the storage-neutral contract for transparent
-  ledger configuration and financial authority. It adds `ChainPoint`,
-  `TransparentLedgerMode`, the atomic `TransparentLedgerSnapshot`, and the
-  `TransparentLedgerRead` trait. Stores must reject unconfigured handles and must
-  not fabricate a spendable private balance.
-- `AppliedTransparentPolicy`, `PrivateTransparentDetail`, and
-  `TransparentLedgerWrite::apply_transparent_policy`. `TransparentLedgerRead`
-  gains `applied_transparent_policy`, `check_transparent_policy_generation`, and
-  `pending_private_transparent_details`. Mixed `PrivateTransparentDetail`s
-  describe unresolved transactions (no stored raw), not sticky markers after
-  payload completion.
-- `EnhancePirStoreResult::PrivateDetailsUnsupported` for mixed transactions
-  whose transparent details cannot be recovered over a public request under
-  `PrivateRequired`.
-- Candidate transparent recovery, behind `transparent-inputs`:
-  - `TransparentLedgerRead::transparent_watch_set` returns an account's watched
-    addresses (`WatchedAddress`, `WatchOrigin`), each required from the account
-    birthday. It also returns the capture context
-    (`TransparentRecoveryContext`: policy generation and the highest
-    contiguously scanned block) and any open `PendingPage`s.
-  - `TransparentLedgerWrite::apply_transparent_ledger_commit` atomically applies
-    one `TransparentLedgerCommit`, which can carry:
-    - receive and spend events (`ReceiveEvent`, `SpendEvent`);
-    - checked and unsupported `AddressRange`s;
-    - opened and completed pages (`PageRequest`), all attributed to a
-      `RecoveryRevision` and a locally accepted anchor.
 
-    It returns `CommitOutcome`. A refused commit applies nothing and reports a
-    `CommitRejection`: `Stale`, `Integrity`, or `Invalid`.
-  - `TransparentLedgerRead::transparent_candidate_recovery` returns unverified
-    development diagnostics (`CandidateRecovery`, `CandidateBlocker`).
-  - Candidate state never changes balances, spend links, locks, address use,
-    receiving-address selection, or history.
-- Private transparent activation, behind `transparent-inputs`:
-  - `TransparentLedgerWrite::promote_transparent_account` promotes an account's
-    complete, qualified ledger to private authority, projecting its events into
-    the wallet.
-  - `AccountLifecycle` (`Candidate`, `Active`) in `TransparentWatchSet` and
-    `TransparentRecoveryContext`, with `StaleCommit::LifecycleChanged`.
-  - `CommitRejection::Refused(RefusedCommit)` for quarantined sources and
-    accounts and for unqualified revisions on active accounts, and
-    `IntegrityFailure::ProjectionContent`. An integrity rejection quarantines
-    the source and the accounts holding its evidence.
-- `TransparentAuthority::Private`, `RecoveryCompletion::Complete`,
-  `LastKnownSource::PrivateLedger`, and the snapshot fields `covered_through`
-  and `recovered_unverified`.
-- `RecoveryBlocker` variants `Recovery(CandidateBlocker)`, `NotActivated`,
-  `Quarantined`, `UnqualifiedRevision`, `LegacyDiscrepancy`, and
-  `ChainBehindTip`. `CandidateBlocker` moved to `data_api::transparent_ledger`
-  and is available in every build.
-- History completeness: `TransparentLedgerRead::transaction_history_details`
-  returns an account's `TransactionHistoryDetails` for requested transactions:
-  a `PoolEffect` with `EffectCompleteness` (`Complete`, `PublicDiscovery`,
-  `Incomplete`) for every supported pool, `DetailCompleteness` for recipients,
-  payment amounts, and memos, a `FeeState` that keeps unknown distinct from
-  zero and from not applicable, a `HistoryClassification` (`LocalIntent`,
-  `Reconstructed`, `Provisional`), and the transaction's pending private
-  details.
-- `TransparentLedgerWrite::qualify_and_apply_transparent_ledger_commit`, behind
-  `transparent-inputs`, atomically qualifies a commit's revision as trusted and
-  applies the commit. It requires `PrivateRequired` on the handle and durably.
-  Qualification is the caller's trust decision; it does not verify the
-  publication. This is a new required trait method: external implementors of
-  `TransparentLedgerWrite` must add it.
+- Storage-neutral transparent ledger contracts for explicit handle configuration,
+  durable policy generations, candidate recovery, trusted qualification,
+  activation and recovery suspension. Candidate evidence alone grants no funds
+  or spending authority; qualification is the caller's trust decision.
+- Account-scoped history details, monetary effects, completeness and Activity
+  rows derived from wallet evidence. `NetReconstructed` finalizes balanced
+  account effects without proving payment or fee attribution.
+- Transparent receipt and display interfaces, bounded display facts with named
+  omissions, and durable detail work with placement checks and retry backoff.
+  Display facts never change balances, history classification or completeness.
+- `FeeState::Unattributed` for an exact whole-transaction fee whose account share
+  is unknown, and `IronwoodEnhancementData::has_transparent_outputs` for the
+  service's unauthenticated output-presence assertion.
+- `TransparentLedgerWrite::forget_transparent_ledger` to remove private-only
+  recovery contributions after restoring public policy.
+- `tor::Client::connect_lightwalletd_channel` for application transport layers.
+- `InputSource::anchor_retention_interval` for the wallet's retained anchor grid.
 
 ### Changed
-- `sync::run` requires `TransparentLedgerRead` and refreshes UTXOs only when the
-  configured transparent ledger mode retains public authority. The mode is
-  resolved before any request, so an unconfigured store fails instead of
-  disclosing its transparent receivers.
-- Public UTXO refresh captures the durable transparent-policy generation and
-  revalidates it immediately before each network request. A stricter transition
-  cannot start another account refresh; callers must cancel and join any request
-  already in flight before applying `PrivateRequired`.
-- `validate_and_apply_records` treats `PrivateDetailsUnsupported` as sticky for
-  later actions in the same batch without rewriting it as `LwdRequired`.
 
-- `InputSource::anchor_retention_interval`, the grid on which the wallet
-  retains durable anchors. It defaults to `AnchorRetentionInterval::ZIP_318`;
-  wrappers around another `InputSource` should forward it.
+- Updated the shared enhancement record dependency to `0.0.1-rc1`.
+
+- Sync requires `TransparentLedgerRead` and an explicit disclosure mode before
+  refreshing transparent outputs. Public requests recheck the durable policy
+  generation; callers must cancel and join in-flight public workers before a
+  private-policy transition.
+- Mixed Enhance PIR results keep privately authenticated memos and an agreeing
+  fee without requesting public transparent details. A withheld mixed result no
+  longer skips later records in its batch; a required public payload still does.
+- Transparent ledger APIs use `activate_transparent_ledger`,
+  `TransparentAddressWatchSet` and recovery-suspension terminology.
+- Transaction proposal interfaces read anchor retention from `InputSource`
+  instead of taking ZIP 318 pool-migration parameters.
+- External storage implementations must implement the new ledger, history,
+  receipt, policy and forgetting contracts used by their enabled features.
+- Updated the PCZT dependency to `zakura-pczt 0.1.0-rc5`.
 
 ### Removed
-- ZIP 318 transaction classification and the pool-migration policy of
-  `propose_transfer`. Vizor schedules its own Orchard -> Ironwood migration
-  transfers, so the library no longer classifies transactions or steers sends
-  toward the migration shape:
-  - `data_api::zip318` and `LowLevelWalletWrite::put_zip318_classification`.
-  - `WalletRead::anchor_retention_interval` and
-    `WalletRead::pool_migration_params`.
-  - `ConfirmationsPolicy::bucketed`.
-  - `NoteSelection::PreferSingle`, `InputSource::select_single_spendable_note`,
-    `InputSource::anchor_computable` and `ReceivedNotes::into_single_covering`.
-  `propose_transfer` always proposes against the ordinary anchor. Anchor
-  retention in `put_blocks` is unchanged.
 
-  An ordinary send that already has the canonical-crossing shape is still
-  built as one: an unpadded Ironwood bundle with the ZIP 318 rolling expiry.
-  `anchor_retention::PoolMigrationParams`, `fees::canonical_crossing_fee`,
-  `proposal::Step::is_canonical_crossing` and
-  `data_api::error::Error::ExpiryHeightConflictsWithCanonicalCrossing` remain
-  for that.
-
-### Changed
-- `InputSelector::propose_transaction` and `InputSelector::propose_shielding`
-  no longer take ZIP 318 parameters; they read the grid from
-  `InputSource::anchor_retention_interval`.
-- `EnhancePirRead::transaction_enhancement_work` documents that SQLite stores
-  require an explicit transparent ledger mode in addition to enhancement mode.
+- ZIP 318 classification APIs, pool-migration send selection,
+  `ConfirmationsPolicy::bucketed`, and the single-note selection and anchor
+  helpers used only by that policy. Ordinary sends still use retained anchors;
+  an already canonical-crossing transaction retains its shape and expiry rules.
 
 ## [0.1.0-rc7] - 2026-09-27
 

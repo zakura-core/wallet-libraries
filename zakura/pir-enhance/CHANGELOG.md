@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc2] - PLANNED
+
+### Packaging
+
+- Include the MIT and Apache license texts in the crate package.
+
 ### Added
 
 - `native` re-exports `prepare_dithered`, `DITHERED_QUERY_BITS` and
@@ -9,12 +15,16 @@
 
 ### Changed
 
+- Updated the shared enhancement record dependency to `0.0.1-rc1`.
+
 - Queries upload a selection dithered to 44 bits instead of rounded to nearest
   at 49 bits, so a 32,768-row request shrinks from 228,468 to 207,988 bytes.
   `NativeSession::prepare` and `types::request_len` follow. The protocol
   revision, `parameters()` (`query_bits = 49`) and parameter IDs are
   unchanged. Requires a server that accepts 44-bit requests; earlier servers
   reject them by length.
+
+- Updated the native PIR dependency to `0.0.1-rc1`.
 
 ## [0.0.1-rc1] - 2026-09-27
 
