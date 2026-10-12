@@ -813,8 +813,8 @@ where
          FROM eligible
          ORDER BY lock_tier {tier_direction}, value DESC, commitment_tree_position, id"
         ),
-        // One-time-key notes come first; one that changes the change shape ends slot filling
-        // (an optional consolidation is missed, the proposal itself is unaffected).
+        // One-time-key notes come first. The input selector skips one that would change the
+        // transaction's shape, so later candidates can still take the spare slots.
         ValueSelection::SmallestFirst { .. } => format!(
             "SELECT {result_columns}
          FROM eligible WHERE lock_tier = :selected_lock_tier
@@ -1017,34 +1017,43 @@ where
     Ok(result)
 }
 
-/// Replaces notes of the covering largest-first `prefix` with one-time-key notes when an equally
-/// small set still covers `target`, so funding retires one-time-key notes without adding inputs.
+/// Replaces notes of the covering largest-first `prefix` with one-time-key notes of the same lock
+/// tier when as many notes still cover `target`, so funding retires one-time-key notes without
+/// adding inputs or moving into a less-preferred tier.
 ///
-/// `later` holds the one-time-key notes that follow `prefix`, in the same descending order. Among
-/// sets of `prefix.len()` notes from `prefix`'s single lock tier, the result has the most
-/// one-time-key notes: for each count `j`, the `j` largest one-time-key notes and the largest other
-/// notes are the strongest such set, so it is the only one checked. A multi-tier prefix is
-/// returned unchanged, preserving lock-tier preference.
+/// `later` holds the one-time-key notes that follow `prefix`, in the same tier-then-descending
+/// order. Notes before `prefix`'s last tier are every eligible note of a more-preferred tier, so
+/// only last-tier notes are swapped, for `later`'s notes of that tier. Among sets of that many
+/// last-tier notes, the result has the most one-time-key notes: for each count `j`, the `j` largest
+/// one-time-key notes and the largest other notes are the strongest such set, so it is the only
+/// one checked.
 fn prefer_one_time_funding<NoteRef, Note>(
-    prefix: Vec<SpendableNoteCandidate<NoteRef, Note>>,
+    mut prefix: Vec<SpendableNoteCandidate<NoteRef, Note>>,
     later: Vec<SpendableNoteCandidate<NoteRef, Note>>,
     target: Zatoshis,
 ) -> Result<Vec<SpendableNoteCandidate<NoteRef, Note>>, SqliteClientError> {
-    let size = prefix.len();
-    let tier = prefix.first().map(|candidate| candidate.lock_tier);
-    if prefix
-        .iter()
-        .any(|candidate| Some(candidate.lock_tier) != tier)
-    {
+    let Some(tier) = prefix.last().map(|candidate| candidate.lock_tier) else {
         return Ok(prefix);
-    }
-    let already = prefix.iter().filter(|candidate| candidate.one_time).count();
+    };
+    let tail = prefix.split_off(
+        prefix
+            .iter()
+            .position(|candidate| candidate.lock_tier == tier)
+            .expect("the last note is in its own tier"),
+    );
+    let fixed = prefix.iter().try_fold(Zatoshis::ZERO, |total, candidate| {
+        (total + candidate.value).ok_or(BalanceError::Overflow)
+    })?;
+    let target = (target - fixed).unwrap_or(Zatoshis::ZERO);
+
+    let size = tail.len();
+    let already = tail.iter().filter(|candidate| candidate.one_time).count();
     let (mut one_time, mut other): (Vec<_>, Vec<_>) =
-        prefix.into_iter().partition(|candidate| candidate.one_time);
+        tail.into_iter().partition(|candidate| candidate.one_time);
     one_time.extend(
         later
             .into_iter()
-            .filter(|candidate| Some(candidate.lock_tier) == tier),
+            .filter(|candidate| candidate.lock_tier == tier),
     );
 
     let mut one_time_count = already;
@@ -1064,8 +1073,9 @@ fn prefer_one_time_funding<NoteRef, Note>(
 
     other.truncate(size - one_time_count);
     one_time.truncate(one_time_count);
-    one_time.append(&mut other);
-    Ok(one_time)
+    prefix.append(&mut one_time);
+    prefix.append(&mut other);
+    Ok(prefix)
 }
 
 struct SpendableNoteCandidate<NoteRef, Note> {
@@ -1203,8 +1213,9 @@ pub(crate) fn unspent_notes_meta(
     // eligibility filter (Part A) is imposed.
     let eligible_condition = output_eligible_condition(lock_filter, "rn");
     // One-time-key notes are spent first (see `select_spendable_notes_for_consolidation`), so
-    // change splitting does not count them as notes the wallet will keep. Spending one then never
-    // changes the split, and spare input slots can retire it.
+    // change splitting does not count them as notes the wallet will keep. Spending one then does
+    // not change the note count the split is based on, though its value can still raise the
+    // split's output count.
     let one_time_excluded = if cfg!(feature = "one-time-ivk") && protocol == ShieldedPool::Ironwood
     {
         "AND rn.receiving_key_id IS NULL"

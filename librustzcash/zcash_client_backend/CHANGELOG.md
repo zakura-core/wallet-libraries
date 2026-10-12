@@ -53,7 +53,9 @@ workspace.
   `record_paid_filter_check` sweep a closed key without a known payment when a newer
   publication's paid filter holds it.
   Transaction construction spends a one-time-key note with its derived viewing key and sends
-  change to the ordinary account key.
+  change to the ordinary account key. `GreedyInputSelector` with
+  `NoteSelection::PreferConsolidation` skips a one-time-key consolidation candidate that
+  would change the transaction's shape, so later candidates can still take spare input slots.
 - `transparent_ledger::{TransparentDetailRead, TransparentDetailWrite}` (prototype): durable
   transparent txid enhancement work (`transparent_detail_work`, returning the requests with the
   mode and policy generation of the same snapshot as `TransparentDetailWork`, the due ones among
