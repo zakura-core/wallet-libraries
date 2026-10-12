@@ -6,7 +6,7 @@ use orchard::{
     tree::{Anchor, MerkleHashOrchard, MerklePath},
     value::NoteValue,
 };
-use zakura_dynamic_ivk::{KeyId, Purpose, recovery::EncryptedNote};
+use zakura_one_time_ivk::{KeyId, Purpose, recovery::EncryptedNote};
 use zcash_note_encryption::Domain;
 
 #[test]

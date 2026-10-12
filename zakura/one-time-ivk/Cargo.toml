@@ -1,7 +1,7 @@
 [package]
-name = "zakura-dynamic-ivk"
+name = "zakura-one-time-ivk"
 version = "0.0.1-rc0"
-description = "Experimental dynamic IVKs: derived Ironwood receiving keys and refund memos"
+description = "Experimental one-time IVKs: derived Ironwood receiving keys and refund memos"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

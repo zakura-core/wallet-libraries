@@ -1,7 +1,7 @@
-# Dynamic IVKs
+# One-time IVKs
 
-Implementation of the draft v1 dynamic IVK and refund-memo
-conventions. A dynamic key keeps the account's spending authority (`ak` and `nk`)
+Implementation of the draft v1 one-time IVK and refund-memo
+conventions. A one-time key keeps the account's spending authority (`ak` and `nk`)
 with its own `rivk`, so each has its own incoming viewing key and address, and a
 wallet trial-decrypts with a changing set of them. Wallets use them for swap refund
 and incoming addresses. The derivation still requires cryptographic review before
@@ -25,13 +25,13 @@ replace recipient, nullifier, signature, value, or change validation. The wallet
 owns reservation, persistence, coverage, lifecycle, and note selection. There is
 no alternate balance store in this crate.
 
-Software PCZT signing of dynamic-key notes works through the same builder.
-Hardware signers need firmware qualification before dynamic keys are enabled for
+Software PCZT signing of one-time-key notes works through the same builder.
+Hardware signers need firmware qualification before one-time keys are enabled for
 hardware accounts.
 
 ## Derivation
 
-A dynamic key keeps the account's `ak` and `nk` and replaces its external `rivk`:
+A one-time key keeps the account's `ak` and `nk` and replaces its external `rivk`:
 
 ```text
 rivk' = ToScalar(PRF^expand_rivk([0x85] || ak || nk || [purpose] || I2LEOSP_64(index)))
@@ -42,7 +42,7 @@ rivk' = ToScalar(PRF^expand_rivk([0x85] || ak || nk || [purpose] || I2LEOSP_64(i
 scalar order. `purpose` is 0 for refund and 1 for incoming. This is ZIP 32's
 internal-key derivation (first byte `0x83`, no suffix) with a different first byte
 and a 9-byte suffix. The input fits one BLAKE2b block, as the internal key's does,
-so a ZIP 2005 recovery circuit could accept dynamic keys as one more `rivk` case
+so a ZIP 2005 recovery circuit could accept one-time keys as one more `rivk` case
 with purpose and index as private inputs. Network and pool identify stored keys
 but are not derivation inputs.
 
@@ -73,7 +73,7 @@ starts with `REFUND_MEMO_MAGIC`.
 From the workspace root:
 
 ```sh
-python3 scripts/dev.py test --config default -p zakura-dynamic-ivk
+python3 scripts/dev.py test --config default -p zakura-one-time-ivk
 ```
 
 Regenerate the KDF vectors from this directory with
@@ -89,5 +89,5 @@ Zcash Protocol Specification **v2026.7.0-202-gafa086, NU6.3 proposal**, commit
 - [§5.6.4.4, Raw Full Viewing Keys, p.123](https://github.com/zcash/zips/blob/afa086bd976e316612a5c06fb139429958d07d84/protocol/protocol.tex#L13077-L13104),
   PDF anchor `orchardfullviewingkeyencoding`.
 
-The dynamic IVK KDF and memo format are proposed wallet conventions, separate from
+The one-time IVK KDF and memo format are proposed wallet conventions, separate from
 these protocol requirements. Passing these tests is not a cryptographic review.
