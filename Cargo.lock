@@ -8065,6 +8065,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-near-intents"
+version = "0.0.1-rc0"
+dependencies = [
+ "zakura-one-time-ivk",
+ "zakura-protocol",
+]
+
+[[package]]
 name = "zakura-one-time-ivk"
 version = "0.0.1-rc0"
 dependencies = [
