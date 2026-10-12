@@ -271,7 +271,7 @@ pub(super) fn reserve_next<P: Parameters>(
     let last: Option<Vec<u8>> = conn.query_row(
         "SELECT MAX(key_index) FROM ironwood_receiving_keys
          WHERE account_id = :account AND purpose = :purpose AND advances_allocation = 1",
-        named_params![":account": account_ref.0, ":purpose": purpose_code(purpose)],
+        named_params![":account": account_ref.0, ":purpose": purpose_code(purpose)?],
         |row| row.get(0),
     )?;
     let mut index = match last {
@@ -311,7 +311,7 @@ fn sweep_pending(
            AND k.active_from IS NULL AND s.done_height IS NULL)",
         rusqlite::params![
             account_ref,
-            purpose_code(key_id.purpose()),
+            purpose_code(key_id.purpose())?,
             key_id.index().to_be_bytes()
         ],
         |row| row.get(0),

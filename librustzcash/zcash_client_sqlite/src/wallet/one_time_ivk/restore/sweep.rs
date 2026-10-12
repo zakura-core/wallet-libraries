@@ -2,9 +2,10 @@
 use std::collections::BTreeMap;
 
 use rusqlite::{Connection, OptionalExtension, params};
-use zakura_one_time_ivk::recovery::EncryptedNote;
 use zcash_client_backend::data_api::{
-    one_time_ivk::restore::{DirectoryPayment, MAX_PUBLICATION_LAG, SweepDeferral},
+    one_time_ivk::restore::{
+        DirectoryPayment, MAX_PUBLICATION_LAG, SweepDeferral, recovery::EncryptedNote,
+    },
     transparent_ledger::ChainPoint,
 };
 use zcash_primitives::{block::BlockHash, transaction::TxId};

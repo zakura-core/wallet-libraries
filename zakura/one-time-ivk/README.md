@@ -20,10 +20,8 @@ issuing live addresses.
 5. Reconstruct inputs with their derived FVKs. Use the account's spending key to
    sign, and its ordinary internal key for change.
 
-`has_same_spending_authority` compares the `ak` and `nk` of valid FVKs. It does not
-replace recipient, nullifier, signature, value, or change validation. The wallet
-owns reservation, persistence, coverage, lifecycle, and note selection. There is
-no alternate balance store in this crate.
+The wallet owns reservation, persistence, coverage, lifecycle, and note selection.
+There is no alternate balance store in this crate.
 
 The SQLite backend implements this contract with its `orchard` feature: durable
 key registration, scanning, completion, and restore sweeps. Its rustdoc, starting
@@ -35,8 +33,7 @@ hardware accounts.
 
 ## Layout
 
-- Crate root: `KeyId`, `Purpose`, derivation, and `has_same_spending_authority`.
-- `recovery`: authentication of privately retrieved incoming notes.
+- Crate root: `KeyId`, `Purpose`, and derivation.
 - `swap`: the refund memo, the completion limits (`RESTORE_WATCH_SECS`,
   `COMPLETION_LIMIT_SECS`), and the provider-neutral lifecycle types
   (`Observation`, `OperationStatus`, `ReceiptExpectation`). Provider status

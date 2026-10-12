@@ -13,5 +13,3 @@
   that an app's provider adapter produces. Scheduling and receipt accounting
   are left to the wallet's store, such as `zakura-client-sqlite` with
   `one-time-ivk`.
-- Add transport-independent incoming-note authentication and commitment-path
-  validation for privately discovered payments.

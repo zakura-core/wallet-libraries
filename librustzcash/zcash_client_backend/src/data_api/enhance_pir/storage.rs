@@ -260,10 +260,11 @@ struct FullOutput {
     enc_ciphertext: [u8; 580],
 }
 
-fn stitched_enc_ciphertext(prefix: &[u8; 52], record: &EnhanceRecord) -> [u8; 580] {
+/// Joins a compact ciphertext prefix and the remaining suffix into a note ciphertext.
+pub(crate) fn stitched_enc_ciphertext(prefix: &[u8; 52], suffix: &[u8; 528]) -> [u8; 580] {
     let mut ciphertext = [0; 580];
     ciphertext[..52].copy_from_slice(prefix);
-    ciphertext[52..].copy_from_slice(record.enc_ciphertext_suffix());
+    ciphertext[52..].copy_from_slice(suffix);
     ciphertext
 }
 
@@ -494,7 +495,10 @@ fn decrypt_memo<AccountId>(
     let output = FullOutput {
         cmx: cmx.to_bytes(),
         ephemeral_key: pending.ephemeral_key,
-        enc_ciphertext: stitched_enc_ciphertext(&pending.compact_ciphertext, record),
+        enc_ciphertext: stitched_enc_ciphertext(
+            &pending.compact_ciphertext,
+            record.enc_ciphertext_suffix(),
+        ),
     };
     let (note, _, memo) = zcash_note_encryption::try_note_decryption(
         &IronwoodDomain::for_compact_action(&compact),
@@ -525,7 +529,10 @@ fn recover_outgoing<AccountId>(
     let output = FullOutput {
         cmx: pending.cmx,
         ephemeral_key: pending.ephemeral_key,
-        enc_ciphertext: stitched_enc_ciphertext(&pending.compact_ciphertext, record),
+        enc_ciphertext: stitched_enc_ciphertext(
+            &pending.compact_ciphertext,
+            record.enc_ciphertext_suffix(),
+        ),
     };
     try_output_recovery_with_ovk(
         &IronwoodDomain::for_compact_action(&compact),
