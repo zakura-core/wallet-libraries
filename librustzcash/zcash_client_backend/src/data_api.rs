@@ -64,7 +64,7 @@
 //! [`propose_shielding`]: crate::data_api::wallet::propose_shielding
 //! [`pczt`]: https://docs.rs/pczt
 
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 use crate::scanning::one_time_ivk::OneTimeScanningKey;
 
 use nonempty::NonEmpty;
@@ -110,7 +110,7 @@ use crate::{
 };
 
 pub mod enhance_pir;
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 pub mod one_time_ivk;
 pub mod status;
 pub mod transparent_ledger;
@@ -2982,11 +2982,11 @@ pub struct DecryptedTransaction<'a, Tx: DecryptableTransaction<AccountId>, Accou
     orchard_outputs: Vec<Tx::DecryptedOrchardOutput>,
     #[cfg(feature = "orchard")]
     ironwood_outputs: Vec<Tx::DecryptedOrchardOutput>,
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     one_time_ivks_applied: bool,
 }
 
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 impl<AccountId: Copy + Eq> DecryptedTransaction<'_, Transaction, AccountId> {
     /// Adds authenticated incoming outputs from the wallet's one-time keys.
     /// A self-payment may already have been recovered with the account OVK.
@@ -3028,7 +3028,7 @@ impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<
             orchard_outputs,
             #[cfg(feature = "orchard")]
             ironwood_outputs,
-            #[cfg(feature = "orchard")]
+            #[cfg(feature = "one-time-ivk")]
             one_time_ivks_applied: false,
         }
     }
@@ -3062,7 +3062,7 @@ impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<
     /// Whether the wallet's one-time keys were tried, through
     /// [`DecryptedTransaction::with_one_time_ivks`]. While a one-time key is open, a
     /// store may refuse a transaction decrypted without them.
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     pub fn one_time_ivks_applied(&self) -> bool {
         self.one_time_ivks_applied
     }

@@ -1,20 +1,21 @@
 //! Restore sweep scheduling, which never derives viewing keys.
 use rusqlite::{Connection, params};
 use zcash_client_backend::data_api::{
-    one_time_ivk::{DiscoveryWork, SweepDeferral},
+    one_time_ivk::restore::{DiscoveryWork, SweepDeferral},
     transparent_ledger::ChainPoint,
 };
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-use super::{
-    KeyId, PendingPayment, account_key, corrupt, invalid, key_ref, payments::queue_payment,
-    reservations::record_provider_seen, stored_key_id,
+use super::{PendingPayment, payments::queue_payment};
+use crate::wallet::one_time_ivk::{
+    KeyId, account_key, corrupt, invalid, key_ref, stored_key_id,
+    swap::reservations::record_provider_seen,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 /// Returns `anchor` only while its block is still on the wallet's chain.
-pub(super) fn canonical(
+pub(in crate::wallet::one_time_ivk) fn canonical(
     conn: &Connection,
     anchor: Option<ChainPoint>,
 ) -> Result<Option<ChainPoint>, SqliteClientError> {
@@ -25,14 +26,17 @@ pub(super) fn canonical(
 }
 
 /// Builds an anchor from a stored height and hash pair.
-pub(super) fn anchor(height: Option<u32>, hash: Option<[u8; 32]>) -> Option<ChainPoint> {
+pub(in crate::wallet::one_time_ivk) fn anchor(
+    height: Option<u32>,
+    hash: Option<[u8; 32]>,
+) -> Option<ChainPoint> {
     height.zip(hash).map(|(height, hash)| ChainPoint {
         height: BlockHeight::from(height),
         hash: BlockHash(hash),
     })
 }
 
-/// Implements `OneTimeIvkRead::one_time_history_pending`.
+/// Implements `OneTimeIvkRestoreRead::one_time_history_pending`.
 pub(crate) fn history_pending<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -52,7 +56,7 @@ pub(crate) fn history_pending<P: Parameters>(
     )?)
 }
 
-/// Implements `OneTimeIvkWrite::prepare_one_time_sweeps`.
+/// Implements `OneTimeIvkRestoreWrite::prepare_one_time_sweeps`.
 pub(crate) fn prepare_sweeps<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -88,7 +92,7 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
     discovery_work(rows).map(Ok)
 }
 
-/// Implements `OneTimeIvkRead::one_time_keys_to_recheck`: closed keys without a mined
+/// Implements `OneTimeIvkRestoreRead::one_time_keys_to_recheck`: closed keys without a mined
 /// payment whose sweep row, if any, is finished below `height`. A key scanned here has
 /// none until its first paid filter check (see `recovery::record_paid_check`). `used`
 /// is not payment evidence: it also marks a receipt that expired unmined.
@@ -128,7 +132,7 @@ fn discovery_work(mut rows: rusqlite::Rows<'_>) -> Result<Vec<DiscoveryWork>, Sq
     Ok(work)
 }
 
-/// Implements `OneTimeIvkWrite::begin_one_time_sweep_attempt`, backing off from one
+/// Implements `OneTimeIvkRestoreWrite::begin_one_time_sweep_attempt`, backing off from one
 /// minute to twelve hours.
 pub(crate) fn begin_sweep_attempt(
     conn: &Connection,
@@ -160,7 +164,7 @@ pub(crate) fn begin_sweep_attempt(
 /// replaced the key's queued set, and reopens the sweep: a `complete` answer records
 /// its coverage, which the caller validated, and an incomplete one clears it, so the
 /// sweep finishes only once its current answer is applied.
-pub(super) fn queue_lookup<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn queue_lookup<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,

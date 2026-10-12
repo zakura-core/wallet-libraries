@@ -196,7 +196,7 @@ pub mod history;
 pub mod init;
 pub(crate) mod ironwood_hooks;
 pub(crate) mod locking;
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 pub mod one_time_ivk;
 #[cfg(feature = "orchard")]
 pub(crate) mod orchard;
@@ -863,7 +863,7 @@ pub(crate) fn delete_account(
 
 /// Whether a one-time key is open, so that blocks scanned or transactions decrypted
 /// without it must not be stored.
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 pub(crate) fn one_time_key_open(conn: &Connection) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys
@@ -6012,11 +6012,15 @@ pub(crate) fn insert_nullifier_map<N: AsRef<[u8]>>(
     }
 
     // One-time IVK recovery's spend evidence: record even empty blocks, but only when
-    // their nullifiers were actually retained.
-    #[cfg(feature = "orchard")]
+    // their nullifiers were actually retained, and only while the wallet holds one-time
+    // IVK state (see `ONE_TIME_IVK_STATE`).
+    #[cfg(feature = "one-time-ivk")]
     if spend_pool == ShieldedPool::Ironwood {
         conn.execute(
-            "INSERT OR IGNORE INTO ironwood_nullifier_scan_blocks (height) VALUES (?1)",
+            &format!(
+                "INSERT OR IGNORE INTO ironwood_nullifier_scan_blocks (height)
+                 SELECT ?1 WHERE {ONE_TIME_IVK_STATE}"
+            ),
             [u32::from(block_height)],
         )?;
     }
@@ -6084,9 +6088,28 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
     .map(Some)
 }
 
+/// SQL condition: the wallet holds one-time IVK state, a registered key or a spend
+/// retention row. Without it, scanning keeps none of the spend evidence that restore
+/// sweeps check, and a build without `one-time-ivk` refuses the database.
+///
+/// Restore stays sound without earlier evidence: `maintain_one_time_ivks` retains spend
+/// history before the history is scanned, a key issued later can be paid only in blocks
+/// scanned after it, and a payment whose evidence is missing is replayed rather than
+/// treated as unspent.
+pub(crate) const ONE_TIME_IVK_STATE: &str = "(EXISTS(SELECT 1 FROM ironwood_receiving_keys)
+    OR EXISTS(SELECT 1 FROM ironwood_one_time_spend_retention))";
+
+/// Whether the wallet holds one-time IVK state (see [`ONE_TIME_IVK_STATE`]).
+pub(crate) fn holds_one_time_ivk_state(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.query_row(&format!("SELECT {ONE_TIME_IVK_STATE}"), [], |row| {
+        row.get(0)
+    })
+}
+
 /// The height from which Ironwood nullifiers stay tracked for one-time IVK restore
 /// sweeps. Shared retention uses the oldest unfinished account, so a completed account
 /// cannot release another account's spend evidence.
+#[cfg(feature = "one-time-ivk")]
 pub(crate) fn ironwood_nullifier_retention_height(
     conn: &Connection,
 ) -> Result<Option<BlockHeight>, SqliteClientError> {
@@ -6106,8 +6129,11 @@ pub(crate) fn prune_nullifier_map(
     conn: &rusqlite::Transaction<'_>,
     block_height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
+    #[cfg(feature = "one-time-ivk")]
     let ironwood_floor = ironwood_nullifier_retention_height(conn)?
         .map_or(block_height, |floor| floor.min(block_height));
+    #[cfg(not(feature = "one-time-ivk"))]
+    let ironwood_floor = block_height;
     conn.execute(
         "DELETE FROM nullifier_map WHERE block_height < ?1
          AND (spend_pool != ?2 OR block_height < ?3)",
@@ -8235,6 +8261,7 @@ mod tests {
 
     /// Pruning keeps Ironwood spend evidence at or above the durable restore retention
     /// floor.
+    #[cfg(feature = "one-time-ivk")]
     #[test]
     fn nullifier_pruning_keeps_the_one_time_retention_floor() {
         use zcash_protocol::PoolType;

@@ -1,5 +1,8 @@
 use super::*;
-use zakura_one_time_ivk::lifecycle::{NearStatus, ReceiptExpectation, near_observation};
+use zakura_one_time_ivk::swap::{
+    OperationStatus::{Active, AwaitingDeposit, Terminal},
+    ReceiptExpectation::{self, Positive},
+};
 
 /// `(observed_at, expectation, expected_value, deadline)` of an operation.
 type Operation = (i64, u8, Option<i64>, Option<i64>);
@@ -9,6 +12,10 @@ const INCONCLUSIVE: Observation = Observation {
     status: OperationStatus::Terminal(ReceiptExpectation::Unknown),
     deadline: None,
 };
+/// A completed swap's payout, of an unreported amount.
+const PAID: OperationStatus = Terminal(Positive(None));
+/// A conclusive end with no Zcash receipt, such as a refund on the source chain.
+const NO_RECEIPT: OperationStatus = Terminal(ReceiptExpectation::None);
 
 /// A file-backed wallet with Ironwood active, scanned through one block that holds an
 /// ordinary note.
@@ -59,7 +66,7 @@ fn begin_at(
     let account = st.test_account().unwrap().id();
     let index = key.key_id().index();
     tx(st.wallet_mut().db_mut(), |c, _| {
-        store::reservations::begin(c, account, index, request, deadline, now)
+        store::swap::reservations::begin(c, account, index, request, deadline, now)
     })
 }
 
@@ -84,18 +91,6 @@ fn quote(st: &mut State, key: &OneTimeKey, request: &str, start: bool) {
     }
 }
 
-/// Records provider `status` for the operation with deposit address `deposit`,
-/// requested at `now`, as an app does with each status it fetches.
-fn observe_status(st: &mut State, deposit: &str, status: &NearStatus<'_>, funded: bool, now: i64) {
-    record_observation(
-        st,
-        deposit,
-        near_observation(Purpose::Receive, status),
-        funded,
-        now,
-    )
-}
-
 /// Records `observation` for the operation with deposit address `deposit` at `now`.
 fn record_observation(
     st: &mut State,
@@ -111,20 +106,21 @@ fn record_observation(
         .unwrap();
 }
 
-/// [`observe_status`] with only a status string.
-fn observe(st: &mut State, deposit: &str, status: &str, funded: bool, now: i64) {
-    let status = NearStatus {
+/// Records provider `status`, without a deadline, for the operation with deposit address
+/// `deposit`, requested at `now`, as an app does with each status it fetches.
+fn observe(st: &mut State, deposit: &str, status: OperationStatus, funded: bool, now: i64) {
+    let observation = Observation {
         status,
-        ..Default::default()
+        deadline: None,
     };
-    observe_status(st, deposit, &status, funded, now)
+    record_observation(st, deposit, observation, funded, now)
 }
 
 /// Reaps the test account's reservations at `now`, returning the reclaimed indices.
 fn reap(st: &mut State, now: i64) -> Vec<u64> {
     let account = st.test_account().unwrap().id();
     tx(st.wallet_mut().db_mut(), |c, p| {
-        store::reservations::reap(c, p, account, now)
+        store::swap::reservations::reap(c, p, account, now)
     })
     .unwrap()
 }
@@ -253,7 +249,7 @@ fn reclamation_waits_until_latest_quote_deadline_plus_cooldown() {
 
     let eligible_at = NOW + 120 + RECEIVE_RECLAIM_SECONDS;
     for request in ["first", "second"] {
-        observe(&mut st, request, "PENDING_DEPOSIT", false, eligible_at - 1);
+        observe(&mut st, request, AwaitingDeposit, false, eligible_at - 1);
     }
     assert!(reap(&mut st, eligible_at - 1).is_empty());
     assert_eq!(reap(&mut st, eligible_at), [0]);
@@ -293,14 +289,14 @@ fn reclaimed_hole_stops_scanning_and_keeps_its_quotes() {
             hole = Some(r);
         } else {
             pay(&mut st, r.full_viewing_key());
-            observe(&mut st, &request, "SUCCESS", true, NOW + 1);
+            observe(&mut st, &request, PAID, true, NOW + 1);
         }
     }
     let r = hole.unwrap();
     assert!(scanning_keys(&st).contains(&r.key_id()));
     let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
     // The status reclaims the hole at once.
-    observe(&mut st, "quote-1", "PENDING_DEPOSIT", false, now);
+    observe(&mut st, "quote-1", AwaitingDeposit, false, now);
     assert!(!reserved(&st, &r));
     assert!(operation(&st, "quote-1").is_some());
     // Every quote is past its deadline and conclusive, so no swap can pay it.
@@ -370,30 +366,28 @@ fn lost_requests_are_reused_only_once_a_seen_set_shows_them_unseen() {
 }
 
 /// A started reservation needs a fresh conclusive status: a funded swap's is a refund,
-/// which `FAILED` also is, and an older status arriving late does not replace a newer one.
+/// and an older status arriving late does not replace a newer one.
 #[test]
 fn a_started_reservation_needs_a_fresh_conclusive_status() {
-    for refund in ["REFUNDED", "FAILED"] {
-        let mut st = fixture();
-        let r = prepare(&mut st, NOW);
-        quote(&mut st, &r, "funded", true);
-        let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
-        record_observation(&mut st, "funded", INCONCLUSIVE, true, now);
-        assert!(reserved(&st, &r), "{refund}");
-        observe(&mut st, "funded", refund, true, now + 1);
-        assert!(!reserved(&st, &r), "{refund}");
-    }
+    let mut st = fixture();
+    let r = prepare(&mut st, NOW);
+    quote(&mut st, &r, "funded", true);
+    let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
+    record_observation(&mut st, "funded", INCONCLUSIVE, true, now);
+    assert!(reserved(&st, &r));
+    observe(&mut st, "funded", NO_RECEIPT, true, now + 1);
+    assert!(!reserved(&st, &r));
 
     let mut st = fixture();
     let r = prepare(&mut st, NOW);
     quote(&mut st, &r, "accepted", true);
     let expired = NOW + 60 + RECEIVE_RECLAIM_SECONDS;
-    observe(&mut st, "accepted", "PENDING_DEPOSIT", false, expired - 1);
+    observe(&mut st, "accepted", AwaitingDeposit, false, expired - 1);
     assert!(reap(&mut st, expired + 120).is_empty());
-    observe(&mut st, "accepted", "PROCESSING", false, expired + 121);
-    observe(&mut st, "accepted", "PENDING_DEPOSIT", false, expired + 120);
+    observe(&mut st, "accepted", Active, false, expired + 121);
+    observe(&mut st, "accepted", AwaitingDeposit, false, expired + 120);
     assert!(reap(&mut st, expired + 121).is_empty());
-    observe(&mut st, "accepted", "PENDING_DEPOSIT", false, expired + 122);
+    observe(&mut st, "accepted", AwaitingDeposit, false, expired + 122);
     assert!(!reserved(&st, &r));
 }
 
@@ -414,15 +408,15 @@ fn late_funded_status_prevents_reclamation() {
             )
             .unwrap()
     };
-    observe(&mut st, "late", "PENDING_DEPOSIT", false, NOW + 2);
-    observe(&mut st, "late", "PROCESSING", true, NOW + 1);
+    observe(&mut st, "late", AwaitingDeposit, false, NOW + 2);
+    observe(&mut st, "late", Active, true, NOW + 1);
     assert_eq!(
         operation(&st, "late"),
         Some((NOW + 2, 4, None, Some(NOW + 60)))
     );
     assert!(funded(&st));
     let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
-    observe(&mut st, "late", "PENDING_DEPOSIT", false, now);
+    observe(&mut st, "late", AwaitingDeposit, false, now);
     assert!(funded(&st));
     assert!(reap(&mut st, now).is_empty());
     assert!(reserved(&st, &r));
@@ -472,7 +466,7 @@ fn accepted_quotes_move_the_recovery_gap() {
         first.get_or_insert(r);
     }
     let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
-    observe(&mut st, "quote-0", "PENDING_DEPOSIT", false, now);
+    observe(&mut st, "quote-0", AwaitingDeposit, false, now);
     assert!(!reserved(&st, &first.unwrap()));
     assert_eq!(
         prepare_seen(&mut st, now, &[]).key_id().index(),
@@ -489,30 +483,28 @@ fn provider_statuses_update_the_operation_or_leave_it_alone() {
     let deadline = Some(NOW + 60);
     assert_eq!(operation(&st, "payout"), Some((NOW, 0, None, deadline)));
     let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
-    // A status the mapping does not recognize counts as active, so nothing is released.
-    let unknown = NearStatus {
-        status: "NEW_STATE",
+    // An active status, as an adapter reports for one it does not recognize, releases
+    // nothing.
+    let active = Observation {
+        status: Active,
         deadline,
-        ..Default::default()
     };
-    observe_status(&mut st, "payout", &unknown, false, now);
+    record_observation(&mut st, "payout", active, false, now);
     assert!(reap(&mut st, now).is_empty());
     assert_eq!(operation(&st, "payout"), Some((now, 0, None, deadline)));
     // Another memo on the same deposit address is another operation.
     let finished = Observation {
-        status: OperationStatus::Terminal(zakura_one_time_ivk::lifecycle::ReceiptExpectation::None),
+        status: NO_RECEIPT,
         deadline: None,
     };
     let db = st.wallet_mut().db_mut();
     let matched = db.record_operation_status(account, "payout", Some("memo"), finished, true, now);
     assert!(!matched.unwrap());
-    let success = NearStatus {
-        status: "SUCCESS",
-        amount_out: Some(Zatoshis::const_from_u64(5_000)),
+    let success = Observation {
+        status: Terminal(Positive(Some(Zatoshis::const_from_u64(5_000)))),
         deadline,
-        ..Default::default()
     };
-    observe_status(&mut st, "payout", &success, true, now + 1);
+    record_observation(&mut st, "payout", success, true, now + 1);
     assert_eq!(
         operation(&st, "payout"),
         Some((now + 1, 2, Some(5_000), deadline))
@@ -526,8 +518,8 @@ fn paid_reservation_closes_once_every_quote_settles() {
     quote(&mut st, &r, "edit", false);
     quote(&mut st, &r, "paid", true);
     pay(&mut st, r.full_viewing_key());
-    observe(&mut st, "paid", "SUCCESS", true, NOW + 1);
-    observe(&mut st, "edit", "PENDING_DEPOSIT", false, NOW + 1);
+    observe(&mut st, "paid", PAID, true, NOW + 1);
+    observe(&mut st, "edit", AwaitingDeposit, false, NOW + 1);
     let expired = NOW + 60 + RECEIVE_RECLAIM_SECONDS;
     // An unfunded edit holds the reservation until its deadline has passed the
     // cooldown and its status is fresh.
@@ -535,7 +527,7 @@ fn paid_reservation_closes_once_every_quote_settles() {
         reap(&mut st, now);
         assert!(reserved(&st, &r));
     }
-    observe(&mut st, "edit", "PENDING_DEPOSIT", false, expired);
+    observe(&mut st, "edit", AwaitingDeposit, false, expired);
     assert!(!reserved(&st, &r));
     assert!(operation(&st, "paid").is_some());
     assert_eq!(prepare(&mut st, expired).key_id().index(), 1);
@@ -548,7 +540,7 @@ fn late_payment_found_by_scanning_prevents_reclamation_and_reuse() {
     quote(&mut st, &r, "late", true);
     pay(&mut st, r.full_viewing_key());
     let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
-    observe(&mut st, "late", "PENDING_DEPOSIT", false, now);
+    observe(&mut st, "late", AwaitingDeposit, false, now);
     // The paid reservation is released, but its key is not reclaimed.
     assert!(scanning_keys(&st).contains(&r.key_id()));
     assert!(reap(&mut st, now).is_empty());
@@ -605,7 +597,7 @@ fn reclamation_waits_for_scanning_to_reach_the_tip() {
     let (h, _) = st.generate_empty_block();
     st.wallet_mut().update_chain_tip(h).unwrap();
     let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
-    observe(&mut st, "abandoned", "PENDING_DEPOSIT", false, now);
+    observe(&mut st, "abandoned", AwaitingDeposit, false, now);
     assert!(reserved(&st, &r));
     st.scan_cached_blocks_with_one_time_ivks(h, 1);
     assert_eq!(reap(&mut st, now), [0]);
@@ -773,7 +765,7 @@ fn issuance_skips_restored_addresses_the_provider_saw() {
     assert_eq!(draft.key_id().index(), 3);
     quote(&mut st, &draft, "after-restore", true);
     let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
-    observe(&mut st, "after-restore", "PENDING_DEPOSIT", false, now);
+    observe(&mut st, "after-restore", AwaitingDeposit, false, now);
     assert!(!reserved(&st, &draft));
     assert_eq!(
         prepare_seen(&mut st, now, &[]).key_id().index(),
@@ -809,7 +801,7 @@ fn reorg_retains_used_marker_and_seen_addresses_keep_the_bound() {
         let r = prepare(&mut st, NOW);
         let request = format!("funded-{i}");
         quote(&mut st, &r, &request, true);
-        observe(&mut st, &request, "PROCESSING", true, NOW + 1);
+        observe(&mut st, &request, Active, true, NOW + 1);
     }
     let draft = prepare(&mut st, NOW);
     assert_eq!(draft.key_id().index(), RECEIVE_GAP_LIMIT);
@@ -965,13 +957,10 @@ fn accepted_deposit_instructions_cannot_change() {
             ..shown
         }
     );
-    let observation = near_observation(
-        Purpose::Receive,
-        &NearStatus {
-            status: "PENDING_DEPOSIT",
-            ..Default::default()
-        },
-    );
+    let observation = Observation {
+        status: AwaitingDeposit,
+        deadline: None,
+    };
     db.record_operation_status(
         account,
         "shared",
@@ -1067,8 +1056,8 @@ fn statuses_reclaim_abandoned_reservations_and_release_settled_ones() {
     quote(&mut st, &paid, "paid", true);
     pay(&mut st, paid.full_viewing_key());
     let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
-    observe(&mut st, "abandoned", "PENDING_DEPOSIT", false, now);
-    observe(&mut st, "paid", "SUCCESS", true, now);
+    observe(&mut st, "abandoned", AwaitingDeposit, false, now);
+    observe(&mut st, "paid", PAID, true, now);
     // Both reservations are done.
     assert!(!reserved(&st, &abandoned) && !reserved(&st, &paid));
     assert!(reap(&mut st, now).is_empty());

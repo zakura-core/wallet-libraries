@@ -1122,7 +1122,7 @@ where
     }
 }
 
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 impl<Cache, DbT, ParamsT> TestState<Cache, DbT, ParamsT>
 where
     Cache: TestCache,

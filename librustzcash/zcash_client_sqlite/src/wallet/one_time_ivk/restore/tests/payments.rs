@@ -89,7 +89,13 @@ fn directory_payment_queue_authenticates_retries_and_survives_reopen_without_cre
         .transactionally_with_extension(|db, _| {
             let mut second = candidate.clone();
             second.txid = TxId::from_bytes([10; 32]);
-            store::payments::queue_payment(db.conn.0, db.params, account, key.key_id(), &second)?;
+            store::restore::payments::queue_payment(
+                db.conn.0,
+                db.params,
+                account,
+                key.key_id(),
+                &second,
+            )?;
             Err(corrupt("rollback fixture"))
         });
     assert!(rollback.is_err());

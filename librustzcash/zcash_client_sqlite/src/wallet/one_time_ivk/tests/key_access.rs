@@ -132,7 +132,7 @@ fn transaction_keys_exclude_unscanned_history_and_preserve_self_payments() {
 
 #[test]
 fn unscanned_transaction_keys_follow_pending_and_imported_output_identity() {
-    let (mut st, key, candidate, through, path) = super::apply::fixture();
+    let (mut st, key, candidate, through, path) = store::restore::tests::apply::fixture();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
     assert!(db.get_one_time_scanning_keys().unwrap().is_empty());

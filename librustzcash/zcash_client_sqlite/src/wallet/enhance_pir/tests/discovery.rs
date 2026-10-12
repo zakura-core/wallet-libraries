@@ -2671,6 +2671,7 @@ fn rediscovery_is_routed_privately_and_can_change_the_next_route() {
 
 // A note found by a one-time key binds its transaction's metadata with that key, never
 // the account's, but its memo is never retrieved privately (see `wallet::one_time_ivk`).
+#[cfg(feature = "one-time-ivk")]
 #[test]
 fn one_time_key_notes_bind_metadata_without_private_memos_after_reopen() {
     use crate::{

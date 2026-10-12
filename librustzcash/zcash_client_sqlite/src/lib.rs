@@ -117,15 +117,18 @@ use zcash_protocol::{
     value::Zatoshis,
 };
 use zip32::{DiversifierIndex, fingerprint::SeedFingerprint};
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 use {
     std::collections::BTreeMap,
     zakura_one_time_ivk::KeyId,
     zcash_client_backend::{
         data_api::{
             one_time_ivk::{
-                DirectoryPayment, DiscoveryWork, OneTimeIvkRead, OneTimeIvkWrite,
-                PaymentApplication, SweepDeferral,
+                OneTimeIvkRead, OneTimeIvkWrite,
+                restore::{
+                    DirectoryPayment, DiscoveryWork, OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite,
+                    PaymentApplication, SweepDeferral,
+                },
             },
             transparent_ledger::ChainPoint,
         },
@@ -549,7 +552,7 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     ) -> Result<Self, rusqlite::Error> {
         rusqlite::Connection::open(path).and_then(move |conn| {
             rusqlite::vtab::array::load_module(&conn)?;
-            #[cfg(not(feature = "orchard"))]
+            #[cfg(not(feature = "one-time-ivk"))]
             wallet::init::refuse_one_time_ivk_state(&conn)?;
             Ok(WalletDb {
                 conn,
@@ -2566,7 +2569,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
     }
 }
 
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIvkRead
     for WalletDb<C, P, CL, R>
 {
@@ -2590,13 +2593,18 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
             receivers,
         )
     }
+}
 
+#[cfg(feature = "one-time-ivk")]
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIvkRestoreRead
+    for WalletDb<C, P, CL, R>
+{
     fn directory_publication_anchor(
         &self,
         height: BlockHeight,
         through: ChainPoint,
     ) -> Result<Result<ChainPoint, SweepDeferral>, Self::Error> {
-        wallet::one_time_ivk::publication_anchor(self.conn.borrow(), height, through)
+        wallet::one_time_ivk::restore::publication_anchor(self.conn.borrow(), height, through)
     }
 
     fn directory_note_data_needed(
@@ -2605,7 +2613,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
         key: KeyId,
         payments: &[DirectoryPayment],
     ) -> Result<Vec<u64>, Self::Error> {
-        wallet::one_time_ivk::note_data_needed(self.conn.borrow(), account, key, payments)
+        wallet::one_time_ivk::restore::note_data_needed(self.conn.borrow(), account, key, payments)
     }
 
     fn one_time_history_pending(
@@ -2613,7 +2621,12 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
         account: AccountUuid,
         through: BlockHeight,
     ) -> Result<bool, Self::Error> {
-        wallet::one_time_ivk::history_pending(self.conn.borrow(), &self.params, account, through)
+        wallet::one_time_ivk::restore::history_pending(
+            self.conn.borrow(),
+            &self.params,
+            account,
+            through,
+        )
     }
 
     fn one_time_keys_to_recheck(
@@ -2621,11 +2634,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
         account: AccountUuid,
         height: BlockHeight,
     ) -> Result<Vec<DiscoveryWork>, Self::Error> {
-        wallet::one_time_ivk::keys_to_recheck(self.conn.borrow(), &self.params, account, height)
+        wallet::one_time_ivk::restore::keys_to_recheck(
+            self.conn.borrow(),
+            &self.params,
+            account,
+            height,
+        )
     }
 }
 
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
     OneTimeIvkWrite for WalletDb<C, P, CL, R>
 {
@@ -2637,11 +2655,16 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
     ) -> Result<(), SqliteClientError> {
         self.transactionally(|wdb| wdb.store_scanned_blocks(from_state, blocks, Some(keys)))
     }
+}
 
+#[cfg(feature = "one-time-ivk")]
+impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
+    OneTimeIvkRestoreWrite for WalletDb<C, P, CL, R>
+{
     fn maintain_one_time_ivks(&mut self, account: AccountUuid) -> Result<(), SqliteClientError> {
         let now = wallet::one_time_ivk::unix_now(&self.clock);
         self.transactionally(|wdb| {
-            wallet::one_time_ivk::maintain(wdb.conn.0, wdb.params, account, now)
+            wallet::one_time_ivk::restore::maintain(wdb.conn.0, wdb.params, account, now)
         })
     }
 
@@ -2653,7 +2676,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         limit: NonZeroU32,
     ) -> Result<Result<Vec<DiscoveryWork>, SweepDeferral>, SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::one_time_ivk::prepare_sweeps(
+            wallet::one_time_ivk::restore::prepare_sweeps(
                 wdb.conn.0, wdb.params, account, through, now, limit,
             )
         })
@@ -2667,7 +2690,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         seen: bool,
     ) -> Result<(), SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::one_time_ivk::begin_sweep_attempt(wdb.conn.0, account, key, now, seen)
+            wallet::one_time_ivk::restore::begin_sweep_attempt(wdb.conn.0, account, key, now, seen)
         })
     }
 
@@ -2680,7 +2703,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         note_data: &BTreeMap<u64, [u8; 528]>,
     ) -> Result<Result<bool, SweepDeferral>, SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::one_time_ivk::queue_directory_lookup(
+            wallet::one_time_ivk::restore::queue_directory_lookup(
                 wdb.conn.0, wdb.params, account, key, anchor, payments, note_data,
             )
         })
@@ -2695,7 +2718,15 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         recent: bool,
         witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
     ) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
-        wallet::one_time_ivk::apply_sweep(self, account, key, through, publication, recent, witness)
+        wallet::one_time_ivk::restore::apply_sweep(
+            self,
+            account,
+            key,
+            through,
+            publication,
+            recent,
+            witness,
+        )
     }
 
     fn record_paid_filter_check(
@@ -2705,7 +2736,12 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         checked: &[(KeyId, bool)],
     ) -> Result<(), SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::one_time_ivk::record_paid_check(wdb.conn.0, account, publication, checked)
+            wallet::one_time_ivk::restore::record_paid_check(
+                wdb.conn.0,
+                account,
+                publication,
+                checked,
+            )
         })
     }
 
@@ -2716,12 +2752,12 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
     ) -> Result<bool, SqliteClientError> {
         let now = wallet::one_time_ivk::unix_now(&self.clock);
         self.transactionally(|wdb| {
-            wallet::one_time_ivk::finish_nullifier_recovery(
+            wallet::one_time_ivk::restore::finish_nullifier_recovery(
                 wdb.conn.0,
                 wdb.params,
                 account,
                 through,
-                wallet::one_time_ivk::RECEIVE_LOOKAHEAD,
+                wallet::one_time_ivk::swap::RECEIVE_LOOKAHEAD,
                 now,
             )
         })
@@ -3285,12 +3321,19 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
         &mut self,
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<AccountUuid>>,
-        #[cfg(feature = "orchard")] one_time_keys: Option<&[(AccountUuid, KeyId)]>,
+        #[cfg(feature = "one-time-ivk")] one_time_keys: Option<&[(AccountUuid, KeyId)]>,
     ) -> Result<(), SqliteClientError> {
-        #[cfg(feature = "orchard")]
+        #[cfg(feature = "one-time-ivk")]
         if one_time_keys.is_none() && wallet::one_time_key_open(self.conn.0)? {
             return Err(SqliteClientError::OneTimeIvksNotUsed);
         }
+        // Without one-time IVK state, nothing needs Ironwood spend evidence kept longer.
+        #[cfg(feature = "one-time-ivk")]
+        let ironwood_nullifier_retention = if wallet::holds_one_time_ivk_state(self.conn.0)? {
+            wallet::ironwood_nullifier_retention_height(self.conn.0)?
+        } else {
+            None
+        };
         // Once the NU6.3 (Ironwood) activation height is reached, checkpoints on the anchor
         // retention grids are retained as durable anchors. The activation height is `None` (and so
         // anchor retention is inactive) on networks that do not yet have an assigned NU6.3
@@ -3316,7 +3359,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             .iter()
             .map(|block| (block.height(), block.block_hash()))
             .collect();
-        #[cfg(feature = "orchard")]
+        #[cfg(feature = "one-time-ivk")]
         let scanned_range = blocks
             .first()
             .zip(blocks.last())
@@ -3329,8 +3372,10 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             from_state,
             blocks,
             anchor_retention.as_ref(),
-            #[cfg(feature = "orchard")]
-            wallet::ironwood_nullifier_retention_height(self.conn.0)?,
+            #[cfg(feature = "one-time-ivk")]
+            ironwood_nullifier_retention,
+            #[cfg(all(feature = "orchard", not(feature = "one-time-ivk")))]
+            None,
         )
         .map_err(SqliteClientError::from)?;
 
@@ -3342,7 +3387,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             &scanned_block_identities,
         )?;
         // A key activated after the scanner captured its keys missed this batch.
-        #[cfg(feature = "orchard")]
+        #[cfg(feature = "one-time-ivk")]
         if let Some((keys, range)) = one_time_keys.zip(scanned_range) {
             wallet::one_time_ivk::rescan_missed_keys(self.conn.0, keys, range)?;
         }
@@ -3576,7 +3621,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         self.store_scanned_blocks(
             from_state,
             blocks,
-            #[cfg(feature = "orchard")]
+            #[cfg(feature = "one-time-ivk")]
             None,
         )
     }
@@ -3627,7 +3672,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
     ) -> Result<(), <Self as WalletRead>::Error> {
         // As with scanned blocks, a transaction decrypted without the open one-time keys
         // would store their payments as someone else's.
-        #[cfg(feature = "orchard")]
+        #[cfg(feature = "one-time-ivk")]
         if !d_tx.one_time_ivks_applied() && wallet::one_time_key_open(self.conn.0)? {
             return Err(SqliteClientError::OneTimeIvksNotUsed);
         }
@@ -3680,8 +3725,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                 &self.gap_limits,
                 sent_tx,
             )?;
-            #[cfg(feature = "orchard")]
-            wallet::one_time_ivk::start_funded_refund_keys(
+            #[cfg(feature = "one-time-ivk")]
+            wallet::one_time_ivk::swap::start_funded_refund_keys(
                 self.conn.0,
                 &self.params,
                 sent_tx.tx(),
@@ -4019,7 +4064,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         #[cfg(feature = "orchard")] ironwood_commitment_tree_size: u32,
         #[cfg(feature = "orchard")] ironwood_action_count: u32,
     ) -> Result<(), Self::Error> {
-        #[cfg(not(feature = "orchard"))]
+        #[cfg(not(feature = "one-time-ivk"))]
         wallet::init::refuse_one_time_ivk_state(self.conn.borrow())?;
         wallet::put_block(
             self.conn.borrow(),
@@ -4345,7 +4390,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
     }
 
     fn delete_retrieval_queue_entries(&mut self, txid: TxId) -> Result<(), Self::Error> {
-        #[cfg(not(feature = "orchard"))]
+        #[cfg(not(feature = "one-time-ivk"))]
         wallet::init::refuse_one_time_ivk_state(self.conn.borrow())?;
         wallet::delete_retrieval_queue_entries(self.conn.borrow(), txid)
     }
@@ -4355,7 +4400,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         range: Range<BlockHeight>,
         wallet_note_positions: &[(ShieldedPool, Position)],
     ) -> Result<(), Self::Error> {
-        #[cfg(not(feature = "orchard"))]
+        #[cfg(not(feature = "one-time-ivk"))]
         wallet::init::refuse_one_time_ivk_state(self.conn.borrow())?;
         wallet::scanning::scan_complete(
             self.conn.borrow(),
@@ -4791,7 +4836,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             tracing::info!("Attributing the sent outputs of transaction {txid} to its funder");
             let ufvks = wallet::get_unified_full_viewing_keys(self.conn.borrow(), &params)?;
             let d_tx = decrypt_transaction(&params, mined_height, Some(tip), &tx, &ufvks);
-            #[cfg(feature = "orchard")]
+            #[cfg(feature = "one-time-ivk")]
             let d_tx = {
                 let receivers: Vec<_> = d_tx
                     .ironwood_outputs()

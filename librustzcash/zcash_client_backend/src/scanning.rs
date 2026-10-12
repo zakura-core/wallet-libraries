@@ -37,7 +37,7 @@ use orchard::note_encryption::OrchardDomain;
 
 pub(crate) mod compact;
 pub mod full;
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 pub mod one_time_ivk;
 
 /// A key that can be used to perform trial decryption and nullifier
@@ -68,7 +68,7 @@ pub trait ScanningKeyOps<D: Domain, AccountId, Nf> {
     fn key_scope(&self) -> Option<Scope>;
 
     /// Derived receiving key that decrypted this output, relative to its account.
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
         None
     }
@@ -95,7 +95,7 @@ impl<D: Domain, AccountId, Nf, K: ScanningKeyOps<D, AccountId, Nf>> ScanningKeyO
         (*self).key_scope()
     }
 
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
         (*self).one_time_key_id()
     }
@@ -120,7 +120,7 @@ impl<D: Domain, AccountId, Nf> ScanningKeyOps<D, AccountId, Nf>
         self.as_ref().key_scope()
     }
 
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
         self.as_ref().one_time_key_id()
     }
@@ -145,7 +145,7 @@ impl<D: Domain, AccountId: Send + Sync, Nf> ScanningKeyOps<D, AccountId, Nf>
         self.as_ref().key_scope()
     }
 
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
         self.as_ref().one_time_key_id()
     }
@@ -1019,7 +1019,7 @@ fn find_received<
                     .try_into()
                     .expect("compact ciphertext prefix"),
             );
-            #[cfg(feature = "orchard")]
+            #[cfg(feature = "one-time-ivk")]
             let output = output.with_one_time_key_id(key.one_time_key_id());
             shielded_outputs.push(output);
         }

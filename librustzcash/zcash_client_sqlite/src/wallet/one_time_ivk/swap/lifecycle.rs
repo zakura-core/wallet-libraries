@@ -1,21 +1,22 @@
 //! Provider observations and the rule that ends a key's trial decryption.
 use rusqlite::{Connection, OptionalExtension, named_params, params};
-use zakura_one_time_ivk::lifecycle::{
+use zakura_one_time_ivk::swap::{
     COMPLETION_LIMIT_SECS, Observation, OperationStatus, RESTORE_WATCH_SECS, ReceiptExpectation,
 };
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
-    RESERVED, RESTORED, account_key, invalid,
+    RESERVED,
     reservations::{STARTED, reap},
 };
+use crate::wallet::one_time_ivk::{RESTORED, account_key, invalid};
 use crate::{
     AccountUuid, error::SqliteClientError, wallet, wallet::common::tx_unexpired_condition,
 };
 
 /// See `WalletDb::close_finished_one_time_keys`.
-pub(super) fn close_finished<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn close_finished<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
@@ -123,7 +124,7 @@ pub(super) fn close_finished<P: Parameters>(
 /// Returns whether `observation` was current and so recorded. `expectation` stores the
 /// status: 0 active, 1 final with no receipt, 2 final with a receipt, 3 final but
 /// inconclusive, 4 awaiting a deposit.
-pub(super) fn record(
+pub(in crate::wallet::one_time_ivk) fn record(
     conn: &Connection,
     id: i64,
     observation: Observation,
@@ -159,7 +160,7 @@ pub(super) fn record(
 }
 
 /// Records `observation` on key `key`'s refund operation `reference`, adding it if new.
-pub(super) fn record_refund(
+pub(in crate::wallet::one_time_ivk) fn record_refund(
     conn: &Connection,
     key: i64,
     reference: &str,

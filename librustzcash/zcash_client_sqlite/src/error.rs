@@ -85,17 +85,17 @@ pub enum SqliteClientError {
     /// Blocks or a transaction were processed without the wallet's open one-time IVKs.
     /// Scan with `scan_cached_blocks_with_one_time_ivks` and decrypt with
     /// `decrypt_and_store_transaction_with_one_time_ivks`.
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     OneTimeIvksNotUsed,
 
     /// A one-time IVK call's input was invalid, such as a passed deadline, a deposit address
     /// for another network, a key, reservation or operation the account does not have, or
     /// directory data that contradicts the wallet's own.
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     InvalidOneTimeIvkInput(&'static str),
 
     /// A one-time key purpose's index space is exhausted.
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     OneTimeIvkIndexExhausted,
 
     /// Decoding of a stored value from its serialized form has failed.
@@ -492,16 +492,16 @@ impl fmt::Display for SqliteClientError {
                 f,
                 "Enhancement mode is not configured; call set_enhancement_mode before enumerating enhancement work"
             ),
-            #[cfg(feature = "orchard")]
+            #[cfg(feature = "one-time-ivk")]
             SqliteClientError::OneTimeIvksNotUsed => write!(
                 f,
                 "This wallet has open one-time IVKs; scan and decrypt with the one-time IVK entry points"
             ),
-            #[cfg(feature = "orchard")]
+            #[cfg(feature = "one-time-ivk")]
             SqliteClientError::InvalidOneTimeIvkInput(reason) => {
                 write!(f, "Invalid one-time IVK input: {reason}")
             }
-            #[cfg(feature = "orchard")]
+            #[cfg(feature = "one-time-ivk")]
             SqliteClientError::OneTimeIvkIndexExhausted => {
                 write!(f, "The one-time key index space is exhausted")
             }
@@ -757,7 +757,7 @@ impl From<ShardTreeError<commitment_tree::Error>> for SqliteClientError {
 
 /// An index whose derived `rivk` gives no valid viewing key, which happens with negligible
 /// probability, is a failure to derive the account's keys.
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 impl From<zakura_one_time_ivk::DerivationError> for SqliteClientError {
     fn from(e: zakura_one_time_ivk::DerivationError) -> Self {
         SqliteClientError::BadAccountData(e.to_string())

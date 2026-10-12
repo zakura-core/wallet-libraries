@@ -1,19 +1,21 @@
 //! Durable ownership-checked candidates. These rows never contribute to balance.
 use rusqlite::{Connection, OptionalExtension, params};
 use zakura_one_time_ivk::recovery::{EncryptedNote, RecoveredNote};
-use zcash_client_backend::data_api::{one_time_ivk::SweepDeferral, transparent_ledger::ChainPoint};
+use zcash_client_backend::data_api::{
+    one_time_ivk::restore::SweepDeferral, transparent_ledger::ChainPoint,
+};
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::{
     PoolType,
     consensus::{BlockHeight, Parameters},
 };
 
-use super::{KeyId, account_key, invalid, key_ref};
+use crate::wallet::one_time_ivk::{KeyId, account_key, invalid, key_ref};
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 /// A directory payment awaiting inclusion and spend checks; its metadata is unchecked.
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct PendingPayment {
+pub(in crate::wallet::one_time_ivk) struct PendingPayment {
     /// Transaction hash in protocol byte order.
     pub txid: TxId,
     /// Original Action index.
@@ -32,7 +34,7 @@ pub(super) struct PendingPayment {
 
 /// Local spend evidence as of one independently checked scan anchor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SpendStatus {
+pub(in crate::wallet::one_time_ivk) enum SpendStatus {
     /// Scan coverage is missing, pruned, or the requested anchor is not yet scanned.
     Unknown,
     /// Every block retains its unlinked nullifiers, and no recorded wallet spend matches.
@@ -43,7 +45,7 @@ pub(super) enum SpendStatus {
 
 /// Authenticates `candidate` with `key` against its registered receiver, returning the
 /// key's registry ID and the note.
-pub(super) fn authenticate<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn authenticate<P: Parameters>(
     conn: &Connection,
     params: &P,
     account: AccountUuid,
@@ -86,7 +88,7 @@ fn payment(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingPayment> {
 
 /// Checks retained nullifiers through `through` for `nullifier`, authenticated
 /// `candidate`'s, without accepting a service's claim of absence.
-pub(super) fn spend_status(
+pub(in crate::wallet::one_time_ivk) fn spend_status(
     conn: &Connection,
     candidate: &PendingPayment,
     nullifier: &orchard::note::Nullifier,
@@ -142,7 +144,7 @@ pub(super) fn spend_status(
 }
 
 /// `account`'s queued candidates for `key`. Loading does not credit or complete them.
-pub(super) fn pending_payments(
+pub(in crate::wallet::one_time_ivk) fn pending_payments(
     conn: &Connection,
     account: AccountUuid,
     key: KeyId,
@@ -156,7 +158,7 @@ pub(super) fn pending_payments(
 }
 
 /// Authenticates and queues one candidate, idempotently, without crediting it.
-pub(super) fn queue_payment<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,

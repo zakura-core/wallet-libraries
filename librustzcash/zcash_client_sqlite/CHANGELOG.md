@@ -158,10 +158,14 @@ workspace.
   facts atomically, and promotion refuses a transfer that introduces missing coverage.
 
 ### Added
-- One-time IVKs (with `orchard`; module `wallet::one_time_ivk`): per-swap Ironwood refund
+- One-time IVKs (feature `one-time-ivk`, which enables `orchard`; module
+  `wallet::one_time_ivk` for the key registry, scanning and spending, and
+  `wallet::one_time_ivk::swap` for issuance, operations, funding and the lifecycle,
+  including `ReservationPolicy`): per-swap Ironwood refund
   and incoming addresses derived from the account viewing key with `zakura-one-time-ivk`,
-  recoverable from the seed. `WalletDb` implements the backend's `OneTimeIvkRead` and
-  `OneTimeIvkWrite`. Keys the wallet issues are trial-decrypted in every batch of
+  recoverable from the seed. `WalletDb` implements the backend's `OneTimeIvkRead`,
+  `OneTimeIvkWrite` and the restore protocol's `OneTimeIvkRestoreRead` and
+  `OneTimeIvkRestoreWrite`. Keys the wallet issues are trial-decrypted in every batch of
   `scan_cached_blocks_with_one_time_ivks` until they close, and their notes spend into
   ordinary change. With `NoteSelection::PreferConsolidation`, one-time-key notes fill spare
   input slots first, so ordinary sends move their value into ordinary internal change
@@ -170,8 +174,9 @@ workspace.
   transaction stores their memo: they carry none the wallet reads, since the refund
   marker is on internal change. While a one-time key is open, blocks and transactions
   processed without the one-time keys are refused (`SqliteClientError::OneTimeIvksNotUsed`).
-  A build without `orchard` refuses to open or initialize a database holding one-time IVK
-  state (`WalletMigrationError::OneTimeIvksRequireOrchard`).
+  The migration creates the one-time IVK tables in every build, but a build without
+  `one-time-ivk` refuses to open or initialize a database holding one-time IVK state
+  (`WalletMigrationError::OneTimeIvksNotEnabled`).
   Invalid input to these calls is `SqliteClientError::InvalidOneTimeIvkInput`, and a call
   that must wait returns its `ReservationPolicy` or `SweepDeferral` as an `Ok` value.
 - Issuance: `WalletDb::reserve_refund_key` and `prepare_receive_reservation`, which require
@@ -187,7 +192,7 @@ workspace.
   `start_receive_operation`, which returns the `ReceiveDeposit` to show; an accepted
   deadline cannot exceed the requested one, and a repeated acceptance cannot change the
   deposit address or memo. `record_operation_status` takes a provider
-  status the app normalized with `zakura_one_time_ivk::lifecycle::near_observation` for
+  status the app's adapter normalized into a `zakura_one_time_ivk::swap::Observation` for
   either kind of operation, by deposit address and memo, and reclaims what it made
   reclaimable: an unstarted reservation after its latest deadline and
   `RECEIVE_RECLAIM_SECONDS`, a started one on a fresh conclusive status, and a funded one
@@ -213,7 +218,9 @@ workspace.
   `directory_note_data_needed`, `queue_directory_lookup` and `apply_one_time_sweep`, which
   credit a note only after verifying its inclusion and spend state locally, and then
   `finish_one_time_nullifier_recovery`, which releases the Ironwood spend history the
-  sweeps needed. Every attempt looks the key up in the current publication, whose answer
+  sweeps needed. Scanning keeps that history only while the wallet holds one-time IVK
+  state, a registered key or retained history, so a wallet without it stores nothing
+  extra. Every attempt looks the key up in the current publication, whose answer
   replaces queued candidates it no longer repeats and reopens the sweep until it is
   applied, and note data is queued in batches, so a long history keeps its progress.
   `begin_one_time_sweep_attempt` takes whether a provider seen set holds the key's

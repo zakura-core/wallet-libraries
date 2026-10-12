@@ -1,9 +1,6 @@
 //! Refund keys, their operations, and the funding transaction's memo and shape.
 use rusqlite::{Connection, OptionalExtension, params};
-use zakura_one_time_ivk::{
-    REFUND_MEMO_MAGIC, RefundMemo,
-    lifecycle::{Observation, OperationStatus},
-};
+use zakura_one_time_ivk::swap::{Observation, OperationStatus, REFUND_MEMO_MAGIC, RefundMemo};
 use zcash_client_backend::proposal::Proposal;
 use zcash_keys::{address::Address, encoding::AddressCodec as _};
 use zcash_primitives::transaction::Transaction;
@@ -13,14 +10,14 @@ use zcash_protocol::{
     memo::MemoBytes,
 };
 
-use super::{
-    Discovery, OneTimeKey, Purpose, ReservationPolicy, account_key, activate, invalid,
-    issuance_start, lifecycle::record_refund, recovery, reserve_next,
+use super::{ReservationPolicy, issuance_start, lifecycle::record_refund, reserve_next};
+use crate::wallet::one_time_ivk::{
+    Discovery, OneTimeKey, Purpose, account_key, activate, invalid, restore::recovery,
 };
 use crate::{AccountUuid, error::SqliteClientError};
 
 /// See `WalletDb::reserve_refund_key`.
-pub(super) fn reserve<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
@@ -47,7 +44,7 @@ pub(super) fn reserve<P: Parameters>(
 }
 
 /// See `WalletDb::refund_funding_memo`.
-pub(super) fn funding_memo<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn funding_memo<P: Parameters>(
     conn: &Connection,
     params: &P,
     account: AccountUuid,
@@ -63,7 +60,7 @@ pub(super) fn funding_memo<P: Parameters>(
 }
 
 /// See `WalletDb::record_refund_operation`.
-pub(super) fn record_operation<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn record_operation<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
