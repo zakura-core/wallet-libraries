@@ -1032,13 +1032,20 @@ fn prefer_one_time_funding<NoteRef, Note>(
 ) -> Result<Vec<SpendableNoteCandidate<NoteRef, Note>>, SqliteClientError> {
     let size = prefix.len();
     let tier = prefix.first().map(|candidate| candidate.lock_tier);
-    if prefix.iter().any(|candidate| Some(candidate.lock_tier) != tier) {
+    if prefix
+        .iter()
+        .any(|candidate| Some(candidate.lock_tier) != tier)
+    {
         return Ok(prefix);
     }
     let already = prefix.iter().filter(|candidate| candidate.one_time).count();
     let (mut one_time, mut other): (Vec<_>, Vec<_>) =
         prefix.into_iter().partition(|candidate| candidate.one_time);
-    one_time.extend(later.into_iter().filter(|candidate| Some(candidate.lock_tier) == tier));
+    one_time.extend(
+        later
+            .into_iter()
+            .filter(|candidate| Some(candidate.lock_tier) == tier),
+    );
 
     let mut one_time_count = already;
     for j in (already + 1..=size.min(one_time.len())).rev() {
