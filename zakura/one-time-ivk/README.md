@@ -30,7 +30,6 @@ hardware accounts.
 ## Layout
 
 - Crate root: `KeyId`, `Purpose`, and derivation.
-- `recovery`: authentication of privately retrieved incoming notes.
 - `swap`: the refund memo, the completion limits (`RESTORE_WATCH_SECS`,
   `COMPLETION_LIMIT_SECS`), and the provider-neutral lifecycle types
   (`Observation`, `OperationStatus`, `ReceiptExpectation`). Provider status
