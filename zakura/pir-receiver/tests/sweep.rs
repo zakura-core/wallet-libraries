@@ -28,7 +28,7 @@ use receiver_pir_server::{Publication, Publications, router_with_publications};
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use sha2::{Digest as _, Sha256};
 use tower::ServiceExt as _;
-use zakura_one_time_ivk::lifecycle::RESTORE_WATCH_SECS;
+use zakura_one_time_ivk::swap::RESTORE_WATCH_SECS;
 use zakura_pir_enhance::{
     ClientError, QueryBinding, ShardSession,
     transport::{Request as EnhanceRequest, ResponseBody, Transport as EnhanceTransport},
@@ -40,7 +40,10 @@ use zakura_pir_receiver::{
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _, WalletWrite as _,
     chain::BlockSource as _,
-    one_time_ivk::{OneTimeIvkRead, OneTimeIvkWrite as _, PaymentApplication},
+    one_time_ivk::{
+        OneTimeIvkRead as _,
+        restore::{OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite as _, PaymentApplication},
+    },
     testing::{AddressType, IronwoodFvk, TestBuilder, TestRng, TestState},
     transparent_ledger::ChainPoint,
 };
@@ -52,7 +55,10 @@ use zcash_client_sqlite::{
         db::{TestDb, TestDbFactory},
     },
     util::{SystemClock, testing::FixedClock},
-    wallet::one_time_ivk::{KeyId, ProviderSeen, Purpose, RECEIVE_GAP_LIMIT},
+    wallet::one_time_ivk::{
+        KeyId, Purpose,
+        swap::{ProviderSeen, RECEIVE_GAP_LIMIT},
+    },
 };
 use zcash_note_encryption::{Domain as _, try_compact_note_decryption};
 use zcash_primitives::block::BlockHash;
@@ -85,10 +91,11 @@ fn ironwood_wallet() -> State {
     ironwood_wallet_in(TestDbFactory::default())
 }
 
-/// [`ironwood_wallet`] stored as `factory` makes it.
+/// [`ironwood_wallet`] stored as `factory` makes it. Its incoming lookahead is registered
+/// before it scans, as a restore does, so scanning keeps the spend evidence sweeps need.
 fn ironwood_wallet_in(factory: TestDbFactory) -> State {
     let activation = BlockHeight::from_u32(ACTIVATION);
-    TestBuilder::new()
+    let mut st = TestBuilder::new()
         .with_network(LocalNetwork {
             nu6: Some(activation),
             nu6_1: Some(activation),
@@ -99,7 +106,10 @@ fn ironwood_wallet_in(factory: TestDbFactory) -> State {
         .with_data_store_factory(factory)
         .with_block_cache(BlockCache::new())
         .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build()
+        .build();
+    let account = st.test_account().unwrap().id();
+    restore(&mut st, account);
+    st
 }
 
 /// The wallet's fully scanned tip.
@@ -118,8 +128,8 @@ fn receiver(st: &State, index: u64) -> Receiver {
     Receiver::from_bytes(fvk.address_at(0u32, Scope::External).to_raw_address_bytes()).unwrap()
 }
 
-/// Pays incoming one-time key `index` in a new scanned block, before any restore has
-/// registered the key, so scanning cannot find it. Returns the payment as the
+/// Pays incoming one-time key `index` in a new scanned block. Scanning cannot find it: a
+/// restored key is swept before it is ever scanned. Returns the payment as the
 /// directory lists it and its note data. The output is the chain's Ironwood leaf at
 /// `position`, which is the number of earlier Ironwood outputs.
 fn pay_restored_key(st: &mut State, index: u64, position: u64) -> (Record, [u8; 528]) {
@@ -328,7 +338,7 @@ impl Notes {
     }
 }
 
-impl<W: OneTimeIvkRead> NoteSource<W> for Notes {
+impl<W: OneTimeIvkRestoreRead> NoteSource<W> for Notes {
     async fn note_data(
         &mut self,
         _: &W,
@@ -345,7 +355,7 @@ impl<W: OneTimeIvkRead> NoteSource<W> for Notes {
 /// A note source that cannot serve the wallet's chain.
 struct NoNotes;
 
-impl<W: OneTimeIvkRead> NoteSource<W> for NoNotes {
+impl<W: OneTimeIvkRestoreRead> NoteSource<W> for NoNotes {
     async fn note_data(
         &mut self,
         _: &W,
@@ -509,7 +519,7 @@ struct Mislabeled {
     calls: usize,
 }
 
-impl<W: OneTimeIvkRead> NoteSource<W> for Mislabeled {
+impl<W: OneTimeIvkRestoreRead> NoteSource<W> for Mislabeled {
     async fn note_data(
         &mut self,
         _: &W,

@@ -10,7 +10,7 @@ use receiver_directory::{
     witness::WitnessSnapshot,
 };
 use receiver_pir::{AcceptedCoverage, transport::DirectoryClient};
-use zakura_one_time_ivk::{KeyId, lifecycle::RESTORE_WATCH_SECS};
+use zakura_one_time_ivk::{KeyId, swap::RESTORE_WATCH_SECS};
 use zakura_pir_enhance::{
     ClientError, ClientResourceLimits,
     transport::{Client, PendingClient, Transport as EnhanceTransport},
@@ -19,9 +19,9 @@ use zakura_pir_enhance::{
 use zcash_client_backend::data_api::{
     WalletRead,
     enhance_pir::EnhancePirRead,
-    one_time_ivk::{
-        DirectoryPayment, DiscoveryWork, OneTimeIvkRead, OneTimeIvkWrite, PaymentApplication,
-        SweepDeferral,
+    one_time_ivk::restore::{
+        DirectoryPayment, DiscoveryWork, OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite,
+        PaymentApplication, SweepDeferral,
     },
     transparent_ledger::ChainPoint,
 };
@@ -79,7 +79,7 @@ pub trait WriteLock {
 
 /// Supplies the note data that payments a lookup found need.
 #[allow(async_fn_in_trait)]
-pub trait NoteSource<W: OneTimeIvkRead> {
+pub trait NoteSource<W: OneTimeIvkRestoreRead> {
     /// The 528 ciphertext bytes after the directory's prefix for each of `positions`,
     /// keyed by commitment tree position. `wallet` is the wallet being swept.
     /// `positions` is never empty when a sweep calls this. [`Error::NotesUnavailable`]
@@ -120,7 +120,7 @@ impl<T, P, W> NoteSource<W> for EnhanceNotes<'_, T, P>
 where
     T: EnhanceTransport,
     P: Parameters,
-    W: OneTimeIvkRead + EnhancePirRead,
+    W: OneTimeIvkRestoreRead + EnhancePirRead,
 {
     async fn note_data(
         &mut self,
@@ -178,8 +178,8 @@ pub struct Swept<E> {
 
 /// Runs `account`'s due restore sweeps against the receiver directory at `origin`,
 /// then releases Ironwood spend evidence that no sweep needs any longer (see
-/// [`OneTimeIvkWrite::finish_one_time_nullifier_recovery`]). A wallet with several
-/// accounts calls it once for each.
+/// [`OneTimeIvkRestoreWrite::finish_one_time_nullifier_recovery`]). A wallet with
+/// several accounts calls it once for each.
 ///
 /// `through` is the wallet's fully scanned tip, and sweeps and release run only while
 /// it is also the stored chain tip and the block the wallet scanned there, which
@@ -187,26 +187,26 @@ pub struct Swept<E> {
 /// When none is due, the run makes no request. Otherwise the publication must commit
 /// to `genesis` ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS) on mainnet), cover
 /// history from Ironwood activation on `params`' network, and end at a block the
-/// wallet accepts (see [`OneTimeIvkRead::directory_publication_anchor`]) with the
-/// wallet's Ironwood tree size there, and have a dated seen set for at least one swap
+/// wallet accepts (see [`OneTimeIvkRestoreRead::directory_publication_anchor`]) with
+/// the wallet's Ironwood tree size there, and have a dated seen set for at least one swap
 /// provider and for every provider with a set, as for [`fetch_seen`](crate::fetch_seen).
 ///
 /// Each key's receiver is first tested against the publication's filters, which every
 /// wallet downloads alike: only a receiver in the paid set is looked up over PIR, and
 /// one in a swap provider's seen set is never issued again (see
-/// [`OneTimeIvkWrite::begin_one_time_sweep_attempt`]). A key whose receiver a provider's
-/// recent set holds keeps scanning for the wallet's restore watch, and any other closes
-/// (see [`OneTimeIvkWrite::apply_one_time_sweep`]). A recent set can rule a receiver out
-/// only if it is current and complete: its feed's last read began at most fifteen
+/// [`OneTimeIvkRestoreWrite::begin_one_time_sweep_attempt`]). A key whose receiver a
+/// provider's recent set holds keeps scanning for the wallet's restore watch, and any
+/// other closes (see [`OneTimeIvkRestoreWrite::apply_one_time_sweep`]). A recent set can
+/// rule a receiver out only if it is current and complete: its feed's last read began at most fifteen
 /// minutes before `now`, and its window, with the feed running throughout, covers
 /// [`RESTORE_WATCH_SECS`]. Unless every provider has such a set, every key keeps
 /// scanning.
 ///
 /// After releasing, the run checks closed keys with no known payment against the
 /// publication's paid filter once per publication (see
-/// [`OneTimeIvkWrite::record_paid_filter_check`]), so a payment the publication shows
-/// after such a key closed is swept on a later run. While any such key exists, every
-/// run fetches the manifest; it fetches the filters only for a newer publication.
+/// [`OneTimeIvkRestoreWrite::record_paid_filter_check`]), so a payment the publication
+/// shows after such a key closed is swept on a later run. While any such key exists,
+/// every run fetches the manifest; it fetches the filters only for a newer publication.
 ///
 /// A run that looks nothing up opens no PIR session and fetches no witnesses. New
 /// payments a lookup finds take their note data from `notes`. A run sweeps at most one
@@ -231,7 +231,7 @@ pub async fn sweep<W, P, T, N, L>(
     now: i64,
 ) -> Result<Swept<AccountError<W>>, Error<AccountError<W>>>
 where
-    W: OneTimeIvkWrite,
+    W: OneTimeIvkRestoreWrite,
     P: Parameters,
     T: Transport,
     N: NoteSource<W>,
@@ -401,7 +401,7 @@ struct Session<T> {
 impl<'a, T: Transport> Directory<'a, T> {
     /// Accepts the publication `origin` serves, at the block of the wallet's chain it
     /// ends at.
-    async fn accept<W: OneTimeIvkRead, P: Parameters>(
+    async fn accept<W: OneTimeIvkRestoreRead, P: Parameters>(
         wallet: &W,
         params: &P,
         through: ChainPoint,
@@ -566,7 +566,7 @@ async fn sweep_key<W, T, N, L>(
     lock: &L,
 ) -> Result<(), Error<AccountError<W>>>
 where
-    W: OneTimeIvkWrite,
+    W: OneTimeIvkRestoreWrite,
     T: Transport,
     N: NoteSource<W>,
     L: WriteLock,

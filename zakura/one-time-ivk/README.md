@@ -25,8 +25,8 @@ replace recipient, nullifier, signature, value, or change validation. The wallet
 owns reservation, persistence, coverage, lifecycle, and note selection. There is
 no alternate balance store in this crate.
 
-The SQLite backend implements this contract with its `orchard` feature: durable
-key registration, scanning, completion, and the restore sweeps that
+The SQLite backend implements this contract with its `one-time-ivk` feature:
+durable key registration, scanning, completion, and the restore sweeps that
 `zakura-pir-receiver` runs. Its rustdoc, starting at
 `zcash_client_sqlite::wallet::one_time_ivk`, documents the calls a wallet makes.
 

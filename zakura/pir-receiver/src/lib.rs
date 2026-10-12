@@ -10,11 +10,11 @@
 //!
 //! `fetch_seen` downloads the swap provider seen sets that a wallet checks before
 //! issuing a swap address. The `wallet` feature adds `sweep`, which runs these lookups
-//! for any wallet store that implements the backend's `OneTimeIvkWrite`. The caller
-//! supplies transports, which carry its route policy, cancellation and timeouts, and a
-//! `WriteLock` that serializes wallet writes with its other writers. Dropping a `sweep`
-//! future at any await is safe: each wallet step commits on its own, and every begun
-//! attempt is already backed off.
+//! for any wallet store that implements the backend's `OneTimeIvkRestoreWrite`. The
+//! caller supplies transports, which carry its route policy, cancellation and timeouts,
+//! and a `WriteLock` that serializes wallet writes with its other writers. Dropping a
+//! `sweep` future at any await is safe: each wallet step commits on its own, and every
+//! begun attempt is already backed off.
 
 mod seen;
 #[cfg(feature = "wallet")]
