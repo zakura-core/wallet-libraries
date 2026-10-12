@@ -33,7 +33,9 @@ workspace.
   `record_paid_filter_check` sweep a closed key without a known payment when a newer
   publication's paid filter holds it.
   Transaction construction spends a one-time-key note with its derived viewing key and sends
-  change to the ordinary account key.
+  change to the ordinary account key. `GreedyInputSelector` with
+  `NoteSelection::PreferConsolidation` skips a one-time-key consolidation candidate that
+  would change the transaction's shape, so later candidates can still take spare input slots.
 - `ll::wallet::{put_blocks_with_nullifier_retention, put_blocks_rows_with_nullifier_retention}`
   (with `one-time-ivk`): `put_blocks` and `put_blocks_rows` with a height from which Ironwood
   nullifiers stay tracked, for a store that finds Ironwood notes after scanning past them.

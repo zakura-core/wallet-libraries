@@ -21,7 +21,9 @@ workspace.
   `OneTimeIvkRestoreWrite`. New errors are `SqliteClientError::OneTimeIvksNotUsed` and
   `SqliteClientError::InvalidOneTimeIvkInput`. The one-time IVK migration creates its
   tables in every build, and a build without `one-time-ivk` refuses a database holding
-  one-time IVK state (`WalletMigrationError::OneTimeIvksNotEnabled`).
+  one-time IVK state (`WalletMigrationError::OneTimeIvksNotEnabled`). With
+  `NoteSelection::PreferConsolidation`, one-time-key notes are spent first where that
+  adds no inputs and keeps the transaction's shape.
 
 ## [0.1.0-rc8] - PLANNED
 
