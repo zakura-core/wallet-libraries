@@ -20,14 +20,14 @@ zakura-one-time-ivk = { version = "=0.0.1-rc0", path = "../one-time-ivk", option
 zcash_client_backend = { workspace = true, features = ["one-time-ivk"], optional = true }
 zcash_protocol = { workspace = true, optional = true }
 # The receiver crates come from wallet-pir's `main`.
-receiver-directory = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c" }
-receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c" }
+receiver-directory = { git = "https://github.com/valargroup/wallet-pir", rev = "ff27d6497abc9d09a7dd7f003cac90726b69c9a3" }
+receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "ff27d6497abc9d09a7dd7f003cac90726b69c9a3" }
 
 [dev-dependencies]
 axum = "0.7"
 orchard.workspace = true
-receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c", features = ["server"] }
-receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c" }
+receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "ff27d6497abc9d09a7dd7f003cac90726b69c9a3", features = ["server"] }
+receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", rev = "ff27d6497abc9d09a7dd7f003cac90726b69c9a3" }
 rusqlite = { workspace = true, features = ["hooks"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower = { workspace = true, features = ["util"] }
