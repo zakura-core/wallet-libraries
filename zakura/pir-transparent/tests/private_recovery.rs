@@ -771,31 +771,29 @@ impl Fixture {
             .unwrap()
     }
 
-    /// The query body lengths the current service accepts, as (44-bit
-    /// dithered, 49-bit): the 8-byte binding, then each table scheme's upload.
-    fn query_lengths(&self) -> (HashSet<usize>, HashSet<usize>) {
+    /// The query body lengths the current service accepts: the 8-byte
+    /// binding, then each table scheme's upload. The history tables publish
+    /// one scheme each, the 8-bit profile's 28-bit dithered query.
+    fn query_lengths(&self) -> HashSet<usize> {
         let url = self.url.as_deref().expect("a served publication");
         let mut transport = HttpShardTransport::new(url, &HttpOptions::default()).unwrap();
         let (init, _) = transport.init().unwrap();
         let service = transparent_wallet::parse_init(&init).unwrap();
-        let (mut dithered, mut nearest) = (HashSet::new(), HashSet::new());
+        let mut lengths = HashSet::new();
         for geometry in &service.geometries {
             for (scheme, dq44) in [
                 (&geometry.directory_scheme, &geometry.directory_scheme_dq44),
                 (&geometry.pages_scheme, &geometry.pages_scheme_dq44),
             ] {
-                let dq44 = dq44
-                    .as_ref()
-                    .expect("the service advertises 44-bit queries");
-                assert_eq!((scheme.query_bits, dq44.query_bits), (49, 44));
-                nearest.insert(8 + scheme.request_bytes);
-                dithered.insert(8 + dq44.request_bytes);
+                assert!(dq44.is_none(), "an 8-bit table publishes one scheme");
+                assert_eq!(scheme.query_bits, 28);
+                lengths.insert(8 + scheme.request_bytes);
             }
         }
-        (dithered, nearest)
+        lengths
     }
 
-    /// The body length of a 44-bit query to page shard `child` of one shard
+    /// The body length of a 28-bit query to page shard `child` of one shard
     /// revision, the 8-byte binding then a selection over the rows its
     /// manifest fixes for that page shard, and whether those rows are fewer
     /// than a whole segment. Read from the published manifest, which stays on
@@ -816,7 +814,7 @@ impl Fixture {
         let child = manifest.child(child).expect("a declared page shard");
         let rows = child.query_rows();
         (
-            8 + transparent_native::request_len_bits(rows as usize, 44),
+            8 + transparent_native::profile_for("pages").request_len_bits(rows as usize, 28),
             rows < child.page_segments[0].rows,
         )
     }
@@ -824,7 +822,7 @@ impl Fixture {
     /// Asserts that every request the service received used one of its routes
     /// with that route's method, carried none of the account's scripts in its
     /// path, query, headers or body, and named no shard in `below_floor`; and
-    /// that every query went at 44 dithered bits, a pages query selecting over
+    /// that every query went at 28 dithered bits, a pages query selecting over
     /// exactly the rows its revision's manifest fixes. Returns how many pages
     /// queries selected over fewer rows than a whole segment.
     fn assert_private(&self, below_floor: &[u64]) -> usize {
@@ -865,11 +863,10 @@ impl Fixture {
                     .any(|request| request.path.ends_with(kind) && shard(&request.path).is_some())
             );
         }
-        // The service advertises the dithered schemes, so every query uses one.
-        // A directory query selects over the whole table; a pages query over
-        // the rows its manifest fixes, fewer than a segment for a growing tail.
-        let (dithered, nearest) = self.query_lengths();
-        assert!(dithered.is_disjoint(&nearest));
+        // Every query uses the table's one scheme. A directory query selects
+        // over the whole table; a pages query over the rows its manifest
+        // fixes, fewer than a segment for a growing tail.
+        let lengths = self.query_lengths();
         let pages = Regex::new(PAGES_QUERY).unwrap();
         let mut prefixes = 0;
         for request in requests.iter().filter(|request| request.method == "POST") {
@@ -881,7 +878,7 @@ impl Fixture {
                     prefixes += usize::from(prefix);
                 }
                 None => assert!(
-                    dithered.contains(&request.body.len()),
+                    lengths.contains(&request.body.len()),
                     "a {}-byte query to {}",
                     request.body.len(),
                     request.path
