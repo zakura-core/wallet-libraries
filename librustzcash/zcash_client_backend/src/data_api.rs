@@ -65,7 +65,7 @@
 //! [`pczt`]: https://docs.rs/pczt
 
 #[cfg(feature = "orchard")]
-use crate::scanning::dynamic_ivk::DynamicScanningKey;
+use crate::scanning::one_time_ivk::OneTimeScanningKey;
 
 use nonempty::NonEmpty;
 use secrecy::SecretVec;
@@ -109,9 +109,9 @@ use crate::{
     wallet::{Note, NoteId, ReceivedNote, Recipient, WalletTransparentOutput, WalletTx},
 };
 
-#[cfg(feature = "orchard")]
-pub mod dynamic_ivk;
 pub mod enhance_pir;
+#[cfg(feature = "orchard")]
+pub mod one_time_ivk;
 pub mod status;
 pub mod transparent_ledger;
 
@@ -2983,17 +2983,17 @@ pub struct DecryptedTransaction<'a, Tx: DecryptableTransaction<AccountId>, Accou
     #[cfg(feature = "orchard")]
     ironwood_outputs: Vec<Tx::DecryptedOrchardOutput>,
     #[cfg(feature = "orchard")]
-    dynamic_ivks_applied: bool,
+    one_time_ivks_applied: bool,
 }
 
 #[cfg(feature = "orchard")]
 impl<AccountId: Copy + Eq> DecryptedTransaction<'_, Transaction, AccountId> {
-    /// Adds authenticated incoming outputs from the wallet's dynamic keys.
+    /// Adds authenticated incoming outputs from the wallet's one-time keys.
     /// A self-payment may already have been recovered with the account OVK.
     /// In that case, retain one incoming record carrying its receiving-key identity.
-    pub fn with_dynamic_ivks(
+    pub fn with_one_time_ivks(
         mut self,
-        keys: impl IntoIterator<Item = DynamicScanningKey<AccountId>>,
+        keys: impl IntoIterator<Item = OneTimeScanningKey<AccountId>>,
     ) -> Self {
         for key in keys {
             for output in key.decrypt_outputs(self.tx) {
@@ -3003,7 +3003,7 @@ impl<AccountId: Copy + Eq> DecryptedTransaction<'_, Transaction, AccountId> {
                 self.ironwood_outputs.push(output);
             }
         }
-        self.dynamic_ivks_applied = true;
+        self.one_time_ivks_applied = true;
         self
     }
 }
@@ -3029,7 +3029,7 @@ impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<
             #[cfg(feature = "orchard")]
             ironwood_outputs,
             #[cfg(feature = "orchard")]
-            dynamic_ivks_applied: false,
+            one_time_ivks_applied: false,
         }
     }
 
@@ -3059,12 +3059,12 @@ impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<
         &self.ironwood_outputs
     }
 
-    /// Whether the wallet's dynamic keys were tried, through
-    /// [`DecryptedTransaction::with_dynamic_ivks`]. While a dynamic key is open, a
+    /// Whether the wallet's one-time keys were tried, through
+    /// [`DecryptedTransaction::with_one_time_ivks`]. While a one-time key is open, a
     /// store may refuse a transaction decrypted without them.
     #[cfg(feature = "orchard")]
-    pub fn dynamic_ivks_applied(&self) -> bool {
-        self.dynamic_ivks_applied
+    pub fn one_time_ivks_applied(&self) -> bool {
+        self.one_time_ivks_applied
     }
 
     /// Returns whether the transaction has decrypted outputs

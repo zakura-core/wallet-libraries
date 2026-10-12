@@ -29,8 +29,8 @@ impl RusqliteMigration for Migration {
             "ALTER TABLE ironwood_enhance_routing ADD COLUMN has_transparent_outputs INTEGER
                  CHECK (has_transparent_outputs IN (0, 1));",
         )?;
-        // `queue_ironwood_output_shape` without its dynamic-key filter: that column may not
-        // exist yet, and no dynamic-key note can.
+        // `queue_ironwood_output_shape` without its one-time-key filter: that column may not
+        // exist yet, and no one-time-key note can.
         conn.execute_batch(
             "INSERT INTO ironwood_memo_retrieval_queue (received_note_id, commitment_tree_position)
              SELECT rn.id, rn.commitment_tree_position

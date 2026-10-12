@@ -120,16 +120,16 @@ use zip32::{DiversifierIndex, fingerprint::SeedFingerprint};
 #[cfg(feature = "orchard")]
 use {
     std::collections::BTreeMap,
-    zakura_dynamic_ivk::KeyId,
+    zakura_one_time_ivk::KeyId,
     zcash_client_backend::{
         data_api::{
-            dynamic_ivk::{
-                DirectoryPayment, DiscoveryWork, DynamicIvkRead, DynamicIvkWrite,
+            one_time_ivk::{
+                DirectoryPayment, DiscoveryWork, OneTimeIvkRead, OneTimeIvkWrite,
                 PaymentApplication, SweepDeferral,
             },
             transparent_ledger::ChainPoint,
         },
-        scanning::dynamic_ivk::DynamicScanningKey,
+        scanning::one_time_ivk::OneTimeScanningKey,
     },
 };
 
@@ -550,7 +550,7 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
         rusqlite::Connection::open(path).and_then(move |conn| {
             rusqlite::vtab::array::load_module(&conn)?;
             #[cfg(not(feature = "orchard"))]
-            wallet::init::refuse_dynamic_ivk_state(&conn)?;
+            wallet::init::refuse_one_time_ivk_state(&conn)?;
             Ok(WalletDb {
                 conn,
                 params,
@@ -2567,22 +2567,22 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
 }
 
 #[cfg(feature = "orchard")]
-impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> DynamicIvkRead
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIvkRead
     for WalletDb<C, P, CL, R>
 {
-    fn get_dynamic_scanning_keys(
+    fn get_one_time_scanning_keys(
         &self,
-    ) -> Result<Vec<DynamicScanningKey<AccountUuid>>, Self::Error> {
-        wallet::dynamic_ivk::scanning_keys(self.conn.borrow(), &self.params)
+    ) -> Result<Vec<OneTimeScanningKey<AccountUuid>>, Self::Error> {
+        wallet::one_time_ivk::scanning_keys(self.conn.borrow(), &self.params)
     }
 
-    fn get_dynamic_transaction_keys(
+    fn get_one_time_transaction_keys(
         &self,
         txid: TxId,
         height: Option<BlockHeight>,
         receivers: &[orchard::Address],
-    ) -> Result<Vec<DynamicScanningKey<AccountUuid>>, Self::Error> {
-        wallet::dynamic_ivk::transaction_keys(
+    ) -> Result<Vec<OneTimeScanningKey<AccountUuid>>, Self::Error> {
+        wallet::one_time_ivk::transaction_keys(
             self.conn.borrow(),
             &self.params,
             txid,
@@ -2596,7 +2596,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> DynamicIv
         height: BlockHeight,
         through: ChainPoint,
     ) -> Result<Result<ChainPoint, SweepDeferral>, Self::Error> {
-        wallet::dynamic_ivk::publication_anchor(self.conn.borrow(), height, through)
+        wallet::one_time_ivk::publication_anchor(self.conn.borrow(), height, through)
     }
 
     fn directory_note_data_needed(
@@ -2605,31 +2605,31 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> DynamicIv
         key: KeyId,
         payments: &[DirectoryPayment],
     ) -> Result<Vec<u64>, Self::Error> {
-        wallet::dynamic_ivk::note_data_needed(self.conn.borrow(), account, key, payments)
+        wallet::one_time_ivk::note_data_needed(self.conn.borrow(), account, key, payments)
     }
 
-    fn dynamic_history_pending(
+    fn one_time_history_pending(
         &self,
         account: AccountUuid,
         through: BlockHeight,
     ) -> Result<bool, Self::Error> {
-        wallet::dynamic_ivk::history_pending(self.conn.borrow(), &self.params, account, through)
+        wallet::one_time_ivk::history_pending(self.conn.borrow(), &self.params, account, through)
     }
 
-    fn dynamic_keys_to_recheck(
+    fn one_time_keys_to_recheck(
         &self,
         account: AccountUuid,
         height: BlockHeight,
     ) -> Result<Vec<DiscoveryWork>, Self::Error> {
-        wallet::dynamic_ivk::keys_to_recheck(self.conn.borrow(), &self.params, account, height)
+        wallet::one_time_ivk::keys_to_recheck(self.conn.borrow(), &self.params, account, height)
     }
 }
 
 #[cfg(feature = "orchard")]
 impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
-    DynamicIvkWrite for WalletDb<C, P, CL, R>
+    OneTimeIvkWrite for WalletDb<C, P, CL, R>
 {
-    fn put_blocks_with_dynamic_ivks(
+    fn put_blocks_with_one_time_ivks(
         &mut self,
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<AccountUuid>>,
@@ -2638,14 +2638,14 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         self.transactionally(|wdb| wdb.store_scanned_blocks(from_state, blocks, Some(keys)))
     }
 
-    fn maintain_dynamic_ivks(&mut self, account: AccountUuid) -> Result<(), SqliteClientError> {
-        let now = wallet::dynamic_ivk::unix_now(&self.clock);
+    fn maintain_one_time_ivks(&mut self, account: AccountUuid) -> Result<(), SqliteClientError> {
+        let now = wallet::one_time_ivk::unix_now(&self.clock);
         self.transactionally(|wdb| {
-            wallet::dynamic_ivk::maintain(wdb.conn.0, wdb.params, account, now)
+            wallet::one_time_ivk::maintain(wdb.conn.0, wdb.params, account, now)
         })
     }
 
-    fn prepare_dynamic_sweeps(
+    fn prepare_one_time_sweeps(
         &mut self,
         account: AccountUuid,
         through: ChainPoint,
@@ -2653,13 +2653,13 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         limit: NonZeroU32,
     ) -> Result<Result<Vec<DiscoveryWork>, SweepDeferral>, SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::dynamic_ivk::prepare_sweeps(
+            wallet::one_time_ivk::prepare_sweeps(
                 wdb.conn.0, wdb.params, account, through, now, limit,
             )
         })
     }
 
-    fn begin_dynamic_sweep_attempt(
+    fn begin_one_time_sweep_attempt(
         &mut self,
         account: AccountUuid,
         key: KeyId,
@@ -2667,7 +2667,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         seen: bool,
     ) -> Result<(), SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::dynamic_ivk::begin_sweep_attempt(wdb.conn.0, account, key, now, seen)
+            wallet::one_time_ivk::begin_sweep_attempt(wdb.conn.0, account, key, now, seen)
         })
     }
 
@@ -2680,13 +2680,13 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         note_data: &BTreeMap<u64, [u8; 528]>,
     ) -> Result<Result<bool, SweepDeferral>, SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::dynamic_ivk::queue_directory_lookup(
+            wallet::one_time_ivk::queue_directory_lookup(
                 wdb.conn.0, wdb.params, account, key, anchor, payments, note_data,
             )
         })
     }
 
-    fn apply_dynamic_sweep(
+    fn apply_one_time_sweep(
         &mut self,
         account: AccountUuid,
         key: KeyId,
@@ -2695,7 +2695,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         recent: bool,
         witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
     ) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
-        wallet::dynamic_ivk::apply_sweep(self, account, key, through, publication, recent, witness)
+        wallet::one_time_ivk::apply_sweep(self, account, key, through, publication, recent, witness)
     }
 
     fn record_paid_filter_check(
@@ -2705,23 +2705,23 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         checked: &[(KeyId, bool)],
     ) -> Result<(), SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::dynamic_ivk::record_paid_check(wdb.conn.0, account, publication, checked)
+            wallet::one_time_ivk::record_paid_check(wdb.conn.0, account, publication, checked)
         })
     }
 
-    fn finish_dynamic_nullifier_recovery(
+    fn finish_one_time_nullifier_recovery(
         &mut self,
         account: AccountUuid,
         through: ChainPoint,
     ) -> Result<bool, SqliteClientError> {
-        let now = wallet::dynamic_ivk::unix_now(&self.clock);
+        let now = wallet::one_time_ivk::unix_now(&self.clock);
         self.transactionally(|wdb| {
-            wallet::dynamic_ivk::finish_nullifier_recovery(
+            wallet::one_time_ivk::finish_nullifier_recovery(
                 wdb.conn.0,
                 wdb.params,
                 account,
                 through,
-                wallet::dynamic_ivk::RECEIVE_LOOKAHEAD,
+                wallet::one_time_ivk::RECEIVE_LOOKAHEAD,
                 now,
             )
         })
@@ -3277,19 +3277,19 @@ where
 }
 
 impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P, CL, R> {
-    /// Stores scanned blocks for `put_blocks` and, with `dynamic_keys`, the dynamic key
-    /// snapshot that scanned them, for `put_blocks_with_dynamic_ivks`. Blocks scanned
-    /// without dynamic keys are refused while `wallet::dynamic_key_open`: storing them
+    /// Stores scanned blocks for `put_blocks` and, with `one_time_keys`, the one-time key
+    /// snapshot that scanned them, for `put_blocks_with_one_time_ivks`. Blocks scanned
+    /// without one-time keys are refused while `wallet::one_time_key_open`: storing them
     /// would mark a key's payments scanned without finding them.
     fn store_scanned_blocks(
         &mut self,
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<AccountUuid>>,
-        #[cfg(feature = "orchard")] dynamic_keys: Option<&[(AccountUuid, KeyId)]>,
+        #[cfg(feature = "orchard")] one_time_keys: Option<&[(AccountUuid, KeyId)]>,
     ) -> Result<(), SqliteClientError> {
         #[cfg(feature = "orchard")]
-        if dynamic_keys.is_none() && wallet::dynamic_key_open(self.conn.0)? {
-            return Err(SqliteClientError::DynamicIvksNotUsed);
+        if one_time_keys.is_none() && wallet::one_time_key_open(self.conn.0)? {
+            return Err(SqliteClientError::OneTimeIvksNotUsed);
         }
         // Once the NU6.3 (Ironwood) activation height is reached, checkpoints on the anchor
         // retention grids are retained as durable anchors. The activation height is `None` (and so
@@ -3343,8 +3343,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
         )?;
         // A key activated after the scanner captured its keys missed this batch.
         #[cfg(feature = "orchard")]
-        if let Some((keys, range)) = dynamic_keys.zip(scanned_range) {
-            wallet::dynamic_ivk::rescan_missed_keys(self.conn.0, keys, range)?;
+        if let Some((keys, range)) = one_time_keys.zip(scanned_range) {
+            wallet::one_time_ivk::rescan_missed_keys(self.conn.0, keys, range)?;
         }
         Ok(())
     }
@@ -3625,11 +3625,11 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         &mut self,
         d_tx: DecryptedTransaction<Transaction, <Self as WalletRead>::AccountId>,
     ) -> Result<(), <Self as WalletRead>::Error> {
-        // As with scanned blocks, a transaction decrypted without the open dynamic keys
+        // As with scanned blocks, a transaction decrypted without the open one-time keys
         // would store their payments as someone else's.
         #[cfg(feature = "orchard")]
-        if !d_tx.dynamic_ivks_applied() && wallet::dynamic_key_open(self.conn.0)? {
-            return Err(SqliteClientError::DynamicIvksNotUsed);
+        if !d_tx.one_time_ivks_applied() && wallet::one_time_key_open(self.conn.0)? {
+            return Err(SqliteClientError::OneTimeIvksNotUsed);
         }
         let chain_tip = wallet::chain_tip_height(self.conn.borrow())?
             .ok_or(SqliteClientError::ChainHeightUnknown)?;
@@ -3681,7 +3681,11 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                 sent_tx,
             )?;
             #[cfg(feature = "orchard")]
-            wallet::dynamic_ivk::start_funded_refund_keys(self.conn.0, &self.params, sent_tx.tx())?;
+            wallet::one_time_ivk::start_funded_refund_keys(
+                self.conn.0,
+                &self.params,
+                sent_tx.tx(),
+            )?;
         }
         Ok(())
     }
@@ -4016,7 +4020,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         #[cfg(feature = "orchard")] ironwood_action_count: u32,
     ) -> Result<(), Self::Error> {
         #[cfg(not(feature = "orchard"))]
-        wallet::init::refuse_dynamic_ivk_state(self.conn.borrow())?;
+        wallet::init::refuse_one_time_ivk_state(self.conn.borrow())?;
         wallet::put_block(
             self.conn.borrow(),
             block_height,
@@ -4342,7 +4346,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
 
     fn delete_retrieval_queue_entries(&mut self, txid: TxId) -> Result<(), Self::Error> {
         #[cfg(not(feature = "orchard"))]
-        wallet::init::refuse_dynamic_ivk_state(self.conn.borrow())?;
+        wallet::init::refuse_one_time_ivk_state(self.conn.borrow())?;
         wallet::delete_retrieval_queue_entries(self.conn.borrow(), txid)
     }
 
@@ -4352,7 +4356,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         wallet_note_positions: &[(ShieldedPool, Position)],
     ) -> Result<(), Self::Error> {
         #[cfg(not(feature = "orchard"))]
-        wallet::init::refuse_dynamic_ivk_state(self.conn.borrow())?;
+        wallet::init::refuse_one_time_ivk_state(self.conn.borrow())?;
         wallet::scanning::scan_complete(
             self.conn.borrow(),
             &self.params,
@@ -4794,14 +4798,14 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
                     .iter()
                     .map(|output| output.note().0.recipient())
                     .collect();
-                let keys = wallet::dynamic_ivk::transaction_keys(
+                let keys = wallet::one_time_ivk::transaction_keys(
                     self.conn.borrow(),
                     &params,
                     txid,
                     mined_height,
                     &receivers,
                 )?;
-                d_tx.with_dynamic_ivks(keys)
+                d_tx.with_one_time_ivks(keys)
             };
             store_decrypted_tx(self, &params, self.gap_limits, tip, d_tx)?;
         }

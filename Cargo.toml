@@ -20,7 +20,7 @@ members = [
     "zakura/pir-status",
     "zakura/transaction-status",
     "zakura/pir-transparent",
-    "zakura/dynamic-ivk",
+    "zakura/one-time-ivk",
     "zakura/pir-receiver",
 ]
 

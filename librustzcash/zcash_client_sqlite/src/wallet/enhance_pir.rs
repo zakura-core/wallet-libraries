@@ -312,7 +312,7 @@ fn require_lwd(
     Ok(())
 }
 
-/// Settles enhancement for `tx_ref`, which holds a note a dynamic IVK restore sweep
+/// Settles enhancement for `tx_ref`, which holds a note a one-time IVK restore sweep
 /// retrieved privately. A stored or routed transaction keeps its route (private if it had
 /// none) and retires its enhancement if nothing is left. Otherwise nothing shows whether it
 /// has transparent parts, so it is queued and routed like a scanned transaction whose
@@ -855,7 +855,7 @@ fn queue_transaction(
          WHERE received_note_id IN (SELECT id FROM ironwood_received_notes WHERE transaction_id = :tx)",
         named_params![":tx": tx_ref.0],
     )?;
-    // Dynamic-key notes carry no memo the wallet reads; only internal change carries the refund marker.
+    // One-time-key notes carry no memo the wallet reads; only internal change carries the refund marker.
     conn.execute(
         "INSERT INTO ironwood_memo_retrieval_queue (received_note_id, commitment_tree_position)
          SELECT id, commitment_tree_position FROM ironwood_received_notes
@@ -1096,7 +1096,7 @@ fn pending_note<P: Parameters>(
         get_account(conn, params, account_id)?.ok_or(SqliteClientError::AccountUnknown)?;
     let diversifier = Diversifier::from_bytes(diversifier);
     let ivk = match receiving_key_id {
-        Some(id) => super::dynamic_ivk::queued_note_ivk(conn, &account, id, scope, diversifier)?,
+        Some(id) => super::one_time_ivk::queued_note_ivk(conn, &account, id, scope, diversifier)?,
         None => match scope {
             Scope::External => account.uivk().orchard().clone(),
             Scope::Internal => account

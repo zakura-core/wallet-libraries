@@ -82,21 +82,21 @@ pub enum SqliteClientError {
     #[cfg(feature = "transparent-inputs")]
     TransparentActivationBlocked(Vec<RecoveryBlocker>),
 
-    /// Blocks or a transaction were processed without the wallet's open dynamic IVKs.
-    /// Scan with `scan_cached_blocks_with_dynamic_ivks` and decrypt with
-    /// `decrypt_and_store_transaction_with_dynamic_ivks`.
+    /// Blocks or a transaction were processed without the wallet's open one-time IVKs.
+    /// Scan with `scan_cached_blocks_with_one_time_ivks` and decrypt with
+    /// `decrypt_and_store_transaction_with_one_time_ivks`.
     #[cfg(feature = "orchard")]
-    DynamicIvksNotUsed,
+    OneTimeIvksNotUsed,
 
-    /// A dynamic IVK call's input was invalid, such as a passed deadline, a deposit address
+    /// A one-time IVK call's input was invalid, such as a passed deadline, a deposit address
     /// for another network, a key, reservation or operation the account does not have, or
     /// directory data that contradicts the wallet's own.
     #[cfg(feature = "orchard")]
-    InvalidDynamicIvkInput(&'static str),
+    InvalidOneTimeIvkInput(&'static str),
 
-    /// A dynamic key purpose's index space is exhausted.
+    /// A one-time key purpose's index space is exhausted.
     #[cfg(feature = "orchard")]
-    DynamicIvkIndexExhausted,
+    OneTimeIvkIndexExhausted,
 
     /// Decoding of a stored value from its serialized form has failed.
     CorruptedData(String),
@@ -493,17 +493,17 @@ impl fmt::Display for SqliteClientError {
                 "Enhancement mode is not configured; call set_enhancement_mode before enumerating enhancement work"
             ),
             #[cfg(feature = "orchard")]
-            SqliteClientError::DynamicIvksNotUsed => write!(
+            SqliteClientError::OneTimeIvksNotUsed => write!(
                 f,
-                "This wallet has open dynamic IVKs; scan and decrypt with the dynamic IVK entry points"
+                "This wallet has open one-time IVKs; scan and decrypt with the one-time IVK entry points"
             ),
             #[cfg(feature = "orchard")]
-            SqliteClientError::InvalidDynamicIvkInput(reason) => {
-                write!(f, "Invalid dynamic IVK input: {reason}")
+            SqliteClientError::InvalidOneTimeIvkInput(reason) => {
+                write!(f, "Invalid one-time IVK input: {reason}")
             }
             #[cfg(feature = "orchard")]
-            SqliteClientError::DynamicIvkIndexExhausted => {
-                write!(f, "The dynamic key index space is exhausted")
+            SqliteClientError::OneTimeIvkIndexExhausted => {
+                write!(f, "The one-time key index space is exhausted")
             }
             SqliteClientError::TransparentLedgerModeNotConfigured => write!(
                 f,
@@ -758,8 +758,8 @@ impl From<ShardTreeError<commitment_tree::Error>> for SqliteClientError {
 /// An index whose derived `rivk` gives no valid viewing key, which happens with negligible
 /// probability, is a failure to derive the account's keys.
 #[cfg(feature = "orchard")]
-impl From<zakura_dynamic_ivk::DerivationError> for SqliteClientError {
-    fn from(e: zakura_dynamic_ivk::DerivationError) -> Self {
+impl From<zakura_one_time_ivk::DerivationError> for SqliteClientError {
+    fn from(e: zakura_one_time_ivk::DerivationError) -> Self {
         SqliteClientError::BadAccountData(e.to_string())
     }
 }

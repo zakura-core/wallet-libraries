@@ -173,7 +173,7 @@ use {
 };
 
 #[cfg(feature = "orchard")]
-use super::dynamic_ivk::DynamicIvkWrite;
+use super::one_time_ivk::OneTimeIvkWrite;
 
 pub mod error;
 use error::Error;
@@ -657,17 +657,17 @@ where
     Ok(scan_summary)
 }
 
-/// [`scan_cached_blocks`], also trial-decrypting with the wallet's dynamic keys.
+/// [`scan_cached_blocks`], also trial-decrypting with the wallet's one-time keys.
 ///
-/// The keys come from [`DynamicIvkRead::get_dynamic_scanning_keys`], and the blocks are
-/// stored with [`DynamicIvkWrite::put_blocks_with_dynamic_ivks`]. A wallet with open
-/// dynamic keys must be scanned with this function rather than [`scan_cached_blocks`].
+/// The keys come from [`OneTimeIvkRead::get_one_time_scanning_keys`], and the blocks are
+/// stored with [`OneTimeIvkWrite::put_blocks_with_one_time_ivks`]. A wallet with open
+/// one-time keys must be scanned with this function rather than [`scan_cached_blocks`].
 ///
-/// [`DynamicIvkRead::get_dynamic_scanning_keys`]: super::dynamic_ivk::DynamicIvkRead::get_dynamic_scanning_keys
+/// [`OneTimeIvkRead::get_one_time_scanning_keys`]: super::one_time_ivk::OneTimeIvkRead::get_one_time_scanning_keys
 #[cfg(feature = "orchard")]
 #[tracing::instrument(skip(params, block_source, data_db, from_state))]
 #[allow(clippy::type_complexity)]
-pub fn scan_cached_blocks_with_dynamic_ivks<ParamsT, DbT, BlockSourceT>(
+pub fn scan_cached_blocks_with_one_time_ivks<ParamsT, DbT, BlockSourceT>(
     params: &ParamsT,
     block_source: &BlockSourceT,
     data_db: &mut DbT,
@@ -678,7 +678,7 @@ pub fn scan_cached_blocks_with_dynamic_ivks<ParamsT, DbT, BlockSourceT>(
 where
     ParamsT: consensus::Parameters + Send + 'static,
     BlockSourceT: BlockSource,
-    DbT: DynamicIvkWrite,
+    DbT: OneTimeIvkWrite,
     <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
 {
     assert_eq!(from_height, from_state.block_height + 1);
@@ -686,13 +686,15 @@ where
     let account_ufvks = data_db
         .get_unified_full_viewing_keys()
         .map_err(Error::Wallet)?;
-    let dynamic_keys = data_db.get_dynamic_scanning_keys().map_err(Error::Wallet)?;
-    let dynamic_key_ids = dynamic_keys
+    let one_time_keys = data_db
+        .get_one_time_scanning_keys()
+        .map_err(Error::Wallet)?;
+    let one_time_key_ids = one_time_keys
         .iter()
         .map(|key| (*key.account_id(), key.key_id()))
         .collect::<Vec<_>>();
     let scanning_keys =
-        ScanningKeys::from_account_ufvks(account_ufvks).with_dynamic_ivks(dynamic_keys);
+        ScanningKeys::from_account_ufvks(account_ufvks).with_one_time_ivks(one_time_keys);
     let (scan_summary, scanned_blocks) = scan_blocks(
         params,
         block_source,
@@ -703,13 +705,13 @@ where
     )?;
 
     data_db
-        .put_blocks_with_dynamic_ivks(from_state, scanned_blocks, &dynamic_key_ids)
+        .put_blocks_with_one_time_ivks(from_state, scanned_blocks, &one_time_key_ids)
         .map_err(Error::Wallet)?;
     Ok(scan_summary)
 }
 
 /// Scans at most `limit` blocks from `from_height` with `scanning_keys`, for
-/// [`scan_cached_blocks`] and its dynamic IVK twin, returning the blocks to store.
+/// [`scan_cached_blocks`] and its one-time IVK twin, returning the blocks to store.
 #[allow(clippy::type_complexity)]
 fn scan_blocks<ParamsT, DbT, BlockSourceT, IvkTag>(
     params: &ParamsT,
@@ -769,7 +771,7 @@ where
             )
             .map_err(Error::Scan)?;
 
-            // ScanSummary omits ordinary and dynamic Ironwood notes; adding Ironwood counters is separate work.
+            // ScanSummary omits ordinary and one-time Ironwood notes; adding Ironwood counters is separate work.
             for wtx in &scanned_block.transactions {
                 scan_summary.spent_sapling_note_count += wtx.sapling_spends().len();
                 scan_summary.received_sapling_note_count += wtx.sapling_outputs().len();
