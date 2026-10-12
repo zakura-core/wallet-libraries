@@ -2,7 +2,7 @@
 
 use incrementalmerkletree::Position;
 use rusqlite::{Connection, Row, ToSql, named_params, types::Value};
-use std::{num::NonZeroU64, rc::Rc};
+use std::{cell::Cell, num::NonZeroU64, rc::Rc};
 
 use zcash_client_backend::{
     data_api::{
@@ -397,10 +397,10 @@ where
     }
 }
 
-/// Selects the fewest eligible notes needed to cover `value`, followed by notes that the input
-/// selector may use for shape-preserving consolidation: one-time-key notes first (with
-/// `one-time-ivk`), so spare input slots move their value into ordinary change, then the smallest
-/// notes.
+/// Selects the fewest eligible notes needed to cover `value`, preferring one-time-key notes among
+/// sets of that size (with `one-time-ivk`), followed by notes that the input selector may use for
+/// shape-preserving consolidation: one-time-key notes first, so spare input slots move their value
+/// into ordinary change, then the smallest notes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn select_spendable_notes_for_consolidation<P: consensus::Parameters, F, Note>(
     conn: &Connection,
@@ -676,7 +676,8 @@ where
 enum ValueSelection {
     /// Accumulate the oldest eligible notes until the target value is covered.
     Accumulate,
-    /// Accumulate larger notes first after honoring lock-tier preference.
+    /// Accumulate larger notes first after honoring lock-tier preference, then prefer one-time-key
+    /// notes without increasing the note count (see [`prefer_one_time_funding`]).
     LargestFirst,
     /// Return up to `limit` notes from the specified lock tier: one-time-key notes first, then in
     /// ascending value order.
@@ -687,8 +688,9 @@ enum ValueSelection {
 /// specified ``target_value`` in Zatoshis from the specified shielded protocols excluding
 /// the ones present in the ``exclude`` slice.
 ///
-/// [`ValueSelection::LargestFirst`] returns the first confirmed descending-value prefix that
-/// covers the target, or every eligible note when the target cannot be covered.
+/// [`ValueSelection::LargestFirst`] returns the fewest confirmed notes that cover the target,
+/// preferring one-time-key notes among sets of that size, or every eligible note when the target
+/// cannot be covered.
 /// [`ValueSelection::SmallestFirst`] returns a bounded ascending-value prefix from one lock tier.
 ///
 /// - Implementation details
@@ -778,7 +780,8 @@ where
         "SELECT * from eligible WHERE so_far >= :target_value ORDER BY so_far LIMIT 1";
     // Without `one-time-ivk` the wallet holds no one-time-key notes (see
     // `WalletMigrationError::OneTimeIvksNotEnabled`), so the ordering matches plain selection.
-    let one_time_note = if cfg!(feature = "one-time-ivk") && protocol == ShieldedPool::Ironwood {
+    let prefer_one_time = cfg!(feature = "one-time-ivk") && protocol == ShieldedPool::Ironwood;
+    let one_time_note = if prefer_one_time {
         "rn.receiving_key_id IS NOT NULL"
     } else {
         "0"
@@ -787,7 +790,7 @@ where
         "id, txid, {output_index_col},
                 diversifier, value, {note_reconstruction_cols}, commitment_tree_position,
                 ufvk, recipient_key_scope,
-                lock_tier, mined_height, witness_stabilized, trust_status,
+                lock_tier, one_time_note, mined_height, witness_stabilized, trust_status,
                 max_shielding_input_height, min_shielding_input_trust"
     );
     // The `eligible` CTE is shared; only the selection over it differs by shape. Accumulation
@@ -914,7 +917,14 @@ where
     }
     push_lock_params(&mut sql_params, lock_filter, &overridable_owners);
 
+    // Once largest-first funding is covered, only one-time-key notes can still change the
+    // selection, so other rows skip note reconstruction.
+    let funding_covered = Cell::new(false);
     let notes = stmt_select_notes.query_and_then(&sql_params[..], |row| {
+        let one_time = row.get::<_, bool>("one_time_note")?;
+        if funding_covered.get() && !one_time {
+            return Ok(None);
+        }
         let tx_trust_status = row.get::<_, bool>("trust_status")?;
         let max_shielding_input_height = row
             .get::<_, Option<u32>>("max_shielding_input_height")?
@@ -930,6 +940,7 @@ where
                 n,
                 value,
                 lock_tier,
+                one_time,
                 tx_trust_status,
                 max_shielding_input_height,
                 tx_shielding_inputs_trusted,
@@ -940,11 +951,13 @@ where
 
     let mut result = vec![];
     let mut selected_value = Zatoshis::ZERO;
+    let mut later_one_time = vec![];
     for result_maybe_note in notes {
         let Some((
             note,
             value,
             lock_tier,
+            one_time,
             tx_trusted,
             max_shielding_input_height,
             tx_shielding_inputs_trusted,
@@ -968,16 +981,29 @@ where
             ) == 0;
 
         if has_confirmations {
-            result.push(SpendableNoteCandidate {
+            let candidate = SpendableNoteCandidate {
                 note,
                 value,
                 lock_tier,
-            });
+                one_time,
+            };
+            if funding_covered.get() {
+                // Only a covering prefix's size of one-time-key notes can be swapped in.
+                if later_one_time.len() < result.len() {
+                    later_one_time.push(candidate);
+                    continue;
+                }
+                break;
+            }
+            result.push(candidate);
             match selection {
                 ValueSelection::LargestFirst => {
                     selected_value = (selected_value + value).ok_or(BalanceError::Overflow)?;
                     if selected_value >= target_value {
-                        break;
+                        if !prefer_one_time {
+                            break;
+                        }
+                        funding_covered.set(true);
                     }
                 }
                 ValueSelection::SmallestFirst { limit, .. } if result.len() >= limit => break,
@@ -985,13 +1011,62 @@ where
             }
         }
     }
+    if funding_covered.get() {
+        return prefer_one_time_funding(result, later_one_time, target_value);
+    }
     Ok(result)
+}
+
+/// Replaces notes of the covering largest-first `prefix` with one-time-key notes when an equally
+/// small set still covers `target`, so funding retires one-time-key notes without adding inputs.
+///
+/// `later` holds the one-time-key notes that follow `prefix`, in the same descending order. Among
+/// sets of `prefix.len()` notes from `prefix`'s single lock tier, the result has the most
+/// one-time-key notes: for each count `j`, the `j` largest one-time-key notes and the largest other
+/// notes are the strongest such set, so it is the only one checked. A multi-tier prefix is
+/// returned unchanged, preserving lock-tier preference.
+fn prefer_one_time_funding<NoteRef, Note>(
+    prefix: Vec<SpendableNoteCandidate<NoteRef, Note>>,
+    later: Vec<SpendableNoteCandidate<NoteRef, Note>>,
+    target: Zatoshis,
+) -> Result<Vec<SpendableNoteCandidate<NoteRef, Note>>, SqliteClientError> {
+    let size = prefix.len();
+    let tier = prefix.first().map(|candidate| candidate.lock_tier);
+    if prefix.iter().any(|candidate| Some(candidate.lock_tier) != tier) {
+        return Ok(prefix);
+    }
+    let already = prefix.iter().filter(|candidate| candidate.one_time).count();
+    let (mut one_time, mut other): (Vec<_>, Vec<_>) =
+        prefix.into_iter().partition(|candidate| candidate.one_time);
+    one_time.extend(later.into_iter().filter(|candidate| Some(candidate.lock_tier) == tier));
+
+    let mut one_time_count = already;
+    for j in (already + 1..=size.min(one_time.len())).rev() {
+        let value = one_time
+            .iter()
+            .take(j)
+            .chain(other.iter().take(size - j))
+            .try_fold(Zatoshis::ZERO, |total, candidate| {
+                (total + candidate.value).ok_or(BalanceError::Overflow)
+            })?;
+        if value >= target {
+            one_time_count = j;
+            break;
+        }
+    }
+
+    other.truncate(size - one_time_count);
+    one_time.truncate(one_time_count);
+    one_time.append(&mut other);
+    Ok(one_time)
 }
 
 struct SpendableNoteCandidate<NoteRef, Note> {
     note: ReceivedNote<NoteRef, Note>,
     value: Zatoshis,
     lock_tier: i64,
+    /// Whether the note was received by a one-time key (see [`prefer_one_time_funding`]).
+    one_time: bool,
 }
 
 #[allow(dead_code)]
@@ -1120,6 +1195,15 @@ pub(crate) fn unspent_notes_meta(
     // This is an aggregation, not a value-target selection, so no tier ordering applies; only the
     // eligibility filter (Part A) is imposed.
     let eligible_condition = output_eligible_condition(lock_filter, "rn");
+    // One-time-key notes are spent first (see `select_spendable_notes_for_consolidation`), so
+    // change splitting does not count them as notes the wallet will keep. Spending one then never
+    // changes the split, and spare input slots can retire it.
+    let one_time_excluded = if cfg!(feature = "one-time-ivk") && protocol == ShieldedPool::Ironwood
+    {
+        "AND rn.receiving_key_id IS NULL"
+    } else {
+        ""
+    };
     let overridable_owners = overridable_owners_rarray(lock_filter);
     let account_uuid = account.0;
     let target_height_arg = u32::from(target_height);
@@ -1145,7 +1229,8 @@ pub(crate) fn unspent_notes_meta(
                  AND transactions.mined_height IS NOT NULL
                  AND rn.id NOT IN rarray(:exclude)
                  AND rn.id NOT IN ({}) -- the note is unspent
-                 AND ({eligible_condition}) -- the note is eligible under the lock filter",
+                 AND ({eligible_condition}) -- the note is eligible under the lock filter
+                 {one_time_excluded}",
                 spent_notes_clause(table_prefix),
             ),
             &sql_params[..],
