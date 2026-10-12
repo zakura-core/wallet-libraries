@@ -167,9 +167,11 @@ workspace.
   `OneTimeIvkWrite` and the restore protocol's `OneTimeIvkRestoreRead` and
   `OneTimeIvkRestoreWrite`. Keys the wallet issues are trial-decrypted in every batch of
   `scan_cached_blocks_with_one_time_ivks` until they close, and their notes spend into
-  ordinary change. With `NoteSelection::PreferConsolidation`, one-time-key notes fill spare
-  input slots first, so ordinary sends move their value into ordinary internal change
-  without changing the fee or transaction shape. Full-transaction and Enhance PIR
+  ordinary change. With `NoteSelection::PreferConsolidation`, one-time-key notes fund a
+  payment when they cover it with no more inputs, then fill spare input slots first, so
+  ordinary sends move their value into ordinary internal change without changing the fee
+  or transaction shape. `get_account_metadata` does not count them, so change splitting
+  does not change when one is spent. Full-transaction and Enhance PIR
   retrieval authenticate these notes with their registered key, but only a full
   transaction stores their memo: they carry none the wallet reads, since the refund
   marker is on internal change. While a one-time key is open, blocks and transactions
@@ -223,6 +225,7 @@ workspace.
   extra. Every attempt looks the key up in the current publication, whose answer
   replaces queued candidates it no longer repeats and reopens the sweep until it is
   applied, and note data is queued in batches, so a long history keeps its progress.
+  `prepare_one_time_sweeps` selects none until the wallet has fully scanned its chain tip.
   `begin_one_time_sweep_attempt` takes whether a provider seen set holds the key's
   receiver and stores a hit before any lookup, so a seen key is never issued.
   `apply_one_time_sweep` takes whether a current recent set holds it: such a key scans

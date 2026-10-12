@@ -57,17 +57,22 @@ pub(super) fn wallet(file_backed: bool) -> TestState<(), TestDb, LocalNetwork> {
         .build()
 }
 
+/// The test network with Ironwood active from the test account's birthday.
+pub(super) fn ironwood_network() -> LocalNetwork {
+    let activation = Some(BlockHeight::from_u32(100_000));
+    LocalNetwork {
+        nu6: activation,
+        nu6_1: activation,
+        nu6_2: activation,
+        nu6_3: activation,
+        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+    }
+}
+
 /// A file-backed wallet with a block cache and Ironwood active from its first block.
 pub(super) fn ironwood_wallet() -> State {
-    let activation = BlockHeight::from_u32(100_000);
     TestBuilder::new()
-        .with_network(LocalNetwork {
-            nu6: Some(activation),
-            nu6_1: Some(activation),
-            nu6_2: Some(activation),
-            nu6_3: Some(activation),
-            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
-        })
+        .with_network(ironwood_network())
         .with_data_store_factory(TestDbFactory::file_backed())
         .with_block_cache(crate::testing::BlockCache::new())
         .with_account_from_sapling_activation(BlockHash([0; 32]))
@@ -142,17 +147,9 @@ pub(super) fn recover(
     key: KeyId,
     from: BlockHeight,
 ) -> OneTimeKey {
+    let (sweep, now) = (Discovery::Sweep, clock_now());
     tx(db, |c, p| {
-        register(
-            c,
-            p,
-            account,
-            key,
-            from,
-            true,
-            Discovery::Sweep,
-            clock_now(),
-        )
+        register(c, p, account, key, from, true, sweep, now)
     })
     .unwrap()
     .1
@@ -160,17 +157,9 @@ pub(super) fn recover(
 
 /// Keeps `count` incoming lookahead keys expecting payments from `from`.
 pub(super) fn lookahead(db: &mut Db, account: AccountUuid, count: u32, from: BlockHeight) {
-    tx(db, |c, p| {
-        store::restore::recovery::maintain_receive_lookahead(
-            c,
-            p,
-            account,
-            count,
-            from,
-            clock_now(),
-        )
-    })
-    .unwrap()
+    use store::restore::recovery::maintain_receive_lookahead as maintain;
+    let now = clock_now();
+    tx(db, |c, p| maintain(c, p, account, count, from, now)).unwrap()
 }
 
 /// Reserves like `WalletDb::prepare_receive_reservation`, scanning a new key from `from`,
@@ -248,16 +237,9 @@ pub(super) fn finish_recovery(
     through: ChainPoint,
     lookahead: u32,
 ) -> Result<bool, SqliteClientError> {
-    tx(db, |c, p| {
-        store::restore::retention::finish_nullifier_recovery(
-            c,
-            p,
-            account,
-            through,
-            lookahead,
-            clock_now(),
-        )
-    })
+    use store::restore::retention::finish_nullifier_recovery as finish;
+    let now = clock_now();
+    tx(db, |c, p| finish(c, p, account, through, lookahead, now))
 }
 
 /// Starts or extends trial decryption of `key` from `from`, as registration and
@@ -280,18 +262,10 @@ pub(super) fn apply_payment(
     through: ChainPoint,
     (anchor, path): (ChainPoint, &MerklePath),
 ) -> Result<PaymentApplication, SqliteClientError> {
-    let configured = db.transparent_ledger_mode;
+    use store::restore::apply::apply_payment as apply;
+    let (mode, anchored) = (db.transparent_ledger_mode, (anchor, path));
     tx(db, |c, p| {
-        store::restore::apply::apply_payment(
-            c,
-            p,
-            configured,
-            account,
-            key,
-            candidate,
-            through,
-            (anchor, path),
-        )
+        apply(c, p, mode, account, key, candidate, through, anchored)
     })
     .map(|applied| applied.expect("the payment's blocks are on the wallet's chain"))
 }
@@ -312,14 +286,10 @@ pub(super) fn observe_with(
     observation: Observation,
     now: i64,
 ) -> Result<(), SqliteClientError> {
+    use store::swap::lifecycle::record_refund;
     tx(db, |c, _| {
-        store::swap::lifecycle::record_refund(
-            c,
-            key_ref(c, account, key)?,
-            reference,
-            observation,
-            now,
-        )
+        let key = key_ref(c, account, key)?;
+        record_refund(c, key, reference, observation, now)
     })
 }
 
@@ -342,12 +312,8 @@ pub(super) fn observe(
 /// [`WalletDb::close_finished_one_time_keys`] with `tip`'s block time set to `now`, as
 /// when the caller's clock agrees with the chain.
 pub(super) fn close_at(db: &mut Db, account: AccountUuid, now: i64, tip: BlockHeight) -> usize {
-    db.conn
-        .execute(
-            "UPDATE blocks SET time = ?2 WHERE height = ?1",
-            rusqlite::params![u32::from(tip), now],
-        )
-        .unwrap();
+    let sql = "UPDATE blocks SET time = ?2 WHERE height = ?1";
+    exec(&db.conn, sql, rusqlite::params![u32::from(tip), now]);
     db.close_finished_one_time_keys(account, now, tip).unwrap()
 }
 
@@ -379,31 +345,21 @@ pub(super) fn get_key(
 
 /// `key`'s stored scan start and whether it advances allocation.
 pub(super) fn key_state(db: &Db, key: KeyId) -> (BlockHeight, bool) {
-    db.conn
-        .query_row(
-            "SELECT scan_from, advances_allocation FROM ironwood_receiving_keys
-             WHERE purpose = ?1 AND key_index = ?2",
-            rusqlite::params![
-                purpose_code(key.purpose()).unwrap(),
-                key.index().to_be_bytes()
-            ],
-            |r| Ok((BlockHeight::from(r.get::<_, u32>(0)?), r.get(1)?)),
-        )
-        .unwrap()
+    let sql = "SELECT scan_from, advances_allocation FROM ironwood_receiving_keys
+               WHERE purpose = ?1 AND key_index = ?2";
+    let purpose = purpose_code(key.purpose()).unwrap();
+    let params = rusqlite::params![purpose, key.index().to_be_bytes()];
+    let (from, advances): (u32, bool) = row(&db.conn, sql, params);
+    (from.into(), advances)
 }
 
 /// `key`'s last queued lookup, if it is still on the wallet's chain.
 pub(super) fn lookup_coverage(db: &Db, account: AccountUuid, key: KeyId) -> Option<ChainPoint> {
     let id = key_ref(&db.conn, account, key).unwrap();
-    let lookup = db
-        .conn
-        .query_row(
-            "SELECT lookup_height, lookup_hash FROM ironwood_one_time_sweeps
-             WHERE receiving_key_id = ?1",
-            [id],
-            |r| Ok(store::restore::planner::anchor(r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
+    let sql = "SELECT lookup_height, lookup_hash FROM ironwood_one_time_sweeps
+               WHERE receiving_key_id = ?1";
+    let (height, hash) = row(&db.conn, sql, [id]);
+    let lookup = store::restore::planner::anchor(height, hash);
     store::restore::planner::canonical(&db.conn, lookup).unwrap()
 }
 
@@ -427,13 +383,8 @@ pub(super) fn tip(st: &State) -> ChainPoint {
 
 /// The one-time key of each unspent Ironwood note at `height`, `None` for ordinary notes.
 pub(super) fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>> {
-    st.wallet()
-        .db()
-        .get_unspent_ironwood_notes_at_historical_height(st.test_account().unwrap().id(), height)
-        .unwrap()
-        .iter()
-        .map(|n| n.one_time_key_id())
-        .collect()
+    let notes = notes(st, height);
+    notes.iter().map(|n| n.one_time_key_id()).collect()
 }
 
 /// A sweep's `recent` flag for a receiver a swap may still pay, so its key keeps
@@ -449,17 +400,8 @@ pub(super) fn scanning_keys(st: &State) -> Vec<KeyId> {
 /// Pays `key` in a new scanned block and returns the output as a directory
 /// candidate. The output must be the chain's first Ironwood leaf.
 pub(super) fn pay_candidate(st: &mut State, key: KeyId) -> PendingPayment {
-    let fvk = key
-        .derive(&FullViewingKey::from(
-            st.test_account().unwrap().usk().orchard(),
-        ))
-        .unwrap();
-    let (height, _, _) = st.generate_next_block(
-        &IronwoodFvk(fvk.clone()),
-        AddressType::DefaultExternal,
-        Zatoshis::const_from_u64(100_000),
-    );
-    st.scan_cached_blocks_with_one_time_ivks(height, 1);
+    let fvk = derive(st, key);
+    let height = pay(st, &fvk, 100_000);
     let candidate = candidate_at(st, height, &fvk);
     assert_eq!(candidate.position, 0);
     candidate
@@ -472,28 +414,17 @@ pub(super) fn candidate_at(
     height: BlockHeight,
     fvk: &FullViewingKey,
 ) -> PendingPayment {
-    let data: Vec<u8> = st
-        .cache()
-        .0
-        .query_row(
-            "SELECT data FROM compactblocks WHERE height = ?1",
-            [u32::from(height)],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let sql = "SELECT data FROM compactblocks WHERE height = ?1";
+    let data: Vec<u8> = value(&st.cache().0, sql, [u32::from(height)]);
     let block = CompactBlock::decode(data.as_slice()).unwrap();
     let ivk = fvk.to_ivk(Scope::External).prepare();
-    let actions: u32 = block
-        .vtx
-        .iter()
-        .map(|tx| tx.ironwood_actions.len() as u32)
-        .sum();
-    let mut position = block
+    let actions = block.vtx.iter().map(|tx| tx.ironwood_actions.len() as u32);
+    let size = block
         .chain_metadata
         .as_ref()
         .unwrap()
-        .ironwood_commitment_tree_size
-        - actions;
+        .ironwood_commitment_tree_size;
+    let mut position = size - actions.sum::<u32>();
     for tx in &block.vtx {
         for (index, compact) in tx.ironwood_actions.iter().enumerate() {
             let action = CompactAction::try_from(compact).unwrap();
@@ -535,14 +466,6 @@ pub(super) fn external_payment_with(
     memo: &zcash_protocol::memo::MemoBytes,
     also: Vec<zip321::Payment>,
 ) -> zcash_primitives::transaction::Transaction {
-    use std::convert::Infallible;
-    use zcash_client_backend::{
-        data_api::wallet::{ConfirmationsPolicy, input_selection::GreedyInputSelector},
-        fees::{DustOutputPolicy, StandardFeeRule, standard},
-        wallet::OvkPolicy,
-    };
-    use zcash_keys::address::{Address, UnifiedAddress};
-    use zip321::{Payment, TransactionRequest};
     let mut funder = ironwood_wallet();
     let birthday = funder.test_account().unwrap().birthday().clone();
     let (account, usk) = funder
@@ -550,52 +473,18 @@ pub(super) fn external_payment_with(
         .db_mut()
         .create_account("funder", &SecretVec::new(vec![7; 32]), &birthday, None)
         .unwrap();
-    let (height, _, _) = funder.generate_next_block(
-        &IronwoodFvk(FullViewingKey::from(usk.orchard())),
-        AddressType::DefaultExternal,
-        Zatoshis::const_from_u64(1_000_000),
-    );
-    funder.scan_cached_blocks_with_one_time_ivks(height, 1);
+    pay(&mut funder, &FullViewingKey::from(usk.orchard()), 1_000_000);
     funder.generate_and_scan_empty_blocks_with_one_time_ivks(5);
-    let network = *funder.network();
-    let address = Address::Unified(UnifiedAddress::from_receivers(Some(to), None, None).unwrap());
-    let payment = Payment::new(
-        address.to_zcash_address(&network),
-        Some(Zatoshis::const_from_u64(50_000)),
-        Some(memo.clone()),
-        None,
-        None,
-        vec![],
-    )
-    .unwrap();
-    let request = TransactionRequest::new(std::iter::once(payment).chain(also).collect()).unwrap();
-    let strategy = standard::SingleOutputChangeStrategy::<TestDb>::new(
-        StandardFeeRule::Zip317,
-        None,
-        zcash_protocol::ShieldedPool::Orchard,
-        DustOutputPolicy::default(),
+    let payments = std::iter::once(payment(&unified(to), 50_000, Some(memo)));
+    let change = (None, zcash_protocol::ShieldedPool::Orchard);
+    let (_, txid) = transfer(
+        &mut funder,
+        (account, &usk),
+        payments.chain(also).collect(),
+        change,
     );
-    let proposal = funder
-        .propose_transfer(
-            account,
-            &GreedyInputSelector::new(),
-            &strategy,
-            request,
-            ConfirmationsPolicy::MIN,
-        )
-        .unwrap();
-    let created = funder
-        .create_proposed_transactions::<Infallible, _, Infallible, _>(
-            &usk,
-            OvkPolicy::Sender,
-            &proposal,
-        )
-        .unwrap();
-    funder
-        .wallet()
-        .get_transaction(created[0])
-        .unwrap()
-        .unwrap()
+    let db = funder.wallet();
+    db.get_transaction(txid.unwrap()).unwrap().unwrap()
 }
 
 /// Encrypts `note` with a `[4; 512]` memo, as a directory candidate carries it.
@@ -641,21 +530,206 @@ pub(super) fn directory_answer(
 }
 
 /// Reopens `st`'s wallet database from its file.
-pub(super) fn reopen(st: &mut State) {
-    let reopened = WalletDb::for_path(
-        st.wallet().data_file_path(),
-        *st.network(),
-        test_clock(),
-        test_rng(),
-    )
-    .unwrap();
+pub(super) fn reopen<C>(st: &mut TestState<C, TestDb, LocalNetwork>) {
+    let path = st.wallet().data_file_path().to_owned();
+    let reopened = WalletDb::for_path(path, *st.network(), test_clock(), test_rng()).unwrap();
     *st.wallet_mut().db_mut() = reopened;
+}
+
+/// The test account's Orchard FVK, which its one-time keys derive from.
+pub(super) fn parent<C>(st: &TestState<C, TestDb, LocalNetwork>) -> FullViewingKey {
+    FullViewingKey::from(st.test_account().unwrap().usk().orchard())
+}
+
+/// The test account's key `key`, derived without registering it.
+pub(super) fn derive<C>(st: &TestState<C, TestDb, LocalNetwork>, key: KeyId) -> FullViewingKey {
+    key.derive(&parent(st)).unwrap()
+}
+
+/// Mines and scans a block paying `value` to `fvk`'s default address, returning its
+/// height.
+pub(super) fn pay(st: &mut State, fvk: &FullViewingKey, value: u64) -> BlockHeight {
+    let recipient = IronwoodFvk(fvk.clone());
+    let value = Zatoshis::const_from_u64(value);
+    let (height, _, _) = st.generate_next_block(&recipient, AddressType::DefaultExternal, value);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
+    height
+}
+
+/// `receiver` as a unified address.
+pub(super) fn unified(receiver: orchard::Address) -> zcash_keys::address::Address {
+    use zcash_keys::address::{Address, UnifiedAddress};
+    Address::Unified(UnifiedAddress::from_receivers(Some(receiver), None, None).unwrap())
+}
+
+/// A receiver no test wallet holds.
+pub(super) fn foreign_receiver() -> orchard::Address {
+    let key = orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap();
+    FullViewingKey::from(&key).address_at(0u32, Scope::External)
+}
+
+/// The P2PKH address whose key hash repeats `byte`.
+pub(super) fn p2pkh(byte: u8) -> zcash_keys::address::Address {
+    use transparent::address::TransparentAddress;
+    zcash_keys::address::Address::Transparent(TransparentAddress::PublicKeyHash([byte; 20]))
+}
+
+/// A payment of `value` zatoshis to `to`, with `memo` if any.
+pub(super) fn payment(
+    to: &zcash_keys::address::Address,
+    value: u64,
+    memo: Option<&zcash_protocol::memo::MemoBytes>,
+) -> zip321::Payment {
+    let to = to.to_zcash_address(&ironwood_network());
+    let value = Some(Zatoshis::const_from_u64(value));
+    zip321::Payment::new(to, value, memo.cloned(), None, None, vec![]).unwrap()
+}
+
+/// A proposal the test store made.
+pub(super) type Proposal = zcash_client_backend::proposal::Proposal<
+    zcash_client_backend::fees::StandardFeeRule,
+    crate::ReceivedNoteId,
+>;
+
+/// Proposes and creates, without mining, a transaction from `account` paying `payments`
+/// with change in `pool` carrying `memo`. Returns the proposal and the transaction's
+/// ID, or the store's error.
+pub(super) fn transfer(
+    st: &mut State,
+    (account, usk): (AccountUuid, &zcash_keys::keys::UnifiedSpendingKey),
+    payments: Vec<zip321::Payment>,
+    (memo, pool): (
+        Option<&zcash_protocol::memo::MemoBytes>,
+        zcash_protocol::ShieldedPool,
+    ),
+) -> (
+    Proposal,
+    Result<zcash_primitives::transaction::TxId, SqliteClientError>,
+) {
+    use std::convert::Infallible;
+    use zcash_client_backend::{
+        data_api::{
+            error::Error,
+            wallet::{ConfirmationsPolicy, input_selection::GreedyInputSelector},
+        },
+        fees::{DustOutputPolicy, StandardFeeRule, standard::SingleOutputChangeStrategy},
+        wallet::OvkPolicy,
+    };
+    let strategy = SingleOutputChangeStrategy::<TestDb>::new(
+        StandardFeeRule::Zip317,
+        memo.cloned(),
+        pool,
+        DustOutputPolicy::default(),
+    );
+    let request = zip321::TransactionRequest::new(payments).unwrap();
+    let selector = GreedyInputSelector::new();
+    let policy = ConfirmationsPolicy::MIN;
+    let proposal = st
+        .propose_transfer(account, &selector, &strategy, request, policy)
+        .unwrap();
+    let created = st
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            usk,
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .map(|created| created[0])
+        .map_err(|e| match e {
+            Error::DataSource(e) => e,
+            _ => panic!("transaction creation failed outside the store"),
+        });
+    (proposal, created)
+}
+
+/// Spends `value` from the test account to [`foreign_receiver`] with ordinary Orchard
+/// change, then mines and scans the transaction. Returns its proposal and height.
+pub(super) fn spend_to_foreign(st: &mut State, value: u64) -> (Proposal, BlockHeight) {
+    let account = st.test_account().cloned().unwrap();
+    let to = payment(&unified(foreign_receiver()), value, None);
+    let change = (None, zcash_protocol::ShieldedPool::Orchard);
+    let (proposal, txid) = transfer(st, (account.id(), account.usk()), vec![to], change);
+    let (height, _) = st.generate_next_block_including(txid.unwrap());
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
+    (proposal, height)
+}
+
+/// The value `sql` selects with `params`.
+pub(super) fn value<T: rusqlite::types::FromSql>(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> T {
+    conn.query_row(sql, params, |r| r.get(0)).unwrap()
+}
+
+/// The row `sql` selects with `params`, as a tuple.
+pub(super) fn row<T>(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> T
+where
+    T: for<'r> TryFrom<&'r rusqlite::Row<'r>, Error = rusqlite::Error>,
+{
+    conn.query_row(sql, params, |r| T::try_from(r)).unwrap()
+}
+
+/// The rows `sql` selects with `params`, as tuples.
+pub(super) fn rows<T>(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> Vec<T>
+where
+    T: for<'r> TryFrom<&'r rusqlite::Row<'r>, Error = rusqlite::Error>,
+{
+    let mut stmt = conn.prepare(sql).unwrap();
+    let rows = stmt.query_map(params, |r| T::try_from(r)).unwrap();
+    rows.collect::<Result<_, _>>().unwrap()
+}
+
+/// The values `sql` selects with `params`.
+pub(super) fn column<T: rusqlite::types::FromSql>(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Vec<T> {
+    let mut stmt = conn.prepare(sql).unwrap();
+    let values = stmt.query_map(params, |r| r.get(0)).unwrap();
+    values.collect::<Result<_, _>>().unwrap()
+}
+
+/// Executes `sql` with `params`.
+pub(super) fn exec(conn: &Connection, sql: &str, params: impl rusqlite::Params) {
+    conn.execute(sql, params).unwrap();
+}
+
+/// The test account's unspent Ironwood notes at `height`.
+pub(super) fn notes(
+    st: &State,
+    height: BlockHeight,
+) -> Vec<zcash_client_backend::wallet::ReceivedNote<crate::ReceivedNoteId, Note>> {
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet().db();
+    db.get_unspent_ironwood_notes_at_historical_height(account, height)
+        .unwrap()
+}
+
+/// [`apply_payment`] with `path` at `through`.
+pub(super) fn apply(
+    db: &mut Db,
+    account: AccountUuid,
+    key: KeyId,
+    candidate: &PendingPayment,
+    through: ChainPoint,
+    path: &MerklePath,
+) -> PaymentApplication {
+    apply_payment(db, account, key, candidate, through, (through, path)).unwrap()
+}
+
+/// The wallet's Ironwood nullifier retention height.
+pub(super) fn retention_height(st: &State) -> Option<BlockHeight> {
+    crate::wallet::ironwood_nullifier_retention_height(st.wallet().conn()).unwrap()
 }
 
 mod enhancement;
 mod key_access;
 mod scanning;
 
+/// Reservations survive a reopen, and each purpose and account has its own index space,
+/// whose keys another account cannot look up.
 #[test]
 fn reservations_survive_reopen_and_keep_purposes_and_accounts_separate() {
     let mut st = wallet(true);
@@ -667,43 +741,45 @@ fn reservations_survive_reopen_and_keep_purposes_and_accounts_separate() {
     assert_eq!(incoming.key_id(), KeyId::new(Purpose::Receive, 0));
     assert_ne!(refund.receiver(), incoming.receiver());
 
-    let path = st.wallet().data_file_path().to_owned();
-    let network = *st.network();
-    // Close the original connection while keeping the fixture's temporary file alive.
-    drop(std::mem::replace(
-        st.wallet_mut().conn_mut(),
-        Connection::open_in_memory().unwrap(),
-    ));
-    let mut reopened = WalletDb::for_path(path, network, test_clock(), test_rng()).unwrap();
-    let keys = all_keys(&reopened, account).unwrap();
+    reopen(&mut st);
+    let db = st.wallet_mut().db_mut();
+    let keys = all_keys(db, account).unwrap();
     assert_eq!(keys.len(), 2);
     assert_eq!(
         keys[0].full_viewing_key().to_bytes(),
         refund.full_viewing_key().to_bytes()
     );
     assert_eq!(keys[1].receiver(), incoming.receiver());
-    let next = reserve_key(&mut reopened, account, Purpose::Refund, start());
+    let next = reserve_key(db, account, Purpose::Refund, start());
     assert_eq!(next.key_id().index(), 1);
 
     let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
     let birthday = st.test_account().unwrap().birthday().clone();
-    let (other, _) = reopened
-        .create_account("other", &seed, &birthday, None)
-        .unwrap();
-    let key = reserve_key(&mut reopened, other, Purpose::Refund, start());
+    let db = st.wallet_mut().db_mut();
+    let (other, _) = db.create_account("other", &seed, &birthday, None).unwrap();
+    for key in [&refund, &incoming] {
+        assert!(get_key(db, other, key.key_id()).unwrap().is_none());
+        let found = db.get_one_time_key_for_receiver(other, &key.receiver());
+        assert!(found.unwrap().is_none());
+    }
+    let key = reserve_key(db, other, Purpose::Refund, start());
     assert_eq!(key.key_id().index(), 0);
     assert_ne!(key.receiver(), refund.receiver());
 }
 
+/// Lookahead keys wait for their sweeps without advancing allocation, so issuance never
+/// skips them; recovery evidence promotes a key and only widens its history, and the
+/// lookahead extends only above the highest recovered index.
 #[test]
-fn lookahead_does_not_skip_unissued_addresses_and_recovery_promotes_it() {
+fn lookahead_waits_for_sweeps_and_extends_above_recovered_keys() {
     let mut st = wallet(false);
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
-    for index in 0..20 {
-        watch(db, account, index, start());
-        assert!(!key_state(db, KeyId::new(Purpose::Receive, index)).1);
-    }
+    lookahead(db, account, 20, start());
+    lookahead(db, account, 20, start());
+    let keys = all_keys(db, account).unwrap();
+    assert_eq!(keys.len(), 20);
+    assert!(keys.iter().all(|k| !key_state(db, k.key_id()).1));
     let key_id = KeyId::new(Purpose::Receive, 18);
     recover(db, account, key_id, 80.into());
     assert!(key_state(db, key_id).1);
@@ -717,6 +793,14 @@ fn lookahead_does_not_skip_unissued_addresses_and_recovery_promotes_it() {
     ));
     let refund = reserve_key(db, account, Purpose::Refund, start());
     assert_eq!(refund.key_id().index(), 0);
+    recover(db, account, KeyId::new(Purpose::Receive, 19), start());
+    lookahead(db, account, 20, start());
+    let keys = all_keys(db, account).unwrap();
+    let incoming = keys
+        .iter()
+        .filter(|k| k.key_id().purpose() == Purpose::Receive);
+    assert_eq!(incoming.count(), 40);
+    assert_eq!(keys.last().unwrap().key_id().index(), 39);
 }
 
 #[test]
@@ -740,28 +824,16 @@ fn recovered_indices_use_full_u64_order_and_never_wrap() {
 fn operation_and_reservation_commit_or_roll_back_together() {
     let mut st = wallet(false);
     let account = st.test_account().unwrap().id();
-    st.wallet()
-        .conn()
-        .execute_batch("CREATE TABLE ext_operations (key_index BLOB NOT NULL)")
-        .unwrap();
+    let schema = "CREATE TABLE ext_operations (key_index BLOB NOT NULL)";
+    st.wallet().conn().execute_batch(schema).unwrap();
     let db = st.wallet_mut().db_mut();
     let reserve_with = |db: &mut Db, fail: bool| {
         db.transactionally_with_extension(|tx, ext| {
             let (conn, params) = (tx.conn.0, tx.params);
-            let key = reserve_next(
-                conn,
-                params,
-                account,
-                Purpose::Refund,
-                start(),
-                Discovery::Scan,
-                0,
-            )?
-            .unwrap();
-            ext.execute(
-                "INSERT INTO ext_operations VALUES (?1)",
-                [&key.key_id().index().to_le_bytes()],
-            )?;
+            let (purpose, scan) = (Purpose::Refund, Discovery::Scan);
+            let key = reserve_next(conn, params, account, purpose, start(), scan, 0)?.unwrap();
+            let index = key.key_id().index().to_le_bytes();
+            ext.execute("INSERT INTO ext_operations VALUES (?1)", [&index])?;
             if fail {
                 return Err(corrupt("fixture operation write failed"));
             }
@@ -771,13 +843,12 @@ fn operation_and_reservation_commit_or_roll_back_together() {
     assert!(reserve_with(db, true).is_err());
     assert!(all_keys(db, account).unwrap().is_empty());
     assert_eq!(reserve_with(db, false).unwrap().key_id().index(), 0);
-    assert_eq!(
-        st.wallet()
-            .conn()
-            .query_row::<u32, _, _>("SELECT COUNT(*) FROM ext_operations", [], |r| r.get(0))
-            .unwrap(),
-        1
+    let count: u32 = value(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ext_operations",
+        [],
     );
+    assert_eq!(count, 1);
 }
 
 #[test]
@@ -814,72 +885,15 @@ fn concurrent_connections_never_return_the_same_reservation() {
 }
 
 #[test]
-fn corrupted_receiver_is_not_replaced_or_silently_skipped() {
-    let mut st = wallet(false);
-    let account = st.test_account().unwrap().id();
-    watch(st.wallet_mut().db_mut(), account, 0, start());
-    st.wallet()
-        .conn()
-        .execute(
-            "UPDATE ironwood_receiving_keys SET receiver = zeroblob(43)",
-            [],
-        )
-        .unwrap();
-    let db = st.wallet_mut().db_mut();
-    assert!(matches!(
-        all_keys(db, account),
-        Err(SqliteClientError::CorruptedData(_))
-    ));
-    let key = KeyId::new(Purpose::Receive, 0);
-    assert!(matches!(
-        tx(db, |c, p| register(
-            c,
-            p,
-            account,
-            key,
-            start(),
-            true,
-            Discovery::Sweep,
-            0
-        )),
-        Err(SqliteClientError::CorruptedData(_))
-    ));
-    assert!(!key_state(db, KeyId::new(Purpose::Receive, 0)).1);
-}
-
-#[test]
 fn account_deletion_cascades_and_unknown_accounts_cannot_reserve() {
     let mut st = wallet(false);
     let account = st.test_account().unwrap().id();
     reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, start());
     st.wallet_mut().delete_account(account).unwrap();
-    assert_eq!(
-        st.wallet()
-            .conn()
-            .query_row::<u32, _, _>("SELECT COUNT(*) FROM ironwood_receiving_keys", [], |r| r
-                .get(0))
-            .unwrap(),
-        0
-    );
+    let sql = "SELECT COUNT(*) FROM ironwood_receiving_keys";
+    assert_eq!(value::<u32>(st.wallet().conn(), sql, []), 0);
     assert!(matches!(
         reserve(st.wallet_mut().db_mut(), account, Purpose::Refund, start()),
         Err(SqliteClientError::AccountUnknown)
     ));
-}
-
-#[test]
-fn maintained_lookahead_extends_only_above_a_restored_key() {
-    let mut st = wallet(false);
-    let account = st.test_account().unwrap().id();
-    let db = st.wallet_mut().db_mut();
-    lookahead(db, account, 20, start());
-    lookahead(db, account, 20, start());
-    let keys = all_keys(db, account).unwrap();
-    assert_eq!(keys.len(), 20);
-    assert!(keys.iter().all(|k| !key_state(db, k.key_id()).1));
-    recover(db, account, KeyId::new(Purpose::Receive, 19), start());
-    lookahead(db, account, 20, start());
-    let keys = all_keys(db, account).unwrap();
-    assert_eq!(keys.len(), 40);
-    assert_eq!(keys.last().unwrap().key_id().index(), 39);
 }

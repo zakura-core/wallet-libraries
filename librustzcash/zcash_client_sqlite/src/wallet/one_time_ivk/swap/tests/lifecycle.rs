@@ -10,7 +10,7 @@ const DAY: i64 = 24 * HOUR;
 
 /// Unix time the fixed test clock stamps on registered keys as `registered_at`.
 fn registered_at() -> i64 {
-    unix_now(&test_clock())
+    clock_now()
 }
 
 /// The height above the scanned tip, where a newly issued key starts scanning.
@@ -23,17 +23,6 @@ fn refund_key(st: &mut State) -> OneTimeKey {
     let account = st.test_account().unwrap().id();
     let from = next_height(st);
     reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, from)
-}
-
-/// Mines and scans a block paying `value` to `key`, and returns its height.
-fn pay(st: &mut State, key: &OneTimeKey, value: u64) -> BlockHeight {
-    let (height, _, _) = st.generate_next_block(
-        &IronwoodFvk(key.full_viewing_key().clone()),
-        AddressType::DefaultExternal,
-        Zatoshis::const_from_u64(value),
-    );
-    st.scan_cached_blocks_with_one_time_ivks(height, 1);
-    height
 }
 
 /// Mines blocks until the latest receipt has the untrusted confirmations closing needs.
@@ -56,15 +45,17 @@ fn observe_swap(st: &mut State, key: KeyId, status: OperationStatus, now: i64) {
 
 /// `operation`'s stored `(observed_at, expectation, expected_value, deadline)`.
 fn operation_row(st: &State, operation: &str) -> (i64, u8, Option<i64>, Option<i64>) {
-    st.wallet()
-        .conn()
-        .query_row(
-            "SELECT observed_at, expectation, expected_value, deadline
-             FROM ironwood_one_time_operations WHERE reference = ?1",
-            [operation],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .unwrap()
+    let sql = "SELECT observed_at, expectation, expected_value, deadline
+               FROM ironwood_one_time_operations WHERE reference = ?1";
+    row(st.wallet().conn(), sql, [operation])
+}
+
+/// An observation of `status` without a deadline.
+fn status(status: OperationStatus) -> Observation {
+    Observation {
+        status,
+        deadline: None,
+    }
 }
 
 /// Newer observations replace older ones, an older one arriving late is ignored, a
@@ -123,28 +114,16 @@ fn a_refund_owed_starts_an_unfunded_refund_key() {
         let from = next_height(&st);
         // Reserved as issuance does: it starts only when its funding transaction is stored.
         let db = st.wallet_mut().db_mut();
+        let (refund, funding) = (Purpose::Refund, Discovery::Funding);
         let key = tx(db, |c, p| {
-            reserve_next(
-                c,
-                p,
-                account,
-                Purpose::Refund,
-                from,
-                Discovery::Funding,
-                clock_now(),
-            )
-        })
-        .unwrap()
-        .unwrap()
-        .key_id();
+            reserve_next(c, p, account, refund, from, funding, clock_now())
+        });
+        let key = key.unwrap().unwrap().key_id();
         observe(db, account, key, "deposit", Active, 100).unwrap();
-        let record = |db: &mut Db, status, at| {
-            let observation = Observation {
-                status,
-                deadline: None,
-            };
-            db.record_operation_status(account, "deposit", None, observation, false, at)
-                .unwrap()
+        let record = |db: &mut Db, s, at| {
+            let recorded =
+                db.record_operation_status(account, "deposit", None, status(s), false, at);
+            recorded.unwrap()
         };
         assert!(record(db, Active, 100));
         assert!(scanning_keys(&st).is_empty());
@@ -174,20 +153,18 @@ fn a_final_status_closes_a_key_and_an_inconclusive_one_waits_for_the_limit() {
         }
         let closes_at = registered_at() + closes_at;
         assert_eq!(close(&mut st, closes_at), 1);
-        let closed_at: Option<i64> = st
-            .wallet()
-            .conn()
-            .query_row("SELECT closed_at FROM ironwood_receiving_keys", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(closed_at, Some(closes_at));
+        let sql = "SELECT closed_at FROM ironwood_receiving_keys";
+        assert_eq!(
+            value::<Option<i64>>(st.wallet().conn(), sql, []),
+            Some(closes_at)
+        );
         assert_eq!(close(&mut st, closes_at + LIMIT), 0);
     }
 }
 
-/// A key expecting a receipt stays open until its receipts cover the expected amount,
-/// or any receipt without one, with the untrusted confirmations, then closes.
+/// A key expecting a receipt stays open, still scanning, until its receipts cover the
+/// expected amount, or any receipt without one, with the untrusted confirmations, then
+/// closes.
 #[test]
 fn expected_receipts_keep_a_key_open_until_received_and_confirmed() {
     for (expected, payments) in [(Some(150_000), &[100_000, 50_000][..]), (None, &[10_000])] {
@@ -198,48 +175,40 @@ fn expected_receipts_keep_a_key_open_until_received_and_confirmed() {
         observe_swap(&mut st, key.key_id(), status, terminal);
         for value in payments {
             assert_eq!(close(&mut st, terminal), 0);
-            pay(&mut st, &key, *value);
+            pay(&mut st, key.full_viewing_key(), *value);
         }
         st.generate_and_scan_empty_blocks_with_one_time_ivks(8);
         assert_eq!(close(&mut st, terminal), 0);
+        assert_eq!(scanning_keys(&st), [key.key_id()]);
         st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
         assert_eq!(close(&mut st, terminal), 1);
     }
 }
 
+/// A rewind that un-mines a receipt keeps its key open, or reopens it if it closed, so
+/// scanning again from the rewind mines the receipt again; past its limit, the key waits
+/// for the unmined receipt, which can be mined until it expires. Once the receipt is
+/// confirmed again, the key closes.
 #[test]
-fn rewound_receipt_keeps_key_open_until_mined_again() {
-    let mut st = scanned_wallet();
-    let key = refund_key(&mut st);
-    let terminal = registered_at() + HOUR;
-    observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
-    let height = pay(&mut st, &key, 10_000);
-    confirm(&mut st);
-    st.truncate_to_height_retaining_cache(height - 1);
-    assert_eq!(close(&mut st, terminal), 0);
-    st.scan_cached_blocks_with_one_time_ivks(height, 10);
-    assert_eq!(close(&mut st, terminal), 1);
-}
-
-#[test]
-fn a_rewind_reopens_a_closed_key_whose_receipt_it_unmines() {
-    let mut st = scanned_wallet();
-    let key = refund_key(&mut st);
-    let terminal = registered_at() + HOUR;
-    observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
-    let height = pay(&mut st, &key, 10_000);
-    confirm(&mut st);
-    assert_eq!(close(&mut st, terminal), 1);
-    assert!(scanning_keys(&st).is_empty());
-    // A repair rewind below the receipt un-mines it, so the key scans again and the
-    // rescan mines the receipt again; the key closes once it is confirmed again.
-    st.truncate_to_height_retaining_cache(height - 1);
-    assert_eq!(scanning_keys(&st), [key.key_id()]);
-    // Past its limit, it waits for the unmined receipt, which can be mined until it expires.
-    assert_eq!(close(&mut st, terminal + LIMIT), 0);
-    st.scan_cached_blocks_with_one_time_ivks(height, 10);
-    assert_eq!(unspent_keys(&st, height + 9), [Some(key.key_id())]);
-    assert_eq!(close(&mut st, terminal), 1);
+fn a_rewind_that_unmines_a_receipt_keeps_or_reopens_its_key() {
+    for closed_first in [false, true] {
+        let mut st = scanned_wallet();
+        let key = refund_key(&mut st);
+        let terminal = registered_at() + HOUR;
+        observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
+        let height = pay(&mut st, key.full_viewing_key(), 10_000);
+        confirm(&mut st);
+        if closed_first {
+            assert_eq!(close(&mut st, terminal), 1);
+            assert!(scanning_keys(&st).is_empty());
+        }
+        st.truncate_to_height_retaining_cache(height - 1);
+        assert_eq!(scanning_keys(&st), [key.key_id()]);
+        assert_eq!(close(&mut st, terminal + LIMIT), 0);
+        st.scan_cached_blocks_with_one_time_ivks(height, 10);
+        assert_eq!(unspent_keys(&st, height + 9), [Some(key.key_id())]);
+        assert_eq!(close(&mut st, terminal), 1);
+    }
 }
 
 /// A rewind that keeps a closed key's receipt but leaves it short of the untrusted
@@ -251,15 +220,14 @@ fn a_rewind_reopens_a_closed_key_whose_receipt_it_leaves_unconfirmed() {
     let key = refund_key(&mut st);
     let terminal = registered_at() + HOUR;
     observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
-    let height = pay(&mut st, &key, 10_000);
-    confirm(&mut st);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    let height = pay(&mut st, key.full_viewing_key(), 10_000);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(10);
     assert_eq!(close(&mut st, terminal), 1);
     st.truncate_to_height(height + 9);
     assert!(scanning_keys(&st).is_empty());
     st.truncate_to_height(height + 8);
     assert_eq!(scanning_keys(&st), [key.key_id()]);
-    let replacement = pay(&mut st, &key, 20_000);
+    let replacement = pay(&mut st, key.full_viewing_key(), 20_000);
     assert_eq!(replacement, height + 9);
     assert_eq!(unspent_keys(&st, replacement), [Some(key.key_id()); 2]);
 }
@@ -308,53 +276,46 @@ fn the_limit_counts_from_the_latest_deadline_or_registration() {
     }
 }
 
+/// Keys close only at a tip the wallet stored and fully scanned, never while a rescan is
+/// queued, and at the earlier of the caller's clock and the tip block's time.
 #[test]
-fn closing_uses_the_earlier_of_the_clock_and_the_tip_block_time() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    refund_key(&mut st);
-    let tip = st.wallet().chain_height().unwrap().unwrap();
-    let limit = registered_at() + LIMIT;
-    let year = 365 * 24 * HOUR;
-    let db = st.wallet_mut().db_mut();
-    assert_eq!(close_at(db, account, limit - 1, tip), 0);
-    // A clock that runs fast does not move the tip block's time.
-    let closed = db.close_finished_one_time_keys(account, limit + year, tip);
-    assert_eq!(closed.unwrap(), 0);
-    st.wallet()
-        .conn()
-        .execute(
-            "UPDATE blocks SET time = ?2 WHERE height = ?1",
-            rusqlite::params![u32::from(tip), limit + year],
-        )
-        .unwrap();
-    // One that runs slow only delays closing.
-    let db = st.wallet_mut().db_mut();
-    let closed = db.close_finished_one_time_keys(account, limit - 1, tip);
-    assert_eq!(closed.unwrap(), 0);
-    let closed = db.close_finished_one_time_keys(account, limit, tip);
-    assert_eq!(closed.unwrap(), 1);
-}
-
-#[test]
-fn keys_stay_open_while_a_rescan_is_queued() {
+fn closing_needs_the_scanned_tip_and_the_earlier_of_clock_and_block_time() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let key = refund_key(&mut st).key_id();
     let terminal = registered_at() + HOUR;
     let tip = st.wallet().chain_height().unwrap().unwrap();
     observe_swap(&mut st, key, Terminal(NoReceipt), terminal);
-    reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, tip);
-    assert!(
-        st.wallet()
-            .suggest_scan_ranges()
-            .unwrap()
-            .iter()
-            .any(|r| r.block_range().contains(&tip))
-    );
+    // The network reports a block the wallet has not stored or scanned yet.
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(close_at(db, account, terminal + DAY, tip + 1), 0);
+    // Another key's activation queues a rescan of the tip.
+    reserve_key(db, account, Purpose::Refund, tip);
+    let ranges = st.wallet().suggest_scan_ranges().unwrap();
+    assert!(ranges.iter().any(|r| r.block_range().contains(&tip)));
     assert_eq!(close(&mut st, terminal + DAY), 0);
     st.scan_cached_blocks_with_one_time_ivks(tip, 1);
     assert_eq!(close(&mut st, terminal + DAY), 1);
+
+    // The other key, without operations, closes at its limit.
+    let limit = registered_at() + LIMIT;
+    let year = 365 * DAY;
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(close_at(db, account, limit - 1, tip), 0);
+    // A clock that runs fast does not move the tip block's time.
+    let closed = db.close_finished_one_time_keys(account, limit + year, tip);
+    assert_eq!(closed.unwrap(), 0);
+    let sql = "UPDATE blocks SET time = ?2 WHERE height = ?1";
+    exec(
+        &db.conn,
+        sql,
+        rusqlite::params![u32::from(tip), limit + year],
+    );
+    // One that runs slow only delays closing.
+    let closed = db.close_finished_one_time_keys(account, limit - 1, tip);
+    assert_eq!(closed.unwrap(), 0);
+    let closed = db.close_finished_one_time_keys(account, limit, tip);
+    assert_eq!(closed.unwrap(), 1);
 }
 
 /// An incoming key stays open while its reservation is, here held by a quote request
@@ -379,7 +340,7 @@ fn incoming_key_closes_only_once_paid_and_released() {
     for key in [&reserved, &unpaid] {
         observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
     }
-    pay(&mut st, &reserved, 10_000);
+    pay(&mut st, reserved.full_viewing_key(), 10_000);
     confirm(&mut st);
     let released = now + DAY + RECEIVE_RECLAIM_SECONDS;
     assert_eq!(close(&mut st, released - 1), 0);
@@ -415,15 +376,10 @@ fn underpaid_reservation(st: &mut State) -> (OneTimeKey, i64) {
 
 /// Records provider `status` for the test account's funded incoming operation `swap` at
 /// `at`.
-fn record_receive_status(st: &mut State, status: OperationStatus, at: i64) {
+fn record_receive_status(st: &mut State, s: OperationStatus, at: i64) {
     let account = st.test_account().unwrap().id();
-    let observation = Observation {
-        status,
-        deadline: None,
-    };
-    st.wallet_mut()
-        .db_mut()
-        .record_operation_status(account, "swap", None, observation, true, at)
+    let db = st.wallet_mut().db_mut();
+    db.record_operation_status(account, "swap", None, status(s), true, at)
         .unwrap();
 }
 
@@ -445,21 +401,17 @@ fn a_started_reservation_left_active_stops_scanning_at_the_limit() {
     assert_ne!(next.unwrap().unwrap().key_id(), key.key_id());
 }
 
-/// Records `observation` for the test account's refund operation `swap` at `at`.
-fn record_swap(st: &mut State, observation: Observation, at: i64) {
+/// Records `status` for the test account's refund operation `swap` at `at`.
+fn record_swap(st: &mut State, s: OperationStatus, at: i64) {
     let account = st.test_account().unwrap().id();
-    st.wallet_mut()
-        .db_mut()
-        .record_operation_status(account, "swap", None, observation, false, at)
+    let db = st.wallet_mut().db_mut();
+    db.record_operation_status(account, "swap", None, status(s), false, at)
         .unwrap();
 }
 
 /// A refund owed, with the expected amount if any.
-fn owed(value: Option<u64>) -> Observation {
-    Observation {
-        status: Terminal(Positive(value.map(Zatoshis::const_from_u64))),
-        deadline: None,
-    }
+fn owed(value: Option<u64>) -> OperationStatus {
+    Terminal(Positive(value.map(Zatoshis::const_from_u64)))
 }
 
 /// Closes a refund key whose operation `swap` reported no refund, returning when.
@@ -472,23 +424,26 @@ fn closed_without_refund(st: &mut State) -> i64 {
 }
 
 /// Closes a key once its operation `swap` settled with a payment of 50,000, returning
-/// when: a refund key, or a started incoming reservation that is then released.
+/// when: a refund key, or a started incoming reservation that is then released. The
+/// key's note survives closing.
 fn closed_settled(st: &mut State, incoming: bool) -> i64 {
     let at = registered_at() + 2 * HOUR;
     let key = if incoming {
         let (key, _) = underpaid_reservation(st);
-        pay(st, &key, 50_000);
+        pay(st, key.full_viewing_key(), 50_000);
         confirm(st);
-        record_receive_status(st, owed(Some(50_000)).status, at);
+        record_receive_status(st, owed(Some(50_000)), at);
         key
     } else {
         let key = refund_key(st);
-        observe_swap(st, key.key_id(), owed(Some(50_000)).status, at);
-        pay(st, &key, 50_000);
+        observe_swap(st, key.key_id(), owed(Some(50_000)), at);
+        pay(st, key.full_viewing_key(), 50_000);
         confirm(st);
         key
     };
     assert_eq!(close(st, at), 1, "{:?}", key.key_id());
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    assert_eq!(unspent_keys(st, tip), [Some(key.key_id())]);
     at
 }
 
@@ -520,17 +475,7 @@ fn statuses_never_reopen_a_closed_key() {
         (
             "inconclusive after none",
             closed_without_refund,
-            |st, at| {
-                let status = Terminal(Unknown);
-                record_swap(
-                    st,
-                    Observation {
-                        status,
-                        deadline: None,
-                    },
-                    at,
-                )
-            },
+            |st, at| record_swap(st, Terminal(Unknown), at),
         ),
         (
             "raised refund",
@@ -540,7 +485,7 @@ fn statuses_never_reopen_a_closed_key() {
         (
             "corrected payout",
             |st| closed_settled(st, true),
-            |st, at| record_receive_status(st, owed(Some(80_000)).status, at),
+            |st, at| record_receive_status(st, owed(Some(80_000)), at),
         ),
         (
             "refund owed past the limit",
@@ -552,7 +497,7 @@ fn statuses_never_reopen_a_closed_key() {
             |st| closed_at_the_limit(st, true),
             |st, at| {
                 record_receive_status(st, Terminal(NoReceipt), at);
-                record_receive_status(st, owed(Some(50_000)).status, at + 1);
+                record_receive_status(st, owed(Some(50_000)), at + 1);
             },
         ),
     ];
@@ -589,7 +534,7 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
     db.start_receive_operation(account, "accepted")
         .unwrap()
         .unwrap();
-    pay(&mut st, &reservation, 70_000);
+    pay(&mut st, reservation.full_viewing_key(), 70_000);
     confirm(&mut st);
     let released = deadline + RECEIVE_RECLAIM_SECONDS;
     let payout = Some(Zatoshis::const_from_u64(70_000));
@@ -601,48 +546,9 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
             status,
             deadline: Some(deadline),
         };
-        st.wallet_mut()
-            .db_mut()
-            .record_operation_status(account, request, None, observation, funded, released)
+        let db = st.wallet_mut().db_mut();
+        db.record_operation_status(account, request, None, observation, funded, released)
             .unwrap();
     }
     assert_eq!(close(&mut st, released + DAY), 1);
-}
-
-#[test]
-fn closed_key_stops_scanning_but_keeps_its_notes() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let key = refund_key(&mut st);
-    let height = pay(&mut st, &key, 40_000);
-    let terminal = registered_at() + HOUR;
-    observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
-    // The receipt is not deep enough yet to survive a reorg on a closed key.
-    assert_eq!(close(&mut st, terminal), 0);
-    assert_eq!(scanning_keys(&st), [key.key_id()]);
-    confirm(&mut st);
-    assert_eq!(close(&mut st, terminal), 1);
-    assert!(scanning_keys(&st).is_empty());
-    let notes = st
-        .wallet()
-        .db()
-        .get_unspent_ironwood_notes_at_historical_height(account, height)
-        .unwrap();
-    assert_eq!(notes.len(), 1);
-    assert_eq!(notes[0].one_time_key_id(), Some(key.key_id()));
-    assert_eq!(notes[0].note().value().inner(), 40_000);
-}
-
-#[test]
-fn keys_close_only_at_the_confirmed_tip() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let key = refund_key(&mut st);
-    let terminal = registered_at() + HOUR;
-    let tip = st.wallet().chain_height().unwrap().unwrap();
-    observe_swap(&mut st, key.key_id(), Terminal(NoReceipt), terminal);
-    // The network reports a block the wallet has not stored or scanned yet.
-    let db = st.wallet_mut().db_mut();
-    assert_eq!(close_at(db, account, terminal + DAY, tip + 1), 0);
-    assert_eq!(close_at(db, account, terminal + DAY, tip), 1);
 }
