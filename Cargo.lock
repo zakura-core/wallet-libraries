@@ -8153,12 +8153,16 @@ dependencies = [
  "tower",
  "zakura-client-backend",
  "zakura-client-sqlite",
+ "zakura-keys",
  "zakura-near-intents",
  "zakura-one-time-ivk",
  "zakura-orchard",
  "zakura-pir-receiver",
  "zakura-primitives",
  "zakura-protocol",
+ "zakura-sapling-crypto",
+ "zakura-transparent",
+ "zakura-zip321",
 ]
 
 [[package]]

@@ -23,17 +23,21 @@ receiver-directory = { git = "https://github.com/valargroup/wallet-pir", rev = "
 receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c", features = ["server"] }
 receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c" }
 rusqlite.workspace = true
+sapling = { workspace = true, features = ["test-dependencies"] }
 secrecy.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
 tower = { workspace = true, features = ["util"] }
+transparent.workspace = true
 zakura-near-intents = { path = "../near-intents" }
 zakura-one-time-ivk = { path = "../one-time-ivk" }
 zakura-pir-receiver = { path = "../pir-receiver", features = ["wallet"] }
 zcash_client_backend = { workspace = true, features = ["one-time-ivk", "test-dependencies"] }
 zcash_client_sqlite = { path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["one-time-ivk", "test-dependencies"] }
+zcash_keys = { workspace = true, features = ["orchard"] }
 zcash_primitives.workspace = true
 zcash_protocol = { workspace = true, features = ["local-consensus"] }
+zip321.workspace = true
 
 [[test]]
 name = "scenarios"

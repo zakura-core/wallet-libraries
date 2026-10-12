@@ -1,9 +1,11 @@
 //! The scenario catalog, grouped as in the suite plan.
 
 mod incoming;
+mod refund;
 
 use crate::harness::Ctx;
 
+pub const FUNDING: &str = "B. Funding and refunds";
 pub const LIVE: &str = "C. Live detection";
 pub const OFFLINE: &str = "D. Offline and clocks";
 pub const RESTORE: &str = "E. Restore from seed";
@@ -28,6 +30,7 @@ pub struct Scenario {
 pub fn all() -> Vec<Scenario> {
     let mut scenarios = Vec::new();
     scenarios.extend(incoming::all());
+    scenarios.extend(refund::all());
     let mut ids = std::collections::BTreeSet::new();
     for scenario in &scenarios {
         assert!(ids.insert(scenario.id.clone()), "duplicate id {}", scenario.id);

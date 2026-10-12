@@ -15,15 +15,21 @@ use zakura_one_time_ivk::{KeyId, Purpose};
 use zakura_one_time_ivk_scenarios::Class;
 use zakura_pir_receiver::{Swept, sweep};
 use zcash_client_backend::data_api::{
-    AccountBirthday, WalletRead as _, WalletWrite as _,
+    AccountBirthday, WalletCommitmentTrees, WalletRead as _, WalletWrite as _,
     chain::scan_cached_blocks_with_one_time_ivks,
+    enhance_pir::{EnhancePirRead as _, EnhancementMode, TransactionEnhancementWork},
+    wallet::{
+        SpendingKeys, create_proposed_transactions, decrypt_and_store_transaction_with_one_time_ivks,
+        input_selection::{GreedyInputSelector, NoteSelection, SpendPolicy},
+        propose_transfer,
+    },
     one_time_ivk::{
         OneTimeIvkRead as _,
         restore::{OneTimeIvkRestoreRead as _, OneTimeIvkRestoreWrite as _},
     },
     scanning::ScanPriority,
     testing::TestRng,
-    transparent_ledger::ChainPoint,
+    transparent_ledger::{ChainPoint, TransparentLedgerMode},
     wallet::ConfirmationsPolicy,
 };
 use zcash_client_sqlite::{
@@ -32,9 +38,20 @@ use zcash_client_sqlite::{
     util::testing::FixedClock,
     wallet::{
         init::init_wallet_db,
-        one_time_ivk::swap::{OperationOutcome, ProviderSeen, ReceiveDeposit, ReservationPolicy},
+        one_time_ivk::swap::{
+            OperationOutcome, ProviderSeen, ReceiveDeposit, ReservationPolicy,
+            verify_refund_funding_proposal,
+        },
     },
 };
+use zcash_client_backend::{
+    fees::{DustOutputPolicy, StandardFeeRule, standard::SingleOutputChangeStrategy},
+    wallet::OvkPolicy,
+};
+use zcash_keys::{address::Address, keys::UnifiedSpendingKey};
+use sapling::prover::mock::{MockOutputProver, MockSpendProver};
+use zcash_primitives::transaction::Transaction;
+use zcash_protocol::ShieldedPool;
 use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork, value::Zatoshis};
 
 use super::{
@@ -59,6 +76,22 @@ pub struct Found {
     pub class: Class,
     /// The wallet's sync count when it was found.
     pub sync: u32,
+}
+
+/// A ZEC-to-X swap a wallet quoted: its refund key and NEAR's deposit address.
+#[derive(Clone, Debug)]
+pub struct RefundSwap {
+    pub index: u64,
+    pub fvk: FullViewingKey,
+    pub deposit: String,
+    pub deadline: i64,
+}
+
+impl RefundSwap {
+    /// The report's name for its key.
+    pub fn label(&self) -> String {
+        format!("R{}", self.index)
+    }
 }
 
 /// An incoming (X to ZEC) swap a wallet quoted.
@@ -143,6 +176,7 @@ pub struct Device {
     _file: NamedTempFile,
     pub account: AccountUuid,
     pub fvk: FullViewingKey,
+    usk: UnifiedSpendingKey,
     skew: i64,
     found: BTreeMap<([u8; 32], u32), Found>,
     phase: Phase,
@@ -171,6 +205,9 @@ impl Device {
         let mut db = WalletDb::for_path(&path, network(), chain.clock(skew), TestRng::seed_from_u64(7))
             .expect("the wallet opens");
         init_wallet_db(&mut db, Some(SecretVec::new(seed.to_vec()))).expect("the schema migrates");
+        // Payload retrieval over the public path: the simulator serves raw transactions.
+        db.set_enhancement_mode(EnhancementMode::Standard);
+        db.set_transparent_ledger_mode(TransparentLedgerMode::Public);
         let birthday = AccountBirthday::from_parts(chain.state_below(birthday), None);
         let (account, usk) = db
             .create_account(name, &SecretVec::new(seed.to_vec()), &birthday, None)
@@ -182,6 +219,7 @@ impl Device {
             _file: file,
             account,
             fvk: FullViewingKey::from(usk.orchard()),
+            usk,
             skew,
             found: BTreeMap::new(),
             phase: Phase::Scan,
@@ -261,6 +299,7 @@ impl Device {
                 .into_iter()
                 .find(|r| r.priority() > ScanPriority::Scanned);
             let Some(range) = next else {
+                self.enhance(chain);
                 self.db
                     .maintain_one_time_ivks(account)
                     .expect("maintenance at the tip");
@@ -293,6 +332,37 @@ impl Device {
             .close_finished_one_time_keys(account, self.now(chain), tip)
             .expect("finished keys close");
         scanned
+    }
+
+    /// Serves the wallet's public payload requests from the chain's raw transactions, as
+    /// lightwalletd's GetTransaction would, until none it can serve remains.
+    fn enhance(&mut self, chain: &Chain) {
+        for _ in 0..4 {
+            let work = self
+                .db
+                .transaction_enhancement_work()
+                .expect("enhancement work");
+            let mut served = 0;
+            for item in work {
+                let TransactionEnhancementWork::Public(request) = item else {
+                    continue;
+                };
+                let Some((tx, height)) = chain.transaction(&request.txid()) else {
+                    continue;
+                };
+                decrypt_and_store_transaction_with_one_time_ivks(
+                    &network(),
+                    &mut self.db,
+                    &tx,
+                    Some(height),
+                )
+                .expect("the transaction decrypts and stores");
+                served += 1;
+            }
+            if served == 0 {
+                break;
+            }
+        }
     }
 
     /// Runs restore sweeps against a fresh publication until none is pending, at most
@@ -463,6 +533,128 @@ impl Device {
             fvk,
             deposit,
         })
+    }
+
+    /// Quotes a ZEC-to-X swap: reserves the next refund key and binds NEAR's deposit
+    /// address to it, as Vizor does before showing the quote.
+    pub fn quote_refund(
+        &mut self,
+        chain: &Chain,
+        near: &mut Near,
+        deadline_in: i64,
+    ) -> Result<RefundSwap, ReservationPolicy> {
+        let now = self.now(chain);
+        let key = {
+            let seen_near = &*near;
+            let contains = |receivers: &[[u8; 43]]| {
+                receivers.iter().map(|r| seen_near.seen(r, now)).collect()
+            };
+            let seen = ProviderSeen {
+                since: near.feed_started,
+                until: near.read_until(now),
+                contains: &contains,
+            };
+            self.db
+                .reserve_refund_key(self.account, chain.tip(), Some(&seen))
+                .expect("refund reservation")?
+        };
+        let index = key.key_id().index();
+        let deposit = near.zec_deposit_address();
+        let deadline = now + deadline_in;
+        self.db
+            .record_refund_operation(self.account, index, &deposit, deadline, now)
+            .expect("the refund operation records");
+        let fvk = self.key(Purpose::Refund, index);
+        near.give(receiver_of(&fvk), now, Role::Refund);
+        Ok(RefundSwap {
+            index,
+            fvk,
+            deposit,
+            deadline,
+        })
+    }
+
+    /// Builds and signs the transaction paying `amount` to the swap's deposit address from
+    /// Ironwood notes, with the refund memo on its Ironwood change, checked as Vizor checks
+    /// it. The wallet stores it as sent; the caller mines it.
+    pub fn fund_refund(&mut self, swap: &RefundSwap, amount: u64) -> Transaction {
+        let memo = self
+            .db
+            .refund_funding_memo(self.account, swap.index, &swap.deposit)
+            .expect("the refund memo");
+        let to = Address::decode(&network(), &swap.deposit)
+            .expect("the deposit address decodes")
+            .to_zcash_address(&network());
+        let payment = zip321::Payment::new(
+            to,
+            Some(Zatoshis::const_from_u64(amount)),
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .expect("a payment");
+        let request = zip321::TransactionRequest::new(vec![payment]).expect("a request");
+        let strategy = SingleOutputChangeStrategy::<Wallet>::new(
+            StandardFeeRule::Zip317,
+            Some(memo.clone()),
+            ShieldedPool::Ironwood,
+            DustOutputPolicy::default(),
+        );
+        let policy = SpendPolicy::shielded_pools([ShieldedPool::Ironwood])
+            .with_note_selection(NoteSelection::PreferConsolidation);
+        let proposal = propose_transfer::<_, _, _, _, <Wallet as WalletCommitmentTrees>::Error>(
+            &mut self.db,
+            &network(),
+            self.account,
+            &GreedyInputSelector::new(),
+            &strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+            &policy,
+            None,
+            None,
+        )
+        .expect("the funding proposal");
+        verify_refund_funding_proposal(&proposal, &memo, &swap.deposit)
+            .expect("the funding proposal carries the refund memo");
+        let txids = create_proposed_transactions::<_, _, std::convert::Infallible, _, std::convert::Infallible, _>(
+            &mut self.db,
+            &network(),
+            &MockSpendProver,
+            &MockOutputProver,
+            &SpendingKeys::from_unified_spending_key(self.usk.clone()),
+            OvkPolicy::Sender,
+            &proposal,
+            None,
+        )
+        .expect("the funding transaction builds");
+        self.db
+            .get_transaction(*txids.first())
+            .expect("the stored transaction")
+            .expect("the wallet stored its transaction")
+    }
+
+    /// Records a NEAR status for a refund swap, normalized by `zakura-near-intents`.
+    pub fn observe_refund(
+        &mut self,
+        chain: &Chain,
+        swap: &RefundSwap,
+        status: &str,
+        refunded: Option<u64>,
+    ) -> bool {
+        let observation = near_observation(
+            Purpose::Refund,
+            &NearStatus {
+                status,
+                swap_type: Some("EXACT_INPUT"),
+                refunded_amount: refunded.map(Zatoshis::const_from_u64),
+                amount_out: None,
+            },
+        );
+        self.db
+            .record_operation_status(self.account, &swap.deposit, None, observation, self.now(chain))
+            .expect("the status records")
     }
 
     /// Records a NEAR status for an incoming swap, normalized by `zakura-near-intents`

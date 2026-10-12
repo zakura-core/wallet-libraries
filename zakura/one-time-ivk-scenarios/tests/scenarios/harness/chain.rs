@@ -19,8 +19,15 @@ use zcash_client_sqlite::{
     },
     util::testing::FixedClock,
 };
-use zcash_primitives::{block::BlockHash, transaction::TxId};
-use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork, value::Zatoshis};
+use zcash_primitives::{
+    block::BlockHash,
+    transaction::{Transaction, TxId},
+};
+use zcash_protocol::{
+    consensus::{BlockHeight, BranchId},
+    local_consensus::LocalNetwork,
+    value::Zatoshis,
+};
 
 /// Ironwood, and every upgrade before it, activates at this height.
 pub const ACTIVATION: u32 = 100_000;
@@ -160,6 +167,9 @@ pub struct Chain {
     /// Background activity added while mining; scenarios may change it.
     pub traffic: Traffic,
     foreign: FullViewingKey,
+    /// Wallet-built transactions the chain mined, as raw bytes with their heights, for
+    /// wallets that ask for them by txid.
+    txs: BTreeMap<[u8; 32], (Vec<u8>, BlockHeight)>,
 }
 
 impl Chain {
@@ -181,6 +191,7 @@ impl Chain {
             foreign: FullViewingKey::from(
                 &SpendingKey::from_bytes([7; 32]).expect("a valid spending key"),
             ),
+            txs: BTreeMap::new(),
         };
         chain.mine(1);
         chain
@@ -382,6 +393,32 @@ impl Chain {
             mined.push(entry);
         }
         mined
+    }
+
+    /// Mines a block holding only `tx`, a transaction a wallet built and signed.
+    pub fn mine_tx(&mut self, tx: &Transaction) -> BlockHeight {
+        let (height, _) = self.st.generate_next_block_from_tx(1, tx);
+        self.advance();
+        let block = self.block(height);
+        for compact in &block.vtx {
+            for action in &compact.ironwood_actions {
+                self.commitments
+                    .push(action.cmx.as_slice().try_into().expect("32-byte cmx"));
+            }
+        }
+        let mut raw = Vec::new();
+        tx.write(&mut raw).expect("the transaction serializes");
+        self.txs.insert(*tx.txid().as_ref(), (raw, height));
+        height
+    }
+
+    /// A transaction the chain mined, and its height, as lightwalletd's GetTransaction
+    /// would return it.
+    pub fn transaction(&self, txid: &TxId) -> Option<(Transaction, BlockHeight)> {
+        let (raw, height) = self.txs.get(txid.as_ref())?;
+        let branch = BranchId::for_height(&network(), *height);
+        let tx = Transaction::read(&raw[..], branch).expect("the stored transaction parses");
+        Some((tx, *height))
     }
 
     /// The cached compact block at `height`.

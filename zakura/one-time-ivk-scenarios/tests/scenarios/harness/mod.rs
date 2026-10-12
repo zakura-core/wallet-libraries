@@ -12,7 +12,7 @@ use zcash_client_sqlite::wallet::one_time_ivk::swap::ReservationPolicy;
 use zcash_protocol::consensus::BlockHeight;
 
 use chain::{Chain, Mined, Payer, day_of};
-use device::{Device, IncomingSwap, SyncReport};
+use device::{Device, IncomingSwap, RefundSwap, SyncReport};
 use near::Near;
 
 /// A wallet in a scenario.
@@ -38,6 +38,10 @@ pub struct Ctx {
     expectations: Vec<Expectation>,
     checks: Vec<Check>,
     metrics: Vec<Metric>,
+    /// Balances checked once every wallet has settled.
+    final_balances: Vec<(Dev, u64)>,
+    /// Wallet pairs whose balances must match once settled.
+    same_balances: Vec<(Dev, Dev)>,
 }
 
 impl Ctx {
@@ -51,6 +55,8 @@ impl Ctx {
             expectations: Vec::new(),
             checks: Vec::new(),
             metrics: Vec::new(),
+            final_balances: Vec::new(),
+            same_balances: Vec::new(),
         }
     }
 
@@ -128,6 +134,27 @@ impl Ctx {
         }
     }
 
+    /// Keeps every wallet syncing a block at a time, as Vizor's polling would, until each
+    /// is quiet: nothing pending, deferred or left to scan. At most six rounds per wallet.
+    /// Runs after every scenario so a find that needs another sync (a spend-history replay,
+    /// a sweep's rescan) counts.
+    pub fn settle(&mut self) {
+        for i in 0..self.devices.len() {
+            let dev = Dev(i);
+            for round in 0..6 {
+                let report = self.devices[i].sync(&self.chain, &self.near);
+                let quiet = !report.pending && report.problems.is_empty() && report.scanned_blocks <= 1;
+                if report.found_live + report.found_by_sweep > 0 || !report.problems.is_empty() || round == 0 && report.scanned_blocks > 1 {
+                    self.log_sync(dev, &report);
+                }
+                if quiet {
+                    break;
+                }
+                self.chain.mine(1);
+            }
+        }
+    }
+
     /// Logs a sync's outcome and any sweep problems.
     fn log_sync(&mut self, dev: Dev, report: &SyncReport) {
         let balance = self.devices[dev.0].balance();
@@ -169,6 +196,53 @@ impl Ctx {
             Err(policy) => self.log(&name, format!("quote refused: {policy:?}")),
         }
         quoted
+    }
+
+    /// Quotes a ZEC-to-X swap on `dev`, reserving a refund key for it.
+    pub fn quote_refund(&mut self, dev: Dev, deadline_in: i64) -> Result<RefundSwap, ReservationPolicy> {
+        let quoted = self.devices[dev.0].quote_refund(&self.chain, &mut self.near, deadline_in);
+        let name = self.name(dev);
+        match &quoted {
+            Ok(swap) => {
+                let text = format!(
+                    "quotes a ZEC-to-X swap with refund key {}, deposit {}, deadline in {} min",
+                    swap.label(),
+                    swap.deposit,
+                    deadline_in / 60
+                );
+                self.log(&name, text);
+            }
+            Err(policy) => self.log(&name, format!("refund quote refused: {policy:?}")),
+        }
+        quoted
+    }
+
+    /// Funds a ZEC-to-X swap from `dev`'s Ironwood notes and mines the transaction.
+    pub fn fund_refund(&mut self, dev: Dev, swap: &RefundSwap, amount: u64) -> BlockHeight {
+        let tx = self.devices[dev.0].fund_refund(swap, amount);
+        let height = self.chain.mine_tx(&tx);
+        let name = self.name(dev);
+        self.log(
+            &name,
+            format!(
+                "funds the deposit with {} (refund memo for {} on Ironwood change), mined at {}",
+                zec(amount),
+                swap.label(),
+                u32::from(height)
+            ),
+        );
+        height
+    }
+
+    /// Records a NEAR status for a ZEC-to-X swap on `dev`.
+    pub fn observe_refund(&mut self, dev: Dev, swap: &RefundSwap, status: &str, refunded: Option<u64>) {
+        let matched = self.devices[dev.0].observe_refund(&self.chain, swap, status, refunded);
+        let name = self.name(dev);
+        let amount = refunded.map_or(String::new(), |v| format!(", refundedAmount {}", zec(v)));
+        self.log(
+            &name,
+            format!("records NEAR status {status} for {}{amount}{}", swap.label(), if matched { "" } else { " (no match)" }),
+        );
     }
 
     /// Records a NEAR status for an incoming swap on `dev`.
@@ -260,15 +334,14 @@ impl Ctx {
         });
     }
 
-    /// Checks that `dev`'s balance is `expected` zatoshis.
+    /// Checks, once every wallet has settled, that `dev`'s balance is `expected` zatoshis.
     pub fn check_balance(&mut self, dev: Dev, expected: u64) {
-        let actual = self.devices[dev.0].balance();
-        let name = self.name(dev);
-        self.check(
-            format!("{name} balance"),
-            actual == expected,
-            format!("{} (expected {})", zec(actual), zec(expected)),
-        );
+        self.final_balances.push((dev, expected));
+    }
+
+    /// Checks, once every wallet has settled, that `a` and `b` hold the same balance.
+    pub fn check_same_balance(&mut self, a: Dev, b: Dev) {
+        self.same_balances.push((a, b));
     }
 
     /// Checks whether `dev`'s key `label` is open.
@@ -295,6 +368,24 @@ impl Ctx {
 
     /// Payment observations, checks, metrics and the timeline.
     pub fn finish(mut self) -> (Vec<Event>, Vec<PaymentResult>, Vec<Check>, Vec<Metric>) {
+        for (dev, expected) in std::mem::take(&mut self.final_balances) {
+            let actual = self.devices[dev.0].balance();
+            let name = self.name(dev);
+            self.check(
+                format!("{name} final balance"),
+                actual == expected,
+                format!("{} (expected {})", zec(actual), zec(expected)),
+            );
+        }
+        for (a, b) in std::mem::take(&mut self.same_balances) {
+            let (x, y) = (self.devices[a.0].balance(), self.devices[b.0].balance());
+            let (na, nb) = (self.name(a), self.name(b));
+            self.check(
+                format!("{nb} ends with {na}'s balance"),
+                x == y,
+                format!("{na} {}, {nb} {}", zec(x), zec(y)),
+            );
+        }
         let mut payments = Vec::new();
         for e in &self.expectations {
             let device = &self.devices[e.wallet.0];

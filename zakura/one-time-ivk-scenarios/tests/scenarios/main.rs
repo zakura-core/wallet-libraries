@@ -194,7 +194,12 @@ fn run_one(scenario: &Scenario) -> ScenarioResult {
                 Default::default()
             }
             Ok(mut ctx) => {
-                if panic::catch_unwind(AssertUnwindSafe(|| (scenario.run)(&mut ctx))).is_err() {
+                let ran = panic::catch_unwind(AssertUnwindSafe(|| {
+                    (scenario.run)(&mut ctx);
+                    ctx.log("suite", "every wallet keeps syncing until quiet");
+                    ctx.settle();
+                }));
+                if ran.is_err() {
                     error = Some(last_panic());
                 }
                 match panic::catch_unwind(AssertUnwindSafe(|| ctx.finish())) {

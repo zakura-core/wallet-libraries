@@ -48,6 +48,17 @@ impl Near {
         format!("near-deposit-{:04}", self.deposits)
     }
 
+    /// A fresh ZEC deposit address for a ZEC-to-X quote: a P2PKH address, as 1Click
+    /// deposits are, encoded for the simulated network.
+    pub fn zec_deposit_address(&mut self) -> String {
+        self.deposits += 1;
+        let hash = [u8::try_from(self.deposits % 251).expect("fits"); 20];
+        zcash_keys::address::Address::Transparent(
+            transparent::address::TransparentAddress::PublicKeyHash(hash),
+        )
+        .encode(&super::chain::network())
+    }
+
     /// When the feed's last complete read began, as of `now`.
     pub fn read_until(&self, now: i64) -> i64 {
         now - self.read_lag
