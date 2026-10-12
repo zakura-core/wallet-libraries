@@ -18,7 +18,7 @@ use std::{
 };
 
 use zakura_one_time_ivk_scenarios::{
-    Meta, Outcome, Report, ScenarioResult, render_html, render_markdown,
+    Meta, Outcome, Report, ScenarioResult, render_html, render_html_page, render_markdown,
 };
 
 use catalog::Scenario;
@@ -118,6 +118,8 @@ fn main() {
     std::fs::write(args.report.join("report.json"), json).expect("report.json");
     std::fs::write(args.report.join("report.md"), render_markdown(&report)).expect("report.md");
     std::fs::write(args.report.join("report.html"), render_html(&report)).expect("report.html");
+    std::fs::write(args.report.join("report.page.html"), render_html_page(&report))
+        .expect("report.page.html");
     let totals = report.totals();
     println!(
         "\n{} passed, {} failed, {} errors in {:.1} s",

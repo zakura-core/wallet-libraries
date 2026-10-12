@@ -11,7 +11,7 @@
 mod html;
 mod markdown;
 
-pub use html::render_html;
+pub use html::{render_html, render_html_page};
 pub use markdown::render_markdown;
 
 use serde::{Deserialize, Serialize};
