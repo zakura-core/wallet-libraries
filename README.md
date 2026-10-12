@@ -12,9 +12,6 @@ resolves `zcash_client_backend` and `zcash_client_sqlite` from crates.io, which
 drags the crates.io `orchard` and `zcash_primitives` back into the graph
 alongside their Zakura forks. This repository closes that gap.
 
-See [releasing wallet-libraries](docs/releasing.md) for the candidate versions,
-publication order, name reservations and registry prerequisites.
-
 ## What is vendored
 
 | Directory | Published as | Forked from |
