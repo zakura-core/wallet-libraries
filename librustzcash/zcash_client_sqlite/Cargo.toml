@@ -142,6 +142,7 @@ orchard = [
     "dep:zakura-one-time-ivk",
     "dep:zcash_note_encryption",
     "zcash_client_backend/orchard",
+    "zcash_client_backend/one-time-ivk",
     "zcash_keys/orchard",
     # The `orchard_ironwood_migration_unsatisfiability` schema migration reads stored PCZTs.
     "pczt/orchard",

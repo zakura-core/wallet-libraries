@@ -1,9 +1,6 @@
 //! Refund keys, their operations, and the funding transaction's memo and shape.
 use rusqlite::{Connection, OptionalExtension, params};
-use zakura_one_time_ivk::{
-    REFUND_MEMO_MAGIC, RefundMemo,
-    lifecycle::{Observation, OperationStatus},
-};
+use zakura_one_time_ivk::swap::{Observation, OperationStatus, REFUND_MEMO_MAGIC, RefundMemo};
 use zcash_client_backend::proposal::Proposal;
 use zcash_keys::{address::Address, encoding::AddressCodec as _};
 use zcash_primitives::transaction::Transaction;

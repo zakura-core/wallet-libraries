@@ -1,6 +1,6 @@
 use super::apply::{fixture, fixture_in};
 use super::*;
-use zakura_one_time_ivk::lifecycle::OperationStatus;
+use zakura_one_time_ivk::swap::OperationStatus;
 
 /// Completes the restore sweep of every key registered to `account` at `through`.
 fn finish_sweeps(db: &mut Db, account: AccountUuid, through: ChainPoint) {
@@ -350,7 +350,7 @@ fn retention_waits_for_internal_memos_until_their_blocks_are_scanned() {
         .conn()
         .execute(
             "UPDATE ironwood_received_notes SET memo=?1",
-            [zakura_one_time_ivk::RefundMemo::new(7).encode()],
+            [zakura_one_time_ivk::swap::RefundMemo::new(7).encode()],
         )
         .unwrap();
     let mined: u32 = st

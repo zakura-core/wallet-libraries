@@ -65,9 +65,13 @@ use {
     zcash_client_backend::{
         data_api::{
             one_time_ivk::{
-                DirectoryPayment, DiscoveryWork, OneTimeIvkRead, OneTimeIvkWrite,
-                PaymentApplication, SweepDeferral, ambassador_impl_OneTimeIvkRead,
+                OneTimeIvkRead, OneTimeIvkWrite, ambassador_impl_OneTimeIvkRead,
                 ambassador_impl_OneTimeIvkWrite,
+                restore::{
+                    DirectoryPayment, DiscoveryWork, OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite,
+                    PaymentApplication, SweepDeferral, ambassador_impl_OneTimeIvkRestoreRead,
+                    ambassador_impl_OneTimeIvkRestoreWrite,
+                },
             },
             transparent_ledger::ChainPoint,
         },
@@ -110,7 +114,9 @@ pub(crate) fn test_rng() -> TestRng {
 #[cfg_attr(
     feature = "orchard",
     delegate(OneTimeIvkRead, target = "wallet_db"),
-    delegate(OneTimeIvkWrite, target = "wallet_db")
+    delegate(OneTimeIvkWrite, target = "wallet_db"),
+    delegate(OneTimeIvkRestoreRead, target = "wallet_db"),
+    delegate(OneTimeIvkRestoreWrite, target = "wallet_db")
 )]
 pub struct TestDb {
     wallet_db: WalletDb<Connection, LocalNetwork, FixedClock, TestRng>,

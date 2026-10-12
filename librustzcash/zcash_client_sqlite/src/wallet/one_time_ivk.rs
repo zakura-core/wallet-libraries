@@ -11,7 +11,7 @@
 //! - `scan_cached_blocks_with_one_time_ivks` and
 //!   `decrypt_and_store_transaction_with_one_time_ivks` in place of the ordinary
 //!   scanning and decryption; while a key is open, the others are refused.
-//! - [`OneTimeIvkWrite::maintain_one_time_ivks`] when each sync starts and again at the
+//! - [`OneTimeIvkRestoreWrite::maintain_one_time_ivks`] when each sync starts and again at the
 //!   tip, and [`WalletDb::close_finished_one_time_keys`] once sync reaches a tip it
 //!   confirmed with the network.
 //! - For an outgoing swap, [`WalletDb::reserve_refund_key`], then
@@ -22,12 +22,11 @@
 //!   [`WalletDb::begin_receive_operation`], [`WalletDb::finish_receive_operation`] and
 //!   [`WalletDb::start_receive_operation`].
 //! - [`WalletDb::record_operation_status`] for each provider status of either.
-//! - The [`OneTimeIvkWrite`] sweep steps for restore sweeps, and
+//! - The [`OneTimeIvkRestoreWrite`] sweep steps for restore sweeps, and
 //!   [`WalletDb::recheck_one_time_key_history`] when the user asks to recheck swaps.
 //!
-//! [`OneTimeIvkRead`]: zcash_client_backend::data_api::one_time_ivk::OneTimeIvkRead
-//! [`OneTimeIvkWrite`]: zcash_client_backend::data_api::one_time_ivk::OneTimeIvkWrite
-//! [`OneTimeIvkWrite::maintain_one_time_ivks`]: zcash_client_backend::data_api::one_time_ivk::OneTimeIvkWrite::maintain_one_time_ivks
+//! [`OneTimeIvkRestoreWrite`]: zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreWrite
+//! [`OneTimeIvkRestoreWrite::maintain_one_time_ivks`]: zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreWrite::maintain_one_time_ivks
 
 mod apply;
 mod funding;
@@ -75,7 +74,7 @@ use zcash_protocol::{
     memo::MemoBytes,
 };
 
-use zakura_one_time_ivk::lifecycle::Observation;
+use zakura_one_time_ivk::swap::Observation;
 pub use zakura_one_time_ivk::{KeyId, Purpose};
 
 use crate::{AccountUuid, WalletDb, error::SqliteClientError, util::Clock};
@@ -251,10 +250,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
         self.transactionally(|db| reservations::start(db.conn.0, account, request))
     }
 
-    /// Records a provider status, requested at `now` and normalized by the caller (such as
-    /// with `near_observation`), on `account`'s accepted operations with this deposit
-    /// address and memo, then reclaims what became reclaimable. Returns whether any
-    /// matched. `funded`, sticky, says a deposit was seen.
+    /// Records a provider status, requested at `now` and normalized by the app's provider
+    /// adapter, on `account`'s accepted operations with this deposit address and memo,
+    /// then reclaims what became reclaimable. Returns whether any matched. `funded`,
+    /// sticky, says a deposit was seen.
     ///
     /// An observation older than the stored one is ignored, except that its `funded` still
     /// sticks. A deadline only fills a missing one. A refund key this wallet never funded
@@ -300,7 +299,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// No provider status reopens a closed key; a rewind does, when it un-mines a receipt
     /// or leaves it short of those confirmations. A later payment to a closed key without
     /// a known payment is found once a newer publication's paid filter holds it (see
-    /// `OneTimeIvkWrite::record_paid_filter_check`). One to a closed key that was already
+    /// `OneTimeIvkRestoreWrite::record_paid_filter_check`). One to a closed key that was already
     /// paid, such as a corrected larger payout, is found only by
     /// [`Self::recheck_one_time_key_history`], and an incoming index beyond the restored
     /// lookahead is never swept.

@@ -1,7 +1,7 @@
 //! Incoming reservations, which live on their key's row, and their quote operations.
 use orchard::keys::Scope;
 use rusqlite::{Connection, OptionalExtension, named_params, params};
-use zakura_one_time_ivk::lifecycle::{
+use zakura_one_time_ivk::swap::{
     Observation,
     OperationStatus::Terminal,
     ReceiptExpectation::{Positive, Unknown},

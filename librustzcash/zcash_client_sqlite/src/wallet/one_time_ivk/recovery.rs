@@ -1,6 +1,6 @@
 //! Recovery from authenticated wallet data, independent of the discovery transport.
 use rusqlite::{Connection, OptionalExtension, params};
-use zakura_one_time_ivk::{REFUND_MEMO_MAGIC, RefundMemo};
+use zakura_one_time_ivk::swap::{REFUND_MEMO_MAGIC, RefundMemo};
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
@@ -42,7 +42,7 @@ fn requeue(
     )?)
 }
 
-/// Implements `OneTimeIvkWrite::record_paid_filter_check`.
+/// Implements `OneTimeIvkRestoreWrite::record_paid_filter_check`.
 pub(crate) fn record_paid_check(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
@@ -72,7 +72,7 @@ pub(crate) fn record_paid_check(
     Ok(())
 }
 
-/// Implements `OneTimeIvkWrite::maintain_one_time_ivks`, keeping
+/// Implements `OneTimeIvkRestoreWrite::maintain_one_time_ivks`, keeping
 /// [`RECEIVE_GAP_LIMIT`](super::RECEIVE_GAP_LIMIT) incoming lookahead keys.
 pub(crate) fn maintain<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,

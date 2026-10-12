@@ -6,7 +6,7 @@ use orchard::tree::{MerkleHashOrchard, MerklePath};
 use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::{
     data_api::{
-        one_time_ivk::{PaymentApplication, SweepDeferral},
+        one_time_ivk::restore::{PaymentApplication, SweepDeferral},
         transparent_ledger::{ChainPoint, TransparentLedgerMode},
     },
     wallet::{WalletOrchardOutput, WalletTx},
@@ -25,7 +25,7 @@ use super::{
 };
 use crate::{WalletDb, error::SqliteClientError, wallet};
 
-/// Implements `OneTimeIvkWrite::apply_one_time_sweep`, one transaction per payment.
+/// Implements `OneTimeIvkRestoreWrite::apply_one_time_sweep`, one transaction per payment.
 #[allow(clippy::type_complexity)]
 pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL, R>(
     db: &mut WalletDb<C, P, CL, R>,

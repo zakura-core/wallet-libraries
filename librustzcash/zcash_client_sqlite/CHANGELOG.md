@@ -160,8 +160,9 @@ workspace.
 ### Added
 - One-time IVKs (with `orchard`; module `wallet::one_time_ivk`): per-swap Ironwood refund
   and incoming addresses derived from the account viewing key with `zakura-one-time-ivk`,
-  recoverable from the seed. `WalletDb` implements the backend's `OneTimeIvkRead` and
-  `OneTimeIvkWrite`. Keys the wallet issues are trial-decrypted in every batch of
+  recoverable from the seed. `WalletDb` implements the backend's `OneTimeIvkRead`,
+  `OneTimeIvkWrite` and the restore protocol's `OneTimeIvkRestoreRead` and
+  `OneTimeIvkRestoreWrite`. Keys the wallet issues are trial-decrypted in every batch of
   `scan_cached_blocks_with_one_time_ivks` until they close, and their notes spend into
   ordinary change. Full-transaction and Enhance PIR retrieval authenticate these notes
   with their registered key, but only a full transaction stores their memo: they carry
@@ -185,7 +186,7 @@ workspace.
   `start_receive_operation`, which returns the `ReceiveDeposit` to show; an accepted
   deadline cannot exceed the requested one, and a repeated acceptance cannot change the
   deposit address or memo. `record_operation_status` takes a provider
-  status the app normalized with `zakura_one_time_ivk::lifecycle::near_observation` for
+  status the app's adapter normalized into a `zakura_one_time_ivk::swap::Observation` for
   either kind of operation, by deposit address and memo, and reclaims what it made
   reclaimable: an unstarted reservation after its latest deadline and
   `RECEIVE_RECLAIM_SECONDS`, a started one on a fresh conclusive status, and a funded one

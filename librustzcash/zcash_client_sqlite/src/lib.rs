@@ -124,8 +124,11 @@ use {
     zcash_client_backend::{
         data_api::{
             one_time_ivk::{
-                DirectoryPayment, DiscoveryWork, OneTimeIvkRead, OneTimeIvkWrite,
-                PaymentApplication, SweepDeferral,
+                OneTimeIvkRead, OneTimeIvkWrite,
+                restore::{
+                    DirectoryPayment, DiscoveryWork, OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite,
+                    PaymentApplication, SweepDeferral,
+                },
             },
             transparent_ledger::ChainPoint,
         },
@@ -2590,7 +2593,12 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
             receivers,
         )
     }
+}
 
+#[cfg(feature = "orchard")]
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIvkRestoreRead
+    for WalletDb<C, P, CL, R>
+{
     fn directory_publication_anchor(
         &self,
         height: BlockHeight,
@@ -2637,7 +2645,12 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
     ) -> Result<(), SqliteClientError> {
         self.transactionally(|wdb| wdb.store_scanned_blocks(from_state, blocks, Some(keys)))
     }
+}
 
+#[cfg(feature = "orchard")]
+impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
+    OneTimeIvkRestoreWrite for WalletDb<C, P, CL, R>
+{
     fn maintain_one_time_ivks(&mut self, account: AccountUuid) -> Result<(), SqliteClientError> {
         let now = wallet::one_time_ivk::unix_now(&self.clock);
         self.transactionally(|wdb| {

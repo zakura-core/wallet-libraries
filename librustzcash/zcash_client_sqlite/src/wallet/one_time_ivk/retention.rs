@@ -29,7 +29,7 @@ pub(super) fn retain_spend_history<P: Parameters>(
     Ok(())
 }
 
-/// Implements `OneTimeIvkWrite::finish_one_time_nullifier_recovery` with `lookahead`
+/// Implements `OneTimeIvkRestoreWrite::finish_one_time_nullifier_recovery` with `lookahead`
 /// incoming keys.
 pub(crate) fn finish_nullifier_recovery<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,

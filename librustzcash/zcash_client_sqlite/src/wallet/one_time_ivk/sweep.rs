@@ -1,10 +1,10 @@
-//! Restore sweep steps around an app's directory lookups (see `OneTimeIvkWrite`).
+//! Restore sweep steps around an app's directory lookups (see `OneTimeIvkRestoreWrite`).
 use std::collections::BTreeMap;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use zakura_one_time_ivk::recovery::EncryptedNote;
 use zcash_client_backend::data_api::{
-    one_time_ivk::{DirectoryPayment, MAX_PUBLICATION_LAG, SweepDeferral},
+    one_time_ivk::restore::{DirectoryPayment, MAX_PUBLICATION_LAG, SweepDeferral},
     transparent_ledger::ChainPoint,
 };
 use zcash_primitives::{block::BlockHash, transaction::TxId};
@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
-/// Implements `OneTimeIvkRead::directory_publication_anchor`.
+/// Implements `OneTimeIvkRestoreRead::directory_publication_anchor`.
 pub(crate) fn publication_anchor(
     conn: &Connection,
     height: BlockHeight,
@@ -33,7 +33,7 @@ pub(crate) fn publication_anchor(
     Ok(Ok(ChainPoint { height, hash }))
 }
 
-/// Implements `OneTimeIvkRead::directory_note_data_needed`.
+/// Implements `OneTimeIvkRestoreRead::directory_note_data_needed`.
 pub(crate) fn note_data_needed(
     conn: &Connection,
     account: AccountUuid,
@@ -109,7 +109,7 @@ fn sort_directory_payments<'a>(
     Ok((kept, missing))
 }
 
-/// Implements `OneTimeIvkWrite::queue_directory_lookup`.
+/// Implements `OneTimeIvkRestoreWrite::queue_directory_lookup`.
 pub(crate) fn queue_directory_lookup<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -163,7 +163,7 @@ pub(crate) fn queue_directory_lookup<P: Parameters>(
 }
 
 /// Finishes `key`'s sweep at its lookup's anchor once its candidates are applied (see
-/// `OneTimeIvkWrite::apply_one_time_sweep`).
+/// `OneTimeIvkRestoreWrite::apply_one_time_sweep`).
 pub(super) fn finish(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,

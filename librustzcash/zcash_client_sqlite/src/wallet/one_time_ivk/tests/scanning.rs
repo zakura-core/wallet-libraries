@@ -1,6 +1,6 @@
 use std::{cell::Cell, ops::Range};
 
-use zakura_one_time_ivk::lifecycle::{OperationStatus, ReceiptExpectation};
+use zakura_one_time_ivk::swap::{OperationStatus, ReceiptExpectation};
 use zcash_client_backend::data_api::chain::{
     BlockSource, ChainState, error, scan_cached_blocks_with_one_time_ivks,
 };

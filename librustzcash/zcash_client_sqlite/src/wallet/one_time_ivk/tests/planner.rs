@@ -1,7 +1,7 @@
 use super::*;
 use rusqlite::params;
 use std::{collections::BTreeMap, num::NonZeroU32};
-use zakura_one_time_ivk::lifecycle::{OperationStatus, RESTORE_WATCH_SECS, ReceiptExpectation};
+use zakura_one_time_ivk::swap::{OperationStatus, RESTORE_WATCH_SECS, ReceiptExpectation};
 
 const NOW: i64 = 1_000;
 

@@ -149,7 +149,7 @@ fn one_time_ivk_full_transaction_before_compact_scan() {
 /// retrieval as irrelevant. This guards the store's `get_one_time_transaction_keys`.
 #[test]
 fn closed_key_decrypts_its_externally_funded_transaction_after_reopen() {
-    use zakura_one_time_ivk::lifecycle::COMPLETION_LIMIT_SECS;
+    use zakura_one_time_ivk::swap::COMPLETION_LIMIT_SECS;
     let mut st = scanned_wallet();
     let network = *st.network();
     let account = st.test_account().unwrap().id();
@@ -370,7 +370,7 @@ fn refund_keys(st: &State) -> Vec<(u64, u32, bool)> {
 
 #[test]
 fn refund_funding_memo_recovers_from_seed_with_zero_change() {
-    use zakura_one_time_ivk::RefundMemo;
+    use zakura_one_time_ivk::swap::RefundMemo;
     let (mut st, first) = ironwood_funded_wallet();
     let network = *st.network();
     let account = st.test_account().cloned().unwrap();
@@ -566,10 +566,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
 /// quote never starts its key.
 #[test]
 fn a_refund_key_starts_scanning_when_its_funding_transaction_is_stored() {
-    use zakura_one_time_ivk::{
-        RefundMemo,
-        lifecycle::{OperationStatus::Terminal, ReceiptExpectation},
-    };
+    use zakura_one_time_ivk::swap::{OperationStatus::Terminal, ReceiptExpectation, RefundMemo};
     let (mut st, _) = ironwood_funded_wallet();
     let account = st.test_account().unwrap().id();
     let network = *st.network();
@@ -742,7 +739,7 @@ fn a_funding_memo_must_match_its_recorded_deposit() {
 
 #[test]
 fn reissued_refund_key_sweeps_history_before_its_scan_start() {
-    use zakura_one_time_ivk::RefundMemo;
+    use zakura_one_time_ivk::swap::RefundMemo;
     let (mut st, _) = ironwood_funded_wallet();
     let account = st.test_account().unwrap().id();
     let network = *st.network();
@@ -772,7 +769,7 @@ fn reissued_refund_key_sweeps_history_before_its_scan_start() {
 
 #[test]
 fn refund_memos_restore_keys_whatever_the_funding_outputs() {
-    use zakura_one_time_ivk::RefundMemo;
+    use zakura_one_time_ivk::swap::RefundMemo;
     let memo = MemoBytes::from_bytes(&RefundMemo::new(7).encode()).unwrap();
     let transparent = |byte| Address::Transparent(TransparentAddress::PublicKeyHash([byte; 20]));
     let receiver = orchard::keys::FullViewingKey::from(
@@ -805,7 +802,7 @@ fn refund_memos_restore_keys_whatever_the_funding_outputs() {
 /// for its history first, as any such transaction does.
 #[test]
 fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
-    use zakura_one_time_ivk::RefundMemo;
+    use zakura_one_time_ivk::swap::RefundMemo;
     use zcash_client_backend::data_api::enhance_pir::{
         EnhancePirRead, EnhancePirWork, EnhancePirWrite, EnhanceRecord, EnhanceRecordParts,
         EnhanceTransactionMetadata, EnhancementMode, TransactionEnhancementWork,

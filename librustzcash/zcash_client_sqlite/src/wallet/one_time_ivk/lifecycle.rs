@@ -1,6 +1,6 @@
 //! Provider observations and the rule that ends a key's trial decryption.
 use rusqlite::{Connection, OptionalExtension, named_params, params};
-use zakura_one_time_ivk::lifecycle::{
+use zakura_one_time_ivk::swap::{
     COMPLETION_LIMIT_SECS, Observation, OperationStatus, RESTORE_WATCH_SECS, ReceiptExpectation,
 };
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;

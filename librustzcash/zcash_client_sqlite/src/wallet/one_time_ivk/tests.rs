@@ -9,15 +9,18 @@ use orchard::{
 use prost::Message;
 use secrecy::{ExposeSecret, SecretVec};
 use zakura_one_time_ivk::{
-    lifecycle::{Observation, OperationStatus},
     recovery::EncryptedNote,
+    swap::{Observation, OperationStatus},
 };
 use zcash_client_backend::{
     data_api::{
         WalletRead, WalletWrite,
         one_time_ivk::{
-            DirectoryPayment, DiscoveryWork, MAX_PUBLICATION_LAG, OneTimeIvkRead as _,
-            OneTimeIvkWrite as _, PaymentApplication, SweepDeferral,
+            OneTimeIvkRead as _,
+            restore::{
+                DirectoryPayment, DiscoveryWork, MAX_PUBLICATION_LAG, OneTimeIvkRestoreRead as _,
+                OneTimeIvkRestoreWrite as _, PaymentApplication, SweepDeferral,
+            },
         },
         testing::{AddressType, IronwoodFvk, TestBuilder, TestRng, TestState},
         transparent_ledger::ChainPoint,

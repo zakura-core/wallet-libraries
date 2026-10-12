@@ -1,7 +1,7 @@
 //! Restore sweep scheduling, which never derives viewing keys.
 use rusqlite::{Connection, params};
 use zcash_client_backend::data_api::{
-    one_time_ivk::{DiscoveryWork, SweepDeferral},
+    one_time_ivk::restore::{DiscoveryWork, SweepDeferral},
     transparent_ledger::ChainPoint,
 };
 use zcash_primitives::block::BlockHash;
@@ -32,7 +32,7 @@ pub(super) fn anchor(height: Option<u32>, hash: Option<[u8; 32]>) -> Option<Chai
     })
 }
 
-/// Implements `OneTimeIvkRead::one_time_history_pending`.
+/// Implements `OneTimeIvkRestoreRead::one_time_history_pending`.
 pub(crate) fn history_pending<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -52,7 +52,7 @@ pub(crate) fn history_pending<P: Parameters>(
     )?)
 }
 
-/// Implements `OneTimeIvkWrite::prepare_one_time_sweeps`.
+/// Implements `OneTimeIvkRestoreWrite::prepare_one_time_sweeps`.
 pub(crate) fn prepare_sweeps<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -88,7 +88,7 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
     discovery_work(rows).map(Ok)
 }
 
-/// Implements `OneTimeIvkRead::one_time_keys_to_recheck`: closed keys without a mined
+/// Implements `OneTimeIvkRestoreRead::one_time_keys_to_recheck`: closed keys without a mined
 /// payment whose sweep row, if any, is finished below `height`. A key scanned here has
 /// none until its first paid filter check (see `recovery::record_paid_check`). `used`
 /// is not payment evidence: it also marks a receipt that expired unmined.
@@ -128,7 +128,7 @@ fn discovery_work(mut rows: rusqlite::Rows<'_>) -> Result<Vec<DiscoveryWork>, Sq
     Ok(work)
 }
 
-/// Implements `OneTimeIvkWrite::begin_one_time_sweep_attempt`, backing off from one
+/// Implements `OneTimeIvkRestoreWrite::begin_one_time_sweep_attempt`, backing off from one
 /// minute to twelve hours.
 pub(crate) fn begin_sweep_attempt(
     conn: &Connection,
