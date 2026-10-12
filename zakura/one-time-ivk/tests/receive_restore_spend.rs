@@ -12,7 +12,7 @@ use orchard::{
 };
 use rand::rng;
 use shardtree::{ShardTree, store::memory::MemoryShardStore};
-use zakura_one_time_ivk::{KeyId, Purpose, RefundMemo};
+use zakura_one_time_ivk::{KeyId, Purpose, swap::RefundMemo};
 
 #[test]
 fn receive_restore_and_spend_both_purposes_with_ordinary_change() {
