@@ -2,8 +2,9 @@
 
 mod incoming;
 mod issuance;
-mod reorg;
 mod refund;
+mod reorg;
+mod robustness;
 
 use crate::harness::Ctx;
 
@@ -13,6 +14,7 @@ pub const LIVE: &str = "C. Live detection";
 pub const OFFLINE: &str = "D. Offline and clocks";
 pub const RESTORE: &str = "E. Restore from seed";
 pub const REORGS: &str = "F. Reorgs";
+pub const SPENDING: &str = "G. Spending";
 pub const STATUSES: &str = "H. Provider statuses";
 
 /// One scenario: a world the run builds, what it does in it, and what the documented
@@ -37,6 +39,7 @@ pub fn all() -> Vec<Scenario> {
     scenarios.extend(incoming::all());
     scenarios.extend(refund::all());
     scenarios.extend(reorg::all());
+    scenarios.extend(robustness::all());
     let mut ids = std::collections::BTreeSet::new();
     for scenario in &scenarios {
         assert!(ids.insert(scenario.id.clone()), "duplicate id {}", scenario.id);

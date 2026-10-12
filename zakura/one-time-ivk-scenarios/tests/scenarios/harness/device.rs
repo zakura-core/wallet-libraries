@@ -417,6 +417,8 @@ impl Device {
     pub fn sweep(&mut self, chain: &Chain, near: &Near) -> (usize, usize, Vec<String>) {
         let now = self.now(chain);
         let reach = self.reach.clone();
+        // Injected failures answer the first requests of one sync only.
+        self.reach.directory_faults.clear();
         let directory = Served::new(reach.directory, move || {
             let directory = Directory::publish(chain, near, now, &reach.publication);
             directory.fail_next(&reach.directory_faults);
@@ -581,11 +583,13 @@ impl Device {
         let index = self.prepare_incoming(chain, near)?;
         let request = self.begin_incoming(chain, index, deadline_in)?;
         let fvk = self.key(Purpose::Receive, index);
-        near.give(receiver_of(&fvk), now, Role::Payout);
+        near.give(receiver_of(&fvk), chain.now(), Role::Payout);
+        // NEAR sets the accepted deadline by its own clock; the store keeps the earlier
+        // of it and the one the device requested.
         let deposit = ReceiveDeposit {
             address: near.deposit_address(),
             memo: None,
-            deadline: now + deadline_in,
+            deadline: chain.now() + deadline_in,
         };
         self.finish_incoming(&request, &OperationOutcome::Accepted(deposit.clone()));
         self.db
@@ -802,6 +806,86 @@ impl Device {
                 self.now(chain),
             )
             .expect("the status records")
+    }
+
+    /// Stores a transaction seen in the mempool, as Vizor's mempool watcher does for one
+    /// that pays the wallet, and credits what it finds to live scanning.
+    pub fn receive_mempool(&mut self, tx: &Transaction) -> usize {
+        decrypt_and_store_transaction_with_one_time_ivks(&network(), &mut self.db, tx, None)
+            .expect("the mempool transaction stores");
+        self.tag(Phase::Scan)
+    }
+
+    /// Sends `value` to `to` as an ordinary payment, selecting notes as Vizor does for
+    /// ordinary sends (consolidating into spare input slots), and returns the transaction.
+    pub fn send_ordinary(&mut self, to: orchard::Address, value: u64) -> Transaction {
+        let to = Address::Unified(
+            zcash_keys::address::UnifiedAddress::from_receivers(Some(to), None, None)
+                .expect("a unified address"),
+        )
+        .to_zcash_address(&network());
+        let payment = zip321::Payment::new(
+            to,
+            Some(Zatoshis::const_from_u64(value)),
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .expect("a payment");
+        let request = zip321::TransactionRequest::new(vec![payment]).expect("a request");
+        let strategy = SingleOutputChangeStrategy::<Wallet>::new(
+            StandardFeeRule::Zip317,
+            None,
+            ShieldedPool::Ironwood,
+            DustOutputPolicy::default(),
+        );
+        let policy = SpendPolicy::shielded_pools([ShieldedPool::Ironwood])
+            .with_note_selection(NoteSelection::PreferConsolidation);
+        let proposal = propose_transfer::<_, _, _, _, <Wallet as WalletCommitmentTrees>::Error>(
+            &mut self.db,
+            &network(),
+            self.account,
+            &GreedyInputSelector::new(),
+            &strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+            &policy,
+            None,
+            None,
+        )
+        .expect("the payment proposal");
+        let txids = create_proposed_transactions::<_, _, std::convert::Infallible, _, std::convert::Infallible, _>(
+            &mut self.db,
+            &network(),
+            &MockSpendProver,
+            &MockOutputProver,
+            &SpendingKeys::from_unified_spending_key(self.usk.clone()),
+            OvkPolicy::Sender,
+            &proposal,
+            None,
+        )
+        .expect("the payment builds");
+        self.db
+            .get_transaction(*txids.first())
+            .expect("the stored transaction")
+            .expect("the wallet stored its transaction")
+    }
+
+    /// Unspent value the wallet holds in notes one-time keys received, in zatoshis.
+    pub fn unspent_one_time_value(&self) -> u64 {
+        let conn = read_only(&self.path);
+        conn.query_row(
+            "SELECT COALESCE(SUM(n.value), 0) FROM ironwood_received_notes n
+             WHERE n.receiving_key_id IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM ironwood_received_note_spends s
+                               JOIN transactions t ON t.id_tx = s.transaction_id
+                               WHERE s.ironwood_received_note_id = n.id)",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|v| u64::try_from(v).unwrap_or(0))
+        .expect("one-time value")
     }
 
     /// Total balance, unconfirmed notes included, in zatoshis.

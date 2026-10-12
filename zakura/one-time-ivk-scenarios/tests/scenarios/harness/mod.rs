@@ -162,6 +162,8 @@ impl Ctx {
     /// Runs after every scenario so a find that needs another sync (a spend-history replay,
     /// a sweep's rescan) counts.
     pub fn settle(&mut self) {
+        // Let the directory, which publishes two blocks behind the tip, catch up.
+        self.chain.mine(3);
         for i in 0..self.devices.len() {
             let dev = Dev(i);
             for round in 0..6 {
@@ -398,6 +400,44 @@ impl Ctx {
             format!("{label}: {} pays {} to {key} in a signed transaction", payer.label(), zec(value)),
         );
         (mined, tx)
+    }
+
+    /// Builds and signs a payment from NEAR's wallet without mining it.
+    pub fn near_tx(
+        &mut self,
+        fvk: &FullViewingKey,
+        value: u64,
+        payer: Payer,
+    ) -> zcash_primitives::transaction::Transaction {
+        let near = self.near_wallet();
+        let ovk = match payer {
+            Payer::Near => zcash_client_backend::wallet::OvkPolicy::custom_from_common_bytes(&[0; 32]),
+            Payer::Wallet => zcash_client_backend::wallet::OvkPolicy::Sender,
+        };
+        let to = fvk.address_at(0u32, orchard::keys::Scope::External);
+        self.devices[near.0].send_to(to, value, ovk)
+    }
+
+    /// Shows `tx` to `dev` in the mempool.
+    pub fn mempool(&mut self, dev: Dev, label: &str, tx: &zcash_primitives::transaction::Transaction) {
+        let found = self.devices[dev.0].receive_mempool(tx);
+        let balance = self.devices[dev.0].balance();
+        let name = self.name(dev);
+        self.log(&name, format!("sees {label} in the mempool: {found} found, balance {}", zec(balance)));
+    }
+
+    /// Mines `tx` and records the payment it makes to `fvk`.
+    pub fn mine_payment(
+        &mut self,
+        label: &str,
+        tx: &zcash_primitives::transaction::Transaction,
+        fvk: &FullViewingKey,
+        value: u64,
+        payer: Payer,
+    ) -> Mined {
+        let height = self.chain.mine_tx(tx);
+        self.log("chain", format!("{label} is mined at {}", u32::from(height)));
+        self.chain.record_payment(height, fvk, value, payer)
     }
 
     /// Mines `tx` again, as after a reorg that returned it to the mempool.
