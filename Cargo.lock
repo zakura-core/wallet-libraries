@@ -8137,6 +8137,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-one-time-ivk-scenarios"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "receiver-directory",
+ "receiver-pir",
+ "receiver-pir-server",
+ "rusqlite",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "zakura-client-backend",
+ "zakura-client-sqlite",
+ "zakura-near-intents",
+ "zakura-one-time-ivk",
+ "zakura-orchard",
+ "zakura-pir-receiver",
+ "zakura-primitives",
+ "zakura-protocol",
+]
+
+[[package]]
 name = "zakura-orchard"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

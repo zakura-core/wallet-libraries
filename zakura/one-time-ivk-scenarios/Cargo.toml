@@ -1,0 +1,44 @@
+[package]
+name = "zakura-one-time-ivk-scenarios"
+version = "0.0.0"
+publish = false
+description = "Scenario suite for one-time IVKs: issuance, live and restored detection, and cost"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+# The library holds only the report model and its renderers. The scenarios and
+# their harness are the `scenarios` test target, so the wallet's test features
+# stay out of every normal build.
+[dependencies]
+serde = { workspace = true, features = ["std"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+axum = "0.7"
+orchard.workspace = true
+receiver-directory = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c" }
+receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c", features = ["server"] }
+receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c" }
+rusqlite.workspace = true
+secrecy.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }
+tower = { workspace = true, features = ["util"] }
+zakura-near-intents = { path = "../near-intents" }
+zakura-one-time-ivk = { path = "../one-time-ivk" }
+zakura-pir-receiver = { path = "../pir-receiver", features = ["wallet"] }
+zcash_client_backend = { workspace = true, features = ["one-time-ivk", "test-dependencies"] }
+zcash_client_sqlite = { path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["one-time-ivk", "test-dependencies"] }
+zcash_primitives.workspace = true
+zcash_protocol = { workspace = true, features = ["local-consensus"] }
+
+[[test]]
+name = "scenarios"
+path = "tests/scenarios/main.rs"
+harness = false
+
+[lints]
+workspace = true

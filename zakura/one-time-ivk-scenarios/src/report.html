@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One-time IVK scenarios</title>
+</head>
+<body>
+<pre id="report"></pre>
+<script id="report-json" type="application/json">__REPORT_JSON__</script>
+<script>
+document.getElementById("report").textContent =
+  JSON.stringify(JSON.parse(document.getElementById("report-json").textContent), null, 2);
+</script>
+</body>
+</html>

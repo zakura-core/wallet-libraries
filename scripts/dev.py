@@ -15,7 +15,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = {
-    "default": (["--workspace", "--exclude", "zakura-wallet-lib", "--exclude", "zakura-pir-enhance", "--exclude", "zakura-pir-transparent", "--exclude", "zakura-pir-receiver"], []),
+    "default": (["--workspace", "--exclude", "zakura-wallet-lib", "--exclude", "zakura-pir-enhance", "--exclude", "zakura-pir-transparent", "--exclude", "zakura-pir-receiver", "--exclude", "zakura-one-time-ivk-scenarios"], []),
     "orchard": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "test-dependencies"]),
     "transparent": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "test-dependencies", "unstable"]),
     "transparent-import": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "transparent-key-import", "test-dependencies", "unstable"]),
@@ -26,6 +26,7 @@ CONFIGS = {
     "transparent-pir-sqlite": (["-p", "zakura-pir-transparent"], ["sqlite"]),
     "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing"]),
     "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),
+    "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
 }
 VERIFY = ("zakura-graph", "wallet-lib-modes", "vendor-ancestry")
 

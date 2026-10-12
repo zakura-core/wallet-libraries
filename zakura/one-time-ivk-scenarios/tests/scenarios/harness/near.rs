@@ -1,0 +1,111 @@
+//! NEAR Intents as the receiver directory's feed sees it: every address it was given,
+//! when, and in which role.
+
+use receiver_directory::{Receiver, snapshot::ProviderSet};
+use zakura_one_time_ivk::swap::RESTORE_WATCH_SECS;
+
+use super::chain::{DAY, MINUTE, T0};
+
+/// What NEAR was given an address as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// An X-to-ZEC payout address (an incoming key).
+    Payout,
+    /// A ZEC-to-X refund address (a refund key).
+    Refund,
+}
+
+/// NEAR's view of the addresses wallets gave it, and the feed the directory reads.
+pub struct Near {
+    given: Vec<([u8; 43], i64, Role)>,
+    /// When the directory's feed started reading NEAR.
+    pub feed_started: i64,
+    /// How long ago the feed's last complete read began.
+    pub read_lag: i64,
+    deposits: u32,
+}
+
+impl Default for Near {
+    fn default() -> Self {
+        Self {
+            given: Vec::new(),
+            feed_started: T0 - 30 * DAY,
+            read_lag: MINUTE,
+            deposits: 0,
+        }
+    }
+}
+
+impl Near {
+    /// Records that NEAR was given `receiver` at `at`.
+    pub fn give(&mut self, receiver: [u8; 43], at: i64, role: Role) {
+        self.given.push((receiver, at, role));
+    }
+
+    /// A fresh deposit address on the source chain, for an incoming quote.
+    pub fn deposit_address(&mut self) -> String {
+        self.deposits += 1;
+        format!("near-deposit-{:04}", self.deposits)
+    }
+
+    /// When the feed's last complete read began, as of `now`.
+    pub fn read_until(&self, now: i64) -> i64 {
+        now - self.read_lag
+    }
+
+    /// Whether `receiver` is in the seen set as of `now`: a payout address given after
+    /// the feed started and before its last read.
+    pub fn seen(&self, receiver: &[u8; 43], now: i64) -> bool {
+        let until = self.read_until(now);
+        self.given.iter().any(|(r, at, role)| {
+            r == receiver && *role == Role::Payout && *at >= self.feed_started && *at <= until
+        })
+    }
+
+    /// The provider sets a publication made at `now` carries: `near-intents/recent`
+    /// (payout and refund addresses given in the 24 hours before the last read) and
+    /// `near-intents/seen` (payout addresses since the feed started).
+    pub fn sets(&self, now: i64) -> Vec<ProviderSet> {
+        let until = self.read_until(now);
+        let window = RESTORE_WATCH_SECS;
+        let recent = self
+            .given
+            .iter()
+            .filter(|(_, at, _)| *at <= until && *at > until - window)
+            .map(|(r, _, _)| Receiver::from_bytes(*r).expect("a valid receiver"));
+        let seen = self
+            .given
+            .iter()
+            .filter(|(_, at, role)| {
+                *role == Role::Payout && *at >= self.feed_started && *at <= until
+            })
+            .map(|(r, _, _)| Receiver::from_bytes(*r).expect("a valid receiver"));
+        vec![
+            ProviderSet {
+                label: "near-intents/recent".into(),
+                window_secs: Some(u64::try_from(window).expect("a positive window")),
+                since_unix: self.feed_started,
+                until_unix: until,
+                receivers: dedup(recent),
+            },
+            ProviderSet {
+                label: "near-intents/seen".into(),
+                window_secs: None,
+                since_unix: self.feed_started,
+                until_unix: until,
+                receivers: dedup(seen),
+            },
+        ]
+    }
+}
+
+/// `receivers` without repeats, in first-seen order.
+fn dedup(receivers: impl Iterator<Item = Receiver>) -> Vec<Receiver> {
+    let mut out: Vec<Receiver> = Vec::new();
+    for receiver in receivers {
+        if !out.iter().any(|r| r.as_bytes() == receiver.as_bytes()) {
+            out.push(receiver);
+        }
+    }
+    out
+}
