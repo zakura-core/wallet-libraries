@@ -157,6 +157,9 @@ pub struct Reach {
     pub directory_faults: Vec<u16>,
     /// How the publication differs from a faithful index.
     pub publication: Options,
+    /// Sweep runs per sync. Vizor runs one per account per sync and leaves pending work
+    /// for the next sync; each run sweeps at most one batch of 64 keys.
+    pub sweep_runs_per_sync: usize,
 }
 
 impl Default for Reach {
@@ -165,6 +168,7 @@ impl Default for Reach {
             directory: true,
             directory_faults: Vec::new(),
             publication: Options::default(),
+            sweep_runs_per_sync: 1,
         }
     }
 }
@@ -419,9 +423,9 @@ impl Device {
         }
     }
 
-    /// Runs restore sweeps against a fresh publication until none is pending, at most
-    /// 20 runs, and returns the keys finished, the lookups made, and why any key was
-    /// deferred or a run stopped.
+    /// Runs restore sweeps against a fresh publication, `Reach::sweep_runs_per_sync` runs
+    /// at most and fewer once none is pending, and returns the keys finished, the lookups
+    /// made, and why any key was deferred or a run stopped.
     pub fn sweep(&mut self, chain: &Chain, near: &Near) -> (usize, usize, Vec<String>) {
         let now = self.now(chain);
         let reach = self.reach.clone();
@@ -441,7 +445,7 @@ impl Device {
             .expect("a runtime");
         let mut finished = 0;
         let mut problems = Vec::new();
-        for _ in 0..20 {
+        for _ in 0..self.reach.sweep_runs_per_sync.max(1) {
             self.sweep_runs += 1;
             let swept: Result<Swept<SqliteClientError>, _> = runtime.block_on(sweep(
                 &mut self.db,

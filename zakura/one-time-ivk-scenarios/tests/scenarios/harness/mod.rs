@@ -171,7 +171,7 @@ impl Ctx {
         self.chain.mine(3);
         for i in 0..self.devices.len() {
             let dev = Dev(i);
-            for round in 0..6 {
+            for round in 0..40 {
                 let report = self.devices[i].sync(&self.chain, &self.near);
                 let quiet = !report.pending && report.problems.is_empty() && report.scanned_blocks <= 1;
                 if report.found_live + report.found_by_sweep > 0 || !report.problems.is_empty() || round == 0 && report.scanned_blocks > 1 {
