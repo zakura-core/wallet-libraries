@@ -315,6 +315,55 @@ where
     DbT: PutBlocksRowsDbT<SE, <DbT as LowLevelWalletRead>::AccountRef>,
     DbT::TxRef: Eq + Hash,
 {
+    put_blocks_rows_inner(
+        wallet_db,
+        #[cfg(feature = "transparent-inputs")]
+        gap_limits,
+        from_state,
+        blocks,
+        #[cfg(feature = "orchard")]
+        None,
+    )
+}
+
+/// [`put_blocks_rows`], also tracking Ironwood nullifiers from `ironwood_nullifier_retention`
+/// even below the floor described under its "Nullifier tracking", for a store that can find
+/// Ironwood notes after scanning past them. See
+/// [`LowLevelWalletWrite::prune_tracked_nullifiers`] for the pruning contract.
+#[cfg(feature = "one-time-ivk")]
+pub fn put_blocks_rows_with_nullifier_retention<DbT, SE, TE>(
+    wallet_db: &mut DbT,
+    #[cfg(feature = "transparent-inputs")] gap_limits: GapLimits,
+    from_state: &ChainState,
+    blocks: Vec<ScannedBlock<<DbT as LowLevelWalletRead>::AccountId>>,
+    ironwood_nullifier_retention: Option<BlockHeight>,
+) -> Result<PutBlocksRows, PutBlocksError<SE, TE>>
+where
+    DbT: PutBlocksRowsDbT<SE, <DbT as LowLevelWalletRead>::AccountRef>,
+    DbT::TxRef: Eq + Hash,
+{
+    put_blocks_rows_inner(
+        wallet_db,
+        #[cfg(feature = "transparent-inputs")]
+        gap_limits,
+        from_state,
+        blocks,
+        ironwood_nullifier_retention,
+    )
+}
+
+/// The body of [`put_blocks_rows`] and its retaining variant; `None` retains nothing extra.
+fn put_blocks_rows_inner<DbT, SE, TE>(
+    wallet_db: &mut DbT,
+    #[cfg(feature = "transparent-inputs")] gap_limits: GapLimits,
+    from_state: &ChainState,
+    blocks: Vec<ScannedBlock<<DbT as LowLevelWalletRead>::AccountId>>,
+    #[cfg(feature = "orchard")] ironwood_nullifier_retention: Option<BlockHeight>,
+) -> Result<PutBlocksRows, PutBlocksError<SE, TE>>
+where
+    DbT: PutBlocksRowsDbT<SE, <DbT as LowLevelWalletRead>::AccountRef>,
+    DbT::TxRef: Eq + Hash,
+{
     if blocks.is_empty() {
         return Ok(PutBlocksRows::default());
     }
@@ -349,6 +398,9 @@ where
         from_state.block_height(),
         blocks.last().map(|block| block.height()),
     );
+    #[cfg(feature = "orchard")]
+    let ironwood_tracking_floor = nullifier_tracking_floor
+        .map(|floor| ironwood_nullifier_retention.map_or(floor, |height| floor.min(height)));
 
     let mut sapling_commitments = vec![];
     #[cfg(feature = "orchard")]
@@ -518,8 +570,9 @@ where
             wallet_db
                 .track_block_orchard_nullifiers(block.height(), block.orchard().nullifier_map())
                 .map_err(PutBlocksError::Storage)?;
-
-            #[cfg(feature = "orchard")]
+        }
+        #[cfg(feature = "orchard")]
+        if should_track_nullifiers(ironwood_tracking_floor, block.height()) {
             wallet_db
                 .track_block_ironwood_nullifiers(block.height(), block.ironwood().nullifier_map())
                 .map_err(PutBlocksError::Storage)?;
@@ -640,12 +693,65 @@ where
     DbT: PutBlocksDbT<SE, TE, <DbT as LowLevelWalletRead>::AccountRef>,
     DbT::TxRef: Eq + Hash,
 {
-    let rows = put_blocks_rows(
+    put_blocks_inner(
         wallet_db,
         #[cfg(feature = "transparent-inputs")]
         gap_limits,
         from_state,
         blocks,
+        anchor_retention,
+        #[cfg(feature = "orchard")]
+        None,
+    )
+}
+
+/// [`put_blocks`], retaining Ironwood nullifiers as
+/// [`put_blocks_rows_with_nullifier_retention`] does.
+#[cfg(feature = "one-time-ivk")]
+pub fn put_blocks_with_nullifier_retention<DbT, SE, TE>(
+    wallet_db: &mut DbT,
+    #[cfg(feature = "transparent-inputs")] gap_limits: GapLimits,
+    from_state: &ChainState,
+    blocks: Vec<ScannedBlock<<DbT as LowLevelWalletRead>::AccountId>>,
+    anchor_retention: Option<&AnchorRetention>,
+    ironwood_nullifier_retention: Option<BlockHeight>,
+) -> Result<(), PutBlocksError<SE, TE>>
+where
+    DbT: PutBlocksDbT<SE, TE, <DbT as LowLevelWalletRead>::AccountRef>,
+    DbT::TxRef: Eq + Hash,
+{
+    put_blocks_inner(
+        wallet_db,
+        #[cfg(feature = "transparent-inputs")]
+        gap_limits,
+        from_state,
+        blocks,
+        anchor_retention,
+        ironwood_nullifier_retention,
+    )
+}
+
+/// The body of [`put_blocks`] and its retaining variant; `None` retains nothing extra.
+fn put_blocks_inner<DbT, SE, TE>(
+    wallet_db: &mut DbT,
+    #[cfg(feature = "transparent-inputs")] gap_limits: GapLimits,
+    from_state: &ChainState,
+    blocks: Vec<ScannedBlock<<DbT as LowLevelWalletRead>::AccountId>>,
+    anchor_retention: Option<&AnchorRetention>,
+    #[cfg(feature = "orchard")] ironwood_nullifier_retention: Option<BlockHeight>,
+) -> Result<(), PutBlocksError<SE, TE>>
+where
+    DbT: PutBlocksDbT<SE, TE, <DbT as LowLevelWalletRead>::AccountRef>,
+    DbT::TxRef: Eq + Hash,
+{
+    let rows = put_blocks_rows_inner(
+        wallet_db,
+        #[cfg(feature = "transparent-inputs")]
+        gap_limits,
+        from_state,
+        blocks,
+        #[cfg(feature = "orchard")]
+        ironwood_nullifier_retention,
     )?;
 
     let mut sapling_commitments = rows.sapling_commitments;

@@ -41,6 +41,12 @@ cargo check --manifest-path "$repo_root/Cargo.toml" \
 cargo check --manifest-path "$repo_root/Cargo.toml" \
   -p zakura-pir-transparent --lib --locked
 
+# Feature unification can turn on the backend's `one-time-ivk` for a SQLite
+# build that leaves its own off, so SQLite must still build that way.
+cargo check --manifest-path "$repo_root/Cargo.toml" \
+  -p zakura-client-sqlite --lib --locked \
+  --features orchard,transparent-inputs,zcash_client_backend/one-time-ivk
+
 cargo metadata --locked --manifest-path "$repo_root/Cargo.toml" \
   --format-version 1 --all-features \
   > "$CARGO_TARGET_DIR/zakura-graph-metadata.json"

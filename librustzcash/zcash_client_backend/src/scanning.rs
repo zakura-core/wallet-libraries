@@ -37,6 +37,8 @@ use orchard::note_encryption::OrchardDomain;
 
 pub(crate) mod compact;
 pub mod full;
+#[cfg(feature = "one-time-ivk")]
+pub mod one_time_ivk;
 
 /// A key that can be used to perform trial decryption and nullifier
 /// computation for a [`CompactSaplingOutput`] or [`CompactOrchardAction`].
@@ -65,6 +67,12 @@ pub trait ScanningKeyOps<D: Domain, AccountId, Nf> {
     /// Returns the [`zip32::Scope`] for which this key was derived, if known.
     fn key_scope(&self) -> Option<Scope>;
 
+    /// Derived receiving key that decrypted this output, relative to its account.
+    #[cfg(feature = "one-time-ivk")]
+    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
+        None
+    }
+
     /// Produces the nullifier for the specified note and witness, if possible.
     ///
     /// IVK-based implementations of this trait cannot successfully derive
@@ -87,6 +95,11 @@ impl<D: Domain, AccountId, Nf, K: ScanningKeyOps<D, AccountId, Nf>> ScanningKeyO
         (*self).key_scope()
     }
 
+    #[cfg(feature = "one-time-ivk")]
+    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
+        (*self).one_time_key_id()
+    }
+
     fn nf(&self, note: &D::Note, note_position: Position) -> Option<Nf> {
         (*self).nf(note, note_position)
     }
@@ -107,6 +120,11 @@ impl<D: Domain, AccountId, Nf> ScanningKeyOps<D, AccountId, Nf>
         self.as_ref().key_scope()
     }
 
+    #[cfg(feature = "one-time-ivk")]
+    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
+        self.as_ref().one_time_key_id()
+    }
+
     fn nf(&self, note: &D::Note, note_position: Position) -> Option<Nf> {
         self.as_ref().nf(note, note_position)
     }
@@ -125,6 +143,11 @@ impl<D: Domain, AccountId: Send + Sync, Nf> ScanningKeyOps<D, AccountId, Nf>
 
     fn key_scope(&self) -> Option<Scope> {
         self.as_ref().key_scope()
+    }
+
+    #[cfg(feature = "one-time-ivk")]
+    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
+        self.as_ref().one_time_key_id()
     }
 
     fn nf(&self, note: &D::Note, note_position: Position) -> Option<Nf> {
@@ -981,23 +1004,24 @@ fn find_received<
             let note_commitment_tree_position = note_position(output_idx);
             let nf = key.nf(&note, note_commitment_tree_position);
 
-            shielded_outputs.push(
-                WalletOutput::from_parts(
-                    output_idx,
-                    output.ephemeral_key(),
-                    enrich_note(note),
-                    is_change,
-                    note_commitment_tree_position,
-                    nf,
-                    *key.account_id(),
-                    key.key_scope(),
-                )
-                .with_compact_ciphertext(
-                    output.enc_ciphertext()[..52]
-                        .try_into()
-                        .expect("compact ciphertext prefix"),
-                ),
+            let output = WalletOutput::from_parts(
+                output_idx,
+                output.ephemeral_key(),
+                enrich_note(note),
+                is_change,
+                note_commitment_tree_position,
+                nf,
+                *key.account_id(),
+                key.key_scope(),
+            )
+            .with_compact_ciphertext(
+                output.enc_ciphertext()[..52]
+                    .try_into()
+                    .expect("compact ciphertext prefix"),
             );
+            #[cfg(feature = "one-time-ivk")]
+            let output = output.with_one_time_key_id(key.one_time_key_id());
+            shielded_outputs.push(output);
         }
 
         note_commitments.push((node, retention))

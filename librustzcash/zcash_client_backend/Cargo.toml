@@ -26,6 +26,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 zakura-pir-enhance-types = { version = "=0.0.1-rc1", path = "../../zakura/pir-enhance-types" }
+zakura-one-time-ivk = { version = "=0.0.1-rc0", path = "../../zakura/one-time-ivk", optional = true }
 zcash_address.workspace = true
 zcash_encoding.workspace = true
 zcash_keys = { workspace = true, features = ["std", "sapling"] }
@@ -208,6 +209,10 @@ spend-index = ["transparent-inputs"]
 ## carries an Orchard bundle type); this feature gates the wallet's
 ## Orchard note-handling code, not the crate linkage.
 orchard = ["dep:pasta_curves", "zcash_keys/orchard"]
+
+## Enables one-time IVKs, derived Ironwood receiving keys (see
+## `data_api::one_time_ivk`).
+one-time-ivk = ["orchard", "dep:zakura-one-time-ivk"]
 
 ## Enables compatibility with legacy zcashd wallet data
 zcashd-compat = ["zcash_keys/zcashd-compat"]

@@ -10,6 +10,34 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+
+- One-time IVKs (with the new `one-time-ivk` feature, which requires `orchard`): Ironwood
+  receiving keys that keep an account's spending authority with their own incoming viewing keys
+  (see `zakura-one-time-ivk`), which the wallet trial-decrypts as a changing set. `orchard`
+  alone builds without them. `scanning::one_time_ivk::OneTimeScanningKey` is one such key, and
+  received notes and outputs report theirs through `one_time_key_id`. A store implements
+  `data_api::one_time_ivk::{OneTimeIvkRead, OneTimeIvkWrite}` for keys and scanning.
+  `chain::scan_cached_blocks_with_one_time_ivks` also trial-decrypts every key from
+  `get_one_time_scanning_keys` and passes that snapshot to `put_blocks_with_one_time_ivks`, so a
+  store can rescan blocks that a key activated mid-batch missed, and
+  `wallet::decrypt_and_store_transaction_with_one_time_ivks` also decrypts with
+  `get_one_time_transaction_keys` through `decrypt_transaction_with_one_time_ivks`, which
+  `DecryptedTransaction::one_time_ivks_applied` records,
+  so a store can refuse transactions decrypted without them; no one-time key may open between
+  that decryption and storage. The restore protocol is separate, in
+  `data_api::one_time_ivk::restore::{OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite}`: its sweep
+  steps look keys recovered from the seed up in a receiver directory, and
+  `restore::recovery::EncryptedNote` authenticates the notes it returns as `RecoveredNote`s; a
+  step that must wait returns a `SweepDeferral`. `one_time_keys_to_recheck` and
+  `record_paid_filter_check` sweep a closed key without a known payment when a newer
+  publication's paid filter holds it.
+  Transaction construction spends a one-time-key note with its derived viewing key and sends
+  change to the ordinary account key.
+- `ll::wallet::{put_blocks_with_nullifier_retention, put_blocks_rows_with_nullifier_retention}`
+  (with `one-time-ivk`): `put_blocks` and `put_blocks_rows` with a height from which Ironwood
+  nullifiers stay tracked, for a store that finds Ironwood notes after scanning past them.
+
 ## [0.1.0-rc8] - PLANNED
 
 Breaking release for explicit transparent disclosure policy, private recovery,
