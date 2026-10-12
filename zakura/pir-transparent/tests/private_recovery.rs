@@ -1381,6 +1381,152 @@ fn growing_tail_pages_queries_select_only_its_rows() {
     assert!(f.assert_private(&[0, 1, 2]) > 0);
 }
 
+/// The decoupled tests' page shards: ten blocks each from the tail's start, so a
+/// grown tail keeps its earlier page shards byte for byte.
+const PAGE_SPAN: u64 = 10;
+
+/// The decoupled tests' publication: three sealed shards below the birthday and a
+/// tail from `H0 + 600` through `tail_end` at `revision`, in page shards of
+/// [`PAGE_SPAN`] blocks, holding `a0`'s history at the offsets in `offsets` from
+/// `H0 + 600` through `tail_end`. Each is a receive of 10,000 times its position,
+/// from one, except that the fifth event spends the first receive.
+///
+/// The two newest events stay in the directory; each older one is pushed into
+/// the page shard open when the event two places after it arrives:
+///
+/// | Block | Arrives | Pushed out | Into |
+/// |---|---|---|---|
+/// | +3 | e3 | e1 | pages-0 |
+/// | +11 | e4 | e2 | pages-1 |
+/// | +12 | e5 | e3 | pages-1 |
+/// | +21 | e6 | e4 | pages-2 |
+fn decoupled(a0: TransparentAddress, tail_end: u64, revision: u32) -> Vec<ShardSpec> {
+    // Unrelated activity over the first revision's blocks alone, so a grown
+    // tail changes none of its earlier blocks.
+    let mut events = noise(H0 + 600, H0 + 619, 3);
+    for (n, offset) in DECOUPLED_OFFSETS.iter().enumerate() {
+        let (n, at) = (n as u64 + 1, H0 + 600 + offset);
+        if at > tail_end {
+            break;
+        }
+        let event = if n == 5 {
+            spend(at, txid(n), (txid(1), 0))
+        } else {
+            receive(at, txid(n), 0, 10_000 * n)
+        };
+        events.push((script(a0), event));
+    }
+    vec![
+        sealed(H0, H0 + 199, noise(H0, H0 + 199, 0)),
+        sealed(H0 + 200, H0 + 399, noise(H0 + 200, H0 + 399, 1)),
+        sealed(H0 + 400, H0 + 599, noise(H0 + 400, H0 + 599, 2)),
+        ShardSpec {
+            page_span: PAGE_SPAN,
+            ..tail(tail_end, revision, events)
+        },
+    ]
+}
+
+/// Offsets from `H0 + 600` of `a0`'s events in [`decoupled`].
+const DECOUPLED_OFFSETS: [u64; 6] = [1, 2, 3, 11, 12, 21];
+
+impl Fixture {
+    /// Pages queries the service received from the `from`th request on, by the
+    /// page shard each addressed.
+    fn pages_queries(&self, from: usize) -> Vec<u32> {
+        let pages = Regex::new(PAGES_QUERY).unwrap();
+        self.server.requests()[from..]
+            .iter()
+            .filter(|request| request.method == "POST")
+            .filter_map(|request| {
+                pages
+                    .captures(&request.path)
+                    .map(|captures| captures[2].parse().unwrap())
+            })
+            .collect()
+    }
+
+    /// Rows in the companion's run cache.
+    fn cached_runs(&self) -> i64 {
+        self.companion_db()
+            .query_row("SELECT COUNT(*) FROM run_cache", [], |row| row.get(0))
+            .unwrap()
+    }
+}
+
+/// A history pushed into two page shards of the tail comes back exactly: the
+/// walk reads the newest run, in the open page shard, then the older run in the
+/// sealed one it points to, and caches that sealed run. Once the tail grows, the
+/// catch-up reads the runs that changed and stops at the cached run, where a fresh
+/// wallet walks the whole chain; both settle the same spendable outputs.
+#[test]
+fn a_history_across_page_shards_recovers_and_catch_up_stops_at_the_cached_run() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let birthday = H0 + 600;
+    let (first_end, grown_end) = (H0 + 619, H0 + 629);
+    let mut f = Fixture::new(birthday, first_end);
+    f.trust_service();
+    let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
+    let map = f.publish(&decoupled(a0, first_end, 0), SEAL);
+    // pages-0 sealed over +0..=+9, pages-1 open over +10..=+19.
+    assert_eq!(map.shards[3].page_segments, 2, "two page shards");
+
+    let pass = f.drive();
+    assert_eq!(pass.batch.state, BatchState::Ready);
+    assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
+    f.activate();
+    // Runs pages-1 [e2, e3] and pages-0 [e1]; e4 and e5 inline, e5 spending e1.
+    let expected: Vec<OutPoint> = {
+        let mut outpoints: Vec<OutPoint> = [2, 3, 4].map(|n| outpoint(txid(n), 0)).to_vec();
+        outpoints.sort_by_key(|outpoint| (*outpoint.hash(), outpoint.n()));
+        outpoints
+    };
+    assert_eq!(f.spendable().unwrap(), expected);
+    assert_eq!(
+        f.pages_queries(0),
+        vec![1, 0],
+        "the head run, then the older one"
+    );
+    // Only the run in the sealed page shard is final, so only it is cached.
+    assert_eq!(f.cached_runs(), 1);
+    f.assert_private(&[0, 1, 2]);
+
+    // The tail grows: pages-1 seals, pages-2 opens, and e6 pushes e4 into it.
+    f.scan_to(grown_end);
+    let seen = f.server.requests().len();
+    f.publish(&decoupled(a0, grown_end, 1), SEAL);
+    let pass = f.drive();
+    assert_eq!(pass.batch.state, BatchState::Ready);
+    assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
+    let expected: Vec<OutPoint> = {
+        let mut outpoints: Vec<OutPoint> = [2, 3, 4, 6].map(|n| outpoint(txid(n), 0)).to_vec();
+        outpoints.sort_by_key(|outpoint| (*outpoint.hash(), outpoint.n()));
+        outpoints
+    };
+    assert_eq!(f.spendable().unwrap(), expected);
+    // pages-2's head and pages-1's run, now sealed; pages-0's is cached.
+    assert_eq!(
+        f.pages_queries(seen),
+        vec![2, 1],
+        "the walk stops at the cached run"
+    );
+    assert_eq!(f.cached_runs(), 2);
+    f.assert_private(&[0, 1, 2]);
+
+    // A fresh wallet on the same chain pays for every run.
+    let mut fresh = Fixture::new(birthday, grown_end);
+    fresh.trust_service();
+    let a0 = fresh.derived(TransparentKeyScope::EXTERNAL, 0);
+    fresh.publish(&decoupled(a0, grown_end, 1), SEAL);
+    let pass = fresh.drive();
+    assert_eq!(pass.batch.state, BatchState::Ready);
+    assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
+    fresh.activate();
+    assert_eq!(fresh.spendable().unwrap(), expected);
+    assert_eq!(fresh.pages_queries(0), vec![2, 1, 0]);
+    fresh.assert_private(&[0, 1, 2]);
+}
+
 /// The last height the re-cut tests publish, and the wallet's tip.
 const RECUT_TIP: u64 = H0 + 549;
 
