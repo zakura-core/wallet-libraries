@@ -398,7 +398,7 @@ where
 }
 
 /// Selects the fewest eligible notes needed to cover `value`, followed by notes that the input
-/// selector may use for shape-preserving consolidation: dynamic-key notes first, so spare input
+/// selector may use for shape-preserving consolidation: one-time-key notes first, so spare input
 /// slots move their value into ordinary change, then the smallest notes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn select_spendable_notes_for_consolidation<P: consensus::Parameters, F, Note>(
@@ -677,7 +677,7 @@ enum ValueSelection {
     Accumulate,
     /// Accumulate larger notes first after honoring lock-tier preference.
     LargestFirst,
-    /// Return up to `limit` notes from the specified lock tier: dynamic-key notes first, then in
+    /// Return up to `limit` notes from the specified lock tier: one-time-key notes first, then in
     /// ascending value order.
     SmallestFirst { lock_tier: i64, limit: usize },
 }
@@ -775,7 +775,7 @@ where
         .unwrap_or(("0", "ASC"));
     let crossing_note_subquery =
         "SELECT * from eligible WHERE so_far >= :target_value ORDER BY so_far LIMIT 1";
-    let dynamic_note = if protocol == ShieldedPool::Ironwood {
+    let one_time_note = if protocol == ShieldedPool::Ironwood {
         "rn.receiving_key_id IS NOT NULL"
     } else {
         "0"
@@ -807,12 +807,12 @@ where
          FROM eligible
          ORDER BY lock_tier {tier_direction}, value DESC, commitment_tree_position, id"
         ),
-        // Dynamic-key notes come first; one that changes the change shape ends slot filling
+        // One-time-key notes come first; one that changes the change shape ends slot filling
         // (an optional consolidation is missed, the proposal itself is unaffected).
         ValueSelection::SmallestFirst { .. } => format!(
             "SELECT {result_columns}
          FROM eligible WHERE lock_tier = :selected_lock_tier
-         ORDER BY dynamic_note DESC, value ASC, commitment_tree_position, id"
+         ORDER BY one_time_note DESC, value ASC, commitment_tree_position, id"
         ),
     };
     let eligible_condition = output_eligible_condition(lock_filter, "rn");
@@ -823,7 +823,7 @@ where
                  rn.diversifier, rn.value,
                  {note_reconstruction_cols}, rn.commitment_tree_position,
                  {tier_column} AS lock_tier,
-                 {dynamic_note} AS dynamic_note,
+                 {one_time_note} AS one_time_note,
                  {so_far} AS so_far,
                  accounts.ufvk as ufvk, rn.recipient_key_scope,
                  t.block AS mined_height,
