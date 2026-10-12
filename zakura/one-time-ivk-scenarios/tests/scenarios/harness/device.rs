@@ -481,8 +481,50 @@ impl Device {
         self.found.get(&id).copied()
     }
 
-    /// Quotes an X-to-ZEC swap: reserves an incoming address against NEAR's current seen
-    /// set, saves the request before it leaves, records NEAR's acceptance and starts it.
+    /// Reserves an incoming address against NEAR's current seen set, as Vizor does
+    /// before a quote: the draft, or the next address issuance allows.
+    pub fn prepare_incoming(
+        &mut self,
+        chain: &Chain,
+        near: &Near,
+    ) -> Result<u64, ReservationPolicy> {
+        let now = self.now(chain);
+        let contains =
+            |receivers: &[[u8; 43]]| receivers.iter().map(|r| near.seen(r, now)).collect();
+        let seen = ProviderSeen {
+            since: near.feed_started,
+            until: near.read_until(now),
+            contains: &contains,
+        };
+        self.db
+            .prepare_receive_reservation(self.account, now, chain.tip(), Some(&seen))
+            .expect("reservation")
+            .map(|key| key.key_id().index())
+    }
+
+    /// Saves a quote request for the reservation at `index` just before it leaves the
+    /// device, returning its identity.
+    pub fn begin_incoming(
+        &mut self,
+        chain: &Chain,
+        index: u64,
+        deadline_in: i64,
+    ) -> Result<String, ReservationPolicy> {
+        let now = self.now(chain);
+        self.db
+            .begin_receive_operation(self.account, index, now + deadline_in, now)
+            .expect("the request is saved")
+    }
+
+    /// Records how a quote request ended.
+    pub fn finish_incoming(&mut self, request: &str, outcome: &OperationOutcome) {
+        self.db
+            .finish_receive_operation(self.account, request, outcome)
+            .expect("the outcome records");
+    }
+
+    /// Quotes an X-to-ZEC swap: reserves an incoming address, saves the request before
+    /// it leaves, records NEAR's acceptance and starts it.
     pub fn quote_incoming(
         &mut self,
         chain: &Chain,
@@ -490,41 +532,16 @@ impl Device {
         deadline_in: i64,
     ) -> Result<IncomingSwap, ReservationPolicy> {
         let now = self.now(chain);
-        let tip = chain.tip();
-        let key = {
-            let seen_near = &*near;
-            let contains = |receivers: &[[u8; 43]]| {
-                receivers.iter().map(|r| seen_near.seen(r, now)).collect()
-            };
-            let seen = ProviderSeen {
-                since: near.feed_started,
-                until: near.read_until(now),
-                contains: &contains,
-            };
-            self.db
-                .prepare_receive_reservation(self.account, now, tip, Some(&seen))
-                .expect("reservation")?
-        };
-        let index = key.key_id().index();
-        let deadline = now + deadline_in;
-        let request = self
-            .db
-            .begin_receive_operation(self.account, index, deadline, now)
-            .expect("the request is saved")?;
+        let index = self.prepare_incoming(chain, near)?;
+        let request = self.begin_incoming(chain, index, deadline_in)?;
         let fvk = self.key(Purpose::Receive, index);
         near.give(receiver_of(&fvk), now, Role::Payout);
         let deposit = ReceiveDeposit {
             address: near.deposit_address(),
             memo: None,
-            deadline,
+            deadline: now + deadline_in,
         };
-        self.db
-            .finish_receive_operation(
-                self.account,
-                &request,
-                &OperationOutcome::Accepted(deposit.clone()),
-            )
-            .expect("the outcome records");
+        self.finish_incoming(&request, &OperationOutcome::Accepted(deposit.clone()));
         self.db
             .start_receive_operation(self.account, &request)
             .expect("the operation starts")?;

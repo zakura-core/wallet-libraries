@@ -70,7 +70,13 @@ pub fn render_markdown(report: &Report) -> String {
         .flat_map(|s| s.payments.iter().map(move |p| (s, p)))
         .filter(|(_, p)| p.expected == Class::MissedDocumented)
         .collect();
-    if !documented.is_empty() {
+    let gaps: Vec<_> = report
+        .scenarios
+        .iter()
+        .flat_map(|s| s.checks.iter().map(move |c| (s, c)))
+        .filter(|(_, c)| c.documented_gap)
+        .collect();
+    if !documented.is_empty() || !gaps.is_empty() {
         let _ = writeln!(out, "## Documented misses\n");
         let _ = writeln!(
             out,
@@ -82,6 +88,9 @@ pub fn render_markdown(report: &Report) -> String {
                 "- {}: {} to {} on {}. {}",
                 s.id, p.payment, p.key, p.wallet, p.rationale
             );
+        }
+        for (s, c) in gaps {
+            let _ = writeln!(out, "- {}: {}. {}", s.id, c.name, c.detail);
         }
         let _ = writeln!(out);
     }

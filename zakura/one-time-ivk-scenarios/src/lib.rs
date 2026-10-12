@@ -183,6 +183,11 @@ pub struct Check {
     pub ok: bool,
     /// The observed value, or why it failed.
     pub detail: String,
+    /// Set when the check records a weakness the library documents, such as an address
+    /// reused inside a feed's read lag: it passes when the wallet behaves as documented,
+    /// and the report lists it with the documented misses.
+    #[serde(default)]
+    pub documented_gap: bool,
 }
 
 /// One measurement.

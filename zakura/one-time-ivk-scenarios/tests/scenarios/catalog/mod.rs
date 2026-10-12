@@ -1,10 +1,12 @@
 //! The scenario catalog, grouped as in the suite plan.
 
 mod incoming;
+mod issuance;
 mod refund;
 
 use crate::harness::Ctx;
 
+pub const ISSUANCE: &str = "A. Issuance";
 pub const FUNDING: &str = "B. Funding and refunds";
 pub const LIVE: &str = "C. Live detection";
 pub const OFFLINE: &str = "D. Offline and clocks";
@@ -29,6 +31,7 @@ pub struct Scenario {
 /// Every scenario, in report order.
 pub fn all() -> Vec<Scenario> {
     let mut scenarios = Vec::new();
+    scenarios.extend(issuance::all());
     scenarios.extend(incoming::all());
     scenarios.extend(refund::all());
     let mut ids = std::collections::BTreeSet::new();

@@ -177,25 +177,64 @@ impl Ctx {
     }
 
     /// Quotes an incoming swap on `dev` with a deposit deadline `deadline_in` seconds out.
+    /// Like the app, it answers a refusal by catching up and trying again, at most three
+    /// times: `Gap` by running the restore sweeps it waits for, `Coverage` by syncing.
     pub fn quote_incoming(
         &mut self,
         dev: Dev,
         deadline_in: i64,
     ) -> Result<IncomingSwap, ReservationPolicy> {
-        let quoted = self.devices[dev.0].quote_incoming(&self.chain, &mut self.near, deadline_in);
         let name = self.name(dev);
-        match &quoted {
-            Ok(swap) => {
-                let text = format!(
-                    "quotes an incoming swap on {}, deadline in {} min",
-                    swap.label(),
-                    deadline_in / 60
-                );
-                self.log(&name, text);
+        let mut attempt = 0;
+        loop {
+            let quoted =
+                self.devices[dev.0].quote_incoming(&self.chain, &mut self.near, deadline_in);
+            match quoted {
+                Ok(swap) => {
+                    let text = format!(
+                        "quotes an incoming swap on {}, deadline in {} min",
+                        swap.label(),
+                        deadline_in / 60
+                    );
+                    self.log(&name, text);
+                    return Ok(swap);
+                }
+                Err(policy) if attempt < 3 && matches!(policy, ReservationPolicy::Gap | ReservationPolicy::Coverage) => {
+                    attempt += 1;
+                    self.log(&name, format!("quote refused ({policy:?}), catching up and retrying"));
+                    self.sync(dev);
+                }
+                Err(policy) => {
+                    self.log(&name, format!("quote refused: {policy:?}"));
+                    return Err(policy);
+                }
             }
-            Err(policy) => self.log(&name, format!("quote refused: {policy:?}")),
         }
-        quoted
+    }
+
+    /// Reserves an incoming address on `dev` without sending a quote.
+    pub fn prepare_incoming(&mut self, dev: Dev) -> Result<u64, ReservationPolicy> {
+        self.devices[dev.0].prepare_incoming(&self.chain, &self.near)
+    }
+
+    /// Saves a quote request on `dev` for the reservation at `index`.
+    pub fn begin_incoming(
+        &mut self,
+        dev: Dev,
+        index: u64,
+        deadline_in: i64,
+    ) -> Result<String, ReservationPolicy> {
+        self.devices[dev.0].begin_incoming(&self.chain, index, deadline_in)
+    }
+
+    /// Records how `dev`'s quote request ended.
+    pub fn finish_incoming(
+        &mut self,
+        dev: Dev,
+        request: &str,
+        outcome: &zcash_client_sqlite::wallet::one_time_ivk::swap::OperationOutcome,
+    ) {
+        self.devices[dev.0].finish_incoming(request, outcome);
     }
 
     /// Quotes a ZEC-to-X swap on `dev`, reserving a refund key for it.
@@ -322,6 +361,18 @@ impl Ctx {
             name: name.into(),
             ok,
             detail: detail.into(),
+            documented_gap: false,
+        });
+    }
+
+    /// Records a documented weakness: `ok` is whether the wallet behaved as the library
+    /// documents, and `detail` names the documentation.
+    pub fn documented_gap(&mut self, name: impl Into<String>, ok: bool, detail: impl Into<String>) {
+        self.checks.push(Check {
+            name: name.into(),
+            ok,
+            detail: detail.into(),
+            documented_gap: true,
         });
     }
 
