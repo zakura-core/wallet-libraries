@@ -289,14 +289,22 @@ where
     let ufvks = data.get_unified_full_viewing_keys()?;
     let mined_height =
         mined_height.map_or_else(|| data.get_tx_height(tx.txid()), |h| Ok(Some(h)))?;
-    let decrypted = decrypt_transaction(params, mined_height, data.chain_height()?, tx, &ufvks);
-    let receivers: Vec<_> = decrypted
+    let chain_height = data.chain_height()?;
+    // The receivers the account keys recover select the one-time keys to decrypt with.
+    let receivers: Vec<_> = decrypt_transaction(params, mined_height, chain_height, tx, &ufvks)
         .ironwood_outputs()
         .iter()
         .map(|output| output.note().0.recipient())
         .collect();
     let keys = data.get_one_time_transaction_keys(tx.txid(), mined_height, &receivers)?;
-    data.store_decrypted_tx(decrypted.with_one_time_ivks(keys))?;
+    data.store_decrypted_tx(crate::decrypt_transaction_with_one_time_ivks(
+        params,
+        mined_height,
+        chain_height,
+        tx,
+        &ufvks,
+        keys,
+    ))?;
 
     Ok(())
 }

@@ -65,11 +65,17 @@ fn full_transaction_roundtrip(full_first: bool) {
         .unwrap();
     let tx = st.wallet().get_transaction(created[0]).unwrap().unwrap();
 
-    // Ordinary OVK recovery finds these self-payments as outgoing. Swap decryption
-    // must replace those records with incoming records, not duplicate them.
+    // Ordinary OVK recovery finds these self-payments as outgoing. Decryption with the
+    // one-time keys must find each as one incoming record, not both.
     let ufvks = st.wallet().get_unified_full_viewing_keys().unwrap();
-    let decoded = zcash_client_backend::decrypt_transaction(&network, None, Some(h), &tx, &ufvks)
-        .with_one_time_ivks(st.wallet().get_one_time_scanning_keys().unwrap());
+    let decoded = zcash_client_backend::decrypt_transaction_with_one_time_ivks(
+        &network,
+        None,
+        Some(h),
+        &tx,
+        &ufvks,
+        st.wallet().get_one_time_scanning_keys().unwrap(),
+    );
     for key in &keys {
         let outputs: Vec<_> = decoded
             .ironwood_outputs()

@@ -3374,8 +3374,6 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             anchor_retention.as_ref(),
             #[cfg(feature = "one-time-ivk")]
             ironwood_nullifier_retention,
-            #[cfg(all(feature = "orchard", not(feature = "one-time-ivk")))]
-            None,
         )
         .map_err(SqliteClientError::from)?;
 
@@ -4853,7 +4851,14 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
                     mined_height,
                     &receivers,
                 )?;
-                d_tx.with_one_time_ivks(keys)
+                zcash_client_backend::decrypt_transaction_with_one_time_ivks(
+                    &params,
+                    mined_height,
+                    Some(tip),
+                    &tx,
+                    &ufvks,
+                    keys,
+                )
             };
             store_decrypted_tx(self, &params, self.gap_limits, tip, d_tx)?;
         }
