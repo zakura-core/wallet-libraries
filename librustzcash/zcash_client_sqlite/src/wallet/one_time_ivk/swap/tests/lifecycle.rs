@@ -1,9 +1,8 @@
 use super::*;
-use zakura_one_time_ivk::lifecycle::{
-    COMPLETION_LIMIT_SECS as LIMIT, NearStatus, Observation,
-    OperationStatus::{Active, Terminal},
+use zakura_one_time_ivk::swap::{
+    COMPLETION_LIMIT_SECS as LIMIT, Observation,
+    OperationStatus::{Active, AwaitingDeposit, Terminal},
     ReceiptExpectation::{None as NoReceipt, Positive, Unknown},
-    near_observation,
 };
 
 const HOUR: i64 = 60 * 60;
@@ -139,28 +138,21 @@ fn a_refund_owed_starts_an_unfunded_refund_key() {
         .unwrap()
         .key_id();
         observe(db, account, key, "deposit", Active, 100).unwrap();
-        let record = |db: &mut Db, status: NearStatus<'_>, at| {
-            let observation = near_observation(Purpose::Refund, &status);
+        let record = |db: &mut Db, status, at| {
+            let observation = Observation {
+                status,
+                deadline: None,
+            };
             db.record_operation_status(account, "deposit", None, observation, false, at)
                 .unwrap()
         };
-        let status = |status| NearStatus {
-            status,
-            ..Default::default()
-        };
-        assert!(record(db, status("PROCESSING"), 100));
+        assert!(record(db, Active, 100));
         assert!(scanning_keys(&st).is_empty());
         let db = st.wallet_mut().db_mut();
         if settled_first {
-            let settled = NearStatus {
-                status: "SUCCESS",
-                swap_type: Some("EXACT_INPUT"),
-                refunded_amount: Some(Zatoshis::ZERO),
-                ..Default::default()
-            };
-            assert!(record(db, settled, 300));
+            assert!(record(db, Terminal(NoReceipt), 300));
         }
-        assert!(record(db, status("REFUNDED"), 200));
+        assert!(record(db, Terminal(Positive(None)), 200));
         let expected = if settled_first { vec![] } else { vec![key] };
         assert_eq!(scanning_keys(&st), expected, "{settled_first}");
     }
@@ -378,7 +370,7 @@ fn incoming_key_closes_only_once_paid_and_released() {
     let reserved = prepare_from(db, account, now, from, None).unwrap().unwrap();
     let index = reserved.key_id().index();
     tx(db, |c, _| {
-        store::reservations::begin(c, account, index, "pending", now + DAY, now)
+        store::swap::reservations::begin(c, account, index, "pending", now + DAY, now)
     })
     .unwrap()
     .unwrap();
@@ -408,7 +400,7 @@ fn underpaid_reservation(st: &mut State) -> (OneTimeKey, i64) {
     let key = prepare_from(db, account, now, from, None).unwrap().unwrap();
     let index = key.key_id().index();
     tx(db, |c, _| {
-        store::reservations::begin(c, account, index, "swap", deadline, now)
+        store::swap::reservations::begin(c, account, index, "swap", deadline, now)
     })
     .unwrap()
     .unwrap();
@@ -417,20 +409,18 @@ fn underpaid_reservation(st: &mut State) -> (OneTimeKey, i64) {
     db.start_receive_operation(account, "swap")
         .unwrap()
         .unwrap();
-    record_receive_status(st, "INCOMPLETE_DEPOSIT", None, now + HOUR);
+    record_receive_status(st, Active, now + HOUR);
     (key, deadline)
 }
 
-/// Records 1Click `status`, with payout `amount_out`, for the test account's funded
-/// incoming operation `swap` at `at`.
-fn record_receive_status(st: &mut State, status: &str, amount_out: Option<u64>, at: i64) {
+/// Records provider `status` for the test account's funded incoming operation `swap` at
+/// `at`.
+fn record_receive_status(st: &mut State, status: OperationStatus, at: i64) {
     let account = st.test_account().unwrap().id();
-    let status = NearStatus {
+    let observation = Observation {
         status,
-        amount_out: amount_out.map(Zatoshis::const_from_u64),
-        ..Default::default()
+        deadline: None,
     };
-    let observation = near_observation(Purpose::Receive, &status);
     st.wallet_mut()
         .db_mut()
         .record_operation_status(account, "swap", None, observation, true, at)
@@ -489,7 +479,7 @@ fn closed_settled(st: &mut State, incoming: bool) -> i64 {
         let (key, _) = underpaid_reservation(st);
         pay(st, &key, 50_000);
         confirm(st);
-        record_receive_status(st, "SUCCESS", Some(50_000), at);
+        record_receive_status(st, owed(Some(50_000)).status, at);
         key
     } else {
         let key = refund_key(st);
@@ -550,7 +540,7 @@ fn statuses_never_reopen_a_closed_key() {
         (
             "corrected payout",
             |st| closed_settled(st, true),
-            |st, at| record_receive_status(st, "SUCCESS", Some(80_000), at),
+            |st, at| record_receive_status(st, owed(Some(80_000)).status, at),
         ),
         (
             "refund owed past the limit",
@@ -561,8 +551,8 @@ fn statuses_never_reopen_a_closed_key() {
             "payout past the limit",
             |st| closed_at_the_limit(st, true),
             |st, at| {
-                record_receive_status(st, "REFUNDED", None, at);
-                record_receive_status(st, "SUCCESS", Some(50_000), at + 1);
+                record_receive_status(st, Terminal(NoReceipt), at);
+                record_receive_status(st, owed(Some(50_000)).status, at + 1);
             },
         ),
     ];
@@ -589,7 +579,7 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
     let index = reservation.key_id().index();
     for request in ["edit", "accepted"] {
         tx(db, |c, _| {
-            store::reservations::begin(c, account, index, request, deadline, now)
+            store::swap::reservations::begin(c, account, index, request, deadline, now)
         })
         .unwrap()
         .unwrap();
@@ -603,17 +593,14 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
     confirm(&mut st);
     let released = deadline + RECEIVE_RECLAIM_SECONDS;
     let payout = Some(Zatoshis::const_from_u64(70_000));
-    for (request, status, amount_out, funded) in [
-        ("edit", "PENDING_DEPOSIT", None, false),
-        ("accepted", "SUCCESS", payout, true),
+    for (request, status, funded) in [
+        ("edit", AwaitingDeposit, false),
+        ("accepted", Terminal(Positive(payout)), true),
     ] {
-        let status = NearStatus {
+        let observation = Observation {
             status,
-            amount_out,
             deadline: Some(deadline),
-            ..Default::default()
         };
-        let observation = near_observation(Purpose::Receive, &status);
         st.wallet_mut()
             .db_mut()
             .record_operation_status(account, request, None, observation, funded, released)

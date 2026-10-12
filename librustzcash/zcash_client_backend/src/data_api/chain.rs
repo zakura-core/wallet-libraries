@@ -172,7 +172,7 @@ use {
     super::scanning::ScanPriority, crate::data_api::scanning::ScanRange, async_trait::async_trait,
 };
 
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 use super::one_time_ivk::OneTimeIvkWrite;
 
 pub mod error;
@@ -664,7 +664,7 @@ where
 /// one-time keys must be scanned with this function rather than [`scan_cached_blocks`].
 ///
 /// [`OneTimeIvkRead::get_one_time_scanning_keys`]: super::one_time_ivk::OneTimeIvkRead::get_one_time_scanning_keys
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 #[tracing::instrument(skip(params, block_source, data_db, from_state))]
 #[allow(clippy::type_complexity)]
 pub fn scan_cached_blocks_with_one_time_ivks<ParamsT, DbT, BlockSourceT>(

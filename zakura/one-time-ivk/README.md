@@ -13,10 +13,10 @@ issuing live addresses.
 2. Call `KeyId::new(purpose, index).derive(account_external_fvk)` and select
    `address_at(0u32, Scope::External)` for the receiver.
 3. Register that FVK for scanning and retain its purpose/index with received notes.
-4. For a refund, encode `RefundMemo` in an ordinary internal note in the funding
-   transaction, whose only transparent output pays the P2PKH or P2SH deposit.
-   Decode only after note authentication and verification that the transaction
-   was the wallet's own send, including zero-value and spent notes.
+4. For a refund, encode `swap::RefundMemo` in an ordinary internal note in the
+   funding transaction, whose only transparent output pays the P2PKH or P2SH
+   deposit. Decode only after note authentication and verification that the
+   transaction was the wallet's own send, including zero-value and spent notes.
 5. Reconstruct inputs with their derived FVKs. Use the account's spending key to
    sign, and its ordinary internal key for change.
 
@@ -33,6 +33,15 @@ key registration, scanning, completion, and the restore sweeps that
 Software PCZT signing of one-time-key notes works through the same builder.
 Hardware signers need firmware qualification before one-time keys are enabled for
 hardware accounts.
+
+## Layout
+
+- Crate root: `KeyId`, `Purpose`, derivation, and `has_same_spending_authority`.
+- `recovery`: authentication of privately retrieved incoming notes.
+- `swap`: the refund memo, the completion limits (`RESTORE_WATCH_SECS`,
+  `COMPLETION_LIMIT_SECS`), and the provider-neutral lifecycle types
+  (`Observation`, `OperationStatus`, `ReceiptExpectation`). Provider status
+  parsing belongs to the app.
 
 ## Derivation
 
@@ -71,7 +80,7 @@ is swept once and, if the provider was given its address in the last day, scans 
 another 24 hours, with no provider lookups. Incoming indices are
 recovered through lookahead, not this memo. `RefundMemo::decode` returns `None`
 for any memo that is not a v1 record, and a wallet ignores such a memo even when it
-starts with `REFUND_MEMO_MAGIC`.
+starts with `swap::REFUND_MEMO_MAGIC`.
 
 ## Validation
 

@@ -398,8 +398,9 @@ where
 }
 
 /// Selects the fewest eligible notes needed to cover `value`, followed by notes that the input
-/// selector may use for shape-preserving consolidation: one-time-key notes first, so spare input
-/// slots move their value into ordinary change, then the smallest notes.
+/// selector may use for shape-preserving consolidation: one-time-key notes first (with
+/// `one-time-ivk`), so spare input slots move their value into ordinary change, then the smallest
+/// notes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn select_spendable_notes_for_consolidation<P: consensus::Parameters, F, Note>(
     conn: &Connection,
@@ -775,7 +776,9 @@ where
         .unwrap_or(("0", "ASC"));
     let crossing_note_subquery =
         "SELECT * from eligible WHERE so_far >= :target_value ORDER BY so_far LIMIT 1";
-    let one_time_note = if protocol == ShieldedPool::Ironwood {
+    // Without `one-time-ivk` the wallet holds no one-time-key notes (see
+    // `WalletMigrationError::OneTimeIvksNotEnabled`), so the ordering matches plain selection.
+    let one_time_note = if cfg!(feature = "one-time-ivk") && protocol == ShieldedPool::Ironwood {
         "rn.receiving_key_id IS NOT NULL"
     } else {
         "0"

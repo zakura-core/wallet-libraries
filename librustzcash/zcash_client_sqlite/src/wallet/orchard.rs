@@ -45,6 +45,9 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
     // `ReceivedNoteId` must carry the pool the note was selected from, so that pool-filtered
     // exclusion (see `select_unspent_notes`) matches it rather than misrouting it to Orchard.
     let note_id = ReceivedNoteId(pool, row.get("id")?);
+    #[cfg(not(feature = "one-time-ivk"))]
+    let _ = conn;
+    #[cfg(feature = "one-time-ivk")]
     let receiving_key_id: Option<i64> = if pool == ShieldedPool::Ironwood {
         row.get("receiving_key_id")?
     } else {
@@ -124,11 +127,14 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
             let fvk = ufvk.orchard().ok_or_else(|| {
                 SqliteClientError::CorruptedData("missing Orchard FVK".to_owned())
             })?;
+            #[cfg(feature = "one-time-ivk")]
             let one_time_key = receiving_key_id
                 .map(|id| super::one_time_ivk::note_key(conn, id, fvk))
                 .transpose()?;
+            #[cfg(feature = "one-time-ivk")]
             let fvk = one_time_key.as_ref().map_or(fvk, |(_, fvk)| fvk);
             let recipient = fvk.to_ivk(spending_key_scope).address(diversifier);
+            #[cfg(feature = "one-time-ivk")]
             if one_time_key.is_some()
                 && (spending_key_scope != Scope::External
                     || recipient != fvk.address_at(0u32, Scope::External))
@@ -157,7 +163,9 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
                 mined_height,
                 max_shielding_input_height,
             );
-            Ok(received.with_one_time_key_id(one_time_key.map(|(id, _)| id)))
+            #[cfg(feature = "one-time-ivk")]
+            let received = received.with_one_time_key_id(one_time_key.map(|(id, _)| id));
+            Ok(received)
         })
         .transpose()
 }
@@ -529,11 +537,16 @@ pub(crate) fn put_received_note<
     let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(shielded_pool)?;
 
     let account_id = get_account_ref(conn, output.account_id())?;
+    #[cfg(not(feature = "one-time-ivk"))]
+    let receiving_key_id: Option<i64> = None;
+    #[cfg(feature = "one-time-ivk")]
     let receiving_key_id =
         super::one_time_ivk::validate_received_key(conn, params, shielded_pool, output)?;
+    #[cfg(feature = "one-time-ivk")]
     if let (ShieldedPool::Ironwood, Some(nf)) = (shielded_pool, output.nullifier()) {
         super::one_time_ivk::adopt_found_note(conn, &nf.to_bytes(), tx_ref, output.index())?;
     }
+    #[cfg(feature = "one-time-ivk")]
     if shielded_pool == ShieldedPool::Ironwood {
         use rusqlite::OptionalExtension;
         let stored_key: Option<i64> = conn
@@ -613,6 +626,7 @@ pub(crate) fn put_received_note<
         .map_err(SqliteClientError::from)?;
 
     // Only validated Ironwood one-time-key outputs carry a key.
+    #[cfg(feature = "one-time-ivk")]
     if let Some(key_id) = receiving_key_id {
         conn.execute(
             "UPDATE ironwood_received_notes SET receiving_key_id = ?1 WHERE id = ?2",

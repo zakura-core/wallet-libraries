@@ -73,9 +73,9 @@ pub enum WalletMigrationError {
     /// whose meaning it does not know. External migrations must be supplied on every call.
     UnknownMigrations(Vec<Uuid>),
 
-    /// The database holds one-time IVK state, which a build without the `orchard` feature
-    /// cannot scan with or keep consistent, so such a build refuses to open it.
-    OneTimeIvksRequireOrchard,
+    /// The database holds one-time IVK state, which a build without the `one-time-ivk`
+    /// feature cannot scan with or keep consistent, so such a build refuses to open it.
+    OneTimeIvksNotEnabled,
 
     /// Some other unexpected violation of database business rules occurred
     Other(Box<SqliteClientError>),
@@ -163,9 +163,9 @@ impl fmt::Display for WalletMigrationError {
                     ids.join(", ")
                 )
             }
-            WalletMigrationError::OneTimeIvksRequireOrchard => write!(
+            WalletMigrationError::OneTimeIvksNotEnabled => write!(
                 f,
-                "The wallet database holds one-time IVK state, which needs a build with the orchard feature"
+                "The wallet database holds one-time IVK state, which needs a build with the one-time-ivk feature"
             ),
             WalletMigrationError::Other(err) => {
                 write!(f, "Unexpected violation of database business rules: {err}")
@@ -201,7 +201,7 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::EnhancementModeNotConfigured => {
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
-        #[cfg(feature = "orchard")]
+        #[cfg(feature = "one-time-ivk")]
         SqliteClientError::OneTimeIvksNotUsed
         | SqliteClientError::InvalidOneTimeIvkInput(_)
         | SqliteClientError::OneTimeIvkIndexExhausted => {
@@ -320,7 +320,7 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
 /// at least once any time a client program upgrades to a new version of this library.  The
 /// operation of this procedure is idempotent, so it is safe (though not required) to invoke this
 /// operation every time the wallet is opened (see [`WalletMigrator`] for builds without
-/// `orchard`).
+/// `one-time-ivk`).
 ///
 /// In order to correctly apply migrations to accounts derived from a seed, sometimes the
 /// optional `seed` argument is required. This function should first be invoked with
@@ -421,8 +421,8 @@ pub fn init_wallet_db<
 /// and should be invoked at least once any time a client program upgrades to a new
 /// version of this library. The operation of this procedure is idempotent, so it is safe
 /// (though not required) to invoke this operation every time the wallet is opened. A build
-/// without `orchard` refuses a database holding one-time IVK state whether or not this runs
-/// (see [`WalletMigrationError::OneTimeIvksRequireOrchard`]).
+/// without `one-time-ivk` refuses a database holding one-time IVK state whether or not this
+/// runs (see [`WalletMigrationError::OneTimeIvksNotEnabled`]).
 ///
 /// In order to correctly apply migrations to accounts derived from a seed, sometimes the
 /// seed is required. The migrator should first be used without calling [`Self::with_seed`];
@@ -706,7 +706,7 @@ fn init_wallet_db_internal<
         }
         if target_migrations.is_empty() {
             migrator.up(None)?;
-            #[cfg(not(feature = "orchard"))]
+            #[cfg(not(feature = "one-time-ivk"))]
             verify_no_one_time_ivk_state(wdb.conn.borrow()).map_err(MigratorError::Adapter)?;
         } else {
             for target_migration in target_migrations {
@@ -767,10 +767,10 @@ fn verify_no_unknown_migrations(
     }
 }
 
-/// Refuses, in a build without `orchard`, a database holding one-time IVK state: such a
-/// build would store blocks and transactions without the one-time keys and prune the
+/// Refuses, in a build without `one-time-ivk`, a database holding one-time IVK state: such
+/// a build would store blocks and transactions without the one-time keys and prune the
 /// Ironwood spend evidence their recovery needs. A database not yet migrated holds none.
-#[cfg(not(feature = "orchard"))]
+#[cfg(not(feature = "one-time-ivk"))]
 fn verify_no_one_time_ivk_state(conn: &rusqlite::Connection) -> Result<(), WalletMigrationError> {
     let migrated: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema
@@ -778,25 +778,18 @@ fn verify_no_one_time_ivk_state(conn: &rusqlite::Connection) -> Result<(), Walle
         [],
         |row| row.get(0),
     )?;
-    let present = migrated
-        && conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys)
-                OR EXISTS(SELECT 1 FROM ironwood_one_time_spend_retention)",
-            [],
-            |row| row.get(0),
-        )?;
-    if present {
-        Err(WalletMigrationError::OneTimeIvksRequireOrchard)
+    if migrated && super::holds_one_time_ivk_state(conn)? {
+        Err(WalletMigrationError::OneTimeIvksNotEnabled)
     } else {
         Ok(())
     }
 }
 
-/// [`verify_no_one_time_ivk_state`] as a rusqlite error, so a build without `orchard`
+/// [`verify_no_one_time_ivk_state`] as a rusqlite error, so a build without `one-time-ivk`
 /// refuses such a database even if it never migrates it: at `WalletDb::for_path`, and in
 /// the low-level writes that record scanned blocks or retire transaction retrieval, which
 /// every handle's block and transaction storage reaches.
-#[cfg(not(feature = "orchard"))]
+#[cfg(not(feature = "one-time-ivk"))]
 pub(crate) fn refuse_one_time_ivk_state(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     verify_no_one_time_ivk_state(conn).map_err(|e| match e {
         WalletMigrationError::DbError(e) => e,
@@ -1225,10 +1218,11 @@ mod tests {
             .unwrap();
     }
 
-    /// A build without `orchard` opens a database without one-time IVK state and refuses
-    /// one with it, whether opened by path or migrated; an `orchard` build opens both.
+    /// A build without `one-time-ivk` opens a database without one-time IVK state and
+    /// refuses one with it, whether opened by path or migrated; a `one-time-ivk` build opens
+    /// both.
     #[test]
-    fn one_time_ivk_state_needs_an_orchard_build() {
+    fn one_time_ivk_state_needs_a_one_time_ivk_build() {
         use super::{WalletMigrationError, WalletMigrator};
         use schemerz::MigratorError;
 
@@ -1252,11 +1246,11 @@ mod tests {
             .unwrap();
         let reopened = open();
         let migrated = WalletMigrator::new().init_or_migrate(&mut db);
-        if cfg!(feature = "orchard") {
+        if cfg!(feature = "one-time-ivk") {
             reopened.unwrap();
             migrated.unwrap();
         } else {
-            let refusal = WalletMigrationError::OneTimeIvksRequireOrchard.to_string();
+            let refusal = WalletMigrationError::OneTimeIvksNotEnabled.to_string();
             assert!(matches!(
                 reopened,
                 Err(rusqlite::Error::SqliteFailure(_, Some(message))) if message == refusal
@@ -1264,16 +1258,16 @@ mod tests {
             assert!(matches!(
                 migrated,
                 Err(MigratorError::Adapter(
-                    WalletMigrationError::OneTimeIvksRequireOrchard
+                    WalletMigrationError::OneTimeIvksNotEnabled
                 ))
             ));
         }
     }
 
-    /// Without `orchard`, a caller-owned transaction handle cannot record scanned blocks or
-    /// retire transaction retrieval over one-time IVK state, through `WalletWrite` or the
-    /// low-level API, and the retrieval request survives.
-    #[cfg(not(feature = "orchard"))]
+    /// Without `one-time-ivk`, a caller-owned transaction handle cannot record scanned
+    /// blocks or retire transaction retrieval over one-time IVK state, through `WalletWrite`
+    /// or the low-level API, and the retrieval request survives.
+    #[cfg(not(feature = "one-time-ivk"))]
     #[test]
     fn caller_owned_transactions_refuse_one_time_ivk_state() {
         use std::collections::HashMap;
@@ -1319,7 +1313,7 @@ mod tests {
         )
         .freeze()
         .unwrap();
-        let refusal = WalletMigrationError::OneTimeIvksRequireOrchard.to_string();
+        let refusal = WalletMigrationError::OneTimeIvksNotEnabled.to_string();
         let refused = |result: Result<(), SqliteClientError>| {
             matches!(
                 result,
@@ -1358,7 +1352,15 @@ mod tests {
             BlockHash([0; 32]),
             0,
             0,
-            0
+            0,
+            #[cfg(feature = "orchard")]
+            0,
+            #[cfg(feature = "orchard")]
+            0,
+            #[cfg(feature = "orchard")]
+            0,
+            #[cfg(feature = "orchard")]
+            0,
         )));
         assert!(refused(
             handle.notify_scan_complete(height..height + 1, &[])

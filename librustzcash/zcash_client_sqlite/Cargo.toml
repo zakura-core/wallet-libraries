@@ -132,14 +132,13 @@ default = ["multicore"]
 multicore = ["maybe-rayon/threads", "zcash_primitives/multicore"]
 
 ## Enables support for storing data related to the sending and receiving of
-## Orchard funds, and one-time IVKs (see `wallet::one_time_ivk`).
+## Orchard funds.
 ##
 ## This crate's storage-trait impls are gated on this feature while the backend traits grow
 ## their Orchard and Ironwood methods under theirs, so the two must turn on together or the impls
 ## stop satisfying the traits.
 orchard = [
     "dep:orchard",
-    "dep:zakura-one-time-ivk",
     "dep:zcash_note_encryption",
     "zcash_client_backend/orchard",
     "zcash_keys/orchard",
@@ -148,6 +147,16 @@ orchard = [
     "pczt/io-finalizer",
     "pczt/spend-finalizer",
     "pczt/tx-extractor",
+]
+
+## Enables one-time IVKs, derived Ironwood receiving keys (see `wallet::one_time_ivk`).
+##
+## The schema is the same in every build. A build without this feature refuses a database
+## holding one-time IVK state (`WalletMigrationError::OneTimeIvksNotEnabled`).
+one-time-ivk = [
+    "orchard",
+    "dep:zakura-one-time-ivk",
+    "zcash_client_backend/one-time-ivk",
 ]
 
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.

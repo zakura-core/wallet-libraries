@@ -317,6 +317,7 @@ fn require_lwd(
 /// none) and retires its enhancement if nothing is left. Otherwise nothing shows whether it
 /// has transparent parts, so it is queued and routed like a scanned transaction whose
 /// compact data does not prove it Ironwood-only.
+#[cfg(feature = "one-time-ivk")]
 pub(crate) fn finish_private_receipt(
     conn: &Transaction<'_>,
     configured: Option<TransparentLedgerMode>,
@@ -1096,8 +1097,9 @@ fn pending_note<P: Parameters>(
         get_account(conn, params, account_id)?.ok_or(SqliteClientError::AccountUnknown)?;
     let diversifier = Diversifier::from_bytes(diversifier);
     let ivk = match receiving_key_id {
+        #[cfg(feature = "one-time-ivk")]
         Some(id) => super::one_time_ivk::queued_note_ivk(conn, &account, id, scope, diversifier)?,
-        None => match scope {
+        _ => match scope {
             Scope::External => account.uivk().orchard().clone(),
             Scope::Internal => account
                 .ufvk()

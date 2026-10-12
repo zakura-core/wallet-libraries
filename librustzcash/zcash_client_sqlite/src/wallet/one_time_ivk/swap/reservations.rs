@@ -1,7 +1,7 @@
 //! Incoming reservations, which live on their key's row, and their quote operations.
 use orchard::keys::Scope;
 use rusqlite::{Connection, OptionalExtension, named_params, params};
-use zakura_one_time_ivk::lifecycle::{
+use zakura_one_time_ivk::swap::{
     Observation,
     OperationStatus::Terminal,
     ReceiptExpectation::{Positive, Unknown},
@@ -9,10 +9,10 @@ use zakura_one_time_ivk::lifecycle::{
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-use super::{
-    Discovery, KeyId, OneTimeKey, Purpose, RESERVED, ReservationPolicy, account_key, activate,
-    corrupt, decode_index, invalid, key_by_id, lifecycle::record, next_index, register,
-    restore_start,
+use super::{RESERVED, ReservationPolicy, lifecycle::record};
+use crate::wallet::one_time_ivk::{
+    Discovery, KeyId, OneTimeKey, Purpose, account_key, activate, corrupt, decode_index, invalid,
+    key_by_id, next_index, register, restore_start,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -93,7 +93,8 @@ const SEEN: &str = "(k.provider_seen = 1
           AND (o.reference IS NOT NULL OR o.begun_at < :since OR o.begun_at > :covered)))";
 
 /// SQL condition on `ironwood_receiving_keys k`: one of its quotes was started.
-pub(super) const STARTED: &str = "EXISTS(SELECT 1 FROM ironwood_one_time_operations o
+pub(in crate::wallet::one_time_ivk) const STARTED: &str =
+    "EXISTS(SELECT 1 FROM ironwood_one_time_operations o
     WHERE o.receiving_key_id = k.id AND o.started = 1)";
 
 /// Whether key `key` is open and scanned through the tip without a payment or candidate.
@@ -204,7 +205,7 @@ fn reusable(conn: &Connection, key: i64, now: i64) -> Result<bool, SqliteClientE
 /// Releases `account`'s settled paid reservations and reclaims abandoned unpaid ones
 /// scanned empty (see [`reusable`]), whose keys stop scanning. Returns the reclaimed
 /// incoming indices.
-pub(super) fn reap<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn reap<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
@@ -257,7 +258,7 @@ pub(super) fn reap<P: Parameters>(
 }
 
 /// See `WalletDb::begin_receive_operation`, which chooses `request`.
-pub(super) fn begin(
+pub(in crate::wallet::one_time_ivk) fn begin(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
     index: u64,
@@ -322,7 +323,7 @@ fn operation(
 }
 
 /// See `WalletDb::finish_receive_operation`.
-pub(super) fn finish(
+pub(in crate::wallet::one_time_ivk) fn finish(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
     request: &str,
@@ -368,7 +369,7 @@ pub(super) fn finish(
 }
 
 /// See `WalletDb::start_receive_operation`.
-pub(super) fn start(
+pub(in crate::wallet::one_time_ivk) fn start(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
     request: &str,
@@ -404,7 +405,7 @@ pub(super) fn start(
 
 /// See `WalletDb::record_operation_status`. An incoming operation is updated while its
 /// reservation is open, and after release if its key was paid and it was funded.
-pub(super) fn record_status<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn record_status<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
@@ -443,7 +444,7 @@ pub(super) fn record_status<P: Parameters>(
 
 /// See `WalletDb::prepare_receive_reservation`: resumes the draft, or reserves the lowest
 /// index never quoted, or else the lowest abandoned one, scanning it from `scan_from`.
-pub(super) fn prepare<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
@@ -558,7 +559,7 @@ pub(super) fn prepare<P: Parameters>(
         KeyId::new(Purpose::Receive, index),
         scan_from,
         true,
-        super::Discovery::Scan,
+        Discovery::Scan,
         now,
     )?;
     conn.execute(
@@ -569,7 +570,7 @@ pub(super) fn prepare<P: Parameters>(
 }
 
 /// Records which of `account`'s unseen incoming keys `seen` holds.
-pub(super) fn record_seen(
+pub(in crate::wallet::one_time_ivk) fn record_seen(
     conn: &Connection,
     account: i64,
     seen: &ProviderSeen<'_>,
@@ -606,7 +607,10 @@ pub(super) fn record_seen(
 /// Records that a swap provider was given key `id`'s receiver as a payout address. The
 /// key is never issued again, so like a paid key it extends the restore walk and the gap
 /// (see [`recovery_end`]). Nothing clears this.
-pub(super) fn record_provider_seen(conn: &Connection, id: i64) -> Result<(), SqliteClientError> {
+pub(in crate::wallet::one_time_ivk) fn record_provider_seen(
+    conn: &Connection,
+    id: i64,
+) -> Result<(), SqliteClientError> {
     conn.execute(
         "UPDATE ironwood_receiving_keys
          SET provider_seen = 1, advances_allocation = 1 WHERE id = ?1",
