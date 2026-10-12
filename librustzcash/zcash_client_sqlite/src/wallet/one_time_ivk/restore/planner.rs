@@ -56,7 +56,10 @@ pub(crate) fn history_pending<P: Parameters>(
     )?)
 }
 
-/// Implements `OneTimeIvkRestoreWrite::prepare_one_time_sweeps`.
+/// Implements `OneTimeIvkRestoreWrite::prepare_one_time_sweeps`. Selects nothing unless
+/// `through` is both the stored chain tip and the fully scanned height: below either, an
+/// attempt's network lookups could end only in `PaymentApplication::AwaitingScan` for any
+/// payment they find, as `apply::apply_payment` checks again.
 pub(crate) fn prepare_sweeps<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -71,6 +74,11 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
     let (owner, _) = account_key(conn, params, account)?;
     if canonical(conn, Some(through))?.is_none() {
         return Ok(Err(SweepDeferral::UnknownAnchor));
+    }
+    if wallet::fully_scanned_height(conn)? != Some(through.height)
+        || wallet::chain_tip_height(conn)? != Some(through.height)
+    {
+        return Ok(Ok(vec![]));
     }
     // A finished sweep is offered again while a late lookup left candidates queued.
     let mut stmt = conn.prepare(

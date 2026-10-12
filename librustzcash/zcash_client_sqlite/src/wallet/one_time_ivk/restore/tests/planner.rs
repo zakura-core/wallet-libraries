@@ -126,6 +126,8 @@ fn restored_keys_are_swept_instead_of_scanned_or_issued() {
     let db = st.wallet_mut().db_mut();
     let issued = reserve_key(db, account, Purpose::Refund, through.height).key_id();
     recover(db, account, issued, through.height);
+    // Issuing the key queued a rescan of the tip (see `sweeps_wait_for_the_fully_scanned_tip`).
+    st.scan_cached_blocks_with_one_time_ivks(through.height, 1);
     let work = prepare(&mut st, through, NOW).unwrap();
     let swept: Vec<_> = work.iter().map(|w| (w.key, w.receiver)).collect();
     let expected = [incoming, refund].map(|k| (k.key_id(), k.receiver().to_raw_address_bytes()));
@@ -179,6 +181,30 @@ fn sweeps_are_due_from_their_scan_start_at_canonical_points() {
     let stale = prepare(&mut st, removed, NOW);
     assert!(matches!(stale, Err(SweepDeferral::UnknownAnchor)));
     assert_eq!(due(&mut st, replaced, NOW), [key]);
+}
+
+/// No sweep is prepared, so none is leased, while the chain tip is above the scanned tip
+/// or a rescan is queued below it, where a found payment could only wait for scanning.
+/// Sweeps resume without backoff once scanning catches up.
+#[test]
+fn sweeps_wait_for_the_fully_scanned_tip() {
+    let (mut st, account, through) = setup();
+    let key = watch(st.wallet_mut().db_mut(), account, 0, through.height).key_id();
+    let (next, _) = st.generate_empty_block();
+    st.wallet_mut().update_chain_tip(next).unwrap();
+    assert!(due(&mut st, through, NOW).is_empty());
+    st.scan_cached_blocks_with_one_time_ivks(next, 1);
+    let through = tip(&st);
+    // A key issued from the tip queues a rescan of it.
+    reserve_key(
+        st.wallet_mut().db_mut(),
+        account,
+        Purpose::Refund,
+        through.height,
+    );
+    assert!(due(&mut st, through, NOW).is_empty());
+    st.scan_cached_blocks_with_one_time_ivks(through.height, 1);
+    assert_eq!(due(&mut st, through, NOW), [key]);
 }
 
 /// Each attempt defers its sweep, doubling from one minute to a twelve-hour cap.
