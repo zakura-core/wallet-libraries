@@ -40,6 +40,8 @@ pub struct Ctx {
     metrics: Vec<Metric>,
     /// Balances checked once every wallet has settled.
     final_balances: Vec<(Dev, u64)>,
+    /// NEAR's own wallet, created on its first real payout.
+    near_wallet: Option<Dev>,
     /// Wallet pairs whose balances must match once settled.
     same_balances: Vec<(Dev, Dev)>,
 }
@@ -57,6 +59,7 @@ impl Ctx {
             metrics: Vec::new(),
             final_balances: Vec::new(),
             same_balances: Vec::new(),
+            near_wallet: None,
         }
     }
 
@@ -106,9 +109,29 @@ impl Ctx {
 
     /// Syncs `dev` and logs what it found.
     pub fn sync(&mut self, dev: Dev) -> SyncReport {
+        let rewinds = self.devices[dev.0].rewinds.len();
         let report = self.devices[dev.0].sync(&self.chain, &self.near);
+        let name = self.name(dev);
+        for (at, to) in self.devices[dev.0].rewinds[rewinds..].to_vec() {
+            self.log(&name, format!("reorg: conflict at {at}, rewinds to {to}"));
+        }
         self.log_sync(dev, &report);
         report
+    }
+
+    /// Replaces the chain above `to`: the next mined blocks form the new branch.
+    pub fn reorg(&mut self, to: BlockHeight) {
+        let from = self.chain.tip();
+        self.chain.rewind(to);
+        self.log(
+            "chain",
+            format!(
+                "reorg: blocks {}..={} are replaced; the new branch grows from {}",
+                u32::from(to) + 1,
+                u32::from(from),
+                u32::from(to)
+            ),
+        );
     }
 
     /// Runs "Check swap history" on `dev`, then keeps syncing a block at a time, as
@@ -257,7 +280,13 @@ impl Ctx {
     }
 
     /// Funds a ZEC-to-X swap from `dev`'s Ironwood notes and mines the transaction.
-    pub fn fund_refund(&mut self, dev: Dev, swap: &RefundSwap, amount: u64) -> BlockHeight {
+    /// Returns the height and the transaction, which a reorg test can mine again.
+    pub fn fund_refund(
+        &mut self,
+        dev: Dev,
+        swap: &RefundSwap,
+        amount: u64,
+    ) -> (BlockHeight, zcash_primitives::transaction::Transaction) {
         let tx = self.devices[dev.0].fund_refund(swap, amount);
         let height = self.chain.mine_tx(&tx);
         let name = self.name(dev);
@@ -270,7 +299,7 @@ impl Ctx {
                 u32::from(height)
             ),
         );
-        height
+        (height, tx)
     }
 
     /// Records a NEAR status for a ZEC-to-X swap on `dev`.
@@ -323,6 +352,59 @@ impl Ctx {
             .join(", ");
         self.log("chain", format!("{label}: {} pays {to}", payer.label()));
         mined
+    }
+
+    /// NEAR's wallet, funded with 1,000 ZEC of Ironwood notes on first use. It pays with
+    /// real signed transactions, which a reorg can return to the chain.
+    fn near_wallet(&mut self) -> Dev {
+        if let Some(dev) = self.near_wallet {
+            return dev;
+        }
+        let birthday = self.chain.tip() + 1;
+        let device = Device::new("NEAR", &mut self.chain, [0x99; 32], birthday, 0);
+        self.devices.push(device);
+        let dev = Dev(self.devices.len() - 1);
+        let fvk = self.devices[dev.0].fvk.clone();
+        self.chain.pay(&[(fvk, 1_000 * chain::ZEC)], Payer::Wallet);
+        self.chain.mine(10);
+        self.devices[dev.0].scan(&self.chain);
+        self.near_wallet = Some(dev);
+        dev
+    }
+
+    /// Mines a real transaction from NEAR's wallet paying `value` to `fvk`'s address, with
+    /// the zero OVK when `payer` is NEAR, and returns the payment. Returns the transaction
+    /// too, so a reorg test can mine it again.
+    pub fn pay_tx(
+        &mut self,
+        label: &str,
+        key: &str,
+        fvk: &FullViewingKey,
+        value: u64,
+        payer: Payer,
+    ) -> (Mined, zcash_primitives::transaction::Transaction) {
+        let near = self.near_wallet();
+        let ovk = match payer {
+            Payer::Near => zcash_client_backend::wallet::OvkPolicy::custom_from_common_bytes(&[0; 32]),
+            Payer::Wallet => zcash_client_backend::wallet::OvkPolicy::Sender,
+        };
+        let to = fvk.address_at(0u32, orchard::keys::Scope::External);
+        let tx = self.devices[near.0].send_to(to, value, ovk);
+        let height = self.chain.mine_tx(&tx);
+        let mined = self.chain.record_payment(height, fvk, value, payer);
+        self.devices[near.0].scan(&self.chain);
+        self.log(
+            "chain",
+            format!("{label}: {} pays {} to {key} in a signed transaction", payer.label(), zec(value)),
+        );
+        (mined, tx)
+    }
+
+    /// Mines `tx` again, as after a reorg that returned it to the mempool.
+    pub fn remine(&mut self, label: &str, tx: &zcash_primitives::transaction::Transaction, fvk: &FullViewingKey, value: u64, payer: Payer) -> Mined {
+        let height = self.chain.mine_tx(tx);
+        self.log("chain", format!("{label}: the same transaction is mined again at {}", u32::from(height)));
+        self.chain.record_payment(height, fvk, value, payer)
     }
 
     /// Mines empty blocks until `secs` have passed.

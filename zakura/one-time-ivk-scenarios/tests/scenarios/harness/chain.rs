@@ -1,22 +1,27 @@
 //! The simulated chain: real heights, a block every 75 seconds, real Ironwood note
 //! encryption, and a record of every payment the receiver directory could index.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use receiver_directory::{Payment, Receiver, Record};
 use zcash_client_backend::{
     data_api::{
-        chain::{BlockSource as _, ChainState},
-        testing::{AddressType, FakeCompactOutput, IronwoodFvk, TestBuilder, TestCache, TestState},
+        TransactionStatus,
+        chain::{BlockSource, ChainState, error::Error as ChainError},
+        testing::{
+            AddressType, CacheInsertionResult, FakeCompactOutput, IronwoodFvk, TestBuilder,
+            TestCache, TestState,
+        },
     },
     proto::compact_formats::CompactBlock,
 };
 use zcash_client_sqlite::{
-    testing::{
-        BlockCache, BlockCacheInsertionResult,
-        db::{TestDb, TestDbFactory},
-    },
+    testing::db::{TestDb, TestDbFactory},
     util::testing::FixedClock,
 };
 use zcash_primitives::{
@@ -65,27 +70,70 @@ pub fn day_of(unix: i64) -> f64 {
     (unix - T0) as f64 / DAY as f64
 }
 
+/// The chain's compact blocks, in memory and shared, so a reorg can replace them.
+#[derive(Clone, Default)]
+pub struct Blocks(Arc<RwLock<BTreeMap<u32, CompactBlock>>>);
+
+impl BlockSource for Blocks {
+    type Error = std::convert::Infallible;
+
+    fn with_blocks<F, WalletErrT>(
+        &self,
+        from_height: Option<BlockHeight>,
+        limit: Option<usize>,
+        mut with_block: F,
+    ) -> Result<(), ChainError<WalletErrT, Self::Error>>
+    where
+        F: FnMut(CompactBlock) -> Result<(), ChainError<WalletErrT, Self::Error>>,
+    {
+        let from = from_height.map_or(0, u32::from);
+        let blocks: Vec<CompactBlock> = self
+            .0
+            .read()
+            .unwrap()
+            .range(from..)
+            .take(limit.unwrap_or(usize::MAX))
+            .map(|(_, block)| block.clone())
+            .collect();
+        for block in blocks {
+            with_block(block)?;
+        }
+        Ok(())
+    }
+}
+
+/// What inserting a block reports to the test chain.
+pub struct Inserted(Vec<TxId>);
+
+impl CacheInsertionResult for Inserted {
+    fn txids(&self) -> &[TxId] {
+        &self.0
+    }
+}
+
 /// A block cache that stamps each block with its scheduled time, which the wallet's
-/// closing rules read.
-pub struct TimedCache(BlockCache);
+/// closing rules read, and lets a reorg replace blocks.
+pub struct TimedCache(Blocks);
 
 impl TestCache for TimedCache {
-    type BsError = <BlockCache as TestCache>::BsError;
-    type BlockSource = <BlockCache as TestCache>::BlockSource;
-    type InsertResult = BlockCacheInsertionResult;
+    type BsError = std::convert::Infallible;
+    type BlockSource = Blocks;
+    type InsertResult = Inserted;
 
     fn block_source(&self) -> &Self::BlockSource {
-        self.0.block_source()
+        &self.0
     }
 
     fn insert(&mut self, cb: &CompactBlock) -> Self::InsertResult {
         let mut cb = cb.clone();
         cb.time = u32::try_from(block_time(cb.height())).expect("block times fit u32");
-        self.0.insert(&cb)
+        let txids = cb.vtx.iter().map(|tx| tx.txid()).collect();
+        self.0.0.write().unwrap().insert(u32::from(cb.height()), cb);
+        Inserted(txids)
     }
 
     fn truncate_to_height(&mut self, height: BlockHeight) {
-        self.0.truncate_to_height(height)
+        self.0.0.write().unwrap().split_off(&(u32::from(height) + 1));
     }
 }
 
@@ -178,7 +226,7 @@ impl Chain {
         let st = TestBuilder::new()
             .with_network(network())
             .with_data_store_factory(TestDbFactory::default())
-            .with_block_cache(TimedCache(BlockCache::new()))
+            .with_block_cache(TimedCache(Blocks::default()))
             .build();
         let mut chain = Self {
             st,
@@ -412,6 +460,101 @@ impl Chain {
         height
     }
 
+    /// Replaces every block above `to`, as a reorg does: the new branch starts with one
+    /// empty block at `to + 1`. Outputs mined above `to` are forgotten (the directory no
+    /// longer lists them); wallet-built transactions stay available to mine again.
+    pub fn rewind(&mut self, to: BlockHeight) {
+        let at = u32::from(to);
+        self.st.cache().0.write().unwrap().split_off(&(at + 1));
+        self.states.retain(|h, _| *h <= at);
+        let size = usize::try_from(self.tree_size_at(to)).expect("fits");
+        self.commitments.truncate(size);
+        self.mined.retain(|m| u32::from(m.height) <= at);
+        self.txs.retain(|_, (_, height)| u32::from(*height) <= at);
+        let state = self.states[&at].clone();
+        let sizes = |tree: u64| u32::try_from(tree).expect("fits");
+        self.st.generate_block_at::<IronwoodFvk>(
+            to + 1,
+            state.block_hash(),
+            &[],
+            sizes(state.final_sapling_tree().tree_size()),
+            sizes(state.final_orchard_tree().tree_size()),
+            sizes(state.final_ironwood_tree().tree_size()),
+            false,
+        );
+        self.advance();
+    }
+
+    /// Records the output of the transaction mined at `height` that `fvk`'s default
+    /// address received, found by trial decryption, as a payment from `payer`.
+    pub fn record_payment(&mut self, height: BlockHeight, fvk: &FullViewingKey, value: u64, payer: Payer) -> Mined {
+        use orchard::note_encryption::{CompactAction, IronwoodDomain};
+        use zcash_note_encryption::try_compact_note_decryption;
+        let block = self.block(height);
+        let ivk = fvk.to_ivk(Scope::External).prepare();
+        let first = self.tree_size_at(height - 1);
+        let mut index = 0u64;
+        for tx in &block.vtx {
+            for (action_index, compact) in tx.ironwood_actions.iter().enumerate() {
+                let position = first + index;
+                index += 1;
+                let action = CompactAction::try_from(compact).expect("a valid compact action");
+                let domain = IronwoodDomain::for_compact_action(&action);
+                if try_compact_note_decryption(&domain, &ivk, &action).is_none() {
+                    continue;
+                }
+                let txid = tx.txid();
+                let receiver = receiver_of(fvk);
+                let cmx: [u8; 32] = compact.cmx.as_slice().try_into().expect("32-byte cmx");
+                let action_index = u32::try_from(action_index).expect("few actions");
+                let indexed = (payer == Payer::Near).then(|| Record {
+                    receiver: Receiver::from_bytes(receiver).expect("a valid receiver"),
+                    page: 0,
+                    total: 1,
+                    payment: Payment {
+                        height: u32::from(height),
+                        block_hash: block.hash().0,
+                        txid: *txid.as_ref(),
+                        tx_index: u32::try_from(tx.index).expect("small index").max(1),
+                        action_index,
+                        position,
+                        action_nullifier: compact.nullifier.as_slice().try_into().expect("32 bytes"),
+                        cmx,
+                        ephemeral_key: compact.ephemeral_key.as_slice().try_into().expect("32 bytes"),
+                        ciphertext_prefix: compact.ciphertext.as_slice().try_into().expect("52 bytes"),
+                    },
+                });
+                let mined = Mined {
+                    txid,
+                    action_index,
+                    height,
+                    position,
+                    value,
+                    receiver,
+                    payer,
+                    indexed,
+                };
+                self.mined.push(mined.clone());
+                return mined;
+            }
+        }
+        panic!("no output in block {} pays the key", u32::from(height));
+    }
+
+    /// What lightwalletd would say about `txid`: mined at a height on this branch, or
+    /// unknown (a payment the reorg removed and nobody rebroadcast).
+    pub fn status(&self, txid: &TxId) -> TransactionStatus {
+        if let Some((_, height)) = self.txs.get(txid.as_ref()) {
+            if u32::from(*height) <= u32::from(self.tip()) && self.states.contains_key(&u32::from(*height)) {
+                return TransactionStatus::Mined(*height);
+            }
+        }
+        match self.mined.iter().find(|m| m.txid == *txid) {
+            Some(m) => TransactionStatus::Mined(m.height),
+            None => TransactionStatus::TxidNotRecognized,
+        }
+    }
+
     /// A transaction the chain mined, and its height, as lightwalletd's GetTransaction
     /// would return it.
     pub fn transaction(&self, txid: &TxId) -> Option<(Transaction, BlockHeight)> {
@@ -423,14 +566,6 @@ impl Chain {
 
     /// The cached compact block at `height`.
     fn block(&self, height: BlockHeight) -> CompactBlock {
-        let mut block = None;
-        self.st
-            .cache()
-            .with_blocks::<_, ()>(Some(height), Some(1), |cb| {
-                block = Some(cb);
-                Ok(())
-            })
-            .expect("the block is cached");
-        block.expect("the block is cached")
+        self.st.cache().0.read().unwrap()[&u32::from(height)].clone()
     }
 }

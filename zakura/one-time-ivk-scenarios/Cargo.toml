@@ -35,6 +35,7 @@ zakura-pir-receiver = { path = "../pir-receiver", features = ["wallet"] }
 zcash_client_backend = { workspace = true, features = ["one-time-ivk", "test-dependencies"] }
 zcash_client_sqlite = { path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["one-time-ivk", "test-dependencies"] }
 zcash_keys = { workspace = true, features = ["orchard"] }
+zcash_note_encryption.workspace = true
 zcash_primitives.workspace = true
 zcash_protocol = { workspace = true, features = ["local-consensus"] }
 zip321.workspace = true

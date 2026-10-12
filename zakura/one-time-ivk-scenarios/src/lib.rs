@@ -50,6 +50,9 @@ pub enum Class {
     FoundBySweep,
     /// Credited only after the user's "Check swap history".
     FoundAfterRecheck,
+    /// As an expectation only: credited automatically, live or by sweep. A restored key
+    /// can be found by its sweep or by the rescan the sweep starts.
+    FoundAutomatically,
     /// Not credited, which the library documents.
     MissedDocumented,
     /// Not credited. As an expectation this never appears; as an outcome it means the
@@ -62,7 +65,7 @@ impl Class {
     pub fn found(self) -> bool {
         matches!(
             self,
-            Self::FoundLive | Self::FoundBySweep | Self::FoundAfterRecheck
+            Self::FoundLive | Self::FoundBySweep | Self::FoundAfterRecheck | Self::FoundAutomatically
         )
     }
 
@@ -72,6 +75,7 @@ impl Class {
             Self::FoundLive => "found live",
             Self::FoundBySweep => "found by sweep",
             Self::FoundAfterRecheck => "found after recheck",
+            Self::FoundAutomatically => "found automatically",
             Self::MissedDocumented => "missed (documented)",
             Self::Missed => "missed",
         }
@@ -82,6 +86,7 @@ impl Class {
     pub fn satisfied_by(self, actual: Class) -> bool {
         match self {
             Self::MissedDocumented => !actual.found(),
+            Self::FoundAutomatically => matches!(actual, Self::FoundLive | Self::FoundBySweep),
             expected => expected == actual,
         }
     }

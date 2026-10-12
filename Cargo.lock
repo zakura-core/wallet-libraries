@@ -8163,6 +8163,7 @@ dependencies = [
  "zakura-sapling-crypto",
  "zakura-transparent",
  "zakura-zip321",
+ "zcash_note_encryption",
 ]
 
 [[package]]

@@ -15,9 +15,10 @@ use zakura_one_time_ivk::{KeyId, Purpose};
 use zakura_one_time_ivk_scenarios::Class;
 use zakura_pir_receiver::{Swept, sweep};
 use zcash_client_backend::data_api::{
-    AccountBirthday, WalletCommitmentTrees, WalletRead as _, WalletWrite as _,
-    chain::scan_cached_blocks_with_one_time_ivks,
+    AccountBirthday, TransactionStatus, WalletCommitmentTrees, WalletRead as _, WalletWrite as _,
+    chain::{error::Error as ChainError, scan_cached_blocks_with_one_time_ivks},
     enhance_pir::{EnhancePirRead as _, EnhancementMode, TransactionEnhancementWork},
+    status::{TransactionStatusMode, TransactionStatusRead as _},
     wallet::{
         SpendingKeys, create_proposed_transactions, decrypt_and_store_transaction_with_one_time_ivks,
         input_selection::{GreedyInputSelector, NoteSelection, SpendPolicy},
@@ -187,6 +188,8 @@ pub struct Device {
     pub sweep_runs: usize,
     /// Blocks scanned across every sync.
     pub scanned_blocks: u64,
+    /// Reorgs the wallet rewound for, as (conflict height, height rewound to).
+    pub rewinds: Vec<(u32, u32)>,
     pub reach: Reach,
 }
 
@@ -208,6 +211,7 @@ impl Device {
         // Payload retrieval over the public path: the simulator serves raw transactions.
         db.set_enhancement_mode(EnhancementMode::Standard);
         db.set_transparent_ledger_mode(TransparentLedgerMode::Public);
+        db.set_status_mode(TransactionStatusMode::Public);
         let birthday = AccountBirthday::from_parts(chain.state_below(birthday), None);
         let (account, usk) = db
             .create_account(name, &SecretVec::new(seed.to_vec()), &birthday, None)
@@ -227,6 +231,7 @@ impl Device {
             lookups: 0,
             sweep_runs: 0,
             scanned_blocks: 0,
+            rewinds: Vec::new(),
             reach: Reach::default(),
         }
     }
@@ -317,16 +322,39 @@ impl Device {
             let start = range.block_range().start;
             let len = u32::from(range.block_range().end) - u32::from(start);
             let batch = len.min(1_000);
-            scan_cached_blocks_with_one_time_ivks(
+            let scan = scan_cached_blocks_with_one_time_ivks(
                 &network(),
                 chain.block_source(),
                 &mut self.db,
                 start,
                 &chain.state_below(start),
                 batch as usize,
-            )
-            .expect("blocks scan");
-            scanned += u64::from(batch);
+            );
+            match scan {
+                Ok(_) => scanned += u64::from(batch),
+                // A reorg: rewind ten blocks below the conflict and scan again, as wallets do.
+                Err(ChainError::Scan(e)) if e.is_continuity_error() => {
+                    let below = e.at_height().saturating_sub(10);
+                    // Not below the wallet's history: rewind as far as it allows. Near the
+                    // birthday the reported safe height itself can be refused, so step up.
+                    let mut target = below;
+                    let to = loop {
+                        match self.db.truncate_to_height(target) {
+                            Ok(to) => break to,
+                            Err(SqliteClientError::RequestedRewindInvalid {
+                                safe_rewind_height: Some(safe),
+                                ..
+                            }) if target < e.at_height() => {
+                                target = if safe > target { safe } else { target + 1 };
+                            }
+                            Err(error) => panic!("the wallet rewinds: {error:?}"),
+                        }
+                    };
+                    self.rewinds.push((u32::from(e.at_height()), u32::from(to)));
+                    self.db.update_chain_tip(tip).expect("the tip updates");
+                }
+                Err(e) => panic!("blocks scan: {e:?}"),
+            }
         }
         self.db
             .close_finished_one_time_keys(account, self.now(chain), tip)
@@ -334,9 +362,20 @@ impl Device {
         scanned
     }
 
-    /// Serves the wallet's public payload requests from the chain's raw transactions, as
-    /// lightwalletd's GetTransaction would, until none it can serve remains.
+    /// Serves the wallet's status and payload requests from the chain, as lightwalletd's
+    /// GetTransaction would (Vizor routes the same obligations to Status and Enhance PIR
+    /// under Private queries), until none it can serve remains.
     fn enhance(&mut self, chain: &Chain) {
+        let status_work = self
+            .db
+            .transaction_status_work()
+            .expect("status work");
+        for item in status_work {
+            let txid = item.txid();
+            self.db
+                .set_transaction_status(txid, chain.status(&txid))
+                .expect("the status records");
+        }
         for _ in 0..4 {
             let work = self
                 .db
@@ -348,6 +387,13 @@ impl Device {
                     continue;
                 };
                 let Some((tx, height)) = chain.transaction(&request.txid()) else {
+                    // GetTransaction's NotFound for a transaction a reorg removed. A fake
+                    // output still on the chain has no raw form to serve, so it waits.
+                    if let TransactionStatus::TxidNotRecognized = chain.status(&request.txid()) {
+                        self.db
+                            .set_transaction_status(request.txid(), TransactionStatus::TxidNotRecognized)
+                            .expect("the status records");
+                    }
                     continue;
                 };
                 decrypt_and_store_transaction_with_one_time_ivks(
@@ -652,6 +698,61 @@ impl Device {
             .expect("the wallet stored its transaction")
     }
 
+    /// Builds and signs a transaction paying `value` to `to` from this wallet's Ironwood
+    /// notes, with `ovk` (the zero OVK for NEAR's payouts). The wallet stores it as sent.
+    pub fn send_to(&mut self, to: orchard::Address, value: u64, ovk: OvkPolicy) -> Transaction {
+        let to = Address::Unified(
+            zcash_keys::address::UnifiedAddress::from_receivers(Some(to), None, None)
+                .expect("a unified address"),
+        )
+        .to_zcash_address(&network());
+        let payment = zip321::Payment::new(
+            to,
+            Some(Zatoshis::const_from_u64(value)),
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .expect("a payment");
+        let request = zip321::TransactionRequest::new(vec![payment]).expect("a request");
+        let strategy = SingleOutputChangeStrategy::<Wallet>::new(
+            StandardFeeRule::Zip317,
+            None,
+            ShieldedPool::Ironwood,
+            DustOutputPolicy::default(),
+        );
+        let policy = SpendPolicy::shielded_pools([ShieldedPool::Ironwood]);
+        let proposal = propose_transfer::<_, _, _, _, <Wallet as WalletCommitmentTrees>::Error>(
+            &mut self.db,
+            &network(),
+            self.account,
+            &GreedyInputSelector::new(),
+            &strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+            &policy,
+            None,
+            None,
+        )
+        .expect("the payment proposal");
+        let txids = create_proposed_transactions::<_, _, std::convert::Infallible, _, std::convert::Infallible, _>(
+            &mut self.db,
+            &network(),
+            &MockSpendProver,
+            &MockOutputProver,
+            &SpendingKeys::from_unified_spending_key(self.usk.clone()),
+            ovk,
+            &proposal,
+            None,
+        )
+        .expect("the payment builds");
+        self.db
+            .get_transaction(*txids.first())
+            .expect("the stored transaction")
+            .expect("the wallet stored its transaction")
+    }
+
     /// Records a NEAR status for a refund swap, normalized by `zakura-near-intents`.
     pub fn observe_refund(
         &mut self,
@@ -752,6 +853,27 @@ impl Device {
                 format!("{prefix}{}", id.index())
             })
             .collect()
+    }
+}
+
+impl Device {
+    /// The wallet's stored view of a transaction, for diagnostics: mined height, expiry
+    /// height, and whether a status request for it is queued.
+    pub fn tx_view(&self, txid: [u8; 32]) -> String {
+        let conn = read_only(&self.path);
+        let row: Option<(Option<u32>, Option<u32>)> = conn
+            .query_row(
+                "SELECT mined_height, expiry_height FROM transactions WHERE txid = ?1",
+                [txid.to_vec()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+        let queued = self
+            .db
+            .transaction_status_work()
+            .map(|work| work.iter().any(|w| *w.txid().as_ref() == txid))
+            .unwrap_or(false);
+        format!("stored {row:?} (mined_height, expiry_height), status queued {queued}")
     }
 }
 
