@@ -42,7 +42,8 @@ workspace.
   `get_one_time_scanning_keys` and passes that snapshot to `put_blocks_with_one_time_ivks`, so a
   store can rescan blocks that a key activated mid-batch missed, and
   `wallet::decrypt_and_store_transaction_with_one_time_ivks` also decrypts with
-  `get_one_time_transaction_keys`, which `DecryptedTransaction::one_time_ivks_applied` records,
+  `get_one_time_transaction_keys` through `decrypt_transaction_with_one_time_ivks`, which
+  `DecryptedTransaction::one_time_ivks_applied` records,
   so a store can refuse transactions decrypted without them; no one-time key may open between
   that decryption and storage. The restore protocol is separate, in
   `data_api::one_time_ivk::restore::{OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite}`: its sweep
@@ -104,7 +105,7 @@ workspace.
   binds its transaction's metadata with that key. `PendingIronwoodMetadata::Incoming`
   boxes it.
 - `ll::wallet::put_blocks` and `ll::wallet::put_blocks_rows` take
-  `ironwood_nullifier_retention` (with `orchard`): a height from which Ironwood nullifiers
+  `ironwood_nullifier_retention` (with `one-time-ivk`): a height from which Ironwood nullifiers
   stay tracked, for a store that finds Ironwood notes after scanning past them. Pass `None`
   to keep the previous behaviour.
 - `enhance_pir::storage::validate_and_apply_records` captures the stored-metadata snapshot for
