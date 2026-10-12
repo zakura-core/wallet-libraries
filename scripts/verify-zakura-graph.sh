@@ -36,10 +36,11 @@ PY
 cargo check --manifest-path "$repo_root/Cargo.toml" \
   --workspace --exclude "$facade" --all-targets --all-features --locked
 
-# No development lane builds the transparent PIR adapter without `wallet`: its
-# tests serve shards in process, so the `default` lane leaves it out.
+# No development lane builds the transparent PIR adapter or the receiver PIR
+# client without `wallet`: their tests serve shards or directories in process,
+# so the `default` lane leaves them out.
 cargo check --manifest-path "$repo_root/Cargo.toml" \
-  -p zakura-pir-transparent --lib --locked
+  -p zakura-pir-transparent -p zakura-pir-receiver --lib --locked
 
 # Feature unification can turn on the backend's `one-time-ivk` for a SQLite
 # build that leaves its own off, so SQLite must still build that way.
@@ -106,6 +107,16 @@ for name in sorted(forbidden & versions.keys()):
 for name, found in sorted(versions.items()):
     if len(found) > 1 and (name.startswith("zakura-") or name in expected_packages):
         problems.append(f"{name}: {len(found)} versions in the graph: {sorted(found)}")
+
+# Two git sources of one name are separate crates even at one version. Checked
+# over the whole workspace graph, where the PIR clients share wallet-pir crates.
+git_sources = defaultdict(set)
+for package in packages.values():
+    if (package["source"] or "").startswith("git+"):
+        git_sources[package["name"]].add(package["source"])
+for name, found in sorted(git_sources.items()):
+    if len(found) > 1:
+        problems.append(f"{name}: {len(found)} git sources in the graph: {sorted(found)}")
 
 missing = expected_packages - versions.keys()
 for name in sorted(missing):

@@ -3717,10 +3717,12 @@ name = "pir-control"
 version = "0.1.0"
 source = "git+https://github.com/valargroup/wallet-pir?rev=a65634b4f2f2cd3fa00c6f9eb32345362cf3983c#a65634b4f2f2cd3fa00c6f9eb32345362cf3983c"
 dependencies = [
+ "axum",
  "hex",
  "rand 0.8.8",
  "serde",
  "sha2 0.10.9",
+ "tokio",
 ]
 
 [[package]]
@@ -4260,6 +4262,52 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d92195228612ac8eed47adbc2ed0f04e513a4ccb98175b6f2bd04d963b533655"
 dependencies = [
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "receiver-directory"
+version = "0.0.1"
+source = "git+https://github.com/valargroup/wallet-pir?rev=a65634b4f2f2cd3fa00c6f9eb32345362cf3983c#a65634b4f2f2cd3fa00c6f9eb32345362cf3983c"
+dependencies = [
+ "bitcoin",
+ "incrementalmerkletree",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "zakura-orchard",
+ "zcash_note_encryption",
+]
+
+[[package]]
+name = "receiver-pir"
+version = "0.0.1"
+source = "git+https://github.com/valargroup/wallet-pir?rev=a65634b4f2f2cd3fa00c6f9eb32345362cf3983c#a65634b4f2f2cd3fa00c6f9eb32345362cf3983c"
+dependencies = [
+ "hex",
+ "ipir-sp 0.1.0-rc.6 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6)",
+ "pir-native",
+ "rand 0.8.8",
+ "receiver-directory",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "receiver-pir-server"
+version = "0.0.1"
+source = "git+https://github.com/valargroup/wallet-pir?rev=a65634b4f2f2cd3fa00c6f9eb32345362cf3983c#a65634b4f2f2cd3fa00c6f9eb32345362cf3983c"
+dependencies = [
+ "axum",
+ "hex",
+ "pir-control",
+ "pir-observability",
+ "receiver-directory",
+ "receiver-pir",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -8181,6 +8229,26 @@ dependencies = [
  "rand 0.8.8",
  "rand_chacha 0.3.1",
  "reinspiring 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "zakura-pir-receiver"
+version = "0.0.1-rc0"
+dependencies = [
+ "axum",
+ "receiver-directory",
+ "receiver-pir",
+ "receiver-pir-server",
+ "rusqlite",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "zakura-client-backend",
+ "zakura-client-sqlite",
+ "zakura-one-time-ivk",
+ "zakura-orchard",
+ "zakura-primitives",
+ "zakura-protocol",
 ]
 
 [[package]]
