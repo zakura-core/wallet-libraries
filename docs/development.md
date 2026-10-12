@@ -18,7 +18,7 @@ python3 scripts/dev.py verify
 
 | Configuration | Packages and features |
 | --- | --- |
-| `default` | Workspace except the facade, Enhance PIR, the transparent PIR adapter and receiver PIR; default features |
+| `default` | Workspace except the facade, Enhance PIR, the transparent PIR adapter, receiver PIR and the one-time IVK scenarios; default features |
 | `orchard` | Backend + SQLite; `orchard,test-dependencies` |
 | `transparent` | Backend + SQLite; `orchard,transparent-inputs,test-dependencies,unstable` |
 | `transparent-import` | Backend + SQLite; transparent features plus `transparent-key-import` |
@@ -29,6 +29,7 @@ python3 scripts/dev.py verify
 | `transparent-pir-sqlite` | Transparent PIR adapter; `sqlite` (`wallet` plus the SQLite apply-and-acknowledge integration and the in-process end-to-end tests) |
 | `transparent-pir-testing` | Transparent PIR adapter; `sqlite` and `testing` (the test support applications build their recovery and txid display tests on) |
 | `pir-receiver` | Receiver PIR; `wallet` (which enables the backend's `orchard`; its tests use SQLite with `orchard`) |
+| `one-time-ivk-scenarios` | One-time IVK scenario suite (see its README); `ONE_TIME_IVK_SLOW=1` adds the scenarios that wait months of chain time |
 
 `default` builds the backend and SQLite crates without Orchard or transparent
 inputs, which `orchard` and `transparent` test, so items used only under those
