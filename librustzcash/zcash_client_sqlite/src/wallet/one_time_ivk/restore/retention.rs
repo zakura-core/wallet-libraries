@@ -3,12 +3,13 @@ use rusqlite::{Connection, params};
 use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
-use super::{account_key, corrupt, queue_rescan, recovery, restore_start};
+use super::recovery;
+use crate::wallet::one_time_ivk::{account_key, corrupt, queue_rescan, restore_start};
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 /// Retains `account`'s Ironwood spend evidence from its birthday, or Ironwood
 /// activation if later, until [`finish_nullifier_recovery`] releases it.
-pub(super) fn retain_spend_history<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn retain_spend_history<P: Parameters>(
     conn: &Connection,
     params: &P,
     account: AccountUuid,
@@ -86,7 +87,7 @@ pub(crate) fn finish_nullifier_recovery<P: Parameters>(
 
 /// Repairs missing spend evidence by replaying the account's recovery interval, which
 /// makes no nullifier query.
-pub(super) fn queue_spend_history<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn queue_spend_history<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,

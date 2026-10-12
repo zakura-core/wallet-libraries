@@ -18,12 +18,13 @@ use zcash_protocol::{
 };
 
 use super::{
-    AccountUuid, KeyId, PendingPayment, SpendStatus, corrupt,
+    PendingPayment, SpendStatus,
     payments::{authenticate, pending_payments, spend_status},
     retention::queue_spend_history,
     sweep,
 };
-use crate::{WalletDb, error::SqliteClientError, wallet};
+use crate::wallet::one_time_ivk::{KeyId, corrupt};
+use crate::{AccountUuid, WalletDb, error::SqliteClientError, wallet};
 
 /// Implements `OneTimeIvkRestoreWrite::apply_one_time_sweep`, one transaction per payment.
 #[allow(clippy::type_complexity)]
@@ -79,7 +80,7 @@ fn merkle_path(position: u32, siblings: [[u8; 32]; 32]) -> Option<MerklePath> {
 /// stored (see `wallet::one_time_ivk`). `configured` is the handle's transparent ledger
 /// mode, for routing the transaction's enhancement.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn apply_payment<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     configured: Option<TransparentLedgerMode>,

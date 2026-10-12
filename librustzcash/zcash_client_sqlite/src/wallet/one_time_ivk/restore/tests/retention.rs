@@ -462,7 +462,7 @@ fn repeated_missing_history_does_not_restart_the_public_replay() {
     let db = st.wallet_mut().db_mut();
     let replay = |db: &mut Db| {
         tx(db, |c, p| {
-            store::retention::queue_spend_history(c, p, account, through.height)
+            store::restore::retention::queue_spend_history(c, p, account, through.height)
         })
         .unwrap()
     };

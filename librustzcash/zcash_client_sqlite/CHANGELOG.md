@@ -159,7 +159,9 @@ workspace.
 
 ### Added
 - One-time IVKs (feature `one-time-ivk`, which enables `orchard`; module
-  `wallet::one_time_ivk`): per-swap Ironwood refund
+  `wallet::one_time_ivk` for the key registry, scanning and spending, and
+  `wallet::one_time_ivk::swap` for issuance, operations, funding and the lifecycle,
+  including `ReservationPolicy`): per-swap Ironwood refund
   and incoming addresses derived from the account viewing key with `zakura-one-time-ivk`,
   recoverable from the seed. `WalletDb` implements the backend's `OneTimeIvkRead`,
   `OneTimeIvkWrite` and the restore protocol's `OneTimeIvkRestoreRead` and

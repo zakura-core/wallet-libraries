@@ -370,7 +370,7 @@ fn incoming_key_closes_only_once_paid_and_released() {
     let reserved = prepare_from(db, account, now, from, None).unwrap().unwrap();
     let index = reserved.key_id().index();
     tx(db, |c, _| {
-        store::reservations::begin(c, account, index, "pending", now + DAY, now)
+        store::swap::reservations::begin(c, account, index, "pending", now + DAY, now)
     })
     .unwrap()
     .unwrap();
@@ -400,7 +400,7 @@ fn underpaid_reservation(st: &mut State) -> (OneTimeKey, i64) {
     let key = prepare_from(db, account, now, from, None).unwrap().unwrap();
     let index = key.key_id().index();
     tx(db, |c, _| {
-        store::reservations::begin(c, account, index, "swap", deadline, now)
+        store::swap::reservations::begin(c, account, index, "swap", deadline, now)
     })
     .unwrap()
     .unwrap();
@@ -579,7 +579,7 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
     let index = reservation.key_id().index();
     for request in ["edit", "accepted"] {
         tx(db, |c, _| {
-            store::reservations::begin(c, account, index, request, deadline, now)
+            store::swap::reservations::begin(c, account, index, request, deadline, now)
         })
         .unwrap()
         .unwrap();

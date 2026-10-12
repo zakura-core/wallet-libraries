@@ -340,7 +340,7 @@ fn send_with_change_memo(
 /// Runs refund memo recovery for `account` in its own transaction.
 fn recover_memos(st: &mut State, account: AccountUuid) {
     tx(st.wallet_mut().db_mut(), |c, p| {
-        store::recovery::recover_refund_memos(c, p, account, clock_now())
+        store::restore::recovery::recover_refund_memos(c, p, account, clock_now())
     })
     .unwrap()
 }
@@ -405,8 +405,9 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
         first,
         (u32::from(mined) - u32::from(first) + 1) as usize,
     );
-    let pending =
-        |st: &State| store::recovery::refund_memos_pending(st.wallet().conn(), restored).unwrap();
+    let pending = |st: &State| {
+        store::restore::recovery::refund_memos_pending(st.wallet().conn(), restored).unwrap()
+    };
     // Compact scanning stores the change without its memo.
     recover_memos(&mut st, restored);
     assert!(refund_keys(&st).is_empty());
@@ -503,7 +504,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
 
     // A failed enclosing transaction leaves the registration for a retry.
     let aborted: Result<(), SqliteClientError> = super::tx(st.wallet_mut().db_mut(), |c, p| {
-        store::recovery::recover_refund_memos(c, p, restored, clock_now())?;
+        store::restore::recovery::recover_refund_memos(c, p, restored, clock_now())?;
         Err(corrupt("test rollback"))
     });
     assert!(aborted.is_err());
@@ -793,7 +794,9 @@ fn refund_memos_restore_keys_whatever_the_funding_outputs() {
         let (_, _, mined) = send_with_change_memo(&mut st, payments, &memo);
         recover_memos(&mut st, account);
         assert_eq!(refund_keys(&st), [(7, u32::from(mined), true)]);
-        assert!(!store::recovery::refund_memos_pending(st.wallet().conn(), account).unwrap());
+        assert!(
+            !store::restore::recovery::refund_memos_pending(st.wallet().conn(), account).unwrap()
+        );
     }
 }
 

@@ -5,12 +5,13 @@ use zcash_primitives::transaction::TxId;
 /// Pays receive key 8 at the tip before registering it, so scanning misses the note,
 /// then watches the key from the next block and queues the payment. Also returns the
 /// tip and the payment's path there.
-pub(super) fn fixture() -> (State, OneTimeKey, PendingPayment, ChainPoint, MerklePath) {
+pub(in crate::wallet::one_time_ivk) fn fixture()
+-> (State, OneTimeKey, PendingPayment, ChainPoint, MerklePath) {
     fixture_in(ironwood_wallet())
 }
 
 /// [`fixture`] in `st`, an [`ironwood_wallet`] with no blocks.
-pub(super) fn fixture_in(
+pub(in crate::wallet::one_time_ivk) fn fixture_in(
     mut st: State,
 ) -> (State, OneTimeKey, PendingPayment, ChainPoint, MerklePath) {
     let account = st.test_account().unwrap().id();

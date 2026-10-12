@@ -7,14 +7,15 @@ use zcash_client_backend::data_api::{
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-use super::{
-    KeyId, PendingPayment, account_key, corrupt, invalid, key_ref, payments::queue_payment,
-    reservations::record_provider_seen, stored_key_id,
+use super::{PendingPayment, payments::queue_payment};
+use crate::wallet::one_time_ivk::{
+    KeyId, account_key, corrupt, invalid, key_ref, stored_key_id,
+    swap::reservations::record_provider_seen,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 /// Returns `anchor` only while its block is still on the wallet's chain.
-pub(super) fn canonical(
+pub(in crate::wallet::one_time_ivk) fn canonical(
     conn: &Connection,
     anchor: Option<ChainPoint>,
 ) -> Result<Option<ChainPoint>, SqliteClientError> {
@@ -25,7 +26,10 @@ pub(super) fn canonical(
 }
 
 /// Builds an anchor from a stored height and hash pair.
-pub(super) fn anchor(height: Option<u32>, hash: Option<[u8; 32]>) -> Option<ChainPoint> {
+pub(in crate::wallet::one_time_ivk) fn anchor(
+    height: Option<u32>,
+    hash: Option<[u8; 32]>,
+) -> Option<ChainPoint> {
     height.zip(hash).map(|(height, hash)| ChainPoint {
         height: BlockHeight::from(height),
         hash: BlockHash(hash),
@@ -160,7 +164,7 @@ pub(crate) fn begin_sweep_attempt(
 /// replaced the key's queued set, and reopens the sweep: a `complete` answer records
 /// its coverage, which the caller validated, and an incomplete one clears it, so the
 /// sweep finishes only once its current answer is applied.
-pub(super) fn queue_lookup<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn queue_lookup<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,

@@ -1,18 +1,18 @@
-use std::sync::{Arc, Barrier};
+pub(super) use std::sync::{Arc, Barrier};
 
-use incrementalmerkletree::Hashable;
-use orchard::{
+pub(super) use incrementalmerkletree::Hashable;
+pub(super) use orchard::{
     note::Note,
     note_encryption::{CompactAction, IronwoodDomain, IronwoodNoteEncryption},
     tree::{MerkleHashOrchard, MerklePath},
 };
-use prost::Message;
-use secrecy::{ExposeSecret, SecretVec};
-use zakura_one_time_ivk::{
+pub(super) use prost::Message;
+pub(super) use secrecy::{ExposeSecret, SecretVec};
+pub(super) use zakura_one_time_ivk::{
     recovery::EncryptedNote,
     swap::{Observation, OperationStatus},
 };
-use zcash_client_backend::{
+pub(super) use zcash_client_backend::{
     data_api::{
         WalletRead, WalletWrite,
         one_time_ivk::{
@@ -27,24 +27,28 @@ use zcash_client_backend::{
     },
     proto::compact_formats::CompactBlock,
 };
-use zcash_note_encryption::{Domain, try_compact_note_decryption};
-use zcash_primitives::block::BlockHash;
-use zcash_protocol::{local_consensus::LocalNetwork, value::Zatoshis};
+pub(super) use zcash_note_encryption::{Domain, try_compact_note_decryption};
+pub(super) use zcash_primitives::block::BlockHash;
+pub(super) use zcash_protocol::{local_consensus::LocalNetwork, value::Zatoshis};
 
-use super::*;
-use crate::testing::db::{TestDb, TestDbFactory, test_clock, test_rng};
-use crate::util::testing::FixedClock;
+pub(super) use super::{
+    restore::payments::{PendingPayment, SpendStatus},
+    swap::*,
+    *,
+};
+pub(super) use crate::testing::db::{TestDb, TestDbFactory, test_clock, test_rng};
+pub(super) use crate::util::testing::FixedClock;
 /// The module under test, whose submodule names the test modules shadow.
-use crate::wallet::one_time_ivk as store;
+pub(super) use crate::wallet::one_time_ivk as store;
 
 /// A test wallet with a block cache.
-type State = TestState<crate::testing::BlockCache, TestDb, LocalNetwork>;
+pub(super) type State = TestState<crate::testing::BlockCache, TestDb, LocalNetwork>;
 /// The test wallet's database handle.
-type Db = WalletDb<Connection, LocalNetwork, FixedClock, TestRng>;
+pub(super) type Db = WalletDb<Connection, LocalNetwork, FixedClock, TestRng>;
 /// A result that may wait on a reservation policy.
-type Policy<T> = Result<Result<T, ReservationPolicy>, SqliteClientError>;
+pub(super) type Policy<T> = Result<Result<T, ReservationPolicy>, SqliteClientError>;
 
-fn wallet(file_backed: bool) -> TestState<(), TestDb, LocalNetwork> {
+pub(super) fn wallet(file_backed: bool) -> TestState<(), TestDb, LocalNetwork> {
     TestBuilder::new()
         .with_data_store_factory(if file_backed {
             TestDbFactory::file_backed()
@@ -56,7 +60,7 @@ fn wallet(file_backed: bool) -> TestState<(), TestDb, LocalNetwork> {
 }
 
 /// A file-backed wallet with a block cache and Ironwood active from its first block.
-fn ironwood_wallet() -> State {
+pub(super) fn ironwood_wallet() -> State {
     let activation = BlockHeight::from_u32(100_000);
     TestBuilder::new()
         .with_network(LocalNetwork {
@@ -73,23 +77,23 @@ fn ironwood_wallet() -> State {
 }
 
 /// An Ironwood wallet scanned through one empty block, so it is at its tip.
-fn scanned_wallet() -> State {
+pub(super) fn scanned_wallet() -> State {
     let mut st = ironwood_wallet();
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     st
 }
 
-fn start() -> BlockHeight {
+pub(super) fn start() -> BlockHeight {
     BlockHeight::from_u32(100)
 }
 
 /// The test clock's time, which registration stamps on keys.
-fn clock_now() -> i64 {
+pub(super) fn clock_now() -> i64 {
     unix_now(&test_clock())
 }
 
 /// Runs `f` in one wallet transaction.
-fn tx<A>(
+pub(super) fn tx<A>(
     db: &mut Db,
     f: impl FnOnce(&rusqlite::Transaction<'_>, &LocalNetwork) -> Result<A, SqliteClientError>,
 ) -> Result<A, SqliteClientError> {
@@ -98,7 +102,7 @@ fn tx<A>(
 
 /// Reserves `account`'s next `purpose` index, scanned at once from `from`, without
 /// readiness checks.
-fn reserve(
+pub(super) fn reserve(
     db: &mut Db,
     account: AccountUuid,
     purpose: Purpose,
@@ -120,16 +124,26 @@ pub(crate) fn reserve_key(
 }
 
 /// Registers incoming lookahead key `index` for a sweep, expecting payments from `from`.
-fn watch(db: &mut Db, account: AccountUuid, index: u64, from: BlockHeight) -> OneTimeKey {
+pub(super) fn watch(
+    db: &mut Db,
+    account: AccountUuid,
+    index: u64,
+    from: BlockHeight,
+) -> OneTimeKey {
     tx(db, |c, p| {
-        store::recovery::watch_receive_key(c, p, account, index, from, clock_now())
+        store::restore::recovery::watch_receive_key(c, p, account, index, from, clock_now())
     })
     .unwrap()
 }
 
 /// Registers `key` as recovered evidence would, from `from`. A key this wallet never
 /// scanned is queued for a receiver-directory sweep.
-fn recover(db: &mut Db, account: AccountUuid, key: KeyId, from: BlockHeight) -> OneTimeKey {
+pub(super) fn recover(
+    db: &mut Db,
+    account: AccountUuid,
+    key: KeyId,
+    from: BlockHeight,
+) -> OneTimeKey {
     tx(db, |c, p| {
         register(
             c,
@@ -147,16 +161,23 @@ fn recover(db: &mut Db, account: AccountUuid, key: KeyId, from: BlockHeight) -> 
 }
 
 /// Keeps `count` incoming lookahead keys expecting payments from `from`.
-fn lookahead(db: &mut Db, account: AccountUuid, count: u32, from: BlockHeight) {
+pub(super) fn lookahead(db: &mut Db, account: AccountUuid, count: u32, from: BlockHeight) {
     tx(db, |c, p| {
-        store::recovery::maintain_receive_lookahead(c, p, account, count, from, clock_now())
+        store::restore::recovery::maintain_receive_lookahead(
+            c,
+            p,
+            account,
+            count,
+            from,
+            clock_now(),
+        )
     })
     .unwrap()
 }
 
 /// Reserves like `WalletDb::prepare_receive_reservation`, scanning a new key from `from`,
 /// without readiness checks, reaping or lookahead registration.
-fn prepare_from(
+pub(super) fn prepare_from(
     db: &mut Db,
     account: AccountUuid,
     now: i64,
@@ -166,15 +187,15 @@ fn prepare_from(
     tx(db, |c, p| {
         if let Some(seen) = seen {
             let (owner, _) = account_key(c, p, account)?;
-            store::reservations::record_seen(c, owner.0, seen)?;
+            store::swap::reservations::record_seen(c, owner.0, seen)?;
         }
-        store::reservations::prepare(c, p, account, now, from, seen)
+        store::swap::reservations::prepare(c, p, account, now, from, seen)
     })
 }
 
 /// Queues a complete lookup of `key` at `anchor` that found `payments`. A deferral is
 /// an error here.
-fn queue_lookup(
+pub(super) fn queue_lookup(
     db: &mut Db,
     account: AccountUuid,
     key: KeyId,
@@ -182,25 +203,25 @@ fn queue_lookup(
     payments: &[PendingPayment],
 ) -> Result<(), SqliteClientError> {
     tx(db, |c, p| {
-        store::planner::queue_lookup(c, p, account, key, anchor, payments, true)
+        store::restore::planner::queue_lookup(c, p, account, key, anchor, payments, true)
     })?
     .map_err(|deferral| corrupt(&format!("{deferral:?}")))
 }
 
 /// Authenticates and queues `candidate` for `key`.
-fn queue_payment(
+pub(super) fn queue_payment(
     db: &mut Db,
     account: AccountUuid,
     key: KeyId,
     candidate: &PendingPayment,
 ) -> Result<(), SqliteClientError> {
     tx(db, |c, p| {
-        store::payments::queue_payment(c, p, account, key, candidate)
+        store::restore::payments::queue_payment(c, p, account, key, candidate)
     })
 }
 
 /// Authenticates `candidate` and checks its spend evidence through `through`.
-fn spend_status(
+pub(super) fn spend_status(
     db: &mut Db,
     account: AccountUuid,
     key: KeyId,
@@ -208,45 +229,52 @@ fn spend_status(
     through: ChainPoint,
 ) -> Result<SpendStatus, SweepDeferral> {
     tx(db, |c, p| {
-        let (_, note) = store::payments::authenticate(c, p, account, key, candidate)?;
-        store::payments::spend_status(c, candidate, note.nullifier(), through)
+        let (_, note) = store::restore::payments::authenticate(c, p, account, key, candidate)?;
+        store::restore::payments::spend_status(c, candidate, note.nullifier(), through)
     })
     .unwrap()
 }
 
 /// Retains `account`'s Ironwood spend evidence, as maintenance does.
-fn retain(db: &mut Db, account: AccountUuid) {
+pub(super) fn retain(db: &mut Db, account: AccountUuid) {
     tx(db, |c, p| {
-        store::retention::retain_spend_history(c, p, account)
+        store::restore::retention::retain_spend_history(c, p, account)
     })
     .unwrap()
 }
 
 /// Releases retained nullifiers at `through`, keeping `lookahead` incoming keys.
-fn finish_recovery(
+pub(super) fn finish_recovery(
     db: &mut Db,
     account: AccountUuid,
     through: ChainPoint,
     lookahead: u32,
 ) -> Result<bool, SqliteClientError> {
     tx(db, |c, p| {
-        store::retention::finish_nullifier_recovery(c, p, account, through, lookahead, clock_now())
+        store::restore::retention::finish_nullifier_recovery(
+            c,
+            p,
+            account,
+            through,
+            lookahead,
+            clock_now(),
+        )
     })
 }
 
 /// Starts or extends trial decryption of `key` from `from`, as registration and
 /// finished refund sweeps do.
-fn activate_key(db: &mut Db, account: AccountUuid, key: KeyId, from: BlockHeight) {
+pub(super) fn activate_key(db: &mut Db, account: AccountUuid, key: KeyId, from: BlockHeight) {
     assert!(tx(db, |c, _| activate(c, key_ref(c, account, key)?, from)).unwrap());
 }
 
 /// `account`'s queued candidates for `key`.
-fn pending(db: &Db, account: AccountUuid, key: KeyId) -> Vec<PendingPayment> {
-    store::payments::pending_payments(&db.conn, account, key).unwrap()
+pub(super) fn pending(db: &Db, account: AccountUuid, key: KeyId) -> Vec<PendingPayment> {
+    store::restore::payments::pending_payments(&db.conn, account, key).unwrap()
 }
 
 /// Applies queued `candidate` with `path` at `anchor`.
-fn apply_payment(
+pub(super) fn apply_payment(
     db: &mut Db,
     account: AccountUuid,
     key: KeyId,
@@ -256,7 +284,7 @@ fn apply_payment(
 ) -> Result<PaymentApplication, SqliteClientError> {
     let configured = db.transparent_ledger_mode;
     tx(db, |c, p| {
-        store::apply::apply_payment(
+        store::restore::apply::apply_payment(
             c,
             p,
             configured,
@@ -271,14 +299,14 @@ fn apply_payment(
 }
 
 /// Finishes `key`'s sweep after an empty lookup at `anchor`.
-fn finish_sweep(db: &mut Db, account: AccountUuid, key: KeyId, anchor: ChainPoint) {
+pub(super) fn finish_sweep(db: &mut Db, account: AccountUuid, key: KeyId, anchor: ChainPoint) {
     queue_lookup(db, account, key, anchor, &[]).unwrap();
     let applied = db.apply_one_time_sweep(account, key, anchor, anchor, WATCHED, |_, _| None);
     assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
 }
 
 /// Records `observation` for `key`'s operation `reference` at `now`.
-fn observe_with(
+pub(super) fn observe_with(
     db: &mut Db,
     account: AccountUuid,
     key: KeyId,
@@ -287,12 +315,18 @@ fn observe_with(
     now: i64,
 ) -> Result<(), SqliteClientError> {
     tx(db, |c, _| {
-        store::lifecycle::record_refund(c, key_ref(c, account, key)?, reference, observation, now)
+        store::swap::lifecycle::record_refund(
+            c,
+            key_ref(c, account, key)?,
+            reference,
+            observation,
+            now,
+        )
     })
 }
 
 /// Records `status` for `key`'s operation `reference` at `now`, without a deadline.
-fn observe(
+pub(super) fn observe(
     db: &mut Db,
     account: AccountUuid,
     key: KeyId,
@@ -309,7 +343,7 @@ fn observe(
 
 /// [`WalletDb::close_finished_one_time_keys`] with `tip`'s block time set to `now`, as
 /// when the caller's clock agrees with the chain.
-fn close_at(db: &mut Db, account: AccountUuid, now: i64, tip: BlockHeight) -> usize {
+pub(super) fn close_at(db: &mut Db, account: AccountUuid, now: i64, tip: BlockHeight) -> usize {
     db.conn
         .execute(
             "UPDATE blocks SET time = ?2 WHERE height = ?1",
@@ -321,12 +355,15 @@ fn close_at(db: &mut Db, account: AccountUuid, now: i64, tip: BlockHeight) -> us
 
 /// Every key registered to `account` by purpose and index, each re-derived and checked
 /// against its stored receiver.
-fn all_keys(db: &Db, account: AccountUuid) -> Result<Vec<OneTimeKey>, SqliteClientError> {
+pub(super) fn all_keys(
+    db: &Db,
+    account: AccountUuid,
+) -> Result<Vec<OneTimeKey>, SqliteClientError> {
     keys_where(&db.conn, &db.params, account, "1", [account.0])
 }
 
 /// The key registered to `account` as `key`, re-derived and checked.
-fn get_key(
+pub(super) fn get_key(
     db: &Db,
     account: AccountUuid,
     key: KeyId,
@@ -343,7 +380,7 @@ fn get_key(
 }
 
 /// `key`'s stored scan start and whether it advances allocation.
-fn key_state(db: &Db, key: KeyId) -> (BlockHeight, bool) {
+pub(super) fn key_state(db: &Db, key: KeyId) -> (BlockHeight, bool) {
     db.conn
         .query_row(
             "SELECT scan_from, advances_allocation FROM ironwood_receiving_keys
@@ -355,7 +392,7 @@ fn key_state(db: &Db, key: KeyId) -> (BlockHeight, bool) {
 }
 
 /// `key`'s last queued lookup, if it is still on the wallet's chain.
-fn lookup_coverage(db: &Db, account: AccountUuid, key: KeyId) -> Option<ChainPoint> {
+pub(super) fn lookup_coverage(db: &Db, account: AccountUuid, key: KeyId) -> Option<ChainPoint> {
     let id = key_ref(&db.conn, account, key).unwrap();
     let lookup = db
         .conn
@@ -363,14 +400,14 @@ fn lookup_coverage(db: &Db, account: AccountUuid, key: KeyId) -> Option<ChainPoi
             "SELECT lookup_height, lookup_hash FROM ironwood_one_time_sweeps
              WHERE receiving_key_id = ?1",
             [id],
-            |r| Ok(store::planner::anchor(r.get(0)?, r.get(1)?)),
+            |r| Ok(store::restore::planner::anchor(r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    store::planner::canonical(&db.conn, lookup).unwrap()
+    store::restore::planner::canonical(&db.conn, lookup).unwrap()
 }
 
 /// An accepted operation outcome with these deposit instructions.
-fn accepted(address: &str, memo: Option<&str>, deadline: i64) -> OperationOutcome {
+pub(super) fn accepted(address: &str, memo: Option<&str>, deadline: i64) -> OperationOutcome {
     OperationOutcome::Accepted(ReceiveDeposit {
         address: address.into(),
         memo: memo.map(Into::into),
@@ -379,7 +416,7 @@ fn accepted(address: &str, memo: Option<&str>, deadline: i64) -> OperationOutcom
 }
 
 /// The wallet's fully scanned tip.
-fn tip(st: &State) -> ChainPoint {
+pub(super) fn tip(st: &State) -> ChainPoint {
     let block = st.wallet().block_fully_scanned().unwrap().unwrap();
     ChainPoint {
         height: block.block_height(),
@@ -388,7 +425,7 @@ fn tip(st: &State) -> ChainPoint {
 }
 
 /// The one-time key of each unspent Ironwood note at `height`, `None` for ordinary notes.
-fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>> {
+pub(super) fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>> {
     st.wallet()
         .db()
         .get_unspent_ironwood_notes_at_historical_height(st.test_account().unwrap().id(), height)
@@ -400,17 +437,17 @@ fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>> {
 
 /// A sweep's `recent` flag for a receiver a swap may still pay, so its key keeps
 /// scanning.
-const WATCHED: bool = true;
+pub(super) const WATCHED: bool = true;
 
 /// Keys the scanner trial-decrypts with.
-fn scanning_keys(st: &State) -> Vec<KeyId> {
+pub(super) fn scanning_keys(st: &State) -> Vec<KeyId> {
     let keys = st.wallet().get_one_time_scanning_keys().unwrap();
     keys.iter().map(|k| k.key_id()).collect()
 }
 
 /// Pays `key` in a new scanned block and returns the output as a directory
 /// candidate. The output must be the chain's first Ironwood leaf.
-fn pay_candidate(st: &mut State, key: KeyId) -> PendingPayment {
+pub(super) fn pay_candidate(st: &mut State, key: KeyId) -> PendingPayment {
     let fvk = key
         .derive(&FullViewingKey::from(
             st.test_account().unwrap().usk().orchard(),
@@ -429,7 +466,11 @@ fn pay_candidate(st: &mut State, key: KeyId) -> PendingPayment {
 
 /// The first output to `fvk`'s external address in cached block `height`, as a directory
 /// candidate whose note data carries [`encrypt_note`]'s memo.
-fn candidate_at(st: &State, height: BlockHeight, fvk: &FullViewingKey) -> PendingPayment {
+pub(super) fn candidate_at(
+    st: &State,
+    height: BlockHeight,
+    fvk: &FullViewingKey,
+) -> PendingPayment {
     let data: Vec<u8> = st
         .cache()
         .0
@@ -480,7 +521,7 @@ fn candidate_at(st: &State, height: BlockHeight, fvk: &FullViewingKey) -> Pendin
 
 /// A transaction another wallet built, paying 50,000 zatoshis to `to` with `memo` from
 /// its own Ironwood funds, so this wallet neither funded nor stored it.
-fn external_payment(
+pub(super) fn external_payment(
     to: orchard::Address,
     memo: &zcash_protocol::memo::MemoBytes,
 ) -> zcash_primitives::transaction::Transaction {
@@ -488,7 +529,7 @@ fn external_payment(
 }
 
 /// [`external_payment`], also making the `also` payments.
-fn external_payment_with(
+pub(super) fn external_payment_with(
     to: orchard::Address,
     memo: &zcash_protocol::memo::MemoBytes,
     also: Vec<zip321::Payment>,
@@ -557,7 +598,7 @@ fn external_payment_with(
 }
 
 /// Encrypts `note` with a `[4; 512]` memo, as a directory candidate carries it.
-fn encrypt_note(note: Note) -> EncryptedNote {
+pub(super) fn encrypt_note(note: Note) -> EncryptedNote {
     let enc = IronwoodNoteEncryption::new(None, note, [4; 512]);
     let bytes = enc.encrypt_note_plaintext();
     EncryptedNote::from_parts(
@@ -570,7 +611,7 @@ fn encrypt_note(note: Note) -> EncryptedNote {
 }
 
 /// The authentication path of the first leaf in an otherwise empty tree.
-fn first_leaf_path() -> MerklePath {
+pub(super) fn first_leaf_path() -> MerklePath {
     MerklePath::from_parts(
         0,
         std::array::from_fn(|level| MerkleHashOrchard::empty_root((level as u8).into())),
@@ -578,7 +619,7 @@ fn first_leaf_path() -> MerklePath {
 }
 
 /// `candidate` as the directory reports it, with its note data by position.
-fn directory_answer(
+pub(super) fn directory_answer(
     candidate: &PendingPayment,
 ) -> (DirectoryPayment, std::collections::BTreeMap<u64, [u8; 528]>) {
     let note = candidate.encrypted_note.to_bytes();
@@ -599,7 +640,7 @@ fn directory_answer(
 }
 
 /// Reopens `st`'s wallet database from its file.
-fn reopen(st: &mut State) {
+pub(super) fn reopen(st: &mut State) {
     let reopened = WalletDb::for_path(
         st.wallet().data_file_path(),
         *st.network(),
@@ -610,14 +651,8 @@ fn reopen(st: &mut State) {
     *st.wallet_mut().db_mut() = reopened;
 }
 
-mod apply;
 mod enhancement;
 mod key_access;
-mod lifecycle;
-mod payments;
-mod planner;
-mod reservations;
-mod retention;
 mod scanning;
 
 #[test]

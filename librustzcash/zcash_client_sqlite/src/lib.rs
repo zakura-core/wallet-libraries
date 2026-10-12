@@ -2604,7 +2604,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
         height: BlockHeight,
         through: ChainPoint,
     ) -> Result<Result<ChainPoint, SweepDeferral>, Self::Error> {
-        wallet::one_time_ivk::publication_anchor(self.conn.borrow(), height, through)
+        wallet::one_time_ivk::restore::publication_anchor(self.conn.borrow(), height, through)
     }
 
     fn directory_note_data_needed(
@@ -2613,7 +2613,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
         key: KeyId,
         payments: &[DirectoryPayment],
     ) -> Result<Vec<u64>, Self::Error> {
-        wallet::one_time_ivk::note_data_needed(self.conn.borrow(), account, key, payments)
+        wallet::one_time_ivk::restore::note_data_needed(self.conn.borrow(), account, key, payments)
     }
 
     fn one_time_history_pending(
@@ -2621,7 +2621,12 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
         account: AccountUuid,
         through: BlockHeight,
     ) -> Result<bool, Self::Error> {
-        wallet::one_time_ivk::history_pending(self.conn.borrow(), &self.params, account, through)
+        wallet::one_time_ivk::restore::history_pending(
+            self.conn.borrow(),
+            &self.params,
+            account,
+            through,
+        )
     }
 
     fn one_time_keys_to_recheck(
@@ -2629,7 +2634,12 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
         account: AccountUuid,
         height: BlockHeight,
     ) -> Result<Vec<DiscoveryWork>, Self::Error> {
-        wallet::one_time_ivk::keys_to_recheck(self.conn.borrow(), &self.params, account, height)
+        wallet::one_time_ivk::restore::keys_to_recheck(
+            self.conn.borrow(),
+            &self.params,
+            account,
+            height,
+        )
     }
 }
 
@@ -2654,7 +2664,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
     fn maintain_one_time_ivks(&mut self, account: AccountUuid) -> Result<(), SqliteClientError> {
         let now = wallet::one_time_ivk::unix_now(&self.clock);
         self.transactionally(|wdb| {
-            wallet::one_time_ivk::maintain(wdb.conn.0, wdb.params, account, now)
+            wallet::one_time_ivk::restore::maintain(wdb.conn.0, wdb.params, account, now)
         })
     }
 
@@ -2666,7 +2676,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         limit: NonZeroU32,
     ) -> Result<Result<Vec<DiscoveryWork>, SweepDeferral>, SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::one_time_ivk::prepare_sweeps(
+            wallet::one_time_ivk::restore::prepare_sweeps(
                 wdb.conn.0, wdb.params, account, through, now, limit,
             )
         })
@@ -2680,7 +2690,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         seen: bool,
     ) -> Result<(), SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::one_time_ivk::begin_sweep_attempt(wdb.conn.0, account, key, now, seen)
+            wallet::one_time_ivk::restore::begin_sweep_attempt(wdb.conn.0, account, key, now, seen)
         })
     }
 
@@ -2693,7 +2703,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         note_data: &BTreeMap<u64, [u8; 528]>,
     ) -> Result<Result<bool, SweepDeferral>, SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::one_time_ivk::queue_directory_lookup(
+            wallet::one_time_ivk::restore::queue_directory_lookup(
                 wdb.conn.0, wdb.params, account, key, anchor, payments, note_data,
             )
         })
@@ -2708,7 +2718,15 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         recent: bool,
         witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
     ) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
-        wallet::one_time_ivk::apply_sweep(self, account, key, through, publication, recent, witness)
+        wallet::one_time_ivk::restore::apply_sweep(
+            self,
+            account,
+            key,
+            through,
+            publication,
+            recent,
+            witness,
+        )
     }
 
     fn record_paid_filter_check(
@@ -2718,7 +2736,12 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         checked: &[(KeyId, bool)],
     ) -> Result<(), SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::one_time_ivk::record_paid_check(wdb.conn.0, account, publication, checked)
+            wallet::one_time_ivk::restore::record_paid_check(
+                wdb.conn.0,
+                account,
+                publication,
+                checked,
+            )
         })
     }
 
@@ -2729,12 +2752,12 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
     ) -> Result<bool, SqliteClientError> {
         let now = wallet::one_time_ivk::unix_now(&self.clock);
         self.transactionally(|wdb| {
-            wallet::one_time_ivk::finish_nullifier_recovery(
+            wallet::one_time_ivk::restore::finish_nullifier_recovery(
                 wdb.conn.0,
                 wdb.params,
                 account,
                 through,
-                wallet::one_time_ivk::RECEIVE_LOOKAHEAD,
+                wallet::one_time_ivk::swap::RECEIVE_LOOKAHEAD,
                 now,
             )
         })
@@ -3696,7 +3719,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                 sent_tx,
             )?;
             #[cfg(feature = "one-time-ivk")]
-            wallet::one_time_ivk::start_funded_refund_keys(
+            wallet::one_time_ivk::swap::start_funded_refund_keys(
                 self.conn.0,
                 &self.params,
                 sent_tx.tx(),

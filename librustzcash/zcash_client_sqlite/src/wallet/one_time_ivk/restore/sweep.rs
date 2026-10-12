@@ -11,10 +11,11 @@ use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
-    KeyId, PendingPayment, activate, corrupt, invalid, key_ref,
+    PendingPayment,
     payments::pending_payments,
     planner::{anchor, canonical, queue_lookup},
 };
+use crate::wallet::one_time_ivk::{KeyId, activate, corrupt, invalid, key_ref};
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 /// Implements `OneTimeIvkRestoreRead::directory_publication_anchor`.
@@ -164,7 +165,7 @@ pub(crate) fn queue_directory_lookup<P: Parameters>(
 
 /// Finishes `key`'s sweep at its lookup's anchor once its candidates are applied (see
 /// `OneTimeIvkRestoreWrite::apply_one_time_sweep`).
-pub(super) fn finish(
+pub(in crate::wallet::one_time_ivk) fn finish(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
     key: KeyId,

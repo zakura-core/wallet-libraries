@@ -66,7 +66,7 @@ fn begin_at(
     let account = st.test_account().unwrap().id();
     let index = key.key_id().index();
     tx(st.wallet_mut().db_mut(), |c, _| {
-        store::reservations::begin(c, account, index, request, deadline, now)
+        store::swap::reservations::begin(c, account, index, request, deadline, now)
     })
 }
 
@@ -120,7 +120,7 @@ fn observe(st: &mut State, deposit: &str, status: OperationStatus, funded: bool,
 fn reap(st: &mut State, now: i64) -> Vec<u64> {
     let account = st.test_account().unwrap().id();
     tx(st.wallet_mut().db_mut(), |c, p| {
-        store::reservations::reap(c, p, account, now)
+        store::swap::reservations::reap(c, p, account, now)
     })
     .unwrap()
 }

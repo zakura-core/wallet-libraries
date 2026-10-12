@@ -23,9 +23,10 @@ recovery through receiver-directory sweeps, and spending. The migration creates 
 tables in every build, but a build without `one-time-ivk` refuses to open a database
 holding any of this state. `WalletDb` implements the backend's `OneTimeIvkRead` and
 `OneTimeIvkWrite`, so a wallet scans with `scan_cached_blocks_with_one_time_ivks`, and
-the restore protocol's `OneTimeIvkRestoreRead` and `OneTimeIvkRestoreWrite`. Compact scanning and software spending retain
-each note's derived key; change uses ordinary account keys. The `wallet::one_time_ivk`
-rustdoc lists the calls a wallet makes, and the
+the restore protocol's `OneTimeIvkRestoreRead` and `OneTimeIvkRestoreWrite`. Compact
+scanning and software spending retain each note's derived key; change uses ordinary
+account keys. The `wallet::one_time_ivk` rustdoc lists the calls a wallet makes; swap
+issuance, operations and closing are in `wallet::one_time_ivk::swap`. The
 [`zakura-one-time-ivk` README](../../zakura/one-time-ivk/README.md) describes the key
 derivation and refund memo.
 

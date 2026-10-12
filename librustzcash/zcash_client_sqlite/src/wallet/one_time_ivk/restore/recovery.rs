@@ -5,15 +5,15 @@ use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
 
-use super::{
+use super::{planner::canonical, retention::retain_spend_history};
+use crate::wallet::one_time_ivk::{
     Discovery, KeyId, OneTimeKey, Purpose, RESTORED, account_key, decode_index, key_ref,
-    next_index, planner::canonical, register, reservations::RECEIVE_LOOKAHEAD, restore_start,
-    retention::retain_spend_history,
+    next_index, register, restore_start, swap::RECEIVE_LOOKAHEAD,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 /// See `WalletDb::recheck_one_time_key_history`.
-pub(super) fn recheck<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn recheck<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
@@ -73,7 +73,7 @@ pub(crate) fn record_paid_check(
 }
 
 /// Implements `OneTimeIvkRestoreWrite::maintain_one_time_ivks`, keeping
-/// [`RECEIVE_GAP_LIMIT`](super::RECEIVE_GAP_LIMIT) incoming lookahead keys.
+/// [`RECEIVE_GAP_LIMIT`](crate::wallet::one_time_ivk::swap::RECEIVE_GAP_LIMIT) incoming lookahead keys.
 pub(crate) fn maintain<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -88,7 +88,7 @@ pub(crate) fn maintain<P: Parameters>(
 /// Whether an internal funding record may still hold an unregistered refund index after
 /// [`recover_refund_memos`]: its memo is not retrieved yet, or it lacks own-send evidence
 /// while scanning has not reached its block. Refund issuance and nullifier release wait.
-pub(super) fn refund_memos_pending(
+pub(in crate::wallet::one_time_ivk) fn refund_memos_pending(
     conn: &Connection,
     account: AccountUuid,
 ) -> Result<bool, SqliteClientError> {
@@ -117,7 +117,7 @@ pub(super) fn refund_memos_pending(
 /// A marker still lacking that evidence once scanning passed its block was funded before
 /// the birthday or is not this wallet's: its key is swept without advancing allocation,
 /// so a forged record cannot exhaust the index space.
-pub(super) fn recover_refund_memos<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
@@ -182,7 +182,7 @@ pub(super) fn recover_refund_memos<P: Parameters>(
 }
 
 /// [`maintain`] with `lookahead` incoming keys, once scanning reaches an Ironwood tip.
-pub(super) fn maintain_restore_discovery<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn maintain_restore_discovery<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
@@ -206,7 +206,7 @@ pub(super) fn maintain_restore_discovery<P: Parameters>(
 }
 
 /// Keeps [`RECEIVE_LOOKAHEAD`] incoming keys from the account's restore start.
-pub(super) fn extend_receive_lookahead<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn extend_receive_lookahead<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
@@ -220,7 +220,7 @@ pub(super) fn extend_receive_lookahead<P: Parameters>(
 /// Keeps `count` swept incoming keys above the highest allocated index, while that index
 /// is a restored one or there is none: above a key this wallet issued, it handed nothing
 /// out. This is bounded-gap recovery, not a completeness proof.
-pub(super) fn maintain_receive_lookahead<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn maintain_receive_lookahead<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
@@ -263,7 +263,7 @@ pub(super) fn maintain_receive_lookahead<P: Parameters>(
 }
 
 /// Registers incoming key `index` for a sweep, without advancing allocation.
-pub(super) fn watch_receive_key<P: Parameters>(
+pub(in crate::wallet::one_time_ivk) fn watch_receive_key<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
