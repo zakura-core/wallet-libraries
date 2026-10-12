@@ -7727,9 +7727,9 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7784,7 +7784,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-backend"
-version = "0.1.0-rc7"
+version = "0.1.0-rc8"
 dependencies = [
  "ambassador",
  "arti-client",
@@ -7861,7 +7861,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-sqlite"
-version = "0.1.0-rc7"
+version = "0.1.0-rc8"
 dependencies = [
  "ambassador",
  "assert_matches",
@@ -8081,7 +8081,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pczt"
-version = "0.1.0-rc4"
+version = "0.1.0-rc5"
 dependencies = [
  "blake2b_simd",
  "document-features",
@@ -8117,7 +8117,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-enhance"
-version = "0.0.1-rc1"
+version = "0.0.1-rc2"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -8145,11 +8145,11 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-enhance-types"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 
 [[package]]
 name = "zakura-pir-native"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "ipir-sp 0.1.0-rc.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand 0.8.8",
@@ -8159,7 +8159,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-status"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "hex",
  "rand 0.8.8",
@@ -8353,7 +8353,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-transaction-status"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "tokio",
  "tonic",
@@ -8391,7 +8391,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-wallet-lib"
-version = "0.1.0-rc6"
+version = "0.1.0-rc7"
 dependencies = [
  "orchard",
  "pczt",

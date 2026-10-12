@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc1] - PLANNED
+
+### Fixed
+
+- Include the MIT and Apache license texts in the crate package. Wire records
+  and encoding validation are unchanged.
+
 ## [0.0.1-rc0] - 2026-09-24
 
 Initial release candidate for the shared Ironwood enhancement record types.

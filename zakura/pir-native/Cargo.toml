@@ -1,6 +1,6 @@
 [package]
 name = "zakura-pir-native"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 description = "Native two-mask InspiRING primitives shared by Zakura PIR clients"
 edition.workspace = true
 rust-version.workspace = true

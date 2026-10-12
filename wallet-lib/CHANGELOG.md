@@ -7,10 +7,17 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc7] - PLANNED
+
+### Packaging
+
+- Include the MIT and Apache license texts in the crate package.
+
 ### Changed
-- Updated the Zakura PCZT dependency to `zakura-pczt 0.1.0-rc4`.
+- Updated the Zakura PCZT dependency to `zakura-pczt 0.1.0-rc5`.
 - Pinned the Common v2 dependencies exactly so a fresh consumer cannot select
   `2.1.0` while this facade requires the `2.0.0` family.
+- Updated backend and SQLite dependencies to `0.1.0-rc8`.
 
 ## [0.1.0-rc6] - 2026-09-27
 

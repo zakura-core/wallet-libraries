@@ -10,396 +10,101 @@ workspace.
 
 ## [Unreleased]
 
-- `WalletDb::rewind_to_chain_state`, and with it adding or importing an account, no longer
-  fails with `CorruptedData` ("the … note commitment tree retains checkpoints both above and
-  below height H, but none at that height to truncate to") when accounts are added one after
-  another with no scan in between, or after a reorg truncation. The pruning floor is measured
-  from the wallet's view of the chain tip, as documented, rather than from `MAX(blocks.height)`,
-  so successive rewinds with no scan in between share one floor instead of each reaching up to
-  99 blocks deeper. Because pools prune their oldest checkpoints independently, the rewind also
-  skips a checkpoint height that a pool straddles while retaining only anchors below it; a pool
-  missing a checkpoint inside its own window is still reported as corrupted. There is no schema
-  change.
+## [0.1.0-rc8] - PLANNED
 
-- An input known only from a recovered receive that a chain rewind left unplaced is no longer
-  refused as `Withdrawn` while its account's recovery catches up. The input check, direct
-  lookup and final storage report `AuthorityRefusal::Pending` for that account, and admit the
-  input once a later pass places the receive again. This holds however far the replacement
-  chain grows past the receive's height or its transaction's expiry: an output only such a
-  receive evidences is never `Expired`. An output public discovery or local construction also
-  evidences keeps the expiry rule, so under public authority a dead output is not spendable. A receive withdrawn by a replacement
-  revision is still `Refused(Withdrawn)`, as is an unplaced one once recovery covers the tip
-  without placing it. A suspended or otherwise unadmitted account is `NotAdmitted`.
+### Packaging
 
-- Name the durable stop after contradictory recovery evidence "recovery suspension".
-  Move its checks and writes into `recovery_suspension`. Stored SQLite table names
-  and suspension behavior are unchanged.
+- Include the MIT and Apache license texts in the crate package.
 
-- Rename the prototype ledger activation method to `activate_transparent_ledger`
-  and `SqliteClientError::TransparentPromotionBlocked` to `TransparentActivationBlocked`.
-  Recovery readiness checks and the atomic candidate-to-active transition are unchanged.
-- History entries carry `TransactionHistoryDetails::activity`, and report
-  `FeeState::Unattributed` for an exact whole fee whose account share is not established.
-  Activity reads the account's outputs in the transaction (`v_tx_outputs`) and its Orchard
-  spends in the same snapshot; no display fact is read. `WalletDb`
-  implements `TransparentDetailRead::transaction_receipt` in one read snapshot. There is no
-  schema change.
-
-- `SqliteClientError::TransparentAuthorityUnavailable` carries an `AuthorityRefusal`:
-  `Pending { accounts }` when every refused input is a held, unspent, unexpired, mature and
-  unwithdrawn (possibly rewound and unplaced) output of an active account not suspended from recovery whose only blockers are
-  `Recovery(IncompleteCoverage)` and `ChainBehindTip` (with none needed when the target is
-  ahead of the chain), and `Refused(RefusalReason)` otherwise. Any other blocker, such as open
-  pages or unresolved spends, is `NotAdmitted`. Other reasons include `UnknownOutput`,
-  `CompetingSpend`, `Spent`, `ImmatureCoinbase`, `Withdrawn`, `NotInLedger` and `StaleTarget`. `check_transparent_transaction_inputs`,
-  direct lookup, selection and final storage classify within the read that refused. Messages
-  name no outpoint, transaction or address.
-
-- `WalletDb` implements `TransparentLedgerWrite::forget_transparent_ledger`. Under `Public`
-  on the handle and durably, it removes in one transaction every spend link, pending spend,
-  output and transaction that only the transparent ledger supports, the ledger origin of rows
-  another origin also supports, and recovered events, coverage, pending pages and transaction
-  metadata. Outputs that lost a spend are queued for spend detection again. A ledger-only
-  output that is locked, or that a spend from another origin refers to, stays without value or
-  authority and raises `tpir_meta.min_reader_version` to 5. Revisions, qualification,
-  quarantine, candidate windows and shared derivations stay. A wallet without ledger facts is
-  only read. `PrivateRequired` on either side fails with
-  `PublicTransparentDiscoveryForbidden`. There is no schema change.
-
-- Transparent ledger reads resolve a configured handle under the durable policy: a durably
-  applied `PrivateRequired` policy governs every read, including one applied by another
-  connection after the handle was configured, instead of failing it with
-  `TransparentLedgerPolicyConflict`, which is removed. Reads never write the policy, and an
-  explicitly lowered policy again resolves to the handle's configured mode. An unconfigured
-  handle, a missing or corrupt policy row, or a newer reader requirement still fails closed.
-  Qualifying a revision or promoting an account still requires a handle configured
-  `PrivateRequired`, and a handle configured `Public` records no recovery evidence.
-- `WalletDb::is_autocommit` reports whether the handle's connection is outside an explicit
-  SQL transaction.
-
-- Transparent receipt ownership now requires current, qualified, non-quarantined private
-  spend evidence or an independently recorded public/local spend. Candidate and withdrawn
-  recovery records cannot suppress funding omissions. Raw sender ownership also requires an
-  outpoint actually spent by the transaction. Conservative contradiction checks are unchanged.
-
-- Transparent txid enhancement (prototype): `WalletDb` implements `TransparentDetailRead` and
-  `TransparentDetailWrite`. The additive `transparent_txid_enhancement` migration adds
-  `transparent_detail_work`, `transparent_tx_display` (one display entry: fee, counts, sender
-  and omission flags) and `transparent_tx_display_outputs` (outputs 0 and 1), and
-  queues work for existing mined route-2 transactions and ledger-origin transactions without raw
-  bytes. Ledger projection, the route-2 marker, and mining a route-2 transaction queue work for
-  mined transactions without stored facts; each first deletes stored facts that the wallet now
-  contradicts. Storing raw bytes clears work and any display facts. Parked work is due again
-  after seven days without a display map change; under public authority nothing is parked, and
-  held work is due at its ordinary retry. Failed lookups and contradictions only
-  change retry state while the looked-up height still matches the transaction's mined height;
-  a change of outcome class restarts the backoff. The listing returns the due preferred
-  transactions in the caller's order before up to `limit` others; a preference never makes work
-  due. The view shows work as pending only while the listing would return it.
-  Facts are validated against the coinbase
-  position, owned outputs that financial queries count, recovered metadata, the stored fee,
-  known shielded components, and known spends (input indexes and the number of distinct spent
-  outpoints, including public spend links); a contradiction stores nothing.
-- Recovered outgoing Activity assumes account funding and the whole fee unless recovered evidence
-  identifies conflicting funding. The transparent-spend veto now requires an active account's
-  qualified, non-quarantined observation at the accepted transaction height; candidate recovery
-  cannot suppress the estimate. This display convention does not establish payment or fee attribution.
-- Private recovery of mixed transparent/Ironwood transactions under `PrivateRequired` keeps
-  the details that do not depend on transparent data. A has-transparent Enhance PIR record (or
-  a compact scan with explicit non-Ironwood fields) still takes the sticky route-2
-  (`PrivateDetailsUnsupported`) marker, but the transaction keeps private memo work for its
-  received Ironwood notes. Each memo is authenticated by note decryption, and the whole-transaction
-  fee is filled only when it agrees with every known fee, expiry, and displayed expiry; a
-  disagreeing response is rejected without effect. Memo work is dispatched only while public
-  authority is absent and is dropped when a policy transition restores it (route 1).
-  The additive `ironwood_unsupported_memo_retry` migration requeues the unknown memos of
-  route-2 transactions in existing wallets, without resetting notes, spend links, or routes.
-- History reconstructs a mixed transaction without full data, as
-  `HistoryClassification::NetReconstructed`, only as a transparent-to-shielded self-transfer: every owned effect complete, qualified metadata counting exactly the account's
-  published transparent inputs, its exact whole-transaction fee agreeing with the stored one
-  when present, recovered evidence that no transparent outputs exist, only
-  transparent spends and shielded receipts, and the spent value equal to the receipts plus that
-  fee. Otherwise it stays provisional. A net reconstruction does not prove the debit was the
-  fee: another party's shielded spend paying an equal output at a padding action has the same
-  evidence. The stored fee of such a transaction is the whole
-  transaction's: `FeeState` stays `Unknown` and the aggregate payment is not inferred.
-
-- Mixed net-shielding reconstruction can use the qualified transparent PIR whole-transaction
-  fee when Enhance PIR omits it, without filling `transactions.fee` or attributing the fee.
-  The additive `ironwood_transparent_output_shape` migration retains the nullable output-presence
-  assertion and privately requeues its recovery for existing memo-complete route-2 wallets.
-  Unknown or conflicting shape, incomplete/unqualified effects, and failed accounting remain
-  provisional.
-
-- A stored transaction that spends a wallet transparent output recorded after it, and so has no
-  sent outputs, is stored again from its raw data once that output is recorded through
-  `put_received_transparent_utxo` or a retrieved parent transaction. Its sent outputs are
-  attributed only when one wallet account funded it and every transparent input spends a wallet
-  output; jointly funded transactions stay unattributed. Fixes fresh restores whose sends stayed
-  provisional with no recipient or payment. Ledger projection is not covered. No migration
-  re-derives sends already stored this way; recording their spent output again does.
-
-- Transparent spend discovery retains work for unmined local spenders and resumes after they
-  expire. Address and per-outpoint completion advance past expired-spender links, using expiry
-  at the current tip; an address range advances only the outputs whose search frontier it covers.
-
-- Fixed `v_transactions.account_balance_delta`, `total_spent` and `total_received` being
-  multiplied for a send whose sent notes include an output a wallet account received
-  (transparent change, or a transfer to another account): `sent_note_counts` grouped by the
-  receiving rather than the sending account. The `v_transactions_sender_grouping` migration
-  recreates the view.
-- Rewinds now preserve historical inclusion receipts for transactions compact scanning cannot
-  rediscover through wallet shielded notes or spends. Accepted rescanning of the same block restores
-  mined height and an available transaction index locally, without an automatic status query.
-  A changed block or missing receipt uses the existing routed status recovery. The additive
-  `transaction_reconfirmation_receipts` migration starts empty; it cannot reconstruct erased hashes.
-- Reconfirmation status obligations are backfilled by `unmined_status_obligations` and flagged by
-  `status_reconfirmation`. The `reconfirm_mined` flag exempts fallback work from expiry dormancy
-  until one completed observation. Incomplete private coverage preserves recovery; it never permits
-  a public fallback or proves absence. Delayed changed-block recovery beyond Status PIR retention
-  can remain unresolved. See `docs/transaction_status_work.md` for the coverage contract.
-
-- Shared derivation origins survive promotion and reopen without transferring receiver ownership.
-  Activity at those receivers schedules new gaps and withholds private authority until coverage
-  completes. Active recovery materializes its discovered addresses before projecting receipts.
-  The additive `transparent_shared_derivations` migration creates empty bookkeeping; recording
-  a shared origin requires reader version 8 and excludes public legacy-writer handover.
-
-- Candidate windows respect existing receiver ownership; imports discard competing candidate
-  facts atomically, and promotion refuses a transfer that introduces missing coverage.
+Breaking storage release for explicit transparent policy, privately recovered
+funds, and account-scoped history. See the
+[wallet integration guide](../../docs/transparent-pir-wallet-integration.md)
+and [status recovery contract](../../docs/transaction_status_work.md).
 
 ### Added
-- `WalletDb::transaction_history_summaries` returns typed account-scoped transaction
-  metadata and monetary effects without reading raw transaction payloads. It shares
-  the corrected accounting definition of `v_transactions`, filters account inputs
-  before aggregation, and reuses caller-owned read snapshots. The existing view
-  retains its columns and behavior. A seedless `v_transactions_legacy_projection`
-  migration restores its retained `zip318_kind` field after sender grouping;
-  transaction values and historical migration SQL are unchanged.
-- `SqlTransaction::new` lets consumers run guarded wallet operations and application cleanup in one caller-owned transaction.
-- `WalletDb::check_transparent_transaction_inputs` authorizes finalized submissions and exact-byte retries without permitting competing spends or weakening transparent authority.
-- The unreleased `drop_zip318_pool_migration` retains `transactions.zip318_kind` and its
-  `v_transactions` field in place, preserving classification values on upgrades from published
-  rc5/rc7 schemas. The obsolete explicit rollback preparation API is removed. Development
-  databases that already dropped the column are outside the supported upgrade path. Writable
-  downgrades after a private-ledger upgrade are not qualified by this schema change.
-- Initialization refuses unknown migration IDs before schema interpretation and restores foreign
-  key enforcement on error. ZIP 318 removal names dependent application views/triggers.
-- Shared-receiver activity expands effective recovery windows on read, exposing work immediately.
-  Promotion materializes only unowned receivers; public reads do not inspect private provenance,
-  and per-account balance reads share one SQLite snapshot.
-- `WalletHandleModes`, `set_handle_modes`, and `with_handle_modes` configure every supported disclosure lane together without persisting policy.
-- Revision observations no longer supersede wallet-wide evidence. Only a trusted qualification transition (a trusted commit, or the test/development hook) withdraws older provisional evidence. New revision writes require reader version 6; version-5 binaries cannot safely operate those wallets.
-- `get_wallet_summary` reuses existing transactions, allowing summary and transparent authority reads in one snapshot. Per-account transparent balances use an account-scoped query.
 
-- The seedless `transparent_ledger_schema` migration. It adds `tpir_meta`, the
-  durable transparent policy recorded as public, and the `tpir_output_origins`
-  and `tpir_spend_origins` provenance tables. It classifies every existing
-  transparent output and spend as legacy evidence, and marks records whose
-  transaction has local creation evidence as local construction too. Neither
-  origin is coverage. Existing wallet tables are unchanged.
-- The additive `transparent_policy_generation` migration. It adds
-  `tx_retrieval_queue.policy_generation` (default 0) and extends
-  `ironwood_enhance_routing.route` to allow `2` (`PRIVATE_DETAILS_UNSUPPORTED`).
-- The seedless, additive `transparent_recovery_schema` migration. It adds empty
-  candidate recovery tables: `tpir_candidate_windows`, `tpir_revisions`,
-  `tpir_receive_events`, `tpir_receive_observations`, `tpir_spend_events`,
-  `tpir_spend_observations`, `tpir_coverage`, `tpir_pending_pages`, and
-  `tpir_pending_page_scripts`, with indexes for coverage by script, events by
-  account, and spends by prevout.
-- Candidate recovery: `WalletDb` implements `transparent_watch_set`,
-  `apply_transparent_ledger_commit`, and `transparent_candidate_recovery`.
-  - A commit requires a `PrivateRequired` policy, both on the handle and durably
-    applied, at the captured generation. The account must
-    still exist, the target and anchor must still be local blocks, and every
-    named address must still be watched by the account.
-  - Events are idempotent: contradictory content or placement is refused.
-    Superseding a provisional revision retracts its observations and removes
-    events that no other active revision observed.
-    Within one revision, supported coverage and an open page cannot overlap,
-    and no range can be reported both checked and unsupported.
-  - The first candidate commit raises `tpir_meta.min_reader_version` to 3, the
-    minimum recovery reader version, so builds without the recovery lifecycle fail
-    closed on that wallet.
-  - A commit extends the candidate window of a derived scope when mined
-    activity reaches within a gap limit of its end. Window addresses are
-    derived on read and are never written to `addresses`.
-  - Truncation clips candidate coverage to the rescan floor and re-anchors it
-    there, clears event placements above it, and removes pages opened for a
-    later target. This runs in every build.
-  - A spend mined below the output it consumes is refused, as are events of one
-    transaction that disagree on its placement or coinbase classification.
-  - A policy transition removes open pages.
-  - Re-attributing an imported receiver to another account forgets the previous
-    account's candidate evidence for it.
-  - Deleting an account removes its candidate state.
-- `SqliteClientError::TransparentRecoveryNotEnabled` and, behind
-  `transparent-inputs`, `SqliteClientError::TransparentLedgerCommitRejected`.
-- The seedless, additive `transparent_activation_schema` migration. It adds
-  empty `tpir_active_accounts`, `tpir_qualified_revisions`,
-  `tpir_quarantined_sources`, and `tpir_quarantined_accounts` tables.
-- Private transparent activation, behind `transparent-inputs`:
-  - `promote_transparent_account` requires `PrivateRequired` on the handle and
-    durably. In one transaction it rechecks quarantine, the candidate blockers
-    at a local target equal to the chain tip, qualification of every
-    contributing revision, and agreement with the wallet's legacy evidence;
-    adds the candidate window's addresses; projects every placed event with a
-    new ledger-event origin (2); and records the account as active.
-  - Projection joins the shared transaction row and keeps raw data, fees, local
-    creation evidence, notes, locks, and other origins. A projected coinbase
-    receive records `tx_index = 0`. A placement, coinbase, or content conflict
-    with the wallet is an integrity failure.
-  - Withdrawing the last observation of a receive retains its ledger-only output
-    row, historical origin, independently supported spends, and reservations.
-    Without a placed receive it contributes no balance and authorizes no input,
-    including after demotion to public policy. Replaying the receive preserves
-    spend links and lock ownership. Independent output origins remain evidence.
-  - An active account's commits require a qualified revision and project their
-    events in the same transaction. Window growth then uses the wallet's own
-    gap-limit address generation.
-  - An integrity rejection applies none of the commit's facts but quarantines
-    the source, the account, and every account holding the source's evidence,
-    and removes their pending pages. Quarantined sources and accounts refuse
-    later commits. Quarantine survives rewinds; nothing clears it yet.
-  - Leaving `PrivateRequired` demotes every active account.
-  - Activation, qualification, and quarantine writes raise
-    `tpir_meta.min_reader_version` to 5. Withdrawal of a previously projected
-    receive also requires 5, including on a demoted candidate account, so a
-    version 4 reader cannot mistake retained rows for current public funds.
-  - `WalletDb::qualify_transparent_revision`, a test and development hook
-    behind `test-dependencies`. Production builds qualify a revision only
-    through a trusted commit.
-  - `qualify_and_apply_transparent_ledger_commit` requires `PrivateRequired` on
-    the handle and durably. In one transaction it makes every check of an
-    ordinary commit, qualifies the exact revision, withdraws older provisional
-    evidence of its source across the wallet, and applies the commit's facts.
-    An integrity failure quarantines as an ordinary commit does, without
-    qualifying; any other failure changes nothing. There is no schema or
-    reader-version change.
-- `SqliteClientError::TransparentPromotionBlocked`, behind `transparent-inputs`.
-- Projection origins for new transparent records. Public discovery records a
-  legacy-public origin, and local construction, including creation evidence
-  recorded by an outbox, records a local origin. Each is written in the same
-  transaction as the record it describes.
-- `WalletDb::set_transparent_ledger_mode` and `with_transparent_ledger_mode`,
-  and implementations of `TransparentLedgerRead` and `TransparentLedgerWrite`.
-  The mode is not persisted, and transactional handles inherit it. The snapshot
-  reports `Unavailable` authority, never a fabricated or public balance, when:
-  - private authority is required;
-  - the chain tip is unknown; or
-  - the build cannot read transparent state.
-- Durable policy transitions via `apply_transparent_policy`. A mode change
-  increments `policy_generation` by one in the same SQLite transaction and
-  restamps outstanding `tx_retrieval_queue` rows to that generation so
-  still-required work remains dispatchable under modes that retain public
-  authority; same-mode reapplication does not. Restoring public authority also converts unresolved
-  sticky `route = 2` (mixed) markers to the public LWD route so those
-  transactions become ordinary enhancement work again.
-  `check_transparent_policy_generation` is the commit check an older open handle
-  must fail. Pending withheld follow-on details are exposed by
-  `pending_private_transparent_details`. Mixed (`route = 2`) details are reported
-  only while the transaction has no stored raw payload.
-- `SqliteClientError` variants:
-  - `TransparentLedgerModeNotConfigured`;
-  - `TransparentAuthorityUnavailable`;
-  - `PublicTransparentDiscoveryForbidden`;
-  - `TransparentLedgerIncompatible`: the wallet requires a newer ledger reader;
-  - `StaleTransparentPolicy`: a captured generation no longer matches the
-    wallet after a concurrent transition.
-
-  A `tpir_meta` table without its policy row, or a missing `tpir_meta` after the
-  migration has run, is reported as corrupted data.
-- `WalletDb` implements `transaction_history_details`. Every result is derived
-  from stored facts in one read (the transaction row, the account's outputs and
-  spends, the scan queue, ledger coverage, and queued follow-on work); no
-  completion marker is stored.
+- Durable transparent policy and generation tracking, output/spend provenance,
+  candidate events and coverage, trusted revision qualification, private-ledger
+  activation and recovery suspension. Existing outputs and spends are marked
+  legacy evidence; this grants no private coverage. New recovery tables start
+  empty and do not automatically activate private policy.
+- Atomic recovery commits bound to the account, watched addresses, policy
+  generation, locally scanned target and anchor. Contradictory trusted recovery
+  suspends its source and affected accounts without applying contradictory facts.
+  Observations alone cannot replace wallet-wide evidence.
+- Per-account private spending authority once qualified recovery covers the
+  chain tip without blockers and agrees with legacy evidence. Final transaction
+  storage checks the inputs again, including coinbase maturity and reservations.
+- Shared derivation bookkeeping that preserves receiver ownership across
+  activation and reopen, expands recovery windows on activity, and materializes
+  only unowned receivers. Imports and ownership changes invalidate competing
+  candidate evidence atomically.
+- `transaction_history_summaries`, history Activity and receipt reads using one
+  account-scoped snapshot. They keep financial evidence separate from display
+  facts and report unattributed fees and incomplete effects explicitly.
+- Transparent txid display storage and queued lookups with policy/placement
+  checks, contradiction rejection, bounded output slots, omissions, backoff and
+  periodic map rechecks. Raw payload ingestion clears display work and facts.
+- Private mixed-transaction memo retries and output-presence recovery. Balanced
+  net shielding can use a qualified transparent PIR whole fee without storing
+  or attributing it; unknown or conflicting evidence stays provisional.
+- Historical inclusion receipts and reconfirmation obligations. Rescanning an
+  accepted unchanged block can restore inclusion locally; changed blocks use
+  the configured status source. Incomplete private coverage never permits a
+  public fallback. Old erased block hashes cannot be reconstructed.
+- `WalletHandleModes`, `WalletDb::is_autocommit`, `SqlTransaction::new`, and
+  `check_transparent_transaction_inputs` for guarded application integration.
+- Atomic forgetting of private-only ledger contributions under public policy.
+  Independently supported data and reservations survive; retained ledger-only
+  locked rows grant no value or authority.
 
 ### Changed
-- `TransparentDetailRead::transparent_display_view` returns `None` for an account that takes
-  no part in the transaction's transparent side: no transparent output or spend of its own,
-  scanned or recovered, and no shielded part (a received, spent or sent note) in a
-  transaction the wallet records as having one, by its raw bytes or, without them, by detail
-  work, stored display facts or the route-2 marker. It used to return a view whose outputs
-  the account did not own.
-- Unmined shielded history remains incomplete when scanning discovers a funding
-  note whose spend was not linked at payload ingestion. A scanned chain tip and
-  stored raw data certify completeness only once all known owned nullifiers
-  have their spend links, preventing a debit's change from being classified as
-  a complete receive with no applicable fee.
-- Transparent outpoint lookup with a spend target now enforces coinbase
-  maturity, matching the other selectors. The final private transaction storage
-  gate therefore rejects an immature coinbase input, including externally
-  finalized transactions. Lookups without a spend target retain metadata access.
-- The following now require an explicitly configured transparent ledger mode;
-  they never default to public authority:
-  - transparent input selection;
-  - storing any transaction with transparent inputs, in every build;
-  - `put_received_transparent_utxo`;
-  - the transparent spend-detection and address-history requests of
-    `transaction_data_requests`;
-  - `transaction_status_work` and `transaction_status_work_for`.
-- Under `PrivateRequired`, set on the handle or durably applied, public
-  transparent discovery stops. Public enhancement and status dispatch require
-  a matching `policy_generation` and a mode that retains public authority.
-  Parent-transaction retrieval and mixed Enhance results are withheld from
-  public requests and reported as pending private details while they remain
-  unresolved (mixed `route = 2` rows with stored raw are omitted; public LWD
-  `route = 1` rows are included); financial rows are not deleted. Status
-  obligations become `TransactionStatusWork::Private`.
-- Transparent authority is unavailable under `PrivateRequired`, while the chain
-  tip is unknown, and in builds without `transparent-inputs`. While it is
-  unavailable:
-  - transparent input selection and storing transactions with transparent
-    inputs fail;
-  - `get_wallet_summary` omits transparent funds;
-  - `get_transparent_balances` fails;
-  - `get_received_outputs` reports transparent outputs as not spendable
-    (`u32::MAX`).
 
-  Shielded-funded spends, including unshielding, are unaffected.
-- Under `PrivateRequired`, transparent authority is per account. An account is
-  eligible for a transaction targeting `T` when it is active and not
-  quarantined, its ledger has no blockers, and its covered local target and the
-  chain tip are both `T - 1`. Then:
-  - every transparent selector admits only ledger-projected outputs of eligible
-    accounts, within one read snapshot. The account selector and the outpoint
-    lookup fail for an ineligible account; the address selectors filter out
-    ineligible accounts and fail only when no owning account is eligible;
-  - storing a transaction rechecks each transparent input at its target height,
-    except inputs created by an earlier transaction of the same batch;
-  - the snapshot reports `Private` authority and the ledger-projected balance.
-    Otherwise its blockers explain why authority is unavailable.
-  `get_wallet_summary` and `get_transparent_balances` still omit transparent
-  funds under `PrivateRequired`.
-- A transparent output report whose script or value conflicts with the stored
-  output is refused.
-- Retrieval-queue inserts stamp the current policy generation and do not
-  refresh it on conflict. Internal commit paths check the captured generation
-  before inserting a public request.
-- Transparent address-history request enumeration reads public authority, the
-  chain tip, and request rows from one SQLite snapshot, so a concurrent policy
-  transition cannot expose private-era rows under stale public authority.
-- A wallet whose `tpir_meta.min_reader_version` exceeds this build's reader
-  version now also refuses rewinds (every `truncate_to_height`,
-  `truncate_to_chain_state`, and `rewind_to_chain_state`), the re-attribution of
-  an imported receiver, account deletion, creation-evidence bookkeeping,
-  transparent output and spend writes (including low-level writes), and
-  `qualify_transparent_revision`, with
-  `TransparentLedgerIncompatible`, changing nothing. Previously a rewind clipped
-  recovery state that a newer reader might maintain differently.
+- Transparent selection, ingestion, discovery, status and enhancement require
+  explicit handle configuration. A durable private policy governs reads on
+  older open handles too; missing, corrupt or unreadable policy fails closed.
+- Public requests carry a policy generation. Private policy blocks public
+  transparent discovery and routes status privately; restoring public policy
+  demotes active ledgers and rebuilds unresolved public detail work.
+- Private authority is account-specific and checked within the read snapshot.
+  Legacy balance APIs still omit private transparent funds; the ledger snapshot
+  reports the available private balance and its blockers.
+- Pending recovery and definitive input refusals are distinct typed results.
+  An unplaced recovered receive remains pending while recovery catches up and
+  can become spendable again when re-placed; withdrawn evidence stays refused.
+- Reader-version guards cover reads, rewinds, ownership changes, deletion and
+  transparent writes. Shared derivations require reader version 8; older
+  writable wallet handover is not qualified by retaining legacy columns.
+- Updated backend and PCZT dependencies to the next release candidates.
+
+### Fixed
+
+- Repeated account imports and rewinds use a pruning floor measured from the
+  chain tip. Rewinds tolerate a checkpoint naturally straddled by independently
+  pruned pools while still reporting a missing checkpoint inside a pool's window.
+- Sent-note grouping no longer multiplies account totals for change or transfers
+  between wallet accounts. The retained transaction view keeps its legacy fields.
+- Restoring an output after its spending transaction re-derives the send from
+  stored raw data. Attribution requires one wallet funder and all transparent
+  inputs owned; shared funding stays unattributed. Ledger projection and old
+  sends without a newly recorded parent output are outside this repair.
+- Transparent spend discovery retains unmined local-spender work and resumes
+  after expiry without advancing unrelated output search frontiers.
+- Unmined shielded history stays incomplete until known owned nullifiers are
+  linked to their spends. Private receipt ownership requires current qualified
+  evidence or independent public/local evidence, and an actually spent outpoint.
+- Unknown migrations are refused before schema interpretation, and foreign key
+  enforcement is restored after initialization errors.
 
 ### Removed
-- The ZIP 318 pool-migration schema. A new `drop_zip318_pool_migration`
-  migration drops the `orchard_ironwood_migration*` tables and their indexes,
-  which nothing read or wrote. The migrations that created them stay
-  registered, so existing databases still migrate. The `zip318_kind` column of
-  `transactions` and `v_transactions` stays for published rc5/rc7 writers.
-- The implementations of the removed backend APIs
-  (`put_zip318_classification`, `select_single_spendable_note`,
-  `anchor_computable` and `WalletRead::anchor_retention_interval`).
-  `WalletDb` reports its configured grid through
-  `InputSource::anchor_retention_interval` instead.
-- `set_durable_policy_for_testing`; tests use `apply_transparent_policy`.
+
+- Obsolete ZIP 318 pool-migration tables and APIs. Historical migration IDs and
+  `transactions.zip318_kind` / its transaction-view field remain for supported
+  upgrades from published rc5/rc7 writers. Development databases that already
+  dropped the column are outside that upgrade path; writable downgrades after
+  private recovery are not qualified.
+- Prototype rollback preparation and `set_durable_policy_for_testing` APIs;
+  policy transitions use `apply_transparent_policy`.
 
 ## [0.1.0-rc7] - 2026-09-27
 

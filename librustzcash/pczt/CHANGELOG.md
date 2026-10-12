@@ -10,6 +10,13 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc5] - PLANNED
+
+### Fixed
+
+- Included the MIT and Apache license texts in the published crate package.
+  PCZT behavior and public APIs are unchanged.
+
 ## [0.1.0-rc4] - 2026-09-28
 
 ### Changed
