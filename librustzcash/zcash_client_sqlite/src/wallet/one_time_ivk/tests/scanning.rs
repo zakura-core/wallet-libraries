@@ -529,3 +529,52 @@ fn key_activated_mid_batch_is_requeued_for_the_blocks_it_missed() {
     assert_eq!(unspent_keys(&st, paid + 1), vec![Some(key)]);
     assert!(queued(&st).is_empty());
 }
+
+/// Ordinary scanning keeps no Ironwood spend evidence for restore sweeps until the wallet
+/// holds one-time IVK state, a registered key or a spend retention row, and keeps it for
+/// every block scanned from then on.
+#[test]
+fn spend_evidence_is_kept_only_with_one_time_ivk_state() {
+    for registered_key in [true, false] {
+        let mut st = ironwood_wallet();
+        let account = st.test_account().unwrap().id();
+        let covered = |st: &State| -> Vec<u32> {
+            let conn = st.wallet().conn();
+            let mut stmt = conn
+                .prepare("SELECT height FROM ironwood_nullifier_scan_blocks ORDER BY height")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let mut scan_empty_block = |st: &mut State| {
+            let (height, _) = st.generate_empty_block();
+            st.scan_cached_blocks(height, 1);
+            height
+        };
+        scan_empty_block(&mut st);
+        scan_empty_block(&mut st);
+        assert!(covered(&st).is_empty(), "{registered_key}");
+        assert_eq!(
+            crate::wallet::ironwood_nullifier_retention_height(st.wallet().conn()).unwrap(),
+            None
+        );
+
+        let db = st.wallet_mut().db_mut();
+        if registered_key {
+            // A sweep-only key is not trial-decrypted, so ordinary scanning continues.
+            let from = db.chain_height().unwrap().unwrap() + 1;
+            watch(db, account, 0, from);
+        } else {
+            retain(db, account);
+        }
+        let first = scan_empty_block(&mut st);
+        let second = scan_empty_block(&mut st);
+        assert_eq!(
+            covered(&st),
+            vec![u32::from(first), u32::from(second)],
+            "{registered_key}"
+        );
+    }
+}

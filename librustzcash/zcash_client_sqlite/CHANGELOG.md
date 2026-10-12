@@ -216,7 +216,9 @@ workspace.
   `directory_note_data_needed`, `queue_directory_lookup` and `apply_one_time_sweep`, which
   credit a note only after verifying its inclusion and spend state locally, and then
   `finish_one_time_nullifier_recovery`, which releases the Ironwood spend history the
-  sweeps needed. Every attempt looks the key up in the current publication, whose answer
+  sweeps needed. Scanning keeps that history only while the wallet holds one-time IVK
+  state, a registered key or retained history, so a wallet without it stores nothing
+  extra. Every attempt looks the key up in the current publication, whose answer
   replaces queued candidates it no longer repeats and reopens the sweep until it is
   applied, and note data is queued in batches, so a long history keeps its progress.
   `begin_one_time_sweep_attempt` takes whether a provider seen set holds the key's

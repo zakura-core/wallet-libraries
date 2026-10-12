@@ -3327,6 +3327,13 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
         if one_time_keys.is_none() && wallet::one_time_key_open(self.conn.0)? {
             return Err(SqliteClientError::OneTimeIvksNotUsed);
         }
+        // Without one-time IVK state, nothing needs Ironwood spend evidence kept longer.
+        #[cfg(feature = "one-time-ivk")]
+        let ironwood_nullifier_retention = if wallet::holds_one_time_ivk_state(self.conn.0)? {
+            wallet::ironwood_nullifier_retention_height(self.conn.0)?
+        } else {
+            None
+        };
         // Once the NU6.3 (Ironwood) activation height is reached, checkpoints on the anchor
         // retention grids are retained as durable anchors. The activation height is `None` (and so
         // anchor retention is inactive) on networks that do not yet have an assigned NU6.3
@@ -3366,7 +3373,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             blocks,
             anchor_retention.as_ref(),
             #[cfg(feature = "one-time-ivk")]
-            wallet::ironwood_nullifier_retention_height(self.conn.0)?,
+            ironwood_nullifier_retention,
             #[cfg(all(feature = "orchard", not(feature = "one-time-ivk")))]
             None,
         )

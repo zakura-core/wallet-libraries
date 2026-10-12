@@ -778,14 +778,7 @@ fn verify_no_one_time_ivk_state(conn: &rusqlite::Connection) -> Result<(), Walle
         [],
         |row| row.get(0),
     )?;
-    let present = migrated
-        && conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys)
-                OR EXISTS(SELECT 1 FROM ironwood_one_time_spend_retention)",
-            [],
-            |row| row.get(0),
-        )?;
-    if present {
+    if migrated && super::holds_one_time_ivk_state(conn)? {
         Err(WalletMigrationError::OneTimeIvksNotEnabled)
     } else {
         Ok(())
