@@ -16,7 +16,6 @@ ff.workspace = true
 orchard.workspace = true
 pasta_curves.workspace = true
 zcash_protocol.workspace = true
-zcash_note_encryption.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

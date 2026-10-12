@@ -12,5 +12,3 @@
   provider-neutral `Observation`, `OperationStatus`, and `ReceiptExpectation`
   that an app's provider adapter produces. Scheduling and receipt accounting
   are left to the wallet's store.
-- Add transport-independent incoming-note authentication and commitment-path
-  validation for privately discovered payments.
