@@ -34,14 +34,14 @@ same-file = { version = "1.0.6", optional = true }
 base64 = { workspace = true, optional = true }
 thiserror = "2"
 url = "2"
-transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c", optional = true }
-transparent-wallet-store = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c", optional = true }
-transparent-events = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c", optional = true }
-transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c", optional = true }
-transparent-txid-client = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c", optional = true }
-transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c", optional = true }
-transparent-native = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c", optional = true }
-transparent-shard-server = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c", optional = true }
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "23406014875ae224ce3ee040c092f10a5bec8557", optional = true }
+transparent-wallet-store = { git = "https://github.com/valargroup/wallet-pir", rev = "23406014875ae224ce3ee040c092f10a5bec8557", optional = true }
+transparent-events = { git = "https://github.com/valargroup/wallet-pir", rev = "23406014875ae224ce3ee040c092f10a5bec8557", optional = true }
+transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "23406014875ae224ce3ee040c092f10a5bec8557", optional = true }
+transparent-txid-client = { git = "https://github.com/valargroup/wallet-pir", rev = "23406014875ae224ce3ee040c092f10a5bec8557", optional = true }
+transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "23406014875ae224ce3ee040c092f10a5bec8557", optional = true }
+transparent-native = { git = "https://github.com/valargroup/wallet-pir", rev = "23406014875ae224ce3ee040c092f10a5bec8557", optional = true }
+transparent-shard-server = { git = "https://github.com/valargroup/wallet-pir", rev = "23406014875ae224ce3ee040c092f10a5bec8557", optional = true }
 axum = { version = "0.7", optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread"] }
 tower = { version = "0.5", optional = true, features = ["util"] }
@@ -58,22 +58,22 @@ zcash_client_backend = { workspace = true, features = ["orchard", "test-dependen
 zcash_keys = { workspace = true, features = ["transparent-inputs"] }
 # The end-to-end tests read the service's init and manifests, and run discovery,
 # through the reference HTTP adapters; the library takes caller transports.
-transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c", features = ["reqwest"] }
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "23406014875ae224ce3ee040c092f10a5bec8557", features = ["reqwest"] }
 # The example's and the end-to-end tests' `HttpExchange`: one blocking request at a
 # time, the client the reference HTTP adapters above already build.
 reqwest = { version = "0.12", default-features = false, features = ["blocking"] }
 # The end-to-end test publishes shards and serves them in process; it requires
 # `wallet`, which brings the event and filter crates.
-transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c" }
-transparent-shard-server = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c" }
+transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "23406014875ae224ce3ee040c092f10a5bec8557" }
+transparent-shard-server = { git = "https://github.com/valargroup/wallet-pir", rev = "23406014875ae224ce3ee040c092f10a5bec8557" }
 # The private-recovery test computes the pages query length a manifest fixes.
-transparent-native = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c" }
+transparent-native = { git = "https://github.com/valargroup/wallet-pir", rev = "23406014875ae224ce3ee040c092f10a5bec8557" }
 axum = "0.7"
 tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
 regex = { workspace = true, features = ["std"] }
 # The txid display end-to-end test queries a recent shard of a few txids, below the client's
 # own floor, which the client's testing feature lowers.
-transparent-txid-client = { git = "https://github.com/valargroup/wallet-pir", rev = "a65634b4f2f2cd3fa00c6f9eb32345362cf3983c", features = ["testing"] }
+transparent-txid-client = { git = "https://github.com/valargroup/wallet-pir", rev = "23406014875ae224ce3ee040c092f10a5bec8557", features = ["testing"] }
 # The txid display end-to-end test drives the in-process server's router directly.
 tower = { version = "0.5", features = ["util"] }
 
