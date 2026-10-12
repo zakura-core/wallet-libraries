@@ -7921,23 +7921,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zakura-dynamic-ivk"
-version = "0.0.1-rc0"
-dependencies = [
- "blake2b_simd",
- "ff 0.14.0",
- "hex",
- "incrementalmerkletree",
- "rand 0.10.3",
- "shardtree",
- "zakura-orchard",
- "zakura-pasta-curves",
- "zakura-protocol",
- "zcash_note_encryption",
- "zeroize",
-]
-
-[[package]]
 name = "zakura-halo2-gadgets"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8030,6 +8013,23 @@ dependencies = [
  "zakura-transparent",
  "zcash_encoding",
  "zip32",
+]
+
+[[package]]
+name = "zakura-one-time-ivk"
+version = "0.0.1-rc0"
+dependencies = [
+ "blake2b_simd",
+ "ff 0.14.0",
+ "hex",
+ "incrementalmerkletree",
+ "rand 0.10.3",
+ "shardtree",
+ "zakura-orchard",
+ "zakura-pasta-curves",
+ "zakura-protocol",
+ "zcash_note_encryption",
+ "zeroize",
 ]
 
 [[package]]

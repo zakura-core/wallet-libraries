@@ -1,4 +1,4 @@
-//! Experimental dynamic IVKs: Ironwood receiving keys that share an account's
+//! Experimental one-time IVKs: Ironwood receiving keys that share an account's
 //! spending authority, each with its own incoming viewing key, and the refund memo
 //! that lets a restore find refund keys.
 //!

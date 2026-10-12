@@ -1,5 +1,5 @@
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
-use zakura_dynamic_ivk::{KeyId, Purpose, RefundMemo, has_same_spending_authority};
+use zakura_one_time_ivk::{KeyId, Purpose, RefundMemo, has_same_spending_authority};
 
 #[test]
 fn derived_keys_separate_purposes_and_preserve_only_authority() {
