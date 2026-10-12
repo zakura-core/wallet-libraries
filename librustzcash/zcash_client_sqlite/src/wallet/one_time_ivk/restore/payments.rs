@@ -1,8 +1,11 @@
 //! Durable ownership-checked candidates. These rows never contribute to balance.
 use rusqlite::{Connection, OptionalExtension, params};
-use zakura_one_time_ivk::recovery::{EncryptedNote, RecoveredNote};
 use zcash_client_backend::data_api::{
-    one_time_ivk::restore::SweepDeferral, transparent_ledger::ChainPoint,
+    one_time_ivk::restore::{
+        SweepDeferral,
+        recovery::{EncryptedNote, RecoveredNote},
+    },
+    transparent_ledger::ChainPoint,
 };
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::{

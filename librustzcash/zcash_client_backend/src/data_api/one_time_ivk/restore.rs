@@ -24,6 +24,8 @@ use zcash_protocol::consensus::BlockHeight;
 use super::{OneTimeIvkRead, OneTimeIvkWrite};
 use crate::data_api::{WalletRead, transparent_ledger::ChainPoint};
 
+pub mod recovery;
+
 /// A directory publication more than this many blocks behind the wallet's scanned tip
 /// is stale: finishing sweeps at it would leave a long rescan behind.
 pub const MAX_PUBLICATION_LAG: u32 = 100;
@@ -91,7 +93,7 @@ pub enum PaymentApplication {
     /// the account's birthday and, as with any such note, is not tracked. No memo is
     /// stored (see [`EncryptedNote::decrypt`]).
     ///
-    /// [`EncryptedNote::decrypt`]: zakura_one_time_ivk::recovery::EncryptedNote::decrypt
+    /// [`EncryptedNote::decrypt`]: recovery::EncryptedNote::decrypt
     Applied,
 }
 

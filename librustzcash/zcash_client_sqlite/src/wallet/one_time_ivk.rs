@@ -271,7 +271,7 @@ fn key_ref(conn: &Connection, account: AccountUuid, key: KeyId) -> Result<i64, S
          WHERE a.uuid = ?1 AND k.purpose = ?2 AND k.key_index = ?3",
         rusqlite::params![
             account.0,
-            purpose_code(key.purpose()),
+            purpose_code(key.purpose())?,
             key.index().to_be_bytes()
         ],
         |r| r.get(0),
@@ -343,7 +343,7 @@ fn register<P: Parameters>(
          RETURNING id, scan_from, active_from",
             named_params![
                 ":account": account_ref.0,
-                ":purpose": purpose_code(key_id.purpose()),
+                ":purpose": purpose_code(key_id.purpose())?,
                 ":index": &key_id.index().to_be_bytes(),
                 ":receiver": &receiver,
                 ":scan_from": u32::from(scan_from),
@@ -567,11 +567,12 @@ pub(super) fn adopt_found_note(
     Ok(())
 }
 
-/// The stored code of `purpose`.
-fn purpose_code(purpose: Purpose) -> u8 {
+/// The stored code of `purpose`, or an error for a purpose this store does not support.
+fn purpose_code(purpose: Purpose) -> Result<u8, SqliteClientError> {
     match purpose {
-        Purpose::Refund => 0,
-        Purpose::Receive => 1,
+        Purpose::Refund => Ok(0),
+        Purpose::Receive => Ok(1),
+        _ => Err(invalid("unsupported one-time key purpose")),
     }
 }
 

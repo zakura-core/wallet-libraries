@@ -8,10 +8,7 @@ pub(super) use orchard::{
 };
 pub(super) use prost::Message;
 pub(super) use secrecy::{ExposeSecret, SecretVec};
-pub(super) use zakura_one_time_ivk::{
-    recovery::EncryptedNote,
-    swap::{Observation, OperationStatus},
-};
+pub(super) use zakura_one_time_ivk::swap::{Observation, OperationStatus};
 pub(super) use zcash_client_backend::{
     data_api::{
         WalletRead, WalletWrite,
@@ -20,6 +17,7 @@ pub(super) use zcash_client_backend::{
             restore::{
                 DirectoryPayment, DiscoveryWork, MAX_PUBLICATION_LAG, OneTimeIvkRestoreRead as _,
                 OneTimeIvkRestoreWrite as _, PaymentApplication, SweepDeferral,
+                recovery::EncryptedNote,
             },
         },
         testing::{AddressType, IronwoodFvk, TestBuilder, TestRng, TestState},
@@ -368,7 +366,7 @@ pub(super) fn get_key(
     account: AccountUuid,
     key: KeyId,
 ) -> Result<Option<OneTimeKey>, SqliteClientError> {
-    let (purpose, index) = (purpose_code(key.purpose()), key.index().to_be_bytes());
+    let (purpose, index) = (purpose_code(key.purpose())?, key.index().to_be_bytes());
     let selected = "k.purpose = ?2 AND k.key_index = ?3";
     key_matching(
         &db.conn,
@@ -385,7 +383,10 @@ pub(super) fn key_state(db: &Db, key: KeyId) -> (BlockHeight, bool) {
         .query_row(
             "SELECT scan_from, advances_allocation FROM ironwood_receiving_keys
              WHERE purpose = ?1 AND key_index = ?2",
-            rusqlite::params![purpose_code(key.purpose()), key.index().to_be_bytes()],
+            rusqlite::params![
+                purpose_code(key.purpose()).unwrap(),
+                key.index().to_be_bytes()
+            ],
             |r| Ok((BlockHeight::from(r.get::<_, u32>(0)?), r.get(1)?)),
         )
         .unwrap()
