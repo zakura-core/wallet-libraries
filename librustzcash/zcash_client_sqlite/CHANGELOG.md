@@ -158,7 +158,8 @@ workspace.
   facts atomically, and promotion refuses a transfer that introduces missing coverage.
 
 ### Added
-- One-time IVKs (with `orchard`; module `wallet::one_time_ivk`): per-swap Ironwood refund
+- One-time IVKs (feature `one-time-ivk`, which enables `orchard`; module
+  `wallet::one_time_ivk`): per-swap Ironwood refund
   and incoming addresses derived from the account viewing key with `zakura-one-time-ivk`,
   recoverable from the seed. `WalletDb` implements the backend's `OneTimeIvkRead`,
   `OneTimeIvkWrite` and the restore protocol's `OneTimeIvkRestoreRead` and
@@ -168,9 +169,10 @@ workspace.
   with their registered key, but only a full transaction stores their memo: they carry
   none the wallet reads, since the refund marker is on internal change. While a one-time
   key is open, blocks and transactions processed without the one-time keys are refused
-  (`SqliteClientError::OneTimeIvksNotUsed`). A build without `orchard` refuses to
-  open or initialize a database holding one-time IVK state
-  (`WalletMigrationError::OneTimeIvksRequireOrchard`).
+  (`SqliteClientError::OneTimeIvksNotUsed`). The migration creates the one-time IVK
+  tables in every build, but a build without `one-time-ivk` refuses to open or
+  initialize a database holding one-time IVK state
+  (`WalletMigrationError::OneTimeIvksNotEnabled`).
   Invalid input to these calls is `SqliteClientError::InvalidOneTimeIvkInput`, and a call
   that must wait returns its `ReservationPolicy` or `SweepDeferral` as an `Ok` value.
 - Issuance: `WalletDb::reserve_refund_key` and `prepare_receive_reservation`, which require

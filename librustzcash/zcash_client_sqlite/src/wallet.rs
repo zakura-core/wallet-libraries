@@ -196,7 +196,7 @@ pub mod history;
 pub mod init;
 pub(crate) mod ironwood_hooks;
 pub(crate) mod locking;
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 pub mod one_time_ivk;
 #[cfg(feature = "orchard")]
 pub(crate) mod orchard;
@@ -863,7 +863,7 @@ pub(crate) fn delete_account(
 
 /// Whether a one-time key is open, so that blocks scanned or transactions decrypted
 /// without it must not be stored.
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 pub(crate) fn one_time_key_open(conn: &Connection) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys
@@ -6013,7 +6013,7 @@ pub(crate) fn insert_nullifier_map<N: AsRef<[u8]>>(
 
     // One-time IVK recovery's spend evidence: record even empty blocks, but only when
     // their nullifiers were actually retained.
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     if spend_pool == ShieldedPool::Ironwood {
         conn.execute(
             "INSERT OR IGNORE INTO ironwood_nullifier_scan_blocks (height) VALUES (?1)",

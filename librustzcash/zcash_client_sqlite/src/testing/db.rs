@@ -58,7 +58,7 @@ use crate::{
 };
 
 // The delegated one-time IVK traits' signatures name these.
-#[cfg(feature = "orchard")]
+#[cfg(feature = "one-time-ivk")]
 use {
     std::collections::BTreeMap,
     zakura_one_time_ivk::KeyId,
@@ -112,7 +112,7 @@ pub(crate) fn test_rng() -> TestRng {
 #[delegate(EnhancePirRead, target = "wallet_db")]
 #[delegate(TransactionStatusRead, target = "wallet_db")]
 #[cfg_attr(
-    feature = "orchard",
+    feature = "one-time-ivk",
     delegate(OneTimeIvkRead, target = "wallet_db"),
     delegate(OneTimeIvkWrite, target = "wallet_db"),
     delegate(OneTimeIvkRestoreRead, target = "wallet_db"),

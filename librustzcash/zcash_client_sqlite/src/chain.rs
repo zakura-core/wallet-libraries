@@ -549,11 +549,11 @@ mod tests {
         testing::pool::scan_cached_blocks_detects_spends_out_of_order::<OrchardPoolTester>()
     }
 
-    /// A build without `orchard` refuses to record scanned blocks over one-time IVK state,
-    /// leaving the scanned chain unchanged.
+    /// A build without `one-time-ivk` refuses to record scanned blocks over one-time IVK
+    /// state, leaving the scanned chain unchanged.
     #[test]
-    #[cfg(not(feature = "orchard"))]
-    fn scanning_without_orchard_refuses_one_time_ivk_state() {
+    #[cfg(not(feature = "one-time-ivk"))]
+    fn scanning_without_the_feature_refuses_one_time_ivk_state() {
         use crate::error::SqliteClientError;
         use zcash_client_backend::data_api::{
             WalletRead,
@@ -600,7 +600,7 @@ mod tests {
     /// Blocks scanned without the wallet's open one-time keys are refused, leaving the
     /// scanned chain unchanged. Inactive and closed keys do not block them.
     #[test]
-    #[cfg(feature = "orchard")]
+    #[cfg(feature = "one-time-ivk")]
     fn scanning_without_one_time_ivks_refuses_open_one_time_keys() {
         use crate::{error::SqliteClientError, testing::db::TestDb};
         use zcash_client_backend::data_api::{
