@@ -161,6 +161,28 @@ fn one_time_ivk_rejects_mismatched_note_metadata() {
     assert!(!key_state(st.wallet().db(), key.key_id()).1);
 }
 
+/// Lookahead keys wait for a sweep: unlike activation, registering them replays no
+/// scanned history, and scanning never trial-decrypts with them.
+#[test]
+fn lookahead_keys_are_swept_instead_of_scanned() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let key = KeyId::new(Purpose::Receive, 1);
+    let first = mine_payment(&mut st, key, 50_000);
+    st.scan_cached_blocks_with_one_time_ivks(first, 1);
+    lookahead(st.wallet_mut().db_mut(), account, 2, first);
+    assert!(queued(&st).is_empty());
+    assert!(scanning_keys(&st).is_empty());
+    assert!(
+        st.wallet()
+            .one_time_history_pending(account, first)
+            .unwrap()
+    );
+    let later = mine_payment(&mut st, key, 60_000);
+    st.scan_cached_blocks_with_one_time_ivks(later, 1);
+    assert!(unspent_keys(&st, later).is_empty());
+}
+
 #[test]
 fn active_keys_scan_whole_batches_across_their_start() {
     let mut st = ironwood_wallet();
