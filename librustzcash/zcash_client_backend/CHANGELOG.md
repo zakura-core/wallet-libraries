@@ -100,7 +100,7 @@ workspace.
   funded a recovered send and its fee unless recovered evidence identifies another contributor.
   This display assumption does not establish payment or fee attribution.
 - `ll::wallet::put_blocks` and `ll::wallet::put_blocks_rows` take
-  `ironwood_nullifier_retention` (with `orchard`): a height from which Ironwood nullifiers
+  `ironwood_nullifier_retention` (with `one-time-ivk`): a height from which Ironwood nullifiers
   stay tracked, for a store that finds Ironwood notes after scanning past them. Pass `None`
   to keep the previous behaviour.
 - `enhance_pir::storage::validate_and_apply_records` captures the stored-metadata snapshot for
