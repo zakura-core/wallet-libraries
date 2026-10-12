@@ -1,10 +1,10 @@
 # Receiver directory restore sweeps
 
-A restored wallet finds payments to its dynamic keys by looking each one up in a
+A restored wallet finds payments to its one-time keys by looking each one up in a
 receiver directory over PIR. `fetch_seen` downloads the swap provider seen sets that
 a wallet checks before issuing a swap address. With the `wallet` feature, `sweep`
 runs one account's restore sweeps for any wallet store that implements the backend's
-dynamic IVK traits (`zcash_client_backend::data_api::dynamic_ivk`), such as
+one-time IVK traits (`zcash_client_backend::data_api::one_time_ivk`), such as
 `zakura-client-sqlite`. Its rustdoc states which publications a run accepts, when it
 sends requests, which keys keep scanning or are checked again, and how failures are
 retried.

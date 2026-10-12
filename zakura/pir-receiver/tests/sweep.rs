@@ -1,4 +1,4 @@
-//! Restore sweeps end to end: a restored wallet looks up its dynamic keys in a receiver
+//! Restore sweeps end to end: a restored wallet looks up its one-time keys in a receiver
 //! directory served in process, over the service's own routes and real PIR, and
 //! imports what it finds only after checking it against its own chain.
 
@@ -28,7 +28,7 @@ use receiver_pir_server::{Publication, Publications, router_with_publications};
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use sha2::{Digest as _, Sha256};
 use tower::ServiceExt as _;
-use zakura_dynamic_ivk::lifecycle::RESTORE_WATCH_SECS;
+use zakura_one_time_ivk::lifecycle::RESTORE_WATCH_SECS;
 use zakura_pir_enhance::{
     ClientError, QueryBinding, ShardSession,
     transport::{Request as EnhanceRequest, ResponseBody, Transport as EnhanceTransport},
@@ -40,7 +40,7 @@ use zakura_pir_receiver::{
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _, WalletWrite as _,
     chain::BlockSource as _,
-    dynamic_ivk::{DynamicIvkRead, DynamicIvkWrite as _, PaymentApplication},
+    one_time_ivk::{OneTimeIvkRead, OneTimeIvkWrite as _, PaymentApplication},
     testing::{AddressType, IronwoodFvk, TestBuilder, TestRng, TestState},
     transparent_ledger::ChainPoint,
 };
@@ -52,7 +52,7 @@ use zcash_client_sqlite::{
         db::{TestDb, TestDbFactory},
     },
     util::{SystemClock, testing::FixedClock},
-    wallet::dynamic_ivk::{KeyId, ProviderSeen, Purpose, RECEIVE_GAP_LIMIT},
+    wallet::one_time_ivk::{KeyId, ProviderSeen, Purpose, RECEIVE_GAP_LIMIT},
 };
 use zcash_note_encryption::{Domain as _, try_compact_note_decryption};
 use zcash_primitives::block::BlockHash;
@@ -111,14 +111,14 @@ fn tip(st: &State) -> ChainPoint {
     }
 }
 
-/// The receiver of the test account's incoming dynamic key `index`.
+/// The receiver of the test account's incoming one-time key `index`.
 fn receiver(st: &State, index: u64) -> Receiver {
     let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
     let fvk = KeyId::new(Purpose::Receive, index).derive(&parent).unwrap();
     Receiver::from_bytes(fvk.address_at(0u32, Scope::External).to_raw_address_bytes()).unwrap()
 }
 
-/// Pays incoming dynamic key `index` in a new scanned block, before any restore has
+/// Pays incoming one-time key `index` in a new scanned block, before any restore has
 /// registered the key, so scanning cannot find it. Returns the payment as the
 /// directory lists it and its note data. The output is the chain's Ironwood leaf at
 /// `position`, which is the number of earlier Ironwood outputs.
@@ -130,7 +130,7 @@ fn pay_restored_key(st: &mut State, index: u64, position: u64) -> (Record, [u8; 
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(VALUE),
     );
-    st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
     let mut block = None;
     st.cache()
         .with_blocks::<_, ()>(Some(height), Some(1), |cb| {
@@ -328,7 +328,7 @@ impl Notes {
     }
 }
 
-impl<W: DynamicIvkRead> NoteSource<W> for Notes {
+impl<W: OneTimeIvkRead> NoteSource<W> for Notes {
     async fn note_data(
         &mut self,
         _: &W,
@@ -345,7 +345,7 @@ impl<W: DynamicIvkRead> NoteSource<W> for Notes {
 /// A note source that cannot serve the wallet's chain.
 struct NoNotes;
 
-impl<W: DynamicIvkRead> NoteSource<W> for NoNotes {
+impl<W: OneTimeIvkRead> NoteSource<W> for NoNotes {
     async fn note_data(
         &mut self,
         _: &W,
@@ -379,7 +379,7 @@ impl WriteLock for Labels {
 fn restore(st: &mut State, account: AccountUuid) {
     st.wallet_mut()
         .db_mut()
-        .maintain_dynamic_ivks(account)
+        .maintain_one_time_ivks(account)
         .unwrap();
 }
 
@@ -437,7 +437,7 @@ async fn a_restore_sweep_finds_a_payout_and_moves_the_lookahead_past_it() {
     let account = st.test_account().unwrap().id();
     let paid = 3;
     let (record, note_data) = pay_restored_key(&mut st, paid, 0);
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
     assert_eq!(st.get_total_balance(account), Zatoshis::ZERO);
@@ -484,7 +484,7 @@ async fn every_payment_to_a_key_is_imported_in_note_data_batches() {
             records.push(record);
             data.insert(position, note_data);
         }
-        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+        st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
         restore(&mut st, account);
         let through = tip(&st);
         let commitments: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
@@ -509,7 +509,7 @@ struct Mislabeled {
     calls: usize,
 }
 
-impl<W: DynamicIvkRead> NoteSource<W> for Mislabeled {
+impl<W: OneTimeIvkRead> NoteSource<W> for Mislabeled {
     async fn note_data(
         &mut self,
         _: &W,
@@ -527,7 +527,7 @@ async fn note_data_for_other_positions_is_missing_data() {
     let account = st.test_account().unwrap().id();
     let paid = 1;
     let (record, note_data) = pay_restored_key(&mut st, paid, 0);
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
     let directory = Directory::new(publish(
@@ -560,7 +560,7 @@ async fn note_data_for_other_positions_is_missing_data() {
 async fn a_wallet_without_payments_downloads_only_the_filters() {
     let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
     let directory = Directory::new(publish(&[], &[], through, &provider(&[])));
@@ -584,13 +584,13 @@ async fn a_wallet_without_payments_downloads_only_the_filters() {
 async fn a_newer_paid_filter_finds_a_payment_to_a_closed_key() {
     let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     restore(&mut st, account);
     let first = tip(&st);
     let directory = Directory::new(publish(&[], &[], first, &provider(&[])));
     let mut notes = Notes::new(BTreeMap::new());
     settle(&mut st, first, &directory, &mut notes).await;
-    assert!(st.wallet().get_dynamic_scanning_keys().unwrap().is_empty());
+    assert!(st.wallet().get_one_time_scanning_keys().unwrap().is_empty());
 
     // The closed key misses a payment, which the same publication cannot show.
     let (record, note_data) = pay_restored_key(&mut st, 0, 0);
@@ -616,7 +616,7 @@ async fn a_newer_paid_filter_finds_a_payment_to_a_closed_key() {
     );
 
     // A later publication still holds the paid key, but it is not looked up again.
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     let later = tip(&st);
     let directory = Directory::new(publish(
         std::slice::from_ref(&record),
@@ -641,7 +641,7 @@ async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
     ] {
         let mut st = ironwood_wallet();
         let account = st.test_account().unwrap().id();
-        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+        st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
         restore(&mut st, account);
         let through = tip(&st);
         let sets = if case == "quoted" {
@@ -661,7 +661,7 @@ async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
         settle(&mut st, through, &directory, &mut notes).await;
         let mut scanning: Vec<_> = st
             .wallet()
-            .get_dynamic_scanning_keys()
+            .get_one_time_scanning_keys()
             .unwrap()
             .iter()
             .map(|k| k.key_id().index())
@@ -683,7 +683,7 @@ async fn a_seen_hit_outlives_a_rejected_payment_and_a_later_miss() {
     // A later output, which publication A's tree replaces.
     let (later_output, _) = pay_restored_key(&mut st, 1000, 1);
     let commitments = [record.payment.cmx, later_output.payment.cmx];
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
     let seen = |st: &State| -> bool {
@@ -752,7 +752,7 @@ struct FailFirstAttempt {
 impl WriteLock for FailFirstAttempt {
     fn write<T>(&self, label: &'static str, write: impl FnOnce() -> T) -> T {
         let mut labels = self.labels.borrow_mut();
-        if label == "dynamic_sweep.attempt" && !labels.contains(&label) {
+        if label == "one_time_sweep.attempt" && !labels.contains(&label) {
             self.fail.store(true, Ordering::SeqCst);
         }
         labels.push(label);
@@ -768,7 +768,7 @@ async fn a_failed_attempt_write_stops_the_run() {
     let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
     let (record, note_data) = pay_restored_key(&mut st, 0, 0);
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
     let directory = Directory::new(publish(
@@ -791,7 +791,7 @@ async fn a_failed_attempt_write_stops_the_run() {
     assert!(matches!(result, Err(Error::Wallet(_))), "{result:?}");
     assert_eq!(
         *lock.labels.borrow(),
-        ["dynamic_sweep.due", "dynamic_sweep.attempt"]
+        ["one_time_sweep.due", "one_time_sweep.attempt"]
     );
     assert!(
         directory.requests().iter().all(|r| !r.starts_with("POST")),
@@ -807,10 +807,10 @@ async fn a_failed_attempt_write_stops_the_run() {
 async fn a_stale_tip_releases_nothing() {
     let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     let directory = Directory::new(publish(&[], &[], through, &provider(&[])));
     let lock = Labels::default();
     run(&mut st, through, &directory, &mut NoNotes, &lock, NOW)
@@ -835,7 +835,7 @@ struct WriterBeforeRelease<F> {
 
 impl<F: FnOnce()> WriteLock for WriterBeforeRelease<F> {
     fn write<T>(&self, label: &'static str, write: impl FnOnce() -> T) -> T {
-        if label != "dynamic_sweep.release" {
+        if label != "one_time_sweep.release" {
             return write();
         }
         if let Some(other) = self.other.borrow_mut().take() {
@@ -891,7 +891,7 @@ async fn release_runs_only_at_the_fully_scanned_tip() {
         let mut st = ironwood_wallet_in(TestDbFactory::file_backed());
         let network = *st.network();
         let account = st.test_account().unwrap().id();
-        st.generate_and_scan_empty_blocks_with_dynamic_ivks(2);
+        st.generate_and_scan_empty_blocks_with_one_time_ivks(2);
         restore(&mut st, account);
         let through = tip(&st);
         let path = st.wallet().conn().path().unwrap().to_owned();
@@ -910,7 +910,7 @@ async fn release_runs_only_at_the_fully_scanned_tip() {
                     && matches!(
                         ctx.action,
                         AuthAction::Read {
-                            table_name: "ironwood_dynamic_spend_retention",
+                            table_name: "ironwood_one_time_spend_retention",
                             ..
                         }
                     )
@@ -942,7 +942,7 @@ async fn release_runs_only_at_the_fully_scanned_tip() {
 #[tokio::test]
 async fn seen_sets_of_another_network_are_refused() {
     let mut st = ironwood_wallet();
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     let directory = Directory::new(publish(&[], &[], tip(&st), &provider(&[])));
     let refused = fetch_seen(ORIGIN, &directory, [8; 32]).await;
     assert!(
@@ -966,7 +966,7 @@ async fn seen_sets_of_another_network_are_refused() {
 async fn every_provider_with_sets_needs_a_seen_set() {
     let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
     // Provider `a` has its seen set only if `a_seen`. `b` has only a seen set, from a
@@ -996,13 +996,13 @@ async fn every_provider_with_sets_needs_a_seen_set() {
         assert!(
             labels
                 .iter()
-                .all(|l| ["dynamic_sweep.due", "dynamic_sweep.attempt"].contains(l)),
+                .all(|l| ["one_time_sweep.due", "one_time_sweep.attempt"].contains(l)),
             "{labels:?}"
         );
         assert!(
             st.wallet()
                 .db()
-                .dynamic_history_pending(account, through.height)
+                .one_time_history_pending(account, through.height)
                 .unwrap()
         );
     }
@@ -1066,7 +1066,7 @@ async fn a_run_fatal_failure_stops_the_run_before_leasing_more_keys() {
         let records: Vec<_> = (0..2)
             .map(|index| pay_restored_key(&mut st, index, index).0)
             .collect();
-        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+        st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
         restore(&mut st, account);
         let through = tip(&st);
         let cmxs: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
@@ -1094,7 +1094,7 @@ async fn a_run_fatal_failure_stops_the_run_before_leasing_more_keys() {
         let due: Vec<_> = st
             .wallet_mut()
             .db_mut()
-            .prepare_dynamic_sweeps(account, through, NOW, NonZeroU32::new(64).unwrap())
+            .prepare_one_time_sweeps(account, through, NOW, NonZeroU32::new(64).unwrap())
             .unwrap()
             .unwrap()
             .iter()
@@ -1114,7 +1114,7 @@ async fn a_publication_off_the_wallets_chain_is_refused_before_any_lookup() {
         let mut st = ironwood_wallet();
         let account = st.test_account().unwrap().id();
         let (record, note_data) = pay_restored_key(&mut st, 0, 0);
-        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+        st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
         restore(&mut st, account);
         let through = tip(&st);
         let publication = if off_chain {
@@ -1146,7 +1146,7 @@ async fn a_publication_off_the_wallets_chain_is_refused_before_any_lookup() {
         assert!(
             st.wallet()
                 .db()
-                .dynamic_history_pending(account, through.height)
+                .one_time_history_pending(account, through.height)
                 .unwrap()
         );
         for (now, requests) in [(NOW, 1), (NOW + 60, 2)] {
@@ -1300,7 +1300,7 @@ async fn a_deferred_candidate_takes_each_publications_current_answer() {
         let account = st.test_account().unwrap().id();
         let key = KeyId::new(Purpose::Receive, 0);
         let (record, note_data) = pay_restored_key(&mut st, key.index(), 0);
-        st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+        st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
         restore(&mut st, account);
         let mut through = tip(&st);
         let mut first = record.clone();
@@ -1310,7 +1310,7 @@ async fn a_deferred_candidate_takes_each_publications_current_answer() {
             AwaitingScan => {
                 st.generate_empty_block();
                 let (top, _) = st.generate_empty_block();
-                st.scan_cached_blocks_with_dynamic_ivks(top, 1);
+                st.scan_cached_blocks_with_one_time_ivks(top, 1);
                 let block = st.wallet().block_metadata(top).unwrap().unwrap();
                 through = ChainPoint {
                     height: top,
@@ -1351,7 +1351,7 @@ async fn a_deferred_candidate_takes_each_publications_current_answer() {
         );
         assert!(swept.pending);
         if deferral == AwaitingScan {
-            st.scan_cached_blocks_with_dynamic_ivks(through.height - 1, 1);
+            st.scan_cached_blocks_with_one_time_ivks(through.height - 1, 1);
         }
 
         // Publication B, after the attempt's backoff.
@@ -1390,7 +1390,7 @@ async fn an_unchanged_answer_reuses_queued_note_data() {
     let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
     let (record, note_data) = pay_restored_key(&mut st, 0, 0);
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
     st.wallet()
@@ -1445,7 +1445,7 @@ async fn each_run_sweeps_one_batch_and_later_runs_progress() {
     let account = st.test_account().unwrap().id();
     let paid = 100;
     let (record, note_data) = pay_restored_key(&mut st, paid, 0);
-    st.generate_and_scan_empty_blocks_with_dynamic_ivks(1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     restore(&mut st, account);
     let through = tip(&st);
     // The set is finite, so an unbounded run stops past it instead of hanging.

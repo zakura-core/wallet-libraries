@@ -1,4 +1,4 @@
-//! Restore sweeps over a wallet's dynamic IVK traits.
+//! Restore sweeps over a wallet's one-time IVK traits.
 
 use std::{collections::BTreeMap, num::NonZeroU32};
 
@@ -10,7 +10,7 @@ use receiver_directory::{
     witness::WitnessSnapshot,
 };
 use receiver_pir::{AcceptedCoverage, transport::DirectoryClient};
-use zakura_dynamic_ivk::{KeyId, lifecycle::RESTORE_WATCH_SECS};
+use zakura_one_time_ivk::{KeyId, lifecycle::RESTORE_WATCH_SECS};
 use zakura_pir_enhance::{
     ClientError, ClientResourceLimits,
     transport::{Client, PendingClient, Transport as EnhanceTransport},
@@ -18,11 +18,11 @@ use zakura_pir_enhance::{
 };
 use zcash_client_backend::data_api::{
     WalletRead,
-    dynamic_ivk::{
-        DirectoryPayment, DiscoveryWork, DynamicIvkRead, DynamicIvkWrite, PaymentApplication,
+    enhance_pir::EnhancePirRead,
+    one_time_ivk::{
+        DirectoryPayment, DiscoveryWork, OneTimeIvkRead, OneTimeIvkWrite, PaymentApplication,
         SweepDeferral,
     },
-    enhance_pir::EnhancePirRead,
     transparent_ledger::ChainPoint,
 };
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
@@ -79,7 +79,7 @@ pub trait WriteLock {
 
 /// Supplies the note data that payments a lookup found need.
 #[allow(async_fn_in_trait)]
-pub trait NoteSource<W: DynamicIvkRead> {
+pub trait NoteSource<W: OneTimeIvkRead> {
     /// The 528 ciphertext bytes after the directory's prefix for each of `positions`,
     /// keyed by commitment tree position. `wallet` is the wallet being swept.
     /// `positions` is never empty when a sweep calls this. [`Error::NotesUnavailable`]
@@ -120,7 +120,7 @@ impl<T, P, W> NoteSource<W> for EnhanceNotes<'_, T, P>
 where
     T: EnhanceTransport,
     P: Parameters,
-    W: DynamicIvkRead + EnhancePirRead,
+    W: OneTimeIvkRead + EnhancePirRead,
 {
     async fn note_data(
         &mut self,
@@ -178,7 +178,7 @@ pub struct Swept<E> {
 
 /// Runs `account`'s due restore sweeps against the receiver directory at `origin`,
 /// then releases Ironwood spend evidence that no sweep needs any longer (see
-/// [`DynamicIvkWrite::finish_dynamic_nullifier_recovery`]). A wallet with several
+/// [`OneTimeIvkWrite::finish_one_time_nullifier_recovery`]). A wallet with several
 /// accounts calls it once for each.
 ///
 /// `through` is the wallet's fully scanned tip, and sweeps and release run only while
@@ -187,16 +187,16 @@ pub struct Swept<E> {
 /// When none is due, the run makes no request. Otherwise the publication must commit
 /// to `genesis` ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS) on mainnet), cover
 /// history from Ironwood activation on `params`' network, and end at a block the
-/// wallet accepts (see [`DynamicIvkRead::directory_publication_anchor`]) with the
+/// wallet accepts (see [`OneTimeIvkRead::directory_publication_anchor`]) with the
 /// wallet's Ironwood tree size there, and have a dated seen set for at least one swap
 /// provider and for every provider with a set, as for [`fetch_seen`](crate::fetch_seen).
 ///
 /// Each key's receiver is first tested against the publication's filters, which every
 /// wallet downloads alike: only a receiver in the paid set is looked up over PIR, and
 /// one in a swap provider's seen set is never issued again (see
-/// [`DynamicIvkWrite::begin_dynamic_sweep_attempt`]). A key whose receiver a provider's
+/// [`OneTimeIvkWrite::begin_one_time_sweep_attempt`]). A key whose receiver a provider's
 /// recent set holds keeps scanning for the wallet's restore watch, and any other closes
-/// (see [`DynamicIvkWrite::apply_dynamic_sweep`]). A recent set can rule a receiver out
+/// (see [`OneTimeIvkWrite::apply_one_time_sweep`]). A recent set can rule a receiver out
 /// only if it is current and complete: its feed's last read began at most fifteen
 /// minutes before `now`, and its window, with the feed running throughout, covers
 /// [`RESTORE_WATCH_SECS`]. Unless every provider has such a set, every key keeps
@@ -204,7 +204,7 @@ pub struct Swept<E> {
 ///
 /// After releasing, the run checks closed keys with no known payment against the
 /// publication's paid filter once per publication (see
-/// [`DynamicIvkWrite::record_paid_filter_check`]), so a payment the publication shows
+/// [`OneTimeIvkWrite::record_paid_filter_check`]), so a payment the publication shows
 /// after such a key closed is swept on a later run. While any such key exists, every
 /// run fetches the manifest; it fetches the filters only for a newer publication.
 ///
@@ -231,7 +231,7 @@ pub async fn sweep<W, P, T, N, L>(
     now: i64,
 ) -> Result<Swept<AccountError<W>>, Error<AccountError<W>>>
 where
-    W: DynamicIvkWrite,
+    W: OneTimeIvkWrite,
     P: Parameters,
     T: Transport,
     N: NoteSource<W>,
@@ -244,8 +244,8 @@ where
     let mut directory = None;
     if current {
         let work = lock
-            .write("dynamic_sweep.due", || {
-                wallet.prepare_dynamic_sweeps(account, through, now, BATCH)
+            .write("one_time_sweep.due", || {
+                wallet.prepare_one_time_sweeps(account, through, now, BATCH)
             })
             .map_err(Error::Wallet)?
             .map_err(Error::Deferred)?;
@@ -260,8 +260,8 @@ where
                     // if its own lookup had failed, and the next sync does not wait on
                     // the same directory again.
                     for item in &work {
-                        lock.write("dynamic_sweep.attempt", || {
-                            wallet.begin_dynamic_sweep_attempt(account, item.key, now, false)
+                        lock.write("one_time_sweep.attempt", || {
+                            wallet.begin_one_time_sweep_attempt(account, item.key, now, false)
                         })
                         .map_err(Error::Wallet)?;
                     }
@@ -275,8 +275,8 @@ where
             }
             for (item, check) in work.into_iter().zip(checks) {
                 // A key whose lease is not stored would be due again at once.
-                lock.write("dynamic_sweep.attempt", || {
-                    wallet.begin_dynamic_sweep_attempt(account, item.key, now, check.seen)
+                lock.write("one_time_sweep.attempt", || {
+                    wallet.begin_one_time_sweep_attempt(account, item.key, now, check.seen)
                 })
                 .map_err(Error::Wallet)?;
                 let swept_key = sweep_key(
@@ -303,17 +303,17 @@ where
                 }
             }
             // New lookahead keys wait for a later run, which bounds this one.
-            lock.write("dynamic_sweep.lookahead", || {
-                wallet.maintain_dynamic_ivks(account)
+            lock.write("one_time_sweep.lookahead", || {
+                wallet.maintain_one_time_ivks(account)
             })
             .map_err(Error::Wallet)?;
         }
         // Another writer may have moved the tip while the sweep held no lock, and a
         // finished key may have queued a rescan below it.
-        lock.write("dynamic_sweep.release", || {
+        lock.write("one_time_sweep.release", || {
             let scanned = wallet.block_fully_scanned()?.map(|b| b.block_height());
             if at_tip(wallet, through)? && scanned == Some(through.height) {
-                wallet.finish_dynamic_nullifier_recovery(account, through)?;
+                wallet.finish_one_time_nullifier_recovery(account, through)?;
             }
             Ok(())
         })
@@ -321,7 +321,7 @@ where
     }
     if let (true, Some(transport)) = (current, transport) {
         // Closed keys with no known payment need each newer publication's paid filter.
-        let closed = wallet.dynamic_keys_to_recheck(account, through.height + 1);
+        let closed = wallet.one_time_keys_to_recheck(account, through.height + 1);
         if !closed.map_err(Error::Wallet)?.is_empty() {
             let accepted = Directory::accept(wallet, params, through, genesis, origin, transport);
             directory = Some(accepted.await?);
@@ -331,7 +331,7 @@ where
         // Only keys this publication has not checked, so the filters are fetched only for
         // a newer one.
         let keys = wallet
-            .dynamic_keys_to_recheck(account, directory.anchor.height)
+            .one_time_keys_to_recheck(account, directory.anchor.height)
             .map_err(Error::Wallet)?;
         if !keys.is_empty() {
             let checks = directory.check(&keys, now).await?;
@@ -340,7 +340,7 @@ where
                 .zip(checks)
                 .map(|(item, check)| (item.key, check.paid))
                 .collect();
-            lock.write("dynamic_sweep.recheck", || {
+            lock.write("one_time_sweep.recheck", || {
                 wallet.record_paid_filter_check(account, directory.anchor, &checked)
             })
             .map_err(Error::Wallet)?;
@@ -348,7 +348,7 @@ where
     }
     // Read last, since a paid filter hit queues its key's sweep again.
     let pending = wallet
-        .dynamic_history_pending(account, through.height)
+        .one_time_history_pending(account, through.height)
         .map_err(Error::Wallet)?;
     Ok(Swept {
         finished,
@@ -401,7 +401,7 @@ struct Session<T> {
 impl<'a, T: Transport> Directory<'a, T> {
     /// Accepts the publication `origin` serves, at the block of the wallet's chain it
     /// ends at.
-    async fn accept<W: DynamicIvkRead, P: Parameters>(
+    async fn accept<W: OneTimeIvkRead, P: Parameters>(
         wallet: &W,
         params: &P,
         through: ChainPoint,
@@ -566,7 +566,7 @@ async fn sweep_key<W, T, N, L>(
     lock: &L,
 ) -> Result<(), Error<AccountError<W>>>
 where
-    W: DynamicIvkWrite,
+    W: OneTimeIvkWrite,
     T: Transport,
     N: NoteSource<W>,
     L: WriteLock,
@@ -601,7 +601,7 @@ where
             notes.note_data(wallet, batch.clone()).await?
         };
         let done = lock
-            .write("dynamic_sweep.queue", || {
+            .write("one_time_sweep.queue", || {
                 wallet.queue_directory_lookup(account, key, anchor, &payments, &note_data)
             })
             .map_err(Error::Wallet)?
@@ -623,8 +623,8 @@ where
         None
     };
     let applied = lock
-        .write("dynamic_sweep.apply", || {
-            wallet.apply_dynamic_sweep(account, key, through, anchor, check.recent, |p, cmx| {
+        .write("one_time_sweep.apply", || {
+            wallet.apply_one_time_sweep(account, key, through, anchor, check.recent, |p, cmx| {
                 witnesses.and_then(|w| w.path(p, cmx).ok())
             })
         })

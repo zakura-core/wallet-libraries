@@ -1,7 +1,7 @@
-//! Restore sweeps of dynamic keys through a receiver directory over PIR.
+//! Restore sweeps of one-time keys through a receiver directory over PIR.
 //!
 //! A restored wallet cannot rescan public history for every key its seed may have
-//! used, so each dynamic key recovered from the seed is looked up once in a receiver
+//! used, so each one-time key recovered from the seed is looked up once in a receiver
 //! directory: a public index of Ironwood payments sent with the zero outgoing viewing
 //! key, keyed by receiver. Lookups use PIR, so the directory does not learn which
 //! receivers the wallet holds. A publication is used only at a block the wallet
@@ -10,7 +10,7 @@
 //!
 //! `fetch_seen` downloads the swap provider seen sets that a wallet checks before
 //! issuing a swap address. The `wallet` feature adds `sweep`, which runs these lookups
-//! for any wallet store that implements the backend's `DynamicIvkWrite`. The caller
+//! for any wallet store that implements the backend's `OneTimeIvkWrite`. The caller
 //! supplies transports, which carry its route policy, cancellation and timeouts, and a
 //! `WriteLock` that serializes wallet writes with its other writers. Dropping a `sweep`
 //! future at any await is safe: each wallet step commits on its own, and every begun

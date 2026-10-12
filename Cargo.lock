@@ -8243,7 +8243,7 @@ dependencies = [
  "tower",
  "zakura-client-backend",
  "zakura-client-sqlite",
- "zakura-dynamic-ivk",
+ "zakura-one-time-ivk",
  "zakura-orchard",
  "zakura-pir-enhance",
  "zakura-primitives",
