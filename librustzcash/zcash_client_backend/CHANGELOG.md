@@ -46,9 +46,11 @@ workspace.
   so a store can refuse transactions decrypted without them; no one-time key may open between
   that decryption and storage. The restore protocol is separate, in
   `data_api::one_time_ivk::restore::{OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite}`: its sweep
-  steps look keys recovered from the seed up in a receiver directory; a step that must wait
-  returns a `SweepDeferral`. `one_time_keys_to_recheck` and `record_paid_filter_check` sweep a
-  closed key without a known payment when a newer publication's paid filter holds it.
+  steps look keys recovered from the seed up in a receiver directory, and
+  `restore::recovery::EncryptedNote` authenticates the notes it returns as `RecoveredNote`s; a
+  step that must wait returns a `SweepDeferral`. `one_time_keys_to_recheck` and
+  `record_paid_filter_check` sweep a closed key without a known payment when a newer
+  publication's paid filter holds it.
   Transaction construction spends a one-time-key note with its derived viewing key and sends
   change to the ordinary account key.
 - `transparent_ledger::{TransparentDetailRead, TransparentDetailWrite}` (prototype): durable
