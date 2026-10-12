@@ -133,7 +133,11 @@ impl TestCache for TimedCache {
     }
 
     fn truncate_to_height(&mut self, height: BlockHeight) {
-        self.0.0.write().unwrap().split_off(&(u32::from(height) + 1));
+        self.0
+            .0
+            .write()
+            .unwrap()
+            .split_off(&(u32::from(height) + 1));
     }
 }
 
@@ -246,7 +250,10 @@ impl Chain {
 
     /// The latest block.
     pub fn tip(&self) -> BlockHeight {
-        self.st.latest_cached_block().expect("the chain has blocks").height()
+        self.st
+            .latest_cached_block()
+            .expect("the chain has blocks")
+            .height()
     }
 
     /// Unix time now, which is the tip's block time.
@@ -266,7 +273,10 @@ impl Chain {
 
     /// Records the state at the new tip and moves every clock to its time.
     fn advance(&mut self) {
-        let block = self.st.latest_cached_block().expect("a block was just added");
+        let block = self
+            .st
+            .latest_cached_block()
+            .expect("a block was just added");
         self.states
             .insert(u32::from(block.height()), block.chain_state().clone());
         let now = self.now();
@@ -388,8 +398,7 @@ impl Chain {
         let tx = &block.vtx[0];
         let txid = tx.txid();
         let mut mined = Vec::new();
-        for (index, ((fvk, value), compact)) in
-            outputs.iter().zip(&tx.ironwood_actions).enumerate()
+        for (index, ((fvk, value), compact)) in outputs.iter().zip(&tx.ironwood_actions).enumerate()
         {
             let cmx: [u8; 32] = compact.cmx.as_slice().try_into().expect("32-byte cmx");
             self.commitments.push(cmx);
@@ -397,34 +406,30 @@ impl Chain {
             let action_index = u32::try_from(index).expect("few actions");
             let receiver = receiver_of(fvk);
             let indexed = (payer == Payer::Near).then(|| Record {
-                    receiver: Receiver::from_bytes(receiver).expect("a valid receiver"),
-                    page: 0,
-                    total: 1,
-                    payment: Payment {
-                        height: u32::from(height),
-                        block_hash: block.hash().0,
-                        txid: *txid.as_ref(),
-                        // The fake block has no coinbase; the directory reads index 0 as one.
-                        tx_index: u32::try_from(tx.index).expect("small index") + 1,
-                        action_index,
-                        position,
-                        action_nullifier: compact
-                            .nullifier
-                            .as_slice()
-                            .try_into()
-                            .expect("32-byte nullifier"),
-                        cmx,
-                        ephemeral_key: compact
-                            .ephemeral_key
-                            .as_slice()
-                            .try_into()
-                            .expect("32-byte key"),
-                        ciphertext_prefix: compact
-                            .ciphertext
-                            .as_slice()
-                            .try_into()
-                            .expect("52 bytes"),
-                    },
+                receiver: Receiver::from_bytes(receiver).expect("a valid receiver"),
+                page: 0,
+                total: 1,
+                payment: Payment {
+                    height: u32::from(height),
+                    block_hash: block.hash().0,
+                    txid: *txid.as_ref(),
+                    // The fake block has no coinbase; the directory reads index 0 as one.
+                    tx_index: u32::try_from(tx.index).expect("small index") + 1,
+                    action_index,
+                    position,
+                    action_nullifier: compact
+                        .nullifier
+                        .as_slice()
+                        .try_into()
+                        .expect("32-byte nullifier"),
+                    cmx,
+                    ephemeral_key: compact
+                        .ephemeral_key
+                        .as_slice()
+                        .try_into()
+                        .expect("32-byte key"),
+                    ciphertext_prefix: compact.ciphertext.as_slice().try_into().expect("52 bytes"),
+                },
             });
             let entry = Mined {
                 txid,
@@ -485,7 +490,13 @@ impl Chain {
 
     /// Records the output of the transaction mined at `height` that `fvk`'s default
     /// address received, found by trial decryption, as a payment from `payer`.
-    pub fn record_payment(&mut self, height: BlockHeight, fvk: &FullViewingKey, value: u64, payer: Payer) -> Mined {
+    pub fn record_payment(
+        &mut self,
+        height: BlockHeight,
+        fvk: &FullViewingKey,
+        value: u64,
+        payer: Payer,
+    ) -> Mined {
         use orchard::note_encryption::{CompactAction, IronwoodDomain};
         use zcash_note_encryption::try_compact_note_decryption;
         let block = self.block(height);
@@ -516,10 +527,22 @@ impl Chain {
                         tx_index: u32::try_from(tx.index).expect("small index").max(1),
                         action_index,
                         position,
-                        action_nullifier: compact.nullifier.as_slice().try_into().expect("32 bytes"),
+                        action_nullifier: compact
+                            .nullifier
+                            .as_slice()
+                            .try_into()
+                            .expect("32 bytes"),
                         cmx,
-                        ephemeral_key: compact.ephemeral_key.as_slice().try_into().expect("32 bytes"),
-                        ciphertext_prefix: compact.ciphertext.as_slice().try_into().expect("52 bytes"),
+                        ephemeral_key: compact
+                            .ephemeral_key
+                            .as_slice()
+                            .try_into()
+                            .expect("32 bytes"),
+                        ciphertext_prefix: compact
+                            .ciphertext
+                            .as_slice()
+                            .try_into()
+                            .expect("52 bytes"),
                     },
                 });
                 let mined = Mined {
@@ -542,7 +565,9 @@ impl Chain {
     /// unknown (a payment the reorg removed and nobody rebroadcast).
     pub fn status(&self, txid: &TxId) -> TransactionStatus {
         if let Some((_, height)) = self.txs.get(txid.as_ref()) {
-            if u32::from(*height) <= u32::from(self.tip()) && self.states.contains_key(&u32::from(*height)) {
+            if u32::from(*height) <= u32::from(self.tip())
+                && self.states.contains_key(&u32::from(*height))
+            {
                 return TransactionStatus::Mined(*height);
             }
         }

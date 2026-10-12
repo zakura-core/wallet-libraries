@@ -15,7 +15,11 @@ use crate::harness::{
 const SEED: [u8; 32] = [0x66; 32];
 
 pub fn all() -> Vec<Scenario> {
-    let mut scenarios = vec![directory_down_at_restore(), omitted_payment(), quiet_chain()];
+    let mut scenarios = vec![
+        directory_down_at_restore(),
+        omitted_payment(),
+        quiet_chain(),
+    ];
     for status in [503, 429, 410] {
         scenarios.push(directory_errors(status));
     }
@@ -30,7 +34,14 @@ pub fn all() -> Vec<Scenario> {
 
 /// Wallet A quotes an incoming swap that NEAR pays a day later and settles. Returns A,
 /// its birthday, the swap and the payout, a day after the payout.
-fn paid_swap(ctx: &mut Ctx) -> (Dev, zcash_protocol::consensus::BlockHeight, IncomingSwap, Mined) {
+fn paid_swap(
+    ctx: &mut Ctx,
+) -> (
+    Dev,
+    zcash_protocol::consensus::BlockHeight,
+    IncomingSwap,
+    Mined,
+) {
     ctx.mine(20);
     let birthday = ctx.chain.tip() + 1;
     ctx.mine(5);
@@ -59,7 +70,8 @@ fn directory_down_at_restore() -> Scenario {
     Scenario {
         id: "E7-directory-down-at-restore".into(),
         group: RESTORE,
-        title: "The receiver directory is down when the seed is restored, and back an hour later".into(),
+        title: "The receiver directory is down when the seed is restored, and back an hour later"
+            .into(),
         summary: "Without the directory a restore cannot sweep its keys, so it cannot issue new \
             addresses either (Gap). The sweep runs once the directory answers."
             .into(),
@@ -81,7 +93,14 @@ fn directory_down_at_restore() -> Scenario {
             ctx.dev(b).reach.directory = true;
             ctx.log("directory", "reachable again");
             keep_syncing(ctx, b, 10 * MINUTE, HOUR);
-            ctx.expect(b, "payout", &swap.label(), &payout, Class::FoundBySweep, "The sweep runs once the directory answers.");
+            ctx.expect(
+                b,
+                "payout",
+                &swap.label(),
+                &payout,
+                Class::FoundBySweep,
+                "The sweep runs once the directory answers.",
+            );
         }),
     }
 }
@@ -90,7 +109,9 @@ fn directory_errors(status: u16) -> Scenario {
     Scenario {
         id: format!("E7-directory-answers-{status}-at-restore"),
         group: RESTORE,
-        title: format!("The receiver directory answers HTTP {status} to a restore's first requests"),
+        title: format!(
+            "The receiver directory answers HTTP {status} to a restore's first requests"
+        ),
         summary: "409 and 410 mean a new publication; anything else, 429 included, is a retryable \
             transport failure that backs the key off. Either way the payment is found by a later \
             sweep."
@@ -101,10 +122,20 @@ fn directory_errors(status: u16) -> Scenario {
             let (_, birthday, swap, payout) = paid_swap(ctx);
             let b = ctx.device("B", SEED, birthday);
             ctx.dev(b).reach.directory_faults = vec![status; 3];
-            ctx.log("directory", format!("answers the next 3 requests with HTTP {status}"));
+            ctx.log(
+                "directory",
+                format!("answers the next 3 requests with HTTP {status}"),
+            );
             ctx.sync(b);
             keep_syncing(ctx, b, 10 * MINUTE, 3 * HOUR);
-            ctx.expect(b, "payout", &swap.label(), &payout, Class::FoundBySweep, "A failed sweep backs off and a later one finds the payment.");
+            ctx.expect(
+                b,
+                "payout",
+                &swap.label(),
+                &payout,
+                Class::FoundBySweep,
+                "A failed sweep backs off and a later one finds the payment.",
+            );
         }),
     }
 }
@@ -179,7 +210,11 @@ fn quiet_chain() -> Scenario {
 fn clock_skew(skew: i64, after_deadline: i64) -> Scenario {
     let direction = if skew > 0 { "fast" } else { "slow" };
     Scenario {
-        id: format!("D2-clock-{}-{direction}-payout-deadline+{}", span(skew.abs()), span(after_deadline)),
+        id: format!(
+            "D2-clock-{}-{direction}-payout-deadline+{}",
+            span(skew.abs()),
+            span(after_deadline)
+        ),
         group: OFFLINE,
         title: format!(
             "A device clock {} {direction}, NEAR silent, payout {} after the deadline",
@@ -191,7 +226,10 @@ fn clock_skew(skew: i64, after_deadline: i64) -> Scenario {
             is the earlier of the device's request and NEAR's answer."
             .into(),
         params: vec![
-            ("device clock".into(), format!("{}{}", if skew > 0 { "+" } else { "-" }, span(skew.abs()))),
+            (
+                "device clock".into(),
+                format!("{}{}", if skew > 0 { "+" } else { "-" }, span(skew.abs())),
+            ),
             ("payout after deadline".into(), span(after_deadline)),
         ],
         slow: true,
@@ -234,9 +272,10 @@ fn mempool_then_mined() -> Scenario {
         id: "C8-payout-in-mempool-then-mined".into(),
         group: LIVE,
         title: "NEAR's payout is seen in the mempool, then mined".into(),
-        summary: "Vizor shows a mempool payout to an open one-time key as pending, then confirms it \
+        summary:
+            "Vizor shows a mempool payout to an open one-time key as pending, then confirms it \
             when mined."
-            .into(),
+                .into(),
         params: Vec::new(),
         slow: false,
         run: Box::new(|ctx| {
@@ -250,15 +289,33 @@ fn mempool_then_mined() -> Scenario {
             let tx = ctx.near_tx(&swap.fvk, ZEC, Payer::Near);
             ctx.mempool(a, "the payout", &tx);
             let pending = ctx.get(a).balance();
-            ctx.check("the mempool payout shows as pending", pending == ZEC, format!("balance {pending} zat"));
+            ctx.check(
+                "the mempool payout shows as pending",
+                pending == ZEC,
+                format!("balance {pending} zat"),
+            );
             ctx.mine(2);
             let payout = ctx.mine_payment("the payout", &tx, &swap.fvk, ZEC, Payer::Near);
             ctx.mine(1);
             ctx.sync(a);
             let b = ctx.device("B", SEED, birthday);
             ctx.sync(b);
-            ctx.expect(a, "payout", &swap.label(), &payout, Class::FoundLive, "Found in the mempool while the key was open, then mined.");
-            ctx.expect(b, "payout", &swap.label(), &payout, Class::FoundAutomatically, "A restore finds the mined payout.");
+            ctx.expect(
+                a,
+                "payout",
+                &swap.label(),
+                &payout,
+                Class::FoundLive,
+                "Found in the mempool while the key was open, then mined.",
+            );
+            ctx.expect(
+                b,
+                "payout",
+                &swap.label(),
+                &payout,
+                Class::FoundAutomatically,
+                "A restore finds the mined payout.",
+            );
             ctx.check_balance(a, ZEC);
         }),
     }
@@ -269,7 +326,8 @@ fn mempool_then_dropped() -> Scenario {
         id: "C8-payout-in-mempool-never-mined".into(),
         group: LIVE,
         title: "NEAR's payout is seen in the mempool and never mined".into(),
-        summary: "A pending payout that never confirms must leave the balance once it expires.".into(),
+        summary: "A pending payout that never confirms must leave the balance once it expires."
+            .into(),
         params: Vec::new(),
         slow: false,
         run: Box::new(|ctx| {
@@ -295,9 +353,10 @@ fn one_time_notes_spent_first() -> Scenario {
         id: "G1-one-time-notes-spent-first".into(),
         group: SPENDING,
         title: "An ordinary send spends one-time-key notes first in spare input slots".into(),
-        summary: "Spending one-time-key notes first moves their value into ordinary change that any \
+        summary:
+            "Spending one-time-key notes first moves their value into ordinary change that any \
             seed restore can find. The restored wallet must end with the same balance."
-            .into(),
+                .into(),
         params: Vec::new(),
         slow: false,
         run: Box::new(|ctx| {
@@ -306,7 +365,13 @@ fn one_time_notes_spent_first() -> Scenario {
             ctx.mine(5);
             let a = ctx.device("A", SEED, birthday);
             let fvk = ctx.get(a).fvk.clone();
-            ctx.pay("A's Ironwood funds", "A's address", &fvk, 2 * ZEC, Payer::Wallet);
+            ctx.pay(
+                "A's Ironwood funds",
+                "A's address",
+                &fvk,
+                2 * ZEC,
+                Payer::Wallet,
+            );
             ctx.mine(10);
             ctx.sync(a);
             let swap = ctx.quote_incoming(a, HOUR).expect("the quote issues");
@@ -316,11 +381,18 @@ fn one_time_notes_spent_first() -> Scenario {
             ctx.mine(12);
             ctx.sync(a);
             let before = ctx.get(a).unspent_one_time_value();
-            let foreign = FullViewingKey::from(&SpendingKey::from_bytes([0xf5; 32]).expect("a key"))
-                .address_at(0u32, Scope::External);
+            let foreign =
+                FullViewingKey::from(&SpendingKey::from_bytes([0xf5; 32]).expect("a key"))
+                    .address_at(0u32, Scope::External);
             let tx = ctx.dev(a).send_ordinary(foreign, ZEC / 10);
             let height = ctx.chain.mine_tx(&tx);
-            ctx.log("A", format!("sends 0.1 ZEC to a foreign address, mined at {}", u32::from(height)));
+            ctx.log(
+                "A",
+                format!(
+                    "sends 0.1 ZEC to a foreign address, mined at {}",
+                    u32::from(height)
+                ),
+            );
             ctx.mine(2);
             ctx.sync(a);
             let after = ctx.get(a).unspent_one_time_value();
@@ -331,7 +403,14 @@ fn one_time_notes_spent_first() -> Scenario {
             );
             let b = ctx.device("B", SEED, birthday);
             ctx.sync(b);
-            ctx.expect(a, "payout", &swap.label(), &payout, Class::FoundLive, "The key was open.");
+            ctx.expect(
+                a,
+                "payout",
+                &swap.label(),
+                &payout,
+                Class::FoundLive,
+                "The key was open.",
+            );
             ctx.check_same_balance(a, b);
         }),
     }

@@ -47,7 +47,8 @@ fn incoming_indices_advance() -> Scenario {
     Scenario {
         id: "A2-incoming-indices-advance".into(),
         group: ISSUANCE,
-        title: "Each accepted incoming quote takes a new address, even after NEAR refunds it".into(),
+        title: "Each accepted incoming quote takes a new address, even after NEAR refunds it"
+            .into(),
         summary: "An accepted quote gives NEAR the address, so it is never issued again, whatever \
             happens to the swap."
             .into(),
@@ -66,7 +67,10 @@ fn incoming_indices_advance() -> Scenario {
             }
             let sixth = ctx.quote_incoming(a, HOUR).expect("the sixth quote issues");
             indices.push(sixth.index);
-            let distinct = indices.iter().collect::<std::collections::BTreeSet<_>>().len();
+            let distinct = indices
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
             ctx.check(
                 "six accepted quotes use six addresses",
                 distinct == indices.len(),
@@ -126,7 +130,13 @@ fn refund_indices_across_restore() -> Scenario {
             let a = wallet(ctx, "A");
             let birthday = ctx.chain.tip() - 5;
             let fvk = ctx.get(a).fvk.clone();
-            ctx.pay("A's Ironwood funds", "A's address", &fvk, 3 * ZEC, Payer::Wallet);
+            ctx.pay(
+                "A's Ironwood funds",
+                "A's address",
+                &fvk,
+                3 * ZEC,
+                Payer::Wallet,
+            );
             ctx.mine(10);
             ctx.sync(a);
             for _ in 0..2 {
@@ -154,17 +164,19 @@ fn unknown_outcomes_hit_the_limit() -> Scenario {
         id: "A7-unknown-outcomes-hit-the-limit".into(),
         group: ISSUANCE,
         title: "30 quote requests with unknown outcomes, then an outage ends".into(),
-        summary: "A request whose outcome is unknown, such as a timeout, holds its address without \
+        summary:
+            "A request whose outcome is unknown, such as a timeout, holds its address without \
             moving the recovery gap. After 30 of them issuance waits (Limit). Once their deadlines \
             and the two-hour cooldown pass, the lowest is reissued, though NEAR may have seen it."
-            .into(),
+                .into(),
         params: vec![("unknown outcomes".into(), "30".into())],
         slow: false,
         run: Box::new(|ctx| {
             let a = wallet(ctx, "A");
             for _ in 0..30 {
                 let index = ctx.prepare_incoming(a).expect("a reservation");
-                ctx.begin_incoming(a, index, HOUR).expect("the request is saved");
+                ctx.begin_incoming(a, index, HOUR)
+                    .expect("the request is saved");
                 ctx.mine(1);
                 ctx.sync(a);
             }
@@ -191,7 +203,11 @@ fn unknown_outcomes_hit_the_limit() -> Scenario {
 }
 
 fn restore_never_reissues(covered: bool) -> Scenario {
-    let feed = if covered { "feed-covers" } else { "feed-missed" };
+    let feed = if covered {
+        "feed-covers"
+    } else {
+        "feed-missed"
+    };
     Scenario {
         id: format!("A5-restore-never-reissues-{feed}"),
         group: ISSUANCE,
@@ -199,11 +215,15 @@ fn restore_never_reissues(covered: bool) -> Scenario {
             "A restore issues after every paid and seen address; NEAR's seen set {} the old quotes",
             if covered { "covers" } else { "misses" }
         ),
-        summary: "A restored wallet knows its old incoming addresses only from payments and NEAR's \
+        summary:
+            "A restored wallet knows its old incoming addresses only from payments and NEAR's \
             seen set. With the seen set, it skips every address NEAR was given; without it, it can \
             reissue an unpaid one."
-            .into(),
-        params: vec![("seen set".into(), if covered { "covers" } else { "misses" }.into())],
+                .into(),
+        params: vec![(
+            "seen set".into(),
+            if covered { "covers" } else { "misses" }.into(),
+        )],
         slow: false,
         run: Box::new(move |ctx| {
             let a = wallet(ctx, "A");
@@ -224,7 +244,10 @@ fn restore_never_reissues(covered: bool) -> Scenario {
             ctx.wait(DAY);
             if !covered {
                 ctx.near.feed_started = ctx.chain.now() - HOUR;
-                ctx.log("directory", "NEAR feed restarted: its seen set starts an hour ago");
+                ctx.log(
+                    "directory",
+                    "NEAR feed restarted: its seen set starts an hour ago",
+                );
             }
             let b = ctx.device("B", SEED, birthday);
             ctx.sync(b);
@@ -252,7 +275,11 @@ fn restore_never_reissues(covered: bool) -> Scenario {
 
 fn two_devices_incoming(after: i64, lag: i64) -> Scenario {
     Scenario {
-        id: format!("A9-two-devices-incoming-{}-later-lag-{}", span(after), span(lag)),
+        id: format!(
+            "A9-two-devices-incoming-{}-later-lag-{}",
+            span(after),
+            span(lag)
+        ),
         group: ISSUANCE,
         title: format!(
             "Two devices on one seed quote incoming swaps {} apart, NEAR feed {} behind",
@@ -300,25 +327,43 @@ fn two_devices_incoming(after: i64, lag: i64) -> Scenario {
 }
 
 fn two_devices_refund(funded: bool) -> Scenario {
-    let state = if funded { "after-a-funds" } else { "before-a-funds" };
+    let state = if funded {
+        "after-a-funds"
+    } else {
+        "before-a-funds"
+    };
     Scenario {
         id: format!("A9-two-devices-refund-{state}"),
         group: ISSUANCE,
         title: format!(
             "Two devices on one seed reserve refund keys two hours apart, {}",
-            if funded { "after A's funding is mined" } else { "before A funds its swap" }
+            if funded {
+                "after A's funding is mined"
+            } else {
+                "before A funds its swap"
+            }
         ),
-        summary: "A refund key is known to another device once its funding memo is on chain. Before \
+        summary:
+            "A refund key is known to another device once its funding memo is on chain. Before \
             that, reserve_refund_key relies on NEAR's seen set, which the receiver directory fills \
             with payout addresses only."
-            .into(),
-        params: vec![("A's swap".into(), if funded { "funded" } else { "quoted only" }.into())],
+                .into(),
+        params: vec![(
+            "A's swap".into(),
+            if funded { "funded" } else { "quoted only" }.into(),
+        )],
         slow: false,
         run: Box::new(move |ctx| {
             let a = wallet(ctx, "A");
             let birthday = ctx.chain.tip() - 5;
             let fvk = ctx.get(a).fvk.clone();
-            ctx.pay("A's Ironwood funds", "A's address", &fvk, 3 * ZEC, Payer::Wallet);
+            ctx.pay(
+                "A's Ironwood funds",
+                "A's address",
+                &fvk,
+                3 * ZEC,
+                Payer::Wallet,
+            );
             ctx.mine(10);
             ctx.sync(a);
             let b = ctx.device("B", SEED, birthday);

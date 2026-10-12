@@ -65,7 +65,10 @@ impl Class {
     pub fn found(self) -> bool {
         matches!(
             self,
-            Self::FoundLive | Self::FoundBySweep | Self::FoundAfterRecheck | Self::FoundAutomatically
+            Self::FoundLive
+                | Self::FoundBySweep
+                | Self::FoundAfterRecheck
+                | Self::FoundAutomatically
         )
     }
 

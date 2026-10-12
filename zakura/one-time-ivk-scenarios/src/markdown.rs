@@ -97,7 +97,10 @@ pub fn render_markdown(report: &Report) -> String {
 
     for group in report.groups() {
         let _ = writeln!(out, "## {group}\n");
-        let _ = writeln!(out, "| Scenario | Result | Payments | Title |\n|---|---|---|---|");
+        let _ = writeln!(
+            out,
+            "| Scenario | Result | Payments | Title |\n|---|---|---|---|"
+        );
         for s in report.scenarios.iter().filter(|s| s.group == group) {
             let result = match s.outcome {
                 Outcome::Pass => "pass",

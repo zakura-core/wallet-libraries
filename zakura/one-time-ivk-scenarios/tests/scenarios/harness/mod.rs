@@ -145,7 +145,10 @@ impl Ctx {
     pub fn check_swap_history(&mut self, dev: Dev) {
         let (queued, mut report) = self.devices[dev.0].check_swap_history(&self.chain, &self.near);
         let name = self.name(dev);
-        self.log(&name, format!("runs Check swap history: {queued} closed keys queued"));
+        self.log(
+            &name,
+            format!("runs Check swap history: {queued} closed keys queued"),
+        );
         self.log_sync(dev, &report);
         for _ in 0..6 {
             let quiet = !report.pending && report.problems.is_empty() && report.scanned_blocks <= 1;
@@ -173,8 +176,12 @@ impl Ctx {
             let dev = Dev(i);
             for round in 0..40 {
                 let report = self.devices[i].sync(&self.chain, &self.near);
-                let quiet = !report.pending && report.problems.is_empty() && report.scanned_blocks <= 1;
-                if report.found_live + report.found_by_sweep > 0 || !report.problems.is_empty() || round == 0 && report.scanned_blocks > 1 {
+                let quiet =
+                    !report.pending && report.problems.is_empty() && report.scanned_blocks <= 1;
+                if report.found_live + report.found_by_sweep > 0
+                    || !report.problems.is_empty()
+                    || round == 0 && report.scanned_blocks > 1
+                {
                     self.log_sync(dev, &report);
                 }
                 if quiet {
@@ -197,7 +204,11 @@ impl Ctx {
             report.lookups,
             report.open_keys,
             zec(balance),
-            if report.pending { ", history pending" } else { "" }
+            if report.pending {
+                ", history pending"
+            } else {
+                ""
+            }
         );
         let name = self.name(dev);
         self.log(&name, text);
@@ -229,9 +240,18 @@ impl Ctx {
                     self.log(&name, text);
                     return Ok(swap);
                 }
-                Err(policy) if attempt < 3 && matches!(policy, ReservationPolicy::Gap | ReservationPolicy::Coverage) => {
+                Err(policy)
+                    if attempt < 3
+                        && matches!(
+                            policy,
+                            ReservationPolicy::Gap | ReservationPolicy::Coverage
+                        ) =>
+                {
                     attempt += 1;
-                    self.log(&name, format!("quote refused ({policy:?}), catching up and retrying"));
+                    self.log(
+                        &name,
+                        format!("quote refused ({policy:?}), catching up and retrying"),
+                    );
                     self.sync(dev);
                 }
                 Err(policy) => {
@@ -268,7 +288,11 @@ impl Ctx {
     }
 
     /// Quotes a ZEC-to-X swap on `dev`, reserving a refund key for it.
-    pub fn quote_refund(&mut self, dev: Dev, deadline_in: i64) -> Result<RefundSwap, ReservationPolicy> {
+    pub fn quote_refund(
+        &mut self,
+        dev: Dev,
+        deadline_in: i64,
+    ) -> Result<RefundSwap, ReservationPolicy> {
         let quoted = self.devices[dev.0].quote_refund(&self.chain, &mut self.near, deadline_in);
         let name = self.name(dev);
         match &quoted {
@@ -310,13 +334,23 @@ impl Ctx {
     }
 
     /// Records a NEAR status for a ZEC-to-X swap on `dev`.
-    pub fn observe_refund(&mut self, dev: Dev, swap: &RefundSwap, status: &str, refunded: Option<u64>) {
+    pub fn observe_refund(
+        &mut self,
+        dev: Dev,
+        swap: &RefundSwap,
+        status: &str,
+        refunded: Option<u64>,
+    ) {
         let matched = self.devices[dev.0].observe_refund(&self.chain, swap, status, refunded);
         let name = self.name(dev);
         let amount = refunded.map_or(String::new(), |v| format!(", refundedAmount {}", zec(v)));
         self.log(
             &name,
-            format!("records NEAR status {status} for {}{amount}{}", swap.label(), if matched { "" } else { " (no match)" }),
+            format!(
+                "records NEAR status {status} for {}{amount}{}",
+                swap.label(),
+                if matched { "" } else { " (no match)" }
+            ),
         );
     }
 
@@ -328,18 +362,28 @@ impl Ctx {
         status: &str,
         amount_out: Option<u64>,
     ) {
-        let matched =
-            self.devices[dev.0].observe_incoming(&self.chain, swap, status, amount_out);
+        let matched = self.devices[dev.0].observe_incoming(&self.chain, swap, status, amount_out);
         let name = self.name(dev);
         let amount = amount_out.map_or(String::new(), |v| format!(", amountOut {}", zec(v)));
         self.log(
             &name,
-            format!("records NEAR status {status} for {}{amount}{}", swap.label(), if matched { "" } else { " (no match)" }),
+            format!(
+                "records NEAR status {status} for {}{amount}{}",
+                swap.label(),
+                if matched { "" } else { " (no match)" }
+            ),
         );
     }
 
     /// Mines one block paying `value` to `fvk`'s address, from `payer`.
-    pub fn pay(&mut self, label: &str, key: &str, fvk: &FullViewingKey, value: u64, payer: Payer) -> Mined {
+    pub fn pay(
+        &mut self,
+        label: &str,
+        key: &str,
+        fvk: &FullViewingKey,
+        value: u64,
+        payer: Payer,
+    ) -> Mined {
         self.pay_many(label, &[(key, fvk, value)], payer).remove(0)
     }
 
@@ -350,7 +394,10 @@ impl Ctx {
         outputs: &[(&str, &FullViewingKey, u64)],
         payer: Payer,
     ) -> Vec<Mined> {
-        let pairs: Vec<_> = outputs.iter().map(|(_, fvk, v)| ((*fvk).clone(), *v)).collect();
+        let pairs: Vec<_> = outputs
+            .iter()
+            .map(|(_, fvk, v)| ((*fvk).clone(), *v))
+            .collect();
         let mined = self.chain.pay(&pairs, payer);
         let to = outputs
             .iter()
@@ -392,7 +439,9 @@ impl Ctx {
     ) -> (Mined, zcash_primitives::transaction::Transaction) {
         let near = self.near_wallet();
         let ovk = match payer {
-            Payer::Near => zcash_client_backend::wallet::OvkPolicy::custom_from_common_bytes(&[0; 32]),
+            Payer::Near => {
+                zcash_client_backend::wallet::OvkPolicy::custom_from_common_bytes(&[0; 32])
+            }
             Payer::Wallet => zcash_client_backend::wallet::OvkPolicy::Sender,
         };
         let to = fvk.address_at(0u32, orchard::keys::Scope::External);
@@ -402,7 +451,11 @@ impl Ctx {
         self.devices[near.0].scan(&self.chain);
         self.log(
             "chain",
-            format!("{label}: {} pays {} to {key} in a signed transaction", payer.label(), zec(value)),
+            format!(
+                "{label}: {} pays {} to {key} in a signed transaction",
+                payer.label(),
+                zec(value)
+            ),
         );
         (mined, tx)
     }
@@ -416,7 +469,9 @@ impl Ctx {
     ) -> zcash_primitives::transaction::Transaction {
         let near = self.near_wallet();
         let ovk = match payer {
-            Payer::Near => zcash_client_backend::wallet::OvkPolicy::custom_from_common_bytes(&[0; 32]),
+            Payer::Near => {
+                zcash_client_backend::wallet::OvkPolicy::custom_from_common_bytes(&[0; 32])
+            }
             Payer::Wallet => zcash_client_backend::wallet::OvkPolicy::Sender,
         };
         let to = fvk.address_at(0u32, orchard::keys::Scope::External);
@@ -424,11 +479,22 @@ impl Ctx {
     }
 
     /// Shows `tx` to `dev` in the mempool.
-    pub fn mempool(&mut self, dev: Dev, label: &str, tx: &zcash_primitives::transaction::Transaction) {
+    pub fn mempool(
+        &mut self,
+        dev: Dev,
+        label: &str,
+        tx: &zcash_primitives::transaction::Transaction,
+    ) {
         let found = self.devices[dev.0].receive_mempool(tx);
         let balance = self.devices[dev.0].balance();
         let name = self.name(dev);
-        self.log(&name, format!("sees {label} in the mempool: {found} found, balance {}", zec(balance)));
+        self.log(
+            &name,
+            format!(
+                "sees {label} in the mempool: {found} found, balance {}",
+                zec(balance)
+            ),
+        );
     }
 
     /// Mines `tx` and records the payment it makes to `fvk`.
@@ -441,14 +507,30 @@ impl Ctx {
         payer: Payer,
     ) -> Mined {
         let height = self.chain.mine_tx(tx);
-        self.log("chain", format!("{label} is mined at {}", u32::from(height)));
+        self.log(
+            "chain",
+            format!("{label} is mined at {}", u32::from(height)),
+        );
         self.chain.record_payment(height, fvk, value, payer)
     }
 
     /// Mines `tx` again, as after a reorg that returned it to the mempool.
-    pub fn remine(&mut self, label: &str, tx: &zcash_primitives::transaction::Transaction, fvk: &FullViewingKey, value: u64, payer: Payer) -> Mined {
+    pub fn remine(
+        &mut self,
+        label: &str,
+        tx: &zcash_primitives::transaction::Transaction,
+        fvk: &FullViewingKey,
+        value: u64,
+        payer: Payer,
+    ) -> Mined {
         let height = self.chain.mine_tx(tx);
-        self.log("chain", format!("{label}: the same transaction is mined again at {}", u32::from(height)));
+        self.log(
+            "chain",
+            format!(
+                "{label}: the same transaction is mined again at {}",
+                u32::from(height)
+            ),
+        );
         self.chain.record_payment(height, fvk, value, payer)
     }
 

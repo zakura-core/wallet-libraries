@@ -152,7 +152,9 @@ impl Directory {
         body: Vec<u8>,
         limit: usize,
     ) -> Result<Vec<u8>, DirectoryError> {
-        let path = url.strip_prefix(ORIGIN).expect("requests stay on the origin");
+        let path = url
+            .strip_prefix(ORIGIN)
+            .expect("requests stay on the origin");
         self.requests
             .lock()
             .unwrap()
@@ -167,7 +169,12 @@ impl Directory {
                     .uri(path)
                     .body(Body::from(body))
                     .expect("a valid request");
-                let response = self.router.clone().oneshot(request).await.expect("routes answer");
+                let response = self
+                    .router
+                    .clone()
+                    .oneshot(request)
+                    .await
+                    .expect("routes answer");
                 let status = response.status().as_u16();
                 let body = axum::body::to_bytes(response.into_body(), limit)
                     .await

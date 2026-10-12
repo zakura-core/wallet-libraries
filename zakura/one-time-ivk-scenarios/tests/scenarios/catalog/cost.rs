@@ -37,7 +37,10 @@ pub fn all() -> Vec<Scenario> {
 }
 
 /// A wallet created after 20 blocks and synced.
-fn wallet(ctx: &mut Ctx, name: &str) -> (crate::harness::Dev, zcash_protocol::consensus::BlockHeight) {
+fn wallet(
+    ctx: &mut Ctx,
+    name: &str,
+) -> (crate::harness::Dev, zcash_protocol::consensus::BlockHeight) {
     ctx.mine(20);
     let birthday = ctx.chain.tip() + 1;
     ctx.mine(5);
@@ -47,13 +50,21 @@ fn wallet(ctx: &mut Ctx, name: &str) -> (crate::harness::Dev, zcash_protocol::co
 }
 
 fn open_keys_over_time(per_day: usize, days: i64, timely: bool) -> Scenario {
-    let mode = if timely { "timely-statuses" } else { "near-silent" };
+    let mode = if timely {
+        "timely-statuses"
+    } else {
+        "near-silent"
+    };
     Scenario {
         id: format!("J1-open-keys-{per_day}-swaps-a-day-for-{days}d-{mode}"),
         group: COST,
         title: format!(
             "{per_day} incoming swaps a day for {days} days, {}",
-            if timely { "NEAR reporting and paying within the hour" } else { "NEAR never answering" }
+            if timely {
+                "NEAR reporting and paying within the hour"
+            } else {
+                "NEAR never answering"
+            }
         ),
         summary: "Every open key is one more incoming viewing key to trial-decrypt each Ironwood \
             action with. Settled swaps close after 10 confirmations; swaps without a final status \
@@ -82,10 +93,18 @@ fn open_keys_over_time(per_day: usize, days: i64, timely: bool) -> Scenario {
                     peak = peak.max(ctx.get(a).scanning().len());
                 }
                 let open = ctx.get(a).scanning().len();
-                ctx.metric(format!("open keys at the end of day {}", day + 1), open as f64, "keys");
+                ctx.metric(
+                    format!("open keys at the end of day {}", day + 1),
+                    open as f64,
+                    "keys",
+                );
             }
             ctx.metric("peak open keys", peak as f64, "keys");
-            let bound = if timely { per_day } else { per_day * days as usize };
+            let bound = if timely {
+                per_day
+            } else {
+                per_day * days as usize
+            };
             ctx.check(
                 "open keys stay within the closing rules",
                 peak <= bound,
@@ -103,7 +122,10 @@ fn scan_cost_by_open_keys() -> Scenario {
         summary: "Measures what each open one-time key adds to scanning: 10,000 foreign actions \
             scanned with 0, 10, 30 and 100 incoming keys open."
             .into(),
-        params: vec![("blocks".into(), "500".into()), ("actions per block".into(), "20".into())],
+        params: vec![
+            ("blocks".into(), "500".into()),
+            ("actions per block".into(), "20".into()),
+        ],
         slow: true,
         run: Box::new(|ctx| {
             let (a, _) = wallet(ctx, "A");
@@ -122,18 +144,28 @@ fn scan_cost_by_open_keys() -> Scenario {
                 ctx.mine(1);
                 ctx.sync(a);
                 let open = ctx.get(a).scanning().len();
-                ctx.chain.traffic = Traffic { every: 1, outputs: 20 };
+                ctx.chain.traffic = Traffic {
+                    every: 1,
+                    outputs: 20,
+                };
                 ctx.mine(500);
                 ctx.chain.traffic = Traffic::default();
                 let started = Instant::now();
                 ctx.scan_only(a);
                 let ms = started.elapsed().as_secs_f64() * 1000.0;
-                ctx.log("A", format!("scans 500 blocks of 20 actions with {open} keys open in {ms:.0} ms"));
+                ctx.log(
+                    "A",
+                    format!("scans 500 blocks of 20 actions with {open} keys open in {ms:.0} ms"),
+                );
                 ctx.metric(format!("scan time with {open} open keys"), ms, "ms");
                 let base = *baseline.get_or_insert(ms);
                 if open > 0 {
                     let per = (ms - base) * 1000.0 / (open as f64 * 10_000.0);
-                    ctx.metric(format!("added time per key per action ({open} keys)"), per, "µs");
+                    ctx.metric(
+                        format!("added time per key per action ({open} keys)"),
+                        per,
+                        "µs",
+                    );
                 }
             }
         }),
@@ -141,13 +173,21 @@ fn scan_cost_by_open_keys() -> Scenario {
 }
 
 fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
-    let when = if recent { "within-the-day" } else { "two-days-earlier" };
+    let when = if recent {
+        "within-the-day"
+    } else {
+        "two-days-earlier"
+    };
     Scenario {
         id: format!("J3-restore-after-{swaps}-paid-swaps-{when}"),
         group: COST,
         title: format!(
             "Restore a seed whose {swaps} incoming addresses were paid {}",
-            if recent { "within the last day" } else { "two days earlier" }
+            if recent {
+                "within the last day"
+            } else {
+                "two days earlier"
+            }
         ),
         summary: "A restore sweeps every paid key through the receiver directory: one PIR lookup \
             per payment page, or the whole row file past about 400 lookups. Keys NEAR was given in \
@@ -173,7 +213,8 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
                     .map(|i| (format!("I{i}"), ctx.get(owner).key(Purpose::Receive, *i)))
                     .collect();
                 for (_, fvk) in &keys {
-                    ctx.near.give(crate::harness::chain::receiver_of(fvk), now, Role::Payout);
+                    ctx.near
+                        .give(crate::harness::chain::receiver_of(fvk), now, Role::Payout);
                 }
                 let outputs: Vec<_> = keys.iter().map(|(k, f)| (k.as_str(), f, VALUE)).collect();
                 paid.extend(ctx.pay_many("payouts", &outputs, Payer::Near));
@@ -193,10 +234,21 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
             let ms = started.elapsed().as_secs_f64() * 1000.0;
             ctx.metric("restore wall time", ms, "ms");
             ctx.metric("restore syncs until quiet", f64::from(syncs), "syncs");
-            ctx.metric("keys scanning after the restore", ctx.get(b).scanning().len() as f64, "keys");
+            ctx.metric(
+                "keys scanning after the restore",
+                ctx.get(b).scanning().len() as f64,
+                "keys",
+            );
             for (i, m) in paid.iter().enumerate() {
                 if i < 3 || i + 1 == paid.len() {
-                    ctx.expect(b, &format!("payout to I{i}"), &format!("I{i}"), m, Class::FoundBySweep, "A restore sweeps paid keys through the directory.");
+                    ctx.expect(
+                        b,
+                        &format!("payout to I{i}"),
+                        &format!("I{i}"),
+                        m,
+                        Class::FoundBySweep,
+                        "A restore sweeps paid keys through the directory.",
+                    );
                 }
             }
             ctx.check_balance(b, swaps * VALUE);
@@ -223,11 +275,17 @@ fn recheck_replay(age: i64, every: u32, parity: Parity) -> Scenario {
         id: if cost {
             format!("J4-recheck-replay-wallet-{}-old", span(age))
         } else {
-            format!("E10-late-find-at-{side}-tree-position-wallet-{}-old", span(age))
+            format!(
+                "E10-late-find-at-{side}-tree-position-wallet-{}-old",
+                span(age)
+            )
         },
         group: if cost { COST } else { super::RESTORE },
         title: if cost {
-            format!("Check swap history finds a late payment on a {}-old wallet", span(age))
+            format!(
+                "Check swap history finds a late payment on a {}-old wallet",
+                span(age)
+            )
         } else {
             format!(
                 "Check swap history finds a late payment at an {side} tree position on a {}-old wallet",
@@ -248,7 +306,10 @@ fn recheck_replay(age: i64, every: u32, parity: Parity) -> Scenario {
         },
         params: vec![
             ("wallet age".into(), span(age)),
-            ("background traffic".into(), format!("one Ironwood output every {every} blocks")),
+            (
+                "background traffic".into(),
+                format!("one Ironwood output every {every} blocks"),
+            ),
             ("late payment position".into(), side.into()),
         ],
         slow: age > 60 * DAY,
@@ -267,10 +328,26 @@ fn recheck_replay(age: i64, every: u32, parity: Parity) -> Scenario {
             let want_odd = parity == Parity::Odd;
             if (ctx.chain.commitments().len() % 2 == 1) != want_odd {
                 let foreign = ctx.get(a).key(Purpose::Refund, 1_000_000);
-                ctx.pay("someone else's output", "a stranger", &foreign, VALUE, Payer::Wallet);
+                ctx.pay(
+                    "someone else's output",
+                    "a stranger",
+                    &foreign,
+                    VALUE,
+                    Payer::Wallet,
+                );
             }
-            let late = ctx.pay("late payment", &swap.label(), &swap.fvk, ZEC / 2, Payer::Near);
-            ctx.metric("late payment's tree position", late.position as f64, "position");
+            let late = ctx.pay(
+                "late payment",
+                &swap.label(),
+                &swap.fvk,
+                ZEC / 2,
+                Payer::Near,
+            );
+            ctx.metric(
+                "late payment's tree position",
+                late.position as f64,
+                "position",
+            );
             ctx.wait(DAY);
             ctx.sync(a);
             let scanned_before = ctx.get(a).scanned_blocks;
@@ -278,7 +355,11 @@ fn recheck_replay(age: i64, every: u32, parity: Parity) -> Scenario {
             ctx.check_swap_history(a);
             let ms = started.elapsed().as_secs_f64() * 1000.0;
             let replayed = ctx.get(a).scanned_blocks - scanned_before;
-            ctx.metric("blocks scanned by Check swap history", replayed as f64, "blocks");
+            ctx.metric(
+                "blocks scanned by Check swap history",
+                replayed as f64,
+                "blocks",
+            );
             ctx.metric("Check swap history wall time", ms, "ms");
             ctx.expect(
                 a,

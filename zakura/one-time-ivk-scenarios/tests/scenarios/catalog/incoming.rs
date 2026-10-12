@@ -192,7 +192,10 @@ fn paid_twice(gap: Option<i64>, payer2: Payer, offline: bool) -> Scenario {
                             Step::Sync => {
                                 ctx.chain.mine_until(at);
                                 ctx.sync(a);
-                                if open && status_recorded && confirmations(ctx, p1.height) >= CONFIRMATIONS {
+                                if open
+                                    && status_recorded
+                                    && confirmations(ctx, p1.height) >= CONFIRMATIONS
+                                {
                                     open = false;
                                     ctx.check_key_open(a, &key, false);
                                 }
@@ -286,7 +289,11 @@ fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
             ctx.sync(b);
             let watched = ctx.get(b).scanning();
             let open_keys = watched.len();
-            ctx.metric("B keys scanning after its restore sweep", open_keys as f64, "keys");
+            ctx.metric(
+                "B keys scanning after its restore sweep",
+                open_keys as f64,
+                "keys",
+            );
             ctx.check(
                 format!("B watches {} after its restore sweep", s.key),
                 watched.contains(&s.key),
@@ -327,7 +334,11 @@ fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
 /// restores the seed. When NEAR's feed `covered` the quotes, the seen set walks the
 /// restore lookahead past them; otherwise it stops 30 indices above the last payment.
 fn beyond_lookahead(unpaid: u64, covered: bool) -> Scenario {
-    let feed = if covered { "feed-covers" } else { "feed-missed" };
+    let feed = if covered {
+        "feed-covers"
+    } else {
+        "feed-missed"
+    };
     Scenario {
         id: format!("E5-lookahead-{unpaid}-unpaid-then-paid-{feed}"),
         group: RESTORE,
@@ -405,7 +416,10 @@ fn beyond_lookahead(unpaid: u64, covered: bool) -> Scenario {
 /// deposit deadline. The key scans until 30 days after the deadline.
 fn provider_silent(after_deadline: i64) -> Scenario {
     Scenario {
-        id: format!("H2-silent-provider-payout-deadline+{}", span(after_deadline)),
+        id: format!(
+            "H2-silent-provider-payout-deadline+{}",
+            span(after_deadline)
+        ),
         group: STATUSES,
         title: format!(
             "NEAR never reports a status and pays {} after the deadline",
@@ -460,13 +474,21 @@ fn provider_silent(after_deadline: i64) -> Scenario {
 /// NEAR pays an incoming swap in two transactions an hour apart and reports SUCCESS
 /// after the first, with `amount_out` either missing or the total.
 fn split_payout(amount_out: Option<u64>) -> Scenario {
-    let name = if amount_out.is_some() { "with-total" } else { "without-amount" };
+    let name = if amount_out.is_some() {
+        "with-total"
+    } else {
+        "without-amount"
+    };
     Scenario {
         id: format!("H3-split-payout-success-{name}"),
         group: STATUSES,
         title: format!(
             "NEAR pays in two parts an hour apart; SUCCESS reported {}",
-            if amount_out.is_some() { "with the total amountOut" } else { "without amountOut" }
+            if amount_out.is_some() {
+                "with the total amountOut"
+            } else {
+                "without amountOut"
+            }
         ),
         summary: "A final status closes a key once its receipts cover what the provider promised. \
             Without an amount the store expects one zatoshi, so the key can close after the first \

@@ -74,9 +74,10 @@ fn payout_reorged_and_remined() -> Scenario {
         id: "F1a-payout-reorged-then-mined-again".into(),
         group: REORGS,
         title: "A payout is reorged out and the same transaction is mined again".into(),
-        summary: "The common reorg: NEAR's payout returns to the mempool and lands in the new branch. \
+        summary:
+            "The common reorg: NEAR's payout returns to the mempool and lands in the new branch. \
             The wallet must keep it once, at its new height."
-            .into(),
+                .into(),
         params: Vec::new(),
         slow: false,
         run: Box::new(|ctx| {
@@ -95,8 +96,22 @@ fn payout_reorged_and_remined() -> Scenario {
             ctx.sync(a);
             let b = ctx.device("B", SEED, birthday);
             ctx.sync(b);
-            ctx.expect(a, "payout (mined again)", &key, &again, Class::FoundLive, "The wallet found the payout before the reorg and keeps it at its new height.");
-            ctx.expect(b, "payout (mined again)", &key, &again, Class::FoundAutomatically, "The directory lists the surviving branch's payment.");
+            ctx.expect(
+                a,
+                "payout (mined again)",
+                &key,
+                &again,
+                Class::FoundLive,
+                "The wallet found the payout before the reorg and keeps it at its new height.",
+            );
+            ctx.expect(
+                b,
+                "payout (mined again)",
+                &key,
+                &again,
+                Class::FoundAutomatically,
+                "The directory lists the surviving branch's payment.",
+            );
             ctx.check_balance(a, ZEC);
             ctx.check_same_balance(a, b);
         }),
@@ -189,7 +204,13 @@ fn funding_reorged_and_remined() -> Scenario {
         run: Box::new(|ctx| {
             let (a, birthday) = wallet(ctx);
             let fvk = ctx.get(a).fvk.clone();
-            ctx.pay("A's Ironwood funds", "A's address", &fvk, 3 * ZEC, Payer::Wallet);
+            ctx.pay(
+                "A's Ironwood funds",
+                "A's address",
+                &fvk,
+                3 * ZEC,
+                Payer::Wallet,
+            );
             ctx.mine(10);
             ctx.sync(a);
             let swap = ctx.quote_refund(a, HOUR).expect("a refund key");
@@ -200,7 +221,13 @@ fn funding_reorged_and_remined() -> Scenario {
             ctx.reorg(funded_at - 1);
             ctx.mine(1);
             let again = ctx.chain.mine_tx(&tx);
-            ctx.log("chain", format!("the funding transaction is mined again at {}", u32::from(again)));
+            ctx.log(
+                "chain",
+                format!(
+                    "the funding transaction is mined again at {}",
+                    u32::from(again)
+                ),
+            );
             ctx.mine(3);
             ctx.sync(a);
             ctx.check_key_open(a, &key, true);
@@ -211,7 +238,14 @@ fn funding_reorged_and_remined() -> Scenario {
             ctx.sync(a);
             let b = ctx.device("B", SEED, birthday);
             ctx.sync(b);
-            ctx.expect(a, "refund", &key, &refund, Class::FoundLive, "The refund key scans from its funding transaction.");
+            ctx.expect(
+                a,
+                "refund",
+                &key,
+                &refund,
+                Class::FoundLive,
+                "The refund key scans from its funding transaction.",
+            );
             ctx.expect(
                 b,
                 "refund",
@@ -235,7 +269,10 @@ fn restored_key_near_rewind() -> Scenario {
             lookup, can leave such a key neither scanning nor closed, so a later payment is never \
             rechecked. This scenario checks whether that happens."
             .into(),
-        params: vec![("rewind".into(), "10 blocks below a conflict 12 blocks above the payment".into())],
+        params: vec![(
+            "rewind".into(),
+            "10 blocks below a conflict 12 blocks above the payment".into(),
+        )],
         slow: false,
         run: Box::new(|ctx| {
             let (a, birthday) = wallet(ctx);
@@ -245,10 +282,12 @@ fn restored_key_near_rewind() -> Scenario {
             ctx.wait(2 * DAY);
             let first = ctx.pay("late payout", &key, &swap.fvk, ZEC, Payer::Near);
             let h = first.height;
-            ctx.chain.mine_until_next_at(crate::harness::chain::block_time(h + 4));
+            ctx.chain
+                .mine_until_next_at(crate::harness::chain::block_time(h + 4));
             let b = ctx.device("B", SEED, birthday);
             ctx.sync(b);
-            ctx.chain.mine_until(crate::harness::chain::block_time(h + 15));
+            ctx.chain
+                .mine_until(crate::harness::chain::block_time(h + 15));
             ctx.sync(b);
             ctx.reorg(h + 11);
             ctx.mine(6);
@@ -269,7 +308,14 @@ fn restored_key_near_rewind() -> Scenario {
             ctx.wait(HOUR);
             ctx.sync(b);
             ctx.check_swap_history(b);
-            ctx.expect(b, "late payout", &key, &first, Class::FoundBySweep, "A restore sweeps the incoming lookahead through the receiver directory.");
+            ctx.expect(
+                b,
+                "late payout",
+                &key,
+                &first,
+                Class::FoundBySweep,
+                "A restore sweeps the incoming lookahead through the receiver directory.",
+            );
             ctx.expect(
                 b,
                 "second payment",

@@ -50,7 +50,13 @@ fn fund_swap(ctx: &mut Ctx) -> Funded {
     ctx.mine(5);
     let a = ctx.device("A", SEED, birthday);
     let fvk = ctx.get(a).fvk.clone();
-    ctx.pay("A's Ironwood funds", "A's address", &fvk, FUNDS, Payer::Wallet);
+    ctx.pay(
+        "A's Ironwood funds",
+        "A's address",
+        &fvk,
+        FUNDS,
+        Payer::Wallet,
+    );
     ctx.mine(10);
     ctx.sync(a);
     let swap = ctx.quote_refund(a, HOUR).expect("the refund key reserves");
@@ -127,7 +133,10 @@ fn refunded_twice(gap: Option<i64>) -> Scenario {
         group: FUNDING,
         title: format!(
             "NEAR refunds a swap twice, {}",
-            gap.map_or("in one transaction".to_string(), |g| format!("{} apart", span(g)))
+            gap.map_or("in one transaction".to_string(), |g| format!(
+                "{} apart",
+                span(g)
+            ))
         ),
         summary: "A refund key closes once its receipts cover the refunded amount NEAR reported. \
             A second refund to the same key after that is found only by Check swap history on the \
@@ -143,7 +152,10 @@ fn refunded_twice(gap: Option<i64>) -> Scenario {
                 None => {
                     let both = ctx.pay_many(
                         "refunds 1 and 2",
-                        &[(&f.key, &f.swap.fvk, 3 * ZEC / 10), (&f.key, &f.swap.fvk, 2 * ZEC / 10)],
+                        &[
+                            (&f.key, &f.swap.fvk, 3 * ZEC / 10),
+                            (&f.key, &f.swap.fvk, 2 * ZEC / 10),
+                        ],
                         Payer::Near,
                     );
                     first = both[0].clone();
@@ -178,9 +190,19 @@ fn refunded_twice(gap: Option<i64>) -> Scenario {
             ctx.sync(b);
             ctx.sync(b);
             ctx.check_swap_history(f.a);
-            ctx.expect(f.a, "refund 1", &f.key, &first, Class::FoundLive, REFUND_OPEN);
+            ctx.expect(
+                f.a,
+                "refund 1",
+                &f.key,
+                &first,
+                Class::FoundLive,
+                REFUND_OPEN,
+            );
             let (class, why) = if gap.is_none_or(|g| g < 12 * 75) {
-                (Class::FoundLive, "Both refunds arrived before the key could close.")
+                (
+                    Class::FoundLive,
+                    "Both refunds arrived before the key could close.",
+                )
             } else {
                 (
                     Class::FoundAfterRecheck,
@@ -188,8 +210,22 @@ fn refunded_twice(gap: Option<i64>) -> Scenario {
                 )
             };
             ctx.expect(f.a, "refund 2", &f.key, &second, class, why);
-            ctx.expect(b, "refund 1", &f.key, &first, Class::FoundBySweep, RESTORE_MEMO);
-            ctx.expect(b, "refund 2", &f.key, &second, Class::FoundBySweep, RESTORE_MEMO);
+            ctx.expect(
+                b,
+                "refund 1",
+                &f.key,
+                &first,
+                Class::FoundBySweep,
+                RESTORE_MEMO,
+            );
+            ctx.expect(
+                b,
+                "refund 2",
+                &f.key,
+                &second,
+                Class::FoundBySweep,
+                RESTORE_MEMO,
+            );
             ctx.check_same_balance(f.a, b);
         }),
     }
@@ -205,10 +241,11 @@ fn restore_before_refund(delay: i64) -> Scenario {
             "Restore while a refund is owed, refund {} after the restore",
             span(delay)
         ),
-        summary: "A restore recovers the refund key from the funding memo. NEAR was given the refund \
+        summary:
+            "A restore recovers the refund key from the funding memo. NEAR was given the refund \
             address within the last day, so the key scans for 24 hours after its sweep; a later \
             refund relies on the paid-filter check."
-            .into(),
+                .into(),
         params: vec![("refund after restore".into(), span(delay))],
         slow: false,
         run: Box::new(move |ctx| {

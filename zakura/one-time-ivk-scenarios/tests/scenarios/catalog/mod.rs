@@ -45,7 +45,11 @@ pub fn all() -> Vec<Scenario> {
     scenarios.extend(cost::all());
     let mut ids = std::collections::BTreeSet::new();
     for scenario in &scenarios {
-        assert!(ids.insert(scenario.id.clone()), "duplicate id {}", scenario.id);
+        assert!(
+            ids.insert(scenario.id.clone()),
+            "duplicate id {}",
+            scenario.id
+        );
     }
     scenarios
 }

@@ -8,6 +8,7 @@ use std::{
 
 use orchard::keys::FullViewingKey;
 use rusqlite::{Connection, OpenFlags};
+use sapling::prover::mock::{MockOutputProver, MockSpendProver};
 use secrecy::SecretVec;
 use tempfile::NamedTempFile;
 use zakura_near_intents::{NearStatus, near_observation};
@@ -18,20 +19,25 @@ use zcash_client_backend::data_api::{
     AccountBirthday, TransactionStatus, WalletCommitmentTrees, WalletRead as _, WalletWrite as _,
     chain::{error::Error as ChainError, scan_cached_blocks_with_one_time_ivks},
     enhance_pir::{EnhancePirRead as _, EnhancementMode, TransactionEnhancementWork},
-    status::{TransactionStatusMode, TransactionStatusRead as _},
-    wallet::{
-        SpendingKeys, create_proposed_transactions, decrypt_and_store_transaction_with_one_time_ivks,
-        input_selection::{GreedyInputSelector, NoteSelection, SpendPolicy},
-        propose_transfer,
-    },
     one_time_ivk::{
         OneTimeIvkRead as _,
         restore::{OneTimeIvkRestoreRead as _, OneTimeIvkRestoreWrite as _},
     },
     scanning::ScanPriority,
+    status::{TransactionStatusMode, TransactionStatusRead as _},
     testing::TestRng,
     transparent_ledger::{ChainPoint, TransparentLedgerMode},
     wallet::ConfirmationsPolicy,
+    wallet::{
+        SpendingKeys, create_proposed_transactions,
+        decrypt_and_store_transaction_with_one_time_ivks,
+        input_selection::{GreedyInputSelector, NoteSelection, SpendPolicy},
+        propose_transfer,
+    },
+};
+use zcash_client_backend::{
+    fees::{DustOutputPolicy, StandardFeeRule, standard::SingleOutputChangeStrategy},
+    wallet::OvkPolicy,
 };
 use zcash_client_sqlite::{
     AccountUuid, WalletDb,
@@ -45,12 +51,7 @@ use zcash_client_sqlite::{
         },
     },
 };
-use zcash_client_backend::{
-    fees::{DustOutputPolicy, StandardFeeRule, standard::SingleOutputChangeStrategy},
-    wallet::OvkPolicy,
-};
 use zcash_keys::{address::Address, keys::UnifiedSpendingKey};
-use sapling::prover::mock::{MockOutputProver, MockSpendProver};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::ShieldedPool;
 use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork, value::Zatoshis};
@@ -120,7 +121,11 @@ pub struct KeyState {
 impl KeyState {
     /// The report's name for the key.
     pub fn label(&self) -> String {
-        format!("{}{}", if self.purpose == 0 { "R" } else { "I" }, self.index)
+        format!(
+            "{}{}",
+            if self.purpose == 0 { "R" } else { "I" },
+            self.index
+        )
     }
 
     /// Whether the wallet trial-decrypts with it.
@@ -211,8 +216,13 @@ impl Device {
     ) -> Self {
         let file = NamedTempFile::new().expect("a temporary wallet file");
         let path = file.path().to_path_buf();
-        let mut db = WalletDb::for_path(&path, network(), chain.clock(skew), TestRng::seed_from_u64(7))
-            .expect("the wallet opens");
+        let mut db = WalletDb::for_path(
+            &path,
+            network(),
+            chain.clock(skew),
+            TestRng::seed_from_u64(7),
+        )
+        .expect("the wallet opens");
         init_wallet_db(&mut db, Some(SecretVec::new(seed.to_vec()))).expect("the schema migrates");
         // Payload retrieval over the public path: the simulator serves raw transactions.
         db.set_enhancement_mode(EnhancementMode::Standard);
@@ -375,10 +385,7 @@ impl Device {
     /// GetTransaction would (Vizor routes the same obligations to Status and Enhance PIR
     /// under Private queries), until none it can serve remains.
     fn enhance(&mut self, chain: &Chain) {
-        let status_work = self
-            .db
-            .transaction_status_work()
-            .expect("status work");
+        let status_work = self.db.transaction_status_work().expect("status work");
         for item in status_work {
             let txid = item.txid();
             self.db
@@ -400,7 +407,10 @@ impl Device {
                     // output still on the chain has no raw form to serve, so it waits.
                     if let TransactionStatus::TxidNotRecognized = chain.status(&request.txid()) {
                         self.db
-                            .set_transaction_status(request.txid(), TransactionStatus::TxidNotRecognized)
+                            .set_transaction_status(
+                                request.txid(),
+                                TransactionStatus::TxidNotRecognized,
+                            )
                             .expect("the status records");
                     }
                     continue;
@@ -624,9 +634,8 @@ impl Device {
         let now = self.now(chain);
         let key = {
             let seen_near = &*near;
-            let contains = |receivers: &[[u8; 43]]| {
-                receivers.iter().map(|r| seen_near.seen(r, now)).collect()
-            };
+            let contains =
+                |receivers: &[[u8; 43]]| receivers.iter().map(|r| seen_near.seen(r, now)).collect();
             let seen = ProviderSeen {
                 since: near.feed_started,
                 until: near.read_until(now),
@@ -695,7 +704,14 @@ impl Device {
         .expect("the funding proposal");
         verify_refund_funding_proposal(&proposal, &memo, &swap.deposit)
             .expect("the funding proposal carries the refund memo");
-        let txids = create_proposed_transactions::<_, _, std::convert::Infallible, _, std::convert::Infallible, _>(
+        let txids = create_proposed_transactions::<
+            _,
+            _,
+            std::convert::Infallible,
+            _,
+            std::convert::Infallible,
+            _,
+        >(
             &mut self.db,
             &network(),
             &MockSpendProver,
@@ -750,7 +766,14 @@ impl Device {
             None,
         )
         .expect("the payment proposal");
-        let txids = create_proposed_transactions::<_, _, std::convert::Infallible, _, std::convert::Infallible, _>(
+        let txids = create_proposed_transactions::<
+            _,
+            _,
+            std::convert::Infallible,
+            _,
+            std::convert::Infallible,
+            _,
+        >(
             &mut self.db,
             &network(),
             &MockSpendProver,
@@ -785,7 +808,13 @@ impl Device {
             },
         );
         self.db
-            .record_operation_status(self.account, &swap.deposit, None, observation, self.now(chain))
+            .record_operation_status(
+                self.account,
+                &swap.deposit,
+                None,
+                observation,
+                self.now(chain),
+            )
             .expect("the status records")
     }
 
@@ -865,7 +894,14 @@ impl Device {
             None,
         )
         .expect("the payment proposal");
-        let txids = create_proposed_transactions::<_, _, std::convert::Infallible, _, std::convert::Infallible, _>(
+        let txids = create_proposed_transactions::<
+            _,
+            _,
+            std::convert::Infallible,
+            _,
+            std::convert::Infallible,
+            _,
+        >(
             &mut self.db,
             &network(),
             &MockSpendProver,
@@ -943,7 +979,11 @@ impl Device {
             .iter()
             .map(|k| {
                 let id = k.key_id();
-                let prefix = if id.purpose() == Purpose::Refund { "R" } else { "I" };
+                let prefix = if id.purpose() == Purpose::Refund {
+                    "R"
+                } else {
+                    "I"
+                };
                 format!("{prefix}{}", id.index())
             })
             .collect()
@@ -1012,7 +1052,8 @@ fn checkpoints(path: &Path) -> String {
 
 /// A read-only connection to a wallet file.
 fn read_only(path: &Path) -> Connection {
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("the wallet file opens")
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("the wallet file opens")
 }
 
 /// The sweep's write lock. Nothing else writes to a scenario's wallet concurrently.

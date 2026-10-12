@@ -48,7 +48,9 @@ impl Args {
             jobs: default_jobs,
             report: std::env::var_os("ONE_TIME_IVK_REPORT_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| Path::new(env!("CARGO_TARGET_TMPDIR")).join("one-time-ivk-scenarios")),
+                .unwrap_or_else(|| {
+                    Path::new(env!("CARGO_TARGET_TMPDIR")).join("one-time-ivk-scenarios")
+                }),
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -62,7 +64,9 @@ impl Args {
                         .and_then(|n| n.parse().ok())
                         .expect("--jobs takes a number")
                 }
-                "--report" => args.report = PathBuf::from(it.next().expect("--report takes a directory")),
+                "--report" => {
+                    args.report = PathBuf::from(it.next().expect("--report takes a directory"))
+                }
                 flag if flag.starts_with('-') => {}
                 filter => args.filter = Some(filter.into()),
             }
@@ -118,8 +122,11 @@ fn main() {
     std::fs::write(args.report.join("report.json"), json).expect("report.json");
     std::fs::write(args.report.join("report.md"), render_markdown(&report)).expect("report.md");
     std::fs::write(args.report.join("report.html"), render_html(&report)).expect("report.html");
-    std::fs::write(args.report.join("report.page.html"), render_html_page(&report))
-        .expect("report.page.html");
+    std::fs::write(
+        args.report.join("report.page.html"),
+        render_html_page(&report),
+    )
+    .expect("report.page.html");
     let totals = report.totals();
     println!(
         "\n{} passed, {} failed, {} errors in {:.1} s",
@@ -152,7 +159,10 @@ fn run_all(scenarios: &[Scenario], jobs: usize) -> Vec<ScenarioResult> {
             Outcome::Fail => "FAIL",
             Outcome::Error => "ERROR",
         };
-        println!("{mark:>5}  {}  ({} ms)", scenarios[i].id, result.duration_ms);
+        println!(
+            "{mark:>5}  {}  ({} ms)",
+            scenarios[i].id, result.duration_ms
+        );
         results.lock().unwrap()[i] = Some(result);
     };
     std::thread::scope(|scope| {
@@ -202,30 +212,29 @@ fn last_panic() -> String {
 fn run_one(scenario: &Scenario) -> ScenarioResult {
     let started = Instant::now();
     let mut error = None;
-    let (timeline, payments, checks, metrics) =
-        match panic::catch_unwind(Ctx::new) {
-            Err(_) => {
-                error = Some(format!("setting up the world: {}", last_panic()));
-                Default::default()
+    let (timeline, payments, checks, metrics) = match panic::catch_unwind(Ctx::new) {
+        Err(_) => {
+            error = Some(format!("setting up the world: {}", last_panic()));
+            Default::default()
+        }
+        Ok(mut ctx) => {
+            let ran = panic::catch_unwind(AssertUnwindSafe(|| {
+                (scenario.run)(&mut ctx);
+                ctx.log("suite", "every wallet keeps syncing until quiet");
+                ctx.settle();
+            }));
+            if ran.is_err() {
+                error = Some(last_panic());
             }
-            Ok(mut ctx) => {
-                let ran = panic::catch_unwind(AssertUnwindSafe(|| {
-                    (scenario.run)(&mut ctx);
-                    ctx.log("suite", "every wallet keeps syncing until quiet");
-                    ctx.settle();
-                }));
-                if ran.is_err() {
-                    error = Some(last_panic());
-                }
-                match panic::catch_unwind(AssertUnwindSafe(|| ctx.finish())) {
-                    Ok(findings) => findings,
-                    Err(_) => {
-                        error.get_or_insert_with(|| format!("collecting results: {}", last_panic()));
-                        Default::default()
-                    }
+            match panic::catch_unwind(AssertUnwindSafe(|| ctx.finish())) {
+                Ok(findings) => findings,
+                Err(_) => {
+                    error.get_or_insert_with(|| format!("collecting results: {}", last_panic()));
+                    Default::default()
                 }
             }
-        };
+        }
+    };
     let mut result = ScenarioResult {
         id: scenario.id.clone(),
         group: scenario.group.into(),
@@ -266,7 +275,11 @@ fn revisions() -> Vec<(String, String)> {
     let mut revisions = Vec::new();
     if let Some(head) = git(&["rev-parse", "HEAD"]) {
         let dirty = git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
-        let value = if dirty { format!("{head} (with local changes)") } else { head };
+        let value = if dirty {
+            format!("{head} (with local changes)")
+        } else {
+            head
+        };
         revisions.push(("wallet-libraries".into(), value));
     }
     if let Ok(lock) = std::fs::read_to_string(root.join("Cargo.lock")) {
