@@ -75,8 +75,6 @@ enum Phase {
 #[derive(Clone, Copy, Debug)]
 pub struct Found {
     pub class: Class,
-    /// The wallet's sync count when it was found.
-    pub sync: u32,
 }
 
 /// A ZEC-to-X swap a wallet quoted: its refund key and NEAR's deposit address.
@@ -85,7 +83,6 @@ pub struct RefundSwap {
     pub index: u64,
     pub fvk: FullViewingKey,
     pub deposit: String,
-    pub deadline: i64,
 }
 
 impl RefundSwap {
@@ -533,10 +530,7 @@ impl Device {
         for (id, _) in credited(&self.path) {
             self.found.entry(id).or_insert_with(|| {
                 new += 1;
-                Found {
-                    class,
-                    sync: self.syncs,
-                }
+                Found { class }
             });
         }
         new
@@ -597,7 +591,6 @@ impl Device {
         near: &mut Near,
         deadline_in: i64,
     ) -> Result<IncomingSwap, ReservationPolicy> {
-        let now = self.now(chain);
         let index = self.prepare_incoming(chain, near)?;
         let request = self.begin_incoming(chain, index, deadline_in)?;
         let fvk = self.key(Purpose::Receive, index);
@@ -655,7 +648,6 @@ impl Device {
             index,
             fvk,
             deposit,
-            deadline,
         })
     }
 

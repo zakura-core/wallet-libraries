@@ -167,7 +167,6 @@ pub struct Mined {
     /// The output's leaf position in the Ironwood note commitment tree.
     pub position: u64,
     pub value: u64,
-    pub receiver: [u8; 43],
     pub payer: Payer,
     /// The record a zero-OVK payment gives the directory.
     pub indexed: Option<Record>,
@@ -433,7 +432,6 @@ impl Chain {
                 height,
                 position,
                 value: *value,
-                receiver,
                 payer,
                 indexed,
             };
@@ -530,7 +528,6 @@ impl Chain {
                     height,
                     position,
                     value,
-                    receiver,
                     payer,
                     indexed,
                 };

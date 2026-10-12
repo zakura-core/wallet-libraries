@@ -145,11 +145,6 @@ impl Directory {
             .count()
     }
 
-    /// Every request so far.
-    pub fn requests(&self) -> usize {
-        self.requests.lock().unwrap().len()
-    }
-
     async fn send(
         &self,
         method: &str,
