@@ -8037,7 +8037,6 @@ dependencies = [
  "zakura-orchard",
  "zakura-pasta-curves",
  "zakura-protocol",
- "zcash_note_encryption",
  "zeroize",
 ]
 

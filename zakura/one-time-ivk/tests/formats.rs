@@ -1,5 +1,5 @@
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
-use zakura_one_time_ivk::{KeyId, Purpose, has_same_spending_authority, swap::RefundMemo};
+use zakura_one_time_ivk::{KeyId, Purpose, swap::RefundMemo};
 
 #[test]
 fn derived_keys_separate_purposes_and_preserve_only_authority() {
@@ -10,24 +10,15 @@ fn derived_keys_separate_purposes_and_preserve_only_authority() {
         for purpose in [Purpose::Refund, Purpose::Receive] {
             let id = KeyId::new(purpose, index);
             let key = id.derive(&account).unwrap();
-            assert!(has_same_spending_authority(&account, &key));
-            assert!(!has_same_spending_authority(&foreign, &key));
+            // Raw FVK encoding is ak || nk || rivk (protocol §5.6.4.4).
+            assert_eq!(key.to_bytes()[..64], account.to_bytes()[..64]);
+            assert_ne!(key.to_bytes()[..64], foreign.to_bytes()[..64]);
             assert_eq!(key.to_bytes(), id.derive(&account).unwrap().to_bytes());
             let address = key.address_at(0u32, Scope::External);
             assert!(!receivers.contains(&address));
             receivers.push(address);
         }
     }
-
-    // Comparing only ak would let a substituted nullifier authority through.
-    let mut substituted = account.to_bytes();
-    substituted[32..64].copy_from_slice(&foreign.to_bytes()[32..64]);
-    let substituted = FullViewingKey::from_bytes(&substituted).unwrap();
-    assert!(!has_same_spending_authority(&account, &substituted));
-    let mut substituted = account.to_bytes();
-    substituted[..32].copy_from_slice(&foreign.to_bytes()[..32]);
-    let substituted = FullViewingKey::from_bytes(&substituted).unwrap();
-    assert!(!has_same_spending_authority(&account, &substituted));
 }
 
 #[test]

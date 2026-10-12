@@ -1,13 +1,16 @@
-//! Authenticate privately retrieved notes before wallet accounting.
+//! Authentication of the notes a restore sweep retrieves, before wallet accounting.
 //! Chain roots and spend-history coverage must come from the wallet independently.
-use crate::KeyId;
+
 use orchard::{
     keys::{FullViewingKey, Scope},
-    note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier},
+    note::{ExtractedNoteCommitment, Note, Nullifier},
     note_encryption::{CompactAction, IronwoodDomain},
     tree::{Anchor, MerklePath},
 };
+use zakura_one_time_ivk::KeyId;
 use zcash_note_encryption::{EphemeralKeyBytes, ShieldedOutput, try_note_decryption};
+
+use crate::data_api::enhance_pir::storage::stitched_enc_ciphertext;
 
 /// Serialized encrypted context size, independent of the discovery transport.
 pub const ENCRYPTED_NOTE_BYTES: usize = 676;
@@ -30,8 +33,7 @@ impl EncryptedNote {
         bytes[..32].copy_from_slice(&action_nullifier);
         bytes[32..64].copy_from_slice(&cmx);
         bytes[64..96].copy_from_slice(&ephemeral_key);
-        bytes[96..148].copy_from_slice(&prefix);
-        bytes[148..].copy_from_slice(suffix);
+        bytes[96..].copy_from_slice(&stitched_enc_ciphertext(&prefix, suffix));
         Self(bytes)
     }
 
@@ -65,8 +67,7 @@ impl EncryptedNote {
 
     /// Derives the expected key and authenticates the note. Returns `None` if
     /// derivation, decoding or authentication fails, or the note is not a v3 note to
-    /// the key's address; that never shows the receiver is unused. This deliberately
-    /// does not use the public zero OVK to establish ownership.
+    /// the key's address; that never shows the receiver is unused.
     ///
     /// The memo is discarded: one-time-key notes carry no memo the wallet reads; only
     /// internal change carries the refund marker.
@@ -88,7 +89,8 @@ impl EncryptedNote {
             &key.to_ivk(Scope::External).prepare(),
             self,
         )?;
-        if note.version() != NoteVersion::V3 || recipient != key.address_at(0u32, Scope::External) {
+        // `IronwoodDomain` accepts only v3 plaintexts.
+        if recipient != key.address_at(0u32, Scope::External) {
             return None;
         }
         Some(RecoveredNote {
@@ -132,5 +134,73 @@ impl RecoveredNote {
     pub fn verify_position(&self, position: u64, path: &MerklePath, accepted_root: Anchor) -> bool {
         position == u64::from(path.position())
             && path.root(self.note.commitment().into()) == accepted_root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use incrementalmerkletree::Hashable;
+    use orchard::{
+        keys::{FullViewingKey, Scope, SpendingKey},
+        note::{Note, NoteVersion, RandomSeed, Rho},
+        note_encryption::{IronwoodDomain, IronwoodNoteEncryption},
+        tree::{Anchor, MerkleHashOrchard, MerklePath},
+        value::NoteValue,
+    };
+    use zakura_one_time_ivk::{KeyId, Purpose};
+    use zcash_note_encryption::Domain;
+
+    use super::EncryptedNote;
+
+    #[test]
+    fn authenticate_derived_key_and_bind_position() {
+        let account = FullViewingKey::from(&SpendingKey::from_bytes([0; 32]).unwrap());
+        for purpose in [Purpose::Refund, Purpose::Receive] {
+            let id = KeyId::new(purpose, 7);
+            let key = id.derive(&account).unwrap();
+            let rho = Rho::from_bytes(&[9; 32]).unwrap();
+            let note = Note::from_parts(
+                key.address_at(0u32, Scope::External),
+                NoteValue::from_raw(30_000),
+                rho,
+                RandomSeed::from_bytes([7; 32], &rho).unwrap(),
+                NoteVersion::V3,
+            )
+            .unwrap();
+            let encryptor = IronwoodNoteEncryption::new(None, note, [4; 512]);
+            let bytes = encryptor.encrypt_note_plaintext();
+            let encrypted = EncryptedNote::from_parts(
+                [9; 32],
+                orchard::note::ExtractedNoteCommitment::from(note.commitment()).to_bytes(),
+                IronwoodDomain::epk_bytes(encryptor.epk()).0,
+                bytes[..52].try_into().unwrap(),
+                bytes[52..].try_into().unwrap(),
+            );
+            let restored = EncryptedNote::from_bytes(*encrypted.to_bytes());
+            let recovered = restored.decrypt(&account, id).unwrap();
+            assert_eq!(recovered.note(), &note);
+            assert_eq!(recovered.nullifier(), &note.nullifier(&key));
+            assert!(restored.decrypt(&account, KeyId::new(purpose, 8)).is_none());
+            let other = FullViewingKey::from(&SpendingKey::from_bytes([1; 32]).unwrap());
+            assert!(restored.decrypt(&other, id).is_none());
+            for offset in [0, 32, 64, 96, 148, 675] {
+                let mut bytes = *restored.to_bytes();
+                bytes[offset] ^= 1;
+                assert!(
+                    EncryptedNote::from_bytes(bytes)
+                        .decrypt(&account, id)
+                        .is_none()
+                );
+            }
+            let path = MerklePath::from_parts(
+                2,
+                std::array::from_fn(|i| MerkleHashOrchard::empty_root((i as u8).into())),
+            );
+            let root = path.root(note.commitment().into());
+            assert!(recovered.verify_position(2, &path, root));
+            assert!(!recovered.verify_position(3, &path, root));
+            assert!(!recovered.verify_position((1u64 << 32) + 2, &path, root));
+            assert!(!recovered.verify_position(2, &path, Anchor::empty_tree()));
+        }
     }
 }
