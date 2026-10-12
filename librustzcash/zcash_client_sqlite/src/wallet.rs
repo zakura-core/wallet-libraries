@@ -8316,6 +8316,84 @@ mod tests {
             vec![200]
         );
     }
+
+    /// Without `one-time-ivk`, a caller-owned handle cannot prune tracked nullifiers over
+    /// one-time IVK state, which would discard spend evidence below the retention floor
+    /// while its replay marker claims the history was replayed.
+    #[cfg(not(feature = "one-time-ivk"))]
+    #[test]
+    fn pruning_without_the_feature_refuses_one_time_ivk_state() {
+        use zcash_client_backend::data_api::ll::LowLevelWalletWrite;
+        use zcash_protocol::PoolType;
+
+        use crate::{
+            SqlTransaction, WalletDb,
+            error::SqliteClientError,
+            testing::db::{test_clock, test_rng},
+            wallet::init::WalletMigrationError,
+        };
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let scanned = st.generate_empty_block().0;
+        st.scan_cached_blocks(scanned, 1);
+        let network = *st.network();
+        let below = u32::from(scanned) - 1;
+        let conn = st.wallet_mut().conn_mut();
+        conn.execute(
+            "INSERT INTO ironwood_one_time_spend_retention
+                 (account_id, nullifier_retention_height, replay_through)
+             SELECT id, 0, ?1 FROM accounts",
+            [u32::from(scanned)],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tx_locator_map VALUES(?1, 0, ?2)",
+            rusqlite::params![below, [1u8; 32]],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO nullifier_map VALUES(?1, ?2, ?3, 0)",
+            rusqlite::params![
+                super::encoding::pool_code(PoolType::IRONWOOD),
+                [2u8; 32],
+                below
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ironwood_nullifier_scan_blocks VALUES(?1)",
+            [below],
+        )
+        .unwrap();
+
+        let owned = conn.transaction().unwrap();
+        let mut handle = WalletDb::from_connection(
+            SqlTransaction::new(&owned),
+            network,
+            test_clock(),
+            test_rng(),
+        );
+        let refusal = WalletMigrationError::OneTimeIvksNotEnabled.to_string();
+        assert!(matches!(
+            handle.prune_tracked_nullifiers(0),
+            Err(SqliteClientError::DbError(rusqlite::Error::SqliteFailure(_, Some(m)))) if m == refusal
+        ));
+        drop(handle);
+        let count = |sql: &str| -> u32 { owned.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM nullifier_map"), 1);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM ironwood_nullifier_scan_blocks"),
+            1
+        );
+        assert_eq!(
+            count("SELECT replay_through FROM ironwood_one_time_spend_retention"),
+            u32::from(scanned)
+        );
+    }
 }
 
 #[cfg(test)]

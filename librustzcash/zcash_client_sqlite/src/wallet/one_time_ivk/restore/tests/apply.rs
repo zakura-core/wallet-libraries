@@ -2,9 +2,10 @@ use super::*;
 use std::collections::BTreeMap;
 use zcash_primitives::transaction::TxId;
 
-/// Watches receive key 8 from the block after its payment, as a restore registers keys
-/// before scanning, so scanning misses the note it is paid at the tip; then queues the
-/// payment. Also returns the tip and the payment's path there.
+/// Retains spend history, pays receive key 8 at the tip before registering it, so
+/// scanning misses the note, then watches the key from the next block and queues the
+/// payment, the order of a restore: retain, scan, then register recovered keys. Also
+/// returns the tip and the payment's path there.
 pub(in crate::wallet::one_time_ivk) fn fixture()
 -> (State, OneTimeKey, PendingPayment, ChainPoint, MerklePath) {
     fixture_in(ironwood_wallet())
@@ -15,16 +16,13 @@ pub(in crate::wallet::one_time_ivk) fn fixture_in(
     mut st: State,
 ) -> (State, OneTimeKey, PendingPayment, ChainPoint, MerklePath) {
     let account = st.test_account().unwrap().id();
+    retain(st.wallet_mut().db_mut(), account);
     let id = KeyId::new(Purpose::Receive, 8);
-    let paid_at = st
-        .latest_cached_block()
-        .map_or(st.sapling_activation_height(), |b| b.height() + 1);
-    let key = watch(st.wallet_mut().db_mut(), account, 8, paid_at + 1);
     let candidate = pay_candidate(&mut st, id);
     let through = tip(&st);
-    assert_eq!(through.height, paid_at);
     assert!(unspent_keys(&st, through.height).is_empty());
     let db = st.wallet_mut().db_mut();
+    let key = watch(db, account, 8, through.height + 1);
     queue_payment(db, account, id, &candidate).unwrap();
     (st, key, candidate, through, first_leaf_path())
 }
@@ -189,13 +187,14 @@ fn a_restored_one_time_note_stores_no_memo() {
         .unwrap();
     let memo = MemoBytes::from_bytes(b"the payment's memo").unwrap();
     let tx = external_payment(fvk.address_at(0u32, Scope::External), &memo);
+    retain(st.wallet_mut().db_mut(), account);
     let (height, _) = st.generate_next_block_from_tx(1, &tx);
-    watch(st.wallet_mut().db_mut(), account, 8, height + 1);
     st.scan_cached_blocks_with_one_time_ivks(height, 1);
     let candidate = candidate_at(&st, height, &fvk);
     let through = tip(&st);
     let path = witness_at(&st, candidate.position);
     let db = st.wallet_mut().db_mut();
+    watch(db, account, 8, height + 1);
     queue_payment(db, account, id, &candidate).unwrap();
     assert_eq!(
         apply_payment(db, account, id, &candidate, through, (through, &path)).unwrap(),
@@ -277,8 +276,8 @@ fn a_claim_contradicting_a_stored_raw_transaction_is_rejected() {
             .unwrap();
         let memo = zcash_protocol::memo::MemoBytes::empty();
         let paid = external_payment(fvk.address_at(0u32, Scope::External), &memo);
+        retain(st.wallet_mut().db_mut(), account);
         let (height, _) = st.generate_next_block_from_tx(1, &paid);
-        watch(st.wallet_mut().db_mut(), account, 8, height + 1);
         st.scan_cached_blocks_with_one_time_ivks(height, 1);
         let genuine = candidate_at(&st, height, &fvk);
         let through = tip(&st);
@@ -324,6 +323,7 @@ fn a_claim_contradicting_a_stored_raw_transaction_is_rejected() {
         if let Some(stored) = stored {
             store_mined(db, stored, height);
         }
+        watch(db, account, 8, height + 1);
         queue_payment(db, account, id, &candidate).unwrap();
         let applied = apply_payment(db, account, id, &candidate, through, (through, &path));
         if matches!(raw, Raw::Absent | Raw::Matching) {
@@ -373,8 +373,8 @@ fn a_directory_payment_leaves_an_unknown_transaction_to_enhancement() {
         let memo = zcash_protocol::memo::MemoBytes::empty();
         let paid = external_payment_with(fvk.address_at(0u32, Scope::External), &memo, vec![mixed]);
         assert!(paid.transparent_bundle().is_some());
+        retain(st.wallet_mut().db_mut(), account);
         let (height, _) = st.generate_next_block_from_tx(1, &paid);
-        watch(st.wallet_mut().db_mut(), account, 8, height + 1);
         st.scan_cached_blocks_with_one_time_ivks(height, 1);
         let candidate = candidate_at(&st, height, &fvk);
         let through = tip(&st);
@@ -383,6 +383,7 @@ fn a_directory_payment_leaves_an_unknown_transaction_to_enhancement() {
         if stored {
             store_mined(db, &paid, height);
         }
+        watch(db, account, 8, height + 1);
         queue_payment(db, account, id, &candidate).unwrap();
         assert_eq!(
             apply_payment(db, account, id, &candidate, through, (through, &path)).unwrap(),
@@ -955,7 +956,6 @@ fn has_transaction(st: &State, txid: TxId) -> bool {
 fn scanning_moves_a_mislabeled_import_to_its_transaction() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
-    // As a restore does, retain spend history before scanning the payment's block.
     retain(st.wallet_mut().db_mut(), account);
     let id = KeyId::new(Purpose::Refund, 0);
     let candidate = pay_candidate(&mut st, id);

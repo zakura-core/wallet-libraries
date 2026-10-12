@@ -88,7 +88,7 @@ From the workspace root:
 
 ```sh
 python3 scripts/dev.py test --config default -p zakura-one-time-ivk
-python3 scripts/dev.py test --config orchard -p zakura-client-sqlite one_time_ivk
+python3 scripts/dev.py test --config one-time-ivk -p zakura-client-sqlite one_time_ivk
 ```
 
 Regenerate the KDF vectors from this directory with

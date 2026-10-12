@@ -4267,6 +4267,9 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
     }
 
     fn prune_tracked_nullifiers(&mut self, pruning_depth: u32) -> Result<(), Self::Error> {
+        // This build's pruning ignores the restore retention floor.
+        #[cfg(not(feature = "one-time-ivk"))]
+        wallet::init::refuse_one_time_ivk_state(self.conn.borrow())?;
         if let Some(meta) = wallet::block_fully_scanned(self.conn.borrow(), &self.params)? {
             wallet::prune_nullifier_map(
                 self.conn.borrow(),
