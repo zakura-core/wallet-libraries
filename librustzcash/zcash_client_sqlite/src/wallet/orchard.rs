@@ -124,17 +124,17 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
             let fvk = ufvk.orchard().ok_or_else(|| {
                 SqliteClientError::CorruptedData("missing Orchard FVK".to_owned())
             })?;
-            let dynamic_key = receiving_key_id
-                .map(|id| super::dynamic_ivk::note_key(conn, id, fvk))
+            let one_time_key = receiving_key_id
+                .map(|id| super::one_time_ivk::note_key(conn, id, fvk))
                 .transpose()?;
-            let fvk = dynamic_key.as_ref().map_or(fvk, |(_, fvk)| fvk);
+            let fvk = one_time_key.as_ref().map_or(fvk, |(_, fvk)| fvk);
             let recipient = fvk.to_ivk(spending_key_scope).address(diversifier);
-            if dynamic_key.is_some()
+            if one_time_key.is_some()
                 && (spending_key_scope != Scope::External
                     || recipient != fvk.address_at(0u32, Scope::External))
             {
                 return Err(SqliteClientError::CorruptedData(
-                    "invalid dynamic-key note recipient".into(),
+                    "invalid one-time-key note recipient".into(),
                 ));
             }
 
@@ -157,7 +157,7 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
                 mined_height,
                 max_shielding_input_height,
             );
-            Ok(received.with_dynamic_key_id(dynamic_key.map(|(id, _)| id)))
+            Ok(received.with_one_time_key_id(one_time_key.map(|(id, _)| id)))
         })
         .transpose()
 }
@@ -530,9 +530,9 @@ pub(crate) fn put_received_note<
 
     let account_id = get_account_ref(conn, output.account_id())?;
     let receiving_key_id =
-        super::dynamic_ivk::validate_received_key(conn, params, shielded_pool, output)?;
+        super::one_time_ivk::validate_received_key(conn, params, shielded_pool, output)?;
     if let (ShieldedPool::Ironwood, Some(nf)) = (shielded_pool, output.nullifier()) {
-        super::dynamic_ivk::adopt_found_note(conn, &nf.to_bytes(), tx_ref, output.index())?;
+        super::one_time_ivk::adopt_found_note(conn, &nf.to_bytes(), tx_ref, output.index())?;
     }
     if shielded_pool == ShieldedPool::Ironwood {
         use rusqlite::OptionalExtension;
@@ -547,12 +547,12 @@ pub(crate) fn put_received_note<
             .flatten();
         if stored_key.is_some() && stored_key != receiving_key_id {
             return Err(SqliteClientError::CorruptedData(
-                "dynamic-key note key identity changed".into(),
+                "one-time-key note key identity changed".into(),
             ));
         }
     }
     let address_id = if receiving_key_id.is_some() {
-        // Dynamic-key receivers are not addresses under the ordinary account UIVK.
+        // One-time-key receivers are not addresses under the ordinary account UIVK.
         None
     } else {
         ensure_address(conn, params, output, target_or_mined_height)?
@@ -612,7 +612,7 @@ pub(crate) fn put_received_note<
         .query_row(sql_args, |row| row.get::<_, i64>(0))
         .map_err(SqliteClientError::from)?;
 
-    // Only validated Ironwood dynamic-key outputs carry a key.
+    // Only validated Ironwood one-time-key outputs carry a key.
     if let Some(key_id) = receiving_key_id {
         conn.execute(
             "UPDATE ironwood_received_notes SET receiving_key_id = ?1 WHERE id = ?2",

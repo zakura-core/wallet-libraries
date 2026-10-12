@@ -2669,14 +2669,14 @@ fn rediscovery_is_routed_privately_and_can_change_the_next_route() {
     assert_eq!(queries_for(&private), 1);
 }
 
-// A note found by a dynamic key binds its transaction's metadata with that key, never
-// the account's, but its memo is never retrieved privately (see `wallet::dynamic_ivk`).
+// A note found by a one-time key binds its transaction's metadata with that key, never
+// the account's, but its memo is never retrieved privately (see `wallet::one_time_ivk`).
 #[test]
-fn dynamic_key_notes_bind_metadata_without_private_memos_after_reopen() {
+fn one_time_key_notes_bind_metadata_without_private_memos_after_reopen() {
     use crate::{
         WalletDb,
         testing::db::{test_clock, test_rng},
-        wallet::dynamic_ivk::Purpose,
+        wallet::one_time_ivk::Purpose,
     };
     use orchard::keys::OutgoingViewingKey;
     use prost::Message;
@@ -2685,7 +2685,7 @@ fn dynamic_key_notes_bind_metadata_without_private_memos_after_reopen() {
     for purpose in [Purpose::Refund, Purpose::Receive] {
         let mut st = state_with_factory(TestDbFactory::file_backed());
         let account = st.test_account().unwrap().id();
-        let key = crate::wallet::dynamic_ivk::tests::reserve_key(
+        let key = crate::wallet::one_time_ivk::tests::reserve_key(
             st.wallet_mut().db_mut(),
             account,
             purpose,
@@ -2720,7 +2720,7 @@ fn dynamic_key_notes_bind_metadata_without_private_memos_after_reopen() {
                 rusqlite::params![block.encode_to_vec(), u32::from(height)],
             )
             .unwrap();
-        st.scan_cached_blocks_with_dynamic_ivks(height, 1);
+        st.scan_cached_blocks_with_one_time_ivks(height, 1);
         let reopened = WalletDb::for_path(
             st.wallet().data_file_path(),
             *st.network(),

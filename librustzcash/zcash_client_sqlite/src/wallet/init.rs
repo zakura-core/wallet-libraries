@@ -73,9 +73,9 @@ pub enum WalletMigrationError {
     /// whose meaning it does not know. External migrations must be supplied on every call.
     UnknownMigrations(Vec<Uuid>),
 
-    /// The database holds dynamic IVK state, which a build without the `orchard` feature
+    /// The database holds one-time IVK state, which a build without the `orchard` feature
     /// cannot scan with or keep consistent, so such a build refuses to open it.
-    DynamicIvksRequireOrchard,
+    OneTimeIvksRequireOrchard,
 
     /// Some other unexpected violation of database business rules occurred
     Other(Box<SqliteClientError>),
@@ -163,9 +163,9 @@ impl fmt::Display for WalletMigrationError {
                     ids.join(", ")
                 )
             }
-            WalletMigrationError::DynamicIvksRequireOrchard => write!(
+            WalletMigrationError::OneTimeIvksRequireOrchard => write!(
                 f,
-                "The wallet database holds dynamic IVK state, which needs a build with the orchard feature"
+                "The wallet database holds one-time IVK state, which needs a build with the orchard feature"
             ),
             WalletMigrationError::Other(err) => {
                 write!(f, "Unexpected violation of database business rules: {err}")
@@ -202,10 +202,10 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
         #[cfg(feature = "orchard")]
-        SqliteClientError::DynamicIvksNotUsed
-        | SqliteClientError::InvalidDynamicIvkInput(_)
-        | SqliteClientError::DynamicIvkIndexExhausted => {
-            unreachable!("migrations do not use dynamic IVKs")
+        SqliteClientError::OneTimeIvksNotUsed
+        | SqliteClientError::InvalidOneTimeIvkInput(_)
+        | SqliteClientError::OneTimeIvkIndexExhausted => {
+            unreachable!("migrations do not use one-time IVKs")
         }
         SqliteClientError::TransparentLedgerModeNotConfigured
         | SqliteClientError::TransparentAuthorityUnavailable(_)
@@ -421,8 +421,8 @@ pub fn init_wallet_db<
 /// and should be invoked at least once any time a client program upgrades to a new
 /// version of this library. The operation of this procedure is idempotent, so it is safe
 /// (though not required) to invoke this operation every time the wallet is opened. A build
-/// without `orchard` refuses a database holding dynamic IVK state whether or not this runs
-/// (see [`WalletMigrationError::DynamicIvksRequireOrchard`]).
+/// without `orchard` refuses a database holding one-time IVK state whether or not this runs
+/// (see [`WalletMigrationError::OneTimeIvksRequireOrchard`]).
 ///
 /// In order to correctly apply migrations to accounts derived from a seed, sometimes the
 /// seed is required. The migrator should first be used without calling [`Self::with_seed`];
@@ -707,7 +707,7 @@ fn init_wallet_db_internal<
         if target_migrations.is_empty() {
             migrator.up(None)?;
             #[cfg(not(feature = "orchard"))]
-            verify_no_dynamic_ivk_state(wdb.conn.borrow()).map_err(MigratorError::Adapter)?;
+            verify_no_one_time_ivk_state(wdb.conn.borrow()).map_err(MigratorError::Adapter)?;
         } else {
             for target_migration in target_migrations {
                 migrator.up(Some(*target_migration))?;
@@ -767,38 +767,38 @@ fn verify_no_unknown_migrations(
     }
 }
 
-/// Refuses, in a build without `orchard`, a database holding dynamic IVK state: such a
-/// build would store blocks and transactions without the dynamic keys and prune the
+/// Refuses, in a build without `orchard`, a database holding one-time IVK state: such a
+/// build would store blocks and transactions without the one-time keys and prune the
 /// Ironwood spend evidence their recovery needs. A database not yet migrated holds none.
 #[cfg(not(feature = "orchard"))]
-fn verify_no_dynamic_ivk_state(conn: &rusqlite::Connection) -> Result<(), WalletMigrationError> {
+fn verify_no_one_time_ivk_state(conn: &rusqlite::Connection) -> Result<(), WalletMigrationError> {
     let migrated: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema
-         WHERE type = 'table' AND name = 'ironwood_dynamic_spend_retention')",
+         WHERE type = 'table' AND name = 'ironwood_one_time_spend_retention')",
         [],
         |row| row.get(0),
     )?;
     let present = migrated
         && conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys)
-                OR EXISTS(SELECT 1 FROM ironwood_dynamic_spend_retention)",
+                OR EXISTS(SELECT 1 FROM ironwood_one_time_spend_retention)",
             [],
             |row| row.get(0),
         )?;
     if present {
-        Err(WalletMigrationError::DynamicIvksRequireOrchard)
+        Err(WalletMigrationError::OneTimeIvksRequireOrchard)
     } else {
         Ok(())
     }
 }
 
-/// [`verify_no_dynamic_ivk_state`] as a rusqlite error, so a build without `orchard`
+/// [`verify_no_one_time_ivk_state`] as a rusqlite error, so a build without `orchard`
 /// refuses such a database even if it never migrates it: at `WalletDb::for_path`, and in
 /// the low-level writes that record scanned blocks or retire transaction retrieval, which
 /// every handle's block and transaction storage reaches.
 #[cfg(not(feature = "orchard"))]
-pub(crate) fn refuse_dynamic_ivk_state(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    verify_no_dynamic_ivk_state(conn).map_err(|e| match e {
+pub(crate) fn refuse_one_time_ivk_state(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    verify_no_one_time_ivk_state(conn).map_err(|e| match e {
         WalletMigrationError::DbError(e) => e,
         e => rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
@@ -944,10 +944,6 @@ mod tests {
             db::TABLE_ACCOUNTS,
             db::TABLE_ADDRESSES,
             db::TABLE_BLOCKS,
-            db::TABLE_IRONWOOD_DYNAMIC_OPERATIONS,
-            db::TABLE_IRONWOOD_DYNAMIC_PAYMENT_RECOVERY,
-            db::TABLE_IRONWOOD_DYNAMIC_SPEND_RETENTION,
-            db::TABLE_IRONWOOD_DYNAMIC_SWEEPS,
             db::TABLE_IRONWOOD_ENHANCE_DISCOVERY_QUEUE,
             db::TABLE_IRONWOOD_ENHANCE_METADATA_QUEUE,
             db::TABLE_IRONWOOD_ENHANCE_OUTGOING_ACCOUNTS,
@@ -955,6 +951,10 @@ mod tests {
             db::TABLE_IRONWOOD_ENHANCE_ROUTING,
             db::TABLE_IRONWOOD_MEMO_RETRIEVAL_QUEUE,
             db::TABLE_IRONWOOD_NULLIFIER_SCAN_BLOCKS,
+            db::TABLE_IRONWOOD_ONE_TIME_OPERATIONS,
+            db::TABLE_IRONWOOD_ONE_TIME_PAYMENT_RECOVERY,
+            db::TABLE_IRONWOOD_ONE_TIME_SPEND_RETENTION,
+            db::TABLE_IRONWOOD_ONE_TIME_SWEEPS,
             db::TABLE_IRONWOOD_RECEIVED_NOTE_SPENDS,
             db::TABLE_IRONWOOD_RECEIVED_NOTES,
             db::TABLE_IRONWOOD_RECEIVING_KEYS,
@@ -1033,8 +1033,8 @@ mod tests {
             db::INDEX_ADDRESSES_INDICES,
             db::INDEX_ADDRESSES_PUBKEYS,
             db::INDEX_ADDRESSES_T_INDICES,
-            db::INDEX_IRONWOOD_DYNAMIC_OPERATIONS_KEY,
-            db::INDEX_IRONWOOD_DYNAMIC_SWEEPS_DUE,
+            db::INDEX_IRONWOOD_ONE_TIME_OPERATIONS_KEY,
+            db::INDEX_IRONWOOD_ONE_TIME_SWEEPS_DUE,
             db::INDEX_IRONWOOD_RNS_NOTE,
             db::INDEX_IRONWOOD_RNS_TX,
             db::INDEX_IRONWOOD_RECEIVED_NOTES_ACCOUNT,
@@ -1225,10 +1225,10 @@ mod tests {
             .unwrap();
     }
 
-    /// A build without `orchard` opens a database without dynamic IVK state and refuses
+    /// A build without `orchard` opens a database without one-time IVK state and refuses
     /// one with it, whether opened by path or migrated; an `orchard` build opens both.
     #[test]
-    fn dynamic_ivk_state_needs_an_orchard_build() {
+    fn one_time_ivk_state_needs_an_orchard_build() {
         use super::{WalletMigrationError, WalletMigrator};
         use schemerz::MigratorError;
 
@@ -1247,7 +1247,7 @@ mod tests {
         db.conn
             .execute_batch(
                 "PRAGMA foreign_keys = OFF;
-                 INSERT INTO ironwood_dynamic_spend_retention (account_id) VALUES (1);",
+                 INSERT INTO ironwood_one_time_spend_retention (account_id) VALUES (1);",
             )
             .unwrap();
         let reopened = open();
@@ -1256,7 +1256,7 @@ mod tests {
             reopened.unwrap();
             migrated.unwrap();
         } else {
-            let refusal = WalletMigrationError::DynamicIvksRequireOrchard.to_string();
+            let refusal = WalletMigrationError::OneTimeIvksRequireOrchard.to_string();
             assert!(matches!(
                 reopened,
                 Err(rusqlite::Error::SqliteFailure(_, Some(message))) if message == refusal
@@ -1264,18 +1264,18 @@ mod tests {
             assert!(matches!(
                 migrated,
                 Err(MigratorError::Adapter(
-                    WalletMigrationError::DynamicIvksRequireOrchard
+                    WalletMigrationError::OneTimeIvksRequireOrchard
                 ))
             ));
         }
     }
 
     /// Without `orchard`, a caller-owned transaction handle cannot record scanned blocks or
-    /// retire transaction retrieval over dynamic IVK state, through `WalletWrite` or the
+    /// retire transaction retrieval over one-time IVK state, through `WalletWrite` or the
     /// low-level API, and the retrieval request survives.
     #[cfg(not(feature = "orchard"))]
     #[test]
-    fn caller_owned_transactions_refuse_dynamic_ivk_state() {
+    fn caller_owned_transactions_refuse_one_time_ivk_state() {
         use std::collections::HashMap;
 
         use super::{WalletMigrationError, WalletMigrator};
@@ -1301,7 +1301,7 @@ mod tests {
         db.conn
             .execute_batch(
                 "PRAGMA foreign_keys = OFF;
-                 INSERT INTO ironwood_dynamic_spend_retention (account_id) VALUES (1);",
+                 INSERT INTO ironwood_one_time_spend_retention (account_id) VALUES (1);",
             )
             .unwrap();
         let height = BlockHeight::from(1_000_000);
@@ -1319,7 +1319,7 @@ mod tests {
         )
         .freeze()
         .unwrap();
-        let refusal = WalletMigrationError::DynamicIvksRequireOrchard.to_string();
+        let refusal = WalletMigrationError::OneTimeIvksRequireOrchard.to_string();
         let refused = |result: Result<(), SqliteClientError>| {
             matches!(
                 result,

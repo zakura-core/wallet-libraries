@@ -189,8 +189,6 @@ use {
 pub mod commitment_tree;
 pub(crate) mod common;
 mod db;
-#[cfg(feature = "orchard")]
-pub mod dynamic_ivk;
 pub(crate) mod encoding;
 #[cfg(feature = "orchard")]
 pub(crate) mod enhance_pir;
@@ -198,6 +196,8 @@ pub mod history;
 pub mod init;
 pub(crate) mod ironwood_hooks;
 pub(crate) mod locking;
+#[cfg(feature = "orchard")]
+pub mod one_time_ivk;
 #[cfg(feature = "orchard")]
 pub(crate) mod orchard;
 pub(crate) mod sapling;
@@ -833,7 +833,7 @@ pub(crate) fn delete_account(
     // and replays already recorded must run again.
     conn.execute("DELETE FROM ironwood_nullifier_scan_blocks", [])?;
     conn.execute(
-        "UPDATE ironwood_dynamic_spend_retention
+        "UPDATE ironwood_one_time_spend_retention
          SET nullifier_retention_height=0, replay_through=NULL",
         [],
     )?;
@@ -861,10 +861,10 @@ pub(crate) fn delete_account(
     Ok(())
 }
 
-/// Whether a dynamic key is open, so that blocks scanned or transactions decrypted
+/// Whether a one-time key is open, so that blocks scanned or transactions decrypted
 /// without it must not be stored.
 #[cfg(feature = "orchard")]
-pub(crate) fn dynamic_key_open(conn: &Connection) -> Result<bool, SqliteClientError> {
+pub(crate) fn one_time_key_open(conn: &Connection) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys
          WHERE active_from IS NOT NULL AND closed_at IS NULL)",
@@ -4305,7 +4305,7 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     // to the retained height.
     trim_scan_queue_to(conn, truncation_height)?;
     conn.execute(
-        "UPDATE ironwood_dynamic_spend_retention SET
+        "UPDATE ironwood_one_time_spend_retention SET
             nullifier_retention_height = MIN(nullifier_retention_height, ?1 + 1),
             replay_through = MIN(replay_through, ?1)",
         [u32::from(truncation_height)],
@@ -4313,7 +4313,7 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     // A sweep whose lookup or completion the rewind removed runs again. Active keys
     // need no repair: the scanner rescans the truncated blocks with them. A closed key
     // is no longer scanned, so reopen any key with a receipt the rewind leaves short of
-    // the confirmations closing requires (see `WalletDb::close_finished_dynamic_keys`);
+    // the confirmations closing requires (see `WalletDb::close_finished_one_time_keys`);
     // it closes again once that receipt is confirmed again.
     let confirmed_below = u32::from(truncation_height)
         .saturating_add(1)
@@ -4327,7 +4327,7 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         [confirmed_below],
     )?;
     conn.execute(
-        "UPDATE ironwood_dynamic_sweeps SET done_height = NULL, next_attempt_at = 0,
+        "UPDATE ironwood_one_time_sweeps SET done_height = NULL, next_attempt_at = 0,
             lookup_height = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_height END,
             lookup_hash = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_hash END
          WHERE done_height > ?1 OR lookup_height > ?1",
@@ -4338,7 +4338,7 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         [u32::from(truncation_height)],
     )?;
     conn.execute(
-        "DELETE FROM ironwood_dynamic_payment_recovery WHERE height > ?1",
+        "DELETE FROM ironwood_one_time_payment_recovery WHERE height > ?1",
         [u32::from(truncation_height)],
     )?;
 
@@ -6011,7 +6011,7 @@ pub(crate) fn insert_nullifier_map<N: AsRef<[u8]>>(
         }
     }
 
-    // Dynamic IVK recovery's spend evidence: record even empty blocks, but only when
+    // One-time IVK recovery's spend evidence: record even empty blocks, but only when
     // their nullifiers were actually retained.
     #[cfg(feature = "orchard")]
     if spend_pool == ShieldedPool::Ironwood {
@@ -6084,14 +6084,14 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
     .map(Some)
 }
 
-/// The height from which Ironwood nullifiers stay tracked for dynamic IVK restore
+/// The height from which Ironwood nullifiers stay tracked for one-time IVK restore
 /// sweeps. Shared retention uses the oldest unfinished account, so a completed account
 /// cannot release another account's spend evidence.
 pub(crate) fn ironwood_nullifier_retention_height(
     conn: &Connection,
 ) -> Result<Option<BlockHeight>, SqliteClientError> {
     conn.query_row(
-        "SELECT MIN(nullifier_retention_height) FROM ironwood_dynamic_spend_retention",
+        "SELECT MIN(nullifier_retention_height) FROM ironwood_one_time_spend_retention",
         [],
         |row| {
             row.get::<_, Option<u32>>(0)
@@ -8236,7 +8236,7 @@ mod tests {
     /// Pruning keeps Ironwood spend evidence at or above the durable restore retention
     /// floor.
     #[test]
-    fn nullifier_pruning_keeps_the_dynamic_retention_floor() {
+    fn nullifier_pruning_keeps_the_one_time_retention_floor() {
         use zcash_protocol::PoolType;
         let mut st = TestBuilder::new()
             .with_data_store_factory(TestDbFactory::default())
@@ -8244,7 +8244,7 @@ mod tests {
             .build();
         let conn = st.wallet_mut().conn_mut();
         conn.execute(
-            "INSERT INTO ironwood_dynamic_spend_retention (account_id, nullifier_retention_height)
+            "INSERT INTO ironwood_one_time_spend_retention (account_id, nullifier_retention_height)
              SELECT id, 200 FROM accounts",
             [],
         )

@@ -7841,7 +7841,7 @@ dependencies = [
  "which",
  "zakura-address",
  "zakura-bls12-381",
- "zakura-dynamic-ivk",
+ "zakura-one-time-ivk",
  "zakura-jubjub",
  "zakura-keys",
  "zakura-orchard",
@@ -7902,7 +7902,7 @@ dependencies = [
  "zakura-address",
  "zakura-bls12-381",
  "zakura-client-backend",
- "zakura-dynamic-ivk",
+ "zakura-one-time-ivk",
  "zakura-jubjub",
  "zakura-keys",
  "zakura-orchard",
@@ -7919,23 +7919,6 @@ dependencies = [
  "zcash_script",
  "zewif",
  "zip32",
-]
-
-[[package]]
-name = "zakura-dynamic-ivk"
-version = "0.0.1-rc0"
-dependencies = [
- "blake2b_simd",
- "ff 0.14.0",
- "hex",
- "incrementalmerkletree",
- "rand 0.10.3",
- "shardtree",
- "zakura-orchard",
- "zakura-pasta-curves",
- "zakura-protocol",
- "zcash_note_encryption",
- "zeroize",
 ]
 
 [[package]]
@@ -8031,6 +8014,23 @@ dependencies = [
  "zakura-transparent",
  "zcash_encoding",
  "zip32",
+]
+
+[[package]]
+name = "zakura-one-time-ivk"
+version = "0.0.1-rc0"
+dependencies = [
+ "blake2b_simd",
+ "ff 0.14.0",
+ "hex",
+ "incrementalmerkletree",
+ "rand 0.10.3",
+ "shardtree",
+ "zakura-orchard",
+ "zakura-pasta-curves",
+ "zakura-protocol",
+ "zcash_note_encryption",
+ "zeroize",
 ]
 
 [[package]]

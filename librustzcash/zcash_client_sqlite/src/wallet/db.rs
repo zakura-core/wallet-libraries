@@ -528,7 +528,7 @@ CREATE INDEX idx_orchard_received_note_spends_transaction_id ON orchard_received
     transaction_id ASC
 )"#;
 
-/// Registered dynamic keys, each with at most one incoming reservation. Empty lookahead
+/// Registered one-time keys, each with at most one incoming reservation. Empty lookahead
 /// entries do not advance allocation.
 pub(super) const TABLE_IRONWOOD_RECEIVING_KEYS: &str = "CREATE TABLE ironwood_receiving_keys (
                 id INTEGER PRIMARY KEY,
@@ -1993,7 +1993,7 @@ pub(super) const TABLE_IRONWOOD_NULLIFIER_SCAN_BLOCKS: &str =
                 height INTEGER PRIMARY KEY CHECK (height BETWEEN 0 AND 4294967295)
             )";
 
-pub(super) const TABLE_IRONWOOD_DYNAMIC_PAYMENT_RECOVERY: &str = "CREATE TABLE ironwood_dynamic_payment_recovery (
+pub(super) const TABLE_IRONWOOD_ONE_TIME_PAYMENT_RECOVERY: &str = "CREATE TABLE ironwood_one_time_payment_recovery (
                 receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
                 txid BLOB NOT NULL CHECK (length(txid) = 32),
                 action_index INTEGER NOT NULL CHECK (action_index BETWEEN 0 AND 4294967295),
@@ -2005,11 +2005,11 @@ pub(super) const TABLE_IRONWOOD_DYNAMIC_PAYMENT_RECOVERY: &str = "CREATE TABLE i
                 PRIMARY KEY (txid, action_index)
             )";
 
-/// One provider operation on a dynamic key: an incoming quote request, identified by
+/// One provider operation on a one-time key: an incoming quote request, identified by
 /// `request` and accepted once `reference` holds its deposit address, or a refund quote,
 /// identified by its deposit address. `expectation` is the normalized status (see
-/// `dynamic_ivk::lifecycle::record`).
-pub(super) const TABLE_IRONWOOD_DYNAMIC_OPERATIONS: &str = "CREATE TABLE ironwood_dynamic_operations (
+/// `one_time_ivk::lifecycle::record`).
+pub(super) const TABLE_IRONWOOD_ONE_TIME_OPERATIONS: &str = "CREATE TABLE ironwood_one_time_operations (
                 id INTEGER PRIMARY KEY,
                 receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
                 request TEXT UNIQUE,
@@ -2025,7 +2025,7 @@ pub(super) const TABLE_IRONWOOD_DYNAMIC_OPERATIONS: &str = "CREATE TABLE ironwoo
                 CHECK (request IS NOT NULL OR reference IS NOT NULL)
             )";
 
-pub(super) const TABLE_IRONWOOD_DYNAMIC_SWEEPS: &str = "CREATE TABLE ironwood_dynamic_sweeps (
+pub(super) const TABLE_IRONWOOD_ONE_TIME_SWEEPS: &str = "CREATE TABLE ironwood_one_time_sweeps (
                 receiving_key_id INTEGER PRIMARY KEY REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
                 lookup_height INTEGER CHECK (lookup_height BETWEEN 0 AND 4294967295),
                 lookup_hash BLOB CHECK (length(lookup_hash) = 32),
@@ -2034,8 +2034,8 @@ pub(super) const TABLE_IRONWOOD_DYNAMIC_SWEEPS: &str = "CREATE TABLE ironwood_dy
                 done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295)
             )";
 
-pub(super) const TABLE_IRONWOOD_DYNAMIC_SPEND_RETENTION: &str =
-    "CREATE TABLE ironwood_dynamic_spend_retention (
+pub(super) const TABLE_IRONWOOD_ONE_TIME_SPEND_RETENTION: &str =
+    "CREATE TABLE ironwood_one_time_spend_retention (
                 account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
                 nullifier_retention_height INTEGER NOT NULL DEFAULT 0
                     CHECK (nullifier_retention_height BETWEEN 0 AND 4294967295),
@@ -2050,11 +2050,11 @@ pub(super) const INDEX_IRONWOOD_RECEIVING_KEYS_SCANNING: &str =
     "CREATE INDEX ironwood_receiving_keys_scanning
                 ON ironwood_receiving_keys(closed_at, active_from)";
 
-pub(super) const INDEX_IRONWOOD_DYNAMIC_OPERATIONS_KEY: &str =
-    "CREATE INDEX ironwood_dynamic_operations_key
-                ON ironwood_dynamic_operations(receiving_key_id)";
+pub(super) const INDEX_IRONWOOD_ONE_TIME_OPERATIONS_KEY: &str =
+    "CREATE INDEX ironwood_one_time_operations_key
+                ON ironwood_one_time_operations(receiving_key_id)";
 
-pub(super) const INDEX_IRONWOOD_DYNAMIC_SWEEPS_DUE: &str = "CREATE INDEX ironwood_dynamic_sweeps_due ON ironwood_dynamic_sweeps(done_height, next_attempt_at)";
+pub(super) const INDEX_IRONWOOD_ONE_TIME_SWEEPS_DUE: &str = "CREATE INDEX ironwood_one_time_sweeps_due ON ironwood_one_time_sweeps(done_height, next_attempt_at)";
 
 /// Source-bound transaction facts. No fee is attributed to an account by this table.
 pub(super) const TABLE_TPIR_TRANSACTION_METADATA: &str = r#"

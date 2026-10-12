@@ -71,8 +71,8 @@ use secrecy::{ExposeSecret, SecretVec};
 use zcash_client_backend::{
     data_api::{
         Account as _, AccountBirthday, AccountPurpose, WalletRead, WalletWrite, Zip32Derivation,
-        chain::ChainState, dynamic_ivk::DynamicIvkRead,
-        wallet::decrypt_and_store_transaction_with_dynamic_ivks,
+        chain::ChainState, one_time_ivk::OneTimeIvkRead,
+        wallet::decrypt_and_store_transaction_with_one_time_ivks,
     },
     wallet::{Exposure, TransparentAddressMetadata},
 };
@@ -1291,9 +1291,9 @@ where
 /// just past the highest mined height in the document, falling back to the
 /// document's export height), verified against its recorded transaction id,
 /// and trial-decrypted against the wallet's tracked viewing keys, including its
-/// dynamic keys, which an initialized database may already hold.
+/// one-time keys, which an initialized database may already hold.
 ///
-/// [`decrypt_and_store_transaction_with_dynamic_ivks`] stores a transaction
+/// [`decrypt_and_store_transaction_with_one_time_ivks`] stores a transaction
 /// only when trial decryption or transparent-output matching shows wallet
 /// involvement, so the count of stored transactions is determined by querying
 /// for each transaction id after the attempt. Storage additionally requires a
@@ -1308,7 +1308,7 @@ fn import_transactions<DbT, P, S>(
 where
     DbT: WalletRead<AccountId = AccountUuid, Error = SqliteClientError>
         + WalletWrite
-        + DynamicIvkRead,
+        + OneTimeIvkRead,
     P: consensus::Parameters,
     S: std::error::Error,
 {
@@ -1376,7 +1376,7 @@ where
             });
         }
 
-        decrypt_and_store_transaction_with_dynamic_ivks(params, wdb, &parsed, mined_height)
+        decrypt_and_store_transaction_with_one_time_ivks(params, wdb, &parsed, mined_height)
             .map_err(ZewifImportError::Wallet)?;
 
         // The transaction is persisted only when it is relevant to the wallet,

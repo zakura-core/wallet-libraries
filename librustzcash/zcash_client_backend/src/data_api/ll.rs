@@ -740,7 +740,7 @@ pub trait ReceivedShieldedOutput {
 
     /// Derived Ironwood receiving key relative to the owning account.
     #[cfg(feature = "orchard")]
-    fn dynamic_key_id(&self) -> Option<zakura_dynamic_ivk::KeyId> {
+    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
         None
     }
 }
@@ -852,8 +852,8 @@ impl<T: ReceivedShieldedOutput<Note = ::orchard::Note, Nullifier = ::orchard::no
 #[cfg(feature = "orchard")]
 impl<AccountId: Copy> ReceivedShieldedOutput for WalletOrchardOutput<AccountId> {
     #[cfg(feature = "orchard")]
-    fn dynamic_key_id(&self) -> Option<zakura_dynamic_ivk::KeyId> {
-        self.dynamic_key_id()
+    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
+        self.one_time_key_id()
     }
 
     fn compact_encryption_fields(&self) -> Option<crate::wallet::CompactEncryptionFields> {
@@ -913,8 +913,8 @@ impl<AccountId: Copy> ReceivedShieldedOutput
     for DecryptedOutput<(::orchard::Note, ::orchard::ValuePool), AccountId>
 {
     #[cfg(feature = "orchard")]
-    fn dynamic_key_id(&self) -> Option<zakura_dynamic_ivk::KeyId> {
-        self.dynamic_key_id()
+    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
+        self.one_time_key_id()
     }
 
     type AccountId = AccountId;

@@ -266,17 +266,17 @@ where
     Ok(())
 }
 
-/// [`decrypt_and_store_transaction`], also decrypting with the wallet's dynamic keys
-/// (see [`DynamicIvkRead::get_dynamic_transaction_keys`]). A wallet with open dynamic
+/// [`decrypt_and_store_transaction`], also decrypting with the wallet's one-time keys
+/// (see [`OneTimeIvkRead::get_one_time_transaction_keys`]). A wallet with open one-time
 /// keys must decrypt with this function rather than [`decrypt_and_store_transaction`].
 ///
 /// The keys are read before decryption and not checked again when storing, so the
-/// caller must not open a dynamic key between the two, for example by holding its
+/// caller must not open a one-time key between the two, for example by holding its
 /// wallet write lock across this call.
 ///
-/// [`DynamicIvkRead::get_dynamic_transaction_keys`]: super::dynamic_ivk::DynamicIvkRead::get_dynamic_transaction_keys
+/// [`OneTimeIvkRead::get_one_time_transaction_keys`]: super::one_time_ivk::OneTimeIvkRead::get_one_time_transaction_keys
 #[cfg(feature = "orchard")]
-pub fn decrypt_and_store_transaction_with_dynamic_ivks<ParamsT, DbT>(
+pub fn decrypt_and_store_transaction_with_one_time_ivks<ParamsT, DbT>(
     params: &ParamsT,
     data: &mut DbT,
     tx: &Transaction,
@@ -284,7 +284,7 @@ pub fn decrypt_and_store_transaction_with_dynamic_ivks<ParamsT, DbT>(
 ) -> Result<(), <DbT as WalletRead>::Error>
 where
     ParamsT: consensus::Parameters,
-    DbT: WalletWrite + super::dynamic_ivk::DynamicIvkRead,
+    DbT: WalletWrite + super::one_time_ivk::OneTimeIvkRead,
 {
     let ufvks = data.get_unified_full_viewing_keys()?;
     let mined_height =
@@ -295,8 +295,8 @@ where
         .iter()
         .map(|output| output.note().0.recipient())
         .collect();
-    let keys = data.get_dynamic_transaction_keys(tx.txid(), mined_height, &receivers)?;
-    data.store_decrypted_tx(decrypted.with_dynamic_ivks(keys))?;
+    let keys = data.get_one_time_transaction_keys(tx.txid(), mined_height, &receivers)?;
+    data.store_decrypted_tx(decrypted.with_one_time_ivks(keys))?;
 
     Ok(())
 }
@@ -1825,7 +1825,7 @@ where
             .orchard()
             .cloned()
             .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?;
-        let fvk = match selected.dynamic_key_id() {
+        let fvk = match selected.one_time_key_id() {
             // The spending authority is unchanged, but the proof needs the FVK
             // whose incoming key generated this particular note's recipient.
             Some(key_id) => key_id
