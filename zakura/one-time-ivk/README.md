@@ -36,7 +36,8 @@ hardware accounts.
 - `swap`: the refund memo, the completion limits (`RESTORE_WATCH_SECS`,
   `COMPLETION_LIMIT_SECS`), and the provider-neutral lifecycle types
   (`Observation`, `OperationStatus`, `ReceiptExpectation`). Provider status
-  parsing belongs to the app.
+  parsing belongs to the app; `zakura-near-intents` normalizes NEAR Intents
+  1Click statuses.
 
 ## Derivation
 
