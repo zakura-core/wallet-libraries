@@ -8,9 +8,9 @@
   its `REFUND_MEMO_MAGIC` prefix, with independent KDF vectors and an Ironwood
   receive/reconstruct/spend proof test.
 - Add the shared completion limits, `RESTORE_WATCH_SECS` (24 hours for restored
-  keys) and `COMPLETION_LIMIT_SECS` (30 days), and direction-aware NEAR
-  status normalization, `lifecycle::near_observation`, including refunded amounts
-  and exact-output leftovers. Scheduling and receipt accounting are left to the
+  keys) and `COMPLETION_LIMIT_SECS` (30 days), and the provider-neutral
+  `Observation`, `OperationStatus`, and `ReceiptExpectation` that an app's
+  provider adapter produces. Scheduling and receipt accounting are left to the
   wallet's store.
 - Add transport-independent incoming-note authentication and commitment-path
   validation for privately discovered payments.
