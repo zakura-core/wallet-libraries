@@ -530,7 +530,10 @@ fn a_mislabeled_answer_yields_to_the_scanned_transaction() {
     for scanned in [false, true] {
         let mut st = scanned_wallet();
         let account = st.test_account().unwrap().id();
-        retain(st.wallet_mut().db_mut(), account);
+        // A scanned note's answer is dropped before any spend history is needed.
+        if !scanned {
+            retain(st.wallet_mut().db_mut(), account);
+        }
         let id = KeyId::new(Purpose::Refund, 0);
         let from = tip(&st).height + 1;
         if scanned {
