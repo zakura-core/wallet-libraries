@@ -44,7 +44,7 @@ type State = TestState<(), TestDb, LocalNetwork>;
 const VALUE: u64 = 2_000_000;
 /// Past a not-covered lookup's backoff of a day and up to a quarter.
 const PAST_BACKOFF: Duration = Duration::from_secs(31 * 3600);
-const MAP_PATH: &str = "/v1/txid/map";
+const MAP_PATH: &str = "/v2/txid/map";
 
 fn t0() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(2_000_000_000)

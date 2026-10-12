@@ -338,9 +338,9 @@ impl Route<'_> {
     /// The origin-relative path, naming the route's identifiers.
     fn path(&self) -> String {
         match *self {
-            Route::ShardMap => "/v1/filters/shards".to_owned(),
-            Route::Filter { shard_id } => format!("/v1/filters/shards/{shard_id}/filter"),
-            Route::Init => "/v1/shards/init".to_owned(),
+            Route::ShardMap => "/v2/filters/shards".to_owned(),
+            Route::Filter { shard_id } => format!("/v2/filters/shards/{shard_id}/filter"),
+            Route::Init => "/v2/shards/init".to_owned(),
             Route::Shard(request) => request.route(),
         }
     }
@@ -348,18 +348,18 @@ impl Route<'_> {
     /// The path with its identifiers elided, for logs.
     fn template(&self) -> String {
         match *self {
-            Route::ShardMap => "/v1/filters/shards".to_owned(),
-            Route::Filter { .. } => "/v1/filters/shards/{id}/filter".to_owned(),
-            Route::Init => "/v1/shards/init".to_owned(),
+            Route::ShardMap => "/v2/filters/shards".to_owned(),
+            Route::Filter { .. } => "/v2/filters/shards/{id}/filter".to_owned(),
+            Route::Init => "/v2/shards/init".to_owned(),
             Route::Shard(ShardRequest::Manifest { .. }) => {
-                "/v1/shards/{id}/revisions/{rev}/manifest".to_owned()
+                "/v2/shards/{id}/revisions/{rev}/manifest".to_owned()
             }
             Route::Shard(ShardRequest::Setup { table, .. }) => format!(
-                "/v1/shards/{{id}}/revisions/{{rev}}/setup/{}/{{segment}}",
+                "/v2/shards/{{id}}/revisions/{{rev}}/setup/{}/{{segment}}",
                 table_template(table)
             ),
             Route::Shard(ShardRequest::Query { table, .. }) => format!(
-                "/v1/shards/{{id}}/revisions/{{rev}}/query/{}",
+                "/v2/shards/{{id}}/revisions/{{rev}}/query/{}",
                 table_template(table)
             ),
         }
@@ -541,32 +541,32 @@ mod tests {
             assert!(!filters.uses_parents());
             assert_eq!(shards.concurrency(), 1);
             let (map, cost) = filters.shard_map().unwrap();
-            assert_eq!(map, b"/v1/filters/shards");
+            assert_eq!(map, b"/v2/filters/shards");
             assert_eq!(cost, map.len() as u64);
         }
         http.exchange().sent.borrow_mut().clear();
         let results = every_route(&mut http);
 
-        let shard = format!("/v1/shards/{SHARD}/revisions/{REVISION}");
-        let template = "/v1/shards/{id}/revisions/{rev}";
+        let shard = format!("/v2/shards/{SHARD}/revisions/{REVISION}");
+        let template = "/v2/shards/{id}/revisions/{rev}";
         let none: &[u8] = &[];
         let expected = [
             (
                 HttpMethod::Get,
-                "/v1/filters/shards".to_owned(),
-                "/v1/filters/shards".to_owned(),
+                "/v2/filters/shards".to_owned(),
+                "/v2/filters/shards".to_owned(),
                 none,
             ),
             (
                 HttpMethod::Get,
-                format!("/v1/filters/shards/{SHARD}/filter"),
-                "/v1/filters/shards/{id}/filter".to_owned(),
+                format!("/v2/filters/shards/{SHARD}/filter"),
+                "/v2/filters/shards/{id}/filter".to_owned(),
                 none,
             ),
             (
                 HttpMethod::Get,
-                "/v1/shards/init".to_owned(),
-                "/v1/shards/init".to_owned(),
+                "/v2/shards/init".to_owned(),
+                "/v2/shards/init".to_owned(),
                 none,
             ),
             (
@@ -729,8 +729,8 @@ mod tests {
     fn debug_output_names_no_identifier() {
         let request = HttpRequest {
             method: HttpMethod::Post,
-            path: format!("/v1/shards/{SHARD}/revisions/{REVISION}/query/pages-1"),
-            template: "/v1/shards/{id}/revisions/{rev}/query/pages-{child}".to_owned(),
+            path: format!("/v2/shards/{SHARD}/revisions/{REVISION}/query/pages-1"),
+            template: "/v2/shards/{id}/revisions/{rev}/query/pages-{child}".to_owned(),
             body: QUERY.to_vec(),
             limit: LIMIT,
             error_limit: 0,
@@ -784,7 +784,7 @@ mod tests {
                 sent[0].path.as_str(),
                 sent[0].template.as_str()
             ),
-            (HttpMethod::Get, "/v1/txid/init", "/v1/txid/init")
+            (HttpMethod::Get, "/v2/txid/init", "/v2/txid/init")
         );
         assert_eq!((sent[0].limit, sent[0].error_limit), (256 << 10, 0));
         for (route, limit) in [
