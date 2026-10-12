@@ -20,10 +20,8 @@ issuing live addresses.
 5. Reconstruct inputs with their derived FVKs. Use the account's spending key to
    sign, and its ordinary internal key for change.
 
-`has_same_spending_authority` compares the `ak` and `nk` of valid FVKs. It does not
-replace recipient, nullifier, signature, value, or change validation. The wallet
-owns reservation, persistence, coverage, lifecycle, and note selection. There is
-no alternate balance store in this crate.
+The wallet owns reservation, persistence, coverage, lifecycle, and note selection.
+There is no alternate balance store in this crate.
 
 Software PCZT signing of one-time-key notes works through the same builder.
 Hardware signers need firmware qualification before one-time keys are enabled for
@@ -31,7 +29,7 @@ hardware accounts.
 
 ## Layout
 
-- Crate root: `KeyId`, `Purpose`, derivation, and `has_same_spending_authority`.
+- Crate root: `KeyId`, `Purpose`, and derivation.
 - `recovery`: authentication of privately retrieved incoming notes.
 - `swap`: the refund memo, the completion limits (`RESTORE_WATCH_SECS`,
   `COMPLETION_LIMIT_SECS`), and the provider-neutral lifecycle types

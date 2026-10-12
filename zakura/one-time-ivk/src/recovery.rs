@@ -3,7 +3,7 @@
 use crate::KeyId;
 use orchard::{
     keys::{FullViewingKey, Scope},
-    note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier},
+    note::{ExtractedNoteCommitment, Note, Nullifier},
     note_encryption::{CompactAction, IronwoodDomain},
     tree::{Anchor, MerklePath},
 };
@@ -65,8 +65,7 @@ impl EncryptedNote {
 
     /// Derives the expected key and authenticates the note. Returns `None` if
     /// derivation, decoding or authentication fails, or the note is not a v3 note to
-    /// the key's address; that never shows the receiver is unused. This deliberately
-    /// does not use the public zero OVK to establish ownership.
+    /// the key's address; that never shows the receiver is unused.
     ///
     /// The memo is discarded: one-time-key notes carry no memo the wallet reads; only
     /// internal change carries the refund marker.
@@ -88,7 +87,8 @@ impl EncryptedNote {
             &key.to_ivk(Scope::External).prepare(),
             self,
         )?;
-        if note.version() != NoteVersion::V3 || recipient != key.address_at(0u32, Scope::External) {
+        // `IronwoodDomain` accepts only v3 plaintexts.
+        if recipient != key.address_at(0u32, Scope::External) {
             return None;
         }
         Some(RecoveredNote {

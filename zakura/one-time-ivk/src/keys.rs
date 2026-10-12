@@ -10,7 +10,12 @@ use zeroize::Zeroizing;
 const RIVK_DOMAIN: u8 = 0x85;
 
 /// Independent v1 receiving sequences under one account's spending authority.
+///
+/// Each purpose has a one-byte code in the derivation input: 0 is refund, 1 is
+/// receive, and 2..=255 are reserved for future purposes. Codes are part of the
+/// derivation and must never change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Purpose {
     /// Return of funds from a Zcash-funded swap, recorded in its funding memo.
     Refund,
@@ -48,7 +53,7 @@ impl KeyId {
     ///
     /// The result keeps the account's `ak` and `nk` and replaces `rivk` with
     /// `ToScalar(PRF^expand_rivk([RIVK_DOMAIN] || ak || nk || [purpose] || index))`,
-    /// where `purpose` is 0 for refund and 1 for incoming and `index` is little-endian.
+    /// where `purpose` is the [`Purpose`] code and `index` is little-endian.
     /// This is ZIP 32's internal-key derivation (first byte `0x83`, no suffix) with
     /// another domain byte and a suffix, so a ZIP 2005 recovery circuit can check
     /// it the same way.
@@ -113,17 +118,6 @@ fn expand_rivk(fvk: &[u8; 96], domain: u8, suffix: &[u8]) -> [u8; 32] {
     // FromUniformBytes reduces a little-endian integer modulo the Pallas scalar
     // order, which is ToScalar^Orchard. pallas::Base would define a different KDF.
     pallas::Scalar::from_uniform_bytes(&wide).to_repr()
-}
-
-/// Checks whether two valid FVKs share `ak` and `nk`, permitting different `rivk`.
-///
-/// This checks the account relationship only. Signing still requires the usual
-/// recipient, nullifier, randomized signing-key, value, and output checks.
-pub fn has_same_spending_authority(account: &FullViewingKey, candidate: &FullViewingKey) -> bool {
-    // Raw FVK encoding is ak || nk || rivk, each 32 bytes (protocol §5.6.4.4).
-    let account = Zeroizing::new(account.to_bytes());
-    let candidate = Zeroizing::new(candidate.to_bytes());
-    account[..64] == candidate[..64]
 }
 
 #[cfg(test)]

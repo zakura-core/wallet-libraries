@@ -19,4 +19,4 @@ pub mod swap;
 
 mod keys;
 
-pub use keys::{DerivationError, KeyId, Purpose, has_same_spending_authority};
+pub use keys::{DerivationError, KeyId, Purpose};
