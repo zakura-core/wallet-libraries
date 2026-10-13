@@ -111,6 +111,18 @@ pub(crate) fn queue_directory_lookup<P: Parameters>(
     if canonical(conn, Some(anchor))?.is_none() {
         return Ok(Err(SweepDeferral::UnknownAnchor));
     }
+    let queued = conn
+        .query_row(
+            "SELECT lookup_height, lookup_hash FROM ironwood_one_time_sweeps
+             WHERE one_time_key_id = ?1",
+            [key_ref(conn, account, key)?],
+            |r| Ok(super::planner::anchor(r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .flatten();
+    if canonical(conn, queued)?.is_some_and(|queued| anchor.height < queued.height) {
+        return Ok(Err(SweepDeferral::StalePublication));
+    }
     let (kept, missing) = sort_directory_payments(conn, account, key, payments)?;
     for old in pending_payments(conn, account, key)? {
         if !kept.contains(&old) {
