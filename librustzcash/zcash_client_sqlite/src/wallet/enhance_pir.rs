@@ -767,7 +767,9 @@ pub(crate) fn queue_scanned(
         IronwoodEnhancementPlan::Ineligible
     ) && (!tx.ironwood_spends().is_empty() || !tx.ironwood_outputs().is_empty())
     {
-        return route_transparent_details(conn, configured, tx_ref);
+        route_transparent_details(conn, configured, tx_ref)?;
+        // Route 2 keeps private memo work; this rescan re-arms it as queue_transaction does.
+        return rearm_rejected_positions(conn, tx_ref);
     }
     // Ordinary rescans load only unspent nullifiers. They must not erase outgoing work
     // merely because an already-linked spend is absent from this scan's account set.

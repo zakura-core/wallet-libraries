@@ -16,8 +16,9 @@ workspace.
   counted against its commitment tree position after the batch rolls back. The
   third rejection removes the position from the query work and lists it as
   `EnhancePirSuspension::Rejected`. Queuing the transaction again on a rescan
-  (including route-2 memo work), binding metadata work to a position, and
-  rewinding past a position clear its count. Only rejected records and
+  (including route-2 memo work of a scanned mixed transaction), binding
+  metadata work to a different position, and rewinding past a position clear
+  its count. Only rejected records and
   unreadable replies count; request failures never reach the store.
 - `WalletDb` implements `EnhancePirWrite::record_ironwood_enhance_unreadable`.
   It counts each distinct position once per call and ignores requests that are

@@ -59,16 +59,27 @@ pub(super) fn bind(
     position: u64,
     index: u32,
 ) -> Result<(), SqliteClientError> {
+    let previous: Option<Option<u64>> = conn
+        .query_row(
+            "SELECT commitment_tree_position FROM ironwood_enhance_metadata_queue
+             WHERE transaction_id = :tx",
+            named_params![":tx": tx_ref.0],
+            |row| row.get(0),
+        )
+        .optional()?;
     conn.execute(
         "UPDATE ironwood_enhance_metadata_queue SET commitment_tree_position = :position,
         output_index = :index, compact_bound = 1 WHERE transaction_id = :tx",
         named_params![":position": position, ":index": index, ":tx": tx_ref.0],
     )?;
     // A newly bound position starts with a full allowance, whoever it was counted against before.
-    conn.execute(
-        "DELETE FROM ironwood_enhance_rejections WHERE commitment_tree_position = :position",
-        named_params![":position": position],
-    )?;
+    // Rebinding the same position (discovery rebuilds every pass) must keep its count.
+    if matches!(previous, Some(bound) if bound != Some(position)) {
+        conn.execute(
+            "DELETE FROM ironwood_enhance_rejections WHERE commitment_tree_position = :position",
+            named_params![":position": position],
+        )?;
+    }
     Ok(())
 }
 

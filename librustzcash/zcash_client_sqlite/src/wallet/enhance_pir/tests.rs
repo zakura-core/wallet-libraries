@@ -3031,6 +3031,65 @@ fn a_rescan_rearms_route_two_memo_positions() {
 }
 
 #[test]
+fn a_mixed_rescan_rearms_route_two_memo_positions() {
+    use zcash_client_backend::wallet::WalletSpend;
+    use zcash_protocol::consensus::TxIndex;
+    let (mut st, tx_ref, request) = fixture();
+    private_required(&mut st);
+    let pending = st
+        .wallet()
+        .db()
+        .pending_memo(request.position())
+        .unwrap()
+        .unwrap();
+    let nf = orchard::note::Nullifier::from_bytes(&pending.note.rho().to_bytes()).unwrap();
+    // A scanned transparent+Ironwood transaction: its plan is Ineligible, so queue_scanned
+    // routes it without reaching queue_transaction.
+    let scanned = WalletTx::new(
+        request.request_id().txid(),
+        TxIndex::from(0u16),
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![WalletSpend::from_parts(
+            0,
+            nf,
+            st.test_account().unwrap().id(),
+        )],
+        vec![],
+    )
+    .with_ironwood_enhancement_plan(IronwoodEnhancementPlan::Ineligible);
+    let rescan = |st: &State| {
+        queue_scanned(
+            st.wallet().conn(),
+            Some(TransparentLedgerMode::PrivateRequired),
+            tx_ref,
+            &scanned,
+        )
+        .unwrap()
+    };
+    rescan(&st);
+    assert_eq!(route_of(&st, tx_ref), Some(PRIVATE_DETAILS_UNSUPPORTED));
+    reject_three_times(&mut st, request);
+    assert_eq!(
+        routed(&st),
+        (
+            vec![],
+            vec![EnhancePirWork::Suspended(EnhancePirSuspension::Rejected(
+                request
+            ))]
+        )
+    );
+    rescan(&st);
+    assert_eq!(route_of(&st, tx_ref), Some(PRIVATE_DETAILS_UNSUPPORTED));
+    assert_eq!(rejections(st.wallet().conn(), request), None);
+    assert_eq!(routed(&st), (vec![], vec![EnhancePirWork::Query(request)]));
+    reject_three_times(&mut st, request);
+}
+
+#[test]
 fn a_rewind_clears_the_counts_of_truncated_positions() {
     let (mut st, tx_ref, request) = fixture();
     report_unreadable(&mut st, &[request]);
