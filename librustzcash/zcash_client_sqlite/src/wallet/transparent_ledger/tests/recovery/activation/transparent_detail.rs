@@ -2066,15 +2066,29 @@ fn view_matches_listability() {
         Some(TransparentDisplayView::Unavailable)
     );
 
-    // Without public authority, three content failures give both up: neither is listed, and
-    // both read as given up rather than unavailable.
+    // Without public authority, refused requests never give a lookup up, however many there
+    // are: both stay listed and read as they did before.
     set_policy(&mut st, PrivateRequired);
     for t in [txid, protected] {
-        for _ in 0..3 {
+        for _ in 0..5 {
+            defer(&mut st, t, unavailable(), now());
+        }
+        assert!(listing_at(&st, later(30 * DAY), None).contains(&t));
+        assert_ne!(view(&st, account, t), Some(TransparentDisplayView::GaveUp));
+    }
+    // Three content failures give both up, and not before the third: after it neither is
+    // listed, and both read as given up rather than unavailable.
+    for t in [txid, protected] {
+        for failures in 1..=3 {
+            assert_ne!(view(&st, account, t), Some(TransparentDisplayView::GaveUp));
             defer(&mut st, t, TransparentDetailOutcome::Absent, now());
+            assert_eq!(
+                view(&st, account, t) == Some(TransparentDisplayView::GaveUp),
+                failures == 3,
+                "given up after {failures} content failures"
+            );
         }
         assert!(!listing_at(&st, later(30 * DAY), None).contains(&t));
-        assert_eq!(view(&st, account, t), Some(TransparentDisplayView::GaveUp));
     }
     // Under public authority nothing is given up, so each reads as it did before.
     set_policy(&mut st, Public);
