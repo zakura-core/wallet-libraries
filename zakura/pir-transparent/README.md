@@ -244,7 +244,7 @@ previous-output lookup fallback.
 ### Account recovery and settlement sequence
 
 A wallet drives an account with three calls per pass and no loop logic of its
-own:
+own, once per sync:
 
 ```rust,ignore
 let mut plan = PassPlan::new(wallet.transparent_watch_set(account)?, PassLimits::default());
@@ -306,10 +306,14 @@ After each pass, `next` applies the first row that matches, in this order:
 | `ApplyAction::Fail` | `Fail`: report the `ApplyFailure` |
 | A ready batch nobody settled | `Skip` |
 | The fresh watch set has no target | `Done(None)`; the pass counts |
-| `passes` (8) counted passes | `Done(Some(retry))` |
-| `Retry::More` | `Pass`: the companion resumes |
-| `Retry::After(wait)` | `Wait(wait)` |
-| `Retry::Complete` or `Stalled` | `Pass` for new work (a grown window or changed addresses), else `Done(Some(retry))` |
+| `Retry::After(wait)` | `Wait(wait)`: a lagging publication or a capacity refusal, which no private reply decides |
+| Any other retry | `Done(Some(retry))` |
+
+A counted pass is the sync's only one: `next` never returns `Pass`, so no reply
+can start another pass at once. A settled commit that grew the window, a watch
+set whose addresses changed, and `Retry::More` (a spent budget) continue at the
+next sync, which reads the fresh watch set and resumes from the companion.
+A restore therefore takes one sync per step of the address window.
 
 A `PassError` never reaches the plan. `Outage` ends the run: the service failed
 every account alike. `Invalid`, `Failure` and `PublicationChanged` end the

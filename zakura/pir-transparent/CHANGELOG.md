@@ -2,7 +2,19 @@
 
 ## [Unreleased]
 
+### Removed
+
+- `PassLimits::passes`: a plan runs one counted pass per sync, so it has no pass
+  count left to bound.
+
 ### Changed
+
+- `PassPlan::next` ends the sync after a counted pass: `Retry::After` is still
+  `Step::Wait`, and every other retry is `Step::Done` with it. A grown address
+  window, changed watched addresses and `Retry::More` no longer start another
+  pass at once; they continue at the next sync. A service that forges a receive
+  near the end of the window can no longer tell from the wallet's next requests
+  whether its directory row was the one forged.
 
 - Depend on the transparent PIR crates from crates.io (`=0.1.0-rc.3`, tagged
   `transparent-v0.1.0-rc.3` in wallet-pir) instead of a git revision.

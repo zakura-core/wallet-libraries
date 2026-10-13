@@ -52,6 +52,9 @@ use zcash_protocol::consensus::BlockHeight;
 /// Bound on each decoded HTTP response body.
 const RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
 
+/// The syncs a recovery may take before the harness gives up.
+const SYNCS: usize = 8;
+
 /// The harness's exchange with the origin: one blocking request at a time, a 30 s
 /// deadline, and no retries, as an `HttpExchange` must.
 struct Exchange {
@@ -298,96 +301,105 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     // 5. Retrieve, validate, save, and acknowledge in that order, as the
-    // library's pass plan says. The plan reads a fresh watch set after each
-    // settlement, so it includes any address-window growth from earlier
-    // commits. Commits are only observed: this harness never qualifies, so a
-    // batch listing retired revisions, which only trusted reconciliation
-    // resolves, holds the account and fails the run.
-    let mut plan = PassPlan::new(
-        state.wallet().db().transparent_watch_set(account)?,
-        PassLimits::default(),
-    );
-    let mut step = plan.first();
+    // library's pass plan says. A plan runs one counted pass per sync: each
+    // sync is a fresh plan over a fresh watch set, so a later sync includes any
+    // address-window growth from earlier commits and resumes a spent budget.
+    // Commits are only observed: this harness never qualifies, so a batch
+    // listing retired revisions, which only trusted reconciliation resolves,
+    // holds the account and fails the run.
     let mut passes = vec![];
     let mut last = None;
-    loop {
-        match step {
-            Step::Pass | Step::Refresh => {}
-            Step::Wait(wait) => std::thread::sleep(wait),
-            Step::Done(_) => break,
-            Step::Hold(HoldCause::Withdrawn(cause)) => {
-                return Err(format!("publication withdrawn: {cause:?}").into());
-            }
-            Step::Hold(HoldCause::Unreconciled) => {
-                return Err(
-                    "frozen fixture unexpectedly requires trusted revision reconciliation".into(),
-                );
-            }
-            other => return Err(format!("recovery stopped: {other:?}").into()),
-        }
-        let watch = plan.watch();
-        if watch.target.unwrap().height != BlockHeight::from(through)
-            || chain.is_accepted(u64::from(through), &watch.target.unwrap().hash.to_string())
-                != transparent_wallet::Acceptance::Accepted
-        {
-            return Err("wallet target differs from independent chain".into());
-        }
-        // Retrieval updates the companion, not wallet balances. The catalog
-        // permits commits only when publication continuity is Ready, and the
-        // pass holds only a Ready batch.
-        let report = reference.pass(watch, &chain, &exchange, RESPONSE_LIMIT, &|| false)?;
-        let held = reference.take_latest::<AccountUuid>();
-        let mut receives = 0;
-        let mut spends = 0;
-        for commit in held.as_ref().map_or(&[][..], |batch| batch.commits()) {
-            receives += commit.receives.len();
-            spends += commit.spends.len();
-            if commit.receives.iter().any(|e| e.metadata.is_none())
-                || commit.spends.iter().any(|e| e.metadata.is_none())
-            {
-                return Err("v11 event missing metadata".into());
-            }
-        }
-        // The ordinary writer rechecks the captured account, policy, and chain
-        // context for every commit. Observed commits are stored as candidate
-        // evidence without qualifying the publisher or projecting these events
-        // into usable funds; the batch is acknowledged once every one applied. This
-        // is what `settle_latest` does after reading the batch.
-        let settled = match held {
-            Some(batch) => reference
-                .apply_and_acknowledge_gated(
-                    batch,
-                    state.wallet_mut().db_mut(),
-                    Trust::Observed,
-                    &mut Ungated,
-                )
-                .map(Some),
-            None => Ok(None),
-        };
-        let grew = matches!(&settled, Ok(Some(applied)) if applied.stats.window_grew);
-        passes.push(json!({
-            "pass": passes.len(),
-            "state": format!("{:?}", report.state),
-            "receives": receives,
-            "spends": spends,
-            "covered_through": report.progress.covered_through,
-            "outcome": format!("{:?}", report.progress.outcome),
-            "window_grew": grew,
-            "publication_changed": report.publication_changed
-        }));
-        step = plan.next(
-            &report,
-            &settled,
+    let mut step = Step::Done(None);
+    for sync in 0..SYNCS {
+        let mut plan = PassPlan::new(
             state.wallet().db().transparent_watch_set(account)?,
+            PassLimits::default(),
         );
-        if step == Step::Fail {
-            return Err(settled.unwrap_err().into());
+        step = plan.first();
+        loop {
+            match step {
+                Step::Pass | Step::Refresh => {}
+                Step::Wait(wait) => std::thread::sleep(wait),
+                Step::Done(_) => break,
+                Step::Hold(HoldCause::Withdrawn(cause)) => {
+                    return Err(format!("publication withdrawn: {cause:?}").into());
+                }
+                Step::Hold(HoldCause::Unreconciled) => {
+                    return Err(
+                        "frozen fixture unexpectedly requires trusted revision reconciliation"
+                            .into(),
+                    );
+                }
+                other => return Err(format!("recovery stopped: {other:?}").into()),
+            }
+            let watch = plan.watch();
+            if watch.target.unwrap().height != BlockHeight::from(through)
+                || chain.is_accepted(u64::from(through), &watch.target.unwrap().hash.to_string())
+                    != transparent_wallet::Acceptance::Accepted
+            {
+                return Err("wallet target differs from independent chain".into());
+            }
+            // Retrieval updates the companion, not wallet balances. The catalog
+            // permits commits only when publication continuity is Ready, and the
+            // pass holds only a Ready batch.
+            let report = reference.pass(watch, &chain, &exchange, RESPONSE_LIMIT, &|| false)?;
+            let held = reference.take_latest::<AccountUuid>();
+            let mut receives = 0;
+            let mut spends = 0;
+            for commit in held.as_ref().map_or(&[][..], |batch| batch.commits()) {
+                receives += commit.receives.len();
+                spends += commit.spends.len();
+                if commit.receives.iter().any(|e| e.metadata.is_none())
+                    || commit.spends.iter().any(|e| e.metadata.is_none())
+                {
+                    return Err("v11 event missing metadata".into());
+                }
+            }
+            // The ordinary writer rechecks the captured account, policy, and chain
+            // context for every commit. Observed commits are stored as candidate
+            // evidence without qualifying the publisher or projecting these events
+            // into usable funds; the batch is acknowledged once every one applied. This
+            // is what `settle_latest` does after reading the batch.
+            let settled = match held {
+                Some(batch) => reference
+                    .apply_and_acknowledge_gated(
+                        batch,
+                        state.wallet_mut().db_mut(),
+                        Trust::Observed,
+                        &mut Ungated,
+                    )
+                    .map(Some),
+                None => Ok(None),
+            };
+            let grew = matches!(&settled, Ok(Some(applied)) if applied.stats.window_grew);
+            passes.push(json!({
+                "sync": sync,
+                "pass": passes.len(),
+                "state": format!("{:?}", report.state),
+                "receives": receives,
+                "spends": spends,
+                "covered_through": report.progress.covered_through,
+                "outcome": format!("{:?}", report.progress.outcome),
+                "window_grew": grew,
+                "publication_changed": report.publication_changed
+            }));
+            step = plan.next(
+                &report,
+                &settled,
+                state.wallet().db().transparent_watch_set(account)?,
+            );
+            if step == Step::Fail {
+                return Err(settled.unwrap_err().into());
+            }
+            last = Some(report);
+            // Reopening the companion tests saved continuation and catalog history.
+            // It is not recreated: recreating would discard continuity evidence.
+            drop(reference);
+            reference = TransparentHistoryRecovery::open(&companion_path, config.clone())?;
         }
-        last = Some(report);
-        // Reopening the companion tests saved continuation and catalog history.
-        // It is not recreated: recreating would discard continuity evidence.
-        drop(reference);
-        reference = TransparentHistoryRecovery::open(&companion_path, config.clone())?;
+        if step == Step::Done(Some(Retry::Complete)) {
+            break;
+        }
     }
     if step != Step::Done(Some(Retry::Complete))
         || last.is_none_or(|report| {
@@ -395,7 +407,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 || report.progress.covered_through < u64::from(through)
         })
     {
-        return Err("recovery did not complete within eight bounded passes".into());
+        return Err("recovery did not complete within the bounded syncs".into());
     }
 
     // 6. Verify the wallet's durable result, independently of the live handle.
