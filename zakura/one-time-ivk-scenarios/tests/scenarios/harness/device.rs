@@ -2,7 +2,8 @@
 //! Vizor's order, recording how it found each payment.
 
 use std::{
-    collections::BTreeMap,
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
 };
@@ -142,6 +143,8 @@ pub struct Receipt {
     pub value: u64,
     /// The one-time key that received it, labelled as the report labels keys.
     pub key: Option<String>,
+    /// The nullifier that spends it, as the wallet derived it.
+    pub nullifier: Option<[u8; 32]>,
 }
 
 /// A one-time key's restore sweep, as the wallet stored it.
@@ -219,6 +222,8 @@ pub struct Device {
     clock: FixedClock,
     /// Times the app restarted, which seeds each reopened database's randomness.
     restarts: u64,
+    /// Receivers of the one-time keys the harness derived from this account.
+    derived: RefCell<BTreeSet<[u8; 43]>>,
     found: BTreeMap<([u8; 32], u32), Found>,
     phase: Phase,
     pub syncs: u32,
@@ -268,6 +273,7 @@ impl Device {
             skew,
             clock,
             restarts: 0,
+            derived: RefCell::new(BTreeSet::new()),
             found: BTreeMap::new(),
             phase: Phase::Scan,
             syncs: 0,
@@ -296,11 +302,20 @@ impl Device {
         chain.now() + self.skew
     }
 
-    /// The account's one-time key for `purpose` and `index`.
+    /// The account's one-time key for `purpose` and `index`, whose receiver joins
+    /// [`Self::derived_receivers`].
     pub fn key(&self, purpose: Purpose, index: u64) -> FullViewingKey {
-        KeyId::new(purpose, index)
+        let fvk = KeyId::new(purpose, index)
             .derive(&self.fvk)
-            .expect("the key derives")
+            .expect("the key derives");
+        self.derived.borrow_mut().insert(receiver_of(&fvk));
+        fvk
+    }
+
+    /// Receivers of every one-time key the harness derived from this account, which the
+    /// harness knows independently of how the wallet labels its notes.
+    pub fn derived_receivers(&self) -> BTreeSet<[u8; 43]> {
+        self.derived.borrow().clone()
     }
 
     /// Syncs as Vizor does: recovery maintenance at the start, every suggested range,
@@ -680,7 +695,8 @@ impl Device {
     pub fn receipt(&self, id: ([u8; 32], u32)) -> Option<Receipt> {
         let conn = read_only(&self.path);
         conn.query_row(
-            "SELECT t.mined_height, n.commitment_tree_position, n.value, k.purpose, k.key_index
+            "SELECT t.mined_height, n.commitment_tree_position, n.value, k.purpose, k.key_index,
+                    n.nf
              FROM ironwood_received_notes n JOIN transactions t ON t.id_tx = n.transaction_id
              LEFT JOIN ironwood_one_time_keys k ON k.id = n.one_time_key_id
              WHERE t.txid = ?1 AND n.action_index = ?2",
@@ -696,11 +712,13 @@ impl Device {
                     )),
                     _ => None,
                 };
+                let nullifier = row.get::<_, Option<Vec<u8>>>(5)?;
                 Ok(Receipt {
                     mined_height: row.get(0)?,
                     position: row.get(1)?,
                     value: row.get(2)?,
                     key,
+                    nullifier: nullifier.map(|nf| nf.try_into().expect("32-byte nullifier")),
                 })
             },
         )

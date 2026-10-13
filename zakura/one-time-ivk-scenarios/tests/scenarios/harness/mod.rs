@@ -6,6 +6,8 @@ pub mod device;
 pub mod directory;
 pub mod near;
 
+use std::collections::BTreeSet;
+
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use zakura_one_time_ivk_scenarios::{Check, Class, Event, Metric, PaymentResult, zec};
 use zcash_client_sqlite::wallet::one_time_ivk::swap::ReservationPolicy;
@@ -20,6 +22,15 @@ const SPEND_PROBE: u64 = 10_000;
 /// Sends [`Ctx::spend_one_time_notes`] makes at most. Each should spend at least one
 /// one-time note, and no scenario applying it holds more than a dozen.
 const MAX_SPENDS: usize = 16;
+
+/// How a check's detail names the output `m`: its txid's first bytes and action index.
+fn output_name(m: &Mined) -> String {
+    let txid: String = m.txid.as_ref()[..4]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("{txid}:{}", m.action_index)
+}
 
 /// A wallet in a scenario.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -669,15 +680,54 @@ impl Ctx {
     /// Settles every wallet and judges the balance checks registered so far, then spends
     /// every one-time-key note `dev` holds through ordinary sends to a stranger, at most
     /// [`MAX_SPENDS`] of them. Each send must be one consensus accepts
-    /// ([`Chain::accepts`]) before it is mined and `dev` syncs. Records one check: every
-    /// send was accepted, no one-time value is left, and the balance fell by exactly the
-    /// value sent plus fees.
+    /// ([`Chain::accepts`]) before it is mined and `dev` syncs.
+    ///
+    /// The notes it must spend are the outputs the chain holds that pay a one-time
+    /// receiver the harness derived for `dev`'s seed, not what the wallet labels as
+    /// one-time notes. Each needs a wallet note row, found by txid and action index,
+    /// whose nullifier ends up on chain. A wrong stored nullifier never does, since the
+    /// proof binds the revealed one to the note.
+    /// Records one check: every such nullifier is on chain, every send was accepted, the
+    /// wallet holds no unspent one-time value, and its balance fell by exactly the value
+    /// sent plus fees.
     pub fn spend_one_time_notes(&mut self, dev: Dev) {
         self.settle();
         self.judge_balances();
         let name = self.name(dev);
         let stranger = FullViewingKey::from(&SpendingKey::from_bytes([0xf5; 32]).expect("a key"))
             .address_at(0u32, Scope::External);
+        let seed = self.devices[dev.0].fvk.to_bytes();
+        let receivers: BTreeSet<[u8; 43]> = self
+            .devices
+            .iter()
+            .filter(|device| device.fvk.to_bytes() == seed)
+            .flat_map(Device::derived_receivers)
+            .collect();
+        let payments: Vec<Mined> = self
+            .chain
+            .mined()
+            .iter()
+            .filter(|m| receivers.contains(&m.receiver))
+            .cloned()
+            .collect();
+        let mut nullifiers = Vec::new();
+        let mut unknown = Vec::new();
+        for m in &payments {
+            match self.devices[dev.0]
+                .receipt(m.id())
+                .and_then(|r| r.nullifier)
+            {
+                Some(nf) => nullifiers.push(nf),
+                None => unknown.push(output_name(m)),
+            }
+        }
+        let unspent = |chain: &Chain| {
+            let revealed = chain.nullifiers();
+            nullifiers
+                .iter()
+                .filter(|nf| !revealed.contains(*nf))
+                .count()
+        };
         let (value_before, balance_before) = {
             let device = &self.devices[dev.0];
             (device.unspent_one_time_value(), device.balance())
@@ -686,7 +736,9 @@ impl Ctx {
         let mut sends = Vec::new();
         let mut problem = None;
         for _ in 0..MAX_SPENDS {
-            if self.devices[dev.0].unspent_one_time_value() == 0 {
+            let done =
+                unspent(&self.chain) == 0 && self.devices[dev.0].unspent_one_time_value() == 0;
+            if done {
                 break;
             }
             let tx = match self.devices[dev.0].send_ordinary(stranger, SPEND_PROBE) {
@@ -724,12 +776,20 @@ impl Ctx {
             sends.push(u32::from(height));
             self.sync(dev);
         }
+        let left = unspent(&self.chain);
         let device = &self.devices[dev.0];
         let (value_after, balance_after) = (device.unspent_one_time_value(), device.balance());
         let fell = balance_before.checked_sub(balance_after);
-        let ok = problem.is_none() && value_before > 0 && value_after == 0 && fell == Some(paid);
+        let ok = problem.is_none()
+            && !payments.is_empty()
+            && unknown.is_empty()
+            && left == 0
+            && value_after == 0
+            && fell == Some(paid);
         let mut detail = format!(
-            "{} sends mined at {sends:?}; one-time value {} before, {} after; balance {} before, {} after, sent plus fees {}",
+            "{} payments to one-time receivers, {} of their nullifiers on chain, no note or nullifier for {unknown:?}; {} sends mined at {sends:?}; one-time value {} before, {} after; balance {} before, {} after, sent plus fees {}",
+            payments.len(),
+            nullifiers.len() - left,
             sends.len(),
             zec(value_before),
             zec(value_after),

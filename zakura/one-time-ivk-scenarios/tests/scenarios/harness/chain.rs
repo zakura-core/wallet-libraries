@@ -184,6 +184,8 @@ pub struct Mined {
     pub position: u64,
     pub value: u64,
     pub payer: Payer,
+    /// The receiver it pays, as raw address bytes.
+    pub receiver: [u8; 43],
     /// The record a zero-OVK payment gives the directory.
     pub indexed: Option<Record>,
 }
@@ -592,6 +594,7 @@ impl Chain {
                 position,
                 value: *value,
                 payer,
+                receiver,
                 indexed,
             };
             self.mined.push(entry.clone());
@@ -707,6 +710,7 @@ impl Chain {
                     position,
                     value,
                     payer,
+                    receiver,
                     indexed,
                 };
                 self.mined.push(mined.clone());
@@ -821,7 +825,7 @@ impl Chain {
     }
 
     /// Every Ironwood nullifier the chain's blocks reveal.
-    fn nullifiers(&self) -> BTreeSet<[u8; 32]> {
+    pub fn nullifiers(&self) -> BTreeSet<[u8; 32]> {
         let blocks = self.st.cache().0.read().unwrap();
         blocks
             .values()

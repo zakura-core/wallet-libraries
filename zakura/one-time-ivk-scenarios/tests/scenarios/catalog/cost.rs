@@ -4,6 +4,7 @@
 
 use std::time::Instant;
 
+use orchard::keys::{FullViewingKey, SpendingKey};
 use zakura_one_time_ivk::Purpose;
 use zakura_one_time_ivk_scenarios::Class;
 
@@ -388,7 +389,8 @@ fn recheck_replay(age: i64, every: u32, parity: Parity) -> Scenario {
             // Land the payment on the requested side of its pair.
             let want_odd = parity == Parity::Odd;
             if (ctx.chain.commitments().len() % 2 == 1) != want_odd {
-                let foreign = ctx.get(a).key(Purpose::Refund, 1_000_000);
+                let foreign =
+                    FullViewingKey::from(&SpendingKey::from_bytes([0xf6; 32]).expect("a key"));
                 ctx.pay(
                     "someone else's output",
                     "a stranger",
