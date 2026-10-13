@@ -345,8 +345,8 @@ fn two_devices_refund(funded: bool) -> Scenario {
         ),
         summary:
             "A refund key is known to another device once its funding memo is on chain. Before \
-            that, reserve_refund_key relies on NEAR's seen set, which the receiver directory fills \
-            with payout addresses only."
+            that, reserve_refund_key relies on NEAR's seen set, which holds the refund addresses \
+            NEAR was given as well as payout addresses."
                 .into(),
         params: vec![(
             "A's swap".into(),
@@ -381,14 +381,9 @@ fn two_devices_refund(funded: bool) -> Scenario {
                 "B never gives NEAR a refund address A gave it",
                 second.index != first.index,
                 format!(
-                    "A reserved {}, B reserved {}{}",
+                    "A reserved {}, B reserved {}",
                     first.label(),
-                    second.label(),
-                    if funded {
-                        ""
-                    } else {
-                        "; reserve_refund_key skips seen-set hits, but the receiver directory's seen set holds payout addresses only"
-                    }
+                    second.label()
                 ),
             );
         }),

@@ -64,18 +64,19 @@ impl Near {
         now - self.read_lag
     }
 
-    /// Whether `receiver` is in the seen set as of `now`: a payout address given after
-    /// the feed started and before its last read.
+    /// Whether `receiver` is in the seen set as of `now`: an address given after the feed
+    /// started and before its last read, as a payout or refund address.
     pub fn seen(&self, receiver: &[u8; 43], now: i64) -> bool {
         let until = self.read_until(now);
-        self.given.iter().any(|(r, at, role)| {
-            r == receiver && *role == Role::Payout && *at >= self.feed_started && *at <= until
-        })
+        self.given
+            .iter()
+            .any(|(r, at, _)| r == receiver && *at >= self.feed_started && *at <= until)
     }
 
     /// The provider sets a publication made at `now` carries: `near-intents/recent`
-    /// (payout and refund addresses given in the 24 hours before the last read) and
-    /// `near-intents/seen` (payout addresses since the feed started).
+    /// (addresses given in the 24 hours before the last read) and `near-intents/seen`
+    /// (addresses given since the feed started), each holding payout and refund
+    /// addresses.
     pub fn sets(&self, now: i64) -> Vec<ProviderSet> {
         let until = self.read_until(now);
         let window = RESTORE_WATCH_SECS;
@@ -87,9 +88,7 @@ impl Near {
         let seen = self
             .given
             .iter()
-            .filter(|(_, at, role)| {
-                *role == Role::Payout && *at >= self.feed_started && *at <= until
-            })
+            .filter(|(_, at, _)| *at >= self.feed_started && *at <= until)
             .map(|(r, _, _)| Receiver::from_bytes(*r).expect("a valid receiver"));
         vec![
             ProviderSet {
