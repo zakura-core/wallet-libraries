@@ -16,7 +16,8 @@ pub fn all() -> Vec<Scenario> {
         ordinary_payment_dropped(),
         payout_reorged_and_remined(),
         payout_dropped(),
-        deep_reorg_after_close(),
+        deep_reorg_after_close(false),
+        deep_reorg_after_close(true),
         funding_reorged_and_remined(),
         restored_key_near_rewind(),
     ]
@@ -94,8 +95,12 @@ fn payout_reorged_and_remined() -> Scenario {
             ctx.observe_incoming(a, &swap, "SUCCESS", Some(ZEC));
             ctx.mine(12);
             ctx.sync(a);
+            // The wallet found this transaction before the reorg, so finding it proves
+            // nothing; its record must have moved to the new branch.
+            ctx.check_receipt(a, "the payout", &again);
             let b = ctx.device("B", SEED, birthday);
             ctx.sync(b);
+            ctx.check_receipt(b, "the payout", &again);
             ctx.expect(
                 a,
                 "payout (mined again)",
@@ -154,18 +159,47 @@ fn payout_dropped() -> Scenario {
     }
 }
 
-fn deep_reorg_after_close() -> Scenario {
+/// A payout's key closes after 10 confirmations and SUCCESS, then a 16-block reorg
+/// removes the payout. The same transaction is mined again, or, when `replaced`, NEAR
+/// pays again in a new transaction and the first never returns.
+fn deep_reorg_after_close(replaced: bool) -> Scenario {
+    let (id, title, summary) = if replaced {
+        (
+            "F2-deep-reorg-after-close-payout-paid-again-in-a-new-transaction",
+            "A reorg deeper than 10 confirmations un-mines a payout after its key closed; NEAR pays again in a new transaction",
+            "A rewind that un-mines a receipt reopens its key, which then finds NEAR's new payout. \
+            The lost payout leaves the balance once its expiry passes, and the paid address is \
+            never issued again, even while its only payment is off the chain.",
+        )
+    } else {
+        (
+            "F2-deep-reorg-after-close-payout-mined-again",
+            "A reorg deeper than 10 confirmations un-mines a payout after its key closed; the payout is mined again",
+            "close_finished_one_time_keys: no status reopens a closed key, but a rewind does when \
+            it un-mines a receipt. The returning payout must be found at its new height, with \
+            the key open until it has 10 confirmations there.",
+        )
+    };
     Scenario {
-        id: "F2-deep-reorg-after-close-payout-mined-again".into(),
+        id: id.into(),
         group: REORGS,
-        title: "A reorg deeper than 10 confirmations un-mines a payout after its key closed; the payout is mined again".into(),
-        summary: "close_finished_one_time_keys: no status reopens a closed key, but a rewind does when \
-            it un-mines a receipt. The returning payout must be found at its new height."
-            .into(),
-        params: vec![("reorg depth".into(), "16 blocks".into())],
+        title: title.into(),
+        summary: summary.into(),
+        params: vec![
+            ("reorg depth".into(), "16 blocks".into()),
+            (
+                "payout returns".into(),
+                if replaced {
+                    "in a new transaction"
+                } else {
+                    "as the same transaction"
+                }
+                .into(),
+            ),
+        ],
         slow: false,
-        run: Box::new(|ctx| {
-            let (a, _) = wallet(ctx);
+        run: Box::new(move |ctx| {
+            let (a, birthday) = wallet(ctx);
             let swap = ctx.quote_incoming(a, HOUR).expect("the quote issues");
             let key = swap.label();
             ctx.wait(20 * MINUTE);
@@ -174,19 +208,73 @@ fn deep_reorg_after_close() -> Scenario {
             ctx.mine(14);
             ctx.sync(a);
             ctx.check_key_open(a, &key, false);
+            let scanned = ctx.chain.tip();
             ctx.reorg(first.height - 1);
+            // A wallet sees a reorg only once the new branch outgrows the one it scanned,
+            // so the payout returns just past it, below 10 confirmations when found.
+            while ctx.chain.tip() < scanned {
+                ctx.mine(1);
+            }
+            let again = if replaced {
+                ctx.mine(1);
+                ctx.sync(a);
+                ctx.check_key_open(a, &key, true);
+                let next = ctx.quote_incoming(a, HOUR).expect("a new quote issues");
+                ctx.check(
+                    format!(
+                        "a new quote does not reissue {key} while its payment is off the chain"
+                    ),
+                    next.index != swap.index,
+                    format!("issued {}", next.label()),
+                );
+                ctx.pay("payout paid again", &key, &swap.fvk, ZEC, Payer::Near)
+            } else {
+                ctx.remine("payout", &tx, &swap.fvk, ZEC, Payer::Near)
+            };
             ctx.mine(2);
-            let again = ctx.remine("payout", &tx, &swap.fvk, ZEC, Payer::Near);
-            ctx.mine(20);
             ctx.sync(a);
-            ctx.expect(
-                a,
-                "payout (mined again)",
-                &key,
-                &again,
-                Class::FoundLive,
-                "The wallet found it before the reorg; the rewind reopened the key, which finds it at its new height.",
-            );
+            let payment = if replaced {
+                "the new payout"
+            } else {
+                "the payout"
+            };
+            ctx.check_receipt(a, payment, &again);
+            ctx.check_key_open(a, &key, true);
+            // Past the 10 confirmations, and past the lost transaction's expiry.
+            ctx.mine(if replaced { PAST_EXPIRY } else { 18 });
+            ctx.sync(a);
+            ctx.check_receipt(a, payment, &again);
+            let (label, why) = if replaced {
+                (
+                    "new payout",
+                    "The rewind un-mined the first payout and reopened the key, which finds the new one.",
+                )
+            } else {
+                (
+                    "payout (mined again)",
+                    "The wallet found it before the reorg; the rewind reopened the key, which finds it at its new height.",
+                )
+            };
+            ctx.expect(a, label, &key, &again, Class::FoundLive, why);
+            if replaced {
+                let b = ctx.device("B", SEED, birthday);
+                ctx.sync(b);
+                ctx.expect(
+                    b,
+                    label,
+                    &key,
+                    &again,
+                    Class::FoundAutomatically,
+                    "The directory lists the surviving branch's payment.",
+                );
+                ctx.check_same_balance(a, b);
+                let later = ctx.quote_incoming(a, HOUR).expect("a later quote issues");
+                ctx.check(
+                    format!("a later quote does not reissue {key}, which was paid"),
+                    later.index != swap.index,
+                    format!("issued {}", later.label()),
+                );
+            }
             ctx.check_balance(a, ZEC);
             ctx.spend_one_time_notes(a);
         }),

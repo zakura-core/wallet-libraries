@@ -2,14 +2,17 @@
 //! payouts seen in the mempool, and spending what one-time keys received.
 
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
+use zakura_one_time_ivk::Purpose;
 use zakura_one_time_ivk_scenarios::Class;
 use zcash_client_sqlite::wallet::one_time_ivk::swap::ReservationPolicy;
 
 use super::{LIVE, OFFLINE, RESTORE, SPENDING, Scenario, span};
 use crate::harness::{
     Ctx, Dev,
-    chain::{DAY, HOUR, MINUTE, Mined, Payer, Traffic, ZEC},
+    chain::{DAY, HOUR, MINUTE, Mined, Payer, Traffic, ZEC, receiver_of},
     device::IncomingSwap,
+    directory::Fault,
+    near::Role,
 };
 
 const SEED: [u8; 32] = [0x66; 32];
@@ -22,6 +25,9 @@ pub fn all() -> Vec<Scenario> {
     ];
     for status in [503, 429, 410] {
         scenarios.push(directory_errors(status));
+    }
+    for stops in [false, true] {
+        scenarios.push(directory_fails_after_leasing(stops));
     }
     for (skew, after_deadline) in [(5 * DAY, 29 * DAY), (-2 * DAY, 31 * DAY)] {
         scenarios.push(clock_skew(skew, after_deadline));
@@ -136,6 +142,146 @@ fn directory_errors(status: u16) -> Scenario {
                 Class::FoundBySweep,
                 "A failed sweep backs off and a later one finds the payment.",
             );
+        }),
+    }
+}
+
+/// A restore's sweep loses the directory on I1's second payment page, after leasing I1
+/// and finishing I0. The directory answers HTTP 503, or, when `stops`, the app stops
+/// during the request and its next sync's witness download fails too. Every payment must
+/// be credited once in the end, none of I1's before its lookup completes, and I1's retry
+/// must wait out its backoff.
+fn directory_fails_after_leasing(stops: bool) -> Scenario {
+    let what = if stops {
+        "the app stops during the request, then the witness download fails"
+    } else {
+        "the directory answers HTTP 503"
+    };
+    Scenario {
+        id: if stops {
+            "E7-app-stops-mid-sweep-then-witnesses-fail".into()
+        } else {
+            "E7-directory-fails-a-later-page-after-leasing".into()
+        },
+        group: RESTORE,
+        title: format!("A restore's lookup of a twice-paid key fails on its second page: {what}"),
+        summary: "Each key is leased just before its lookup, and its payments apply only once \
+            every page has arrived. A failure partway through a lookup must credit none of that \
+            key's payments, back the key off, and leave the others to finish. Once retried, every \
+            payment is credited exactly once."
+            .into(),
+        params: vec![("failure".into(), what.into())],
+        slow: false,
+        run: Box::new(move |ctx| {
+            ctx.mine(20);
+            let birthday = ctx.chain.tip() + 1;
+            ctx.mine(5);
+            // The seed's owner quoted and was paid on another device.
+            let owner = ctx.device("A", SEED, birthday);
+            let values = [ZEC / 10, 2 * ZEC / 10, 3 * ZEC / 10, 4 * ZEC / 10];
+            let paid_to = [0, 1, 1, 2];
+            for index in 0..3 {
+                let fvk = ctx.get(owner).key(Purpose::Receive, index);
+                ctx.near
+                    .give(receiver_of(&fvk), ctx.chain.now(), Role::Payout);
+            }
+            let mut payouts = Vec::new();
+            for (&index, &value) in paid_to.iter().zip(&values) {
+                let fvk = ctx.get(owner).key(Purpose::Receive, index);
+                let label = format!("I{index}");
+                payouts.push((
+                    label.clone(),
+                    ctx.pay("payout", &label, &fvk, value, Payer::Near),
+                ));
+                ctx.mine(1);
+            }
+            ctx.wait(2 * DAY);
+            let b = ctx.device("B", SEED, birthday);
+            // Lookups run in key order: I0's page, then I1's two pages.
+            let fault = Fault {
+                request: "POST /v1/receiver/query",
+                after: 2,
+                status: if stops { None } else { Some(503) },
+            };
+            ctx.dev(b).reach.endpoint_faults = vec![fault];
+            ctx.log("directory", format!("I1's second payment page: {what}"));
+            let failed_at = ctx.chain.now();
+            ctx.sync(b);
+            let receipts = |ctx: &Ctx| {
+                (0..3)
+                    .map(|i| ctx.get(b).incoming_receipts(i))
+                    .collect::<Vec<_>>()
+            };
+            let after_failure = receipts(ctx);
+            ctx.check(
+                "B credits I0 but none of I1's payments when I1's lookup fails partway",
+                after_failure[..2] == [1, 0],
+                format!("receipts per key {after_failure:?}"),
+            );
+            let backoff = ctx.get(b).sweep_state(Purpose::Receive, 1);
+            ctx.check(
+                "I1's failed attempt backs it off for 60 s",
+                backoff.is_some_and(|s| s.attempts == 1 && s.next_attempt_at == failed_at + 60),
+                format!("{backoff:?}, failed at {failed_at}"),
+            );
+            if stops {
+                ctx.dev(b).reach.endpoint_faults = vec![Fault {
+                    request: "GET /v1/receiver/witness",
+                    after: 0,
+                    status: Some(503),
+                }];
+                ctx.log("directory", "the next witness download answers HTTP 503");
+            }
+            // Within I1's backoff: the next sync runs at the same chain time.
+            ctx.sync(b);
+            let waiting = ctx.get(b).sweep_state(Purpose::Receive, 1);
+            let other = ctx.get(b).sweep_state(Purpose::Receive, 2);
+            let i2 = ctx.get(b).incoming_receipts(2);
+            ctx.check(
+                "I1 is not retried within its backoff",
+                waiting == backoff,
+                format!("{waiting:?}"),
+            );
+            if stops {
+                ctx.check(
+                    "a failed witness download leases no key",
+                    other.is_some_and(|s| s.attempts == 0) && i2 == 0,
+                    format!("I2 {other:?}, {i2} receipts"),
+                );
+            } else {
+                ctx.check(
+                    "the next sync finishes I2 while I1 waits",
+                    other.is_some_and(|s| s.done_height.is_some()) && i2 == 1,
+                    format!("I2 {other:?}, {i2} receipts"),
+                );
+            }
+            ctx.mine(1);
+            ctx.sync(b);
+            let retried = ctx.get(b).sweep_state(Purpose::Receive, 1);
+            ctx.check(
+                "I1 is retried once its backoff passes, and finishes",
+                retried.is_some_and(|s| s.attempts == 2 && s.done_height.is_some()),
+                format!("{retried:?}"),
+            );
+            keep_syncing(ctx, b, 10 * MINUTE, HOUR);
+            let settled = receipts(ctx);
+            let pending = ctx.get(b).history_pending();
+            ctx.check(
+                "every payment is credited exactly once",
+                settled == [1, 2, 1] && !pending,
+                format!("receipts per key {settled:?}, history pending {pending}"),
+            );
+            for (label, payout) in &payouts {
+                ctx.expect(
+                    b,
+                    "payout",
+                    label,
+                    payout,
+                    Class::FoundBySweep,
+                    "A failed lookup backs its key off, and a later sweep finds every page.",
+                );
+            }
+            ctx.check_balance(b, values.iter().sum());
         }),
     }
 }
@@ -326,7 +472,8 @@ fn mempool_then_dropped() -> Scenario {
         id: "C8-payout-in-mempool-never-mined".into(),
         group: LIVE,
         title: "NEAR's payout is seen in the mempool and never mined".into(),
-        summary: "A pending payout that never confirms must leave the balance once it expires."
+        summary: "A mempool payout to an open one-time key shows as pending, not spendable, and \
+            must leave the balance once it expires unmined."
             .into(),
         params: Vec::new(),
         slow: false,
@@ -340,6 +487,12 @@ fn mempool_then_dropped() -> Scenario {
             ctx.wait(20 * MINUTE);
             let tx = ctx.near_tx(&swap.fvk, ZEC, Payer::Near);
             ctx.mempool(a, "the payout", &tx);
+            let (pending, spendable) = (ctx.get(a).balance(), ctx.get(a).spendable_balance());
+            ctx.check(
+                "the mempool payout is credited as pending",
+                pending == ZEC && spendable == 0,
+                format!("balance {pending} zat, of which {spendable} zat spendable"),
+            );
             ctx.mine(60);
             ctx.sync(a);
             ctx.check_key_open(a, &swap.label(), true);

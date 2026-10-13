@@ -3,6 +3,7 @@
 
 use std::{
     collections::BTreeMap,
+    panic::AssertUnwindSafe,
     path::{Path, PathBuf},
 };
 
@@ -58,7 +59,7 @@ use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork, valu
 
 use super::{
     chain::{Chain, GENESIS, network, receiver_of},
-    directory::{Directory, ORIGIN, Options, Served},
+    directory::{APP_STOPS, Directory, Fault, ORIGIN, Options, Served},
     near::{Near, Role},
 };
 
@@ -121,17 +122,43 @@ pub struct KeyState {
 impl KeyState {
     /// The report's name for the key.
     pub fn label(&self) -> String {
-        format!(
-            "{}{}",
-            if self.purpose == 0 { "R" } else { "I" },
-            self.index
-        )
+        key_label(self.purpose, self.index)
     }
 
     /// Whether the wallet trial-decrypts with it.
     pub fn open(&self) -> bool {
         self.active_from.is_some() && self.closed_at.is_none()
     }
+}
+
+/// A wallet's current record of one Ironwood output it received.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Receipt {
+    /// The height its transaction is mined at, as the wallet now knows it.
+    pub mined_height: Option<u32>,
+    /// Its note commitment tree position.
+    pub position: Option<u64>,
+    /// The value received, in zatoshis.
+    pub value: u64,
+    /// The one-time key that received it, labelled as the report labels keys.
+    pub key: Option<String>,
+}
+
+/// A one-time key's restore sweep, as the wallet stored it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SweepState {
+    /// Attempts leased so far.
+    pub attempts: u32,
+    /// Unix time before which the sweep is not due again.
+    pub next_attempt_at: i64,
+    /// The height the sweep finished at, if it did.
+    pub done_height: Option<u32>,
+}
+
+/// The report's name for the one-time key with stored purpose code `purpose` (0 for
+/// refund, 1 for incoming) and `index`, such as `R0` or `I3`.
+fn key_label(purpose: u8, index: u64) -> String {
+    format!("{}{index}", if purpose == 0 { "R" } else { "I" })
 }
 
 /// How a device's sync went.
@@ -157,6 +184,8 @@ pub struct Reach {
     pub directory: bool,
     /// HTTP statuses the directory answers the first requests with.
     pub directory_faults: Vec<u16>,
+    /// Failures of particular directory endpoints (see [`Fault`]).
+    pub endpoint_faults: Vec<Fault>,
     /// How the publication differs from a faithful index.
     pub publication: Options,
     /// Sweep runs per sync. Vizor runs one per account per sync and leaves pending work
@@ -169,6 +198,7 @@ impl Default for Reach {
         Self {
             directory: true,
             directory_faults: Vec::new(),
+            endpoint_faults: Vec::new(),
             publication: Options::default(),
             sweep_runs_per_sync: 1,
         }
@@ -438,15 +468,18 @@ impl Device {
 
     /// Runs restore sweeps against a fresh publication, `Reach::sweep_runs_per_sync` runs
     /// at most and fewer once none is pending, and returns the keys finished, the lookups
-    /// made, and why any key was deferred or a run stopped.
+    /// made, and why any key was deferred or a run stopped. An injected fault that stops
+    /// the app ends the sweep there, and the app restarts (see [`Self::reopen`]).
     pub fn sweep(&mut self, chain: &Chain, near: &Near) -> (usize, usize, Vec<String>) {
         let now = self.now(chain);
         let reach = self.reach.clone();
-        // Injected failures answer the first requests of one sync only.
+        // Injected failures hit one sync only.
         self.reach.directory_faults.clear();
+        self.reach.endpoint_faults.clear();
         let directory = Served::new(reach.directory, move || {
             let directory = Directory::publish(chain, near, now, &reach.publication);
             directory.fail_next(&reach.directory_faults);
+            directory.fail_at(&reach.endpoint_faults);
             directory
         });
         let Some(through) = self.through() else {
@@ -458,19 +491,31 @@ impl Device {
             .expect("a runtime");
         let mut finished = 0;
         let mut problems = Vec::new();
+        let mut stopped = false;
         for _ in 0..self.reach.sweep_runs_per_sync.max(1) {
             self.sweep_runs += 1;
-            let swept: Result<Swept<SqliteClientError>, _> = runtime.block_on(sweep(
-                &mut self.db,
-                &network(),
-                self.account,
-                through.clone(),
-                GENESIS,
-                ORIGIN,
-                &directory,
-                &NoLock,
-                now,
-            ));
+            let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                runtime.block_on(sweep(
+                    &mut self.db,
+                    &network(),
+                    self.account,
+                    through.clone(),
+                    GENESIS,
+                    ORIGIN,
+                    &directory,
+                    &NoLock,
+                    now,
+                ))
+            }));
+            let swept: Result<Swept<SqliteClientError>, _> = match run {
+                Ok(swept) => swept,
+                Err(payload) if stops_the_app(payload.as_ref()) => {
+                    problems.push(format!("{APP_STOPS}; it restarts"));
+                    stopped = true;
+                    break;
+                }
+                Err(payload) => std::panic::resume_unwind(payload),
+            };
             match swept {
                 Ok(swept) => {
                     finished += swept.finished;
@@ -498,6 +543,10 @@ impl Device {
             let (sent, received) = published.bytes();
             self.bytes_sent += sent;
             self.bytes_received += received;
+        }
+        drop(directory);
+        if stopped {
+            self.reopen();
         }
         (finished, lookups, problems)
     }
@@ -625,6 +674,58 @@ impl Device {
                 receiver.try_into().expect("43-byte receiver"),
             )
         })
+    }
+
+    /// The wallet's current record of the Ironwood output `id`, if it holds it.
+    pub fn receipt(&self, id: ([u8; 32], u32)) -> Option<Receipt> {
+        let conn = read_only(&self.path);
+        conn.query_row(
+            "SELECT t.mined_height, n.commitment_tree_position, n.value, k.purpose, k.key_index
+             FROM ironwood_received_notes n JOIN transactions t ON t.id_tx = n.transaction_id
+             LEFT JOIN ironwood_one_time_keys k ON k.id = n.one_time_key_id
+             WHERE t.txid = ?1 AND n.action_index = ?2",
+            rusqlite::params![id.0.to_vec(), id.1],
+            |row| {
+                let key = match (
+                    row.get::<_, Option<u8>>(3)?,
+                    row.get::<_, Option<Vec<u8>>>(4)?,
+                ) {
+                    (Some(purpose), Some(index)) => Some(key_label(
+                        purpose,
+                        u64::from_be_bytes(index.try_into().expect("8-byte index")),
+                    )),
+                    _ => None,
+                };
+                Ok(Receipt {
+                    mined_height: row.get(0)?,
+                    position: row.get(1)?,
+                    value: row.get(2)?,
+                    key,
+                })
+            },
+        )
+        .ok()
+    }
+
+    /// The restore sweep of the one-time key `purpose`/`index`, if it has one.
+    pub fn sweep_state(&self, purpose: Purpose, index: u64) -> Option<SweepState> {
+        let conn = read_only(&self.path);
+        // The stored purpose code, as in `key_label`.
+        let code = u8::from(purpose == Purpose::Receive);
+        conn.query_row(
+            "SELECT s.attempts, s.next_attempt_at, s.done_height FROM ironwood_one_time_sweeps s
+             JOIN ironwood_one_time_keys k ON k.id = s.one_time_key_id
+             WHERE k.purpose = ?1 AND k.key_index = ?2",
+            rusqlite::params![code, index.to_be_bytes()],
+            |row| {
+                Ok(SweepState {
+                    attempts: row.get(0)?,
+                    next_attempt_at: row.get(1)?,
+                    done_height: row.get(2)?,
+                })
+            },
+        )
+        .ok()
     }
 
     /// Notes the wallet holds from incoming key `index`, spent or not.
@@ -969,15 +1070,21 @@ impl Device {
             .expect("the wallet stored its transaction"))
     }
 
-    /// Unspent value the wallet holds in notes one-time keys received, in zatoshis.
+    /// Unspent value the wallet holds in notes one-time keys received, in zatoshis: notes
+    /// from mined transactions that no mined or unexpired transaction spends. A note from
+    /// a transaction a reorg removed for good is not counted.
     pub fn unspent_one_time_value(&self) -> u64 {
         let conn = read_only(&self.path);
         conn.query_row(
             "SELECT COALESCE(SUM(n.value), 0) FROM ironwood_received_notes n
-             WHERE n.one_time_key_id IS NOT NULL
+             JOIN transactions r ON r.id_tx = n.transaction_id
+             WHERE n.one_time_key_id IS NOT NULL AND r.mined_height IS NOT NULL
                AND NOT EXISTS (SELECT 1 FROM ironwood_received_note_spends s
                                JOIN transactions t ON t.id_tx = s.transaction_id
-                               WHERE s.ironwood_received_note_id = n.id)",
+                               WHERE s.ironwood_received_note_id = n.id
+                                 AND (t.mined_height IS NOT NULL
+                                      OR t.expiry_height = 0
+                                      OR t.expiry_height > (SELECT MAX(height) FROM blocks)))",
             [],
             |r| r.get::<_, i64>(0),
         )
@@ -995,6 +1102,19 @@ impl Device {
                     .account_balances()
                     .get(&self.account)
                     .map_or(0, |b| b.total().into_u64())
+            })
+    }
+
+    /// The balance the wallet can spend now, in zatoshis.
+    pub fn spendable_balance(&self) -> u64 {
+        self.db
+            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .expect("a summary")
+            .map_or(0, |summary| {
+                summary
+                    .account_balances()
+                    .get(&self.account)
+                    .map_or(0, |b| b.spendable_value().into_u64())
             })
     }
 
@@ -1121,6 +1241,15 @@ fn open(path: &Path, clock: &FixedClock, seed: u64) -> Wallet {
 fn read_only(path: &Path) -> Connection {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .expect("the wallet file opens")
+}
+
+/// Whether a panic's `payload` is an injected fault stopping the app (see [`APP_STOPS`]).
+fn stops_the_app(payload: &(dyn std::any::Any + Send)) -> bool {
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied());
+    message == Some(APP_STOPS)
 }
 
 /// The sweep's write lock. Nothing else writes to a scenario's wallet concurrently.

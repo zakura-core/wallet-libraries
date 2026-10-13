@@ -18,7 +18,7 @@ use near::Near;
 /// What each send of [`Ctx::spend_one_time_notes`] pays a stranger.
 const SPEND_PROBE: u64 = 10_000;
 /// Sends [`Ctx::spend_one_time_notes`] makes at most. Each should spend at least one
-/// one-time note, and no scenario applying it holds more than ten.
+/// one-time note, and no scenario applying it holds more than a dozen.
 const MAX_SPENDS: usize = 16;
 
 /// A wallet in a scenario.
@@ -626,6 +626,22 @@ impl Ctx {
     /// Checks, once every wallet has settled, that `a` and `b` hold the same balance.
     pub fn check_same_balance(&mut self, a: Dev, b: Dev) {
         self.same_balances.push((a, b));
+    }
+
+    /// Checks that `dev` holds the output `mined` where the chain has it now: at its
+    /// block and tree position.
+    pub fn check_receipt(&mut self, dev: Dev, payment: &str, mined: &Mined) {
+        let receipt = self.devices[dev.0].receipt(mined.id());
+        let name = self.name(dev);
+        let (height, position) = (u32::from(mined.height), mined.position);
+        let ok = receipt
+            .as_ref()
+            .is_some_and(|r| r.mined_height == Some(height) && r.position == Some(position));
+        self.check(
+            format!("{name} holds {payment} at height {height}, tree position {position}"),
+            ok,
+            format!("{receipt:?}"),
+        );
     }
 
     /// Checks whether `dev`'s key `label` is open.

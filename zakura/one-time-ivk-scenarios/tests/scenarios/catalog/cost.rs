@@ -191,7 +191,9 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
         ),
         summary: "A restore sweeps every paid key through the receiver directory: one PIR lookup \
             per payment page, or the whole row file past about 400 lookups. Keys NEAR was given in \
-            the last day then scan for 24 hours."
+            the last day then scan for 24 hours. Every payment must be credited to its key, and \
+            after a restart the next quote must take an address past every paid one and find its \
+            payout live."
             .into(),
         params: vec![
             ("paid addresses".into(), swaps.to_string()),
@@ -239,6 +241,39 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
                 ctx.get(b).scanning().len() as f64,
                 "keys",
             );
+            let pending = ctx.get(b).history_pending();
+            ctx.check(
+                "no sweeps or queued payments remain after the restore",
+                !pending,
+                format!("{syncs} syncs, pending {pending}"),
+            );
+            let wrong: Vec<String> = paid
+                .iter()
+                .enumerate()
+                .filter_map(|(i, m)| {
+                    let key = format!("I{i}");
+                    let receipt = ctx.get(b).receipt(m.id());
+                    let class = ctx.get(b).found(m.id()).map(|f| f.class);
+                    let right = receipt
+                        .as_ref()
+                        .is_some_and(|r| r.key.as_ref() == Some(&key) && r.value == VALUE)
+                        && class == Some(Class::FoundBySweep);
+                    (!right).then(|| format!("{key}: {receipt:?}, {class:?}"))
+                })
+                .collect();
+            ctx.check(
+                format!(
+                    "B's sweeps credit every one of the {swaps} payouts to its key, with its value"
+                ),
+                wrong.is_empty(),
+                format!(
+                    "{} wrong or missing{}",
+                    wrong.len(),
+                    wrong
+                        .first()
+                        .map_or(String::new(), |w| format!(", first {w}"))
+                ),
+            );
             for (i, m) in paid.iter().enumerate() {
                 if i < 3 || i + 1 == paid.len() {
                     ctx.expect(
@@ -251,7 +286,30 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
                     );
                 }
             }
-            ctx.check_balance(b, swaps * VALUE);
+            ctx.restart(b);
+            let next = ctx
+                .quote_incoming(b, HOUR)
+                .expect("B quotes after its restore");
+            ctx.check(
+                "B's next address follows every paid and seen one",
+                next.index >= swaps,
+                format!("issued {}, after I0 to I{}", next.label(), swaps - 1),
+            );
+            ctx.wait(20 * MINUTE);
+            let label = "payout after the restore";
+            let payout = ctx.pay(label, &next.label(), &next.fvk, VALUE, Payer::Near);
+            ctx.observe_incoming(b, &next, "SUCCESS", Some(VALUE));
+            ctx.mine(1);
+            ctx.sync(b);
+            ctx.expect(
+                b,
+                label,
+                &next.label(),
+                &payout,
+                Class::FoundLive,
+                "B issued the address after its restore, so its key scans from the quote.",
+            );
+            ctx.check_balance(b, (swaps + 1) * VALUE);
             if swaps == 10 {
                 ctx.spend_one_time_notes(b);
             }

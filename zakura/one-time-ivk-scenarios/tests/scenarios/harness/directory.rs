@@ -26,6 +26,21 @@ use super::{
 /// The origin wallets send requests to; the transport serves them in process.
 pub const ORIGIN: &str = "https://receiver.test";
 
+/// What [`Directory`] panics with for an injected [`Fault`] whose app stops mid-request.
+pub const APP_STOPS: &str = "the app stops during a directory request";
+
+/// A failure injected into one directory endpoint.
+#[derive(Clone, Debug)]
+pub struct Fault {
+    /// The requests it targets, by method and path prefix, such as
+    /// `POST /v1/receiver/query`.
+    pub request: &'static str,
+    /// Targeted requests answered normally before it hits.
+    pub after: usize,
+    /// The HTTP status the hit request gets, or `None` when the app stops during it.
+    pub status: Option<u16>,
+}
+
 /// How a publication differs from a faithful index of the chain.
 #[derive(Clone, Debug, Default)]
 pub struct Options {
@@ -40,6 +55,7 @@ pub struct Directory {
     router: Router,
     requests: Mutex<Vec<String>>,
     faults: Mutex<VecDeque<u16>>,
+    targeted: Mutex<Vec<Fault>>,
     /// Request and response body bytes, as (sent, received).
     bytes: Mutex<(u64, u64)>,
 }
@@ -113,6 +129,7 @@ impl Directory {
             router: router_with_publications(publications),
             requests: Mutex::new(Vec::new()),
             faults: Mutex::new(VecDeque::new()),
+            targeted: Mutex::new(Vec::new()),
             bytes: Mutex::new((0, 0)),
         }
     }
@@ -125,6 +142,33 @@ impl Directory {
     /// Answers the next `statuses.len()` requests with these HTTP statuses instead.
     pub fn fail_next(&self, statuses: &[u16]) {
         self.faults.lock().unwrap().extend(statuses.iter().copied());
+    }
+
+    /// Adds endpoint-specific failures (see [`Fault`]).
+    pub fn fail_at(&self, faults: &[Fault]) {
+        self.targeted.lock().unwrap().extend(faults.iter().cloned());
+    }
+
+    /// The status an injected fault answers request `request` with, if one hits it.
+    /// Panics with [`APP_STOPS`] for a fault whose app stops during the request.
+    fn fault_for(&self, request: &str) -> Option<u16> {
+        let mut targeted = self.targeted.lock().unwrap();
+        let aimed = |fault: &Fault| request.starts_with(fault.request);
+        let hit = targeted
+            .iter()
+            .position(|fault| aimed(fault) && fault.after == 0)
+            .map(|i| targeted.remove(i));
+        if hit.is_none() {
+            for fault in targeted.iter_mut().filter(|fault| aimed(fault)) {
+                fault.after -= 1;
+            }
+        }
+        drop(targeted);
+        match hit {
+            Some(Fault { status: None, .. }) => panic!("{APP_STOPS}"),
+            Some(Fault { status, .. }) => status,
+            None => self.faults.lock().unwrap().pop_front(),
+        }
     }
 
     /// Encrypted lookups served so far.
@@ -155,13 +199,10 @@ impl Directory {
         let path = url
             .strip_prefix(ORIGIN)
             .expect("requests stay on the origin");
-        self.requests
-            .lock()
-            .unwrap()
-            .push(format!("{method} {path}"));
+        let request = format!("{method} {path}");
+        self.requests.lock().unwrap().push(request.clone());
         self.bytes.lock().unwrap().0 += body.len() as u64;
-        let fault = self.faults.lock().unwrap().pop_front();
-        let status = match fault {
+        let status = match self.fault_for(&request) {
             Some(status) => status,
             None => {
                 let request = Request::builder()
