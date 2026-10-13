@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use transparent_native::TableProfile;
 use transparent_shard::display::{
     DISPLAY_SCHEMA, DisplayBucket, DisplayLayout, DisplayManifest, DisplayMap, DisplayMapEntry,
-    DisplaySealParams, NATIVE_SCHEMA, TXID_2K8,
+    DisplaySealParams, NATIVE_SCHEMA, TXID_4K8,
 };
 use transparent_shard::manifest::TableGeometry;
 use zcash_client_backend::data_api::transparent_ledger::{
@@ -77,11 +77,11 @@ pub fn apply<P: zcash_protocol::consensus::Parameters, CL, R>(
 }
 
 /// The entries the fake recent shard claims: the production recent window.
-const RECENT_RECORDS: u64 = 90_000;
+const RECENT_RECORDS: u64 = 180_000;
 
-/// The geometry every fake publication uses.
-const GEOMETRY: &str = "txid-2k8";
-const ROWS: u64 = 2048;
+/// The geometry every fake publication uses: the one production serves.
+const GEOMETRY: &str = "txid-4k8";
+const ROWS: u64 = 4096;
 const ROW_BYTES: u32 = 8192;
 
 /// A txid display service publishing one recent shard over `start..=end` whose rows hold no
@@ -103,7 +103,7 @@ impl TxidPublication {
     /// A publication of one recent shard over `start..=end` holding no record.
     pub fn new(start: u64, end: u64) -> Self {
         let directory = TableProfile::new(NATIVE_SCHEMA, GEOMETRY, "txdirectory", ROWS, ROW_BYTES)
-            .expect("the txid-2k8 directory profile");
+            .expect("the txid-4k8 directory profile");
         let init = serde_json::to_vec(&serde_json::json!({
             "schema": DISPLAY_SCHEMA,
             "codec": transparent_shard::txid::CODEC,
@@ -136,7 +136,7 @@ impl TxidPublication {
             geometry: GEOMETRY.to_owned(),
             n_buckets: 1,
             archive_target: 1,
-            layout: DisplayLayout::of(&TXID_2K8),
+            layout: DisplayLayout::of(&TXID_4K8),
             blocks: end - start + 1,
             records: RECENT_RECORDS,
             buckets: vec![DisplayBucket {

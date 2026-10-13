@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Depend on wallet-pir's `transparent-v0.1.0-rc.3` tag (crate versions
+  `=0.1.0-rc.3`) instead of a bare revision. The txid display service now
+  publishes `txid-4k8` tables (4,096 rows of the same 8,192-byte, 72-entry
+  rows; archives and the recent window hold 180,000 entries instead of
+  90,000), which earlier clients refuse as an unknown geometry. A lookup
+  uploads 28,168 bytes instead of 21,000; replies and setups are unchanged.
+  History recovery is unchanged.
+- The `testing` fake txid display publication and the txid end-to-end test use
+  `txid-4k8`, the geometry production serves.
+
 ## [0.0.1-rc0] - PLANNED
 
 ### Packaging
@@ -50,9 +62,10 @@ lookups. See the [README](README.md) and
 
 - Supports `transparent-shard-v12` with decoupled directory/page shards and
   recent `decoupled-2k-8k` / archive `decoupled-32k-32k` geometry. The txid
-  display client uses the one-query `txid-2k8` layout at the 8-bit profile under
-  its own native schema, `transparent-txid-display-p8-v1`; it reports a
-  `/v2/txid` served at the earlier 16-bit profile as unsupported.
+  display client uses the one-query `txid-4k8` layout (and the earlier
+  `txid-2k8`) at the 8-bit profile under its own native schema,
+  `transparent-txid-display-p8-v1`; it reports a `/v2/txid` served at the
+  earlier 16-bit profile as unsupported.
 - Checked partial page walks survive restarts and enforce query/byte limits
   between requests. Verified run caches let catch-up stop at cached history.
 - Uses 44-bit dithered queries when the publication advertises supported schemes,
