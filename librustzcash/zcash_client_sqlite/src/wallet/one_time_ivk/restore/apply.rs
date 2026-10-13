@@ -48,6 +48,7 @@ pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL, R>(
                 db.conn.0,
                 db.params,
                 configured,
+                &db.enhance_pir_session,
                 account,
                 key,
                 &candidate,
@@ -83,6 +84,7 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     configured: Option<TransparentLedgerMode>,
+    session: &wallet::enhance_pir::session::SessionState,
     account: AccountUuid,
     key: KeyId,
     candidate: &PendingPayment,
@@ -331,7 +333,7 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         Some(candidate.height),
         spent_in,
     )?;
-    wallet::enhance_pir::finish_private_receipt(conn, configured, tx_ref, candidate.txid)?;
+    wallet::enhance_pir::finish_private_receipt(conn, configured, session, tx_ref, candidate.txid)?;
     dequeue()?;
     Ok(Ok(PaymentApplication::Applied))
 }

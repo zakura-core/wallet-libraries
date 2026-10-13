@@ -323,6 +323,7 @@ fn require_lwd(
 pub(crate) fn finish_private_receipt(
     conn: &Transaction<'_>,
     configured: Option<TransparentLedgerMode>,
+    session: &SessionState,
     tx_ref: crate::TxRef,
     txid: TxId,
 ) -> Result<(), SqliteClientError> {
@@ -337,6 +338,7 @@ pub(crate) fn finish_private_receipt(
         return queue_transaction(
             conn,
             configured,
+            session,
             tx_ref,
             &IronwoodEnhancementPlan::Ineligible,
         );
