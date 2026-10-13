@@ -946,6 +946,7 @@ mod tests {
             db::TABLE_TX_LOCATOR_MAP,
             db::TABLE_TX_RECONFIRMATION_RECEIPTS,
             db::TABLE_TX_RETRIEVAL_QUEUE,
+            db::TABLE_TX_STATUS_POLLS,
         ];
 
         let rows = describe_tables(&st.wallet().db().conn).unwrap();

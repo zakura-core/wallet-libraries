@@ -1918,6 +1918,14 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
     ) -> Result<(), Self::Error> {
         wallet::record_transaction_created(self.conn.borrow(), txid, earliest)
     }
+
+    fn record_private_status_poll(
+        &mut self,
+        _txid: TxId,
+        _tip: BlockHeight,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 #[cfg(all(

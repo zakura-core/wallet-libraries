@@ -1075,6 +1075,27 @@ CREATE INDEX idx_sent_notes_transaction_id ON sent_notes (
     transaction_id
 )"#;
 
+/// The private status polls of a transaction, fixed when its status work is queued so that
+/// replies cannot steer them.
+///
+/// ### Columns
+/// - `window_start_height`, `window_end_height`: the transaction is polled once at each chain
+///   tip in `[window_start_height, window_end_height)`, mined or not.
+/// - `expiry_poll_height`: the expiry height, when it is past the window; one more poll is due
+///   at the first tip at or past it. `NULL` when there is none.
+/// - `last_polled_height`: the tip of the last private reply recorded; no poll is due again
+///   until a later tip.
+pub(super) const TABLE_TX_STATUS_POLLS: &str = r#"
+CREATE TABLE tx_status_polls (
+    txid BLOB NOT NULL PRIMARY KEY,
+    window_start_height INTEGER NOT NULL CHECK (window_start_height >= 0),
+    window_end_height INTEGER NOT NULL,
+    expiry_poll_height INTEGER,
+    last_polled_height INTEGER,
+    CHECK (window_end_height > window_start_height),
+    CHECK (expiry_poll_height IS NULL OR expiry_poll_height >= window_end_height)
+)"#;
+
 /// Historical inclusion evidence awaiting an accepted scan; it grants no mined authority.
 pub(super) const TABLE_TX_RECONFIRMATION_RECEIPTS: &str = r#"
 CREATE TABLE tx_reconfirmation_receipts (

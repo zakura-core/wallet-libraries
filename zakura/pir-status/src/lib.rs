@@ -40,8 +40,15 @@ pub type Hash = [u8; 32];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Error {
+    /// The service's reply did not match the session: a manifest, header echo or length.
+    /// The service chooses this without knowing which row was asked, so it is a request
+    /// outcome.
     #[error("malformed status data")]
     Malformed,
+    /// The reply matched the session, but its row failed to decrypt or decode. The row is
+    /// what the private query selected, so this is a content outcome.
+    #[error("unreadable status row")]
+    Unreadable,
     #[error("unsupported status protocol")]
     Unsupported,
     #[error("status coverage incomplete")]
