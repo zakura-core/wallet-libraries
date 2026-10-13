@@ -62,7 +62,9 @@ A record that failed on content is asked again at most twice more (three
 attempts in all). Each retry waits a delay drawn from one schedule shared by
 every content outcome, using the operating system's random source. After the
 third failure the wallet stops asking until a rescan or a user action re-arms
-it. A wallet that stops after the first, second or third attempt, or never
+it. For transparent entries and receipts the count is stored, so the bound
+holds across restarts. For Enhance it is kept in the open wallet session, so the
+bound holds per app session (see change D). A wallet that stops after the first, second or third attempt, or never
 fails, gives the service one of four outcomes: at most two bits per record. The
 record's anonymity set, which is today reduced to one row, stays at a quarter
 of its size or more.
@@ -72,8 +74,20 @@ shard), a receipt txid, or an Enhance queue item. A dishonest service can
 already deny service to any record by corrupting it, so stopping after three
 attempts loses nothing a service could not take anyway. A given-up
 transparent entry holds the account, and a given-up Enhance item is listed as
-suspended, so Vizor can explain both. A given-up receipt reads as unavailable,
-as a failing one does today.
+suspended, so Vizor can explain both. A given-up receipt reads as its own
+state, `TransparentDisplayView::GaveUp`: Vizor presents it as unavailable, as a
+failing one is today, but stops polling and prioritising it.
+
+**The application schedules only on what the service already knows.** The
+library rules hold only if the application around them keeps them. *When* a
+query or a run happens may depend on new blocks, the service's own wait
+requests (`Retry::After`, HTTP `Retry-After`), app open and resume, settings
+changes and fixed timers. It must never depend on whether a reply was bad or
+found more work: no immediate rerun after a sync that failed entries or grew
+the address window, no faster polling of a receipt whose lookup failed on
+content, no extra trigger for unfinished recovery. In Vizor, transparent
+recovery runs on block cadence: one run after each foreground sync that
+follows a new block. Work left over waits for the next block.
 
 ## 3. Changes
 
@@ -97,8 +111,12 @@ and the jitter is a hash of the txid and attempt count (`schedule.rs:173`).
   `Unavailable` in `deferral` (`zakura/pir-transparent/src/txid/display_facts.rs:108`).
   The server refuses before it evaluates the query.
 - A row's third content failure marks it given up. It leaves both the due list
-  and the parked list, and its receipt reads as unavailable. Re-mining at a
-  different height re-arms it, as it already resets the backoff.
+  and the parked list. Without public authority its receipt reads as
+  `TransparentDisplayView::GaveUp` (a follow-up to this change; it read as
+  `Unavailable` at first), so an application can stop polling it while showing
+  it as unavailable. Re-mining at a different height re-arms it, as it already
+  resets the backoff, and the view follows the work again. Under public
+  authority nothing is given up.
 - `Contradiction` no longer waits for a changed display map. Parking it while
   `Absent` and `Protocol` retry on a timer would tell them apart.
 - `NotYetPublished`, `NotCovered` and `Unsupported` keep their schedules. The
@@ -135,6 +153,8 @@ pass.
 - Publication lag and overload also end the sync. A pass may have read private
   replies before reporting either condition, so its retry delay schedules the
   next sync rather than another pass with a reply-expanded address window.
+  `Step::Wait` is removed: `Retry::After` also gives `Step::Done`, and the
+  application uses its delay when scheduling the next sync.
 - `Step::Refresh` stays. A commit goes stale only through wallet or chain state
   (an account or address removed, a rewind, a superseded revision), never
   through reply content.
@@ -254,7 +274,10 @@ Tests:
 Enhance counts belong to the open wallet session, not the database. Retain the same
 `EnhancePirSession` across syncs and serialized database handles. A fresh session
 resets the allowance, so the limit bounds reactions within a session rather than
-across wallet restarts. Successful rescans and rewinds re-arm requests; failed or
+across wallet restarts: the three-strike bound holds per app session. A service
+that also watches restarts can query a rejected position three more times per
+app session; keeping the counts in memory was chosen over a stored count and
+migration. Successful rescans and rewinds re-arm requests; failed or
 rolled-back operations do not clear their counts.
 
 ## 4. Order
@@ -266,9 +289,11 @@ integrates against the wallet-pir commit, then repins to the next published
 release candidate.
 
 Vizor needs no protocol change. It picks up B (the recovery loop ends after
-one pass), shows the new held state and Enhance suspension, and recreates its
-transparent recovery cache for the store's new format, in the pin bump that
-follows.
+one pass, on block cadence), maps the new held state onto an existing stop
+reason, shows the Enhance suspension, stops polling given-up receipts, and
+recreates its transparent recovery cache for the store's new format, in the pin
+bump that follows. Its own sync loop must also stop reacting to reply content
+(section 2): no new screens, strings or settings are added for any of this.
 
 ## 5. What increment 1 does not build
 

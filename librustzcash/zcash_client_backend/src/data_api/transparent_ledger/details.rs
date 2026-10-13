@@ -464,6 +464,12 @@ pub enum TransparentDisplayView {
     Unavailable,
     /// The display service does not cover the transaction.
     NotCovered,
+    /// Without public authority, the lookup was given up after three replies failed on
+    /// content at the transaction's mined height. It is not tried again unless the
+    /// transaction is mined at another height or public authority is granted, and the view
+    /// then changes with the work. Present it as [`Self::Unavailable`], but do not poll or
+    /// prioritise it.
+    GaveUp,
 }
 
 /// Whether a display-level conclusion is established.

@@ -19,8 +19,16 @@ workspace.
   whose row or record bytes failed to decode against the same three-strike
   allowance. Callers must call it for such a content failure and must not call
   it for a request failure (HTTP 409/410/429/503, transport error, timeout).
+- `TransparentDisplayView::GaveUp`, for a receipt lookup given up after three
+  replies failed on content at one mined height without public authority.
+  Present it as `Unavailable`, but do not poll or prioritise it; it changes
+  only when the transaction is mined at another height or public authority is
+  granted.
 
 ### Changed
+
+- `TransparentDisplayView` has the new `GaveUp` variant: exhaustive matches
+  must handle it.
 
 - `EnhancePirSuspension` has the new `Rejected` variant: exhaustive matches
   must handle it.
