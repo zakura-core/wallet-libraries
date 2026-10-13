@@ -1001,6 +1001,10 @@ fn find_received<
             // - Notes created by consolidation transactions.
             // - Notes sent from one account to itself.
             let is_change = spent_from_accounts.contains(key.account_id());
+            // A one-time-key payment is incoming even when its account funded it, as in
+            // `decrypt_transaction_with_one_time_ivks`. The store never lowers the flag.
+            #[cfg(feature = "orchard")]
+            let is_change = is_change && key.one_time_key_id().is_none();
             let note_commitment_tree_position = note_position(output_idx);
             let nf = key.nf(&note, note_commitment_tree_position);
 
