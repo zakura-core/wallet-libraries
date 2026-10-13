@@ -448,8 +448,17 @@ pub(in crate::wallet::one_time_ivk) fn start(
     let Some(deposit) = deposit else {
         return Ok(Err(ReservationPolicy::Stale));
     };
-    // The provider no longer takes a deposit, so its instructions must not be shown.
-    if deposit.deadline <= deadline_clock(conn, now)? {
+    // Instructions are shown for one request per reservation, since its receiver takes
+    // one quote, and only while the provider still takes a deposit.
+    let other_started: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_operations o
+             JOIN ironwood_one_time_operations other
+                 ON other.one_time_key_id = o.one_time_key_id
+             WHERE o.id = ?1 AND other.id != ?1 AND other.started = 1)",
+        [id],
+        |r| r.get(0),
+    )?;
+    if other_started || deposit.deadline <= deadline_clock(conn, now)? {
         return Ok(Err(ReservationPolicy::Stale));
     }
     conn.execute(

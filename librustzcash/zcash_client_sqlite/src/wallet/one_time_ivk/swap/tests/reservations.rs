@@ -941,6 +941,27 @@ fn start_refuses_a_quote_past_its_deadline() {
     assert_eq!(refusal(start_at(&mut st, "quote", NOW + 120)), Some(Stale));
 }
 
+/// A reservation with two accepted quote requests starts only one: the other is refused
+/// once the first has started, while restarting the first returns its instructions again,
+/// so one receiver never has two quotes a user could fund.
+#[test]
+fn one_reservation_starts_only_one_accepted_quote() {
+    let mut st = fixture();
+    let r = prepare(&mut st, NOW);
+    for request in ["first", "second"] {
+        begin(&mut st, &r, request).unwrap().unwrap();
+        finish(&mut st, request, &accepted(request, None, NOW + 60)).unwrap();
+    }
+    for _ in 0..2 {
+        assert_eq!(start(&mut st, "first").unwrap().unwrap().address, "first");
+    }
+    assert_eq!(refusal(start(&mut st, "second")), Some(Stale));
+    let sql = "SELECT request FROM ironwood_one_time_operations WHERE started = 1";
+    let started: Vec<String> = column(st.wallet().conn(), sql, []);
+    assert_eq!(started, ["first"]);
+    assert_eq!(refusal(begin(&mut st, &r, "third")), Some(Stale));
+}
+
 /// Refund issuance skips a refund address the provider's seen set holds, such as one an
 /// unfunded quote used before a restore, and registers it for a restore sweep, so a
 /// later reservation without a set does not issue it either.
