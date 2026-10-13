@@ -2368,7 +2368,9 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
     let value = Zatoshis::const_from_u64(100000);
     let transfer_amount = Zatoshis::const_from_u64(50000);
 
-    let run_test = |st: &mut TestState<_, Dsf::DataStore, _>, expected_index, prior_balance| {
+    let run_test = |st: &mut TestState<_, Dsf::DataStore, _>,
+                    expected_index,
+                    prior_balance: Zatoshis| {
         // Add funds to the wallet.
         add_funds(st, value);
         let initial_balance: Option<Zatoshis> = prior_balance + value;
@@ -2377,7 +2379,16 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
             initial_balance.unwrap()
         );
 
-        let expected_step0_fee = (zip317::MARGINAL_FEE * 3u64).unwrap();
+        // The second transfer spends the retained change note and the new note.
+        // Current Orchard also pairs retained change with a wallet-controlled
+        // zero-valued spend, adding an action when both real notes are spent.
+        let logical_actions =
+            if T::SHIELDED_PROTOCOL == ShieldedPool::Orchard && prior_balance.is_positive() {
+                4u64
+            } else {
+                3u64
+            };
+        let expected_step0_fee = (zip317::MARGINAL_FEE * logical_actions).unwrap();
         let expected_step1_fee = zip317::MINIMUM_FEE;
         let expected_ephemeral = (transfer_amount + expected_step1_fee).unwrap();
         let expected_step0_change =
@@ -2477,13 +2488,39 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
 
         assert!(expected_step0_change < expected_ephemeral);
         assert_eq!(confirmed_sent.len(), 2);
-        assert_eq!(confirmed_sent[0].len(), 2);
-        assert_eq!(confirmed_sent[0][0].value, expected_step0_change);
+        // Spending the previously retained Orchard change saves its synthetic
+        // zero-valued internal output as well. Fresh external inputs do not add
+        // another sent change record.
+        let expected_zero_outputs = usize::from(
+            T::SHIELDED_PROTOCOL == ShieldedPool::Orchard && prior_balance.is_positive(),
+        );
+        let zero_outputs: Vec<_> = confirmed_sent[0]
+            .iter()
+            .filter(|output| output.value.is_zero())
+            .collect();
+        assert_eq!(zero_outputs.len(), expected_zero_outputs);
+        assert!(
+            zero_outputs
+                .iter()
+                .all(|output| output.external_recipient.is_none())
+        );
+        assert_eq!(confirmed_sent[0].len(), expected_zero_outputs + 2);
+        let change = confirmed_sent[0]
+            .iter()
+            .find(|output| output.value.is_positive() && output.external_recipient.is_none())
+            .unwrap();
+        assert_eq!(change.value, expected_step0_change);
+        // The test query joins the transaction's ephemeral receiver onto every
+        // sent row, so identify its payment by the external recipient instead.
         let OutputOfSentTx {
             value: ephemeral_v,
             external_recipient: to_addr,
             ephemeral_address,
-        } = confirmed_sent[0][1].clone();
+        } = confirmed_sent[0]
+            .iter()
+            .find(|output| output.external_recipient.is_some())
+            .unwrap()
+            .clone();
         assert_eq!(ephemeral_v, expected_ephemeral);
         assert!(to_addr.is_some());
         assert_eq!(
