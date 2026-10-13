@@ -144,10 +144,9 @@ pass.
 The lookahead stays at the configured gap limits. With one pass per sync, the
 same gap limits apply at every sync.
 
-This holds while filters behave as published. A service that sets every bit
-of its filters makes every watched address match, so the next sync's query
-count reveals how many addresses the wallet watches, including the ones a
-forged receive added. Checking filters for that is in increment 2.
+A service cannot defeat this by forging filters that match every watched
+address: the filter format bounds the match rate for scripts the service does
+not know (see `docs/pir-remaining-leaks-plan.md`, change E).
 
 Tests:
 
@@ -287,6 +286,9 @@ follows.
   of three.
 
 ## 6. Later increments
+
+The plan for what remains, with increment 2 in full, is in
+`docs/pir-remaining-leaks-plan.md`.
 
 **Increment 2, passive timing and size.**
 
