@@ -1263,17 +1263,19 @@ fn transcript(f: &Fixture, from: usize) -> Vec<(String, String, Option<String>, 
 ///
 /// Both services hold one receive for that address in S1, which straddles the
 /// birthday, so its filter matches and its directory row is read alike. The forged
-/// one lies above the birthday; the other below, where the wallet ignores it.
+/// one lies above the birthday; the other below, where the wallet ignores it. No
+/// other event pays the wallet, so the honest window never grows, and the forged
+/// wallet's grown window would cost another pass's requests if it started one.
 #[test]
 fn a_forged_receive_does_not_start_another_pass() {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
     let (birthday, t1) = (H0 + 250, H0 + 649);
     let sync = |forged: bool| {
         let mut f = Fixture::new(birthday, t1);
+        // Nobody's addresses: the lifecycle pays the wallet nothing itself.
         let owned = Owned {
-            a0: f.derived(TransparentKeyScope::EXTERNAL, 0),
-            a1: f.derived(TransparentKeyScope::EXTERNAL, 1),
-            // Nobody's address: the lifecycle's own receive at `last` is not paid.
+            a0: TransparentAddress::PublicKeyHash([0xec; 20]),
+            a1: TransparentAddress::PublicKeyHash([0xed; 20]),
             last: TransparentAddress::PublicKeyHash([0xee; 20]),
         };
         let mut shards = lifecycle(&owned, t1, 0, false);
@@ -1296,8 +1298,8 @@ fn a_forged_receive_does_not_start_another_pass() {
     assert!(!forged_requests.is_empty());
     assert_eq!(forged_requests, honest_requests);
 
-    // A0's receive grows both windows by one address; the forged receive at the last
-    // address grows the forged wallet's by a whole gap, which only its next sync covers.
+    // The forged receive at the last address grows the forged wallet's window by a
+    // whole gap, which only its next sync covers; the honest window stays empty.
     let window = |f: &Fixture| -> BTreeSet<_> {
         f.watch()
             .addresses
@@ -1307,9 +1309,8 @@ fn a_forged_receive_does_not_start_another_pass() {
             .collect()
     };
     let (forged_window, honest_window) = (window(&forged), window(&honest));
-    assert_eq!(honest_window.len(), 1);
-    assert!(forged_window.is_superset(&honest_window));
-    assert!(forged_window.len() > honest_window.len());
+    assert!(honest_window.is_empty());
+    assert!(!forged_window.is_empty());
     assert!(
         forged_window
             .iter()
@@ -1326,6 +1327,35 @@ fn a_forged_receive_does_not_start_another_pass() {
             .iter()
             .all(|address| forged.watched.contains(&pubkey_hash(*address)))
     );
+}
+
+/// A pass behind the publication waits, and the pass after the wait, in the same
+/// sync and plan, covers what the publication has since caught up to.
+#[test]
+fn a_wait_passes_again_within_the_sync() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (birthday, t1, t2) = (H0 + 250, H0 + 649, H0 + 669);
+    let mut f = Fixture::new(birthday, t2);
+    let owned = Owned {
+        a0: f.derived(TransparentKeyScope::EXTERNAL, 0),
+        a1: f.derived(TransparentKeyScope::EXTERNAL, 1),
+        last: f.last_external(),
+    };
+    // Trusted, so the replaced tail reconciles rather than holding the account.
+    f.trust_service();
+    f.publish(&lifecycle(&owned, t1, 0, false), SEAL);
+    let mut plan = PassPlan::new(f.watch(), PassLimits::default());
+    assert_eq!(plan.first(), Step::Pass);
+    let lagging = f.pass_in(&mut plan).expect("a pass");
+    assert_eq!(lagging.batch.progress.outcome, Outcome::Behind);
+    assert_eq!(lagging.batch.progress.covered_through, t1);
+    assert_eq!(lagging.step, Step::Wait(Retry::BEHIND));
+
+    f.publish(&lifecycle(&owned, t2, 1, false), SEAL);
+    let caught_up = f.pass_in(&mut plan).expect("a pass");
+    assert_eq!(caught_up.batch.progress.outcome, Outcome::Complete);
+    assert_eq!(caught_up.batch.progress.covered_through, t2);
+    assert_eq!(caught_up.step, Step::Done(Some(Retry::Complete)));
 }
 
 /// Restore latency at one pass per sync: receives at external indices 0, 9, 18 and
