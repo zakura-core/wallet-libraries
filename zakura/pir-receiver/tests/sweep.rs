@@ -751,6 +751,51 @@ async fn release_runs_only_at_the_fully_scanned_tip() {
     }
 }
 
+/// Runs `other` just before the first lookup is queued, as another writer may while the
+/// sweep holds no lock.
+struct WriterBeforeQueue<F>(RefCell<Option<F>>, RefCell<Vec<&'static str>>);
+
+impl<F: FnOnce()> WriteLock for WriterBeforeQueue<F> {
+    fn write<T>(&self, label: &'static str, write: impl FnOnce() -> T) -> T {
+        self.1.borrow_mut().push(label);
+        if label == "one_time_sweep.queue"
+            && let Some(other) = self.0.borrow_mut().take()
+        {
+            other();
+        }
+        write()
+    }
+}
+
+/// A reorg that drops the publication's anchor after the sweep accepted it stops the run
+/// at the key whose lookup it deferred: every later key would be deferred the same way, so
+/// none is leased or backed off.
+#[tokio::test]
+async fn a_reorged_publication_anchor_leases_no_further_key() {
+    let mut st = ironwood_wallet_in(TestDbFactory::file_backed());
+    let network = *st.network();
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(2);
+    let account = st.test_account().unwrap().id();
+    restore(&mut st, account);
+    let through = tip(&st);
+    let path = st.wallet().conn().path().unwrap().to_owned();
+    let mut handle =
+        OtherWriter::for_path(path, network, SystemClock, TestRng::seed_from_u64(0)).unwrap();
+    let other = || {
+        handle.truncate_to_height(through.height - 1).unwrap();
+    };
+    let lock = WriterBeforeQueue(RefCell::new(Some(other)), RefCell::default());
+    // No key is paid, so no lookup checks the tip before it is leased.
+    let directory = Directory::new(publish(&[], &[], through, &provider(&[])[1..]));
+    let swept = run(&mut st, through, &directory, &lock, NOW).await.unwrap();
+    let labels = lock.1.take();
+    let leased = labels.iter().filter(|l| **l == "one_time_sweep.attempt");
+    assert_eq!(leased.count(), 1, "{labels:?}");
+    let unknown = |e: &_| matches!(e, Error::Deferred(SweepDeferral::UnknownAnchor));
+    assert_matches!(swept.deferred[..], [(_, e)] if unknown(e));
+    assert_eq!(swept.finished, 0);
+}
+
 /// Seen sets must commit to the wallet's genesis, as a sweep's publication must: another
 /// network's sets say nothing about this network's quotes. A publication without seen
 /// sets, or with a provider that has a recent set but no seen set, may omit any receiver,

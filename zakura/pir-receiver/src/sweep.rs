@@ -104,7 +104,8 @@ pub struct Swept<E> {
 /// or a PIR session that fails to open fails the run before any key is leased. Each key is
 /// leased just before its lookup; one that fails is backed off and listed in
 /// [`Swept::deferred`] while the others go on, unless the directory's connection failed
-/// or revoked the session: then the run stops leasing keys. A paid key's payments apply
+/// or revoked the session, or the publication's anchor left the wallet's chain: then the
+/// run stops leasing keys. A paid key's payments apply
 /// only at the fully scanned tip, which a finished key's rescan can lower (see
 /// [`OneTimeIvkRestoreWrite::apply_one_time_sweep`]), so the run also stops before
 /// leasing a paid key while `through` is off it, leaving the rest due. A failed wallet
@@ -167,12 +168,13 @@ where
                 Err(e @ Error::Wallet(_)) => return Err(e),
                 Err(e) => {
                     // Every later key would fail the same way and back off.
-                    let revoked = matches!(
+                    let run_wide = matches!(
                         e,
                         Error::Directory(DirectoryError::Revision | DirectoryError::Transport(_))
+                            | Error::Deferred(SweepDeferral::UnknownAnchor)
                     );
                     deferred.push((item.key, e));
-                    if revoked {
+                    if run_wide {
                         break;
                     }
                 }
