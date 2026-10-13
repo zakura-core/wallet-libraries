@@ -1260,46 +1260,61 @@ fn transcript(f: &Fixture, from: usize) -> Vec<(String, String, Option<String>, 
 /// A service that forges a receive at the last address of the wallet's window learns
 /// nothing from the sync it answers: the wallet sends the same requests as it does to
 /// a service without the receive, and covers the grown window only at the next sync.
+///
+/// Both services hold one receive for that address in S1, which straddles the
+/// birthday, so its filter matches and its directory row is read alike. The forged
+/// one lies above the birthday; the other below, where the wallet ignores it.
 #[test]
 fn a_forged_receive_does_not_start_another_pass() {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
-    let t1 = H0 + 649;
+    let (birthday, t1) = (H0 + 250, H0 + 649);
     let sync = |forged: bool| {
-        let mut f = Fixture::new(H0 + 250, t1);
-        let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
-        let a1 = f.derived(TransparentKeyScope::EXTERNAL, 1);
-        // Without the forged receive, `last` names an address nobody owns.
-        let last = if forged {
-            f.last_external()
-        } else {
-            TransparentAddress::PublicKeyHash([0xee; 20])
+        let mut f = Fixture::new(birthday, t1);
+        let owned = Owned {
+            a0: f.derived(TransparentKeyScope::EXTERNAL, 0),
+            a1: f.derived(TransparentKeyScope::EXTERNAL, 1),
+            // Nobody's address: the lifecycle's own receive at `last` is not paid.
+            last: TransparentAddress::PublicKeyHash([0xee; 20]),
         };
-        f.publish(&lifecycle(&Owned { a0, a1, last }, t1, 0, false), SEAL);
+        let mut shards = lifecycle(&owned, t1, 0, false);
+        let at = if forged { birthday + 60 } else { birthday - 40 };
+        shards[1]
+            .events
+            .push((script(f.last_external()), receive(at, txid(3), 1, 7_000)));
+        f.publish(&shards, SEAL);
         let seen = f.server.requests().len();
         let pass = f.drive();
         let requests = transcript(&f, seen);
         (f, pass, requests)
     };
     let (mut forged, forged_pass, forged_requests) = sync(true);
-    let (_honest, honest_pass, honest_requests) = sync(false);
+    let (honest, honest_pass, honest_requests) = sync(false);
 
     // One pass each, and the service sees the same requests.
-    assert!(forged_pass.grew);
-    assert!(!honest_pass.grew);
     assert_eq!(forged_pass.step, Step::Done(Some(Retry::Complete)));
     assert_eq!(honest_pass.step, Step::Done(Some(Retry::Complete)));
     assert!(!forged_requests.is_empty());
     assert_eq!(forged_requests, honest_requests);
 
-    // The forged wallet records the grown window, and its next sync covers it.
-    let window: BTreeSet<_> = forged
-        .watch()
-        .addresses
-        .iter()
-        .filter(|watched| matches!(watched.origin, WatchOrigin::CandidateWindow { .. }))
-        .map(|watched| watched.address)
-        .collect();
-    assert!(!window.is_empty());
+    // A0's receive grows both windows by one address; the forged receive at the last
+    // address grows the forged wallet's by a whole gap, which only its next sync covers.
+    let window = |f: &Fixture| -> BTreeSet<_> {
+        f.watch()
+            .addresses
+            .iter()
+            .filter(|watched| matches!(watched.origin, WatchOrigin::CandidateWindow { .. }))
+            .map(|watched| watched.address)
+            .collect()
+    };
+    let (forged_window, honest_window) = (window(&forged), window(&honest));
+    assert_eq!(honest_window.len(), 1);
+    assert!(forged_window.is_superset(&honest_window));
+    assert!(forged_window.len() > honest_window.len());
+    assert!(
+        forged_window
+            .iter()
+            .all(|address| !forged.watched.contains(&pubkey_hash(*address)))
+    );
     let seen = forged.server.requests().len();
     let next = forged.drive();
     assert!(forged.server.requests().len() > seen);
@@ -1307,7 +1322,7 @@ fn a_forged_receive_does_not_start_another_pass() {
     assert!(!next.new_work);
     assert_eq!(next.report.progress.covered_through, t1);
     assert!(
-        window
+        forged_window
             .iter()
             .all(|address| forged.watched.contains(&pubkey_hash(*address)))
     );
@@ -1509,7 +1524,7 @@ fn growing_tail_pages_queries_select_only_its_rows() {
         ],
         SEAL,
     );
-    let pass = f.drive();
+    let (pass, _) = f.sync_until_complete(3);
     assert_eq!(pass.batch.state, BatchState::Ready);
     assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
     f.activate();
@@ -1610,7 +1625,7 @@ fn a_history_across_page_shards_recovers_and_catch_up_stops_at_the_cached_run() 
     // pages-0 sealed over +0..=+9, pages-1 open over +10..=+19.
     assert_eq!(map.shards[3].page_segments, 2, "two page shards");
 
-    let pass = f.drive();
+    let (pass, _) = f.sync_until_complete(3);
     assert_eq!(pass.batch.state, BatchState::Ready);
     assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
     f.activate();
@@ -1657,7 +1672,7 @@ fn a_history_across_page_shards_recovers_and_catch_up_stops_at_the_cached_run() 
     fresh.trust_service();
     let a0 = fresh.derived(TransparentKeyScope::EXTERNAL, 0);
     fresh.publish(&decoupled(a0, grown_end, 1), SEAL);
-    let pass = fresh.drive();
+    let (pass, _) = fresh.sync_until_complete(3);
     assert_eq!(pass.batch.state, BatchState::Ready);
     assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
     fresh.activate();
@@ -1833,7 +1848,7 @@ fn recovered_before_recut() -> (
     f.trust_service();
     let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
     let map = f.publish(&before_recut(a0), SEAL);
-    let first = f.drive();
+    let (first, _) = f.sync_until_complete(3);
     assert_eq!(first.batch.state, BatchState::Ready);
     assert_eq!(first.batch.progress.outcome, Outcome::Complete);
     let tail = tail_revision(&first.batch);
@@ -2169,7 +2184,7 @@ fn private_details_end_to_end() {
         ],
         SEAL,
     );
-    assert_eq!(f.drive().batch.state, BatchState::Ready);
+    assert_eq!(f.sync_until_complete(3).0.batch.state, BatchState::Ready);
     f.activate();
     // Both receives are projected; spendability is unchanged by what follows.
     let spendable = f.spendable().unwrap();
