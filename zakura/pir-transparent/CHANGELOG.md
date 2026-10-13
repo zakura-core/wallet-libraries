@@ -4,13 +4,13 @@
 
 ## [0.0.1-rc0] - PLANNED
 
-### Packaging
-
-- Include the MIT and Apache license texts in the crate package.
-
 Initial release candidate for transparent PIR discovery, recovery and receipt
 lookups. See the [README](README.md) and
 [wallet integration guide](../../docs/transparent-pir-wallet-integration.md).
+
+### Packaging
+
+- Include the MIT and Apache license texts in the crate package.
 
 ### Added
 
@@ -55,9 +55,12 @@ lookups. See the [README](README.md) and
   `/v2/txid` served at the earlier 16-bit profile as unsupported.
 - Checked partial page walks survive restarts and enforce query/byte limits
   between requests. Verified run caches let catch-up stop at cached history.
-- Uses 44-bit dithered queries when the publication advertises supported schemes,
-  otherwise 49-bit queries. Published prefix dimensions shorten growing-tail
-  page queries without depending on the privately selected row.
+- Directory, page and archive history queries use the 8-bit one-digit profile
+  with 28-bit queries. This profile does not use 44-bit dithering or a 49-bit
+  fallback. Published prefix dimensions shorten growing-tail page queries
+  without depending on the privately selected row.
+- Discovery, history recovery and receipt lookups use the `/v2` HTTP API.
+  Applications must supply a service that supports these paths and profiles.
 - The reference store is format 6; earlier prototype stores must be recreated.
   Companion names bind the shard schema, so v12 does not reuse v11 companions.
 - Git dependencies remain pinned to one wallet-pir revision and now declare

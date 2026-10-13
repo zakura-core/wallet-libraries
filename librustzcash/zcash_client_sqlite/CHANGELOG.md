@@ -75,7 +75,8 @@ and [status recovery contract](../../docs/transaction_status_work.md).
 - Reader-version guards cover reads, rewinds, ownership changes, deletion and
   transparent writes. Shared derivations require reader version 8; older
   writable wallet handover is not qualified by retaining legacy columns.
-- Updated backend and PCZT dependencies to the next release candidates.
+- Updated backend and PCZT dependencies to `0.1.0-rc8` and `0.1.0-rc5`,
+  respectively.
 
 ### Fixed
 

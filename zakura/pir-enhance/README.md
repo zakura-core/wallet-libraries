@@ -1,10 +1,10 @@
 # zakura-pir-enhance
 
-Release candidate `0.0.1-rc1` requires Rust 1.91. The crate has no default
+Release candidate `0.0.1-rc2` requires Rust 1.91. The crate has no default
 features and bundles no HTTP client: applications implement `transport::Transport`.
-The optional `wallet` feature integrates with `zakura-client-backend 0.1.0-rc7`.
+The optional `wallet` feature integrates with `zakura-client-backend 0.1.0-rc8`.
 The crate speaks the experimental native two-mask protocol (v9). Shared records come from
-`zakura-pir-enhance-types =0.0.1-rc0`. See [CHANGELOG.md](CHANGELOG.md) for
+`zakura-pir-enhance-types =0.0.1-rc1`. See [CHANGELOG.md](CHANGELOG.md) for
 release notes.
 
 This crate implements the mainnet Ironwood enhancement v9 client. Wire schema 11 uses 653-byte suffix-only records, 33 records per row, independently parameterized shards, and the P16Q48 SimplePIR profile with native two-mask payloads. The wallet retains compact encryption fields and supports same-transaction row queries and atomic batch application. SQLite upgrades existing rc5 wallets with a forward migration that preserves notes and adds nullable compact encryption fields. Rescanning compact blocks fills those fields for older notes. A matching v9 server is required.

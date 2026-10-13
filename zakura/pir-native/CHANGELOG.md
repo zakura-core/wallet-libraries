@@ -19,7 +19,8 @@
 ### Changed
 
 - `test_server::Database::answer` accepts both 49-bit and 44-bit requests,
-  telling them apart by exact length.
+  including whole-block prefix selections over a zero tail. It identifies
+  the query width and prefix length from the exact request length.
 
 ## [0.0.1-rc0] - 2026-09-27
 

@@ -1,7 +1,7 @@
 # zakura-pir-enhance-types
 
 Shared schema-11 record types for private Ironwood compact-action enhancement.
-Release candidate `0.0.1-rc0` uses a fixed 653-byte encoding and has no external
+Release candidate `0.0.1-rc1` uses a fixed 653-byte encoding and has no external
 dependencies. The minimum supported Rust version is 1.91.
 
 `EnhanceRecord::from_bytes` validates the record encoding, including reserved

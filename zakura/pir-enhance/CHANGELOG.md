@@ -15,7 +15,8 @@
 
 ### Changed
 
-- Updated the shared enhancement record dependency to `0.0.1-rc1`.
+- Updated the shared enhancement record and native PIR dependencies to
+  `0.0.1-rc1`, and the wallet backend and SQLite dependencies to `0.1.0-rc8`.
 
 - Queries upload a selection dithered to 44 bits instead of rounded to nearest
   at 49 bits, so a 32,768-row request shrinks from 228,468 to 207,988 bytes.
@@ -24,7 +25,10 @@
   unchanged. Requires a server that accepts 44-bit requests; earlier servers
   reject them by length.
 
-- Updated the native PIR dependency to `0.0.1-rc1`.
+- Growing shards upload only the rows their published capacity can hold,
+  rounded up to 2,048-row blocks. For 18,313 used rows, a request is 129,140
+  bytes instead of the full 207,988 bytes. The length depends on public shard
+  capacity; real and cover queries for the same shard have the same length.
 
 ## [0.0.1-rc1] - 2026-09-27
 
