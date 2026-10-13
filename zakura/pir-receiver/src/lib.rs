@@ -3,10 +3,12 @@
 //! A restored wallet cannot rescan public history for every key its seed may have
 //! used, so each one-time key recovered from the seed is looked up once in a receiver
 //! directory: a public index of Ironwood payments sent with the zero outgoing viewing
-//! key, keyed by receiver. Lookups use PIR, so the directory does not learn which
-//! receivers the wallet holds. A publication is used only at a block the wallet
-//! scanned, and the wallet authenticates every payment with its derived key and its
-//! own chain before crediting it.
+//! key, keyed by receiver. Lookups use PIR, so a lookup does not reveal which receiver
+//! it reads. Whether and when the wallet looks up is not hidden: it follows the
+//! publication's paid filter and retries failed lookups, so a dishonest directory that
+//! changes what it serves can test whether the wallet holds a receiver it chose. A
+//! publication is used only at a block the wallet scanned, and the wallet authenticates
+//! every payment with its derived key and its own chain before crediting it.
 //!
 //! `fetch_seen` downloads the swap provider seen sets that a wallet checks before
 //! issuing a swap address. The `wallet` feature adds `sweep`, which runs these lookups
