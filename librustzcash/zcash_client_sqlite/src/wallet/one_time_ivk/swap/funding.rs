@@ -38,7 +38,10 @@ pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
     if recovery::refund_memos_pending(conn, account)? {
         return Ok(Err(ReservationPolicy::Coverage));
     }
-    let index = next_refund_index(conn, params, account, seen, now)?;
+    let index = match next_refund_index(conn, params, account, seen, now)? {
+        Ok(index) => index,
+        Err(policy) => return Ok(Err(policy)),
+    };
     let key = KeyId::new(Purpose::Refund, index);
     let (_, key) = register(
         conn,
@@ -53,16 +56,22 @@ pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
     Ok(Ok(key))
 }
 
+/// How many unregistered refund indices one reservation checks against a seen set before
+/// giving up, so a set that holds every receiver cannot register keys without end.
+const REFUND_SEEN_PROBES: u32 = 100;
+
 /// The lowest refund index above every allocated one that no key is registered at and
 /// `seen` does not hold. A held index is registered for a restore sweep, since a swap
-/// may have paid it, and recorded as seen, so it is never issued.
+/// may have paid it, and recorded as seen, so it is never issued. After
+/// [`REFUND_SEEN_PROBES`] held indices this returns [`ReservationPolicy::Gap`]; the keys
+/// registered so far stay, so a later reservation continues past them.
 pub(in crate::wallet::one_time_ivk) fn next_refund_index<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     seen: Option<&ProviderSeen<'_>>,
     now: i64,
-) -> Result<u64, SqliteClientError> {
+) -> Result<Result<u64, ReservationPolicy>, SqliteClientError> {
     let (account_ref, parent) = account_key(conn, params, account)?;
     // SQLite orders fixed-width big-endian blobs numerically. Unlike INTEGER, this
     // represents the entire u64 index space, including u64::MAX.
@@ -76,6 +85,7 @@ pub(in crate::wallet::one_time_ivk) fn next_refund_index<P: Parameters>(
         Some(bytes) => index_after(decode_index(bytes)?, 1)?,
         None => 0,
     };
+    let mut probes = 0;
     loop {
         let registered = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys
@@ -85,12 +95,16 @@ pub(in crate::wallet::one_time_ivk) fn next_refund_index<P: Parameters>(
         )?;
         if !registered {
             let Some(seen) = seen else {
-                return Ok(index);
+                return Ok(Ok(index));
             };
+            if probes == REFUND_SEEN_PROBES {
+                return Ok(Err(ReservationPolicy::Gap));
+            }
+            probes += 1;
             let key = KeyId::new(Purpose::Refund, index);
             let receiver = key.derive(&parent)?.address_at(0u32, Scope::External);
             if !seen.holds(&receiver)? {
-                return Ok(index);
+                return Ok(Ok(index));
             }
             let from = restore_start(conn, params, account_ref)?;
             let (id, _) = register(

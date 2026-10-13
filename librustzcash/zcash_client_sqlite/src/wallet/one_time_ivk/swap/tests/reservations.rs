@@ -847,6 +847,44 @@ fn refund_issuance_skips_addresses_the_provider_saw() {
     assert_eq!(next.unwrap().unwrap().key_id().index(), 2);
 }
 
+/// A seen set that holds every receiver stops refund issuance with `Gap` after a bounded
+/// number of probes, keeping the keys it registered, so the next reservation continues past
+/// them instead of probing them again.
+#[test]
+fn refund_issuance_bounds_seen_set_probes() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let through = tip(&st).height;
+    let probes = std::cell::Cell::new(0u64);
+    let contains = |receivers: &[[u8; 43]]| {
+        probes.set(probes.get() + receivers.len() as u64);
+        vec![true; receivers.len()]
+    };
+    let everything = ProviderSeen {
+        since: 0,
+        until: NOW,
+        contains: &contains,
+    };
+    let db = st.wallet_mut().db_mut();
+    let issued = db.reserve_refund_key(account, through, Some(&everything));
+    assert!(matches!(issued.unwrap(), Err(Gap)));
+    let held = probes.get();
+    assert_eq!(held, 100);
+    let sql = "SELECT COUNT(*) FROM ironwood_one_time_keys k
+               JOIN ironwood_one_time_sweeps s ON s.one_time_key_id = k.id
+               WHERE k.purpose = 0 AND k.provider_seen";
+    assert_eq!(value::<u64>(&db.conn, sql, []), held);
+
+    let nothing = |receivers: &[[u8; 43]]| vec![false; receivers.len()];
+    let seen = ProviderSeen {
+        since: 0,
+        until: NOW,
+        contains: &nothing,
+    };
+    let next = db.reserve_refund_key(account, through, Some(&seen));
+    assert_eq!(next.unwrap().unwrap().key_id().index(), held);
+}
+
 /// Quotes only assumed seen, whose outcome is unknown and which no seen set covers, keep
 /// their addresses from reissue but do not widen the gap, since a restore walks past only
 /// receipts, seen addresses and accepted quotes; an accepted quote widens it.

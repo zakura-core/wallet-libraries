@@ -57,7 +57,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// seed already used is never issued again, skipping any the provider's current seen
     /// set holds (see [`ProviderSeen`]), if the caller could fetch it. `tip` is the
     /// network's chain tip (see [`ISSUANCE_TIP_LAG`]). The key scans only once its funding
-    /// transaction is stored (see [`WalletDb::record_refund_operation`]).
+    /// transaction is stored (see [`WalletDb::record_refund_operation`]). A seen set that
+    /// holds a long run of unissued indices yields [`ReservationPolicy::Gap`] after
+    /// registering a bounded number of them, which a later reservation continues past.
     pub fn reserve_refund_key(
         &mut self,
         account: AccountUuid,
