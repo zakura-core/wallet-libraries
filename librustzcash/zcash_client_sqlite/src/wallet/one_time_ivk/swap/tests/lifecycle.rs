@@ -598,6 +598,7 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
     pay(&mut st, reservation.full_viewing_key(), 70_000);
     confirm(&mut st);
     let released = deadline + RECEIVE_RECLAIM_SECONDS;
+    chain_agrees(st.wallet().db(), released);
     let payout = Some(Zatoshis::const_from_u64(70_000));
     for (request, status, funded) in [
         ("edit", AwaitingDeposit, false),

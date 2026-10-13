@@ -105,7 +105,8 @@ fn observed(status: OperationStatus, funded: bool) -> Observation {
 }
 
 /// Records provider `observation` at `now` for the operation with this deposit address
-/// and memo, as an app does with each status it fetches. Returns whether one matched.
+/// and memo, as an app does with each status it fetches, with the chain agreeing (see
+/// [`chain_agrees`]). Returns whether one matched.
 fn report_with(
     st: &mut State,
     (deposit, memo): (&str, Option<&str>),
@@ -113,6 +114,7 @@ fn report_with(
     now: i64,
 ) -> bool {
     let account = st.test_account().unwrap().id();
+    chain_agrees(st.wallet().db(), now);
     let db = st.wallet_mut().db_mut();
     let recorded = db.record_operation_status(account, deposit, memo, observation, now);
     recorded.unwrap()
@@ -123,9 +125,11 @@ fn report(st: &mut State, deposit: &str, status: OperationStatus, funded: bool, 
     report_with(st, (deposit, None), observed(status, funded), now);
 }
 
-/// Reaps the test account's reservations at `now`, returning the reclaimed indices.
+/// Reaps the test account's reservations at `now`, with the chain agreeing (see
+/// [`chain_agrees`]), returning the reclaimed indices.
 fn reap(st: &mut State, now: i64) -> Vec<u64> {
     let account = st.test_account().unwrap().id();
+    chain_agrees(st.wallet().db(), now);
     tx(st.wallet_mut().db_mut(), |c, p| {
         store::swap::reservations::reap(c, p, account, now)
     })
@@ -222,6 +226,7 @@ fn issue(st: &mut State, seen: Option<(i64, i64, &[u64])>) -> Result<u64, Reserv
     });
     let account = st.test_account().unwrap().id();
     let through = tip(st).height;
+    chain_agrees(st.wallet().db(), NOW);
     let db = st.wallet_mut().db_mut();
     let issued = db.prepare_receive_reservation(account, NOW, through, seen.as_ref());
     issued.unwrap().map(|k| k.key_id().index())
@@ -272,6 +277,39 @@ fn reclamation_waits_for_the_latest_deadline_plus_cooldown() {
         }
         assert!(reap(&mut st, eligible_at - 1).is_empty(), "{case}");
         assert_eq!(reap(&mut st, eligible_at), [0], "{case}");
+    }
+}
+
+/// A device clock days ahead of the chain cannot reclaim a reservation, started or not,
+/// while its provider deadline has not passed by block time, since the provider may still
+/// take a deposit. Once the chain catches up, it is reclaimed.
+#[test]
+fn a_fast_clock_cannot_reclaim_before_the_deadline_by_block_time() {
+    for started in [false, true] {
+        let mut st = fixture();
+        let account = st.test_account().unwrap().id();
+        let r = prepare(&mut st, NOW);
+        begin(&mut st, &r, "quote").unwrap().unwrap();
+        finish(&mut st, "quote", &accepted("deposit", None, NOW + 60)).unwrap();
+        let fast = EXPIRED + 5 * 24 * 60 * 60;
+        // The chain is still before the deadline.
+        chain_agrees(st.wallet().db(), NOW);
+        if started {
+            start(&mut st, "quote").unwrap().unwrap();
+            let waiting = observed(AwaitingDeposit, false);
+            let db = st.wallet_mut().db_mut();
+            db.record_operation_status(account, "deposit", None, waiting, fast - 10)
+                .unwrap();
+        }
+        let reaped = tx(st.wallet_mut().db_mut(), |c, p| {
+            store::swap::reservations::reap(c, p, account, fast)
+        });
+        assert!(reaped.unwrap().is_empty(), "started={started}");
+        assert_eq!(
+            reap(&mut st, fast),
+            [r.key_id().index()],
+            "started={started}"
+        );
     }
 }
 

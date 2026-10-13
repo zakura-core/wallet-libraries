@@ -355,6 +355,13 @@ pub(super) fn close_at(db: &mut Db, account: AccountUuid, now: i64, tip: BlockHe
     db.close_finished_one_time_keys(account, now, tip).unwrap()
 }
 
+/// Sets the latest block's time to `now`, as when the caller's clock agrees with the
+/// chain. Test blocks otherwise carry time 0, which bounds every provider deadline check.
+pub(super) fn chain_agrees(db: &Db, now: i64) {
+    let sql = "UPDATE blocks SET time = ?1 WHERE height = (SELECT MAX(height) FROM blocks)";
+    exec(&db.conn, sql, [now]);
+}
+
 /// Every key registered to `account` by purpose and index, each re-derived and checked
 /// against its stored receiver.
 pub(super) fn all_keys(
