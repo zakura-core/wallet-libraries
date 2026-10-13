@@ -421,8 +421,10 @@ mod tests {
         )
         .unwrap();
         db.execute(
-            "INSERT INTO pir_bridge_exports VALUES (?1, 4, ?2)",
-            rusqlite::params![vec![1u8; 32], vec![2u8; 32]],
+            "INSERT INTO pir_bridge_exports
+             (source, lineage, revision, sealed, height, hash)
+             VALUES (?1, 4, ?2, 1, 99, ?3)",
+            rusqlite::params![vec![1u8; 32], vec![2u8; 32], vec![3u8; 32]],
         )
         .unwrap();
         drop(db);
