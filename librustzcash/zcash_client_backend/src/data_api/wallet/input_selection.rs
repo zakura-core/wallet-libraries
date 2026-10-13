@@ -509,8 +509,9 @@ pub enum NoteSelection {
     /// changing the transaction's fee or observable shape.
     ///
     /// Necessary funding is not capped. When the selected pool's existing transaction shape has
-    /// no more than five actions, the selector may add the smallest eligible notes while keeping
-    /// the total selected from that pool at no more than five and preserving the existing shape.
+    /// no more than five actions, the selector may add the data source's additional candidates
+    /// (see [`InputSource::select_spendable_notes_for_consolidation`]) while keeping the total
+    /// selected from that pool at no more than five and preserving the existing shape.
     /// Pool and locked-input preferences still take precedence; if no single permitted pool can
     /// fund the payment, selection falls back to ordinary multi-pool funding. If consolidation is
     /// not possible, the funding-only proposal is returned.
@@ -1388,10 +1389,135 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                             && funding_count < baseline_action_count
                             && funding_count < CONSOLIDATION_LIMIT
                         {
+                            let spare = (CONSOLIDATION_LIMIT - funding_count)
+                                .min(baseline_action_count - funding_count);
+
+                            // The balance with `optional` notes added, if it keeps the fee, change
+                            // shape and action count.
+                            let with_optional =
+                                |optional: &ReceivedNotes<DbT::NoteRef>| -> Result<
+                                    Option<TransactionBalance>,
+                                    <DbT as InputSource>::Error,
+                                > {
+                                    let mut candidate_sapling_inputs = sapling_inputs.clone();
+                                    candidate_sapling_inputs.extend(optional.sapling().iter().map(
+                                        |note| (*note.internal_note_id(), note.note().value()),
+                                    ));
+                                    #[cfg(feature = "orchard")]
+                                    let mut candidate_orchard_inputs = orchard_inputs.clone();
+                                    #[cfg(feature = "orchard")]
+                                    candidate_orchard_inputs.extend(optional.orchard().iter().map(
+                                        |note| (*note.internal_note_id(), note.note().value()),
+                                    ));
+                                    #[cfg(feature = "orchard")]
+                                    let mut candidate_ironwood_inputs = ironwood_inputs.clone();
+                                    #[cfg(feature = "orchard")]
+                                    candidate_ironwood_inputs.extend(
+                                        optional.ironwood().iter().map(|note| {
+                                            (*note.internal_note_id(), note.note().value())
+                                        }),
+                                    );
+
+                                    let candidate_input_ids =
+                                        candidate_sapling_inputs.iter().map(|(id, _)| id);
+                                    #[cfg(feature = "orchard")]
+                                    let candidate_input_ids = candidate_input_ids
+                                        .chain(candidate_orchard_inputs.iter().map(|(id, _)| id));
+                                    #[cfg(feature = "orchard")]
+                                    let candidate_input_ids = candidate_input_ids
+                                        .chain(candidate_ironwood_inputs.iter().map(|(id, _)| id));
+                                    let candidate_input_ids =
+                                        candidate_input_ids.cloned().collect::<Vec<_>>();
+
+                                    let candidate_wallet_meta = change_strategy.fetch_wallet_meta(
+                                        wallet_db,
+                                        account,
+                                        target_height,
+                                        &candidate_input_ids,
+                                    )?;
+
+                                    #[cfg(feature = "orchard")]
+                                    let candidate_orchard_view = (
+                                        orchard_bundle_version_for_height(params, target_height),
+                                        &candidate_orchard_inputs[..],
+                                        if ironwood_active_at(params, target_height) {
+                                            &[]
+                                        } else {
+                                            &orchard_outputs[..]
+                                        },
+                                    );
+                                    #[cfg(feature = "orchard")]
+                                    let candidate_ironwood_view = (
+                                        ironwood_bundle_version_for_height(params, target_height),
+                                        &candidate_ironwood_inputs[..],
+                                        if ironwood_active_at(params, target_height) {
+                                            &orchard_outputs[..]
+                                        } else {
+                                            &[]
+                                        },
+                                    );
+
+                                    let candidate_balance = change_strategy.compute_balance(
+                                        params,
+                                        target_height,
+                                        anchor_height,
+                                        zip318,
+                                        &transparent_inputs,
+                                        &transparent_outputs,
+                                        &(
+                                            ::sapling::builder::BundleType::DEFAULT,
+                                            &candidate_sapling_inputs[..],
+                                            &sapling_outputs[..],
+                                        ),
+                                        #[cfg(feature = "orchard")]
+                                        &candidate_orchard_view,
+                                        #[cfg(feature = "orchard")]
+                                        &candidate_ironwood_view,
+                                        ephemeral_output_value.map(EphemeralBalance::Output),
+                                        &candidate_wallet_meta,
+                                    );
+
+                                    Ok(candidate_balance.ok().filter(|candidate_balance| {
+                                        same_change_shape(&tr0_balance, candidate_balance)
+                                            && consolidation_action_count(
+                                                candidate_balance,
+                                                source,
+                                                payment_output_count,
+                                            ) == Some(baseline_action_count)
+                                    }))
+                                };
+
+                            // One-time-key candidates go first. Skip each that would change the
+                            // shape with those kept before it, so later candidates can still take
+                            // the spare slots.
+                            #[cfg(feature = "orchard")]
+                            if source == ShieldedPool::Ironwood {
+                                let (one_time, ordinary): (Vec<_>, Vec<_>) =
+                                    consolidation_additional
+                                        .ironwood()
+                                        .iter()
+                                        .cloned()
+                                        .partition(|note| note.one_time_key_id().is_some());
+                                let mut kept = vec![];
+                                for note in one_time {
+                                    if kept.len() == spare {
+                                        break;
+                                    }
+                                    kept.push(note);
+                                    let trial = ReceivedNotes::new(vec![], vec![], kept.clone());
+                                    if with_optional(&trial)
+                                        .map_err(InputSelectorError::DataSource)?
+                                        .is_none()
+                                    {
+                                        kept.pop();
+                                    }
+                                }
+                                kept.extend(ordinary);
+                                consolidation_additional = ReceivedNotes::new(vec![], vec![], kept);
+                            }
+
                             let optional_count =
-                                note_count_for_pool(&consolidation_additional, source)
-                                    .min(CONSOLIDATION_LIMIT - funding_count)
-                                    .min(baseline_action_count - funding_count);
+                                note_count_for_pool(&consolidation_additional, source).min(spare);
 
                             // Try the largest shape-neutral cleanup first, then smaller prefixes.
                             // This matters when excluding all candidates changes the split-change
@@ -1399,98 +1525,8 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                             for count in (1..=optional_count).rev() {
                                 let candidate_notes =
                                     note_prefix_for_pool(&consolidation_additional, source, count);
-
-                                let mut candidate_sapling_inputs = sapling_inputs.clone();
-                                candidate_sapling_inputs.extend(
-                                    candidate_notes.sapling().iter().map(|note| {
-                                        (*note.internal_note_id(), note.note().value())
-                                    }),
-                                );
-                                #[cfg(feature = "orchard")]
-                                let mut candidate_orchard_inputs = orchard_inputs.clone();
-                                #[cfg(feature = "orchard")]
-                                candidate_orchard_inputs.extend(
-                                    candidate_notes.orchard().iter().map(|note| {
-                                        (*note.internal_note_id(), note.note().value())
-                                    }),
-                                );
-                                #[cfg(feature = "orchard")]
-                                let mut candidate_ironwood_inputs = ironwood_inputs.clone();
-                                #[cfg(feature = "orchard")]
-                                candidate_ironwood_inputs.extend(
-                                    candidate_notes.ironwood().iter().map(|note| {
-                                        (*note.internal_note_id(), note.note().value())
-                                    }),
-                                );
-
-                                let candidate_input_ids =
-                                    candidate_sapling_inputs.iter().map(|(id, _)| id);
-                                #[cfg(feature = "orchard")]
-                                let candidate_input_ids = candidate_input_ids
-                                    .chain(candidate_orchard_inputs.iter().map(|(id, _)| id));
-                                #[cfg(feature = "orchard")]
-                                let candidate_input_ids = candidate_input_ids
-                                    .chain(candidate_ironwood_inputs.iter().map(|(id, _)| id));
-                                let candidate_input_ids =
-                                    candidate_input_ids.cloned().collect::<Vec<_>>();
-
-                                let candidate_wallet_meta = change_strategy
-                                    .fetch_wallet_meta(
-                                        wallet_db,
-                                        account,
-                                        target_height,
-                                        &candidate_input_ids,
-                                    )
-                                    .map_err(InputSelectorError::DataSource)?;
-
-                                #[cfg(feature = "orchard")]
-                                let candidate_orchard_view = (
-                                    orchard_bundle_version_for_height(params, target_height),
-                                    &candidate_orchard_inputs[..],
-                                    if ironwood_active_at(params, target_height) {
-                                        &[]
-                                    } else {
-                                        &orchard_outputs[..]
-                                    },
-                                );
-                                #[cfg(feature = "orchard")]
-                                let candidate_ironwood_view = (
-                                    ironwood_bundle_version_for_height(params, target_height),
-                                    &candidate_ironwood_inputs[..],
-                                    if ironwood_active_at(params, target_height) {
-                                        &orchard_outputs[..]
-                                    } else {
-                                        &[]
-                                    },
-                                );
-
-                                let candidate_balance = change_strategy.compute_balance(
-                                    params,
-                                    target_height,
-                                    anchor_height,
-                                    zip318,
-                                    &transparent_inputs,
-                                    &transparent_outputs,
-                                    &(
-                                        ::sapling::builder::BundleType::DEFAULT,
-                                        &candidate_sapling_inputs[..],
-                                        &sapling_outputs[..],
-                                    ),
-                                    #[cfg(feature = "orchard")]
-                                    &candidate_orchard_view,
-                                    #[cfg(feature = "orchard")]
-                                    &candidate_ironwood_view,
-                                    ephemeral_output_value.map(EphemeralBalance::Output),
-                                    &candidate_wallet_meta,
-                                );
-
-                                if let Ok(candidate_balance) = candidate_balance
-                                    && same_change_shape(&tr0_balance, &candidate_balance)
-                                    && consolidation_action_count(
-                                        &candidate_balance,
-                                        source,
-                                        payment_output_count,
-                                    ) == Some(baseline_action_count)
+                                if let Some(candidate_balance) = with_optional(&candidate_notes)
+                                    .map_err(InputSelectorError::DataSource)?
                                 {
                                     shielded_inputs.append(candidate_notes);
                                     tr0_balance = candidate_balance;
@@ -1651,6 +1687,14 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                     } else {
                         let mut covering = None;
                         for source in pool_preference.iter().copied() {
+                            // A store may lead Ironwood candidates with one-time-key notes,
+                            // which the shape check can skip, so ask for room for as many other
+                            // candidates as well.
+                            let max_additional = if source == ShieldedPool::Ironwood {
+                                2 * (CONSOLIDATION_LIMIT - 1)
+                            } else {
+                                CONSOLIDATION_LIMIT - 1
+                            };
                             let (funding, additional) = wallet_db
                                 .select_spendable_notes_for_consolidation(
                                     account,
@@ -1660,7 +1704,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                                     confirmations_policy,
                                     &exclude,
                                     LockFilter::Policy(spend_policy.locked_input_policy()),
-                                    CONSOLIDATION_LIMIT - 1,
+                                    max_additional,
                                 )
                                 .map_err(InputSelectorError::DataSource)?
                                 .into_parts();

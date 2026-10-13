@@ -1102,6 +1102,8 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
         ))
     }
 
+    /// Ironwood funding and additional candidates prefer one-time-key notes, without adding
+    /// funding notes and leaving room for the smallest other notes.
     fn select_spendable_notes_for_consolidation(
         &self,
         account: Self::AccountId,
