@@ -312,8 +312,11 @@ After each pass, `next` applies the first row that matches, in this order:
 A counted pass is the sync's only one: `next` never returns `Pass`, so no reply
 can start another pass at once. A settled commit that grew the window, a watch
 set whose addresses changed, and `Retry::More` (a spent budget) continue at the
-next sync, which reads the fresh watch set and resumes from the companion.
-A restore therefore takes one sync per step of the address window.
+next sync, or after a wait: when a pass ends in `Wait` (a lagging publication
+or a capacity refusal, which applies to every wallet alike), the pass after the
+wait reads the fresh watch set and resumes from the companion within the same
+sync. A restore therefore takes one sync, or one wait, per step of the address
+window.
 
 A `PassError` never reaches the plan. `Outage` ends the run: the service failed
 every account alike. `Invalid`, `Failure` and `PublicationChanged` end the

@@ -36,14 +36,16 @@ pub struct Progress {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Retry {
     /// Every watched script is covered through the target. Pass again only
-    /// for new work: a changed watch set or a grown window.
+    /// for new work, a changed watch set or a grown window, at the next sync.
     Complete,
-    /// A budget stopped the pass. Pass again at once; the companion resumes.
+    /// A budget stopped the pass. Pass again at the next sync; the companion
+    /// resumes.
     More,
     /// The publication ends below the target, or the service refused for
     /// capacity. Pass again after the wait.
     After(Duration),
-    /// Progress needs more than a retry. Pass again only for new work.
+    /// Progress needs more than a retry. Pass again only for new work, at the
+    /// next sync.
     Stalled,
 }
 
