@@ -317,6 +317,8 @@ pub trait EnhancePirWrite: EnhancePirRead {
     /// where no incoming or outgoing decryption authenticates the action.
     /// Storage may count a rejected record against its position after rolling back;
     /// a position rejected three times is reported as [`EnhancePirSuspension::Rejected`].
+    /// The counting transaction must recheck the request identity: a rewind may have
+    /// reassigned its position after the application transaction rolled back.
     fn apply_ironwood_enhance_records(
         &mut self,
         records: &[(EnhancePirRequest, EnhanceRecord)],

@@ -2774,6 +2774,69 @@ fn third_rejection_suspends_the_position() {
 }
 
 #[test]
+fn a_rejection_after_position_reassignment_does_not_charge_the_replacement() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let (mut st, tx_ref, request) = fixture_with_factory(TestDbFactory::file_backed());
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    let corrupt = corrupt_incoming_record(&st, request);
+    let competing = Connection::open(st.wallet().data_file_path()).unwrap();
+    let reassigned = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&reassigned);
+    let mut begins = 0;
+    st.wallet()
+        .conn()
+        .authorizer(Some(move |ctx: AuthContext<'_>| {
+            if matches!(
+                ctx.action,
+                AuthAction::Transaction {
+                    operation: TransactionOperation::Begin
+                }
+            ) {
+                begins += 1;
+                if begins == 2 {
+                    // Validation has rolled back. Reuse the position before the transaction
+                    // that saves its failure starts, as a concurrent rewind and rescan can.
+                    competing
+                        .execute(
+                            "UPDATE transactions SET txid = :replacement WHERE id_tx = :tx",
+                            named_params![":replacement": &[8u8; 32], ":tx": tx_ref.0],
+                        )
+                        .unwrap();
+                    observed.store(true, Ordering::SeqCst);
+                }
+            }
+            Authorization::Allow
+        }));
+    let result = apply_record(st.wallet_mut().db_mut(), request, &corrupt).unwrap();
+    st.wallet()
+        .conn()
+        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    assert_eq!(result, EnhancePirStoreResult::Rejected);
+    assert!(reassigned.load(Ordering::SeqCst));
+
+    let replacement = st.wallet().db().query_requests().unwrap()[0];
+    assert_eq!(replacement.position(), request.position());
+    assert_ne!(replacement.request_id(), request.request_id());
+    assert_eq!(rejections(st.wallet().conn(), replacement), None);
+    // Only the replacement's own content failures consume its allowance.
+    reject_three_times(&mut st, replacement);
+    assert!(
+        st.wallet()
+            .db()
+            .transaction_enhancement_work()
+            .unwrap()
+            .contains(&rejected_work(replacement))
+    );
+}
+
+#[test]
 fn a_rejection_still_rolls_back_and_is_counted() {
     use zcash_client_backend::data_api::enhance_pir::{
         EnhancePirBatchRejection as Reason, EnhancePirBatchResult as Batch,

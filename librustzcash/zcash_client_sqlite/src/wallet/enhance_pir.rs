@@ -960,10 +960,12 @@ fn rearm_rejected_positions(
     Ok(())
 }
 
-/// Counts an unreadable reply against each distinct position of `requests` that is still query
-/// work. A request that is stale, completed or already suspended is ignored, so a late report
-/// cannot charge a position that a rewind has since given to another transaction.
-pub(crate) fn record_unreadable(
+/// Counts a content failure against each distinct position of `requests` that is still query
+/// work. Called in a transaction after a rejected batch rolled back or a reply failed to decode.
+/// A request that is stale, completed or already suspended is ignored, so a late result cannot
+/// charge a position that a rewind has since given to another transaction. The caller's
+/// transaction keeps the identity checks and increments in one snapshot.
+pub(crate) fn record_content_failures(
     conn: &Connection,
     configured: Option<TransparentLedgerMode>,
     requests: &[EnhancePirRequest],
@@ -991,8 +993,8 @@ pub(crate) fn record_unreadable(
     Ok(())
 }
 
-/// Counts one rejected record against `position`. Called after the rejected batch rolled back.
-pub(crate) fn record_rejection(conn: &Connection, position: u64) -> Result<(), SqliteClientError> {
+/// Increments one position after its request identity was checked in the caller's transaction.
+fn record_rejection(conn: &Connection, position: u64) -> Result<(), SqliteClientError> {
     conn.execute(
         "INSERT INTO ironwood_enhance_rejections (commitment_tree_position, rejections)
          VALUES (:position, 1)

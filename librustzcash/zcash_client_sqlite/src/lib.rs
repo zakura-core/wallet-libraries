@@ -2538,9 +2538,14 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
                     | EnhancePirBatchRejection::MetadataConflict,
                 ) = (index, reason)
                 {
-                    let position = u64::from(records[index].0.position());
                     self.transactionally(|wdb| {
-                        wallet::enhance_pir::record_rejection(wdb.conn.0, position)
+                        // Rollback released the validation snapshot. Recheck the whole request
+                        // before charging a position a rewind may since have reassigned.
+                        wallet::enhance_pir::record_content_failures(
+                            wdb.conn.0,
+                            wdb.transparent_ledger_mode,
+                            &[records[index].0],
+                        )
                     })?;
                 }
             }
@@ -2553,7 +2558,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         requests: &[EnhancePirRequest],
     ) -> Result<(), Self::Error> {
         self.transactionally(|wdb| {
-            wallet::enhance_pir::record_unreadable(
+            wallet::enhance_pir::record_content_failures(
                 wdb.conn.0,
                 wdb.transparent_ledger_mode,
                 requests,

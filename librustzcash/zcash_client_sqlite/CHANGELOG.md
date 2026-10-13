@@ -38,6 +38,9 @@ workspace.
 - `WalletDb` implements `EnhancePirWrite::record_ironwood_enhance_unreadable`.
   It counts each distinct position once per call and ignores requests that are
   no longer query work.
+- Rejected records recheck the transaction and output identity in the transaction
+  saving their count, so a rewind between rollback and counting cannot charge a
+  replacement transaction at the same position.
 
 ## [0.1.0-rc8] - PLANNED
 
