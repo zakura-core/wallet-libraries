@@ -192,7 +192,7 @@ pub struct Device {
     pub lookups: usize,
     /// Sweep runs across every sync.
     pub sweep_runs: usize,
-    /// Blocks scanned across every sync.
+    /// Blocks scanned across every sync and scan.
     pub scanned_blocks: u64,
     /// Reorgs the wallet rewound for, as (conflict height, height rewound to).
     pub rewinds: Vec<(u32, u32)>,
@@ -292,7 +292,6 @@ impl Device {
         report.found_by_sweep = self.tag(sweep_phase);
         report.open_keys = self.keys().iter().filter(|k| k.open()).count();
         report.pending = self.history_pending();
-        self.scanned_blocks += report.scanned_blocks;
         report
     }
 
@@ -378,6 +377,7 @@ impl Device {
         self.db
             .close_finished_one_time_keys(account, self.now(chain), tip)
             .expect("finished keys close");
+        self.scanned_blocks += scanned;
         scanned
     }
 

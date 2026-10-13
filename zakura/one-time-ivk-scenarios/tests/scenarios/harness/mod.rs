@@ -665,7 +665,14 @@ impl Ctx {
                 rationale: e.rationale.clone(),
             });
         }
-        for device in &self.devices {
+        // NEAR's wallet only signs payouts, so its numbers would be noise.
+        let near = self.near_wallet.map(|dev| dev.0);
+        for (_, device) in self
+            .devices
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| Some(*i) != near)
+        {
             self.metrics.push(Metric {
                 name: format!("{} directory lookups", device.name),
                 value: device.lookups as f64,
