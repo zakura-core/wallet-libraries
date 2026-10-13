@@ -80,6 +80,8 @@ mod task;
 #[cfg(feature = "tor")]
 pub mod tor;
 
+#[cfg(feature = "orchard")]
+pub use decrypt::decrypt_transaction_with_one_time_ivks;
 pub use decrypt::{DecryptedOutput, TransferType, decrypt_transaction};
 
 /// Starts process-lifetime Orchard proving-key warm-up if it has not started.

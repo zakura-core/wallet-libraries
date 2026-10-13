@@ -159,7 +159,7 @@ use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{self, BlockHeight};
 
 use crate::{
-    data_api::WalletWrite,
+    data_api::{ScannedBlock, WalletWrite},
     proto::compact_formats::CompactBlock,
     scanning::{
         Nullifiers, ScanningKeys,
@@ -171,6 +171,9 @@ use crate::{
 use {
     super::scanning::ScanPriority, crate::data_api::scanning::ScanRange, async_trait::async_trait,
 };
+
+#[cfg(feature = "orchard")]
+use super::one_time_ivk::OneTimeIvkWrite;
 
 pub mod error;
 use error::Error;
@@ -639,7 +642,99 @@ where
         .get_unified_full_viewing_keys()
         .map_err(Error::Wallet)?;
     let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
-    let mut runners = BatchRunners::<_, (), (), ()>::for_keys(100, &scanning_keys);
+    let (scan_summary, scanned_blocks) = scan_blocks(
+        params,
+        block_source,
+        data_db,
+        from_height,
+        limit,
+        &scanning_keys,
+    )?;
+
+    data_db
+        .put_blocks(from_state, scanned_blocks)
+        .map_err(Error::Wallet)?;
+    Ok(scan_summary)
+}
+
+/// [`scan_cached_blocks`], also trial-decrypting with the wallet's one-time keys.
+///
+/// The keys come from [`OneTimeIvkRead::get_one_time_scanning_keys`], and the blocks are
+/// stored with [`OneTimeIvkWrite::put_blocks_with_one_time_ivks`]. A wallet with open
+/// one-time keys must be scanned with this function rather than [`scan_cached_blocks`].
+///
+/// [`OneTimeIvkRead::get_one_time_scanning_keys`]: super::one_time_ivk::OneTimeIvkRead::get_one_time_scanning_keys
+#[cfg(feature = "orchard")]
+#[tracing::instrument(skip(params, block_source, data_db, from_state))]
+#[allow(clippy::type_complexity)]
+pub fn scan_cached_blocks_with_one_time_ivks<ParamsT, DbT, BlockSourceT>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &mut DbT,
+    from_height: BlockHeight,
+    from_state: &ChainState,
+    limit: usize,
+) -> Result<ScanSummary, Error<<DbT as WalletRead>::Error, BlockSourceT::Error>>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: OneTimeIvkWrite,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+{
+    assert_eq!(from_height, from_state.block_height + 1);
+
+    let account_ufvks = data_db
+        .get_unified_full_viewing_keys()
+        .map_err(Error::Wallet)?;
+    let one_time_keys = data_db
+        .get_one_time_scanning_keys()
+        .map_err(Error::Wallet)?;
+    let one_time_key_ids = one_time_keys
+        .iter()
+        .map(|key| (*key.account_id(), key.key_id()))
+        .collect::<Vec<_>>();
+    let scanning_keys =
+        ScanningKeys::from_account_ufvks(account_ufvks).with_one_time_ivks(one_time_keys);
+    let (scan_summary, scanned_blocks) = scan_blocks(
+        params,
+        block_source,
+        data_db,
+        from_height,
+        limit,
+        &scanning_keys,
+    )?;
+
+    data_db
+        .put_blocks_with_one_time_ivks(from_state, scanned_blocks, &one_time_key_ids)
+        .map_err(Error::Wallet)?;
+    Ok(scan_summary)
+}
+
+/// Scans at most `limit` blocks from `from_height` with `scanning_keys`, for
+/// [`scan_cached_blocks`] and its one-time IVK twin, returning the blocks to store.
+#[allow(clippy::type_complexity)]
+fn scan_blocks<ParamsT, DbT, BlockSourceT, IvkTag>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &DbT,
+    from_height: BlockHeight,
+    limit: usize,
+    scanning_keys: &ScanningKeys<<DbT as WalletRead>::AccountId, IvkTag>,
+) -> Result<
+    (
+        ScanSummary,
+        Vec<ScannedBlock<<DbT as WalletRead>::AccountId>>,
+    ),
+    Error<<DbT as WalletRead>::Error, BlockSourceT::Error>,
+>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletRead,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+    IvkTag: Copy + std::hash::Hash + Eq + Send + 'static,
+{
+    let mut runners = BatchRunners::<_, (), (), ()>::for_keys(100, scanning_keys);
 
     block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
         Some(from_height),
@@ -669,7 +764,7 @@ where
             let scanned_block = scan_block_with_runners::<_, _, _, (), (), ()>(
                 params,
                 block,
-                &scanning_keys,
+                scanning_keys,
                 &nullifiers,
                 prior_block_metadata.as_ref(),
                 Some(&mut runners),
@@ -694,10 +789,7 @@ where
         },
     )?;
 
-    data_db
-        .put_blocks(from_state, scanned_blocks)
-        .map_err(Error::Wallet)?;
-    Ok(scan_summary)
+    Ok((scan_summary, scanned_blocks))
 }
 
 #[cfg(feature = "test-dependencies")]

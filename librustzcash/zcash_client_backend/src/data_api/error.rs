@@ -99,6 +99,11 @@ pub enum Error<DataSourceError, CommitmentTreeError, SelectionError, FeeError, C
     /// full viewing key for an account.
     NoteMismatch(NoteId),
 
+    /// The one-time key recorded for a note being spent derives no valid viewing key (see
+    /// [`zakura_one_time_ivk::KeyId::derive`]), so the note cannot be spent.
+    #[cfg(feature = "orchard")]
+    OneTimeKeyNotDerivable(zakura_one_time_ivk::KeyId),
+
     /// An error occurred parsing the address from a payment request.
     Address(ConversionError<&'static str>),
 
@@ -311,6 +316,11 @@ where
             Error::NoteMismatch(n) => write!(
                 f,
                 "A note being spent ({n:?}) does not correspond to either the internal or external full viewing key for the provided spending key."
+            ),
+            #[cfg(feature = "orchard")]
+            Error::OneTimeKeyNotDerivable(key_id) => write!(
+                f,
+                "The one-time key {key_id:?} of a note being spent derives no valid viewing key."
             ),
 
             Error::Address(e) => {

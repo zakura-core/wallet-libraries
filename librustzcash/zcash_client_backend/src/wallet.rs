@@ -642,6 +642,8 @@ pub struct WalletOutput<Note, Nullifier, AccountId> {
     nf: Option<Nullifier>,
     account_id: AccountId,
     recipient_key_scope: Option<zip32::Scope>,
+    #[cfg(feature = "orchard")]
+    one_time_key_id: Option<zakura_one_time_ivk::KeyId>,
 }
 
 /// Compact action encryption fields retained from scanning for later enhancement.
@@ -674,7 +676,22 @@ impl<Note, Nullifier, AccountId> WalletOutput<Note, Nullifier, AccountId> {
             nf,
             account_id,
             recipient_key_scope,
+            #[cfg(feature = "orchard")]
+            one_time_key_id: None,
         }
+    }
+
+    /// Records the one-time key used for decryption.
+    #[cfg(feature = "orchard")]
+    pub fn with_one_time_key_id(mut self, key_id: Option<zakura_one_time_ivk::KeyId>) -> Self {
+        self.one_time_key_id = key_id;
+        self
+    }
+
+    /// The one-time key that decrypted this output, or `None` for an ordinary account key.
+    #[cfg(feature = "orchard")]
+    pub fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
+        self.one_time_key_id
     }
 
     /// Attaches the compact encryption prefix retained by scanning.
@@ -807,6 +824,8 @@ pub struct ReceivedNote<NoteRef, NoteT> {
     output_index: u16,
     note: NoteT,
     spending_key_scope: Scope,
+    #[cfg(feature = "orchard")]
+    one_time_key_id: Option<zakura_one_time_ivk::KeyId>,
     note_commitment_tree_position: Position,
     mined_height: Option<BlockHeight>,
     max_shielding_input_height: Option<BlockHeight>,
@@ -831,10 +850,25 @@ impl<NoteRef, NoteT> ReceivedNote<NoteRef, NoteT> {
             output_index,
             note,
             spending_key_scope,
+            #[cfg(feature = "orchard")]
+            one_time_key_id: None,
             note_commitment_tree_position,
             mined_height,
             max_shielding_input_height,
         }
+    }
+
+    /// Associates this Ironwood note with its account's one-time key.
+    #[cfg(feature = "orchard")]
+    pub fn with_one_time_key_id(mut self, key_id: Option<zakura_one_time_ivk::KeyId>) -> Self {
+        self.one_time_key_id = key_id;
+        self
+    }
+
+    /// The one-time key to rederive before spending, relative to the account FVK.
+    #[cfg(feature = "orchard")]
+    pub fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
+        self.one_time_key_id
     }
 
     /// Returns the storage backend's internal identifier for the note.
@@ -888,6 +922,8 @@ impl<NoteRef, NoteT> ReceivedNote<NoteRef, NoteT> {
             output_index: self.output_index,
             note: f(self.note),
             spending_key_scope: self.spending_key_scope,
+            #[cfg(feature = "orchard")]
+            one_time_key_id: self.one_time_key_id,
             note_commitment_tree_position: self.note_commitment_tree_position,
             mined_height: self.mined_height,
             max_shielding_input_height: self.max_shielding_input_height,

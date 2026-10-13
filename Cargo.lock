@@ -7794,6 +7794,7 @@ dependencies = [
  "zakura-bls12-381",
  "zakura-jubjub",
  "zakura-keys",
+ "zakura-one-time-ivk",
  "zakura-orchard",
  "zakura-pasta-curves",
  "zakura-pczt",
