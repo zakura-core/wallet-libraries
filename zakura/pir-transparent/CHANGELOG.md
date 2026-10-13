@@ -6,15 +6,19 @@
 
 - `PassLimits::passes`: a plan runs one counted pass per sync, so it has no pass
   count left to bound.
+- `Step::Wait`: retry delays schedule the next sync instead of another pass in
+  the current sync. Callers use `Step::Done(Some(Retry::After(delay)))`.
 
 ### Changed
 
-- `PassPlan::next` ends the sync after a counted pass: `Retry::After` is still
-  `Step::Wait`, and every other retry is `Step::Done` with it. A grown address
+- `PassPlan::next` ends the sync after every counted pass, including publication
+  lag and capacity refusals, with `Step::Done` and its retry. A grown address
   window, changed watched addresses and `Retry::More` no longer start another
-  pass at once; they continue at the next sync, or after a `Step::Wait`. A service that forges a receive
+  pass at once; they continue at the next sync. A service that forges a receive
   near the end of the window can no longer tell from the wallet's next requests
   whether its directory row was the one forged.
+- The recovery example ends its bounded run when a pass reports lag or overload,
+  leaving its saved continuation for a later invocation instead of waiting forever.
 
 - Depend on the transparent PIR crates from crates.io (`=0.1.0-rc.3`, tagged
   `transparent-v0.1.0-rc.3` in wallet-pir) instead of a git revision.
@@ -55,7 +59,7 @@ lookups. See the [README](README.md) and
 - Bounded recovery passes, stable revision identities, companion stores, opaque
   recovery batches and typed ready/pending/withdrawn outcomes. Missing or lagging
   publication data grants no coverage or financial authority.
-- A shared pass driver with explicit retry, wait, refresh, skip and stop decisions.
+- A shared pass driver with explicit retry, refresh, skip and stop decisions.
   Publication changes reset the companion's reference store and retry once;
   catalog lineage remains available to detect conflicting publications.
 - SQLite settlement with explicit observed/trusted evidence and a caller-owned

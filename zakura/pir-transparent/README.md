@@ -249,8 +249,7 @@ own, once per sync:
 ```rust,ignore
 let mut plan = PassPlan::new(wallet.transparent_watch_set(account)?, PassLimits::default());
 let mut step = plan.first();
-while let Step::Pass | Step::Refresh | Step::Wait(_) = step {
-    if let Step::Wait(wait) = step { sleep(wait) } // within the caller's budget
+while let Step::Pass | Step::Refresh = step {
     if should_stop() { break } // the library never reports the caller's cancellation
     let chain = WalletChain::new(&*wallet, plan.watch().target.unwrap());
     let report = companion.pass(plan.watch(), &chain, &exchange, limit, &should_stop)?;
@@ -306,17 +305,16 @@ After each pass, `next` applies the first row that matches, in this order:
 | `ApplyAction::Fail` | `Fail`: report the `ApplyFailure` |
 | A ready batch nobody settled | `Skip` |
 | The fresh watch set has no target | `Done(None)`; the pass counts |
-| `Retry::After(wait)` | `Wait(wait)`: a lagging publication or a capacity refusal, which no private reply decides |
-| Any other retry | `Done(Some(retry))` |
+| Any retry, including `Retry::After(wait)` | `Done(Some(retry))`; schedule the next sync after any reported delay |
 
 A counted pass is the sync's only one: `next` never returns `Pass`, so no reply
 can start another pass at once. A settled commit that grew the window, a watch
 set whose addresses changed, and `Retry::More` (a spent budget) continue at the
-next sync, or after a wait: when a pass ends in `Wait` (a lagging publication
-or a capacity refusal, which applies to every wallet alike), the pass after the
-wait reads the fresh watch set and resumes from the companion within the same
-sync. A restore therefore takes one sync, or one wait, per step of the address
-window.
+next sync. Publication lag and capacity refusals also end the sync: the pass
+may already have read private replies and grown the address window before it
+reported either condition. `Retry::After` gives the caller the delay before
+scheduling the next sync, which reads the fresh watch set and resumes from the
+companion. A restore therefore takes one sync per step of the address window.
 
 A `PassError` never reaches the plan. `Outage` ends the run: the service failed
 every account alike. `Invalid`, `Failure` and `PublicationChanged` end the

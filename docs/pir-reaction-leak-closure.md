@@ -132,8 +132,10 @@ pass.
 - After a pass that counts, `next` returns `Step::Done` with the pass's retry.
   Window growth, changed addresses and `Retry::More` wait for the next sync,
   which reads the fresh watch set as usual.
-- `Step::Refresh` and `Step::Wait` stay. A lagging publication and overload
-  are request outcomes. A commit goes stale only through wallet or chain state
+- Publication lag and overload also end the sync. A pass may have read private
+  replies before reporting either condition, so its retry delay schedules the
+  next sync rather than another pass with a reply-expanded address window.
+- `Step::Refresh` stays. A commit goes stale only through wallet or chain state
   (an account or address removed, a rewind, a superseded revision), never
   through reply content.
 - `PassLimits::passes` has no remaining use and is removed. Vizor keeps its
@@ -149,13 +151,14 @@ forged receive added. Checking filters for that is in increment 2.
 
 Tests:
 
-- Unit tests for `next`: window growth, changed addresses and `Retry::More`
-  each give `Step::Done`; refresh and wait are unchanged.
+- Unit tests for `next`: window growth, changed addresses, `Retry::More`, lag
+  and overload each give `Step::Done`; stale refreshes remain bounded.
 - End to end, with the in-process service (`testing::service`): service A adds
   a receive at the last watched address to the wallet's directory row; service
   B does not. The request transcripts of the two syncs are identical. The
   wallet served by A records the larger window, and its next sync checks the new
-  addresses.
+  addresses. The transcripts also match when the publication is below the wallet's
+  target: both syncs end with the same delay, without a second pass after waiting.
 - Restore cost: a wallet whose used addresses reach index 25, with an external
   gap of 10, finishes recovery in a stated number of syncs. The test asserts
   that number, so a change in restore latency is visible.

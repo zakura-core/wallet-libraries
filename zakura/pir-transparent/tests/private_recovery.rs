@@ -593,8 +593,8 @@ impl Fixture {
         })
     }
 
-    /// One sync: passes as a fresh plan says until it stops, treating a wait as the
-    /// end of the sync. Only refreshes pass again; a counted pass ends the sync.
+    /// One sync: passes as a fresh plan says until it stops. Only refreshes pass
+    /// again; every counted pass ends the sync, including lag or overload.
     fn drive(&mut self) -> Pass {
         let mut plan = PassPlan::new(self.watch(), PassLimits::default());
         assert_eq!(plan.first(), Step::Pass);
@@ -1105,8 +1105,8 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     let lagging = f.pass().unwrap();
     assert_eq!(lagging.batch.state, BatchState::Ready);
     assert_eq!(lagging.batch.progress.outcome, Outcome::Behind);
-    // The plan waits for the publication rather than passing again at once.
-    assert_eq!(lagging.step, Step::Wait(Retry::BEHIND));
+    // The next sync waits for the publication; this sync sends no further pass.
+    assert_eq!(lagging.step, Step::Done(Some(Retry::After(Retry::BEHIND))));
     assert_eq!(lagging.batch.progress.covered_through, t2);
     assert!(!lagging.batch.commits.is_empty());
     assert!(
@@ -1266,12 +1266,17 @@ fn transcript(f: &Fixture, from: usize) -> Vec<(String, String, Option<String>, 
 /// one lies above the birthday; the other below, where the wallet ignores it. No
 /// other event pays the wallet, so the honest window never grows, and the forged
 /// wallet's grown window would cost another pass's requests if it started one.
-#[test]
-fn a_forged_receive_does_not_start_another_pass() {
+fn forged_receive_does_not_start_another_pass(publication_behind: bool) {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
     let (birthday, t1) = (H0 + 250, H0 + 649);
+    let target = t1 + if publication_behind { 20 } else { 0 };
+    let retry = if publication_behind {
+        Retry::After(Retry::BEHIND)
+    } else {
+        Retry::Complete
+    };
     let sync = |forged: bool| {
-        let mut f = Fixture::new(birthday, t1);
+        let mut f = Fixture::new(birthday, target);
         // Nobody's addresses: the lifecycle pays the wallet nothing itself.
         let owned = Owned {
             a0: TransparentAddress::PublicKeyHash([0xec; 20]),
@@ -1293,8 +1298,8 @@ fn a_forged_receive_does_not_start_another_pass() {
     let (honest, honest_pass, honest_requests) = sync(false);
 
     // One pass each, and the service sees the same requests.
-    assert_eq!(forged_pass.step, Step::Done(Some(Retry::Complete)));
-    assert_eq!(honest_pass.step, Step::Done(Some(Retry::Complete)));
+    assert_eq!(forged_pass.step, Step::Done(Some(retry)));
+    assert_eq!(honest_pass.step, Step::Done(Some(retry)));
     assert!(!forged_requests.is_empty());
     assert_eq!(forged_requests, honest_requests);
 
@@ -1319,7 +1324,7 @@ fn a_forged_receive_does_not_start_another_pass() {
     let seen = forged.server.requests().len();
     let next = forged.drive();
     assert!(forged.server.requests().len() > seen);
-    assert_eq!(next.step, Step::Done(Some(Retry::Complete)));
+    assert_eq!(next.step, Step::Done(Some(retry)));
     assert!(!next.new_work);
     assert_eq!(next.report.progress.covered_through, t1);
     assert!(
@@ -1329,10 +1334,21 @@ fn a_forged_receive_does_not_start_another_pass() {
     );
 }
 
-/// A pass behind the publication waits, and the pass after the wait, in the same
-/// sync and plan, covers what the publication has since caught up to.
 #[test]
-fn a_wait_passes_again_within_the_sync() {
+fn a_forged_receive_does_not_start_another_pass() {
+    forged_receive_does_not_start_another_pass(false);
+}
+
+/// Publication lag must not let a forged receive steer a second pass after a wait.
+#[test]
+fn a_forged_receive_with_publication_lag_does_not_start_another_pass() {
+    forged_receive_does_not_start_another_pass(true);
+}
+
+/// A pass behind the publication ends its sync with a retry delay. A fresh plan
+/// at the next sync covers what the publication has since caught up to.
+#[test]
+fn a_lagging_publication_continues_at_the_next_sync() {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
     let (birthday, t1, t2) = (H0 + 250, H0 + 649, H0 + 669);
     let mut f = Fixture::new(birthday, t2);
@@ -1349,9 +1365,11 @@ fn a_wait_passes_again_within_the_sync() {
     let lagging = f.pass_in(&mut plan).expect("a pass");
     assert_eq!(lagging.batch.progress.outcome, Outcome::Behind);
     assert_eq!(lagging.batch.progress.covered_through, t1);
-    assert_eq!(lagging.step, Step::Wait(Retry::BEHIND));
+    assert_eq!(lagging.step, Step::Done(Some(Retry::After(Retry::BEHIND))));
 
     f.publish(&lifecycle(&owned, t2, 1, false), SEAL);
+    let mut plan = PassPlan::new(f.watch(), PassLimits::default());
+    assert_eq!(plan.first(), Step::Pass);
     let caught_up = f.pass_in(&mut plan).expect("a pass");
     assert_eq!(caught_up.batch.progress.outcome, Outcome::Complete);
     assert_eq!(caught_up.batch.progress.covered_through, t2);

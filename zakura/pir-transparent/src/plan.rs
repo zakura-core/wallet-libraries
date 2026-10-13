@@ -2,9 +2,7 @@
 //! after each pass, with feature `sqlite`.
 //!
 //! [`PassPlan`] is pure: it makes no request, reads no clock and touches no database. The
-//! wallet runs the passes, settles them, waits and stops; the plan only says which.
-
-use std::time::Duration;
+//! wallet runs the passes, settles them and stops; the plan only says which.
 
 use rusqlite::Connection;
 use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchSet;
@@ -64,9 +62,6 @@ pub enum Step {
     /// Pass again now, with [`PassPlan::watch`]: a commit of the settlement was stale
     /// for the watch set the pass ran with. It does not count as a pass.
     Refresh,
-    /// Pass again after the wait: the publication ends below the target, or the
-    /// service refused for capacity.
-    Wait(Duration),
     /// The account cannot progress until something outside recovery changes: skip
     /// it, without traffic, for longer than a run.
     Hold(HoldCause),
@@ -88,7 +83,8 @@ pub enum Step {
     /// The account's passes ended for this sync: the counted pass's retry, or `None`
     /// when the watch set has no target, so there is nothing to pass. Offer the account
     /// for activation; the wallet rechecks everything itself. Whatever the retry, the
-    /// next pass waits for the next sync, which reads the fresh watch set.
+    /// next pass waits for the next sync, which reads the fresh watch set. A
+    /// [`Retry::After`] delay belongs to scheduling that next sync.
     Done(Option<Retry>),
 }
 
@@ -142,8 +138,6 @@ pub enum StopCause {
 ///     loop {
 ///         match step {
 ///             Step::Pass | Step::Refresh => {}
-///             // Bounded by the caller's own time budget.
-///             Step::Wait(wait) => std::thread::sleep(wait),
 ///             step => return Ok(Some(step)),
 ///         }
 ///         if should_stop() {
@@ -216,11 +210,10 @@ impl<A> PassPlan<A> {
     ///    elsewhere, and acknowledging it is not this plan's to know.
     /// 4. The pass counts, and it is the sync's only one. With no target in `fresh`
     ///    there is nothing left to pass: [`Step::Done`] with no retry.
-    /// 5. By [`PassReport::retry`]: `After` is [`Step::Wait`], since the publication lags
-    ///    or the service refused for capacity, which no private reply decides; every
-    ///    other retry is [`Step::Done`] with it. A settled commit that grew the window,
-    ///    a watch set whose addresses changed, and `More` wait for the next sync, so no
-    ///    reply can start another pass.
+    /// 5. Every retry is [`Step::Done`] with it, including `After`: a lagging or
+    ///    overloaded pass may already have processed private replies. Its delay
+    ///    schedules the next sync, so a settled commit that grew the window, a
+    ///    changed watch set, or `More` cannot start another pass in this sync.
     pub fn next(
         &mut self,
         report: &PassReport,
@@ -240,10 +233,7 @@ impl<A> PassPlan<A> {
         if self.watch.target.is_none() {
             return Step::Done(None);
         }
-        match report.retry() {
-            Retry::After(wait) => Step::Wait(wait),
-            retry => Step::Done(Some(retry)),
-        }
+        Step::Done(Some(report.retry()))
     }
 
     /// The step after a settlement that failed with `action`.

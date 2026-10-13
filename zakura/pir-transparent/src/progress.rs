@@ -42,7 +42,8 @@ pub enum Retry {
     /// resumes.
     More,
     /// The publication ends below the target, or the service refused for
-    /// capacity. Pass again after the wait.
+    /// capacity. Schedule the next sync after the delay; do not pass again in
+    /// the current sync, which may already have processed private replies.
     After(Duration),
     /// Progress needs more than a retry. Pass again only for new work, at the
     /// next sync.

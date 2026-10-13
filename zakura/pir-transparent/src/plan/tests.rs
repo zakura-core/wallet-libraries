@@ -181,14 +181,14 @@ fn stale_settlements_refresh_a_bounded_number_of_times() {
     let mut plan = new_plan();
     assert_eq!(plan.next(&ready, &stale, watch(1, true)), Step::Done(None));
 
-    // Refreshes do not reset after a wait.
+    // The refresh allowance is not reset when publication lag is reported.
     let limits = PassLimits { stale_refreshes: 1 };
     let mut plan = PassPlan::new(watch(1, false), limits);
     assert_eq!(plan.next(&ready, &stale, watch(1, false)), Step::Refresh);
     let behind = report(BatchState::Ready, Outcome::Behind);
     assert_eq!(
         plan.next(&behind, &applied(false), watch(1, false)),
-        Step::Wait(Retry::BEHIND)
+        Step::Done(Some(Retry::After(Retry::BEHIND)))
     );
     assert_eq!(plan.next(&ready, &stale, watch(1, false)), Step::Skip);
     assert_eq!(PassLimits::default().stale_refreshes, 3);
@@ -263,9 +263,9 @@ fn an_unsettled_ready_pass_is_skipped() {
     }
 }
 
-/// Settled or pending, a counted pass ends the sync: after the wait for `After`,
-/// and otherwise with its retry. Neither a grown window, changed addresses nor
-/// `More` passes again at once; they wait for the next sync.
+/// Settled or pending, every counted pass ends the sync with its retry, including
+/// the delay after lag or overload. Neither window growth nor changed addresses
+/// starts another pass in the current sync.
 #[test]
 fn a_counted_pass_follows_its_retry() {
     for state in [BatchState::Ready, BatchState::Pending] {
@@ -280,24 +280,53 @@ fn a_counted_pass_follows_its_retry() {
                     let mut plan = new_plan();
                     let fresh = watch(1 + u8::from(addresses_changed), false);
                     let step = plan.next(&report(state, outcome), &settled, fresh);
-                    let expected = match outcome {
-                        Outcome::Behind => Step::Wait(Retry::BEHIND),
-                        Outcome::Overloaded => Step::Wait(Retry::OVERLOADED),
-                        Outcome::More => Step::Done(Some(Retry::More)),
-                        Outcome::Complete => Step::Done(Some(Retry::Complete)),
-                        Outcome::Stalled => Step::Done(Some(Retry::Stalled)),
-                    };
+                    let expected = Step::Done(Some(pass_retry(outcome)));
                     assert_eq!(
                         step, expected,
                         "{state:?} grew={grew} changed={addresses_changed} {outcome:?}"
                     );
-                    // The plan runs the next pass, after a wait, with the fresh set.
+                    // The fresh set is saved, but this sync does not pass it again.
                     assert_eq!(
                         plan.watch().addresses.len(),
                         1 + usize::from(addresses_changed)
                     );
                 }
             }
+        }
+    }
+}
+
+fn pass_retry(outcome: Outcome) -> Retry {
+    match outcome {
+        Outcome::Behind => Retry::After(Retry::BEHIND),
+        Outcome::Overloaded => Retry::After(Retry::OVERLOADED),
+        Outcome::More => Retry::More,
+        Outcome::Complete => Retry::Complete,
+        Outcome::Stalled => Retry::Stalled,
+    }
+}
+
+/// A caller that continues until the plan ends must not loop forever on a
+/// publication that stays behind or a service that keeps refusing capacity.
+#[test]
+fn persistent_lag_or_overload_does_not_keep_a_sync_running() {
+    for state in [BatchState::Ready, BatchState::Pending] {
+        for outcome in [Outcome::Behind, Outcome::Overloaded] {
+            let settled = if state == BatchState::Ready {
+                applied(false)
+            } else {
+                NOTHING
+            };
+            let mut plan = new_plan();
+            let mut step = plan.first();
+            let mut passes = 0;
+            while !matches!(step, Step::Done(_)) {
+                assert_eq!(passes, 0, "the sync must end after its counted pass");
+                passes += 1;
+                step = plan.next(&report(state, outcome), &settled, watch(1, false));
+            }
+            assert_eq!(passes, 1);
+            assert_eq!(step, Step::Done(Some(pass_retry(outcome))));
         }
     }
 }
@@ -315,9 +344,8 @@ fn a_target_lost_after_a_pass_ends_the_passes() {
     }
 }
 
-/// Over every input: a wait comes only from a retry that names one, a withdrawn
-/// pass never passes again, and a counted pass, settled or pending, is never
-/// [`Step::Pass`] or [`Step::Refresh`]: it ends the sync or waits.
+/// Over every input: a withdrawn pass never passes again, and every counted
+/// pass, settled or pending, ends the sync with its retry.
 #[test]
 fn the_table_never_retries_what_it_must_not() {
     let mut states = vec![BatchState::Ready, BatchState::Pending];
@@ -332,9 +360,6 @@ fn the_table_never_retries_what_it_must_not() {
                     let pass = report(state, outcome);
                     let step = plan.next(&pass, settled, watch(addresses, targetless));
                     let case = format!("{state:?} {outcome:?} {settled:?} {addresses}");
-                    if let Step::Wait(wait) = step {
-                        assert_eq!(pass.retry(), Retry::After(wait), "{case}");
-                    }
                     if matches!(state, BatchState::Withdrawn(_)) {
                         assert!(matches!(step, Step::Hold(_)), "{case}");
                     }
@@ -345,13 +370,10 @@ fn the_table_never_retries_what_it_must_not() {
                             .is_ok_and(|settled| settled.is_some() || state == BatchState::Pending);
                     if counted {
                         assert_ne!(step, Step::Pass, "{case}");
-                        assert!(matches!(step, Step::Done(_) | Step::Wait(_)), "{case}");
+                        assert!(matches!(step, Step::Done(_)), "{case}");
                     }
                     if targetless {
-                        assert!(
-                            !matches!(step, Step::Pass | Step::Refresh | Step::Wait(_)),
-                            "{case}"
-                        );
+                        assert!(!matches!(step, Step::Pass | Step::Refresh), "{case}");
                     }
                 }
             }

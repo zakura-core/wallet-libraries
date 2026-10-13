@@ -321,7 +321,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         loop {
             match step {
                 Step::Pass | Step::Refresh => {}
-                Step::Wait(wait) => std::thread::sleep(wait),
                 Step::Done(_) => break,
                 Step::Hold(HoldCause::Withdrawn(cause)) => {
                     return Err(format!("publication withdrawn: {cause:?}").into());
@@ -399,6 +398,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             // It is not recreated: recreating would discard continuity evidence.
             drop(reference);
             reference = TransparentHistoryRecovery::open(&companion_path, config.clone())?;
+        }
+        if matches!(step, Step::Done(Some(Retry::After(_)))) {
+            // This snapshot cannot finish while the publication lags or refuses work.
+            // Leave the saved continuation for a later invocation instead of waiting
+            // and letting reply content steer more requests in this run.
+            break;
         }
         if step == Step::Done(Some(Retry::Complete)) && !grew_window {
             break;
