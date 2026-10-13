@@ -39,9 +39,12 @@ use zcash_note_encryption::try_note_decryption;
 #[allow(non_upper_case_globals)]
 const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
 use zcash_primitives::transaction::{
+    TxVersion,
     builder::{BuildConfig, Builder, BundlePadding, DeferredPcztBuilder, PcztResult},
     fees::zip317,
-    sighash::{SignableInput, signature_hash},
+    sighash::SignableInput,
+    sighash_v5::v5_signature_hash,
+    sighash_v6::v6_signature_hash,
     txid::TxIdDigester,
 };
 use zcash_proofs::prover::LocalTxProver;
@@ -254,6 +257,13 @@ fn transparent_to_orchard() {
     let bundle = tx.transparent_bundle().unwrap();
     assert_eq!(bundle.vin.len(), 1);
     let txin = bundle.vin.first().unwrap();
+    // Preserve the effects-only prevout context while selecting the transaction's
+    // signature digest, including the empty Ironwood commitment in v6.
+    let signature_hash = match tx_effects.version() {
+        TxVersion::V5 => v5_signature_hash,
+        TxVersion::V6 => v6_signature_hash,
+        _ => unreachable!("this fixture builds only v5 or v6 transactions"),
+    };
     let sighasher = |script_code: &script::Code, hash_type: &zcash_script::signature::HashType| {
         Some(
             signature_hash(
@@ -435,6 +445,13 @@ fn transparent_p2sh_multisig_to_orchard() {
     let bundle = tx.transparent_bundle().unwrap();
     assert_eq!(bundle.vin.len(), 1);
     let txin = bundle.vin.first().unwrap();
+    // Preserve the effects-only prevout context while selecting the transaction's
+    // signature digest, including the empty Ironwood commitment in v6.
+    let signature_hash = match tx_effects.version() {
+        TxVersion::V5 => v5_signature_hash,
+        TxVersion::V6 => v6_signature_hash,
+        _ => unreachable!("this fixture builds only v5 or v6 transactions"),
+    };
     let sighasher = |script_code: &script::Code, hash_type: &zcash_script::signature::HashType| {
         Some(
             signature_hash(

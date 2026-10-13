@@ -4886,8 +4886,8 @@ pub fn fully_funded_fully_private<P0: ShieldedPoolTester, P1: ShieldedPoolTester
     assert_eq!(proposal0.steps().len(), 1);
     let step0 = &proposal0.steps().head;
 
-    // We expect 2 logical actions, since either pool can pay the full balance required
-    // and note selection should choose the fully-private path.
+    // Sapling needs one padded bundle. An Orchard input now pays an Ironwood
+    // receiver, so both padded bundles contribute to the fee.
     let expected_fee = shielded_send_fee::<P1>();
     assert_eq!(step0.balance().fee_required(), expected_fee);
 
@@ -7665,7 +7665,7 @@ pub fn prefer_consolidation_does_not_grow_sapling_spends(
     );
 }
 
-/// Pre-NU6.3 Orchard can replace a dummy spend side without growing the action count.
+/// An Ironwood payment creates no Orchard output slots for free consolidation inputs.
 #[cfg(feature = "orchard")]
 pub fn consolidation_does_not_add_orchard_inputs_to_fill_ironwood_actions(
     dsf: impl DataStoreFactory,
