@@ -2668,3 +2668,54 @@ fn rediscovery_is_routed_privately_and_can_change_the_next_route() {
     assert!(!private.contains(&EnhancePirWork::Rediscover(job)));
     assert_eq!(queries_for(&private), 1);
 }
+
+#[test]
+fn a_metadata_only_position_is_rearmed_by_binding_and_reaches_suspension() {
+    let mut send = Send::new(false);
+    send.scan_funding();
+    send.scan_send();
+    let request = send.requests()[0];
+    assert_eq!(
+        apply_record(send.st.wallet_mut().db_mut(), request, &send.record).unwrap(),
+        EnhancePirStoreResult::Stored
+    );
+    let tx_ref = send.tx_ref();
+    let conn = send.st.wallet().conn();
+    conn.execute(
+        "UPDATE transactions SET fee = NULL, expiry_height = NULL WHERE id_tx = ?",
+        [tx_ref.0],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO ironwood_enhance_metadata_queue (transaction_id) VALUES (?)",
+        [tx_ref.0],
+    )
+    .unwrap();
+    // A count left on the position, as if a previous owner had exhausted it.
+    conn.execute(
+        "INSERT INTO ironwood_enhance_rejections VALUES (?, ?)",
+        rusqlite::params![u64::from(request.position()), MAX_REJECTIONS],
+    )
+    .unwrap();
+    send.rebuild();
+    // Binding the metadata work to the position starts it with a full allowance.
+    assert_eq!(rejections(send.st.wallet().conn(), request), None);
+    assert_eq!(send.requests(), vec![request]);
+
+    for attempt in 1..=MAX_REJECTIONS {
+        assert_eq!(send.requests(), vec![request], "attempt {attempt}");
+        send.st
+            .wallet_mut()
+            .db_mut()
+            .record_ironwood_enhance_unreadable(&[request])
+            .unwrap();
+    }
+    assert!(send.requests().is_empty());
+    assert!(
+        work(send.st.wallet().conn())
+            .unwrap()
+            .contains(&EnhancePirWork::Suspended(EnhancePirSuspension::Rejected(
+                request
+            )))
+    );
+}

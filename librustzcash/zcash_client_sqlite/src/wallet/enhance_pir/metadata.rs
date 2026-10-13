@@ -64,6 +64,11 @@ pub(super) fn bind(
         output_index = :index, compact_bound = 1 WHERE transaction_id = :tx",
         named_params![":position": position, ":index": index, ":tx": tx_ref.0],
     )?;
+    // A newly bound position starts with a full allowance, whoever it was counted against before.
+    conn.execute(
+        "DELETE FROM ironwood_enhance_rejections WHERE commitment_tree_position = :position",
+        named_params![":position": position],
+    )?;
     Ok(())
 }
 

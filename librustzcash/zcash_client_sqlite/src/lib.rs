@@ -2548,6 +2548,19 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         Ok(result)
     }
 
+    fn record_ironwood_enhance_unreadable(
+        &mut self,
+        requests: &[EnhancePirRequest],
+    ) -> Result<(), Self::Error> {
+        self.transactionally(|wdb| {
+            wallet::enhance_pir::record_unreadable(
+                wdb.conn.0,
+                wdb.transparent_ledger_mode,
+                requests,
+            )
+        })
+    }
+
     fn apply_ironwood_enhance_record(
         &mut self,
         request: EnhancePirRequest,

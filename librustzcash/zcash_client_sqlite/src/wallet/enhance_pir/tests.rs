@@ -2880,3 +2880,171 @@ fn a_rescan_rearms_rejected_positions() {
     // The re-armed position gets the full allowance again.
     reject_three_times(&mut st, request);
 }
+
+fn report_unreadable(st: &mut State, requests: &[EnhancePirRequest]) {
+    st.wallet_mut()
+        .db_mut()
+        .record_ironwood_enhance_unreadable(requests)
+        .unwrap();
+}
+
+#[test]
+fn three_unreadable_replies_suspend_the_position() {
+    let (mut st, _, request) = fixture();
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    let stale = EnhancePirRequest::new(
+        request.position(),
+        IronwoodEnhanceRequestId::new(TxId::from_bytes([9; 32]), 0),
+    );
+    for attempt in 1..=MAX_REJECTIONS {
+        assert!(
+            st.wallet()
+                .db()
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&query_work(request))
+        );
+        // A position counts once per report, however many of its identities the batch held.
+        report_unreadable(&mut st, &[request, request, stale]);
+        assert_eq!(rejections(st.wallet().conn(), request), Some(attempt));
+    }
+    let work = st.wallet().db().transaction_enhancement_work().unwrap();
+    assert!(work.contains(&rejected_work(request)));
+    assert!(!work.contains(&query_work(request)));
+    // A suspended position is no longer query work, so a late report does not count.
+    report_unreadable(&mut st, &[request]);
+    assert_eq!(rejections(st.wallet().conn(), request), Some(MAX_REJECTIONS));
+    // A stale identity alone never charges the position.
+    let (mut st, _, request) = fixture();
+    report_unreadable(&mut st, &[stale]);
+    report_unreadable(&mut st, &[]);
+    assert_eq!(rejections(st.wallet().conn(), request), None);
+}
+
+#[test]
+fn rejections_and_unreadable_replies_share_one_allowance() {
+    let (mut st, _, request) = fixture();
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    let corrupt = corrupt_incoming_record(&st, request);
+    assert_eq!(
+        apply_record(st.wallet_mut().db_mut(), request, &corrupt).unwrap(),
+        EnhancePirStoreResult::Rejected
+    );
+    report_unreadable(&mut st, &[request]);
+    assert_eq!(rejections(st.wallet().conn(), request), Some(2));
+    let work = st.wallet().db().transaction_enhancement_work().unwrap();
+    assert!(work.contains(&query_work(request)));
+    assert_eq!(
+        apply_record(st.wallet_mut().db_mut(), request, &corrupt).unwrap(),
+        EnhancePirStoreResult::Rejected
+    );
+    let work = st.wallet().db().transaction_enhancement_work().unwrap();
+    assert!(work.contains(&rejected_work(request)));
+    assert!(!work.contains(&query_work(request)));
+}
+
+#[test]
+fn an_outgoing_only_position_reaches_suspension() {
+    let (mut st, tx_ref, incoming) = fixture();
+    let outgoing = outgoing(&st, tx_ref, 99, 4);
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    // A fee contradicting the stored one rejects the outgoing record.
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE transactions SET fee = 10 WHERE id_tx = ?",
+            [tx_ref.0],
+        )
+        .unwrap();
+    for attempt in 1..=MAX_REJECTIONS {
+        assert!(
+            st.wallet()
+                .db()
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&query_work(outgoing))
+        );
+        assert_eq!(
+            apply_record(
+                st.wallet_mut().db_mut(),
+                outgoing,
+                &wire_record_with_fee(false, false, Some(0))
+            )
+            .unwrap(),
+            EnhancePirStoreResult::Rejected
+        );
+        assert_eq!(rejections(st.wallet().conn(), outgoing), Some(attempt));
+    }
+    let work = st.wallet().db().transaction_enhancement_work().unwrap();
+    assert!(work.contains(&rejected_work(outgoing)));
+    assert!(!work.contains(&query_work(outgoing)));
+    // The suspension is per position: the incoming note is still queried.
+    assert!(work.contains(&query_work(incoming)));
+    assert_eq!(rejections(st.wallet().conn(), incoming), None);
+}
+
+#[test]
+fn a_rescan_rearms_route_two_memo_positions() {
+    let (mut st, tx_ref, request) = fixture();
+    private_required(&mut st);
+    queue_transaction(
+        st.wallet().conn(),
+        Some(TransparentLedgerMode::PrivateRequired),
+        tx_ref,
+        &IronwoodEnhancementPlan::Ineligible,
+    )
+    .unwrap();
+    assert_eq!(route_of(&st, tx_ref), Some(PRIVATE_DETAILS_UNSUPPORTED));
+    reject_three_times(&mut st, request);
+    assert_eq!(
+        routed(&st),
+        (
+            vec![],
+            vec![EnhancePirWork::Suspended(EnhancePirSuspension::Rejected(
+                request
+            ))]
+        )
+    );
+    let height: u32 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT mined_height FROM transactions WHERE id_tx = ?",
+            [tx_ref.0],
+            |r| r.get(0),
+        )
+        .unwrap();
+    st.scan_cached_blocks(BlockHeight::from_u32(height), 1);
+    assert_eq!(route_of(&st, tx_ref), Some(PRIVATE_DETAILS_UNSUPPORTED));
+    assert_eq!(rejections(st.wallet().conn(), request), None);
+    assert_eq!(routed(&st), (vec![], vec![EnhancePirWork::Query(request)]));
+    reject_three_times(&mut st, request);
+}
+
+#[test]
+fn a_rewind_clears_the_counts_of_truncated_positions() {
+    let (mut st, tx_ref, request) = fixture();
+    report_unreadable(&mut st, &[request]);
+    assert_eq!(rejections(st.wallet().conn(), request), Some(1));
+    let height: u32 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT mined_height FROM transactions WHERE id_tx = ?",
+            [tx_ref.0],
+            |r| r.get(0),
+        )
+        .unwrap();
+    st.wallet_mut()
+        .db_mut()
+        .truncate_to_height(BlockHeight::from_u32(height - 1))
+        .unwrap();
+    // The rescan may give this position to another note, which must not inherit the count.
+    assert_eq!(rejections(st.wallet().conn(), request), None);
+}
