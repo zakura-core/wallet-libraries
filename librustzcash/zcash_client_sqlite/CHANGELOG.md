@@ -25,6 +25,15 @@ workspace.
   counts, and work given up earlier is listed again. A new additive migration
   adds `transparent_detail_work.content_failures`.
 
+### Added
+
+- `ironwood_enhance_rejections` migration: a rejected Enhance PIR record is
+  counted against its commitment tree position after the batch rolls back. The
+  third rejection removes the position from the query work and lists it as
+  `EnhancePirSuspension::Rejected`. Queuing the transaction again on a rescan
+  clears its counts. Only rejected records count; request failures never reach
+  the store.
+
 ## [0.1.0-rc8] - PLANNED
 
 ### Packaging

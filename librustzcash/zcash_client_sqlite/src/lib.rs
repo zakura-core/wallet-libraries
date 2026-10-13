@@ -2516,7 +2516,9 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         records: &[(EnhancePirRequest, EnhanceRecord)],
     ) -> Result<zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult, Self::Error>
     {
-        use zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult;
+        use zcash_client_backend::data_api::enhance_pir::{
+            EnhancePirBatchRejection, EnhancePirBatchResult,
+        };
         let tx = self.conn.borrow_mut().transaction()?;
         let result = wallet::enhance_pir::apply_records(
             &tx,
@@ -2524,10 +2526,24 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
             self.transparent_ledger_mode,
             records,
         )?;
-        if matches!(result, EnhancePirBatchResult::Committed(_)) {
-            tx.commit()?;
-        } else {
-            tx.rollback()?;
+        match result {
+            EnhancePirBatchResult::Committed(_) => tx.commit()?,
+            EnhancePirBatchResult::Rejected { index, reason } => {
+                tx.rollback()?;
+                // Only a record the service sent counts: a batch the caller shaped wrongly
+                // (empty, mixed transactions, conflicting duplicates) says nothing about content.
+                if let (
+                    Some(index),
+                    EnhancePirBatchRejection::RecordRejected
+                    | EnhancePirBatchRejection::MetadataConflict,
+                ) = (index, reason)
+                {
+                    let position = u64::from(records[index].0.position());
+                    self.transactionally(|wdb| {
+                        wallet::enhance_pir::record_rejection(wdb.conn.0, position)
+                    })?;
+                }
+            }
         }
         Ok(result)
     }
