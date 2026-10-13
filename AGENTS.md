@@ -9,7 +9,8 @@ instructions still apply; do not duplicate them here.
 - `librustzcash/zcash_client_backend`: package `zakura-client-backend`.
 - `librustzcash/zcash_client_sqlite`: package `zakura-client-sqlite`.
 - `librustzcash/pczt`: package `zakura-pczt`.
-- `zakura/`: PIR clients/primitives/types and transaction status.
+- `zakura/`: PIR clients/primitives/types, transaction status, one-time IVK
+  keys (`zakura-one-time-ivk`) and their provider adapter (`zakura-near-intents`).
 - `wallet-lib/`: package `zakura-wallet-lib`; its `zakura` and `lrz` backends
   are mutually exclusive. Never run workspace `--all-features` on the facade.
 

@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ORDER = (
     "zakura/pir-enhance-types",
     "zakura/pir-native",
+    "zakura/one-time-ivk",
+    "zakura/near-intents",
     "librustzcash/pczt",
     "librustzcash/zcash_client_backend",
     "librustzcash/zcash_client_sqlite",

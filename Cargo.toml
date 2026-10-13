@@ -20,6 +20,8 @@ members = [
     "zakura/pir-status",
     "zakura/transaction-status",
     "zakura/pir-transparent",
+    "zakura/one-time-ivk",
+    "zakura/near-intents",
 ]
 
 resolver = "2"

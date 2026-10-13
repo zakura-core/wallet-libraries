@@ -45,7 +45,7 @@ cargo metadata --locked --manifest-path "$repo_root/Cargo.toml" \
   --format-version 1 --all-features \
   > "$CARGO_TARGET_DIR/zakura-graph-metadata.json"
 
-python3 - "$CARGO_TARGET_DIR/zakura-graph-metadata.json" "$manifest" <<'PY'
+python3 - "$CARGO_TARGET_DIR/zakura-graph-metadata.json" "$manifest" "$repo_root" <<'PY'
 import json
 import sys
 import tomllib
@@ -60,6 +60,14 @@ forbidden = set(manifest["graph"]["forbidden"])
 expected_packages = {
     crate.get("package", crate["path"]) for crate in manifest["crate"]
 }
+# Hand-written members are roots too, so a new dependency family cannot enter
+# through them unchecked. The facade is left out, as above.
+extra_packages = set()
+for directory in manifest["layout"]["extra_members"]:
+    if directory == manifest["layout"]["facade"]:
+        continue
+    with (Path(sys.argv[3]) / directory / "Cargo.toml").open("rb") as member:
+        extra_packages.add(tomllib.load(member)["package"]["name"])
 
 packages = {package["id"]: package for package in metadata["packages"]}
 nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
@@ -68,7 +76,7 @@ reachable: set[str] = set()
 queue = [
     package_id
     for package_id, package in packages.items()
-    if package["name"] in expected_packages
+    if package["name"] in expected_packages | extra_packages
 ]
 while queue:
     package_id = queue.pop()
@@ -97,15 +105,39 @@ missing = expected_packages - versions.keys()
 for name in sorted(missing):
     problems.append(f"{name}: vendored crate is not in the resolved graph")
 
+# Packaging rewrites a path dependency to a registry requirement, so a
+# publishable package cannot depend (other than for development) on a local
+# `publish = false` package.
+local = {
+    package["name"]: package
+    for package in packages.values()
+    if package["source"] is None
+}
+for package in local.values():
+    if package["publish"] == []:
+        continue
+    for dependency in package["dependencies"]:
+        target = local.get(dependency["name"])
+        if (
+            dependency.get("path")
+            and dependency["kind"] != "dev"
+            and target is not None
+            and target["publish"] == []
+        ):
+            problems.append(
+                f"{package['name']}: publishable but depends on unpublishable "
+                f"{dependency['name']}"
+            )
+
 if problems:
-    print("the resolved graph is not Zakura-only:", file=sys.stderr)
+    print("the resolved graph failed verification:", file=sys.stderr)
     for problem in problems:
         print(f"  {problem}", file=sys.stderr)
     raise SystemExit(1)
 
 zakura = sorted(name for name in versions if name.startswith("zakura-"))
 print(
-    f"verified: {len(versions)} packages reachable from the vendored crates, "
+    f"verified: {len(versions)} packages reachable from the workspace crates, "
     f"{len(zakura)} of them zakura, no crates.io originals"
 )
 print("  " + " ".join(zakura))
