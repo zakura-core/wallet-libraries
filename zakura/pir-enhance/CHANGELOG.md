@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Depend on ipir-sp `0.1.0-rc.7` (with `reinspiring 0.1.3-rc.1` and
+  `inspiring 0.1.0-rc.3`), the release the published transparent PIR crates
+  use. ipir-sp keeps every setup ID, wire layout and certificate unchanged.
+
 ## [0.0.1-rc2] - PLANNED
 
 ### Packaging

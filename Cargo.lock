@@ -2721,12 +2721,13 @@ dependencies = [
 
 [[package]]
 name = "inspiring"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9b0e8f5cffb5d695280a49775f1a635d67a50cc86ae3862193f6739176afba7"
+checksum = "fe3c47b3ed60fef25d532e017ab3e53ebe13d6bec8821b54ed1449dce109b36e"
 dependencies = [
  "bytemuck",
  "memmap2",
+ "rand 0.8.8",
  "rand_chacha 0.3.1",
  "rayon",
  "thiserror 1.0.69",
@@ -2758,25 +2759,26 @@ dependencies = [
 
 [[package]]
 name = "ipir-sp"
-version = "0.1.0-rc.6"
+version = "0.1.0-rc.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4128030557482a837a65cb531b0c2651c4c66f4e3be49900ad3ff41ab7199bfe"
+checksum = "9dafcd5b92bf5d7c159c2df3bb6607f4c2cf1acdd018850eb7bd4b71c48dc549"
 dependencies = [
  "clap",
  "env_logger",
  "fastrand",
- "inspiring 0.1.0-rc.2",
+ "inspiring 0.1.0-rc.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "log",
  "rand 0.9.5",
  "rand_chacha 0.3.1",
  "rayon",
- "reinspiring 0.1.2",
+ "reinspiring 0.1.3-rc.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
  "sha1",
  "sha2 0.10.9",
- "simplepir-kernel 0.1.0-rc.3",
+ "simplepir-kernel 0.1.0-rc.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "valar-spiral-rs",
+ "zeroize",
 ]
 
 [[package]]
@@ -2787,17 +2789,17 @@ dependencies = [
  "clap",
  "env_logger",
  "fastrand",
- "inspiring 0.1.0-rc.3",
+ "inspiring 0.1.0-rc.3 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.7)",
  "log",
  "rand 0.9.5",
  "rand_chacha 0.3.1",
  "rayon",
- "reinspiring 0.1.3-rc.1",
+ "reinspiring 0.1.3-rc.1 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.7)",
  "serde",
  "serde_json",
  "sha1",
  "sha2 0.10.9",
- "simplepir-kernel 0.1.0-rc.4",
+ "simplepir-kernel 0.1.0-rc.4 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.7)",
  "valar-spiral-rs",
  "zeroize",
 ]
@@ -3730,11 +3732,11 @@ name = "pir-native"
 version = "0.1.0"
 source = "git+https://github.com/valargroup/wallet-pir?rev=3e705bb3a24bfc1e35e12ca6c689d440fb8bf3a8#3e705bb3a24bfc1e35e12ca6c689d440fb8bf3a8"
 dependencies = [
- "ipir-sp 0.1.0-rc.7",
+ "ipir-sp 0.1.0-rc.7 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.7)",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
  "rayon",
- "reinspiring 0.1.3-rc.1",
+ "reinspiring 0.1.3-rc.1 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.7)",
 ]
 
 [[package]]
@@ -4365,12 +4367,12 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reinspiring"
-version = "0.1.2"
+version = "0.1.3-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2637107860b7b9083f89143736c5a750c8fdeea1f3376f3f2b0eba9269b97da8"
+checksum = "40e44e05ce528b6482bda9d9060123594e08933ad32b049bdbbec4df381de4b5"
 dependencies = [
  "bytemuck",
- "inspiring 0.1.0-rc.2",
+ "inspiring 0.1.0-rc.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "memmap2",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
@@ -4387,7 +4389,7 @@ version = "0.1.3-rc.1"
 source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.7#35069f1e910de83feeae968dedff5af60e48e434"
 dependencies = [
  "bytemuck",
- "inspiring 0.1.0-rc.3",
+ "inspiring 0.1.0-rc.3 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.7)",
  "memmap2",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
@@ -5058,11 +5060,11 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "simplepir-kernel"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30dd16e9b8bd35b6598faad9b793f53333e652140b46bd0f1769365f12ad9cc6"
+checksum = "12074f1ad6dfb60d44dc652776b9a309adb058ca98970f1297c761f735427f1b"
 dependencies = [
- "inspiring 0.1.0-rc.2",
+ "inspiring 0.1.0-rc.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "rayon",
  "valar-spiral-rs",
 ]
@@ -5072,7 +5074,7 @@ name = "simplepir-kernel"
 version = "0.1.0-rc.4"
 source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.7#35069f1e910de83feeae968dedff5af60e48e434"
 dependencies = [
- "inspiring 0.1.0-rc.3",
+ "inspiring 0.1.0-rc.3 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.7)",
  "rayon",
  "valar-spiral-rs",
 ]
@@ -6873,12 +6875,12 @@ dependencies = [
  "clap",
  "hex",
  "http-body",
- "ipir-sp 0.1.0-rc.7",
+ "ipir-sp 0.1.0-rc.7 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.7)",
  "memmap2",
  "pir-control",
  "pir-observability",
  "rayon",
- "reinspiring 0.1.3-rc.1",
+ "reinspiring 0.1.3-rc.1 (git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.7)",
  "rustix",
  "serde",
  "serde_json",
@@ -8126,11 +8128,11 @@ dependencies = [
  "futures-util",
  "hex",
  "incrementalmerkletree",
- "inspiring 0.1.0-rc.2",
- "ipir-sp 0.1.0-rc.6",
+ "inspiring 0.1.0-rc.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "ipir-sp 0.1.0-rc.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
- "reinspiring 0.1.2",
+ "reinspiring 0.1.3-rc.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -8153,10 +8155,10 @@ version = "0.0.1-rc1"
 name = "zakura-pir-native"
 version = "0.0.1-rc1"
 dependencies = [
- "ipir-sp 0.1.0-rc.6",
+ "ipir-sp 0.1.0-rc.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
- "reinspiring 0.1.2",
+ "reinspiring 0.1.3-rc.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
