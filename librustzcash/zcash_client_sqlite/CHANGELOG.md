@@ -10,6 +10,20 @@ workspace.
 
 ## [Unreleased]
 
+### Changed
+
+- Transparent receipt lookups retry every content outcome (`Absent`, `Protocol`
+  and `Contradiction`) on one schedule: an hour, doubling to a day, plus up to
+  25% jitter. `Contradiction` no longer waits for a changed display map.
+- Retry jitter is drawn from the wallet's random source instead of being
+  derived from the txid, so `TransparentDetailWrite` for `WalletDb` now
+  requires `R: rand_core::Rng`.
+- The third content failure at one mined height gives a receipt lookup up: it
+  is neither due nor parked, and the receipt reads as unavailable. Request
+  failures (`Unavailable`) do not count; mining the transaction at another
+  height re-arms it. A new additive migration adds
+  `transparent_detail_work.content_failures`.
+
 ## [0.1.0-rc8] - PLANNED
 
 ### Packaging

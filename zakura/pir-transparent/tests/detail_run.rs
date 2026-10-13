@@ -5,7 +5,7 @@
 //! shard is not covered. Found facts are built by hand.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use transparent::{
@@ -153,6 +153,23 @@ impl Fixture {
             .ok()
     }
 
+    /// When the work row is next due.
+    fn next_attempt_at(&self, txid: TxId) -> SystemTime {
+        let secs: u64 = self
+            .st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT w.next_attempt_at
+                 FROM transparent_detail_work w JOIN transactions t ON t.id_tx = w.transaction_id
+                 WHERE t.txid = ?1",
+                [txid.as_ref().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
     fn view(&self, txid: TxId) -> Option<TransparentDisplayView> {
         self.st
             .wallet()
@@ -215,12 +232,13 @@ enum MapAnswer {
     Unreachable,
 }
 
-/// The fake service: one of its publications at a time, map failures on demand, and every
-/// request's path.
+/// The fake service: one of its publications at a time, map failures and malformed private
+/// replies on demand, and every request's path.
 struct Service {
     publications: Vec<TxidPublication>,
     serving: AtomicUsize,
     map: Mutex<MapAnswer>,
+    malformed: AtomicBool,
     paths: Mutex<Vec<String>>,
 }
 
@@ -230,6 +248,7 @@ impl Service {
             publications,
             serving: AtomicUsize::new(0),
             map: Mutex::new(MapAnswer::Serve),
+            malformed: AtomicBool::new(false),
             paths: Mutex::default(),
         }
     }
@@ -240,6 +259,11 @@ impl Service {
 
     fn map_answer(&self, answer: MapAnswer) {
         *self.map.lock().unwrap() = answer;
+    }
+
+    /// Flips a byte of every private reply from now on.
+    fn malform_replies(&self) {
+        self.malformed.store(true, Ordering::SeqCst);
     }
 
     fn map_sha256(&self, index: usize) -> [u8; 32] {
@@ -271,7 +295,11 @@ impl HttpExchange for Service {
             }
         }
         let publication = &self.publications[self.serving.load(Ordering::SeqCst)];
-        Ok(publication.answer(request.method, &request.path, &request.body))
+        let mut reply = publication.answer(request.method, &request.path, &request.body);
+        if self.malformed.load(Ordering::SeqCst) && request.path.contains("/query/") {
+            reply.body[0] ^= 1;
+        }
+        Ok(reply)
     }
 }
 
@@ -284,6 +312,7 @@ fn not_covering_then_covering(height: u32) -> Service {
     ])
 }
 
+const PROTOCOL: i64 = 4;
 const NOT_COVERED: i64 = 2;
 const ABSENT: i64 = 1;
 const UNAVAILABLE: i64 = 0;
@@ -817,4 +846,42 @@ fn public_answers() {
         DetailApplied::Deferred(TransparentDetailOutcome::Absent)
     );
     assert_eq!(f.work_row(txid), Some((1, Some(ABSENT), None)));
+}
+
+/// A service that answers malformed for the wallet's row and one that answers "not in the
+/// table" move the wallet alike: with the same random source, both wallets store the same
+/// next-attempt times, and both stop after the third lookup.
+#[test]
+fn malformed_and_absent_replies_share_one_schedule_and_stop_after_three() {
+    let lookups = |malformed: bool| -> (Vec<SystemTime>, Option<i64>) {
+        let mut f = wallet();
+        let txid = f.receipt(0x50, f.height);
+        let height = u64::from(f.height);
+        let exchange = Service::new(vec![TxidPublication::new(height - 5, height + 5)]);
+        if malformed {
+            exchange.malform_replies();
+        }
+        let service = TxidDisplayService::new();
+        let mut at = t0();
+        let mut due = vec![];
+        for _ in 0..3 {
+            let run = f.plan(&service, at, 8, &[]);
+            assert_eq!(f.drive(run, &service, &exchange, at), [txid]);
+            at = f.next_attempt_at(txid);
+            due.push(at);
+        }
+        // Given up: a month later nothing is looked up, nor any request sent.
+        let at = at + Duration::from_secs(30 * 24 * 3600);
+        let sent = exchange.sent();
+        let run = f.plan(&service, at, 8, &[]);
+        assert!(f.drive(run, &service, &exchange, at).is_empty());
+        assert!(exchange.paths_since(sent).is_empty());
+        assert_eq!(f.view(txid), Some(TransparentDisplayView::Unavailable));
+        (due, f.work_row(txid).and_then(|(_, outcome, _)| outcome))
+    };
+    let (malformed, outcome) = lookups(true);
+    assert_eq!(outcome, Some(PROTOCOL));
+    let (absent, outcome) = lookups(false);
+    assert_eq!(outcome, Some(ABSENT));
+    assert_eq!(malformed, absent);
 }

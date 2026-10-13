@@ -125,12 +125,15 @@ pub fn deferral(lookup: &Result<TxidLookup, TxidError>) -> Option<TransparentDet
                 retry_after: *retry_after,
             })
         }
-        Err(TxidError::Stale | TxidError::Transport(_) | TxidError::Cancelled) => {
-            Some(TransparentDetailOutcome::Unavailable { retry_after: None })
-        }
-        Err(TxidError::Refused(_) | TxidError::Protocol(_)) => {
-            Some(TransparentDetailOutcome::Protocol)
-        }
+        // A refusal comes before the server evaluates the private query, so it says nothing
+        // about the row and is retried like any other unavailable service.
+        Err(
+            TxidError::Stale
+            | TxidError::Transport(_)
+            | TxidError::Cancelled
+            | TxidError::Refused(_),
+        ) => Some(TransparentDetailOutcome::Unavailable { retry_after: None }),
+        Err(TxidError::Protocol(_)) => Some(TransparentDetailOutcome::Protocol),
     }
 }
 
@@ -314,7 +317,14 @@ mod tests {
                 Err(TxidError::Stale),
                 Some(O::Unavailable { retry_after: None }),
             ),
-            (Err(TxidError::Refused(400)), Some(O::Protocol)),
+            (
+                Err(TxidError::Refused(400)),
+                Some(O::Unavailable { retry_after: None }),
+            ),
+            (
+                Err(TxidError::Refused(404)),
+                Some(O::Unavailable { retry_after: None }),
+            ),
             (
                 Err(TxidError::Protocol(ProtocolKind::Decode)),
                 Some(O::Protocol),

@@ -381,7 +381,10 @@ ahead of other work however old it is, but only once its lookup is due.
 Failures keep the receipt pending, unavailable, or explicitly not covered.
 Retries are spaced out; work waiting for new publication data periodically
 checks for updates instead of repeating the same lookup continuously, and a
-check that fails counts too. Re-mining makes the lookup eligible again, and
+check that fails counts too. Replies that fail on content (not in the table,
+malformed, or contradicting the wallet) share one schedule, and after the third
+at one mined height the lookup stops and the receipt reads as unavailable;
+refusals and outages do not count. Re-mining makes the lookup eligible again, and
 old responses cannot overwrite newer state. Closing a receipt does not stop
 financial recovery.
 

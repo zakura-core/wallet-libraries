@@ -11,6 +11,10 @@
 - The `testing` fake txid display publication and the txid end-to-end test use
   `txid-4k8` (4,096 rows, a 180,000-entry recent window), the geometry
   production serves.
+- `deferral` maps an HTTP refusal (`TxidError::Refused`) to `Unavailable`
+  instead of `Protocol`: the server refuses before it evaluates the private
+  query, so a refusal is not a content failure and does not count toward the
+  wallet's cap of three.
 
 ## [0.0.1-rc0] - PLANNED
 
