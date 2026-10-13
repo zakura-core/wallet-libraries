@@ -64,6 +64,10 @@ impl SessionState {
         }
     }
 
+    pub(crate) fn has_transaction_journal(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub(crate) fn commit(&self) {
         if let Some(pending) = &self.pending {
             let changes = std::mem::take(&mut *pending.lock().unwrap_or_else(|e| e.into_inner()));

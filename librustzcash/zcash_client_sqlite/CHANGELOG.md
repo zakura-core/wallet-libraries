@@ -34,6 +34,8 @@ workspace.
 - `EnhancePirSession` can be shared by serialized database handles for one wallet.
   Keep it alive across syncs and temporary connections; transaction handles inherit
   it automatically. Independently opened handles otherwise start a fresh session.
+- Enhancement work reads in caller-owned SQL transactions preserve session counts
+  until committed work is read, so a rolled-back removal cannot re-arm a suspension.
 - `WalletDb` implements `EnhancePirWrite::record_ironwood_enhance_unreadable`.
   Request failures do not consume the allowance. Late results recheck their complete
   request identity so a reused position never inherits another transaction's failure.

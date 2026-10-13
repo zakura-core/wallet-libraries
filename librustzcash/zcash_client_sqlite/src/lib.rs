@@ -756,6 +756,8 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
 impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// Shares the in-memory Enhance allowance across serialized handles of this wallet.
     /// Keep the session alive across syncs; a fresh session resets the allowance.
+    /// Work reads inside caller-owned SQL transactions defer count cleanup until a later
+    /// autocommit read. Use [`Self::transactionally`] to commit cleanup with wallet writes.
     #[cfg(feature = "orchard")]
     pub fn with_enhance_pir_session(mut self, session: EnhancePirSession) -> Self {
         self.enhance_pir_session = wallet::enhance_pir::session::SessionState::new(session);

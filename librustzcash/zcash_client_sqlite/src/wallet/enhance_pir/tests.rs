@@ -3346,3 +3346,53 @@ fn completed_requests_release_their_session_count() {
     report_unreadable(&mut st, &[request]);
     assert_eq!(rejections(st.wallet().db(), request), None);
 }
+
+#[test]
+fn caller_owned_transactions_preserve_counts_until_committed_work_is_read() {
+    use crate::testing::db::{test_clock, test_rng};
+
+    for commit in [false, true] {
+        let (mut st, tx_ref, request) = fixture_with_factory(TestDbFactory::file_backed());
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+        reject_three_times(&mut st, request);
+        let session = st.wallet().db().enhance_pir_session();
+        let mut conn = rusqlite::Connection::open(st.wallet().data_file_path()).unwrap();
+        rusqlite::vtab::array::load_module(&conn).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        conn.execute(
+            "UPDATE transactions SET mined_height = NULL WHERE id_tx = ?",
+            [tx_ref.0],
+        )
+        .unwrap();
+        {
+            let db = crate::WalletDb::from_connection(
+                &mut conn,
+                *st.network(),
+                test_clock(),
+                test_rng(),
+            )
+            .with_enhancement_mode(EnhancementMode::PrivateIronwood)
+            .with_transparent_ledger_mode(TransparentLedgerMode::Public)
+            .with_enhance_pir_session(session);
+            assert!(db.transaction_enhancement_work().unwrap().is_empty());
+            assert_eq!(
+                rejections(st.wallet().db(), request),
+                Some(MAX_REJECTIONS),
+                "reading uncommitted removal must preserve the shared allowance"
+            );
+        }
+        conn.execute_batch(if commit { "COMMIT" } else { "ROLLBACK" })
+            .unwrap();
+        let work = st.wallet().db().transaction_enhancement_work().unwrap();
+        if commit {
+            assert!(work.is_empty());
+            assert_eq!(rejections(st.wallet().db(), request), None);
+        } else {
+            assert!(work.contains(&rejected_work(request)));
+            assert!(!work.contains(&query_work(request)));
+            assert_eq!(rejections(st.wallet().db(), request), Some(MAX_REJECTIONS));
+        }
+    }
+}

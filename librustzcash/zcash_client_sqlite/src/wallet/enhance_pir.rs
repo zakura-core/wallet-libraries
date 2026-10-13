@@ -584,8 +584,13 @@ pub(crate) fn transaction_enhancement_work(
     configured: Option<TransparentLedgerMode>,
     session: &SessionState,
 ) -> Result<Vec<TransactionEnhancementWork>, SqliteClientError> {
+    // A caller-owned transaction can expose temporary removals that later roll back.
+    // Only prune committed state, or stage cleanup in the wallet's commit journal.
+    let can_prune = conn.is_autocommit() || session.has_transaction_journal();
     transparent_ledger::with_read_snapshot(conn, |conn| {
-        retain_live_failures(conn, session)?;
+        if can_prune {
+            retain_live_failures(conn, session)?;
+        }
         let private = mode == EnhancementMode::PrivateIronwood;
         let public_authority = transparent_ledger::retains_public_authority(conn, configured)?;
         let current_generation = transparent_ledger::durable_policy(conn)?
