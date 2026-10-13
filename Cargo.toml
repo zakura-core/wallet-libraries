@@ -21,6 +21,7 @@ members = [
     "zakura/transaction-status",
     "zakura/pir-transparent",
     "zakura/one-time-ivk",
+    "zakura/pir-receiver",
     "zakura/near-intents",
 ]
 

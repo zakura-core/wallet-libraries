@@ -111,8 +111,9 @@ class PublishingTests(unittest.TestCase):
     def test_real_manifest_order_covers_all_workspace_crates(self):
         packages, upstream = release.release_packages(release.ROOT)
         workspace = release.tomllib.loads((release.ROOT / "Cargo.toml").read_text())["workspace"]
-        members = {release.tomllib.loads((release.ROOT / directory / "Cargo.toml").read_text())["package"]["name"]
-                   for directory in workspace["members"]}
+        manifests = [release.tomllib.loads((release.ROOT / directory / "Cargo.toml").read_text())["package"]
+                     for directory in workspace["members"]]
+        members = {package["name"] for package in manifests if package.get("publish") is not False}
         self.assertEqual({p["name"] for p in packages}, members)
         # wallet-pir's crates come from crates.io, so no git prerequisite remains.
         self.assertEqual(upstream, [])

@@ -24,8 +24,9 @@ The wallet owns reservation, persistence, coverage, lifecycle, and note selectio
 There is no alternate balance store in this crate.
 
 The SQLite backend implements this contract with its `orchard` feature: durable
-key registration, scanning, completion, and restore sweeps. Its rustdoc, starting
-at `zcash_client_sqlite::wallet::one_time_ivk`, documents the calls a wallet makes.
+key registration, scanning, completion, and the restore sweeps that
+`zakura-pir-receiver` runs. Its rustdoc, starting at
+`zcash_client_sqlite::wallet::one_time_ivk`, documents the calls a wallet makes.
 
 Software PCZT signing of one-time-key notes works through the same builder.
 Hardware signers need firmware qualification before one-time keys are enabled for
