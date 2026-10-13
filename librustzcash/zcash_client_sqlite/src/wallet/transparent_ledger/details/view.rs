@@ -21,7 +21,7 @@ use crate::{AccountUuid, error::SqliteClientError, wallet::TxQueryType};
 use super::super::{output_observation_condition, resolve_mode};
 use super::codes::{NOT_COVERED, NOT_YET_PUBLISHED};
 use super::script::spent_address;
-use super::sql::listable_work_sql;
+use super::sql::{given_up_work_sql, listable_work_sql};
 use super::store::stored_facts;
 
 type OwnedInputScripts = BTreeMap<([u8; 32], u32), Vec<u8>>;
@@ -565,7 +565,23 @@ fn view_from_work(
         ListedWork::Listed(Some(NOT_COVERED)) => TransparentDisplayView::NotCovered,
         ListedWork::Listed(Some(_)) => TransparentDisplayView::Unavailable,
         // Payload retrieval fetches the raw transaction only under public authority.
-        ListedWork::None if !mode.retains_public_authority() => TransparentDisplayView::Unavailable,
+        ListedWork::None if !mode.retains_public_authority() => {
+            let given_up: bool = conn.query_row(
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM transparent_detail_work w
+                                    JOIN transactions t ON t.id_tx = w.transaction_id
+                                    WHERE w.transaction_id = :tx AND {})",
+                    given_up_work_sql()
+                ),
+                named_params![":tx": id_tx],
+                |row| row.get(0),
+            )?;
+            if given_up {
+                TransparentDisplayView::GaveUp
+            } else {
+                TransparentDisplayView::Unavailable
+            }
+        }
         ListedWork::None => {
             let payload_owned: bool = conn.query_row(
                 "SELECT EXISTS (SELECT 1 FROM tx_retrieval_queue

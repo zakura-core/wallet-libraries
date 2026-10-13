@@ -19,15 +19,19 @@ use std::{
 use fixture::{GEOMETRY, Loopback, SEAL, Server, ShardSpec, WIDE, synthetic};
 use regex::Regex;
 use rusqlite::{Connection, OpenFlags, types::Value};
-use transparent::{address::TransparentAddress, bundle::OutPoint, keys::TransparentKeyScope};
+use transparent::{
+    address::TransparentAddress,
+    bundle::OutPoint,
+    keys::{IncomingViewingKey as _, NonHardenedChildIndex, TransparentKeyScope},
+};
 use transparent_events::{ReceiveEvent, SpendEvent, TransparentEvent, Txid};
 use transparent_filter::{Recut, ScriptBytes, SealParameters, ShardMap};
 use transparent_wallet::http::{HttpOptions, HttpShardTransport};
 use zakura_pir_transparent::{
-    ApplyAction, ApplyError, BatchState, Companion, CompanionDir, ForgetError, HoldCause,
-    Interrupted, Outcome, PassError, PassLimits, PassPlan, PassReport, Progress, RecoveryBatch,
-    Retry, ShardTransport, Step, TransparentHistoryRecoveryConfig, Trust, Ungated, WalletChain,
-    WithdrawnCause, WriteGate, forget_private_recovery,
+    ApplyAction, ApplyError, BatchState, Companion, CompanionDir, FailedEntries, ForgetError,
+    HoldCause, Interrupted, Outcome, PassError, PassLimits, PassPlan, PassReport, Progress,
+    RecoveryBatch, Retry, ShardTransport, Step, TransparentHistoryRecoveryConfig, Trust, Ungated,
+    WalletChain, WithdrawnCause, WriteGate, forget_private_recovery,
 };
 use zcash_client_backend::data_api::{
     Account as _, CoinbaseFilter, InputSource as _, WalletRead as _,
@@ -182,6 +186,7 @@ fn sealed(start: u64, end: u64, events: Vec<(ScriptBytes, TransparentEvent)>) ->
         supersedes: String::new(),
         page_span: 0,
         events,
+        malformed_entries: Vec::new(),
     }
 }
 
@@ -196,6 +201,7 @@ fn tail(end: u64, revision: u32, events: Vec<(ScriptBytes, TransparentEvent)>) -
         supersedes: String::new(),
         page_span: 0,
         events,
+        malformed_entries: Vec::new(),
     }
 }
 
@@ -233,11 +239,14 @@ impl Seen {
 }
 
 /// A pass: what it reported, its batch, whether settling it grew the account's
-/// window, and the step its plan takes next.
+/// window, whether it left work for the next sync, and the step its plan takes next.
 struct Pass {
     report: PassReport,
     batch: Seen,
     grew: bool,
+    /// Settling grew the window or changed the watched addresses: the next sync
+    /// passes over addresses this pass did not.
+    new_work: bool,
     step: Step,
 }
 
@@ -571,7 +580,9 @@ impl Fixture {
             }
         };
         assert!(companion.take_latest::<AccountUuid>().is_none());
-        let step = plan.next(&report, &settled, self.watch());
+        let fresh = self.watch();
+        let new_work = grew || fresh.addresses != plan.watch().addresses;
+        let step = plan.next(&report, &settled, fresh);
         if settled.is_err() {
             assert_eq!(step, Step::Hold(HoldCause::Unreconciled));
         }
@@ -579,25 +590,35 @@ impl Fixture {
             report,
             batch,
             grew,
+            new_work,
             step,
         })
     }
 
-    /// Passes as the plan says until it stops, treating a wait as the end of the
-    /// run. Panics if the plan ends on its pass limit still asking for more.
+    /// One sync: passes as a fresh plan says until it stops. Only refreshes pass
+    /// again; every counted pass ends the sync, including lag or overload.
     fn drive(&mut self) -> Pass {
         let mut plan = PassPlan::new(self.watch(), PassLimits::default());
         assert_eq!(plan.first(), Step::Pass);
         loop {
             let pass = self.pass_in(&mut plan).expect("a pass");
-            match pass.step {
-                Step::Pass | Step::Refresh => {}
-                Step::Done(Some(Retry::More)) => {
-                    panic!("recovery did not settle within eight passes")
-                }
-                _ => return pass,
+            if pass.step != Step::Refresh {
+                assert_ne!(pass.step, Step::Pass, "a counted pass ends the sync");
+                return pass;
             }
         }
+    }
+
+    /// Syncs until one ends [`Retry::Complete`] and leaves no new work, returning its
+    /// last pass and the number of syncs it took. Panics after `max` syncs.
+    fn sync_until_complete(&mut self, max: usize) -> (Pass, usize) {
+        for syncs in 1..=max {
+            let pass = self.drive();
+            if pass.step == Step::Done(Some(Retry::Complete)) && !pass.new_work {
+                return (pass, syncs);
+            }
+        }
+        panic!("recovery did not complete within {max} syncs")
     }
 
     fn activate(&mut self) {
@@ -710,37 +731,14 @@ impl Fixture {
     /// Every row of the wallet's tables, those named `tpir_` excluded unless
     /// `ledger`, in a canonical order.
     fn dump(&self, ledger: bool) -> Vec<(String, Vec<String>)> {
-        let conn = self.st.wallet().conn();
-        let tables: Vec<String> = conn
-            .prepare(
-                "SELECT name FROM sqlite_master WHERE type = 'table'
-                 AND name NOT LIKE 'sqlite!_%' ESCAPE '!' ORDER BY name",
-            )
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        tables
-            .into_iter()
-            .filter(|table| ledger || !table.starts_with("tpir_"))
-            .map(|table| {
-                let mut statement = conn.prepare(&format!("SELECT * FROM \"{table}\"")).unwrap();
-                let columns = statement.column_count();
-                let mut rows: Vec<String> = statement
-                    .query_map([], |row| {
-                        (0..columns)
-                            .map(|i| row.get::<_, Value>(i))
-                            .collect::<Result<Vec<_>, _>>()
-                            .map(|values| format!("{values:?}"))
-                    })
-                    .unwrap()
-                    .collect::<Result<_, _>>()
-                    .unwrap();
-                rows.sort();
-                (table, rows)
-            })
-            .collect()
+        dump_tables(self.st.wallet().conn(), |table| {
+            ledger || !table.starts_with("tpir_")
+        })
+    }
+
+    /// Every row of the companion's tables, in a canonical order.
+    fn companion_dump(&self) -> Vec<(String, Vec<String>)> {
+        dump_tables(&self.companion_db(), |_| true)
     }
 
     /// A read-only connection to the companion's database.
@@ -987,9 +985,10 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
 
     // Untrusted: the commits are observed, never trusted, and the account stays
     // an isolated candidate. Its last external address received, so its window
-    // grew and the new addresses were recovered too.
+    // grew and the next sync recovered the new addresses too.
     f.publish(&lifecycle(&owned, t1, 0, false), SEAL);
-    let observed = f.drive();
+    let (observed, syncs) = f.sync_until_complete(3);
+    assert_eq!(syncs, 2);
     assert_eq!(observed.batch.state, BatchState::Ready);
     assert_eq!(observed.batch.progress.outcome, Outcome::Complete);
     assert_eq!(observed.batch.progress.covered_through, t1);
@@ -1085,8 +1084,8 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     let lagging = f.pass().unwrap();
     assert_eq!(lagging.batch.state, BatchState::Ready);
     assert_eq!(lagging.batch.progress.outcome, Outcome::Behind);
-    // The plan waits for the publication rather than passing again at once.
-    assert_eq!(lagging.step, Step::Wait(Retry::BEHIND));
+    // The next sync waits for the publication; this sync sends no further pass.
+    assert_eq!(lagging.step, Step::Done(Some(Retry::After(Retry::BEHIND))));
     assert_eq!(lagging.batch.progress.covered_through, t2);
     assert!(!lagging.batch.commits.is_empty());
     assert!(
@@ -1160,10 +1159,9 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
         kept,
         before.iter().map(|row| (row.0, row.1)).collect::<Vec<_>>()
     );
-    let retried = match reset.step {
-        Step::Pass => f.drive(),
-        _ => reset,
-    };
+    // The retry is inside the pass: the plan never passes again at once.
+    assert_eq!(reset.step, Step::Done(Some(Retry::Complete)));
+    let retried = reset;
     assert_eq!(retried.batch.state, BatchState::Ready);
     assert_eq!(retried.batch.progress.outcome, Outcome::Complete);
     let new_tail = tail_revision(&retried.batch);
@@ -1219,6 +1217,430 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     // Privacy, over every request of every pass: the service's routes only, no
     // watched script, and never a filter for S0, which lies below the floor.
     f.assert_private(&[0]);
+}
+
+/// Every request the service received from `from` on, as (method, path, query, body
+/// length), with revision digests masked: what the service sees of a sync's shape.
+fn transcript(f: &Fixture, from: usize) -> Vec<(String, String, Option<String>, usize)> {
+    let digest = Regex::new("[0-9a-f]{64}").unwrap();
+    f.server.requests()[from..]
+        .iter()
+        .map(|request| {
+            (
+                request.method.clone(),
+                digest.replace_all(&request.path, "<digest>").into_owned(),
+                request.query.clone(),
+                request.body.len(),
+            )
+        })
+        .collect()
+}
+
+/// Every row of `conn`'s tables that `keep` selects, by table, in a canonical order.
+fn dump_tables(conn: &Connection, keep: impl Fn(&str) -> bool) -> Vec<(String, Vec<String>)> {
+    let tables: Vec<String> = conn
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table'
+             AND name NOT LIKE 'sqlite!_%' ESCAPE '!' ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    tables
+        .into_iter()
+        .filter(|table| keep(table))
+        .map(|table| {
+            let mut statement = conn.prepare(&format!("SELECT * FROM \"{table}\"")).unwrap();
+            let columns = statement.column_count();
+            let mut rows: Vec<String> = statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|i| row.get::<_, Value>(i))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|values| format!("{values:?}"))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            rows.sort();
+            (table, rows)
+        })
+        .collect()
+}
+
+/// A service that forges a receive at the last address of the wallet's window learns
+/// nothing from the sync it answers: the wallet sends the same requests as it does to
+/// a service without the receive, and covers the grown window only at the next sync.
+///
+/// Both services hold one receive for that address in S1, which straddles the
+/// birthday, so its filter matches and its directory row is read alike. The forged
+/// one lies above the birthday; the other below, where the wallet ignores it. No
+/// other event pays the wallet, so the honest window never grows, and the forged
+/// wallet's grown window would cost another pass's requests if it started one.
+fn forged_receive_does_not_start_another_pass(publication_behind: bool) {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (birthday, t1) = (H0 + 250, H0 + 649);
+    let target = t1 + if publication_behind { 20 } else { 0 };
+    let retry = if publication_behind {
+        Retry::After(Retry::BEHIND)
+    } else {
+        Retry::Complete
+    };
+    let sync = |forged: bool| {
+        let mut f = Fixture::new(birthday, target);
+        // Nobody's addresses: the lifecycle pays the wallet nothing itself.
+        let owned = Owned {
+            a0: TransparentAddress::PublicKeyHash([0xec; 20]),
+            a1: TransparentAddress::PublicKeyHash([0xed; 20]),
+            last: TransparentAddress::PublicKeyHash([0xee; 20]),
+        };
+        let mut shards = lifecycle(&owned, t1, 0, false);
+        let at = if forged { birthday + 60 } else { birthday - 40 };
+        shards[1]
+            .events
+            .push((script(f.last_external()), receive(at, txid(3), 1, 7_000)));
+        f.publish(&shards, SEAL);
+        let seen = f.server.requests().len();
+        let pass = f.drive();
+        let requests = transcript(&f, seen);
+        (f, pass, requests)
+    };
+    let (mut forged, forged_pass, forged_requests) = sync(true);
+    let (honest, honest_pass, honest_requests) = sync(false);
+
+    // One pass each, and the service sees the same requests.
+    assert_eq!(forged_pass.step, Step::Done(Some(retry)));
+    assert_eq!(honest_pass.step, Step::Done(Some(retry)));
+    assert!(!forged_requests.is_empty());
+    assert_eq!(forged_requests, honest_requests);
+
+    // The forged receive at the last address grows the forged wallet's window by a
+    // whole gap, which only its next sync covers; the honest window stays empty.
+    let window = |f: &Fixture| -> BTreeSet<_> {
+        f.watch()
+            .addresses
+            .iter()
+            .filter(|watched| matches!(watched.origin, WatchOrigin::CandidateWindow { .. }))
+            .map(|watched| watched.address)
+            .collect()
+    };
+    let (forged_window, honest_window) = (window(&forged), window(&honest));
+    assert!(honest_window.is_empty());
+    assert!(!forged_window.is_empty());
+    assert!(
+        forged_window
+            .iter()
+            .all(|address| !forged.watched.contains(&pubkey_hash(*address)))
+    );
+    let seen = forged.server.requests().len();
+    let next = forged.drive();
+    assert!(forged.server.requests().len() > seen);
+    assert_eq!(next.step, Step::Done(Some(retry)));
+    assert!(!next.new_work);
+    assert_eq!(next.report.progress.covered_through, t1);
+    assert!(
+        forged_window
+            .iter()
+            .all(|address| forged.watched.contains(&pubkey_hash(*address)))
+    );
+}
+
+#[test]
+fn a_forged_receive_does_not_start_another_pass() {
+    forged_receive_does_not_start_another_pass(false);
+}
+
+/// Publication lag must not let a forged receive steer the next sync's pass.
+#[test]
+fn a_forged_receive_with_publication_lag_does_not_start_another_pass() {
+    forged_receive_does_not_start_another_pass(true);
+}
+
+/// A pass behind the publication ends its sync with a retry delay. A fresh plan
+/// at the next sync covers what the publication has since caught up to.
+#[test]
+fn a_lagging_publication_continues_at_the_next_sync() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (birthday, t1, t2) = (H0 + 250, H0 + 649, H0 + 669);
+    let mut f = Fixture::new(birthday, t2);
+    let owned = Owned {
+        a0: f.derived(TransparentKeyScope::EXTERNAL, 0),
+        a1: f.derived(TransparentKeyScope::EXTERNAL, 1),
+        last: f.last_external(),
+    };
+    // Trusted, so the replaced tail reconciles rather than holding the account.
+    f.trust_service();
+    f.publish(&lifecycle(&owned, t1, 0, false), SEAL);
+    let mut plan = PassPlan::new(f.watch(), PassLimits::default());
+    assert_eq!(plan.first(), Step::Pass);
+    let lagging = f.pass_in(&mut plan).expect("a pass");
+    assert_eq!(lagging.batch.progress.outcome, Outcome::Behind);
+    assert_eq!(lagging.batch.progress.covered_through, t1);
+    assert_eq!(lagging.step, Step::Done(Some(Retry::After(Retry::BEHIND))));
+
+    f.publish(&lifecycle(&owned, t2, 1, false), SEAL);
+    let mut plan = PassPlan::new(f.watch(), PassLimits::default());
+    assert_eq!(plan.first(), Step::Pass);
+    let caught_up = f.pass_in(&mut plan).expect("a pass");
+    assert_eq!(caught_up.batch.progress.outcome, Outcome::Complete);
+    assert_eq!(caught_up.batch.progress.covered_through, t2);
+    assert_eq!(caught_up.step, Step::Done(Some(Retry::Complete)));
+}
+
+/// A companion a format-6 build wrote (wallet-pir `0.1.0-rc.3`) opens under the
+/// same name and upgrades in place: it keeps every row it held, and its next sync
+/// asks the service exactly what the companion would have asked before.
+#[test]
+fn a_format_six_companion_upgrades_in_place() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let t1 = H0 + 649;
+    let mut f = Fixture::new(H0 + 250, t1);
+    let owned = Owned {
+        a0: f.derived(TransparentKeyScope::EXTERNAL, 0),
+        a1: f.derived(TransparentKeyScope::EXTERNAL, 1),
+        last: f.last_external(),
+    };
+    f.publish(&lifecycle(&owned, t1, 0, false), SEAL);
+    f.sync_until_complete(8);
+    let seen = f.server.requests().len();
+    let before = f.drive();
+    let asked = transcript(&f, seen);
+    let held = f.companion_dump();
+
+    // As a format-6 build leaves it: no content-failure counts.
+    f.companion = None;
+    Connection::open(f.companion_path())
+        .unwrap()
+        .execute_batch(
+            "DROP TABLE failed_entries;
+             UPDATE wallet_meta SET value = '6' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+
+    f.open();
+    assert_eq!(f.companion_dump(), held);
+    let seen = f.server.requests().len();
+    let after = f.drive();
+    assert_eq!(transcript(&f, seen), asked);
+    assert_eq!(after.report.progress.outcome, Outcome::Complete);
+    assert_eq!(after.step, before.step);
+    let companions: Vec<_> = std::fs::read_dir(f.companions().path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "sqlite")
+        })
+        .collect();
+    assert_eq!(companions, [f.companion_path()]);
+    f.assert_private(&[0]);
+}
+
+/// Restore latency at one pass per sync: receives at external indices 0, 9, 18 and
+/// 25 under the default external gap of 10 take one sync per window step.
+#[test]
+fn restore_needs_one_sync_per_window_step() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let t1 = H0 + 649;
+    let mut f = Fixture::new(H0 + 250, t1);
+    let external =
+        f.st.test_account()
+            .unwrap()
+            .usk()
+            .transparent()
+            .to_account_pubkey()
+            .derive_external_ivk()
+            .unwrap();
+    let at = |index: u32| {
+        external
+            .derive_address(NonHardenedChildIndex::from_index(index).unwrap())
+            .unwrap()
+    };
+    assert_eq!(f.last_external(), at(9));
+    let mut s1 = noise(H0 + 200, H0 + 399, 1);
+    s1.push((script(at(0)), receive(H0 + 300, txid(1), 0, 10_000)));
+    s1.push((script(at(9)), receive(H0 + 350, txid(2), 0, 20_000)));
+    let mut s2 = noise(H0 + 400, H0 + 599, 2);
+    s2.push((script(at(18)), receive(H0 + 450, txid(3), 0, 30_000)));
+    let mut tail_events = noise(H0 + 600, t1, 3);
+    tail_events.push((script(at(25)), receive(H0 + 620, txid(4), 0, 40_000)));
+    f.publish(
+        &[
+            sealed(H0, H0 + 199, noise(H0, H0 + 199, 0)),
+            sealed(H0 + 200, H0 + 399, s1),
+            sealed(H0 + 400, H0 + 599, s2),
+            tail(t1, 0, tail_events),
+        ],
+        SEAL,
+    );
+    let (last, syncs) = f.sync_until_complete(8);
+    assert_eq!(syncs, 4);
+    assert_eq!(last.report.progress.covered_through, t1);
+    let received =
+        f.st.wallet()
+            .db()
+            .transparent_candidate_recovery(f.account)
+            .unwrap()
+            .receives
+            .len();
+    assert_eq!(received, 4);
+}
+
+/// A publication paying A0 in S1 and A1 in S2, both above the birthday at `H0 + 250`,
+/// through `t1`. With `malformed`, S1 publishes A0's directory entry malformed. A0's
+/// one receive is inline in its entry, so an honest S1 sends no page query for it.
+fn failing_entry(
+    a0: TransparentAddress,
+    a1: TransparentAddress,
+    t1: u64,
+    malformed: bool,
+) -> Vec<ShardSpec> {
+    let mut s1 = noise(H0 + 200, H0 + 399, 1);
+    s1.push((script(a0), receive(H0 + 300, txid(1), 0, 10_000)));
+    let mut s2 = noise(H0 + 400, H0 + 599, 2);
+    s2.push((script(a1), receive(H0 + 450, txid(2), 0, 20_000)));
+    let mut shards = vec![
+        sealed(H0, H0 + 199, noise(H0, H0 + 199, 0)),
+        sealed(H0 + 200, H0 + 399, s1),
+        sealed(H0 + 400, H0 + 599, s2),
+        tail(t1, 0, noise(H0 + 600, t1, 3)),
+    ];
+    if malformed {
+        shards[1].malformed_entries = vec![script(a0)];
+    }
+    shards
+}
+
+/// The receives the wallet holds as candidate recovery, by txid.
+fn candidate_receives(f: &Fixture) -> BTreeSet<[u8; 32]> {
+    f.st.wallet()
+        .db()
+        .transparent_candidate_recovery(f.account)
+        .unwrap()
+        .receives
+        .iter()
+        .map(|event| *event.outpoint.hash())
+        .collect()
+}
+
+/// Directory queries the service received for shard `shard_id` from `from` on.
+fn directory_queries(f: &Fixture, shard_id: u64, from: usize) -> usize {
+    let route = Regex::new(&format!(
+        "^/v2/shards/{shard_id}/revisions/[0-9a-f]{{64}}/query/directory$"
+    ))
+    .unwrap();
+    f.server.requests()[from..]
+        .iter()
+        .filter(|request| route.is_match(&request.path))
+        .count()
+}
+
+/// A service that publishes A0's directory entry malformed fails that one entry, not
+/// the sync: every other shard settles, A1's receive among them, but A0 stays
+/// uncovered over S1, so the account cannot be activated. Each sync asks the entry
+/// once more, never twice in one sync, and the third failure holds the account. The
+/// entry is not queried again.
+#[test]
+fn a_malformed_entry_fails_alone_and_its_third_failure_holds_the_account() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let t1 = H0 + 649;
+    let mut f = Fixture::new(H0 + 250, t1);
+    let (a0, a1) = (
+        f.derived(TransparentKeyScope::EXTERNAL, 0),
+        f.derived(TransparentKeyScope::EXTERNAL, 1),
+    );
+    f.publish(&failing_entry(a0, a1, t1, true), SEAL);
+
+    for sync in 1..=3usize {
+        let seen = f.server.requests().len();
+        let pass = f.drive();
+        assert_eq!(directory_queries(&f, 1, seen), 2, "sync {sync}");
+        assert_eq!(pass.report.state, BatchState::Ready, "sync {sync}");
+        assert_eq!(
+            pass.report.progress.outcome,
+            Outcome::Stalled,
+            "sync {sync}"
+        );
+        assert!(pass.report.progress.covered_through < t1, "sync {sync}");
+        let held = usize::from(sync == 3);
+        assert_eq!(
+            pass.report.failed_entries,
+            FailedEntries { entries: 1, held },
+            "sync {sync}"
+        );
+        assert_eq!(pass.report.retry(), Retry::Stalled, "sync {sync}");
+        let expected = if sync < 3 {
+            Step::Done(Some(Retry::Stalled))
+        } else {
+            Step::Hold(HoldCause::FailedEntries)
+        };
+        assert_eq!(pass.step, expected, "sync {sync}");
+
+        // The other shards settled: A1's receive in S2 is the wallet's, A0's is not.
+        assert_eq!(
+            candidate_receives(&f),
+            BTreeSet::from([txid(2).0]),
+            "sync {sync}"
+        );
+        assert!(
+            f.st.wallet_mut()
+                .db_mut()
+                .activate_transparent_ledger(f.account)
+                .is_err(),
+            "sync {sync}"
+        );
+    }
+
+    // A caller that passed the held account anyway: the entry is no longer queried.
+    let seen = f.server.requests().len();
+    let pass = f.drive();
+    assert_eq!(directory_queries(&f, 1, seen), 0);
+    assert_eq!(
+        pass.report.failed_entries,
+        FailedEntries {
+            entries: 1,
+            held: 1
+        }
+    );
+    assert_eq!(pass.step, Step::Hold(HoldCause::FailedEntries));
+    f.assert_private(&[0]);
+}
+
+/// A service that publishes the wallet's directory entry malformed learns nothing
+/// from the sync it answers when the honest entry is inline: the wallet sends the
+/// same requests as it does to the honest service.
+#[test]
+fn a_malformed_entry_sends_what_an_inline_one_does() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let t1 = H0 + 649;
+    let sync = |malformed: bool| {
+        let mut f = Fixture::new(H0 + 250, t1);
+        let (a0, a1) = (
+            f.derived(TransparentKeyScope::EXTERNAL, 0),
+            f.derived(TransparentKeyScope::EXTERNAL, 1),
+        );
+        f.publish(&failing_entry(a0, a1, t1, malformed), SEAL);
+        let seen = f.server.requests().len();
+        let pass = f.drive();
+        (pass, transcript(&f, seen))
+    };
+    let (corrupt, corrupt_requests) = sync(true);
+    let (honest, honest_requests) = sync(false);
+
+    assert_eq!(honest.step, Step::Done(Some(Retry::Complete)));
+    assert_eq!(honest.report.failed_entries, FailedEntries::default());
+    assert_eq!(corrupt.step, Step::Done(Some(Retry::Stalled)));
+    assert_eq!(corrupt.report.failed_entries.entries, 1);
+    let pages = Regex::new(PAGES_QUERY).unwrap();
+    assert!(
+        !honest_requests
+            .iter()
+            .any(|(_, path, _, _)| pages.is_match(path))
+    );
+    assert!(!honest_requests.is_empty());
+    assert_eq!(corrupt_requests, honest_requests);
 }
 
 /// Through a real pass: a caller that is stopping is not retried after a publication change,
@@ -1367,7 +1789,7 @@ fn growing_tail_pages_queries_select_only_its_rows() {
         ],
         SEAL,
     );
-    let pass = f.drive();
+    let (pass, _) = f.sync_until_complete(3);
     assert_eq!(pass.batch.state, BatchState::Ready);
     assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
     f.activate();
@@ -1468,7 +1890,7 @@ fn a_history_across_page_shards_recovers_and_catch_up_stops_at_the_cached_run() 
     // pages-0 sealed over +0..=+9, pages-1 open over +10..=+19.
     assert_eq!(map.shards[3].page_segments, 2, "two page shards");
 
-    let pass = f.drive();
+    let (pass, _) = f.sync_until_complete(3);
     assert_eq!(pass.batch.state, BatchState::Ready);
     assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
     f.activate();
@@ -1515,7 +1937,7 @@ fn a_history_across_page_shards_recovers_and_catch_up_stops_at_the_cached_run() 
     fresh.trust_service();
     let a0 = fresh.derived(TransparentKeyScope::EXTERNAL, 0);
     fresh.publish(&decoupled(a0, grown_end, 1), SEAL);
-    let pass = fresh.drive();
+    let (pass, _) = fresh.sync_until_complete(3);
     assert_eq!(pass.batch.state, BatchState::Ready);
     assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
     fresh.activate();
@@ -1639,6 +2061,7 @@ fn before_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
             supersedes: String::new(),
             page_span: 0,
             events: noise(H0 + 500, RECUT_TIP, 4),
+            malformed_entries: Vec::new(),
         },
     ]
 }
@@ -1665,6 +2088,7 @@ fn after_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
             supersedes: String::new(),
             page_span: 0,
             events: [s1.events, s2.events].concat(),
+            malformed_entries: Vec::new(),
         },
         ShardSpec { revision: 1, ..s3 },
         ShardSpec {
@@ -1691,7 +2115,7 @@ fn recovered_before_recut() -> (
     f.trust_service();
     let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
     let map = f.publish(&before_recut(a0), SEAL);
-    let first = f.drive();
+    let (first, _) = f.sync_until_complete(3);
     assert_eq!(first.batch.state, BatchState::Ready);
     assert_eq!(first.batch.progress.outcome, Outcome::Complete);
     let tail = tail_revision(&first.batch);
@@ -2027,7 +2451,7 @@ fn private_details_end_to_end() {
         ],
         SEAL,
     );
-    assert_eq!(f.drive().batch.state, BatchState::Ready);
+    assert_eq!(f.sync_until_complete(3).0.batch.state, BatchState::Ready);
     f.activate();
     // Both receives are projected; spendability is unchanged by what follows.
     let spendable = f.spendable().unwrap();
@@ -2733,6 +3157,7 @@ fn stale_middle_retirement_batch_preserves_reconciliation_across_reopen() {
         supersedes: String::new(),
         page_span: 0,
         events: noise(H0 + 1000, target, 5),
+        malformed_entries: Vec::new(),
     });
     f.publish(&shards, SEAL);
     let batch = f.recover().unwrap();

@@ -396,6 +396,83 @@ mod tests {
         .unwrap()
     }
 
+    /// Upgrading an existing companion keeps its filename and catalog evidence.
+    #[test]
+    fn opening_an_existing_cache_upgrades_it_without_recreating_the_companion() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = CompanionDir::new(temp.path());
+        drop(open(&dir, A, ORIGIN, &[A]));
+        let path = dir.companion_path(A, ORIGIN);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        // Format 6 has the same store and catalog layout except for failure counts.
+        // The reference-store tests separately build the published schema verbatim.
+        db.execute_batch(
+            "DROP TABLE failed_entries;
+             UPDATE wallet_meta SET value='6' WHERE key='schema_version';
+             INSERT INTO wallet_meta VALUES ('upgrade-test', 'retained');
+             INSERT INTO commits VALUES (22, 'shard', 'retained');",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO pir_bridge_catalog
+             (source, start_height, digest, sealed, lineage, revision, height, hash, exported, current)
+             VALUES (?1, 0, 'saved', 1, 4, ?2, 99, ?3, 1, 1)",
+            rusqlite::params![vec![1u8; 32], vec![2u8; 32], vec![3u8; 32]],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO pir_bridge_exports
+             (source, lineage, revision, sealed, height, hash)
+             VALUES (?1, 4, ?2, 1, 99, ?3)",
+            rusqlite::params![vec![1u8; 32], vec![2u8; 32], vec![3u8; 32]],
+        )
+        .unwrap();
+        drop(db);
+
+        let companion = open(&dir, A, ORIGIN, &[A]);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let version: String = db
+            .query_row(
+                "SELECT value FROM wallet_meta WHERE key='schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "7");
+        let marker: String = db
+            .query_row(
+                "SELECT value FROM wallet_meta WHERE key='upgrade-test'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, "retained");
+        let saved: (u64, u64, bool, bool) = db
+            .query_row(
+                "SELECT lineage, height, exported, current FROM pir_bridge_catalog",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(saved, (4, 99, true, true));
+        let exports: u64 = db
+            .query_row("SELECT COUNT(*) FROM pir_bridge_exports", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(exports, 1);
+        let last: u64 = db
+            .query_row("SELECT MAX(id) FROM commits", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(last, 22);
+        let failures: u64 = db
+            .query_row("SELECT COUNT(*) FROM failed_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(failures, 0);
+        drop(db);
+        drop(companion);
+        drop(open(&dir, A, ORIGIN, &[A]));
+        assert!(path.exists());
+    }
+
     #[test]
     fn names_bind_the_account_origin_and_schema() {
         let dir = CompanionDir::new("/wallet.db.tpir");

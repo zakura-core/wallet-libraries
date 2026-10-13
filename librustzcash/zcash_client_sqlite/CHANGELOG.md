@@ -33,7 +33,7 @@ workspace.
   requires `R: rand_core::Rng`.
 - Without public authority, the third content failure at one mined height
   gives a receipt lookup up: it is neither due nor parked, and the receipt
-  reads as unavailable. Request failures (`Unavailable`) do not count; mining
+  reads as `TransparentDisplayView::GaveUp`. Request failures (`Unavailable`) do not count; mining
   the transaction at another height re-arms it. Under public authority nothing
   counts, and work given up earlier is listed again. A new additive migration
   adds `transparent_detail_work.content_failures`.
@@ -44,6 +44,21 @@ workspace.
   (`one_time_key_id IS NULL`) in every build; an ordinary wallet has none. The
   `ironwood_transparent_output_shape` migration now requeues memos itself, without that
   filter, since it can run before the column exists.
+
+### Added
+
+- Enhance PIR replies rejected or unreadable three times suspend that request for the
+  open-wallet session. Counts are in memory, with no new table or migration. A fresh
+  session restores the allowance; rescans, different metadata positions and rewinds
+  re-arm existing work only after their database operation commits.
+- `EnhancePirSession` can be shared by serialized database handles for one wallet.
+  Keep it alive across syncs and temporary connections; transaction handles inherit
+  it automatically. Independently opened handles otherwise start a fresh session.
+- Enhancement work reads in caller-owned SQL transactions preserve session counts
+  until committed work is read, so a rolled-back removal cannot re-arm a suspension.
+- `WalletDb` implements `EnhancePirWrite::record_ironwood_enhance_unreadable`.
+  Request failures do not consume the allowance. Late results recheck their complete
+  request identity so a reused position never inherits another transaction's failure.
 
 ## [0.1.0-rc8] - PLANNED
 

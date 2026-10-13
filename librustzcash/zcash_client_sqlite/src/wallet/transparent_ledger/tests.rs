@@ -1680,6 +1680,7 @@ mod handles {
             &snapshot,
             EnhancementMode::Standard,
             Some(Public),
+            &crate::wallet::enhance_pir::session::SessionState::default(),
         )
         .unwrap();
         assert!(enhancement.contains(&TransactionEnhancementWork::Public(
@@ -1710,6 +1711,7 @@ mod handles {
             &reader.conn,
             EnhancementMode::Standard,
             Some(Public),
+            &crate::wallet::enhance_pir::session::SessionState::default(),
         )
         .unwrap();
         assert!(

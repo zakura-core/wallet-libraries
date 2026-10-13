@@ -87,6 +87,7 @@ fn report(completion: Completion) -> SyncReport {
         replaced_revisions: vec![],
         scripts_added: 0,
         commits: 0,
+        failed_entries: vec![],
     }
 }
 
@@ -139,6 +140,7 @@ fn covered(
         pending_upsert: vec![],
         pending_complete: vec![],
         cached_runs: vec![],
+        failed_entries: vec![],
     }
 }
 
