@@ -327,11 +327,17 @@ mod tests {
             Error::Timeout,
             Error::Cancelled,
             Error::Malformed,
+            Error::Unreadable,
             Error::Unavailable,
             Error::Pir,
         ] {
             assert_ne!(StatusError::from(error), StatusError::LocalStorage);
         }
+        // An unreadable row stays a content outcome, apart from every request outcome.
+        assert_eq!(
+            StatusError::from(Error::Unreadable),
+            StatusError::Unreadable
+        );
         for code in 0..=16 {
             let status = tonic::Status::new(tonic::Code::from(code), "");
             assert_ne!(StatusError::from(status), StatusError::LocalStorage);

@@ -8289,4 +8289,7 @@ mod tests {
 mod request_lifecycle_tests;
 
 #[cfg(test)]
+mod status_poll_tests;
+
+#[cfg(test)]
 mod rewind_floor_tests;

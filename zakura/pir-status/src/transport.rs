@@ -348,6 +348,7 @@ mod tests {
             db: Database,
             manifest: Manifest,
             tamper_header: Mutex<bool>,
+            tamper_body: Mutex<bool>,
         }
 
         impl Transport for Server {
@@ -381,6 +382,9 @@ mod tests {
                     response[40] ^= 1;
                 }
                 response.extend(self.db.answer(&body[HEADER_BYTES..]));
+                if *self.tamper_body.lock().unwrap() {
+                    response[HEADER_BYTES..].fill(0xa5);
+                }
                 assert_eq!(response.len(), max_bytes);
                 Ok(response)
             }
@@ -424,6 +428,7 @@ mod tests {
                 db,
                 manifest,
                 tamper_header: Mutex::new(false),
+                tamper_body: Mutex::new(false),
             }
         }
 
@@ -485,6 +490,14 @@ mod tests {
                     .await,
                 Err(Error::CoverageIncomplete)
             );
+            // A row that does not decrypt to a valid row is a content outcome; a reply that
+            // does not echo the session's header is a request outcome.
+            *transport.tamper_body.lock().unwrap() = true;
+            assert_eq!(
+                client.observe(&transport, &mined.txid, covered).await,
+                Err(Error::Unreadable)
+            );
+            *transport.tamper_body.lock().unwrap() = false;
             *transport.tamper_header.lock().unwrap() = true;
             assert_eq!(
                 client.observe(&transport, &mined.txid, covered).await,

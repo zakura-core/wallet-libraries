@@ -781,10 +781,14 @@ mod tests {
             Ok(Observation::Mined(11))
         );
         row[ROW_BYTES - 1] = 1;
-        assert_eq!(decode_row(&m, &txid, None, &row), Err(Error::Malformed));
+        assert_eq!(decode_row(&m, &txid, None, &row), Err(Error::Unreadable));
         row[ROW_BYTES - 1] = 0;
         row[SLOT_BYTES..SLOT_BYTES * 2].copy_from_slice(&r.encode().unwrap());
-        assert_eq!(decode_row(&m, &txid, None, &row), Err(Error::Malformed));
+        assert_eq!(decode_row(&m, &txid, None, &row), Err(Error::Unreadable));
+        // A slot that fails the record codec makes the whole row unreadable too.
+        row[SLOT_BYTES..SLOT_BYTES * 2].fill(0);
+        row[SLOT_BYTES + 33] = 1;
+        assert_eq!(decode_row(&m, &txid, None, &row), Err(Error::Unreadable));
     }
     fn single(tag: u8, height: u32) -> Vec<u8> {
         let mut row = vec![0; ROW_BYTES];
@@ -805,7 +809,7 @@ mod tests {
             Ok(Observation::Mined(11))
         );
         m.entries = 0;
-        assert_eq!(decode_row(&m, &[9; 32], None, &row), Err(Error::Malformed));
+        assert_eq!(decode_row(&m, &[9; 32], None, &row), Err(Error::Unreadable));
     }
     #[test]
     fn records_at_the_anchor_are_status_observations() {
@@ -820,12 +824,12 @@ mod tests {
     }
 
     #[test]
-    fn match_below_local_inclusion_bound_is_malformed() {
+    fn match_below_local_inclusion_bound_is_unreadable() {
         let m = manifest();
         for (tag, height, earliest, expected) in [
-            (2, 11, Some(15), Err(Error::Malformed)),
+            (2, 11, Some(15), Err(Error::Unreadable)),
             (2, 11, Some(11), Ok(Observation::Mined(11))),
-            (3, 11, Some(15), Err(Error::Malformed)),
+            (3, 11, Some(15), Err(Error::Unreadable)),
             (1, 0, Some(15), Ok(Observation::Mempool)),
         ] {
             let row = single(tag, height);
