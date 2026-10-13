@@ -28,8 +28,9 @@
 //!   [`WalletDb::begin_receive_operation`], [`WalletDb::finish_receive_operation`] and
 //!   [`WalletDb::start_receive_operation`].
 //! - [`WalletDb::record_operation_status`] for each provider status of either.
-//! - The [`OneTimeIvkRestoreWrite`] sweep steps for restore sweeps, and
-//!   [`WalletDb::recheck_one_time_key_history`] when the user asks to recheck swaps.
+//! - `zakura_pir_receiver::sweep`, over the [`OneTimeIvkRestoreWrite`] steps, for restore
+//!   sweeps, and [`WalletDb::recheck_one_time_key_history`] when the user asks to recheck
+//!   swaps.
 //!
 //! [`OneTimeIvkRestoreWrite`]: zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreWrite
 //! [`OneTimeIvkRestoreWrite::maintain_one_time_ivks`]: zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreWrite::maintain_one_time_ivks

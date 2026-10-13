@@ -18,7 +18,7 @@ python3 scripts/dev.py verify
 
 | Configuration | Packages and features |
 | --- | --- |
-| `default` | Workspace except the facade, Enhance PIR and the transparent PIR adapter; default features |
+| `default` | Workspace except the facade, Enhance PIR, the transparent PIR adapter and receiver PIR; default features |
 | `orchard` | Backend + SQLite; `orchard,test-dependencies` |
 | `transparent` | Backend + SQLite; `orchard,transparent-inputs,test-dependencies,unstable` |
 | `transparent-import` | Backend + SQLite; transparent features plus `transparent-key-import` |
@@ -28,6 +28,7 @@ python3 scripts/dev.py verify
 | `transparent-pir` | Transparent PIR adapter; `wallet` |
 | `transparent-pir-sqlite` | Transparent PIR adapter; `sqlite` (`wallet` plus the SQLite apply-and-acknowledge integration and the in-process end-to-end tests) |
 | `transparent-pir-testing` | Transparent PIR adapter; `sqlite` and `testing` (the test support applications build their recovery and txid display tests on) |
+| `pir-receiver` | Receiver PIR; `wallet` (which enables the backend's `orchard`; its tests use SQLite with `orchard`) |
 
 `default` builds the backend and SQLite crates without Orchard or transparent
 inputs, which `orchard` and `transparent` test, so items used only under those
