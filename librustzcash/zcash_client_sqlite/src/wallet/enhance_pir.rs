@@ -940,7 +940,10 @@ fn queue_transaction(
 }
 
 /// Clears the rejection counts of every position the transaction owns, after a rescan queued it.
-fn rearm_rejected_positions(conn: &Connection, tx_ref: crate::TxRef) -> Result<(), SqliteClientError> {
+fn rearm_rejected_positions(
+    conn: &Connection,
+    tx_ref: crate::TxRef,
+) -> Result<(), SqliteClientError> {
     conn.execute(
         "DELETE FROM ironwood_enhance_rejections WHERE commitment_tree_position IN (
              SELECT commitment_tree_position FROM ironwood_received_notes
