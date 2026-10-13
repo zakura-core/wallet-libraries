@@ -33,7 +33,8 @@ workspace.
   publication's paid filter holds it.
   Transaction construction spends a one-time-key note with its derived viewing key and sends
   change to the ordinary account key; `data_api::error::Error::OneTimeKeyNotDerivable` reports
-  a note whose key derives no viewing key.
+  a note whose key derives no viewing key. With `sync`, `sync::run` now requires its store to
+  implement `OneTimeIvkWrite` (through `sync::SyncWallet`) and scans with the one-time keys.
 - `ll::wallet::{put_blocks_with_nullifier_retention, put_blocks_rows_with_nullifier_retention}`
   (with `orchard`): `put_blocks` and `put_blocks_rows` with a height from which Ironwood
   nullifiers stay tracked, for a store that finds Ironwood notes after scanning past them.
