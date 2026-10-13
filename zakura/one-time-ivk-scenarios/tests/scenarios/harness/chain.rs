@@ -743,9 +743,9 @@ impl Chain {
 
     /// Checks that consensus would accept `tx`, a wallet-built transaction that spends
     /// only Ironwood notes: its Ironwood anchor is the tree root at the end of some block
-    /// on this branch, it reveals no nullifier the chain already holds, and its proof,
-    /// spend authorizations and binding signature verify against its shielded sighash.
-    /// Returns why not otherwise.
+    /// on this branch, it reveals no nullifier twice or one the chain already holds, and
+    /// its proof, spend authorizations and binding signature verify against its shielded
+    /// sighash. Returns why not otherwise.
     pub fn accepts(&mut self, tx: &Transaction) -> Result<Accepted, String> {
         if tx.sapling_bundle().is_some() || tx.orchard_bundle().is_some() {
             return Err("it has Sapling or Orchard parts, which this check does not cover".into());
@@ -767,17 +767,20 @@ impl Chain {
                 hex(&bundle.anchor().to_bytes())
             )
         })?;
+        // The batch validator checks proofs and signatures, not nullifier uniqueness.
         let spent = self.nullifiers();
-        let reused = bundle
-            .actions()
-            .iter()
-            .map(|action| action.nullifier().to_bytes())
-            .find(|nf| spent.contains(nf));
-        if let Some(nf) = reused {
-            return Err(format!(
-                "it reveals nullifier {}, already on chain",
-                hex(&nf)
-            ));
+        let mut revealed = BTreeSet::new();
+        for action in bundle.actions() {
+            let nf = action.nullifier().to_bytes();
+            if spent.contains(&nf) {
+                return Err(format!(
+                    "it reveals nullifier {}, already on chain",
+                    hex(&nf)
+                ));
+            }
+            if !revealed.insert(nf) {
+                return Err(format!("it reveals nullifier {} twice", hex(&nf)));
+            }
         }
         let sighash = shielded_sighash(tx);
         let mut validator =
