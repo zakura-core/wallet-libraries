@@ -105,3 +105,43 @@ fresh external-consumer lockfiles.
 A passing focused check does not prove all privacy, migration, protocol, or
 feature combinations; use their affected lanes and final CI. Keep process-local
 proving-key caches and the cargo test runner.
+
+## Publishing the release candidates
+
+A maintainer with crates.io ownership and publishing credentials runs the release
+from a clean, reviewed checkout of `main`, using the pinned Rust toolchain and
+Python 3.11 or newer. Supply the publishing credential through the approved
+credential store at runtime; never put it in this repository or a command argument.
+
+Inspect the selected versions and upstream availability without building or uploading:
+
+```sh
+python3 scripts/publish-crates.py --plan
+```
+
+Publish the prepared versions in dependency order:
+
+```sh
+python3 scripts/publish-crates.py --publish
+```
+
+The script reads versions from the manifests, checks local dependency ordering,
+and checks crates.io before starting. Each unpublished crate must pass Cargo's
+publishing dry run before it is uploaded. It waits for the version to appear
+on crates.io before moving on, and stops on the first error. Rerun the same
+command after resolving a failure: versions already available are skipped.
+A yanked version or a dirty or changed checkout stops the release. Already
+published versions are skipped by name and version; the script does not claim
+that their contents match this checkout.
+
+Without `--publish`, the script performs dry runs only. A separate dry run of a
+dependent crate requires its new dependencies to be published already: Cargo
+replaces local paths and Git locations with registry versions when packaging.
+The script reports that dependency prerequisite rather than bypassing verification.
+
+Transparent PIR requires the registry versions declared for its eight `wallet-pir`
+dependencies, including optional test support. Publish those upstream packages
+first. To release the other nine crates separately, add `--without-transparent`
+to any of the commands above. This script does not publish `wallet-pir` or change
+credentials, changelog dates, tags, or source files. After publication, confirm the
+registry versions and update the corresponding `PLANNED` changelog dates.
