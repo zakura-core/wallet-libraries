@@ -5,7 +5,7 @@
 //! shard is not covered. Found facts are built by hand.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use transparent::{
@@ -153,6 +153,38 @@ impl Fixture {
             .ok()
     }
 
+    /// The work row's content failures at its last placement.
+    fn content_failures(&self, txid: TxId) -> u32 {
+        self.st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT w.content_failures
+                 FROM transparent_detail_work w JOIN transactions t ON t.id_tx = w.transaction_id
+                 WHERE t.txid = ?1",
+                [txid.as_ref().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// When the work row is next due.
+    fn next_attempt_at(&self, txid: TxId) -> SystemTime {
+        let secs: u64 = self
+            .st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT w.next_attempt_at
+                 FROM transparent_detail_work w JOIN transactions t ON t.id_tx = w.transaction_id
+                 WHERE t.txid = ?1",
+                [txid.as_ref().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
     fn view(&self, txid: TxId) -> Option<TransparentDisplayView> {
         self.st
             .wallet()
@@ -215,12 +247,13 @@ enum MapAnswer {
     Unreachable,
 }
 
-/// The fake service: one of its publications at a time, map failures on demand, and every
-/// request's path.
+/// The fake service: one of its publications at a time, map failures and malformed private
+/// replies on demand, and every request's path.
 struct Service {
     publications: Vec<TxidPublication>,
     serving: AtomicUsize,
     map: Mutex<MapAnswer>,
+    malformed: AtomicBool,
     paths: Mutex<Vec<String>>,
 }
 
@@ -230,6 +263,7 @@ impl Service {
             publications,
             serving: AtomicUsize::new(0),
             map: Mutex::new(MapAnswer::Serve),
+            malformed: AtomicBool::new(false),
             paths: Mutex::default(),
         }
     }
@@ -240,6 +274,11 @@ impl Service {
 
     fn map_answer(&self, answer: MapAnswer) {
         *self.map.lock().unwrap() = answer;
+    }
+
+    /// Flips a payload byte of every private reply from now on.
+    fn malform_replies(&self) {
+        self.malformed.store(true, Ordering::SeqCst);
     }
 
     fn map_sha256(&self, index: usize) -> [u8; 32] {
@@ -271,7 +310,13 @@ impl HttpExchange for Service {
             }
         }
         let publication = &self.publications[self.serving.load(Ordering::SeqCst)];
-        Ok(publication.answer(request.method, &request.path, &request.body))
+        let mut reply = publication.answer(request.method, &request.path, &request.body);
+        // The last byte is a reply's payload, past every frame's binding and epoch: the reply
+        // fails to decode, the one validation failure about the row.
+        if self.malformed.load(Ordering::SeqCst) && request.path.contains("/query/") {
+            *reply.body.last_mut().unwrap() ^= 1;
+        }
+        Ok(reply)
     }
 }
 
@@ -284,6 +329,7 @@ fn not_covering_then_covering(height: u32) -> Service {
     ])
 }
 
+const PROTOCOL: i64 = 4;
 const NOT_COVERED: i64 = 2;
 const ABSENT: i64 = 1;
 const UNAVAILABLE: i64 = 0;
@@ -769,7 +815,9 @@ fn found_facts_are_stored() {
 }
 
 /// A public transaction is handed back unwritten only under public transport; a public failure
-/// is deferred without a map.
+/// is deferred without a map, and never counts towards giving the lookup up. Under
+/// `PrivateRequired` any public answer is the caller racing a mode change, deferred as
+/// unavailable.
 #[test]
 fn public_answers() {
     let mut f = wallet();
@@ -780,15 +828,21 @@ fn public_answers() {
     let Some(DetailStep::Lookup(request)) = run.next() else {
         panic!("a lookup");
     };
-    // Under PrivateRequired a public transaction is refused.
-    assert!(matches!(
-        run.record(&request, DetailAnswer::Public(Ok(vec![1u8]))),
-        Some(DetailWrite::Defer {
-            outcome: TransparentDetailOutcome::Protocol,
-            map_sha256: None,
-            ..
-        })
-    ));
+    // Under PrivateRequired a public answer is refused, and says nothing about the row.
+    for answer in [
+        Ok(vec![1u8]),
+        Err(TransparentDetailOutcome::Absent),
+        Err(TransparentDetailOutcome::Protocol),
+    ] {
+        assert!(matches!(
+            run.record(&request, DetailAnswer::Public(answer)),
+            Some(DetailWrite::Defer {
+                outcome: TransparentDetailOutcome::Unavailable { retry_after: None },
+                map_sha256: None,
+                ..
+            })
+        ));
+    }
 
     f.set_policy(TransparentLedgerMode::Public);
     let mut run = DetailRun::plan(f.st.wallet().db(), None, t0(), 8, &[]).unwrap();
@@ -817,4 +871,99 @@ fn public_answers() {
         DetailApplied::Deferred(TransparentDetailOutcome::Absent)
     );
     assert_eq!(f.work_row(txid), Some((1, Some(ABSENT), None)));
+    // Public absences keep the daily retry: none counts, however many there are.
+    for attempts in 2..=4 {
+        let write = run
+            .record::<Vec<u8>>(
+                &request,
+                DetailAnswer::Public(Err(TransparentDetailOutcome::Absent)),
+            )
+            .unwrap();
+        let _ = write.apply(f.st.wallet_mut().db_mut(), t0()).unwrap();
+        assert_eq!(f.work_row(txid), Some((attempts, Some(ABSENT), None)));
+    }
+    assert_eq!(f.content_failures(txid), 0);
+    let far = t0() + Duration::from_secs(30 * 24 * 3600);
+    let mut run = DetailRun::plan(f.st.wallet().db(), None, far, 8, &[]).unwrap();
+    assert!(matches!(run.next(), Some(DetailStep::Lookup(r)) if r.txid == txid));
+}
+
+/// A service that answers malformed for the wallet's row and one that answers "not in the
+/// table" move the wallet alike: with the same random source, both wallets store the same
+/// next-attempt times, and both stop after the third lookup.
+#[test]
+fn malformed_and_absent_replies_share_one_schedule_and_stop_after_three() {
+    let lookups = |malformed: bool| -> (Vec<SystemTime>, Option<i64>) {
+        let mut f = wallet();
+        let txid = f.receipt(0x50, f.height);
+        let height = u64::from(f.height);
+        let exchange = Service::new(vec![TxidPublication::new(height - 5, height + 5)]);
+        if malformed {
+            exchange.malform_replies();
+        }
+        let service = TxidDisplayService::new();
+        let mut at = t0();
+        let mut due = vec![];
+        for _ in 0..3 {
+            let run = f.plan(&service, at, 8, &[]);
+            assert_eq!(f.drive(run, &service, &exchange, at), [txid]);
+            at = f.next_attempt_at(txid);
+            due.push(at);
+        }
+        // Given up: a month later nothing is looked up, nor any request sent.
+        let at = at + Duration::from_secs(30 * 24 * 3600);
+        let sent = exchange.sent();
+        let run = f.plan(&service, at, 8, &[]);
+        assert!(f.drive(run, &service, &exchange, at).is_empty());
+        assert!(exchange.paths_since(sent).is_empty());
+        assert_eq!(f.view(txid), Some(TransparentDisplayView::Unavailable));
+        (due, f.work_row(txid).and_then(|(_, outcome, _)| outcome))
+    };
+    let (malformed, outcome) = lookups(true);
+    assert_eq!(outcome, Some(PROTOCOL));
+    let (absent, outcome) = lookups(false);
+    assert_eq!(outcome, Some(ABSENT));
+    assert_eq!(malformed, absent);
+}
+
+/// A map request the service answers with a redirect is chosen without the row: the lookup
+/// backs off like an outage, never counts towards giving up, and is still made once the map is
+/// served again.
+#[test]
+fn a_redirected_map_never_gives_the_lookup_up() {
+    let mut f = wallet();
+    let txid = f.receipt(0x52, f.height);
+    let height = u64::from(f.height);
+    let exchange = Service::new(vec![TxidPublication::new(height - 5, height + 5)]);
+    exchange.map_answer(MapAnswer::Status(302));
+    let service = TxidDisplayService::new();
+    let mut at = t0();
+    for attempts in 1..=4 {
+        let run = f.plan(&service, at, 8, &[]);
+        assert_eq!(f.drive(run, &service, &exchange, at), [txid]);
+        assert_eq!(
+            f.work_row(txid)
+                .map(|(attempts, outcome, _)| (attempts, outcome)),
+            Some((attempts, Some(UNAVAILABLE)))
+        );
+        assert_eq!(f.content_failures(txid), 0);
+        at = f.next_attempt_at(txid);
+    }
+    // No private query was sent.
+    assert!(
+        exchange
+            .paths_since(0)
+            .iter()
+            .all(|path| !path.contains("/query/"))
+    );
+    assert_eq!(f.view(txid), Some(TransparentDisplayView::Unavailable));
+
+    exchange.map_answer(MapAnswer::Serve);
+    let run = f.plan(&service, at, 8, &[]);
+    assert_eq!(f.drive(run, &service, &exchange, at), [txid]);
+    assert_eq!(
+        f.work_row(txid).map(|(_, outcome, _)| outcome),
+        Some(Some(ABSENT))
+    );
+    assert_eq!(f.content_failures(txid), 1);
 }

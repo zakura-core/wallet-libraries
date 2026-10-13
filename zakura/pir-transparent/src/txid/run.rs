@@ -368,9 +368,9 @@ impl<'a> DetailRun<'a> {
     /// deferred, under the run's policy generation; facts that cannot be translated, and every
     /// other display result (a cancelled one included), are
     /// deferred ([`deferral`]) with the map the lookup used, never one a later lookup or map
-    /// check left the shared service holding. A public transaction is handed
-    /// back only under a snapshot allowing public transport, and deferred as `Protocol`
-    /// otherwise.
+    /// check left the shared service holding. A public answer is handed back (a transaction)
+    /// or deferred (a failure) only under a snapshot allowing public transport; otherwise it
+    /// is deferred as [`Unavailable`](TransparentDetailOutcome::Unavailable).
     pub fn record<R>(
         &self,
         request: &TransparentDetailRequest,
@@ -408,8 +408,15 @@ impl<'a> DetailRun<'a> {
                     transaction,
                 })
             }
-            DetailAnswer::Public(Ok(_)) => Some(defer(TransparentDetailOutcome::Protocol, None)),
-            DetailAnswer::Public(Err(outcome)) => Some(defer(outcome, None)),
+            DetailAnswer::Public(Err(outcome)) if self.public_transport() => {
+                Some(defer(outcome, None))
+            }
+            // A public answer under a private snapshot comes from the caller racing a mode
+            // change, not from a private reply: it says nothing about the row.
+            DetailAnswer::Public(_) => Some(defer(
+                TransparentDetailOutcome::Unavailable { retry_after: None },
+                None,
+            )),
             DetailAnswer::TimedOut => Some(defer(
                 TransparentDetailOutcome::Unavailable { retry_after: None },
                 None,

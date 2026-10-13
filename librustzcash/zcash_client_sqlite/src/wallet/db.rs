@@ -2093,8 +2093,12 @@ CREATE TABLE tpir_transaction_metadata (
 ///   re-arms the row.
 /// - `last_outcome`: `NULL` before any attempt; otherwise 0 unavailable, 1 absent,
 ///   2 not covered, 3 unsupported, 4 protocol, 5 contradiction, 6 not yet published.
-/// - `last_map_sha256`: the display map of the last attempt. A row whose last outcome is 2 or
-///   5 is parked while the caller's map is this one or absent; 3 while the caller has no map.
+/// - `last_map_sha256`: the display map of the last attempt. A row whose last outcome is 2
+///   is parked while the caller's map is this one or absent; 3 while the caller has no map.
+/// - `content_failures`: failed lookups at `attempted_height` whose private reply failed on
+///   content (outcomes 1, 4 and 5), counted only without public authority. At 3 the row is
+///   given up and, without public authority, not listed until it is mined at another height,
+///   which resets the count.
 pub(super) const TABLE_TRANSPARENT_DETAIL_WORK: &str = r#"
 CREATE TABLE transparent_detail_work (
     transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
@@ -2104,7 +2108,8 @@ CREATE TABLE transparent_detail_work (
     attempted_at INTEGER,
     attempted_height INTEGER CHECK (attempted_height >= 0),
     last_outcome INTEGER CHECK (last_outcome BETWEEN 0 AND 6),
-    last_map_sha256 BLOB CHECK (length(last_map_sha256) = 32)
+    last_map_sha256 BLOB CHECK (length(last_map_sha256) = 32),
+    content_failures INTEGER NOT NULL DEFAULT 0 CHECK (content_failures >= 0)
 )"#;
 
 /// Validated transparent display facts of a transaction without raw bytes: one fixed-size

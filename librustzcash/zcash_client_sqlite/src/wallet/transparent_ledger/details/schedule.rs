@@ -3,6 +3,7 @@
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rand_core::Rng;
 use rusqlite::{Connection, OptionalExtension as _, named_params, types::Value};
 use zcash_client_backend::data_api::transparent_ledger::{
     TRANSPARENT_DISPLAY_MAP_RECHECK, TransparentDetailOutcome, TransparentDetailParked,
@@ -25,6 +26,10 @@ use super::sql::{REARMED, eligible_work_sql, parked_work_sql};
 const MINUTE: u64 = 60;
 const HOUR: u64 = 60 * MINUTE;
 pub(super) const DAY: u64 = 24 * HOUR;
+
+/// Content failures at one placement after which a row is given up: it is neither due nor
+/// parked until the transaction is mined at another height.
+pub(crate) const CONTENT_FAILURE_LIMIT: u32 = 3;
 
 /// How long a parked row waits for a changed display map before it is due anyway.
 pub(crate) const PARKED_BACKSTOP: Duration = Duration::from_secs(7 * DAY);
@@ -170,42 +175,55 @@ pub(crate) fn parked_work(
     })
 }
 
-/// A deterministic jitter fraction in `[0, 1)` for this row and attempt.
-fn jitter(txid: &TxId, attempts: u32) -> f64 {
-    // SplitMix64 over the txid prefix and attempt count; spreads retries of many rows apart
-    // without a random source.
-    let mut x = u64::from_le_bytes(txid.as_ref()[..8].try_into().expect("8 bytes"))
-        ^ u64::from(attempts).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^= x >> 31;
-    (x >> 11) as f64 / (1u64 << 53) as f64
+/// A jitter fraction in `[0, 1)` drawn from `rng`.
+///
+/// Drawn from the wallet's random source rather than derived from the row, so the retry time
+/// does not let a service confirm a guessed txid.
+fn jitter(rng: &mut impl Rng) -> f64 {
+    (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64
 }
 
 /// Exponential backoff from `base`, doubling per attempt, plus up to 25% jitter, capped at `cap`.
-fn exponential_backoff(base: u64, cap: u64, attempts: u32, txid: &TxId) -> u64 {
+fn exponential_backoff(base: u64, cap: u64, attempts: u32, rng: &mut impl Rng) -> u64 {
     let doubled = base.saturating_mul(1u64 << attempts.saturating_sub(1).min(32));
     let delay = doubled.min(cap);
-    (delay + (delay as f64 * 0.25 * jitter(txid, attempts)) as u64).min(cap)
+    (delay + (delay as f64 * 0.25 * jitter(rng)) as u64).min(cap)
 }
 
-/// The delay before the next attempt after `outcome`, as the `attempts`th consecutive failure.
-pub(crate) fn backoff(outcome: TransparentDetailOutcome, attempts: u32, txid: &TxId) -> Duration {
+/// Whether `outcome` is about the content of a reply: "not in the table", a reply that failed
+/// to decode, or facts that contradict the wallet. A dishonest service can aim these at chosen
+/// rows, so they share one schedule, and those of private lookups count towards
+/// [`CONTENT_FAILURE_LIMIT`].
+fn is_content(outcome: TransparentDetailOutcome) -> bool {
+    matches!(
+        outcome,
+        TransparentDetailOutcome::Absent
+            | TransparentDetailOutcome::Protocol
+            | TransparentDetailOutcome::Contradiction
+    )
+}
+
+/// The delay before the next attempt after `outcome`, as the `attempts`th consecutive failure,
+/// with jitter from `rng`.
+pub(crate) fn backoff(
+    outcome: TransparentDetailOutcome,
+    attempts: u32,
+    rng: &mut impl Rng,
+) -> Duration {
     let secs = match outcome {
         TransparentDetailOutcome::Unavailable { retry_after } => {
             // Honour the server's advice beyond the cap, up to a day.
             let advised = retry_after.map_or(0, |d| d.as_secs()).min(DAY);
-            exponential_backoff(30, HOUR, attempts, txid).max(advised)
+            exponential_backoff(30, HOUR, attempts, rng).max(advised)
         }
-        TransparentDetailOutcome::Protocol => exponential_backoff(30, HOUR, attempts, txid),
         TransparentDetailOutcome::NotYetPublished => {
-            exponential_backoff(MINUTE, 5 * MINUTE, attempts, txid)
+            exponential_backoff(MINUTE, 5 * MINUTE, attempts, rng)
         }
-        TransparentDetailOutcome::Absent => exponential_backoff(HOUR, DAY, attempts, txid),
-        TransparentDetailOutcome::NotCovered
-        | TransparentDetailOutcome::Unsupported
-        | TransparentDetailOutcome::Contradiction => {
-            DAY + (DAY as f64 * 0.25 * jitter(txid, attempts)) as u64
+        TransparentDetailOutcome::Absent
+        | TransparentDetailOutcome::Protocol
+        | TransparentDetailOutcome::Contradiction => exponential_backoff(HOUR, DAY, attempts, rng),
+        TransparentDetailOutcome::NotCovered | TransparentDetailOutcome::Unsupported => {
+            DAY + (DAY as f64 * 0.25 * jitter(rng)) as u64
         }
     };
     Duration::from_secs(secs)
@@ -226,22 +244,26 @@ fn outcome_code(outcome: TransparentDetailOutcome) -> i64 {
 
 /// Outcomes sharing a backoff schedule. A change of class starts a fresh backoff, so that
 /// minutes-apart `NotYetPublished` retries do not lengthen a later `Unavailable` or `Absent`
-/// backoff.
+/// backoff. Content outcomes form one class, so alternating among them does not restart it.
 fn outcome_class(code: i64) -> i64 {
     match code {
-        UNAVAILABLE | PROTOCOL => UNAVAILABLE,
-        NOT_COVERED | UNSUPPORTED | CONTRADICTION => NOT_COVERED,
+        ABSENT | PROTOCOL | CONTRADICTION => ABSENT,
+        NOT_COVERED | UNSUPPORTED => NOT_COVERED,
         other => other,
     }
 }
 
 /// Records a failed lookup of `txid` at `looked_up_height` on its work row: the attempt, its
-/// outcome and map, and when the next attempt is due.
+/// outcome and map, and when the next attempt is due, with jitter from `rng`.
 ///
 /// Does nothing when the transaction has no work row or is no longer mined at
 /// `looked_up_height`, so a late result never parks or backs off work for another placement.
 /// Consecutive failures of one outcome class at one placement lengthen the backoff; a new
-/// placement or class restarts it. The caller provides the transaction.
+/// placement or class restarts it. Content failures of `private` lookups at one placement are
+/// counted whatever came between them; a new placement resets the count. Under public
+/// authority (`private` false) nothing is counted: the wallet has no privacy reason to give a
+/// lookup up. The caller provides the transaction.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn record_outcome(
     conn: &Connection,
     txid: &TxId,
@@ -249,11 +271,13 @@ pub(super) fn record_outcome(
     outcome: TransparentDetailOutcome,
     map_sha256: Option<[u8; 32]>,
     now: SystemTime,
+    private: bool,
+    rng: &mut impl Rng,
 ) -> Result<(), SqliteClientError> {
     let row = conn
         .query_row(
             "SELECT w.transaction_id, w.attempts, w.attempted_height, t.mined_height,
-                    w.last_outcome
+                    w.last_outcome, w.content_failures
              FROM transparent_detail_work w JOIN transactions t ON t.id_tx = w.transaction_id
              WHERE t.txid = :txid",
             named_params![":txid": txid.as_ref()],
@@ -264,11 +288,13 @@ pub(super) fn record_outcome(
                     row.get::<_, Option<u32>>(2)?,
                     row.get::<_, Option<u32>>(3)?,
                     row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, u32>(5)?,
                 ))
             },
         )
         .optional()?;
-    let Some((tx, attempts, attempted_height, mined_height, last_outcome)) = row else {
+    let Some((tx, attempts, attempted_height, mined_height, last_outcome, content_failures)) = row
+    else {
         return Ok(());
     };
     // A late result must not park or back off work for a different placement. This check
@@ -278,23 +304,26 @@ pub(super) fn record_outcome(
     }
     // A changed placement, or another class of outcome, starts a fresh backoff.
     let code = outcome_code(outcome);
-    let attempts = if attempted_height.is_some()
-        && attempted_height == mined_height
-        && last_outcome.map(outcome_class) == Some(outcome_class(code))
+    let same_placement = attempted_height.is_some() && attempted_height == mined_height;
+    let attempts = if same_placement && last_outcome.map(outcome_class) == Some(outcome_class(code))
     {
         attempts.saturating_add(1)
     } else {
         1
     };
-    let delay = i64_secs(backoff(outcome, attempts, txid));
+    let content_failures = u32::from(private && is_content(outcome))
+        + if same_placement { content_failures } else { 0 };
+    let delay = i64_secs(backoff(outcome, attempts, rng));
     conn.execute(
         "UPDATE transparent_detail_work
          SET attempts = :attempts, next_attempt_at = :next, attempted_at = :now,
-             attempted_height = :height, last_outcome = :outcome, last_map_sha256 = :map
+             attempted_height = :height, last_outcome = :outcome, last_map_sha256 = :map,
+             content_failures = :content_failures
          WHERE transaction_id = :tx",
         named_params![
             ":tx": tx,
             ":attempts": attempts,
+            ":content_failures": content_failures,
             ":now": unix(now),
             ":next": unix(now).saturating_add(delay),
             ":height": mined_height,
@@ -306,6 +335,7 @@ pub(super) fn record_outcome(
 }
 
 /// Records a failed lookup; see `TransparentDetailWrite::defer_transparent_detail`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn defer(
     conn: &Connection,
     configured: Option<TransparentLedgerMode>,
@@ -315,10 +345,48 @@ pub(crate) fn defer(
     map_sha256: Option<[u8; 32]>,
     expected_generation: u64,
     now: SystemTime,
+    rng: &mut impl Rng,
 ) -> Result<(), SqliteClientError> {
-    resolve_mode(conn, configured)?;
     with_read_snapshot(conn, |conn| {
+        let private = !resolve_mode(conn, configured)?.retains_public_authority();
         check_transparent_policy_generation(conn, expected_generation)?;
-        record_outcome(conn, &txid, looked_up_height, outcome, map_sha256, now)
+        record_outcome(
+            conn,
+            &txid,
+            looked_up_height,
+            outcome,
+            map_sha256,
+            now,
+            private,
+            rng,
+        )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use zcash_client_backend::data_api::{
+        testing::TestRng, transparent_ledger::TransparentDetailOutcome,
+    };
+
+    use super::backoff;
+
+    fn first_absent_delay(seed: u64) -> std::time::Duration {
+        backoff(
+            TransparentDetailOutcome::Absent,
+            1,
+            &mut TestRng::seed_from_u64(seed),
+        )
+    }
+
+    /// The delay depends on the random source alone: nothing of the row, such as its txid,
+    /// enters it, so a retry time does not confirm a guessed txid.
+    #[test]
+    fn jitter_comes_from_the_random_source() {
+        // Different seeds give different delays for one lookup.
+        let delays: std::collections::HashSet<_> = (0..8).map(first_absent_delay).collect();
+        assert!(delays.len() > 1, "{delays:?}");
+        // The same seed gives the same delay, whichever row it is drawn for.
+        assert_eq!(first_absent_delay(5), first_absent_delay(5));
+    }
 }
