@@ -408,6 +408,10 @@ const QUERY: u8 = 1;
 const PUBLIC: u8 = 2;
 const DISCOVERY_SUSPENDED: u8 = 3;
 const OUTGOING_SUSPENDED: u8 = 4;
+const REJECTED_SUSPENDED: u8 = 5;
+
+/// Rejections after which a position leaves the query work until a rescan re-arms it.
+pub(crate) const MAX_REJECTIONS: u32 = 3;
 
 /// Selects enhancement rows from `tx_retrieval_queue q` (joined with `transactions t`) that may use
 /// ordinary public transport. When `:protect_ironwood` is set, privately protected transactions
@@ -444,7 +448,9 @@ fn transaction_enhancement_work_sql(private: bool, public: bool) -> String {
          FROM discovery WHERE reason IS NOT NULL
          UNION ALL
          SELECT {OUTGOING_SUSPENDED}, q.commitment_tree_position, t.txid, q.output_index, NULL, NULL
-           {OUTSTANDING_OUTGOING} AND q.not_recoverable = 1"
+           {OUTSTANDING_OUTGOING} AND q.not_recoverable = 1
+         UNION ALL
+         SELECT {REJECTED_SUSPENDED}, position, txid, output_index, NULL, NULL FROM rejected"
     );
     let public_rows = format!(
         "SELECT {PUBLIC} AS kind, 0 AS ordinal, q.txid AS identity, NULL AS output_index,
@@ -475,7 +481,7 @@ fn transaction_enhancement_work_sql(private: bool, public: bool) -> String {
              LEFT JOIN blocks b ON b.height = t.mined_height
              LEFT JOIN blocks prior ON prior.height = t.mined_height - 1
              {ACTIVE_PRIVATE_TX}
-         ), queries AS (
+         ), pending AS (
              SELECT q.commitment_tree_position AS position, t.txid, rn.action_index AS output_index
              FROM ironwood_memo_retrieval_queue q
              JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
@@ -491,6 +497,13 @@ fn transaction_enhancement_work_sql(private: bool, public: bool) -> String {
              JOIN transactions t ON t.id_tx = q.transaction_id
              {ACTIVE_MEMO_TX}
                AND q.commitment_tree_position IS NOT NULL
+         ), exhausted AS (
+             SELECT commitment_tree_position FROM ironwood_enhance_rejections
+             WHERE rejections >= {MAX_REJECTIONS}
+         ), queries AS (
+             SELECT * FROM pending WHERE position NOT IN (SELECT * FROM exhausted)
+         ), rejected AS (
+             SELECT * FROM pending WHERE position IN (SELECT * FROM exhausted)
          )
          {rows}
          ORDER BY kind, ordinal, tx_index, identity, output_index"
@@ -535,6 +548,9 @@ fn read_work(
             )),
             OUTGOING_SUSPENDED => TransactionEnhancementWork::Private(EnhancePirWork::Suspended(
                 EnhancePirSuspension::OutgoingNotRecoverable(private_request(row.get(1)?)?),
+            )),
+            REJECTED_SUSPENDED => TransactionEnhancementWork::Private(EnhancePirWork::Suspended(
+                EnhancePirSuspension::Rejected(private_request(row.get(1)?)?),
             )),
             _ => unreachable!("closed SQL UNION"),
         })
@@ -900,6 +916,18 @@ fn queue_transaction(
     }
 
     metadata::queue(conn, tx_ref, candidates)?;
+    // A rescan re-arms rejected positions, as it resets `not_recoverable` above.
+    conn.execute(
+        "DELETE FROM ironwood_enhance_rejections WHERE commitment_tree_position IN (
+             SELECT commitment_tree_position FROM ironwood_received_notes
+             WHERE transaction_id = :tx AND commitment_tree_position IS NOT NULL
+             UNION SELECT commitment_tree_position FROM ironwood_enhance_outgoing_queue
+             WHERE transaction_id = :tx
+             UNION SELECT commitment_tree_position FROM ironwood_enhance_metadata_queue
+             WHERE transaction_id = :tx AND commitment_tree_position IS NOT NULL
+         )",
+        named_params![":tx": tx_ref.0],
+    )?;
 
     let has_work: bool = conn.query_row(
         concat!("SELECT ", has_private_work!()),
@@ -916,6 +944,17 @@ fn queue_transaction(
     // No route + no work is not proof of completion. A previously completed
     // private transaction, however, must not gain a txid request on replay.
     retire_enhancement_if_complete(conn, tx_ref)
+}
+
+/// Counts one rejected record against `position`. Called after the rejected batch rolled back.
+pub(crate) fn record_rejection(conn: &Connection, position: u64) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "INSERT INTO ironwood_enhance_rejections (commitment_tree_position, rejections)
+         VALUES (:position, 1)
+         ON CONFLICT(commitment_tree_position) DO UPDATE SET rejections = rejections + 1",
+        named_params![":position": position],
+    )?;
+    Ok(())
 }
 
 pub(super) fn outgoing_position_owned_by_other(

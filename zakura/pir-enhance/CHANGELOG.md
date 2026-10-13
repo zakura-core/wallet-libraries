@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Rejected-position suspensions (`EnhancePirSuspension::Rejected`) are counted
+  as incomplete and are not queried, like other suspensions.
+
 ### Changed
 
 - Depend on ipir-sp `0.1.0-rc.7` (with `reinspiring 0.1.3-rc.1` and

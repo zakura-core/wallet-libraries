@@ -236,11 +236,12 @@ mod tests {
                 .is_empty()
         );
         // Transparent txid enhancement tables start empty for a wallet without ledger-origin or
-        // route-2 transactions.
+        // route-2 transactions, as does the Enhance rejection count.
         for table in [
             "transparent_detail_work",
             "transparent_tx_display",
             "transparent_tx_display_outputs",
+            "ironwood_enhance_rejections",
         ] {
             assert!(after.remove(table).unwrap_or_default().is_empty());
         }

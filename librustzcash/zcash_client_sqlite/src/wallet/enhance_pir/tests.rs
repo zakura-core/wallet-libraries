@@ -1824,8 +1824,22 @@ fn batch_rejects_shape_duplicates_and_metadata_conflicts_without_mutation() {
                 reason: Reason::MetadataConflict
             }
         );
-        assert_eq!(requests(st.wallet().conn()).unwrap(), before);
+        // Each metadata conflict counts against the record's position; the third suspends it.
+        let suspended = rejections(st.wallet().conn(), outgoing) >= Some(MAX_REJECTIONS);
+        let expected: Vec<_> = before
+            .iter()
+            .copied()
+            .filter(|request| !suspended || *request != outgoing)
+            .collect();
+        assert_eq!(requests(st.wallet().conn()).unwrap(), expected);
     }
+    // Shape rejections are not counted.
+    assert_eq!(rejections(st.wallet().conn(), incoming), None);
+    assert_eq!(rejections(st.wallet().conn(), other), None);
+    assert_eq!(
+        rejections(st.wallet().conn(), outgoing),
+        Some(MAX_REJECTIONS)
+    );
 }
 
 #[test]
@@ -2174,9 +2188,10 @@ fn routed(st: &State) -> (Vec<TxId>, Vec<EnhancePirWork>) {
     for work in &private {
         let txid = match work {
             EnhancePirWork::Query(request)
-            | EnhancePirWork::Suspended(EnhancePirSuspension::OutgoingNotRecoverable(request)) => {
-                Some(request.request_id().txid())
-            }
+            | EnhancePirWork::Suspended(
+                EnhancePirSuspension::OutgoingNotRecoverable(request)
+                | EnhancePirSuspension::Rejected(request),
+            ) => Some(request.request_id().txid()),
             EnhancePirWork::Suspended(EnhancePirSuspension::Discovery(failure)) => {
                 Some(failure.txid)
             }
@@ -2664,4 +2679,204 @@ fn a_mixed_batch_stores_every_authenticated_memo_only_without_public_authority()
         }
         assert!(st.wallet().db().query_requests().unwrap().is_empty());
     }
+}
+
+/// An incoming record whose note ciphertext fails authentication, as in
+/// `incoming_authentication_precedes_shape_and_flags_are_not_authenticated`.
+fn corrupt_incoming_record(st: &State, request: EnhancePirRequest) -> EnhanceRecord {
+    let pending = st
+        .wallet()
+        .db()
+        .pending_memo(request.position())
+        .unwrap()
+        .unwrap();
+    let mut ciphertext =
+        orchard::note_encryption::IronwoodNoteEncryption::new(None, pending.note, [7; 512])
+            .encrypt_note_plaintext();
+    ciphertext[579] ^= 1;
+    EnhanceRecord::from_parts(EnhanceRecordParts {
+        enc_ciphertext_suffix: ciphertext[52..].try_into().unwrap(),
+        cv_net: [0; 32],
+        out_ciphertext: [0; 80],
+        has_transparent_inputs: false,
+        has_transparent_outputs: false,
+        metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata::new(
+            0,
+            Some(0),
+        )
+        .unwrap(),
+    })
+}
+
+fn rejections(conn: &Connection, request: EnhancePirRequest) -> Option<u32> {
+    conn.query_row(
+        "SELECT rejections FROM ironwood_enhance_rejections WHERE commitment_tree_position = ?",
+        [u64::from(request.position())],
+        |row| row.get(0),
+    )
+    .optional()
+    .unwrap()
+}
+
+fn query_work(request: EnhancePirRequest) -> TransactionEnhancementWork {
+    TransactionEnhancementWork::Private(EnhancePirWork::Query(request))
+}
+
+fn rejected_work(request: EnhancePirRequest) -> TransactionEnhancementWork {
+    TransactionEnhancementWork::Private(EnhancePirWork::Suspended(EnhancePirSuspension::Rejected(
+        request,
+    )))
+}
+
+fn reject_three_times(st: &mut State, request: EnhancePirRequest) {
+    let corrupt = corrupt_incoming_record(st, request);
+    for attempt in 1..=MAX_REJECTIONS {
+        let work = st.wallet().db().transaction_enhancement_work().unwrap();
+        assert!(work.contains(&query_work(request)), "attempt {attempt}");
+        assert!(!work.contains(&rejected_work(request)), "attempt {attempt}");
+        assert_eq!(
+            apply_record(st.wallet_mut().db_mut(), request, &corrupt).unwrap(),
+            EnhancePirStoreResult::Rejected
+        );
+        assert_eq!(rejections(st.wallet().conn(), request), Some(attempt));
+    }
+}
+
+#[test]
+fn third_rejection_suspends_the_position() {
+    use crate::testing::db::{test_clock, test_rng};
+    let (mut st, _, request) = fixture_with_factory(TestDbFactory::file_backed());
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    // Two rejections leave the position in the query work; the third suspends it.
+    reject_three_times(&mut st, request);
+    let work = st.wallet().db().transaction_enhancement_work().unwrap();
+    assert!(work.contains(&rejected_work(request)));
+    assert!(!work.contains(&query_work(request)));
+    assert!(st.wallet().db().query_requests().unwrap().is_empty());
+    // A suspension is not completion: the transaction stays protected, with no public fallback.
+    assert!(is_protected(st.wallet().conn(), request.request_id().txid()).unwrap());
+    assert!(!visible(&st, request));
+
+    // The count is durable.
+    let reopened = crate::WalletDb::for_path(
+        st.wallet().data_file_path(),
+        *st.network(),
+        test_clock(),
+        test_rng(),
+    )
+    .unwrap()
+    .with_enhancement_mode(EnhancementMode::PrivateIronwood)
+    .with_transparent_ledger_mode(TransparentLedgerMode::Public);
+    assert_eq!(rejections(&reopened.conn, request), Some(MAX_REJECTIONS));
+    assert_eq!(reopened.transaction_enhancement_work().unwrap(), work);
+}
+
+#[test]
+fn a_rejection_still_rolls_back_and_is_counted() {
+    use zcash_client_backend::data_api::enhance_pir::{
+        EnhancePirBatchRejection as Reason, EnhancePirBatchResult as Batch,
+    };
+    let (mut st, tx_ref, incoming) = fixture();
+    let outgoing = outgoing(&st, tx_ref, 99, 4);
+    let before = requests(st.wallet().conn()).unwrap();
+    let corrupt = corrupt_incoming_record(&st, incoming);
+    // The outgoing record alone would mark its action not recoverable.
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .apply_ironwood_enhance_records(&[
+                (outgoing, wire_record(false, false)),
+                (incoming, corrupt),
+            ])
+            .unwrap(),
+        Batch::Rejected {
+            index: Some(1),
+            reason: Reason::RecordRejected
+        }
+    );
+    assert_eq!(requests(st.wallet().conn()).unwrap(), before);
+    let not_recoverable: bool = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT not_recoverable FROM ironwood_enhance_outgoing_queue
+             WHERE commitment_tree_position = 99",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!not_recoverable);
+    assert!(
+        st.wallet()
+            .db()
+            .pending_memo(incoming.position())
+            .unwrap()
+            .is_some()
+    );
+    let fee: Option<u64> = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT fee FROM transactions WHERE id_tx = ?",
+            [tx_ref.0],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(fee, None);
+    // Only the rejected record's position is counted.
+    assert_eq!(rejections(st.wallet().conn(), incoming), Some(1));
+    assert_eq!(rejections(st.wallet().conn(), outgoing), None);
+
+    // A batch the caller shaped wrongly says nothing about the service's content.
+    let foreign = EnhancePirRequest::new(
+        Position::from(5),
+        IronwoodEnhanceRequestId::new(TxId::from_bytes([9; 32]), 0),
+    );
+    let valid = authentic_incoming_record(&st, incoming);
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .apply_ironwood_enhance_records(&[(incoming, valid.clone()), (foreign, valid)])
+            .unwrap(),
+        Batch::Rejected {
+            index: Some(1),
+            reason: Reason::MixedTxid
+        }
+    );
+    assert_eq!(rejections(st.wallet().conn(), incoming), Some(1));
+    assert_eq!(rejections(st.wallet().conn(), foreign), None);
+}
+
+#[test]
+fn a_rescan_rearms_rejected_positions() {
+    let (mut st, tx_ref, request) = fixture();
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    reject_three_times(&mut st, request);
+    assert!(
+        st.wallet()
+            .db()
+            .transaction_enhancement_work()
+            .unwrap()
+            .contains(&rejected_work(request))
+    );
+    let height: u32 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT mined_height FROM transactions WHERE id_tx = ?",
+            [tx_ref.0],
+            |r| r.get(0),
+        )
+        .unwrap();
+    st.scan_cached_blocks(BlockHeight::from_u32(height), 1);
+    assert_eq!(rejections(st.wallet().conn(), request), None);
+    let work = st.wallet().db().transaction_enhancement_work().unwrap();
+    assert!(work.contains(&query_work(request)));
+    assert!(!work.contains(&rejected_work(request)));
+    // The re-armed position gets the full allowance again.
+    reject_three_times(&mut st, request);
 }

@@ -10,6 +10,12 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+
+- `EnhancePirSuspension::Rejected`, for an Enhance PIR position whose records were
+  rejected three times. It is not queried again until a rescan queues its
+  transaction again. Exhaustive matches on `EnhancePirSuspension` must handle it.
+
 ## [0.1.0-rc8] - PLANNED
 
 Breaking release for explicit transparent disclosure policy, private recovery,

@@ -220,11 +220,15 @@ mod tests {
             Position::from(0),
             IronwoodEnhanceRequestId::new(TxId::from_bytes([1; 32]), 0),
         );
-        let work = PreparedWork::new([EnhancePirWork::Suspended(
+        for suspension in [
             EnhancePirSuspension::OutgoingNotRecoverable(request),
-        )]);
-        assert_eq!(work.query_count(), 0);
-        assert_eq!(work.incomplete_count(), 1);
+            EnhancePirSuspension::Rejected(request),
+        ] {
+            let work = PreparedWork::new([EnhancePirWork::Suspended(suspension)]);
+            assert_eq!(work.query_count(), 0);
+            assert_eq!(work.positions().count(), 0);
+            assert_eq!(work.incomplete_count(), 1);
+        }
     }
 }
 

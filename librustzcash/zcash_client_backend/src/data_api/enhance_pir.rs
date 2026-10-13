@@ -85,6 +85,9 @@ pub enum EnhancePirSuspension {
     Discovery(IronwoodEnhanceDiscoveryFailure),
     /// Outgoing recovery failed; new funding/scanning may reactivate the action.
     OutgoingNotRecoverable(EnhancePirRequest),
+    /// Records for this position were rejected three times; it is not queried again until a
+    /// rescan queues its transaction again.
+    Rejected(EnhancePirRequest),
 }
 
 /// Result of atomically applying independently validated discovery plans from a block.
@@ -312,6 +315,8 @@ pub trait EnhancePirWrite: EnhancePirRead {
     /// Any live rejection or database error rolls back the entire batch. Stale
     /// requests are harmless no-ops. Server association and metadata are trusted
     /// where no incoming or outgoing decryption authenticates the action.
+    /// Storage may count a rejected record against its position after rolling back;
+    /// a position rejected three times is reported as [`EnhancePirSuspension::Rejected`].
     fn apply_ironwood_enhance_records(
         &mut self,
         records: &[(EnhancePirRequest, EnhanceRecord)],
