@@ -311,6 +311,13 @@ fn requests_until_refused(ctx: &mut Ctx, dev: Dev) -> (Vec<u64>, ReservationPoli
     }
 }
 
+/// Whether `issued` holds every index in `expected` exactly once, and nothing else.
+fn each_once(issued: &[u64], expected: std::ops::RangeInclusive<u64>) -> bool {
+    let mut sorted = issued.to_vec();
+    sorted.sort_unstable();
+    sorted == expected.collect::<Vec<_>>()
+}
+
 /// Wallet A sends a quote request for I0 that reaches NEAR, but its answer is lost, and
 /// the app restarts. A then saves quote requests that never reach NEAR until issuance
 /// waits, and NEAR's feed, `lag` behind, catches up. After the deadlines and cooldown, A
@@ -358,10 +365,13 @@ fn lost_answer_near_saw(lag: i64) -> Scenario {
                     issued.len()
                 ),
             );
+            // Until NEAR's set holds I0, it counts as seen without moving the gap, so a
+            // feed behind leaves the window ending at I29.
+            let first_end = RECEIVE_GAP_LIMIT - u64::from(behind);
             ctx.check(
-                "issuance waits once the window holds no fresh address",
-                refused == ReservationPolicy::Limit,
-                format!("{refused:?} after issuing {issued:?}"),
+                format!("the first pass issues I1 to I{first_end} once each, then issuance waits"),
+                each_once(&issued, 1..=first_end) && refused == ReservationPolicy::Limit,
+                format!("issued {issued:?}, then {refused:?}"),
             );
             ctx.wait(3 * HOUR);
             ctx.sync(a);
@@ -387,8 +397,8 @@ fn lost_answer_near_saw(lag: i64) -> Scenario {
                     again.len()
                 ),
             );
-            // NEAR's set holds I0, which moves the gap one past it; with the feed behind,
-            // the first pass filled only the 29 indices up to the old bound.
+            // NEAR's set now holds I0, which moves the gap one past it. With the feed
+            // behind, the first pass left I30 fresh.
             let expected = if behind { RECEIVE_GAP_LIMIT } else { 1 };
             ctx.check(
                 format!("issuance resumes at I{expected}"),
@@ -396,6 +406,14 @@ fn lost_answer_near_saw(lag: i64) -> Scenario {
                 format!(
                     "issued {again:?}; reservations.rs: an address the provider was given without seeing it is reissued only when the gap rule leaves no fresh one, and one the set holds moves the gap"
                 ),
+            );
+            ctx.check(
+                format!(
+                    "the second pass issues I1 to I{RECEIVE_GAP_LIMIT} once each, then issuance waits"
+                ),
+                each_once(&again, 1..=RECEIVE_GAP_LIMIT)
+                    && refused_again == ReservationPolicy::Limit,
+                format!("issued {again:?}, then {refused_again:?}"),
             );
             let given: Vec<u64> = again
                 .iter()
