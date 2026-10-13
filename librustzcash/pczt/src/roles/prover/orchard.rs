@@ -109,9 +109,8 @@ mod tests {
 
     fn proving_key() -> &'static orchard::circuit::ProvingKey {
         PROVING_KEY.get_or_init(|| {
-            orchard::circuit::ProvingKey::build(
-                orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
-            )
+            orchard::circuit::ProvingKey::build(orchard::circuit::OrchardCircuitVersion::PostNu6_3)
+                .expect("the current Orchard circuit supports proving")
         })
     }
 

@@ -54,17 +54,11 @@ use zcash_protocol::{
 use zcash_script::script::{self, Evaluable};
 
 static ORCHARD_PROVING_KEY: OnceLock<orchard::circuit::ProvingKey> = OnceLock::new();
-static POST_NU6_3_ORCHARD_PROVING_KEY: OnceLock<orchard::circuit::ProvingKey> = OnceLock::new();
 
 fn orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
     ORCHARD_PROVING_KEY.get_or_init(|| {
-        orchard::circuit::ProvingKey::build(orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2)
-    })
-}
-
-fn post_nu6_3_orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
-    POST_NU6_3_ORCHARD_PROVING_KEY.get_or_init(|| {
         orchard::circuit::ProvingKey::build(orchard::circuit::OrchardCircuitVersion::PostNu6_3)
+            .expect("the current Orchard circuit supports proving")
     })
 }
 
@@ -125,7 +119,7 @@ fn assert_external_orchard_signature_round_trip(
 
 #[test]
 fn transparent_to_orchard() {
-    let params = pre_nu6_3_test_network();
+    let params = nu6_3_test_network();
     let rng = OsRng;
 
     // Create a transparent account to send funds from.
@@ -139,8 +133,7 @@ fn transparent_to_orchard() {
     let transparent_sk = transparent_account_sk
         .derive_external_secret_key(address_index)
         .unwrap();
-    let secp = secp256k1::Secp256k1::signing_only();
-    let transparent_pubkey = transparent_sk.public_key(&secp);
+    let transparent_pubkey = transparent_sk.public_key();
     let p2pkh_addr = TransparentAddress::from_pubkey(&transparent_pubkey);
 
     // Create an Orchard account to receive funds.
@@ -312,7 +305,7 @@ fn transparent_to_orchard() {
 
 #[test]
 fn transparent_p2sh_multisig_to_orchard() {
-    let params = pre_nu6_3_test_network();
+    let params = nu6_3_test_network();
     let rng = OsRng;
 
     // Construct a 2-of-3 ZIP 48 P2SH account.
@@ -561,7 +554,7 @@ fn sapling_to_orchard() {
 
     // Build the Orchard bundle we'll be using.
     let mut builder = Builder::new(
-        pre_nu6_3_test_network(),
+        nu6_3_test_network(),
         10_000_000.into(),
         BuildConfig::Standard {
             sapling_anchor: Some(anchor),
@@ -726,7 +719,7 @@ fn orchard_to_orchard() {
 
     // Build the Orchard bundle we'll be using.
     let mut builder = Builder::new(
-        pre_nu6_3_test_network(),
+        nu6_3_test_network(),
         10_000_000.into(),
         BuildConfig::Standard {
             sapling_anchor: None,
@@ -942,7 +935,7 @@ fn orchard_low_level_signer_uses_preverified_signing_parse() {
 
     // Build the Orchard bundle we'll be using.
     let mut builder = Builder::new(
-        pre_nu6_3_test_network(),
+        nu6_3_test_network(),
         10_000_000.into(),
         BuildConfig::Standard {
             sapling_anchor: None,
@@ -1113,8 +1106,7 @@ fn pczt_with_anchor(pool: ShieldedPool) -> Pczt {
     let transparent_sk = transparent_account_sk
         .derive_external_secret_key(address_index)
         .unwrap();
-    let secp = secp256k1::Secp256k1::signing_only();
-    let transparent_pubkey = transparent_sk.public_key(&secp);
+    let transparent_pubkey = transparent_sk.public_key();
 
     let orchard_sk = orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap();
     let orchard_fvk = orchard::keys::FullViewingKey::from(&orchard_sk);
@@ -1430,7 +1422,7 @@ fn wallet_can_set_sapling_witness_after_signing() {
 
     // Build the Sapling transaction that a wallet will sign before proof creation.
     let mut builder = Builder::new(
-        pre_nu6_3_test_network(),
+        nu6_3_test_network(),
         10_000_000.into(),
         BuildConfig::Standard {
             sapling_anchor: Some(anchor),
@@ -1672,7 +1664,7 @@ fn redacted_orchard_anchor_can_be_restored_after_signing() {
     assert!(redacted.orchard().anchor().is_none());
     assert!(
         Prover::new(redacted.clone())
-            .create_orchard_proof(post_nu6_3_orchard_proving_key())
+            .create_orchard_proof(orchard_proving_key())
             .is_err()
     );
 
@@ -1701,9 +1693,9 @@ fn redacted_orchard_anchor_can_be_restored_after_signing() {
     );
 
     let proved = Prover::new(updated)
-        .create_orchard_proof(post_nu6_3_orchard_proving_key())
+        .create_orchard_proof(orchard_proving_key())
         .unwrap()
-        .create_ironwood_proof(post_nu6_3_orchard_proving_key())
+        .create_ironwood_proof(orchard_proving_key())
         .unwrap()
         .finish();
     check_v2_round_trip(&proved);
@@ -1775,7 +1767,7 @@ fn wallet_can_set_orchard_witness_after_signing() {
 
     // Build the Orchard transaction that a wallet will sign before proof creation.
     let mut builder = Builder::new(
-        pre_nu6_3_test_network(),
+        nu6_3_test_network(),
         10_000_000.into(),
         BuildConfig::Standard {
             sapling_anchor: None,
@@ -1992,7 +1984,7 @@ fn wallet_can_set_ironwood_witness_after_signing() {
         .finish();
     assert!(
         Prover::new(redacted.clone())
-            .create_ironwood_proof(post_nu6_3_orchard_proving_key())
+            .create_ironwood_proof(orchard_proving_key())
             .is_err()
     );
 
@@ -2024,7 +2016,7 @@ fn wallet_can_set_ironwood_witness_after_signing() {
     );
 
     let proved = Prover::new(updated)
-        .create_ironwood_proof(post_nu6_3_orchard_proving_key())
+        .create_ironwood_proof(orchard_proving_key())
         .unwrap()
         .finish();
     assert!(matches!(
@@ -2459,7 +2451,7 @@ fn builder_can_defer_anchors_until_proving() {
     // Proving without the real anchor fails: the deferral cannot be silently ignored.
     assert!(
         Prover::new(signed.clone())
-            .create_orchard_proof(post_nu6_3_orchard_proving_key())
+            .create_orchard_proof(orchard_proving_key())
             .is_err()
     );
 
@@ -2490,9 +2482,9 @@ fn builder_can_defer_anchors_until_proving() {
     );
 
     let proved = Prover::new(updated)
-        .create_orchard_proof(post_nu6_3_orchard_proving_key())
+        .create_orchard_proof(orchard_proving_key())
         .unwrap()
-        .create_ironwood_proof(post_nu6_3_orchard_proving_key())
+        .create_ironwood_proof(orchard_proving_key())
         .unwrap()
         .finish();
     check_v2_round_trip(&proved);

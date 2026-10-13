@@ -33,7 +33,7 @@ extra_members = ["wallet-lib", "zakura/pir-enhance", "zakura/pir-enhance-types",
 facade = "wallet-lib"
 # Inherited by every vendored crate through workspace package metadata.
 repository = "https://github.com/zakura-core/wallet-libraries"
-rust_version = "1.91"
+rust_version = "1.97"
 
 [[source]]
 name = "librustzcash"
@@ -77,24 +77,25 @@ path = "zcash_client_sqlite"
 package = "zakura-client-sqlite"
 version = "0.1.0-rc9"
 
-# Workspace dependencies redirected onto the Common v2.0.0 release.
+# Workspace dependencies redirected onto the Common v3.0.0 release.
 # The upstream dependency key is kept, so crate sources continue to say
 # `orchard::` and `zcash_primitives::` while resolving to the forks.
 [rewire]
-bellman = { package = "zakura-bellman", version = "2.0.0" }
-bls12_381 = { package = "zakura-bls12-381", version = "2.0.0" }
-jubjub = { package = "zakura-jubjub", version = "2.0.0" }
-zcash_address = { package = "zakura-address", version = "2.0.0" }
-zcash_protocol = { package = "zakura-protocol", version = "2.0.0" }
-transparent = { package = "zakura-transparent", version = "2.0.0" }
-zip321 = { package = "zakura-zip321", version = "2.0.0" }
-zcash_primitives = { package = "zakura-primitives", version = "2.0.0" }
-zcash_keys = { package = "zakura-keys", version = "2.0.0" }
-zcash_proofs = { package = "zakura-proofs", version = "2.0.0" }
-orchard = { package = "zakura-orchard", version = "2.0.0" }
-sapling = { package = "zakura-sapling-crypto", version = "2.0.0" }
-redjubjub = { package = "zakura-redjubjub", version = "2.0.0" }
-pasta_curves = { package = "zakura-pasta-curves", version = "2.0.0" }
+bellman = { package = "zakura-bellman", version = "3.0.0" }
+bls12_381 = { package = "zakura-bls12-381", version = "3.0.0" }
+jubjub = { package = "zakura-jubjub", version = "3.0.0" }
+zcash_address = { package = "zakura-address", version = "3.0.0" }
+zcash_protocol = { package = "zakura-protocol", version = "3.0.0" }
+transparent = { package = "zakura-transparent", version = "3.0.0" }
+zip321 = { package = "zakura-zip321", version = "3.0.0" }
+zcash_note_encryption = { package = "zakura-note-encryption", version = "3.0.0" }
+zcash_primitives = { package = "zakura-primitives", version = "3.0.0" }
+zcash_keys = { package = "zakura-keys", version = "3.0.0" }
+zcash_proofs = { package = "zakura-proofs", version = "3.0.0" }
+orchard = { package = "zakura-orchard", version = "3.0.0" }
+sapling = { package = "zakura-sapling-crypto", version = "3.0.0" }
+redjubjub = { package = "zakura-redjubjub", version = "3.0.0" }
+pasta_curves = { package = "zakura-pasta-curves", version = "3.0.0" }
 
 # Non-renamed ecosystem crates whose public traits changed with the 1.0 crypto
 # family. The generated workspace keeps upstream's other dependency metadata
@@ -105,6 +106,9 @@ group = "0.14"
 rand = "0.10"
 rand_core = "0.10"
 rand_distr = "0.6"
+bip32 = "0.6"
+secp256k1 = "0.33"
+zcash_script = "0.6"
 
 # Crate names that must never appear in a built graph: the crates.io originals
 # of everything `libraries` forks. Any one of them means an edge escaped the
@@ -114,6 +118,7 @@ forbidden = [
   "orchard",
   "sapling-crypto",
   "zcash_primitives",
+  "zcash_note_encryption",
   "zcash_keys",
   "zcash_proofs",
   "zcash_address",

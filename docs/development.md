@@ -2,7 +2,7 @@
 
 Python 3.11+, Rust, and Git are sufficient for ordinary development on macOS
 and Linux. `rust-toolchain.toml` pins the CI/development compiler; the facade
-verification also checks a fresh Rust 1.91 consumer. Protobuf regeneration
+verification also checks a fresh Rust 1.97 consumer. Protobuf regeneration
 requires the pinned compiler described below; ordinary builds do not.
 
 ## Commands

@@ -90,20 +90,18 @@ pub use decrypt::{DecryptedOutput, TransferType, decrypt_transaction};
 /// the same cache used by the transaction builder, so this is a latency
 /// optimization rather than a correctness requirement.
 ///
-/// Each [`orchard::circuit::OrchardCircuitVersion`] is warmed at most once.
+/// The current proving circuit is warmed at most once. Historical circuits
+/// support verification only and are skipped.
 /// Callers should derive the version from the target transaction's consensus
 /// branch instead of assuming the latest version.
 pub fn start_orchard_proving_key_warmup(circuit_version: orchard::circuit::OrchardCircuitVersion) {
     use orchard::circuit::OrchardCircuitVersion;
     use std::sync::atomic::AtomicBool;
 
-    static INSECURE_PRE_NU6_2: AtomicBool = AtomicBool::new(false);
-    static FIXED_POST_NU6_2: AtomicBool = AtomicBool::new(false);
     static POST_NU6_3: AtomicBool = AtomicBool::new(false);
 
     let started = match circuit_version {
-        OrchardCircuitVersion::InsecurePreNu6_2 => &INSECURE_PRE_NU6_2,
-        OrchardCircuitVersion::FixedPostNu6_2 => &FIXED_POST_NU6_2,
+        OrchardCircuitVersion::InsecurePreNu6_2 | OrchardCircuitVersion::FixedPostNu6_2 => return,
         OrchardCircuitVersion::PostNu6_3 => &POST_NU6_3,
     };
 
@@ -199,8 +197,11 @@ mod tests {
 
         start_orchard_proving_key_warmup(circuit_version);
         start_orchard_proving_key_warmup(circuit_version);
-        let warmed = cached_orchard_proving_key(circuit_version);
+        let warmed = cached_orchard_proving_key(circuit_version).unwrap();
 
-        assert!(ptr::eq(warmed, cached_orchard_proving_key(circuit_version)));
+        assert!(ptr::eq(
+            warmed,
+            cached_orchard_proving_key(circuit_version).unwrap()
+        ));
     }
 }

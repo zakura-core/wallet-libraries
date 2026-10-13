@@ -1972,7 +1972,7 @@ pub struct TestBuilder<Cache, DataStoreFactory> {
 impl TestBuilder<(), ()> {
     /// The default network used by [`TestBuilder::new`].
     ///
-    /// This is a fake network where Sapling through NU5 activate at the same height. We
+    /// This is a fake network where Sapling through NU6.3 activate at the same height. We
     /// pick height 100,000 to be large enough to handle any hard-coded test offsets.
     pub const DEFAULT_NETWORK: LocalNetwork = LocalNetwork {
         overwinter: Some(BlockHeight::from_u32(1)),
@@ -1981,10 +1981,10 @@ impl TestBuilder<(), ()> {
         heartwood: Some(BlockHeight::from_u32(100_000)),
         canopy: Some(BlockHeight::from_u32(100_000)),
         nu5: Some(BlockHeight::from_u32(100_000)),
-        nu6: None,
-        nu6_1: None,
-        nu6_2: None,
-        nu6_3: None,
+        nu6: Some(BlockHeight::from_u32(100_000)),
+        nu6_1: Some(BlockHeight::from_u32(100_000)),
+        nu6_2: Some(BlockHeight::from_u32(100_000)),
+        nu6_3: Some(BlockHeight::from_u32(100_000)),
         nu7: None,
     };
 

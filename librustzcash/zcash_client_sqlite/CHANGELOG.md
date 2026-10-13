@@ -7,6 +7,11 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the public cryptography and note-encryption types to Zakura Common
+  3.0.0 and raised the minimum supported Rust version to 1.97.
+
 ## [0.1.0-rc9] - 2026-10-14
 
 ### Added

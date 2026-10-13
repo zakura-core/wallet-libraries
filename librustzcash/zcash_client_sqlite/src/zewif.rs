@@ -1009,10 +1009,10 @@ fn decode_wif(expected_prefix: u8, wif: &str) -> Option<secp256k1::SecretKey> {
     let payload = bs58::decode(wif).with_check(None).into_vec().ok()?;
     match payload.as_slice() {
         [prefix, key_data @ ..] if *prefix == expected_prefix && key_data.len() == 32 => {
-            secp256k1::SecretKey::from_slice(key_data).ok()
+            secp256k1::SecretKey::from_secret_bytes(key_data.try_into().ok()?).ok()
         }
         [prefix, key_data @ .., 0x01] if *prefix == expected_prefix && key_data.len() == 32 => {
-            secp256k1::SecretKey::from_slice(key_data).ok()
+            secp256k1::SecretKey::from_secret_bytes(key_data.try_into().ok()?).ok()
         }
         _ => None,
     }
@@ -1037,7 +1037,6 @@ where
         NetworkType::Main => 0x80,
         NetworkType::Test | NetworkType::Regtest => 0xEF,
     };
-    let secp = secp256k1::Secp256k1::new();
 
     for entry in store.map_or(&[][..], |s| s.transparent_keys()) {
         if !entry.pubkey().is_compressed() {
@@ -1058,7 +1057,7 @@ where
                     address: address.clone(),
                 }
             })?;
-        if secret_key.public_key(&secp) != pubkey {
+        if secret_key.public_key() != pubkey {
             return Err(ZewifImportError::TransparentKeyMismatch { address });
         }
 
@@ -2063,11 +2062,10 @@ mod tests {
         let (_file, mut wdb) = test_wallet_db();
         let ts = test_seed(0);
 
-        let secp = secp256k1::Secp256k1::new();
-        let secret_key = secp256k1::SecretKey::from_slice(&[0x42; 32]).unwrap();
-        let pubkey = secret_key.public_key(&secp);
+        let secret_key = secp256k1::SecretKey::from_secret_bytes([0x42; 32]).unwrap();
+        let pubkey = secret_key.public_key();
         let mut wif_payload = vec![0xEF];
-        wif_payload.extend_from_slice(&secret_key.secret_bytes());
+        wif_payload.extend_from_slice(&secret_key.to_secret_bytes());
         wif_payload.push(0x01);
         let wif = bs58::encode(wif_payload).with_check().into_string();
 
@@ -2113,12 +2111,11 @@ mod tests {
         let (_file, mut wdb) = test_wallet_db();
         let ts = test_seed(0);
 
-        let secp = secp256k1::Secp256k1::new();
-        let secret_key = secp256k1::SecretKey::from_slice(&[0x42; 32]).unwrap();
-        let pubkey = secret_key.public_key(&secp);
+        let secret_key = secp256k1::SecretKey::from_secret_bytes([0x42; 32]).unwrap();
+        let pubkey = secret_key.public_key();
         let address = TransparentAddress::from_pubkey(&pubkey).encode(&TEST_NETWORK);
         let mut wif_payload = vec![0xEF];
-        wif_payload.extend_from_slice(&secret_key.secret_bytes());
+        wif_payload.extend_from_slice(&secret_key.to_secret_bytes());
         wif_payload.push(0x01);
         let wif = bs58::encode(wif_payload).with_check().into_string();
 
@@ -2174,12 +2171,11 @@ mod tests {
         let (_file, mut wdb) = test_wallet_db();
         let ts = test_seed(0);
 
-        let secp = secp256k1::Secp256k1::new();
-        let secret_key = secp256k1::SecretKey::from_slice(&[0x42; 32]).unwrap();
-        let pubkey = secret_key.public_key(&secp);
+        let secret_key = secp256k1::SecretKey::from_secret_bytes([0x42; 32]).unwrap();
+        let pubkey = secret_key.public_key();
         let address = TransparentAddress::from_pubkey(&pubkey).encode(&TEST_NETWORK);
         let mut wif_payload = vec![0xEF];
-        wif_payload.extend_from_slice(&secret_key.secret_bytes());
+        wif_payload.extend_from_slice(&secret_key.to_secret_bytes());
         wif_payload.push(0x01);
         let wif = bs58::encode(wif_payload).with_check().into_string();
 

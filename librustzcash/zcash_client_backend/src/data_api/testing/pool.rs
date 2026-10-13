@@ -7040,11 +7040,7 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     // Add proof generation keys to Sapling spends.
     let pczt_updated = P0::add_proof_generation_keys(pczt_created, account.usk()).unwrap();
 
-    // Create proofs, using the circuit that governs the Orchard pool under the
-    // consensus branch the PCZT was created for. (The test network's most recent
-    // upgrade is NU5, so this is currently the historical pre-NU6.2 circuit;
-    // modernizing the test network fixture is part of the broader Ironwood test
-    // coverage work.)
+    // Create proofs with the current circuit selected by the PCZT's consensus branch.
     let sapling_prover = LocalTxProver::bundled();
     let orchard_pk = zcash_primitives::transaction::builder::cached_orchard_proving_key(
         zcash_primitives::transaction::components::orchard::bundle_version_for_branch(
@@ -7053,7 +7049,8 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
         )
         .expect("the PCZT's consensus branch supports the Orchard pool")
         .circuit_version(),
-    );
+    )
+    .expect("the test transaction uses a circuit that supports proving");
     let pczt_proven = Prover::new(pczt_updated)
         .create_orchard_proof(orchard_pk)
         .unwrap()
@@ -9085,7 +9082,8 @@ where
         )
         .expect("the PCZT's consensus branch supports the Orchard pool")
         .circuit_version(),
-    );
+    )
+    .expect("the test transaction uses a circuit that supports proving");
     let proven = Prover::new(authorized)
         .create_orchard_proof(orchard_pk)
         .unwrap()

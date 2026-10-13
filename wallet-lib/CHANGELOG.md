@@ -7,6 +7,13 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the Zakura Common stack to 3.0.0, including the shared note-encryption
+  fork, and raised the minimum supported Rust version to 1.97.
+- Updated the selectable upstream backend to the prerelease family using
+  stable bip32 0.6 so both backends can resolve in the same workspace lockfile.
+
 ## [0.1.0-rc8] - 2026-10-14
 
 ### Changed
