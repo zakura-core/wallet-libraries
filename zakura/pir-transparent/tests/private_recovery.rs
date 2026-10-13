@@ -1849,7 +1849,7 @@ struct DisplayService {
 
 impl DisplayService {
     fn start(start: u64, end: u64, records: &[zakura_pir_transparent::DisplayEntry]) -> Self {
-        use transparent_shard::display::{DisplaySealParams, TXID_2K8};
+        use transparent_shard::display::{DisplaySealParams, TXID_4K8};
         use transparent_shard_server::{
             display::{
                 DisplayRole,
@@ -1872,7 +1872,7 @@ impl DisplayService {
                 parent_manifest_digest: String::new(),
                 n_buckets: 1,
                 archive_target: 1,
-                geometry: &TXID_2K8,
+                geometry: &TXID_4K8,
             },
             records,
         )
