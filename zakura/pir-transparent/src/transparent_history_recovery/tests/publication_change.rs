@@ -14,7 +14,8 @@ fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
     let dir = tempfile::tempdir().unwrap();
     let mut adapter = covering(&dir.path().join("companion.sqlite"), &map);
     // Every store table holds something: a receive and its spend, a pending
-    // page, a cached run, cached filter and setup, and a committed anchor.
+    // page, a cached run, a content failure, cached filter and setup, and a
+    // committed anchor.
     let receive = TransparentEvent::Receive(transparent_events::ReceiveEvent {
         metadata: None,
         height: sealed.start_height as u32,
@@ -54,6 +55,7 @@ fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
     let mut open = covered(tail, &tail.manifest_digest, end, &script, vec![]);
     open.covered_scripts.clear();
     open.pending_upsert = vec![store_page(tail, &script, 3)];
+    open.failed_entries = vec![script.clone()];
     adapter.store.commit_shard(open).unwrap();
     adapter
         .store
@@ -101,19 +103,28 @@ fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
     assert!(deferred.commits.is_empty());
     assert_eq!(exported(&adapter), vec![(ARCHIVE, 1), (TAIL, 1)]);
     let held = store_rows(&adapter);
-    assert_eq!(held.len(), 10);
+    assert_eq!(held.len(), 11);
     for (table, rows) in held {
         assert!(rows > 0, "{table}");
     }
 
     // A pass starting from the resealed map stops at the set check, having
-    // emptied every store table but the schema version.
+    // emptied every store table but the schema version and the content failures:
+    // a service changing its publication set earns a held entry no more attempts.
     publication_change(&mut adapter, &resealed);
     let reset = store_rows(&adapter);
-    assert_eq!(reset.len(), 10);
+    assert_eq!(reset.len(), 11);
     for (table, rows) in reset {
-        assert_eq!(rows, u64::from(table == "wallet_meta"), "{table}");
+        let kept = table == "wallet_meta" || table == "failed_entries";
+        assert_eq!(rows, u64::from(kept), "{table}");
     }
+    assert_eq!(
+        adapter
+            .store
+            .entry_failures(tail.shard_id, &script)
+            .unwrap(),
+        1
+    );
     let kept: String = adapter
         .catalog
         .query_row("SELECT key FROM wallet_meta", [], |row| row.get(0))

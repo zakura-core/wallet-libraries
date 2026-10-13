@@ -10,6 +10,31 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+
+- `EnhancePirSuspension::Rejected`, for an Enhance PIR position whose replies
+  were rejected or unreadable three times. It is not queried again until a
+  rescan queues its transaction again or a fresh wallet session is opened.
+- `EnhancePirWrite::record_ironwood_enhance_unreadable`, which counts a reply
+  whose row or record bytes failed to decode against the same three-strike
+  allowance. Callers must call it for such a content failure and must not call
+  it for a request failure (HTTP 409/410/429/503, transport error, timeout).
+- `TransparentDisplayView::GaveUp`, for a receipt lookup given up after three
+  replies failed on content at one mined height without public authority.
+  Present it as `Unavailable`, but do not poll or prioritise it; it changes
+  only when the transaction is mined at another height or public authority is
+  granted.
+
+### Changed
+
+- `TransparentDisplayView` has the new `GaveUp` variant: exhaustive matches
+  must handle it.
+
+- `EnhancePirSuspension` has the new `Rejected` variant: exhaustive matches
+  must handle it.
+- `EnhancePirWrite` has the new required method
+  `record_ironwood_enhance_unreadable`: implementors must provide it.
+
 ## [0.1.0-rc8] - PLANNED
 
 Breaking release for explicit transparent disclosure policy, private recovery,

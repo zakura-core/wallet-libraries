@@ -7,7 +7,7 @@ use zcash_protocol::consensus::BlockHeight;
 
 use super::*;
 use crate::apply::{ApplyError, ApplyStats};
-use crate::progress::{Outcome, Progress};
+use crate::progress::{FailedEntries, Outcome, Progress};
 
 const OUTCOMES: [Outcome; 5] = [
     Outcome::Complete,
@@ -60,6 +60,15 @@ fn report(state: BatchState, outcome: Outcome) -> PassReport {
         commits: usize::from(state == BatchState::Ready),
         retired: 0,
         publication_changed: false,
+        failed_entries: FailedEntries::default(),
+    }
+}
+
+/// [`report`] with `entries` failed entries, `held` of them at the cap.
+fn failing(state: BatchState, outcome: Outcome, entries: usize, held: usize) -> PassReport {
+    PassReport {
+        failed_entries: FailedEntries { entries, held },
+        ..report(state, outcome)
     }
 }
 
@@ -134,7 +143,6 @@ fn a_withdrawn_pass_holds_the_account() {
                 watch(2, false),
             );
             assert_eq!(step, Step::Hold(HoldCause::Withdrawn(cause)), "{outcome:?}");
-            assert_eq!(plan.passes, 0);
         }
     }
 }
@@ -162,7 +170,6 @@ fn every_failed_settlement_has_its_step() {
                 watch(1, false),
             );
             assert_eq!(step, expected, "{action:?} {outcome:?}");
-            assert_eq!(plan.passes, 0);
         }
     }
 }
@@ -178,25 +185,22 @@ fn stale_settlements_refresh_a_bounded_number_of_times() {
         assert_eq!(plan.next(&ready, &stale, watch(1, false)), Step::Refresh);
     }
     assert_eq!(plan.next(&ready, &stale, watch(1, false)), Step::Skip);
-    assert_eq!(plan.passes, 0);
 
     // A refresh that finds no target has nothing to pass.
     let mut plan = new_plan();
     assert_eq!(plan.next(&ready, &stale, watch(1, true)), Step::Done(None));
 
-    // Refreshes do not reset between passes.
-    let limits = PassLimits {
-        passes: 8,
-        stale_refreshes: 1,
-    };
+    // The refresh allowance is not reset when publication lag is reported.
+    let limits = PassLimits { stale_refreshes: 1 };
     let mut plan = PassPlan::new(watch(1, false), limits);
     assert_eq!(plan.next(&ready, &stale, watch(1, false)), Step::Refresh);
-    let more = report(BatchState::Ready, Outcome::More);
+    let behind = report(BatchState::Ready, Outcome::Behind);
     assert_eq!(
-        plan.next(&more, &applied(false), watch(1, false)),
-        Step::Pass
+        plan.next(&behind, &applied(false), watch(1, false)),
+        Step::Done(Some(Retry::After(Retry::BEHIND)))
     );
     assert_eq!(plan.next(&ready, &stale, watch(1, false)), Step::Skip);
+    assert_eq!(PassLimits::default().stale_refreshes, 3);
 }
 
 /// A settlement the caller's gate interrupted skips only the account, never the run:
@@ -213,7 +217,6 @@ fn an_interrupted_settlement_skips_only_the_account() {
             watch(2, false),
         );
         assert_eq!(step, Step::Skip, "{outcome:?}");
-        assert_eq!(plan.passes, 0);
     }
 }
 
@@ -230,7 +233,6 @@ fn a_changed_policy_stops_the_run() {
             plan.next(&ready, &changed, watch(1, targetless)),
             Step::Stop(StopCause::PolicyChanged)
         );
-        assert_eq!(plan.passes, 0);
     }
     // After stale refreshes too.
     let mut plan = new_plan();
@@ -270,8 +272,9 @@ fn an_unsettled_ready_pass_is_skipped() {
     }
 }
 
-/// Settled or pending, a pass follows its retry: at once after `More`, after the
-/// wait for `After`, and only for new work after `Complete` or `Stalled`.
+/// Settled or pending, every counted pass ends the sync with its retry, including
+/// the delay after lag or overload. Neither window growth nor changed addresses
+/// starts another pass in the current sync.
 #[test]
 fn a_counted_pass_follows_its_retry() {
     for state in [BatchState::Ready, BatchState::Pending] {
@@ -282,42 +285,59 @@ fn a_counted_pass_follows_its_retry() {
         };
         for (settled, grew) in settlements {
             for addresses_changed in [false, true] {
-                let new_work = grew || addresses_changed;
                 for outcome in OUTCOMES {
                     let mut plan = new_plan();
                     let fresh = watch(1 + u8::from(addresses_changed), false);
                     let step = plan.next(&report(state, outcome), &settled, fresh);
-                    let expected = match outcome {
-                        Outcome::More => Step::Pass,
-                        Outcome::Behind => Step::Wait(Retry::BEHIND),
-                        Outcome::Overloaded => Step::Wait(Retry::OVERLOADED),
-                        Outcome::Complete | Outcome::Stalled if new_work => Step::Pass,
-                        Outcome::Complete => Step::Done(Some(Retry::Complete)),
-                        Outcome::Stalled => Step::Done(Some(Retry::Stalled)),
-                    };
+                    let expected = Step::Done(Some(pass_retry(outcome)));
                     assert_eq!(
                         step, expected,
                         "{state:?} grew={grew} changed={addresses_changed} {outcome:?}"
                     );
-                    assert_eq!(plan.passes, 1);
+                    // The fresh set is saved, but this sync does not pass it again.
+                    assert_eq!(
+                        plan.watch().addresses.len(),
+                        1 + usize::from(addresses_changed)
+                    );
                 }
             }
         }
     }
 }
 
-/// The plan compares each fresh watch set with the one the pass ran with, not the
-/// first one it was given.
+fn pass_retry(outcome: Outcome) -> Retry {
+    match outcome {
+        Outcome::Behind => Retry::After(Retry::BEHIND),
+        Outcome::Overloaded => Retry::After(Retry::OVERLOADED),
+        Outcome::More => Retry::More,
+        Outcome::Complete => Retry::Complete,
+        Outcome::Stalled => Retry::Stalled,
+    }
+}
+
+/// A caller that continues until the plan ends must not loop forever on a
+/// publication that stays behind or a service that keeps refusing capacity.
 #[test]
-fn new_work_is_measured_against_the_last_watch_set() {
-    let complete = report(BatchState::Pending, Outcome::Complete);
-    let mut plan = new_plan();
-    assert_eq!(plan.next(&complete, &NOTHING, watch(3, false)), Step::Pass);
-    assert_eq!(plan.watch().addresses.len(), 3);
-    assert_eq!(
-        plan.next(&complete, &NOTHING, watch(3, false)),
-        Step::Done(Some(Retry::Complete))
-    );
+fn persistent_lag_or_overload_does_not_keep_a_sync_running() {
+    for state in [BatchState::Ready, BatchState::Pending] {
+        for outcome in [Outcome::Behind, Outcome::Overloaded] {
+            let settled = if state == BatchState::Ready {
+                applied(false)
+            } else {
+                NOTHING
+            };
+            let mut plan = new_plan();
+            let mut step = plan.first();
+            let mut passes = 0;
+            while !matches!(step, Step::Done(_)) {
+                assert_eq!(passes, 0, "the sync must end after its counted pass");
+                passes += 1;
+                step = plan.next(&report(state, outcome), &settled, watch(1, false));
+            }
+            assert_eq!(passes, 1);
+            assert_eq!(step, Step::Done(Some(pass_retry(outcome))));
+        }
+    }
 }
 
 #[test]
@@ -333,35 +353,8 @@ fn a_target_lost_after_a_pass_ends_the_passes() {
     }
 }
 
-/// The pass limit ends a run that would otherwise go on, with the last retry.
-#[test]
-fn the_pass_limit_ends_the_passes() {
-    let limits = PassLimits {
-        passes: 3,
-        stale_refreshes: 3,
-    };
-    for outcome in [Outcome::More, Outcome::Behind, Outcome::Complete] {
-        let mut plan = PassPlan::new(watch(1, false), limits);
-        let pass = report(BatchState::Ready, outcome);
-        for _ in 1..limits.passes {
-            assert_ne!(
-                plan.next(&pass, &applied(true), watch(1, false)),
-                Step::Done(Some(pass.retry()))
-            );
-        }
-        assert_eq!(
-            plan.next(&pass, &applied(true), watch(1, false)),
-            Step::Done(Some(pass.retry())),
-            "{outcome:?}"
-        );
-        assert_eq!(plan.passes, limits.passes);
-    }
-    let defaults = PassLimits::default();
-    assert_eq!((defaults.passes, defaults.stale_refreshes), (8, 3));
-}
-
-/// Over every input: a wait comes only from a retry that names one, a withdrawn
-/// pass never passes again, and only settled or pending passes count.
+/// Over every input: a withdrawn pass never passes again, and every counted
+/// pass, settled or pending, ends the sync with its retry.
 #[test]
 fn the_table_never_retries_what_it_must_not() {
     let mut states = vec![BatchState::Ready, BatchState::Pending];
@@ -376,9 +369,6 @@ fn the_table_never_retries_what_it_must_not() {
                     let pass = report(state, outcome);
                     let step = plan.next(&pass, settled, watch(addresses, targetless));
                     let case = format!("{state:?} {outcome:?} {settled:?} {addresses}");
-                    if let Step::Wait(wait) = step {
-                        assert_eq!(pass.retry(), Retry::After(wait), "{case}");
-                    }
                     if matches!(state, BatchState::Withdrawn(_)) {
                         assert!(matches!(step, Step::Hold(_)), "{case}");
                     }
@@ -387,15 +377,84 @@ fn the_table_never_retries_what_it_must_not() {
                         && settled
                             .as_ref()
                             .is_ok_and(|settled| settled.is_some() || state == BatchState::Pending);
-                    assert_eq!(plan.passes, usize::from(counted), "{case}");
+                    if counted {
+                        assert_ne!(step, Step::Pass, "{case}");
+                        assert!(matches!(step, Step::Done(_)), "{case}");
+                    }
                     if targetless {
-                        assert!(
-                            !matches!(step, Step::Pass | Step::Refresh | Step::Wait(_)),
-                            "{case}"
-                        );
+                        assert!(!matches!(step, Step::Pass | Step::Refresh), "{case}");
                     }
                 }
             }
         }
     }
+}
+
+/// A pass with failed entries ends the sync stalled, whatever else stopped it: a wait
+/// would pass again in the same sync and ask the failed entries again. Settled or
+/// pending, what it read stays settled.
+#[test]
+fn failed_entries_end_the_sync_stalled() {
+    for state in [BatchState::Ready, BatchState::Pending] {
+        let settled = if state == BatchState::Ready {
+            applied(false)
+        } else {
+            NOTHING
+        };
+        for outcome in OUTCOMES {
+            let mut plan = new_plan();
+            let pass = failing(state, outcome, 2, 0);
+            assert_eq!(pass.retry(), Retry::Stalled, "{state:?} {outcome:?}");
+            let step = plan.next(&pass, &settled, watch(1, false));
+            assert_eq!(
+                step,
+                Step::Done(Some(Retry::Stalled)),
+                "{state:?} {outcome:?}"
+            );
+        }
+    }
+}
+
+/// An entry at three content failures holds the account once its pass is settled: it
+/// is no longer queried, so the account cannot be covered.
+#[test]
+fn an_entry_at_the_cap_holds_the_account() {
+    for state in [BatchState::Ready, BatchState::Pending] {
+        let settled = if state == BatchState::Ready {
+            applied(true)
+        } else {
+            NOTHING
+        };
+        for outcome in OUTCOMES {
+            let mut plan = new_plan();
+            let step = plan.next(&failing(state, outcome, 2, 1), &settled, watch(2, false));
+            assert_eq!(
+                step,
+                Step::Hold(HoldCause::FailedEntries),
+                "{state:?} {outcome:?}"
+            );
+        }
+    }
+    // A withdrawn pass keeps its own cause, and a failed settlement its own step.
+    for cause in CAUSES {
+        let mut plan = new_plan();
+        let step = plan.next(
+            &failing(BatchState::Withdrawn(cause), Outcome::Stalled, 1, 1),
+            &NOTHING,
+            watch(1, false),
+        );
+        assert_eq!(step, Step::Hold(HoldCause::Withdrawn(cause)));
+    }
+    let mut plan = new_plan();
+    let held = failing(BatchState::Ready, Outcome::Stalled, 1, 1);
+    assert_eq!(
+        plan.next(&held, &failed(stale()), watch(1, false)),
+        Step::Refresh
+    );
+    // With no target there is nothing to hold.
+    let mut plan = new_plan();
+    assert_eq!(
+        plan.next(&held, &applied(false), watch(1, true)),
+        Step::Done(None)
+    );
 }

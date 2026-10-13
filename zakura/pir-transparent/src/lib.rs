@@ -61,7 +61,7 @@ pub use pass::{PassError, PassReport};
 #[cfg(feature = "sqlite")]
 pub use plan::{HoldCause, PassLimits, PassPlan, Step, StopCause};
 #[cfg(feature = "wallet")]
-pub use progress::{Outcome, Progress, Retry};
+pub use progress::{FailedEntries, Outcome, Progress, Retry};
 #[cfg(feature = "wallet")]
 pub use transparent_history_recovery::{
     SCHEMA, TransparentHistoryRecovery, TransparentHistoryRecoveryConfig,

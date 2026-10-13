@@ -121,6 +121,12 @@ impl PreparedWork {
         prepared
     }
     /// Groups active requests without changing discovery ordering or identities.
+    ///
+    /// When a batch's reply arrives but a record fails to decode ([`crate::client::record_in_row`]
+    /// returns [`ClientError::Response`]), report the batch's requests with
+    /// `EnhancePirWrite::record_ironwood_enhance_unreadable`, so a service that corrupts chosen
+    /// rows cannot have them queried forever. Never report an HTTP refusal (409, 410, 429, 503),
+    /// a transport error, a timeout or a cancellation.
     pub fn batches_by_tx_and_row(
         &self,
     ) -> BTreeMap<(zcash_primitives::transaction::TxId, u64), Vec<EnhancePirRequest>> {
@@ -220,11 +226,15 @@ mod tests {
             Position::from(0),
             IronwoodEnhanceRequestId::new(TxId::from_bytes([1; 32]), 0),
         );
-        let work = PreparedWork::new([EnhancePirWork::Suspended(
+        for suspension in [
             EnhancePirSuspension::OutgoingNotRecoverable(request),
-        )]);
-        assert_eq!(work.query_count(), 0);
-        assert_eq!(work.incomplete_count(), 1);
+            EnhancePirSuspension::Rejected(request),
+        ] {
+            let work = PreparedWork::new([EnhancePirWork::Suspended(suspension)]);
+            assert_eq!(work.query_count(), 0);
+            assert_eq!(work.positions().count(), 0);
+            assert_eq!(work.incomplete_count(), 1);
+        }
     }
 }
 

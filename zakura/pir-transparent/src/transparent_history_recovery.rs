@@ -32,7 +32,7 @@ use crate::batch::{BatchState, WithdrawnCause};
 use crate::batch::{RecoveryBatch, behind_unread_batch};
 use crate::catalog::{self, Published};
 use crate::error::{RecoveryError, ensure_valid, failure};
-use crate::progress::{Outcome, Progress};
+use crate::progress::{FailedEntries, Outcome, Progress};
 use preflight::{accepted_target, watch_floor};
 use sync_inputs::{FloorAcceptingChain, RecordingFilterSource, watched_scripts};
 
@@ -215,7 +215,7 @@ impl TransparentHistoryRecovery {
             max_queries: Some(self.config.queries),
             max_private_bytes: Some(self.config.private_bytes),
         };
-        let report = match transparent_wallet::sync_into(
+        let synced = match transparent_wallet::sync_into(
             &mut self.store,
             &map,
             map_fetch_bytes,
@@ -227,26 +227,42 @@ impl TransparentHistoryRecovery {
             &limits,
             &sync_target.anchor,
         ) {
-            Ok(report) => report,
+            Ok(report) => Some(report),
             Err(SyncError::SealedRewrite { .. }) => return self.refused_rewrite_batch(&map),
             // Not a set change, which was checked above: a map refreshed
             // mid-pass does not continue the first (another re-cut epoch, or a
             // resumed shard id moved to another start). A later pass starts
             // from the publication it then finds.
             Err(SyncError::MapDiverged(_)) => return Ok(behind_unread_batch()),
+            // A reply's content failed where the client could not fail one
+            // directory entry for it: a contradiction no single entry carried.
+            // Like a failed entry, it is the reply's, not the companion's, so
+            // the pass is not a failure a caller would pass again for: what the
+            // sync committed before it settles, and the pass is stalled.
+            Err(SyncError::Content(_)) => None,
             Err(other) => return Err(failure(other)),
+        };
+        let (progress, failed_entries) = match &synced {
+            Some(report) => (
+                Progress::from_sync_report(report, sync_target.clamped),
+                FailedEntries::of(report),
+            ),
+            None => (
+                Progress {
+                    covered_through: 0,
+                    outcome: Outcome::Stalled,
+                },
+                FailedEntries::default(),
+            ),
         };
 
         // A stale revision may have refreshed the map mid-sync. The stored facts
         // are the ones that map described.
         let synced_map: ShardMap = serde_json::from_slice(filters.map()).map_err(failure)?;
         self.check_limits(&synced_map, floor)?;
-        self.normalize(
-            watch,
-            synced_map,
-            Progress::from_sync_report(&report, sync_target.clamped),
-            chain,
-        )
+        let mut batch = self.normalize(watch, synced_map, progress, chain)?;
+        batch.failed_entries = failed_entries;
+        Ok(batch)
     }
 
     /// Every revision `map`, under `set`, publishes, and every one its re-cuts
