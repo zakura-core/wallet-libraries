@@ -235,6 +235,10 @@ counts content failures per entry and never resets them, not even when a
 publication change resets its store; at three the entry is no longer queried,
 and only a new companion asks it again. A content failure the client cannot
 lay at one entry settles what the sync committed before it, as `Stalled`.
+Existing format-6 companions upgrade to format 7 in place on open. The empty
+failure-count table and version marker commit together; saved history, coverage,
+unfinished walks and catalog evidence stay intact. Existing entries start with
+zero counted failures. Other store formats remain unsupported.
 Request failures do not count: refusals, overload, a stale revision, and a
 reply whose length, revision binding or parameter epoch does not verify, which
 fails its request and the pass (`PassError::Failure`) as before.

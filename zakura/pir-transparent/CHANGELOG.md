@@ -40,9 +40,11 @@
   covers `IncompleteReason::ContentFailed`. A reply whose length, revision binding
   or parameter epoch does not verify still fails its request, and the pass.
 - The companion's reference store is format 7, which counts content failures per
-  entry; a companion in format 6 is refused and must be recreated. A publication
-  change that resets the store keeps the counts.
-- Depend on the transparent PIR crates from wallet-pir's `main` at `0bb2f1a2`
+  entry. A format-6 companion upgrades in place: an empty failure-count table
+  and the format marker are added atomically, preserving recovery history,
+  coverage, unfinished work and catalog evidence. A publication change that
+  resets the store keeps the counts.
+- Depend on the transparent PIR crates from wallet-pir's `main` at `4bbcb697`
   (`0.1.0-rc.4`, not yet on crates.io), which fails one entry rather than the sync
   for bad row content. Previously `=0.1.0-rc.3` from crates.io.
 - Txid lookups read the 4,096-row display tables the `/v2/txid` service now
