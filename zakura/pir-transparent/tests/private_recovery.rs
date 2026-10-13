@@ -19,7 +19,11 @@ use std::{
 use fixture::{GEOMETRY, Loopback, SEAL, Server, ShardSpec, WIDE, synthetic};
 use regex::Regex;
 use rusqlite::{Connection, OpenFlags, types::Value};
-use transparent::{address::TransparentAddress, bundle::OutPoint, keys::TransparentKeyScope};
+use transparent::{
+    address::TransparentAddress,
+    bundle::OutPoint,
+    keys::{IncomingViewingKey as _, NonHardenedChildIndex, TransparentKeyScope},
+};
 use transparent_events::{ReceiveEvent, SpendEvent, TransparentEvent, Txid};
 use transparent_filter::{Recut, ScriptBytes, SealParameters, ShardMap};
 use transparent_wallet::http::{HttpOptions, HttpShardTransport};
@@ -233,11 +237,14 @@ impl Seen {
 }
 
 /// A pass: what it reported, its batch, whether settling it grew the account's
-/// window, and the step its plan takes next.
+/// window, whether it left work for the next sync, and the step its plan takes next.
 struct Pass {
     report: PassReport,
     batch: Seen,
     grew: bool,
+    /// Settling grew the window or changed the watched addresses: the next sync
+    /// passes over addresses this pass did not.
+    new_work: bool,
     step: Step,
 }
 
@@ -571,7 +578,9 @@ impl Fixture {
             }
         };
         assert!(companion.take_latest::<AccountUuid>().is_none());
-        let step = plan.next(&report, &settled, self.watch());
+        let fresh = self.watch();
+        let new_work = grew || fresh.addresses != plan.watch().addresses;
+        let step = plan.next(&report, &settled, fresh);
         if settled.is_err() {
             assert_eq!(step, Step::Hold(HoldCause::Unreconciled));
         }
@@ -579,25 +588,35 @@ impl Fixture {
             report,
             batch,
             grew,
+            new_work,
             step,
         })
     }
 
-    /// Passes as the plan says until it stops, treating a wait as the end of the
-    /// run. Panics if the plan ends on its pass limit still asking for more.
+    /// One sync: passes as a fresh plan says until it stops, treating a wait as the
+    /// end of the sync. Only refreshes pass again; a counted pass ends the sync.
     fn drive(&mut self) -> Pass {
         let mut plan = PassPlan::new(self.watch(), PassLimits::default());
         assert_eq!(plan.first(), Step::Pass);
         loop {
             let pass = self.pass_in(&mut plan).expect("a pass");
-            match pass.step {
-                Step::Pass | Step::Refresh => {}
-                Step::Done(Some(Retry::More)) => {
-                    panic!("recovery did not settle within eight passes")
-                }
-                _ => return pass,
+            if pass.step != Step::Refresh {
+                assert_ne!(pass.step, Step::Pass, "a counted pass ends the sync");
+                return pass;
             }
         }
+    }
+
+    /// Syncs until one ends [`Retry::Complete`] and leaves no new work, returning its
+    /// last pass and the number of syncs it took. Panics after `max` syncs.
+    fn sync_until_complete(&mut self, max: usize) -> (Pass, usize) {
+        for syncs in 1..=max {
+            let pass = self.drive();
+            if pass.step == Step::Done(Some(Retry::Complete)) && !pass.new_work {
+                return (pass, syncs);
+            }
+        }
+        panic!("recovery did not complete within {max} syncs")
     }
 
     fn activate(&mut self) {
@@ -987,9 +1006,10 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
 
     // Untrusted: the commits are observed, never trusted, and the account stays
     // an isolated candidate. Its last external address received, so its window
-    // grew and the new addresses were recovered too.
+    // grew and the next sync recovered the new addresses too.
     f.publish(&lifecycle(&owned, t1, 0, false), SEAL);
-    let observed = f.drive();
+    let (observed, syncs) = f.sync_until_complete(3);
+    assert_eq!(syncs, 2);
     assert_eq!(observed.batch.state, BatchState::Ready);
     assert_eq!(observed.batch.progress.outcome, Outcome::Complete);
     assert_eq!(observed.batch.progress.covered_through, t1);
@@ -1160,10 +1180,9 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
         kept,
         before.iter().map(|row| (row.0, row.1)).collect::<Vec<_>>()
     );
-    let retried = match reset.step {
-        Step::Pass => f.drive(),
-        _ => reset,
-    };
+    // The retry is inside the pass: the plan never passes again at once.
+    assert_eq!(reset.step, Step::Done(Some(Retry::Complete)));
+    let retried = reset;
     assert_eq!(retried.batch.state, BatchState::Ready);
     assert_eq!(retried.batch.progress.outcome, Outcome::Complete);
     let new_tail = tail_revision(&retried.batch);
@@ -1219,6 +1238,129 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     // Privacy, over every request of every pass: the service's routes only, no
     // watched script, and never a filter for S0, which lies below the floor.
     f.assert_private(&[0]);
+}
+
+/// Every request the service received from `from` on, as (method, path, query, body
+/// length), with revision digests masked: what the service sees of a sync's shape.
+fn transcript(f: &Fixture, from: usize) -> Vec<(String, String, Option<String>, usize)> {
+    let digest = Regex::new("[0-9a-f]{64}").unwrap();
+    f.server.requests()[from..]
+        .iter()
+        .map(|request| {
+            (
+                request.method.clone(),
+                digest.replace_all(&request.path, "<digest>").into_owned(),
+                request.query.clone(),
+                request.body.len(),
+            )
+        })
+        .collect()
+}
+
+/// A service that forges a receive at the last address of the wallet's window learns
+/// nothing from the sync it answers: the wallet sends the same requests as it does to
+/// a service without the receive, and covers the grown window only at the next sync.
+#[test]
+fn a_forged_receive_does_not_start_another_pass() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let t1 = H0 + 649;
+    let sync = |forged: bool| {
+        let mut f = Fixture::new(H0 + 250, t1);
+        let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
+        let a1 = f.derived(TransparentKeyScope::EXTERNAL, 1);
+        // Without the forged receive, `last` names an address nobody owns.
+        let last = if forged {
+            f.last_external()
+        } else {
+            TransparentAddress::PublicKeyHash([0xee; 20])
+        };
+        f.publish(&lifecycle(&Owned { a0, a1, last }, t1, 0, false), SEAL);
+        let seen = f.server.requests().len();
+        let pass = f.drive();
+        let requests = transcript(&f, seen);
+        (f, pass, requests)
+    };
+    let (mut forged, forged_pass, forged_requests) = sync(true);
+    let (_honest, honest_pass, honest_requests) = sync(false);
+
+    // One pass each, and the service sees the same requests.
+    assert!(forged_pass.grew);
+    assert!(!honest_pass.grew);
+    assert_eq!(forged_pass.step, Step::Done(Some(Retry::Complete)));
+    assert_eq!(honest_pass.step, Step::Done(Some(Retry::Complete)));
+    assert!(!forged_requests.is_empty());
+    assert_eq!(forged_requests, honest_requests);
+
+    // The forged wallet records the grown window, and its next sync covers it.
+    let window: BTreeSet<_> = forged
+        .watch()
+        .addresses
+        .iter()
+        .filter(|watched| matches!(watched.origin, WatchOrigin::CandidateWindow { .. }))
+        .map(|watched| watched.address)
+        .collect();
+    assert!(!window.is_empty());
+    let seen = forged.server.requests().len();
+    let next = forged.drive();
+    assert!(forged.server.requests().len() > seen);
+    assert_eq!(next.step, Step::Done(Some(Retry::Complete)));
+    assert!(!next.new_work);
+    assert_eq!(next.report.progress.covered_through, t1);
+    assert!(
+        window
+            .iter()
+            .all(|address| forged.watched.contains(&pubkey_hash(*address)))
+    );
+}
+
+/// Restore latency at one pass per sync: receives at external indices 0, 9, 18 and
+/// 25 under the default external gap of 10 take one sync per window step.
+#[test]
+fn restore_needs_one_sync_per_window_step() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let t1 = H0 + 649;
+    let mut f = Fixture::new(H0 + 250, t1);
+    let external =
+        f.st.test_account()
+            .unwrap()
+            .usk()
+            .transparent()
+            .to_account_pubkey()
+            .derive_external_ivk()
+            .unwrap();
+    let at = |index: u32| {
+        external
+            .derive_address(NonHardenedChildIndex::from_index(index).unwrap())
+            .unwrap()
+    };
+    assert_eq!(f.last_external(), at(9));
+    let mut s1 = noise(H0 + 200, H0 + 399, 1);
+    s1.push((script(at(0)), receive(H0 + 300, txid(1), 0, 10_000)));
+    s1.push((script(at(9)), receive(H0 + 350, txid(2), 0, 20_000)));
+    let mut s2 = noise(H0 + 400, H0 + 599, 2);
+    s2.push((script(at(18)), receive(H0 + 450, txid(3), 0, 30_000)));
+    let mut tail_events = noise(H0 + 600, t1, 3);
+    tail_events.push((script(at(25)), receive(H0 + 620, txid(4), 0, 40_000)));
+    f.publish(
+        &[
+            sealed(H0, H0 + 199, noise(H0, H0 + 199, 0)),
+            sealed(H0 + 200, H0 + 399, s1),
+            sealed(H0 + 400, H0 + 599, s2),
+            tail(t1, 0, tail_events),
+        ],
+        SEAL,
+    );
+    let (last, syncs) = f.sync_until_complete(8);
+    assert_eq!(syncs, 4);
+    assert_eq!(last.report.progress.covered_through, t1);
+    let received =
+        f.st.wallet()
+            .db()
+            .transparent_candidate_recovery(f.account)
+            .unwrap()
+            .receives
+            .len();
+    assert_eq!(received, 4);
 }
 
 /// Through a real pass: a caller that is stopping is not retried after a publication change,
