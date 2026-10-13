@@ -5,7 +5,8 @@
 use zakura_one_time_ivk::Purpose;
 use zakura_one_time_ivk_scenarios::Class;
 use zcash_client_sqlite::wallet::one_time_ivk::swap::{
-    OperationOutcome, RECEIVE_GAP_LIMIT, ReceiveDeposit, ReservationPolicy,
+    OperationOutcome, RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, ReceiveDeposit,
+    ReservationPolicy, SEEN_SLACK_SECONDS,
 };
 
 use super::{ISSUANCE, Scenario, span};
@@ -21,7 +22,7 @@ const SEED: [u8; 32] = [0x33; 32];
 pub fn all() -> Vec<Scenario> {
     let mut scenarios = vec![
         incoming_indices_advance(),
-        rejected_quote_reuses_address(),
+        rejected_quotes_hold_addresses_back(),
         refund_indices_across_restore(),
         unknown_outcomes_hit_the_limit(),
     ];
@@ -117,31 +118,89 @@ fn incoming_indices_advance() -> Scenario {
     }
 }
 
-fn rejected_quote_reuses_address() -> Scenario {
+/// Wallet A's quote requests are rejected until they fill the window. Their deadlines
+/// and the reclaim grace pass, the app restarts, and NEAR's seen set covers the requests
+/// without holding any of them. Issuance must wait rather than reissue a rejected address.
+fn rejected_quotes_hold_addresses_back() -> Scenario {
     Scenario {
         id: "A3-rejected-quote-holds-address-back".into(),
         group: ISSUANCE,
-        title: "A quote NEAR rejects releases its address, which is reissued only when nothing fresh is left".into(),
-        summary: "A rejection releases the request's hold on the address, but the wallet still \
-            prefers a never-quoted address, so the next quote gets a fresh one."
+        title: "Rejected quotes fill the window, and their addresses are never issued again".into(),
+        summary: "A rejected quote request still gave NEAR the address, so the address is never \
+            issued again. Once rejections fill the 30-index window, issuance waits, even after \
+            the deadlines and the reclaim grace pass, the app restarts, and NEAR's seen set \
+            covers the requests without holding them."
             .into(),
-        params: Vec::new(),
+        params: vec![("rejected quotes".into(), RECEIVE_GAP_LIMIT.to_string())],
         slow: false,
         run: Box::new(|ctx| {
             let a = wallet(ctx, "A");
-            let index = ctx.prepare_incoming(a)
-                .expect("a reservation");
-            let request = ctx.begin_incoming(a, index, HOUR)
-                .expect("the request is saved");
-            ctx.finish_incoming(a, &request, &OperationOutcome::Rejected);
-            ctx.log("A", format!("NEAR rejects the quote request for I{index}"));
-            let next = ctx.quote_incoming(a, HOUR).expect("the next quote issues");
-            ctx.check(
-                "the next quote takes a fresh address",
-                next.index == index + 1,
+            let mut rejected = Vec::new();
+            let refused = loop {
+                match request_quote(ctx, a) {
+                    Ok((index, request)) => {
+                        ctx.finish_incoming(a, &request, &OperationOutcome::Rejected);
+                        rejected.push(index);
+                    }
+                    Err(policy) => break policy,
+                }
+                assert!(
+                    rejected.len() <= 2 * RECEIVE_GAP_LIMIT as usize,
+                    "issuance never waits"
+                );
+                ctx.mine(1);
+                ctx.sync(a);
+            };
+            let last_request = ctx.chain.now();
+            ctx.log(
+                "A",
                 format!(
-                    "rejected I{index}, next {}; reservations.rs: an address the provider was given without seeing it is reissued only when the gap rule leaves no fresh one",
-                    next.label()
+                    "NEAR rejects {} quote requests, and its feed lists none of them; then issuance refuses: {refused:?}",
+                    rejected.len()
+                ),
+            );
+            ctx.check(
+                "each rejection moves the next quote to a fresh address",
+                rejected == (0..RECEIVE_GAP_LIMIT).collect::<Vec<_>>(),
+                format!("rejected {rejected:?}"),
+            );
+            ctx.check(
+                "issuance waits once rejections fill the window",
+                refused == ReservationPolicy::Limit,
+                format!("{refused:?}"),
+            );
+            ctx.wait(HOUR + RECEIVE_RECLAIM_SECONDS + HOUR);
+            ctx.restart(a);
+            ctx.mine(1);
+            ctx.sync(a);
+            let now = ctx.chain.now();
+            let held: Vec<u64> = rejected
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    let receiver = receiver_of(&ctx.get(a).key(Purpose::Receive, i));
+                    ctx.near.seen(&receiver, now)
+                })
+                .collect();
+            let covered = ctx.near.read_until(now) - SEEN_SLACK_SECONDS > last_request;
+            ctx.check(
+                "NEAR's seen set covers the rejected requests and holds none of them",
+                covered && held.is_empty(),
+                format!(
+                    "read until {} s after the last request, slack {SEEN_SLACK_SECONDS} s; holds {held:?}",
+                    ctx.near.read_until(now) - last_request
+                ),
+            );
+            let after = ctx.prepare_incoming(a);
+            ctx.log(
+                "A",
+                format!("after the deadlines, the reclaim grace and a restart: {after:?}"),
+            );
+            ctx.check(
+                "issuance waits rather than reissue a rejected address",
+                after == Err(ReservationPolicy::Limit),
+                format!(
+                    "{after:?}; ProviderSeen: an incoming address counts as seen if the provider rejected a quote for it, since the request still gave it the address"
                 ),
             );
         }),
