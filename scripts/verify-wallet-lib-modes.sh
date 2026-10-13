@@ -272,6 +272,12 @@ packages = {
     for package in json.loads(Path(sys.argv[1]).read_text())["packages"]
 }
 expected = {
+    "zakura-proofs",
+    "zakura-zip321",
+    "zakura-equihash",
+    "zakura-transparent",
+    "zakura-protocol",
+    "zakura-address",
     "zakura-bellman",
     "zakura-bls12-381",
     "zakura-halo2-gadgets",

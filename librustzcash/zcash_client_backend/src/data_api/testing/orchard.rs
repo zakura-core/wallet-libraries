@@ -2,7 +2,7 @@ use std::hash::Hash;
 
 use ::orchard::{
     keys::{FullViewingKey, SpendingKey},
-    note_encryption::OrchardDomain,
+    note_encryption::{IronwoodDomain, OrchardDomain},
     tree::MerkleHashOrchard,
 };
 use incrementalmerkletree::{Address as TreeAddress, Hashable, Level, Position};
@@ -181,29 +181,38 @@ impl ShieldedPoolTester for OrchardPoolTester {
         tx: &Transaction,
         fvk: &Self::Fvk,
     ) -> Option<(Note, Address, MemoBytes)> {
-        for action in tx.orchard_bundle().unwrap().actions() {
-            // Find the output that decrypts with the external OVK
-            let result = try_output_recovery_with_ovk(
-                &OrchardDomain::for_action(action),
-                &fvk.to_ovk(zip32::Scope::External),
-                action,
-                action.cv_net(),
-                &action.encrypted_note().out_ciphertext,
-            );
-
-            if result.is_some() {
-                return result.map(|(note, addr, memo)| {
-                    (
-                        Note::Orchard {
-                            note,
-                            pool: orchard::ValuePool::Orchard,
-                        },
+        for (pool, bundle) in [
+            (orchard::ValuePool::Orchard, tx.orchard_bundle()),
+            (orchard::ValuePool::Ironwood, tx.ironwood_bundle()),
+        ] {
+            for action in bundle.into_iter().flat_map(|bundle| bundle.actions()) {
+                // Recover the payment in the pool where its receiver was routed.
+                let ovk = fvk.to_ovk(zip32::Scope::External);
+                let result = match pool {
+                    orchard::ValuePool::Orchard => try_output_recovery_with_ovk(
+                        &OrchardDomain::for_action(action),
+                        &ovk,
+                        action,
+                        action.cv_net(),
+                        &action.encrypted_note().out_ciphertext,
+                    ),
+                    orchard::ValuePool::Ironwood => try_output_recovery_with_ovk(
+                        &IronwoodDomain::for_action(action),
+                        &ovk,
+                        action,
+                        action.cv_net(),
+                        &action.encrypted_note().out_ciphertext,
+                    ),
+                };
+                if let Some((note, addr, memo)) = result {
+                    return Some((
+                        Note::Orchard { note, pool },
                         UnifiedAddress::from_receivers(Some(addr), None, None)
                             .unwrap()
                             .into(),
                         MemoBytes::from_bytes(&memo).expect("correct length"),
-                    )
-                });
+                    ));
+                }
             }
         }
 

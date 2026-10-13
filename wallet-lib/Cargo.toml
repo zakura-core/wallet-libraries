@@ -60,6 +60,18 @@ zakura-redjubjub-pin = { package = "zakura-redjubjub", version = "=3.0.0", defau
 zakura-sapling-crypto-pin = { package = "zakura-sapling-crypto", version = "=3.0.0", default-features = false, optional = true }
 zakura-sinsemilla-pin = { package = "zakura-sinsemilla", version = "=3.0.0", default-features = false, optional = true }
 
+zakura-address-pin = { package = "zakura-address", version = "=3.0.0", default-features = false, optional = true }
+
+zakura-protocol-pin = { package = "zakura-protocol", version = "=3.0.0", default-features = false, optional = true }
+
+zakura-transparent-pin = { package = "zakura-transparent", version = "=3.0.0", default-features = false, optional = true }
+
+zakura-equihash-pin = { package = "zakura-equihash", version = "=3.0.0", default-features = false, optional = true }
+
+zakura-zip321-pin = { package = "zakura-zip321", version = "=3.0.0", default-features = false, optional = true }
+
+zakura-proofs-pin = { package = "zakura-proofs", version = "=3.0.0", default-features = false, optional = true }
+
 [features]
 default = ["zakura"]
 
@@ -92,6 +104,12 @@ zakura = [
     "dep:orchard",
     "dep:pczt",
     "dep:zcash-primitives",
+    "dep:zakura-address-pin",
+    "dep:zakura-protocol-pin",
+    "dep:zakura-transparent-pin",
+    "dep:zakura-equihash-pin",
+    "dep:zakura-zip321-pin",
+    "dep:zakura-proofs-pin",
     "dep:zakura-bellman-pin",
     "dep:zakura-bls12-381-pin",
     "dep:zakura-halo2-gadgets-pin",

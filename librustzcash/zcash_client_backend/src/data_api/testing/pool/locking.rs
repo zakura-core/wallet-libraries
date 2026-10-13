@@ -101,7 +101,7 @@ pub fn spend_fails_on_locked_notes<T: ShieldedPoolTester>(
     // TODO: send to an account so that we can check its balance.
     assert_eq!(
         st.get_total_balance(account_id),
-        (value - (amount_sent2 + zip317_fee).unwrap()).unwrap()
+        (value - (amount_sent2 + super::shielded_send_fee::<T>()).unwrap()).unwrap()
     );
 }
 

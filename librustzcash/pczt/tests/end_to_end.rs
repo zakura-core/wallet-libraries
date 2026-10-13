@@ -41,8 +41,7 @@ const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
 use zcash_primitives::transaction::{
     builder::{BuildConfig, Builder, BundlePadding, DeferredPcztBuilder, PcztResult},
     fees::zip317,
-    sighash::SignableInput,
-    sighash_v5::v5_signature_hash,
+    sighash::{SignableInput, signature_hash},
     txid::TxIdDigester,
 };
 use zcash_proofs::prover::LocalTxProver;
@@ -63,10 +62,18 @@ fn orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
 }
 
 fn check_round_trip(pczt: &Pczt) {
-    // The v1 and v2 encodings both remain available explicitly.
-    v1::Pczt::try_from(pczt.clone())
-        .expect("v1 encoding succeeds")
-        .serialize();
+    // Legacy transactions remain representable in v1; current transactions
+    // must reject that encoding instead of dropping their v6 fields.
+    if *pczt.global().tx_version() == zcash_protocol::constants::V6_TX_VERSION {
+        assert!(matches!(
+            v1::Pczt::try_from(pczt.clone()),
+            Err(pczt::EncodingError::UnsupportedTxVersion)
+        ));
+    } else {
+        v1::Pczt::try_from(pczt.clone())
+            .expect("v1 encoding succeeds")
+            .serialize();
+    }
     v2::Pczt::try_from(pczt.clone())
         .expect("v2 encoding succeeds")
         .serialize();
@@ -249,7 +256,7 @@ fn transparent_to_orchard() {
     let txin = bundle.vin.first().unwrap();
     let sighasher = |script_code: &script::Code, hash_type: &zcash_script::signature::HashType| {
         Some(
-            v5_signature_hash(
+            signature_hash(
                 &tx_effects,
                 &SignableInput::Transparent(
                     ::transparent::sighash::SignableInput::from_parts(
@@ -430,7 +437,7 @@ fn transparent_p2sh_multisig_to_orchard() {
     let txin = bundle.vin.first().unwrap();
     let sighasher = |script_code: &script::Code, hash_type: &zcash_script::signature::HashType| {
         Some(
-            v5_signature_hash(
+            signature_hash(
                 &tx_effects,
                 &SignableInput::Transparent(
                     ::transparent::sighash::SignableInput::from_parts(

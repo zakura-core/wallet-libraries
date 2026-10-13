@@ -116,6 +116,7 @@ zcash_script = "0.6"
 [graph]
 forbidden = [
   "orchard",
+  "equihash",
   "sapling-crypto",
   "zcash_primitives",
   "zcash_note_encryption",

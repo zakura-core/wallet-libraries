@@ -95,17 +95,11 @@ pub use decrypt::{DecryptedOutput, TransferType, decrypt_transaction};
 /// Callers should derive the version from the target transaction's consensus
 /// branch instead of assuming the latest version.
 pub fn start_orchard_proving_key_warmup(circuit_version: orchard::circuit::OrchardCircuitVersion) {
-    use orchard::circuit::OrchardCircuitVersion;
     use std::sync::atomic::AtomicBool;
 
     static POST_NU6_3: AtomicBool = AtomicBool::new(false);
 
-    let started = match circuit_version {
-        OrchardCircuitVersion::InsecurePreNu6_2 | OrchardCircuitVersion::FixedPostNu6_2 => return,
-        OrchardCircuitVersion::PostNu6_3 => &POST_NU6_3,
-    };
-
-    start_orchard_proving_key_warmup_with(circuit_version, started, |task| {
+    start_orchard_proving_key_warmup_with(circuit_version, &POST_NU6_3, |task| {
         std::thread::Builder::new()
             .name("orchard-proving-key-warmup".to_string())
             .spawn(task)
@@ -119,6 +113,10 @@ fn start_orchard_proving_key_warmup_with(
     spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
 ) {
     use std::sync::atomic::Ordering;
+
+    if !circuit_version.supports_proving() {
+        return;
+    }
 
     if started
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -172,6 +170,20 @@ mod tests {
     use zcash_primitives::transaction::builder::cached_orchard_proving_key;
 
     use super::{start_orchard_proving_key_warmup, start_orchard_proving_key_warmup_with};
+
+    #[test]
+    fn orchard_proving_key_warmup_skips_historical_circuits() {
+        let started = AtomicBool::new(false);
+        for version in [
+            OrchardCircuitVersion::InsecurePreNu6_2,
+            OrchardCircuitVersion::FixedPostNu6_2,
+        ] {
+            start_orchard_proving_key_warmup_with(version, &started, |_| {
+                panic!("historical circuits must never start a proving task")
+            });
+            assert!(!started.load(Ordering::Acquire));
+        }
+    }
 
     #[test]
     fn orchard_proving_key_warmup_retries_after_spawn_failure() {

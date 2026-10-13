@@ -157,6 +157,8 @@ tx-extractor = [
 
 # Undocumented internal feature flag for enabling features needed for tests.
 internal-tests = [
+    "orchard/zip32-addresses",
+    "sapling/zip32-addresses",
     "io-finalizer",
     "orchard",
     "prover",
