@@ -57,7 +57,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// seed already used is never issued again, skipping any the provider's current seen
     /// set holds (see [`ProviderSeen`]), if the caller could fetch it. `tip` is the
     /// network's chain tip (see [`ISSUANCE_TIP_LAG`]). The key scans only once its funding
-    /// transaction is stored (see [`WalletDb::record_refund_operation`]).
+    /// transaction is stored (see [`WalletDb::record_refund_operation`]). A seen set that
+    /// holds a long run of unissued indices yields [`ReservationPolicy::Gap`] after
+    /// registering a bounded number of them, which a later reservation continues past.
     pub fn reserve_refund_key(
         &mut self,
         account: AccountUuid,
@@ -138,9 +140,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     }
 
     /// Records how `request` ended. An accepted deadline only shortens the requested one,
-    /// and a repeat must keep the accepted deposit address and memo, which no other
-    /// operation in the account may hold. A request ends one way only: the other outcome
-    /// is refused afterwards. Either way the provider has the address (see
+    /// and is refused if it has already passed by the earlier of the request time and the
+    /// latest block time. A repeat must keep the accepted deposit address and memo, which
+    /// no other operation in the account may hold. A request ends one way only: the other
+    /// outcome is refused afterwards. Either way the provider has the address (see
     /// [`ProviderSeen`]).
     pub fn finish_receive_operation(
         &mut self,

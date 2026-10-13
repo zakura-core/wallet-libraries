@@ -90,6 +90,42 @@ fn observations_are_monotonic_and_a_seen_deposit_sticks() {
     assert_eq!(operation_row(&st, "swap").0, 500);
 }
 
+/// Conflicting observations requested in the same second leave the same row whichever
+/// arrives last: an expected receipt is never replaced by no receipt or a smaller amount,
+/// so a stale answer cannot settle the key before its receipt arrives.
+#[test]
+fn equal_time_observations_never_lower_the_expected_receipt() {
+    let expect = |value| Terminal(Positive(Some(Zatoshis::const_from_u64(value))));
+    for (a, b, row) in [
+        (
+            expect(70_000),
+            Terminal(NoReceipt),
+            (100, 2, Some(70_000), false),
+        ),
+        (
+            expect(70_000),
+            Terminal(Positive(None)),
+            (100, 2, Some(70_000), false),
+        ),
+        (
+            expect(70_000),
+            expect(50_000),
+            (100, 2, Some(70_000), false),
+        ),
+    ] {
+        for (first, second) in [(a, b), (b, a)] {
+            let mut st = scanned_wallet();
+            let account = st.test_account().unwrap().id();
+            let key = refund_key(&mut st).key_id();
+            for observation in [first, second] {
+                let db = st.wallet_mut().db_mut();
+                observe(db, account, key, "swap", observation, 100).unwrap();
+            }
+            assert_eq!(operation_row(&st, "swap"), row, "{first:?} then {second:?}");
+        }
+    }
+}
+
 /// A refund key whose deposit this wallet did not fund starts once the provider reports
 /// a refund owed, unless a newer status, answered first, reports none.
 #[test]

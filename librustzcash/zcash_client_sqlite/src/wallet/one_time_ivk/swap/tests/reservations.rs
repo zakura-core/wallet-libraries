@@ -817,6 +817,34 @@ fn begin_needs_a_future_deadline_and_returns_a_fresh_request() {
     assert_eq!(start(&mut st, &first).unwrap().unwrap().address, "deposit");
 }
 
+/// An accepted deadline that has passed by the earlier of the request time and the latest
+/// block time is refused without changing the operation, but one only behind a fast
+/// device clock is kept, since the provider sets it by its own clock.
+#[test]
+fn finish_refuses_an_accepted_deadline_that_has_passed() {
+    let mut st = fixture();
+    let chain_time: i64 = value(
+        st.wallet().conn(),
+        "SELECT time FROM blocks ORDER BY height DESC LIMIT 1",
+        [],
+    );
+    // The device clock runs a day ahead of the chain.
+    let now = chain_time + 24 * 60 * 60;
+    let r = prepare(&mut st, NOW);
+    begin_at(&mut st, &r, "fast", now + 60, now)
+        .unwrap()
+        .unwrap();
+    let before = operation(&st, "fast");
+    for passed in [chain_time - 30 * 24 * 60 * 60, chain_time] {
+        let finished = finish(&mut st, "fast", &accepted("deposit", None, passed));
+        assert!(rejected_input(finished), "{passed}");
+        assert_eq!(operation(&st, "fast"), before);
+    }
+    let deadline = chain_time + 60 * 60;
+    finish(&mut st, "fast", &accepted("deposit", None, deadline)).unwrap();
+    assert_eq!(start(&mut st, "fast").unwrap().unwrap().deadline, deadline);
+}
+
 /// Refund issuance skips a refund address the provider's seen set holds, such as one an
 /// unfunded quote used before a restore, and registers it for a restore sweep, so a
 /// later reservation without a set does not issue it either.
@@ -845,6 +873,44 @@ fn refund_issuance_skips_addresses_the_provider_saw() {
     assert_eq!(seen_and_swept, [true]);
     let next = db.reserve_refund_key(account, through, None);
     assert_eq!(next.unwrap().unwrap().key_id().index(), 2);
+}
+
+/// A seen set that holds every receiver stops refund issuance with `Gap` after a bounded
+/// number of probes, keeping the keys it registered, so the next reservation continues past
+/// them instead of probing them again.
+#[test]
+fn refund_issuance_bounds_seen_set_probes() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let through = tip(&st).height;
+    let probes = std::cell::Cell::new(0u64);
+    let contains = |receivers: &[[u8; 43]]| {
+        probes.set(probes.get() + receivers.len() as u64);
+        vec![true; receivers.len()]
+    };
+    let everything = ProviderSeen {
+        since: 0,
+        until: NOW,
+        contains: &contains,
+    };
+    let db = st.wallet_mut().db_mut();
+    let issued = db.reserve_refund_key(account, through, Some(&everything));
+    assert!(matches!(issued.unwrap(), Err(Gap)));
+    let held = probes.get();
+    assert_eq!(held, 100);
+    let sql = "SELECT COUNT(*) FROM ironwood_one_time_keys k
+               JOIN ironwood_one_time_sweeps s ON s.one_time_key_id = k.id
+               WHERE k.purpose = 0 AND k.provider_seen";
+    assert_eq!(value::<u64>(&db.conn, sql, []), held);
+
+    let nothing = |receivers: &[[u8; 43]]| vec![false; receivers.len()];
+    let seen = ProviderSeen {
+        since: 0,
+        until: NOW,
+        contains: &nothing,
+    };
+    let next = db.reserve_refund_key(account, through, Some(&seen));
+    assert_eq!(next.unwrap().unwrap().key_id().index(), held);
 }
 
 /// Quotes only assumed seen, whose outcome is unknown and which no seen set covers, keep

@@ -125,7 +125,7 @@ pub(super) fn reserve_in(
     now: i64,
 ) -> Result<OneTimeKey, SqliteClientError> {
     let index = if purpose == Purpose::Refund {
-        store::swap::funding::next_refund_index(c, p, account, None, now)?
+        store::swap::funding::next_refund_index(c, p, account, None, now)?.unwrap()
     } else {
         let sql = "SELECT MAX(k.key_index) FROM ironwood_one_time_keys k
                    JOIN accounts a ON a.id = k.account_id

@@ -123,7 +123,9 @@ pub(in crate::wallet::one_time_ivk) fn close_finished<P: Parameters>(
 /// stored, and merges its `funded` in either case (see `WalletDb::record_operation_status`).
 /// Returns whether `observation` was current and so recorded. `expectation` stores the
 /// status: 0 active, 1 final with no receipt, 2 final with a receipt, 3 final but
-/// inconclusive, 4 awaiting a deposit.
+/// inconclusive, 4 awaiting a deposit. Between observations requested in the same second,
+/// whichever arrives last cannot replace a stored receipt with a status that expects none
+/// or less, which could close the key before the receipt arrives.
 pub(in crate::wallet::one_time_ivk) fn record(
     conn: &Connection,
     id: i64,
@@ -151,7 +153,8 @@ pub(in crate::wallet::one_time_ivk) fn record(
     let current = conn.execute(
         "UPDATE ironwood_one_time_operations SET
             observed_at = ?2, expectation = ?3, expected_value = ?4
-         WHERE id = ?1 AND observed_at <= ?2",
+         WHERE id = ?1 AND (observed_at < ?2 OR (observed_at = ?2 AND NOT (expectation = 2
+             AND (?3 != 2 OR COALESCE(?4, 1) < COALESCE(expected_value, 1)))))",
         params![id, now, expectation, amount],
     )?;
     Ok(current > 0)
