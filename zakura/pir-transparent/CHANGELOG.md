@@ -2,10 +2,51 @@
 
 ## [Unreleased]
 
+### Added
+
+- `FailedEntries`, `RecoveryBatch::failed_entries` and `PassReport::failed_entries`:
+  the directory entries (one watched script in one shard) whose private replies
+  failed on content in a pass, counted, and how many of them are at three failures.
+- `HoldCause::FailedEntries`: `PassPlan::next` holds an account once one of its
+  entries has failed on content three times, after settling the pass.
+- `testing::service::ShardSpec::malformed_entries`: scripts whose directory entry the
+  test service publishes malformed.
+
+### Removed
+
+- `PassLimits::passes`: a plan runs one counted pass per sync, so it has no pass
+  count left to bound.
+- `Step::Wait`: retry delays schedule the next sync instead of another pass in
+  the current sync. Callers use `Step::Done(Some(Retry::After(delay)))`.
+
 ### Changed
 
-- Depend on the transparent PIR crates from crates.io (`=0.1.0-rc.3`, tagged
-  `transparent-v0.1.0-rc.3` in wallet-pir) instead of a git revision.
+- `PassPlan::next` ends the sync after every counted pass, including publication
+  lag and capacity refusals, with `Step::Done` and its retry. A grown address
+  window, changed watched addresses and `Retry::More` no longer start another
+  pass at once; they continue at the next sync. A service that forges a receive
+  near the end of the window can no longer tell from the wallet's next requests
+  whether its directory row was the one forged.
+- The recovery example ends its bounded run when a pass reports lag or overload,
+  leaving its saved continuation for a later invocation instead of waiting forever.
+
+- A private row whose content fails to decode or check out, or a record that
+  contradicts the companion, fails one directory entry instead of the pass: everything else the sync
+  read settles, and the account stays uncovered and inactive. A pass with failed
+  entries is `Retry::Stalled`, so a failed entry is asked again only at the next
+  sync, and the companion stops asking after three failures. A content failure the
+  reference client cannot lay at one entry is no longer `PassError::Failure`: what
+  the sync committed settles, as `Outcome::Stalled`. `Outcome::Stalled` now also
+  covers `IncompleteReason::ContentFailed`. A reply whose length, revision binding
+  or parameter epoch does not verify still fails its request, and the pass.
+- The companion's reference store is format 7, which counts content failures per
+  entry. A format-6 companion upgrades in place: an empty failure-count table
+  and the format marker are added atomically, preserving recovery history,
+  coverage, unfinished work and catalog evidence. A publication change that
+  resets the store keeps the counts.
+- Depend on the transparent PIR crates from wallet-pir's `main` at `4bbcb697`
+  (`0.1.0-rc.4`, not yet on crates.io), which fails one entry rather than the sync
+  for bad row content. Previously `=0.1.0-rc.3` from crates.io.
 - Txid lookups read the 4,096-row display tables the `/v2/txid` service now
   publishes; earlier clients refuse them. History recovery is unchanged.
 - The `testing` fake txid display publication and the txid end-to-end test use
@@ -43,7 +84,7 @@ lookups. See the [README](README.md) and
 - Bounded recovery passes, stable revision identities, companion stores, opaque
   recovery batches and typed ready/pending/withdrawn outcomes. Missing or lagging
   publication data grants no coverage or financial authority.
-- A shared pass driver with explicit retry, wait, refresh, skip and stop decisions.
+- A shared pass driver with explicit retry, refresh, skip and stop decisions.
   Publication changes reset the companion's reference store and retry once;
   catalog lineage remains available to detect conflicting publications.
 - SQLite settlement with explicit observed/trusted evidence and a caller-owned

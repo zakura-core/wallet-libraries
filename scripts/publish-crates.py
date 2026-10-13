@@ -121,26 +121,85 @@ def wait_for_publication(name, version):
         time.sleep(5)
 
 
-def run_release(root, publish=False, plan=False, without_transparent=False):
+def output_path(root, path):
+    if path is None:
+        return None
+    path = Path(path).resolve()
+    if path.is_relative_to(root.resolve()):
+        raise ReleaseError("Write release receipts outside the checkout.")
+    return path
+
+
+def save_receipt(path, receipt):
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(receipt, indent=2) + "\n")
+        temporary.replace(path)
+
+
+def validate_receipt(path, head, packages, without_transparent):
+    try:
+        receipt = json.loads(Path(path).read_text())
+        expected = [(p["name"], p["version"]) for p in packages]
+        actual = [(p["name"], p["version"]) for p in receipt["packages"]]
+        valid = (receipt["schema_version"] == 1
+                 and receipt["commit"] == head
+                 and receipt["without_transparent"] is without_transparent
+                 and receipt["verification_passed"] is True
+                 and actual == expected
+                 and all(p["registry_status"] in ("available", "absent")
+                         for p in receipt["packages"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        valid = False
+    if not valid:
+        raise ReleaseError("The verification receipt must match this commit, selection, and ordered crate versions.")
+
+
+def observe_package(record, receipt, output):
+    try:
+        status = registry_version(record["name"], record["version"])
+        record["registry_status"] = status
+        if status == "yanked":
+            raise ReleaseError(f"{record['name']} {record['version']} is yanked. Prepare a new version instead.")
+        if status == "available":
+            record["result"] = "previously_available"
+    except ReleaseError:
+        record["result"] = "failed"
+        save_receipt(output, receipt)
+        raise
+    save_receipt(output, receipt)
+    return status
+
+
+def run_release(root, publish=False, plan=False, without_transparent=False,
+                output=None, publish_verified=None):
     head = git(root, "rev-parse", "HEAD")
     check_checkout(root, head)
     packages, upstream = release_packages(root, without_transparent)
+    output = output_path(root, output)
+    if publish_verified is not None:
+        validate_receipt(publish_verified, head, packages, without_transparent)
+    publishing = publish or publish_verified is not None
+    receipt = {"schema_version": 1, "commit": head,
+               "without_transparent": without_transparent,
+               "verification_passed": publish_verified is not None,
+               "packages": [{"name": p["name"], "version": p["version"],
+                             "registry_status": "unknown", "result": "remaining"}
+                            for p in packages]}
+    save_receipt(output, receipt)
     print(f"Release commit: {head}", flush=True)
-    print("Mode: " + ("plan only" if plan else "publish" if publish else "dry run"), flush=True)
+    print("Mode: " + ("plan only" if plan else "publish" if publishing else "dry run"), flush=True)
     missing = []
     for name, version in upstream:
         status = registry_version(name, version)
         print(f"Upstream: {name} {version}: {status}", flush=True)
         if status != "available":
             missing.append(f"{name} {version} ({status})")
-    statuses = {}
-    for package in packages:
+    for package, record in zip(packages, receipt["packages"]):
         name, version = package["name"], package["version"]
-        status = registry_version(name, version)
-        statuses[name] = status
+        status = observe_package(record, receipt, output)
         print(f"Release: {name} {version}: {status}", flush=True)
-        if status == "yanked":
-            raise ReleaseError(f"{name} {version} is yanked. Prepare a new version instead.")
     if missing:
         raise ReleaseError("Publish the required wallet-pir versions first: " + ", ".join(missing)
                            + ". Use --without-transparent to release the other crates separately.")
@@ -149,37 +208,54 @@ def run_release(root, publish=False, plan=False, without_transparent=False):
     # A fresh target directory belongs exclusively to this invocation. No shared
     # dev.py build lease or source-tree target is touched by Cargo packaging.
     with tempfile.TemporaryDirectory(prefix="wallet-crate-release-") as target:
-        if not publish:
+        if not publishing:
             # Cargo overlays all selected .crate archives on the registry while
             # verifying, so unpublished workspace versions can resolve each other.
             # Include published versions too: the goal is to verify this checkout.
             command = ["cargo", "publish", "--manifest-path", str(root / "Cargo.toml"),
                        "--registry", "crates-io", "--target-dir", target,
-                       "--dry-run", "--keep-going"]
+                       "--dry-run", "--keep-going", "--locked"]
             for package in packages:
                 command.extend(["--package", package["name"]])
             check_checkout(root, head)
             print("Verify all selected release packages together.", flush=True)
             subprocess.run(command, cwd=root, check=True)
             check_checkout(root, head)
+            receipt["verification_passed"] = True
+            save_receipt(output, receipt)
             print("All selected release packages passed dry-run verification; nothing uploaded.", flush=True)
             return
-        for package in packages:
+        for package, record in zip(packages, receipt["packages"]):
             name, version = package["name"], package["version"]
-            if statuses[name] == "available":
+            # Another publisher may have completed this version during verification.
+            status = observe_package(record, receipt, output)
+            if status == "available":
                 print(f"Skip already published: {name} {version}", flush=True)
                 continue
             check_checkout(root, head)
             command = ["cargo", "publish", "--manifest-path", str(package["path"]),
-                       "--registry", "crates-io", "--target-dir", target]
-            print(f"Verify package: {name} {version}", flush=True)
-            subprocess.run([*command, "--dry-run"], cwd=root, check=True)
-            check_checkout(root, head)
-            if publish:
+                       "--registry", "crates-io", "--target-dir", target, "--locked"]
+            try:
+                if publish_verified is not None:
+                    command.append("--no-verify")
+                else:
+                    print(f"Verify package: {name} {version}", flush=True)
+                    subprocess.run([*command, "--dry-run"], cwd=root, check=True)
+                check_checkout(root, head)
                 print(f"Upload: {name} {version}", flush=True)
                 subprocess.run(command, cwd=root, check=True)
+                record["result"] = "uploaded_unconfirmed"
+                save_receipt(output, receipt)
                 wait_for_publication(name, version)
                 check_checkout(root, head)
+                record["registry_status"] = "available"
+                record["result"] = "published"
+                save_receipt(output, receipt)
+            except (ReleaseError, subprocess.CalledProcessError, OSError):
+                if record["result"] != "uploaded_unconfirmed":
+                    record["result"] = "failed"
+                save_receipt(output, receipt)
+                raise
     print("Selected crates published.", flush=True)
 
 
@@ -189,10 +265,13 @@ def main():
     mode.add_argument("--plan", action="store_true", help="Check registry prerequisites and print versions without building or uploading")
     mode.add_argument("--dry-run", action="store_true", help="Verify packages without uploading (the default)")
     mode.add_argument("--publish", action="store_true", help="Verify then upload each unpublished version to crates.io")
+    mode.add_argument("--publish-verified", metavar="RECEIPT", help="Upload without recompiling after validating a successful receipt for this checkout")
+    parser.add_argument("--output", type=Path, help="Write the release receipt and progress outside the checkout")
     parser.add_argument("--without-transparent", action="store_true", help="Exclude transparent PIR and its wallet-pir prerequisites")
     args = parser.parse_args()
     try:
-        run_release(ROOT, args.publish, args.plan, args.without_transparent)
+        run_release(ROOT, args.publish, args.plan, args.without_transparent,
+                    output=args.output, publish_verified=args.publish_verified)
     except (ReleaseError, subprocess.CalledProcessError, OSError) as error:
         print(f"Release stopped: {error}", file=sys.stderr)
         return 1

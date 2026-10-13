@@ -307,6 +307,9 @@ pub struct TxRef(pub(crate) i64);
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct AddressRef(pub(crate) i64);
 
+#[cfg(feature = "orchard")]
+pub use wallet::enhance_pir::session::EnhancePirSession;
+
 /// A wrapper for the SQLite connection to the wallet database, along with a capability to read the
 /// system from the clock. A `WalletDb` encapsulates the full set of capabilities that are required
 /// in order to implement the [`WalletRead`], [`WalletWrite`] and [`WalletCommitmentTrees`] traits.
@@ -315,6 +318,8 @@ pub struct WalletDb<C, P, CL, R> {
     params: P,
     clock: CL,
     rng: R,
+    #[cfg(feature = "orchard")]
+    enhance_pir_session: wallet::enhance_pir::session::SessionState,
     anchor_retention_interval: AnchorRetentionInterval,
     #[cfg(feature = "orchard")]
     enhancement_mode: Option<EnhancementMode>,
@@ -539,6 +544,8 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
                 params,
                 clock,
                 rng,
+                #[cfg(feature = "orchard")]
+                enhance_pir_session: Default::default(),
                 anchor_retention_interval: AnchorRetentionInterval::default(),
                 status_mode: None,
                 transparent_ledger_mode: None,
@@ -733,6 +740,8 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             params,
             clock,
             rng,
+            #[cfg(feature = "orchard")]
+            enhance_pir_session: Default::default(),
             anchor_retention_interval: AnchorRetentionInterval::default(),
             status_mode: None,
             transparent_ledger_mode: None,
@@ -745,6 +754,22 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
+    /// Shares the in-memory Enhance allowance across serialized handles of this wallet.
+    /// Keep the session alive across syncs; a fresh session resets the allowance.
+    /// Work reads inside caller-owned SQL transactions defer count cleanup until a later
+    /// autocommit read. Use [`Self::transactionally`] to commit cleanup with wallet writes.
+    #[cfg(feature = "orchard")]
+    pub fn with_enhance_pir_session(mut self, session: EnhancePirSession) -> Self {
+        self.enhance_pir_session = wallet::enhance_pir::session::SessionState::new(session);
+        self
+    }
+
+    /// The content-failure allowance of this open wallet, for additional database handles.
+    #[cfg(feature = "orchard")]
+    pub fn enhance_pir_session(&self) -> EnhancePirSession {
+        self.enhance_pir_session.session.clone()
+    }
+
     /// Reads one wallet snapshot while excluding concurrent SQLite writers.
     ///
     /// The callback receives only a shared wallet handle. The immediate transaction is
@@ -771,6 +796,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
                 params: &self.params,
                 clock: &self.clock,
                 rng: &mut self.rng,
+                #[cfg(feature = "orchard")]
+                enhance_pir_session: self.enhance_pir_session.transaction(),
                 anchor_retention_interval: self.anchor_retention_interval,
                 status_mode: self.status_mode,
                 transparent_ledger_mode: self.transparent_ledger_mode,
@@ -805,11 +832,15 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         F: FnOnce(&mut WalletDb<SqlTransaction<'_>, &P, &CL, &mut R>) -> Result<A, E>,
     {
         let tx = self.conn.borrow_mut().transaction()?;
+        #[cfg(feature = "orchard")]
+        let session = self.enhance_pir_session.transaction();
         let mut wdb = WalletDb {
             conn: SqlTransaction(&tx),
             params: &self.params,
             clock: &self.clock,
             rng: &mut self.rng,
+            #[cfg(feature = "orchard")]
+            enhance_pir_session: session.clone(),
             anchor_retention_interval: self.anchor_retention_interval,
             status_mode: self.status_mode,
             transparent_ledger_mode: self.transparent_ledger_mode,
@@ -820,6 +851,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         };
         let result = f(&mut wdb)?;
         tx.commit()?;
+        #[cfg(feature = "orchard")]
+        session.commit();
         Ok(result)
     }
 
@@ -867,11 +900,15 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         ) -> Result<A, E>,
     {
         let tx = self.conn.borrow_mut().transaction()?;
+        #[cfg(feature = "orchard")]
+        let session = self.enhance_pir_session.transaction();
         let mut wdb = WalletDb {
             conn: SqlTransaction(&tx),
             params: &self.params,
             clock: &self.clock,
             rng: &mut self.rng,
+            #[cfg(feature = "orchard")]
+            enhance_pir_session: session.clone(),
             anchor_retention_interval: self.anchor_retention_interval,
             status_mode: self.status_mode,
             transparent_ledger_mode: self.transparent_ledger_mode,
@@ -884,6 +921,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         let ext = ExtensionTransaction { conn: &tx };
         let result = f(&mut wdb, &ext)?;
         tx.commit()?;
+        #[cfg(feature = "orchard")]
+        session.commit();
         Ok(result)
     }
 
@@ -2446,6 +2485,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
             self.conn.borrow(),
             mode,
             self.transparent_ledger_mode,
+            &self.enhance_pir_session,
         );
         #[cfg(not(feature = "orchard"))]
         return wallet::public_enhancement_work(self.conn.borrow(), self.transparent_ledger_mode);
@@ -2505,6 +2545,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
             wallet::enhance_pir::discovery::rebuild(
                 wdb.conn.0,
                 wdb.transparent_ledger_mode,
+                &wdb.enhance_pir_session,
                 request,
                 block,
             )
@@ -2516,20 +2557,61 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         records: &[(EnhancePirRequest, EnhanceRecord)],
     ) -> Result<zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult, Self::Error>
     {
-        use zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult;
+        use zcash_client_backend::data_api::enhance_pir::{
+            EnhancePirBatchRejection, EnhancePirBatchResult,
+        };
         let tx = self.conn.borrow_mut().transaction()?;
+        let session = self.enhance_pir_session.transaction();
         let result = wallet::enhance_pir::apply_records(
             &tx,
             &self.params,
             self.transparent_ledger_mode,
             records,
         )?;
-        if matches!(result, EnhancePirBatchResult::Committed(_)) {
-            tx.commit()?;
-        } else {
-            tx.rollback()?;
+        match result {
+            EnhancePirBatchResult::Committed(_) => {
+                wallet::enhance_pir::retain_live_failures(&tx, &session)?;
+                tx.commit()?;
+                session.commit();
+            }
+            EnhancePirBatchResult::Rejected { index, reason } => {
+                tx.rollback()?;
+                // Only a record the service sent counts: a batch the caller shaped wrongly
+                // (empty, mixed transactions, conflicting duplicates) says nothing about content.
+                if let (
+                    Some(index),
+                    EnhancePirBatchRejection::RecordRejected
+                    | EnhancePirBatchRejection::MetadataConflict,
+                ) = (index, reason)
+                {
+                    self.transactionally(|wdb| {
+                        // Rollback released the validation snapshot. Recheck the whole request
+                        // before charging a position a rewind may since have reassigned.
+                        wallet::enhance_pir::record_content_failures(
+                            wdb.conn.0,
+                            wdb.transparent_ledger_mode,
+                            &wdb.enhance_pir_session,
+                            &[records[index].0],
+                        )
+                    })?;
+                }
+            }
         }
         Ok(result)
+    }
+
+    fn record_ironwood_enhance_unreadable(
+        &mut self,
+        requests: &[EnhancePirRequest],
+    ) -> Result<(), Self::Error> {
+        self.transactionally(|wdb| {
+            wallet::enhance_pir::record_content_failures(
+                wdb.conn.0,
+                wdb.transparent_ledger_mode,
+                &wdb.enhance_pir_session,
+                requests,
+            )
+        })
     }
 
     fn apply_ironwood_enhance_record(
@@ -3465,20 +3547,26 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         &mut self,
         max_height: BlockHeight,
     ) -> Result<BlockHeight, <Self as WalletRead>::Error> {
-        wallet::truncate_to_height(
+        let height = wallet::truncate_to_height(
             self.conn.0,
             &self.params,
             #[cfg(feature = "transparent-inputs")]
             &self.gap_limits,
             max_height,
-        )
+        )?;
+        #[cfg(feature = "orchard")]
+        wallet::enhance_pir::retain_live_failures(self.conn.0, &self.enhance_pir_session)?;
+        Ok(height)
     }
 
     fn truncate_to_chain_state(
         &mut self,
         chain_state: ChainState,
     ) -> Result<(), <Self as WalletRead>::Error> {
-        wallet::truncate_to_chain_state(self, chain_state)
+        wallet::truncate_to_chain_state(self, chain_state)?;
+        #[cfg(feature = "orchard")]
+        wallet::enhance_pir::retain_live_failures(self.conn.0, &self.enhance_pir_session)?;
+        Ok(())
     }
 
     fn rewind_to_chain_state(
@@ -3493,7 +3581,11 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             &self.gap_limits,
             &chain_state,
             reset_account_birthdays,
-        )
+        )?;
+        #[cfg(feature = "orchard")]
+        wallet::enhance_pir::retain_live_failures(self.conn.0, &self.enhance_pir_session)
+            .map_err(RewindError::DataSource)?;
+        Ok(())
     }
 
     #[cfg(feature = "transparent-inputs")]
@@ -3935,6 +4027,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         wallet::enhance_pir::queue_scanned(
             self.conn.borrow(),
             self.transparent_ledger_mode,
+            &self.enhance_pir_session,
             tx_ref,
             tx,
         )

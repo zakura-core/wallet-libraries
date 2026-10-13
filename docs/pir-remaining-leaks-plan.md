@@ -1,0 +1,413 @@
+# The remaining wallet PIR privacy leaks
+
+Increment 1 (`docs/pir-reaction-leak-closure.md`) closed the reaction leaks in
+transparent recovery, transparent receipts and Ironwood Enhance. Within a sync,
+the requests a wallet sends there no longer depend on what the replies
+contained. Across syncs, a record that fails on content is asked at most three
+times.
+
+This plan covers what is left. It ranks the remaining leaks, sets the scope of
+increment 2, and sketches the later increments. Increment 2 changes only the
+wallet and Vizor. It needs no server change and adds no load to the PIR
+services beyond a few more status queries per transaction.
+
+Terms, as in increment 1. A **content outcome** is anything the wallet reads
+from a private reply: a record, "not in the table", or bytes that fail to
+decode or verify. A **request outcome** is a refusal the server makes without
+evaluating the private query: an HTTP status, overload, a stale publication, a
+timeout. Only content outcomes can be aimed at chosen rows. An **active** leak
+needs the service to change its answers; a **passive** one only needs it to
+watch.
+
+## 1. The leaks, ranked
+
+| Leak | Who can use it | What it reveals | Cost to fix | Test | Increment |
+| --- | --- | --- | --- | --- | --- |
+| Status replies steer polling: a forged "mined" stops it, one bad reply stops all private status for the session, a missing record fails the sync | Active | The transaction's status bucket, about 4 transactions today | Wallet and Vizor | Exact transcript | 2 |
+| Status polling stops at the mined block | Passive | The mined height; with the broadcast time, often the transaction | Wallet; about 10 status queries per transaction instead of 1 or 2 | Exact transcript | 2 |
+| Vizor stops private Enhance for the rest of the sync after an unreadable or rejected reply | Active | The note position | Vizor only | Exact transcript | 2 |
+| The first Enhance query follows the sync that found the transaction | Passive | The block range of a recent transaction | Wallet only | Seeded timing | 2 |
+| The Enhance content-failure cap resets when the wallet is reopened | Active, across restarts | As the row above, two bits per record per session | Wallet only | Exact | Open question |
+| Page queries per entry follow history size; directory queries per shard follow the number of matched scripts | Passive | A size class for an address's history in a shard | Server: more page and directory queries | Statistical | 3 |
+| Private queries go only to shards whose filter matched | Passive | The block ranges where the wallet has activity | Server: one or more queries per shard in range | Statistical | 3 |
+| A filter lists a script the service already knows | Active, needs the script | Whether this client watches that script | Same as the row above | Exact | 3 |
+| The Enhance shard follows from the note position | Passive | A coarse range of note positions | None while there is one shard; then times the shard count | Exact | 3 |
+| Import discovery runs extra passes | Active, once per import | Which matched shards belong to a confirmed account | Wallet only | Exact | Accepted |
+| A filter forged to match every script | None | Nothing: the filter format rules it out (section 3, change E) | None | Statistical | Pin test only |
+| Recovery range, receipt shard and bucket, counts, timing, network address, linking across services | Passive | Ranges, times and identity | Transport | None | Accepted (section 8) |
+
+The status and Vizor Enhance rows come first for the reasons increment 1 gave.
+They identify one record rather than describe a range or a size. Their fixes
+send at most a few more queries. A test can compare request transcripts byte
+for byte. The two timing rows follow because they are wallet-only and cheap,
+and because the status fix closes its active and passive leaks with one
+change.
+
+Status matters more than its table size suggests. The table has 8,192 rows,
+and the transaction's row is a hash of its txid. At the admission ceiling a
+row would hold about 192 transactions (wallet-pir
+`enhance/docs/architecture_status.md`). In use it holds about 4: 32,331
+entries over 8,192 rows. One row is close to one transaction.
+
+## 2. What increment 2 enforces
+
+**Status queries are fixed when the work is queued.** For each transaction
+whose status is asked privately, the wallet fixes two things when it queues
+the work:
+
+- a window of 10 chain tips, starting at the tip it was queued at;
+- an expiry poll at the transaction's expiry height, when that height is past
+  the window.
+
+At each new tip inside the window the wallet asks once about that
+transaction, and at the expiry poll once more. Each poll is sent whether the
+transaction has been seen mined or not, and whatever the earlier replies said.
+After the window and the expiry poll, the wallet stops asking on its own.
+
+The only thing that can change the polls is a request outcome: the wallet may
+retry a refused request at the same tip. The status service therefore sees
+the same queries from an honest wallet whether its transaction mined at the
+first tip, at the ninth, never, or whether the service lied about it.
+
+**Enhance replies do not steer the rest of the sync.** An unreadable reply or
+a rejected record fails that position only. The other positions are still
+queried in the same order, and the failure counts toward the existing cap of
+three.
+
+**Enhance items wait a random time before their first query.** When an item
+is first queued, the wallet draws a delay of 0 to 10 minutes from its random
+source and does not query the item before then. A rescan keeps the drawn time.
+
+## 3. Changes
+
+Increment 2 has two pull requests, one per repository (section 5). Changes A
+and D are in wallet-libraries; B and C are in Vizor. Each change lists the
+files, the rule, and its tests.
+
+Every test lands in a first commit that contains only the tests. That commit
+must fail on its parent, and the pull request names the assertion that fails
+there. An increment 1 test passed against the old code; this step shows each
+new test can catch the regression it is meant for.
+
+### A. Status poll window (wallet-libraries)
+
+Today, `transaction_status_work`
+(`zcash_client_sqlite/src/wallet.rs`) returns every eligible status row on
+every call. It drops a row as soon as `mined_height` is set. `Mined` is
+recorded by `record_mined_transaction`, which overwrites any earlier mined
+height. Status work exists only for transactions that compact scanning cannot
+see (`detectable_via_scanning`), so nothing later checks a forged answer.
+
+Schema, one additive migration chained after
+`transparent_detail_content_failures`:
+
+| Table | Columns | Written |
+| --- | --- | --- |
+| `tx_status_polls` | `txid` (key), `window_start_height`, `window_end_height`, `expiry_poll_height` (nullable), `last_polled_height` (nullable) | When `queue_tx_status` or `queue_status_for_unobservable_transactions` queues private status work |
+
+- `window_end_height` is the queue tip plus 10.
+- `expiry_poll_height` is the expiry height when it is nonzero and past the
+  window, and NULL otherwise.
+- A rewind that queues reconfirmation writes a fresh window, so a rewind
+  re-arms polling.
+- Existing rows get a window starting at the tip the migration runs at, so an
+  upgrade never strands a pending transaction.
+
+Library changes:
+
+- `transaction_status_work` returns a transaction as private work when two
+  things hold:
+  - the current tip is inside its window or is the first tip at or past
+    `expiry_poll_height`;
+  - `last_polled_height` is below the current tip.
+
+  This holds whether or not the transaction is mined. Public work keeps
+  today's rules: in public mode the txid is already disclosed.
+- `PrivateTransactionStatusRequest` gains `settled()`. It is true when the
+  transaction already has a conclusive status, and the caller then sends the
+  query but does not apply the answer.
+- A new `TransactionStatusWrite::record_private_status_poll(txid, tip)`
+  records that a reply came back. The caller calls it for every private reply,
+  readable or not. A request outcome records nothing.
+- `set_transaction_status` keeps the first conclusive answer inside the
+  window. `Mined(h)` for a transaction that status already recorded as mined
+  is ignored rather than overwriting its height.
+- `zakura/pir-status` splits `Error::Malformed` in two:
+  - a reply envelope that does not match the session (header echo, manifest,
+    length) stays a request outcome;
+  - a row that fails to decode, or fails to decrypt (today `Pir`, mapped to
+    `Unavailable`), becomes the new `StatusError::Unreadable`, a content
+    outcome.
+
+  `CoverageIncomplete` is a content outcome, because it follows from a
+  missing record.
+- A transaction still without a conclusive answer once its window and expiry
+  poll have passed leaves automatic work. It stays pending.
+  `transaction_status_work_for`, a rewind, transparent recovery or a rescan
+  can still settle it.
+
+Tests, in `zcash_client_sqlite` beside
+`wallet/request_lifecycle_tests.rs`:
+
+- **Transcript.** Queue a transaction at tip *h* with expiry *h* + 40. Walk
+  the tip from *h* to *h* + 45, and at each tip record the private work
+  returned and the replies fed back. Run four services:
+  - honest, mining the transaction at *h* + 2;
+  - a "mined" answer forged at *h*;
+  - unreadable replies;
+  - `CoverageIncomplete` throughout.
+
+  The four lists of (tip, txid) are equal. Reverted, the honest and forging
+  lists drop the transaction at *h* + 3 and *h* + 1.
+- **At most once per tip.** Read the work twice at one tip after recording a
+  poll: the transaction appears once. Reverted, it appears on every call.
+- **No overwrite.** `Mined(h1)` then `Mined(h2)` leaves the height at *h1*.
+  Reverted, it is *h2*.
+- **Expiry poll.** A transaction mined at *h* + 1 is still asked at *h* + 40.
+  One never mined is settled as expired by that poll.
+- **Durability.** The window survives a reopen. A rewind that requeues
+  reconfirmation opens a new window.
+- **Migration.** Existing rows gain a window at the migration tip.
+- **pir-status.** A corrupted row returns `Unreadable`, and a wrong header
+  echo returns the request-level error. Reverted, both are `Malformed`.
+
+### B. Vizor status driver (Vizor)
+
+Vizor polls status in `run_requests`
+(`rust/src/wallet/sync_engine/enhancement/status/mod.rs`) at each checkpoint,
+about once per new block.
+
+- **Any failure.** Any private error sets `private_failed`, and the rest of the
+  session's private status work is skipped.
+- **Coverage.** `CoverageIncomplete` returns
+  `SyncError::PrivateStatusCoverageIncomplete`, and Dart stops its poll timer
+  (`lib/src/providers/sync_provider.dart`,
+  `_privateStatusCoverageNeedsSettings`).
+- **Restart gate.** The gate (`RecoveryRestartGate`) restarts syncs at an
+  unchanged tip, and resets its backoff whenever the count of status work
+  changes.
+
+Changes:
+
+- `run_requests`:
+  - `Unreadable`, `Malformed` from a row, and `CoverageIncomplete` record the
+    poll and move on to the next txid.
+  - `private_failed` is set only by request outcomes.
+  - `CoverageIncomplete` no longer fails the sync.
+- `status/store.rs`: call `record_private_status_poll` for every private
+  reply. For `settled()` work, send the query and discard the answer. Discard
+  also means no resubmission through `ready_resubmission`.
+- `sync_provider.dart`: drop the status coverage stop. Restarts at an
+  unchanged tip send no status query, because work is due once per tip.
+
+Tests use `FakeStatusSource` in
+`rust/src/wallet/sync_engine/enhancement/tests.rs`:
+
+- **One bad txid.** An unreadable reply for txid A does not skip txid B in
+  the same checkpoint. Reverted, B is skipped.
+- **Honest versus forging.** Over 12 tips, the requests from a wallet whose
+  source mines at the second tip equal those from one whose source forges
+  "mined" at the first. Reverted, the forged run sends fewer.
+- **Request outcome.** A 503 still defers the rest of the checkpoint.
+- **Coverage.** `CoverageIncomplete` leaves the sync successful.
+
+### C. Vizor Enhance after a bad reply (Vizor)
+
+`run_queries` (`rust/src/wallet/sync_engine/enhancement/payload/private.rs`)
+ends the pass on any error other than coverage and routing. That includes a
+row that fails to decode. A rejected record also ends it. The coordinator
+(`payload/coordinator.rs`, `defer_after`) then turns private Enhance off for
+the rest of the sync. The positions after the bad one are never sent, so a
+dishonest service sees where the walk stopped.
+
+The Vizor increment 1 branch may already route unreadable replies to
+`record_ironwood_enhance_unreadable` and keep one `EnhancePirSession`. Change
+C covers whatever it leaves:
+
+- In `run_queries`:
+  - `ClientError::Response`, and `ClientError::Row` holding `Response` or
+    `Pir`, are unreadable. Pass that batch's requests to
+    `record_ironwood_enhance_unreadable`, then continue.
+  - `Row` holding `Transport`, `HttpStatus`, `Json` or `Generation` stays a
+    request outcome.
+  - A body over the size limit, or a length or binding mismatch, is a request
+    outcome, as in transparent change C.
+- A rejected record no longer defers the sync. The store already counts it.
+- `RecoveryWallet` gains `record_unreadable`, implemented for `WalletDatabase`
+  under the write lock.
+
+Tests use the scripted `Service` in `payload/tests.rs`:
+
+- **Transcript.** The service answers row X with a truncated body. The
+  request transcript (path, body length, order) equals the transcript of an
+  honest service. Reverted, it ends at X.
+- **Unreadable call.** The call to `record_unreadable` carries X's requests.
+- **Real database.** Three syncs with the same corrupt row leave the position
+  as `EnhancePirSuspension::Rejected`.
+
+### D. Enhance not-before time (wallet-libraries)
+
+Today an Enhance item is due as soon as it is queued.
+`transaction_enhancement_work` (`zcash_client_sqlite/src/wallet/enhance_pir.rs`)
+has no time condition. `queue_transaction` deletes and re-inserts the memo and
+outgoing rows on every scan, so a time kept in those rows would be drawn again
+at every rescan.
+
+Schema, one additive migration chained after change A's:
+
+| Table | Columns | Written |
+| --- | --- | --- |
+| `ironwood_enhance_not_before` | `commitment_tree_position` (key), `not_before` (Unix seconds) | In `queue_transaction` and `metadata::queue`, only when no row exists for the position |
+
+Library changes:
+
+- The delay is drawn uniformly from 0 to 600 seconds with the wallet's
+  `rng`, and added to the wallet's `clock`. Both are already in scope in the
+  `LowLevelWalletWrite` impl that queues the item.
+- `transaction_enhancement_work_sql` leaves out of `queries` any position
+  whose `not_before` is later than now. The read impl gains a `CL: Clock`
+  bound, so the signature does not change.
+- `EnhancePirWork` gains `Waiting { request, not_before }`.
+  `zakura/pir-enhance` `PreparedWork` counts these as `waiting`, and treats
+  work with waiting items as incomplete, as it does suspended items.
+- The row is deleted when the position's work completes. A rewind that
+  truncates the position deletes it, so a later requeue draws a new time.
+
+Tests, in `wallet/enhance_pir/tests.rs`, with `test_clock` and a seeded
+`test_rng`:
+
+- **Not due early.** At the queue time the item is `Waiting`. After its time
+  it is `Query`. Reverted, it is `Query` at once.
+- **Seeds.** Two seeds give different times. Items found in one scan get
+  independent times.
+- **Rescan.** A rescan keeps the time. Reverted to storing the time in the
+  memo row, it changes.
+- **Migration and completeness.** The migration test passes, and
+  `PreparedWork` is incomplete while an item waits.
+
+Vizor needs one change for D, carried in its pull request: show waiting items
+as pending. Its checkpoint at each block picks them up once due.
+
+### E. Pin the filter bound (wallet-pir, follow-up)
+
+Increment 1 noted that a service could set every bit of its filters so that
+every watched script matches. The filter format rules this out:
+
+- A Golomb-coded filter with N elements maps each script into
+  `[0, N·M)`. Validation rejects any value outside that range (wallet-pir
+  `transparent-filter/src/validate.rs`, `validate_range_filter`).
+- M comes from the profile compiled into the wallet: 1,024 for the
+  production profile. The wallet refuses unknown profiles (`match_filter`,
+  `transparent-wallet/src/sync.rs`).
+- So a script the service does not know matches with probability at most
+  1/M, however the N values are chosen.
+
+No match-rate check is needed. What remains is targeted inclusion of a script
+the service already knows, which is listed in section 1.
+
+A test in `transparent-filter` pins the bound so a later format change cannot
+reopen the leak:
+
+- Build adversarial filters: dense values, the maximum count, and clustered
+  values.
+- Match them against 65,536 scripts from a seeded generator.
+- Assert at most 1/M of the scripts match, within a stated tolerance.
+- Mutation check: compute the range as M instead of N·M, and the test fails.
+
+This is a small wallet-pir change outside the two increment 2 pull requests.
+
+## 4. Cost of cover and padding
+
+Increment 3 sends dummy queries so that the shards and sizes a wallet queries
+stop following its activity. All of it adds server work. The figures come from
+wallet-pir evidence and docs.
+
+| Item | What it sends | Cost |
+| --- | --- | --- |
+| Enhance cover | Every round queries every shard since the birthday (`query_positions_with_cover`) | None today: production has one Enhance shard, and shard 0 is not full. Each later shard multiplies Enhance queries. One query costs 8.4–9.8 ms on the P4000 and uploads about 208 KB. Under Vizor's one-shard cache, each shard switch fetches 89 KB of session data again. |
+| Transparent shard cover | One dummy directory query per shard in range whose filter did not match | From genesis that is about 33 directory shards: 12 archive and about 21 recent. Server time per restore is about 12 × 5.17 ms + 21 × 1.73 ms, so about 100 ms of CPU. Upload is about 12 × 128.5 KB + 21 × 21 KB, so about 2 MB. Steady state adds one query per changed, unmatched shard per sync. |
+| Directory count padding | Every queried shard gets the same number of directory queries, rounded up to a power of two | Small for typical wallets: matched scripts per shard are usually 0 to 2 |
+| History padding | Each entry sends a fixed minimum of page queries, rounded up to a power of two; the number of rounds is padded too | Runs per chain: archive p50 3, p95 16, p99 21, max 32; recent p50 1, p99 4. Fragments per run average 1.21 (archive) and 1.09 (recent). A page query costs 2.5 ms (recent) or 5.2 ms (archive). |
+
+The transparent service passed its gate at 20 queries per second (p50 11 ms,
+p99 38 ms). Its maximum has not been measured.
+
+Questions for the PIR operators:
+
+- When does Enhance shard 1 open?
+- How much headroom does the transparent service have above the 20 QPS gate?
+  Is a restore that sends 33 more directory queries acceptable?
+- Can the census publish the number of fragments per chain as a
+  distribution, not only means? The history-padding minimum needs it.
+
+## 5. Order of pull requests
+
+| Pull request | Repository | Contains | Base | Depends on |
+| --- | --- | --- | --- | --- |
+| This plan | wallet-libraries | This doc | `main` | None |
+| Increment 2, library | wallet-libraries | Changes A and D | This plan's branch, then `main` | Increment 1 (#180–#182, merged) |
+| Increment 2, Vizor | chainapsis/vizor-wallet, branch `transparent-privacy-inc2` | Changes B and C, D's waiting state, and a repin of every wallet-libraries dependency to the library pull request's tip | `transparent-privacy-inc1` | Vizor increment 1, and the library pull request's tip |
+| Filter bound | wallet-pir | Change E | `main` | None |
+
+The library and Vizor pull requests are worked in that order: Vizor pins the
+library's tip and repins after it merges. The filter test can land at any
+time. No crate is published and no wallet-pir release is tagged as part of
+this work.
+
+## 6. Later increments
+
+**Increment 3, shard and size cover.** This turns on Enhance cover by
+default, sends dummy directory queries to unmatched transparent shards in
+range with per-shard count padding, and pads page queries per entry. It is
+gated on the operators' answers in section 4. Enhance cover costs nothing
+while there is one shard. Moving Vizor to `query_positions_with_cover` before
+shard 1 opens would avoid a later change, but the cost then grows by itself.
+That is a capacity decision to make with the operators.
+
+**Increment 4, transport.** Tor or another relay by default hides the
+network address. Separate circuits for the status, Enhance and transparent
+services, with unlinked timing, stop traffic to the three from being linked.
+None of the PIR changes above touches the transport.
+
+## 7. What increment 2 does not build
+
+- No random offset inside each poll interval and no random tail after
+  mining. The fixed window already makes the stop independent of mining, and
+  the start follows the broadcast, which the broadcast service sees anyway.
+- No match-rate check on filters (change E shows it is not needed).
+- No change to import discovery (`zakura/pir-transparent/src/discover.rs`).
+  A forged event plus inflated pages can force another pass, but only once per
+  import the user starts, and the service already sees the import range.
+- No cover or padding queries, and no server change.
+- No defence against forged content. A forged "mined" answer is still
+  believed, as today. Increment 2 only stops it from steering what the wallet
+  asks next.
+- No durable Enhance failure count (see section 9).
+
+## 8. Leaks left visible on purpose
+
+| Leak | Why it stays |
+| --- | --- |
+| The start of status polling dates the broadcast | The broadcast service sees the broadcast itself |
+| Filter downloads start at the birthday shard, exposing the recovery range | Needs downloads from genesis for every wallet; a later choice |
+| Receipt lookups reveal the shard (from the mined height) and the hash bucket | The receipt service is sized so every lookup's anonymity set is at least 180,000 entries |
+| Request counts and timing on every service | Needs the cover in increment 3 and the transport work in increment 4 |
+| The network address without Tor | Increment 4 |
+| Traffic to the three services can be linked | Increment 4 |
+| A filter lists a script the service already knows | Needs shard cover (increment 3) |
+| Discovery's extra passes | Once per import (section 7) |
+| Vizor resubmits a recovered transaction after a status answer says it is missing | Only for transactions recovered by migration; not in the polling path |
+
+## 9. Open questions
+
+- **Durable Enhance cap.** #180 keeps Enhance content-failure counts in the
+  open wallet's session. Reopening the wallet resets them. A service can
+  therefore learn up to two bits per record per session, rather than two bits
+  in all. A durable count needs one small table.
+- **Is 10 minutes enough?** It spreads the first Enhance query over about 8
+  blocks. A longer delay hides the block better but holds memos back.
+- **How often will a transaction stay unresolved after its window?** With 10
+  polls, a transaction slower than 10 blocks is settled by its expiry poll,
+  transparent recovery or a rescan. If this happens often, a second fixed poll
+  at the midpoint would cost one query.
+- **Should Enhance cover go on now, while it is free?** See section 6.

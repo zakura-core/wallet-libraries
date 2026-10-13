@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 import subprocess
+import json
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -16,11 +18,12 @@ def package(name, dependencies=None):
 
 class PublishingTests(unittest.TestCase):
     def run_with(self, packages, statuses, **options):
+        wait_error = options.pop("wait_error", None)
         with patch.object(release, "git", return_value="commit"), \
              patch.object(release, "check_checkout"), \
              patch.object(release, "release_packages", return_value=(packages, options.pop("upstream", []))), \
              patch.object(release, "registry_version", side_effect=lambda name, version: statuses[name]), \
-             patch.object(release, "wait_for_publication"), \
+             patch.object(release, "wait_for_publication", side_effect=wait_error), \
              patch.object(release.subprocess, "run") as cargo:
             release.run_release(Path("."), **options)
             return cargo.call_args_list
@@ -98,7 +101,8 @@ class PublishingTests(unittest.TestCase):
         with patch.object(release.sys, "argv", ["publish-crates.py", "--dry-run"]), \
              patch.object(release, "run_release") as run:
             self.assertEqual(release.main(), 0)
-            run.assert_called_once_with(release.ROOT, False, False, False)
+            run.assert_called_once_with(release.ROOT, False, False, False,
+                                        output=None, publish_verified=None)
 
     def test_dry_run_cannot_be_combined_with_publish(self):
         with patch.object(release.sys, "argv", ["publish-crates.py", "--dry-run", "--publish"]), \
@@ -114,11 +118,155 @@ class PublishingTests(unittest.TestCase):
         members = {release.tomllib.loads((release.ROOT / directory / "Cargo.toml").read_text())["package"]["name"]
                    for directory in workspace["members"]}
         self.assertEqual({p["name"] for p in packages}, members)
-        # wallet-pir's crates come from crates.io, so no git prerequisite remains.
-        self.assertEqual(upstream, [])
+        # Until 0.1.0-rc.4 is on crates.io, wallet-pir's eight crates are git
+        # prerequisites; the repin to crates.io makes this empty again.
+        self.assertEqual(upstream, sorted((name, "0.1.0-rc.4") for name in (
+            "transparent-events", "transparent-filter", "transparent-native", "transparent-shard",
+            "transparent-shard-server", "transparent-txid-client", "transparent-wallet",
+            "transparent-wallet-store")))
         selected, upstream = release.release_packages(release.ROOT, without_transparent=True)
         self.assertEqual(len(selected), len(packages) - 1)
         self.assertEqual(upstream, [])
+
+    def receipt(self, directory, selection, **changes):
+        data = {"schema_version": 1, "commit": "commit", "without_transparent": False,
+                "verification_passed": True,
+                "packages": [{"name": p["name"], "version": p["version"],
+                              "registry_status": "absent", "result": "remaining"}
+                             for p in selection]}
+        data.update(changes)
+        path = Path(directory) / "verified.json"
+        path.write_text(json.dumps(data))
+        return path
+
+    def test_verified_publication_never_compiles_and_preserves_dependency_order(self):
+        packages = [package("first"), package("second")]
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self.receipt(directory, packages)
+            output = Path(directory) / "progress.json"
+            calls = self.run_with(packages, {"first": "absent", "second": "absent"},
+                                  publish_verified=receipt, output=output)
+            self.assertEqual(len(calls), 2)
+            for call, name in zip(calls, ("first", "second")):
+                command = call.args[0]
+                self.assertIn(str(Path(name) / "Cargo.toml"), command)
+                self.assertIn("--no-verify", command)
+                self.assertIn("--locked", command)
+                self.assertNotIn("--dry-run", command)
+            self.assertEqual([p["result"] for p in json.loads(output.read_text())["packages"]],
+                             ["published", "published"])
+
+    def test_bad_receipts_stop_before_registry_queries_or_uploads(self):
+        packages = [package("first"), package("second")]
+        invalid = ({"commit": "other"}, {"verification_passed": False},
+                   {"verification_passed": 1}, {"schema_version": 2},
+                   {"without_transparent": True}, {"packages": []},
+                   {"packages": [{"name": "second", "version": "1.0.0"},
+                                 {"name": "first", "version": "1.0.0"}]},
+                   {"packages": [{"name": "first", "version": "2.0.0"}]})
+        with tempfile.TemporaryDirectory() as directory:
+            for changes in invalid:
+                with self.subTest(changes=changes), \
+                     patch.object(release, "git", return_value="commit"), \
+                     patch.object(release, "check_checkout"), \
+                     patch.object(release, "release_packages", return_value=(packages, [])), \
+                     patch.object(release, "registry_version") as registry, \
+                     patch.object(release.subprocess, "run") as cargo:
+                    with self.assertRaises(release.ReleaseError):
+                        release.run_release(Path("."), publish_verified=self.receipt(directory, packages, **changes))
+                    registry.assert_not_called()
+                    cargo.assert_not_called()
+
+    def test_missing_empty_or_malformed_receipt_never_uploads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            malformed = Path(directory) / "malformed.json"
+            malformed.write_text("not json")
+            for receipt in ("", Path(directory) / "missing.json", malformed):
+                with self.subTest(receipt=receipt), \
+                     patch.object(release, "git", return_value="commit"), \
+                     patch.object(release, "check_checkout"), \
+                     patch.object(release, "release_packages", return_value=([package("first")], [])), \
+                     patch.object(release.subprocess, "run") as cargo:
+                    with self.assertRaises(release.ReleaseError):
+                        release.run_release(Path("."), publish_verified=receipt)
+                    cargo.assert_not_called()
+
+    def test_verified_mode_cannot_be_combined_with_local_publication(self):
+        with patch.object(release.sys, "argv", ["publish-crates.py", "--publish-verified", "receipt.json", "--publish"]), \
+             patch.object(release, "run_release") as run:
+            with self.assertRaises(SystemExit):
+                release.main()
+            run.assert_not_called()
+
+    def test_failed_whole_release_verification_leaves_unsuccessful_receipt(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(release, "git", return_value="commit"), \
+             patch.object(release, "check_checkout"), \
+             patch.object(release, "release_packages", return_value=([package("first")], [])), \
+             patch.object(release, "registry_version", return_value="absent"), \
+             patch.object(release.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "cargo")):
+            output = Path(directory) / "progress.json"
+            with self.assertRaises(subprocess.CalledProcessError):
+                release.run_release(Path("."), output=output)
+            self.assertIs(json.loads(output.read_text())["verification_passed"], False)
+
+    def test_successful_whole_release_verification_writes_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "progress.json"
+            self.run_with([package("first")], {"first": "absent"}, output=output)
+            release.validate_receipt(output, "commit", [package("first")], False)
+
+    def test_receipts_cannot_be_written_inside_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(release.ReleaseError):
+                release.output_path(Path(directory), Path(directory) / "receipt.json")
+
+    def test_failed_upload_retains_prior_success_and_remaining_packages(self):
+        packages = [package("first"), package("second"), package("third")]
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(release, "git", return_value="commit"), \
+             patch.object(release, "check_checkout"), \
+             patch.object(release, "release_packages", return_value=(packages, [])), \
+             patch.object(release, "registry_version", return_value="absent"), \
+             patch.object(release, "wait_for_publication"), \
+             patch.object(release.subprocess, "run", side_effect=[None, subprocess.CalledProcessError(1, "cargo")]) as cargo:
+            output = Path(directory) / "progress.json"
+            with self.assertRaises(subprocess.CalledProcessError):
+                release.run_release(Path("."), publish_verified=self.receipt(directory, packages), output=output)
+            self.assertEqual(cargo.call_count, 2)
+            self.assertEqual([p["result"] for p in json.loads(output.read_text())["packages"]],
+                             ["published", "failed", "remaining"])
+
+    def test_upload_without_registry_confirmation_is_not_reported_as_published(self):
+        packages = [package("first")]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "progress.json"
+            with self.assertRaises(release.ReleaseError):
+                self.run_with(packages, {"first": "absent"},
+                              publish_verified=self.receipt(directory, packages), output=output,
+                              wait_error=release.ReleaseError("not visible"))
+            self.assertEqual(json.loads(output.read_text())["packages"][0]["result"], "uploaded_unconfirmed")
+
+    def test_registry_is_rechecked_before_upload(self):
+        with patch.object(release, "git", return_value="commit"), \
+             patch.object(release, "check_checkout"), \
+             patch.object(release, "release_packages", return_value=([package("first")], [])), \
+             patch.object(release, "registry_version", side_effect=["absent", "available"]), \
+             patch.object(release.subprocess, "run") as cargo:
+            release.run_release(Path("."), publish=True)
+            cargo.assert_not_called()
+
+    def test_yanked_or_unreachable_registry_stops_publication(self):
+        for value in ("yanked", release.ReleaseError("registry unavailable")):
+            with self.subTest(value=value), \
+                 patch.object(release, "git", return_value="commit"), \
+                 patch.object(release, "check_checkout"), \
+                 patch.object(release, "release_packages", return_value=([package("first")], [])), \
+                 patch.object(release, "registry_version", side_effect=["absent", value]), \
+                 patch.object(release.subprocess, "run") as cargo:
+                with self.assertRaises(release.ReleaseError):
+                    release.run_release(Path("."), publish=True)
+                cargo.assert_not_called()
 
 
 if __name__ == "__main__":

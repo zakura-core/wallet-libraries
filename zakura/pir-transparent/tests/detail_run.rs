@@ -916,7 +916,7 @@ fn malformed_and_absent_replies_share_one_schedule_and_stop_after_three() {
         let run = f.plan(&service, at, 8, &[]);
         assert!(f.drive(run, &service, &exchange, at).is_empty());
         assert!(exchange.paths_since(sent).is_empty());
-        assert_eq!(f.view(txid), Some(TransparentDisplayView::Unavailable));
+        assert_eq!(f.view(txid), Some(TransparentDisplayView::GaveUp));
         (due, f.work_row(txid).and_then(|(_, outcome, _)| outcome))
     };
     let (malformed, outcome) = lookups(true);

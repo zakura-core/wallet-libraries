@@ -28,12 +28,15 @@ use transparent_filter::{
     BlockHash, Recut, ScriptBytes, SealParameters, ShardMap, ShardMapEntry, SupersededShard,
     filter_hash,
 };
-use transparent_shard::build::{Block, build_directory_shard};
-use transparent_shard::layout::{DECOUPLED_2K_8K, DECOUPLED_32K_32K, Geometry, MAX_PAGE_CHILDREN};
+use transparent_shard::build::{Block, build_directory_shard, candidate_rows};
+use transparent_shard::layout::{
+    DECOUPLED_2K_8K, DECOUPLED_32K_32K, Geometry, MAX_PAGE_CHILDREN, split_row,
+};
 use transparent_shard::manifest::{
     ManifestLayout, ManifestOccupancy, ManifestSeal, SCHEMA, ShardManifest, TableGeometry,
     pages_table,
 };
+use transparent_shard::records::decode_directory_row;
 use transparent_shard_server::service::{ServiceConfig, ServiceState, router};
 use transparent_shard_server::shardset::{DEFAULT_RETAIN_REVISIONS, ShardSet};
 
@@ -80,6 +83,11 @@ pub struct ShardSpec {
     /// earlier page shards, sealed and byte for byte, as a publisher does.
     pub page_span: u64,
     pub events: Vec<(ScriptBytes, TransparentEvent)>,
+    /// Scripts whose directory entry is published malformed, as a service aiming
+    /// bad content at chosen rows would: both rows the entry may occupy fail to
+    /// decode, so a wallet's query for the script fails on content. Any other
+    /// script sharing such a row fails with it. Empty for an honest shard.
+    pub malformed_entries: Vec<ScriptBytes>,
 }
 
 impl ShardSpec {
@@ -100,6 +108,7 @@ impl ShardSpec {
             supersedes: String::new(),
             page_span: 0,
             events,
+            malformed_entries: Vec::new(),
         }
     }
 
@@ -150,7 +159,7 @@ pub fn publish(
                 (height, events)
             })
             .collect();
-        let (built, children) = build_directory_shard(
+        let (mut built, children) = build_directory_shard(
             shard_id,
             geometry,
             genesis,
@@ -161,6 +170,12 @@ pub fn publish(
             spec.sealed,
         )
         .expect("a buildable shard");
+        malform(
+            &mut built.directory,
+            shard_id,
+            geometry,
+            &spec.malformed_entries,
+        );
         let page_children: Vec<_> = children
             .iter()
             .map(|child| child.describe(geometry))
@@ -289,6 +304,23 @@ pub fn publish(
     )
     .expect("a writable shard set");
     map
+}
+
+/// Makes both candidate rows of each of `scripts` in shard `shard_id`'s `directory`
+/// undecodable: a row's entry count is set past what a row holds. Done before the
+/// manifest commits to the segments, so the service serves the rows as published.
+fn malform(directory: &mut [Vec<u8>], shard_id: u64, geometry: &Geometry, scripts: &[ScriptBytes]) {
+    let rows = geometry.directory_rows * directory.len() as u64;
+    let row_bytes = geometry.directory_row_bytes;
+    for script in scripts {
+        for row in candidate_rows(shard_id, script.as_slice(), rows) {
+            let (segment, within) = split_row(row, geometry.directory_rows);
+            let at = within as usize * row_bytes;
+            let row = &mut directory[segment as usize][at..at + row_bytes];
+            row[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+            assert!(decode_directory_row(row, MAX_PAGE_CHILDREN).is_err());
+        }
+    }
 }
 
 /// `entry` as a re-cut declares it superseded: exactly as it was published.

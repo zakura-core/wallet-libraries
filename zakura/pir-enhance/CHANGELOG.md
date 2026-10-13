@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Rejected-position suspensions (`EnhancePirSuspension::Rejected`) are counted
+  as incomplete and are not queried, like other suspensions.
+- `PreparedWork::batches_by_tx_and_row` documents reporting a batch whose
+  record bytes fail to decode with
+  `EnhancePirWrite::record_ironwood_enhance_unreadable`, and never reporting
+  request failures.
+
 ### Changed
 
 - Depend on ipir-sp `0.1.0-rc.7` (with `reinspiring 0.1.3-rc.1` and

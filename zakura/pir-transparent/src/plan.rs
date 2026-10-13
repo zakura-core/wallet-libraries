@@ -2,9 +2,7 @@
 //! after each pass, with feature `sqlite`.
 //!
 //! [`PassPlan`] is pure: it makes no request, reads no clock and touches no database. The
-//! wallet runs the passes, settles them, waits and stops; the plan only says which.
-
-use std::time::Duration;
+//! wallet runs the passes, settles them and stops; the plan only says which.
 
 use rusqlite::Connection;
 use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchSet;
@@ -45,33 +43,25 @@ impl TransparentHistoryRecovery {
 /// The bounds of one account's passes in one run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PassLimits {
-    /// Passes a plan runs before [`Step::Done`]. A [`Step::Refresh`] does not count.
-    pub passes: usize,
     /// [`Step::Refresh`]es a plan allows; the next stale settlement is [`Step::Skip`].
     pub stale_refreshes: usize,
 }
 
 impl Default for PassLimits {
-    /// Eight passes and three refreshes, as Vizor runs an account.
+    /// Three refreshes, as Vizor runs an account.
     fn default() -> Self {
-        Self {
-            passes: 8,
-            stale_refreshes: 3,
-        }
+        Self { stale_refreshes: 3 }
     }
 }
 
 /// What a wallet does next with an account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// Pass again now, with [`PassPlan::watch`].
+    /// Pass now, with [`PassPlan::watch`]: only [`PassPlan::first`] returns it.
     Pass,
     /// Pass again now, with [`PassPlan::watch`]: a commit of the settlement was stale
     /// for the watch set the pass ran with. It does not count as a pass.
     Refresh,
-    /// Pass again after the wait: the publication ends below the target, or the
-    /// service refused for capacity.
-    Wait(Duration),
     /// The account cannot progress until something outside recovery changes: skip
     /// it, without traffic, for longer than a run.
     Hold(HoldCause),
@@ -90,9 +80,11 @@ pub enum Step {
     /// The wallet failed or its connection was inside a transaction: report the
     /// [`ApplyFailure`] the settlement returned.
     Fail,
-    /// The account's passes ended: the last pass's retry, or `None` when the watch
-    /// set has no target, so there is nothing to pass. Offer the account for
-    /// activation; the wallet rechecks everything itself.
+    /// The account's passes ended for this sync: the counted pass's retry, or `None`
+    /// when the watch set has no target, so there is nothing to pass. Offer the account
+    /// for activation; the wallet rechecks everything itself. Whatever the retry, the
+    /// next pass waits for the next sync, which reads the fresh watch set. A
+    /// [`Retry::After`] delay belongs to scheduling that next sync.
     Done(Option<Retry>),
 }
 
@@ -105,6 +97,10 @@ pub enum HoldCause {
     /// The batch resolves retired revisions, which only [`Trust::Trusted`]
     /// settlement reconciles. Each observed pass would add one more.
     Unreconciled,
+    /// A directory entry of the account's failed on content three times, so it is no
+    /// longer queried and the account cannot be covered. Each failure is something a
+    /// service could aim at chosen rows; only a new companion asks the entry again.
+    FailedEntries,
 }
 
 /// Why a run stops.
@@ -146,8 +142,6 @@ pub enum StopCause {
 ///     loop {
 ///         match step {
 ///             Step::Pass | Step::Refresh => {}
-///             // Bounded by the caller's own time budget.
-///             Step::Wait(wait) => std::thread::sleep(wait),
 ///             step => return Ok(Some(step)),
 ///         }
 ///         if should_stop() {
@@ -173,7 +167,6 @@ pub enum StopCause {
 pub struct PassPlan<A> {
     watch: TransparentAddressWatchSet<A>,
     limits: PassLimits,
-    passes: usize,
     refreshes: usize,
 }
 
@@ -183,7 +176,6 @@ impl<A> PassPlan<A> {
         Self {
             watch,
             limits,
-            passes: 0,
             refreshes: 0,
         }
     }
@@ -220,44 +212,40 @@ impl<A> PassPlan<A> {
     ///    `NotEnabled` and `PolicyChanged` stop the run; `Fail` is [`Step::Fail`].
     /// 3. A ready pass with nothing settled is [`Step::Skip`]: its batch was taken
     ///    elsewhere, and acknowledging it is not this plan's to know.
-    /// 4. The pass counts. With no target in `fresh` there is nothing left to pass:
-    ///    [`Step::Done`] with no retry.
-    /// 5. After [`PassLimits::passes`] passes: [`Step::Done`] with the pass's retry.
-    /// 6. By [`PassReport::retry`]: `More` passes again at once, since the companion
-    ///    resumes; `After` is [`Step::Wait`]; `Complete` and `Stalled` pass again
-    ///    only for new work, a settled commit that grew the window or a watch set
-    ///    whose addresses changed, and are otherwise [`Step::Done`].
+    /// 4. The pass counts, and it is the sync's only one. With no target in `fresh`
+    ///    there is nothing left to pass: [`Step::Done`] with no retry.
+    /// 5. A pass with a directory entry at three content failures
+    ///    ([`FailedEntries::held`](crate::FailedEntries::held)) is
+    ///    [`HoldCause::FailedEntries`]: everything else it read was settled above, but the
+    ///    entry is no longer queried, so the account cannot be covered.
+    /// 6. Every retry is [`Step::Done`] with it, including `After`: a lagging or
+    ///    overloaded pass may already have processed private replies. Its delay
+    ///    schedules the next sync, so a settled commit that grew the window, a
+    ///    changed watch set, or `More` cannot start another pass in this sync.
+    ///    A pass with failed entries is [`Retry::Stalled`] whatever else stopped it.
     pub fn next(
         &mut self,
         report: &PassReport,
         settled: &Result<Option<Applied>, ApplyFailure>,
         fresh: TransparentAddressWatchSet<A>,
     ) -> Step {
-        let previous = std::mem::replace(&mut self.watch, fresh);
+        self.watch = fresh;
         if let BatchState::Withdrawn(cause) = report.state {
             return Step::Hold(HoldCause::Withdrawn(cause));
         }
-        let window_grew = match settled {
-            Ok(Some(applied)) => applied.stats.window_grew,
+        match settled {
+            Ok(Some(_)) => {}
             Ok(None) if report.settleable() => return Step::Skip,
-            Ok(None) => false,
+            Ok(None) => {}
             Err(failure) => return self.after_failure(failure.action()),
-        };
-        self.passes += 1;
+        }
         if self.watch.target.is_none() {
             return Step::Done(None);
         }
-        let retry = report.retry();
-        if self.passes >= self.limits.passes {
-            return Step::Done(Some(retry));
+        if report.failed_entries.held > 0 {
+            return Step::Hold(HoldCause::FailedEntries);
         }
-        let new_work = window_grew || self.watch.addresses != previous.addresses;
-        match retry {
-            Retry::More => Step::Pass,
-            Retry::After(wait) => Step::Wait(wait),
-            Retry::Complete | Retry::Stalled if new_work => Step::Pass,
-            Retry::Complete | Retry::Stalled => Step::Done(Some(retry)),
-        }
+        Step::Done(Some(report.retry()))
     }
 
     /// The step after a settlement that failed with `action`.
