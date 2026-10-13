@@ -19,9 +19,9 @@ serde_json.workspace = true
 [dev-dependencies]
 axum = "0.7"
 orchard.workspace = true
-receiver-directory = { git = "https://github.com/valargroup/wallet-pir", rev = "ff27d6497abc9d09a7dd7f003cac90726b69c9a3" }
-receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "ff27d6497abc9d09a7dd7f003cac90726b69c9a3", features = ["server"] }
-receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", rev = "ff27d6497abc9d09a7dd7f003cac90726b69c9a3" }
+receiver-directory = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.1" }
+receiver-pir = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.1", features = ["server"] }
+receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.1" }
 rusqlite.workspace = true
 sapling = { workspace = true, features = ["test-dependencies"] }
 secrecy.workspace = true
@@ -32,8 +32,8 @@ transparent.workspace = true
 zakura-near-intents = { path = "../near-intents" }
 zakura-one-time-ivk = { path = "../one-time-ivk" }
 zakura-pir-receiver = { path = "../pir-receiver", features = ["wallet"] }
-zcash_client_backend = { workspace = true, features = ["one-time-ivk", "test-dependencies"] }
-zcash_client_sqlite = { path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["one-time-ivk", "test-dependencies"] }
+zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
+zcash_client_sqlite = { path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "test-dependencies"] }
 zcash_keys = { workspace = true, features = ["orchard"] }
 zcash_note_encryption.workspace = true
 zcash_primitives.workspace = true

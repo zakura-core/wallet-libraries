@@ -31,10 +31,11 @@ stamped with the wallet-libraries commit and the wallet-pir revision it ran agai
 
 ## What is real and what is simulated
 
-Real: the SQLite wallet store with `one-time-ivk`, compact scanning, the receiver
-restore client (`zakura-pir-receiver`), the receiver directory's routes and PIR
-(`receiver-pir-server`), Ironwood note encryption, and signed transactions with
-proofs where a scenario needs them (swap funding, payouts that a reorg returns).
+Real: the SQLite wallet store and its one-time IVK tables, compact scanning, the
+receiver restore client (`zakura-pir-receiver`), the receiver directory's routes
+and PIR (`receiver-pir-server`), Ironwood note encryption, and signed transactions
+with proofs where a scenario needs them (swap funding, payouts that a reorg
+returns).
 
 Simulated:
 
