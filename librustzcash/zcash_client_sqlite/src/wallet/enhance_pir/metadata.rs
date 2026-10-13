@@ -76,7 +76,7 @@ pub(super) fn pending<P: Parameters>(
     // authority. Compact-only metadata still belongs to protected transactions only.
     let public_authority = transparent_ledger::retains_public_authority(conn, None)?;
     if let Some(note) = super::pending_note(conn, params, position, true, public_authority)? {
-        return Ok(Some(PendingIronwoodMetadata::Incoming(note)));
+        return Ok(Some(PendingIronwoodMetadata::Incoming(Box::new(note))));
     }
     conn.query_row(
         concat!(

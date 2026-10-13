@@ -10,6 +10,29 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+
+- One-time IVKs (with `orchard`): per-swap Ironwood refund and incoming addresses derived
+  with `zakura-one-time-ivk` and recoverable from the seed. `wallet::one_time_ivk` holds the
+  key registry, scanning, spending and restore sweeps, and its rustdoc lists the calls a
+  wallet makes; `wallet::one_time_ivk::swap` holds issuance, provider operations, refund
+  funding and closing. `WalletDb` implements the backend's `OneTimeIvkRead`,
+  `OneTimeIvkWrite`, `OneTimeIvkRestoreRead` and `OneTimeIvkRestoreWrite`. New errors are
+  `SqliteClientError::OneTimeIvksNotUsed` and `SqliteClientError::InvalidOneTimeIvkInput`.
+  ZeWIF import also decrypts with the wallet's one-time keys.
+- `wallet::init::migrations::ids::ONE_TIME_IVK`, the one-time IVK migration, which runs in
+  every build.
+
+### Changed
+
+- `CURRENT_LEAF_MIGRATIONS` has two leaves, `transparent_txid_enhancement` and
+  `one_time_ivk`. An older build, such as 0.1.0-rc8, refuses a database this version has
+  migrated, as it does any unknown migration.
+- Ironwood memo retrieval skips notes received with a one-time key
+  (`one_time_key_id IS NULL`) in every build; an ordinary wallet has none. The
+  `ironwood_transparent_output_shape` migration now requeues memos itself, without that
+  filter, since it can run before the column exists.
+
 ## [0.1.0-rc8] - PLANNED
 
 ### Packaging

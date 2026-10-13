@@ -7855,6 +7855,7 @@ dependencies = [
  "zakura-client-backend",
  "zakura-jubjub",
  "zakura-keys",
+ "zakura-one-time-ivk",
  "zakura-orchard",
  "zakura-pasta-curves",
  "zakura-pczt",

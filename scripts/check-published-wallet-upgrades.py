@@ -4,7 +4,8 @@
 Older consumers ingest transaction/UTXO fixtures before the current library upgrades them: the
 published rc5 and rc7 releases (rc7 is the mobile 0.0.50 baseline) and this repository at
 PRE_MIGRATIONS, the last revision before the unconditional ironwood_unsupported_memo_retry,
-ironwood_transparent_output_shape and transparent_txid_enhancement migrations. The probe verifies
+ironwood_transparent_output_shape, transparent_txid_enhancement and one_time_ivk migrations. The
+probe verifies
 preserved data, classification values, legacy provenance, that the upgrade queues no private work
 for a wallet that never had a private policy, repeat initialization, and how older readers treat
 the upgraded database. The pre-migration fork must refuse unknown migrations without changing it;
@@ -24,13 +25,20 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "librustzcash/zcash_client_backend/tests/fixtures/ironwood-fee-expiry.hex"
-# The last revision before the three unconditional migrations below.
+# The last revision before the unconditional migrations below.
 PRE_MIGRATIONS = "cf1dcfec88062c420322578226d5240328002d3d"
 UNCONDITIONAL_MIGRATIONS = {
     "ironwood_unsupported_memo_retry": "3d1c7a52-8e0b-4f6d-9a47-5be2c0f19e84",
     "ironwood_transparent_output_shape": "8f4c3210-04e1-49eb-9de2-d713ee0a8426",
     "transparent_txid_enhancement": "73d751a3-dbdc-461a-9154-e061903aae4f",
+    "one_time_ivk": "23cd21bc-9c96-4b40-8fc0-725b734a1113",
 }
+# Tables the one_time_ivk migration creates, which an upgrade must leave empty.
+ONE_TIME_IVK_TABLES = (
+    "ironwood_one_time_keys", "ironwood_one_time_operations", "ironwood_one_time_sweeps",
+    "ironwood_one_time_payment_recovery", "ironwood_nullifier_scan_blocks",
+    "ironwood_one_time_fresh_accounts", "ironwood_one_time_spend_retention",
+)
 WRITERS = ("rc5", "rc7", "pre-migrations")
 # Writers whose library refuses a database with migrations it does not know.
 REFUSING_READERS = ("pre-migrations",)
@@ -92,6 +100,10 @@ def assert_no_private_work(path, version):
             count = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
             assert count == 0, f"{version}: the upgrade queued {count} rows in {table}"
         assert conn.execute("SELECT count(*) FROM ironwood_enhance_routing WHERE route = 2").fetchone()[0] == 0
+        for table in ONE_TIME_IVK_TABLES:
+            count = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            assert count == 0, f"{version}: the upgrade left {count} rows in {table}"
+        assert conn.execute("SELECT count(*) FROM ironwood_received_notes WHERE one_time_key_id IS NOT NULL").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM tx_retrieval_queue WHERE policy_generation != 0").fetchone()[0] == 0
 
 

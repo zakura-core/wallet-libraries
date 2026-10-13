@@ -193,6 +193,10 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::EnhancementModeNotConfigured => {
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
+        #[cfg(feature = "orchard")]
+        SqliteClientError::OneTimeIvksNotUsed | SqliteClientError::InvalidOneTimeIvkInput(_) => {
+            unreachable!("migrations do not use one-time IVKs")
+        }
         SqliteClientError::TransparentLedgerModeNotConfigured
         | SqliteClientError::TransparentAuthorityUnavailable(_)
         | SqliteClientError::TransparentLedgerIncompatible { .. }
@@ -891,6 +895,13 @@ mod tests {
             db::TABLE_IRONWOOD_ENHANCE_OUTGOING_QUEUE,
             db::TABLE_IRONWOOD_ENHANCE_ROUTING,
             db::TABLE_IRONWOOD_MEMO_RETRIEVAL_QUEUE,
+            db::TABLE_IRONWOOD_NULLIFIER_SCAN_BLOCKS,
+            db::TABLE_IRONWOOD_ONE_TIME_FRESH_ACCOUNTS,
+            db::TABLE_IRONWOOD_ONE_TIME_KEYS,
+            db::TABLE_IRONWOOD_ONE_TIME_OPERATIONS,
+            db::TABLE_IRONWOOD_ONE_TIME_PAYMENT_RECOVERY,
+            db::TABLE_IRONWOOD_ONE_TIME_SPEND_RETENTION,
+            db::TABLE_IRONWOOD_ONE_TIME_SWEEPS,
             db::TABLE_IRONWOOD_RECEIVED_NOTE_SPENDS,
             db::TABLE_IRONWOOD_RECEIVED_NOTES,
             db::TABLE_IRONWOOD_TREE_CAP,
@@ -968,10 +979,15 @@ mod tests {
             db::INDEX_ADDRESSES_INDICES,
             db::INDEX_ADDRESSES_PUBKEYS,
             db::INDEX_ADDRESSES_T_INDICES,
+            db::INDEX_IRONWOOD_ONE_TIME_KEYS_ACCOUNT_RECEIVER,
+            db::INDEX_IRONWOOD_ONE_TIME_KEYS_SCANNING,
+            db::INDEX_IRONWOOD_ONE_TIME_OPERATIONS_KEY,
+            db::INDEX_IRONWOOD_ONE_TIME_SWEEPS_DUE,
             db::INDEX_IRONWOOD_RNS_NOTE,
             db::INDEX_IRONWOOD_RNS_TX,
             db::INDEX_IRONWOOD_RECEIVED_NOTES_ACCOUNT,
             db::INDEX_IRONWOOD_RECEIVED_NOTES_ADDRESS,
+            db::INDEX_IRONWOOD_RECEIVED_NOTES_ONE_TIME_KEY,
             db::INDEX_IRONWOOD_RECEIVED_NOTES_TX,
             db::INDEX_IRONWOOD_RECEIVED_NOTES_WITNESS_STABILIZED,
             db::INDEX_NF_MAP_LOCATOR_IDX,

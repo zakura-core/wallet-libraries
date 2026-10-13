@@ -36,6 +36,7 @@ use super::{
 };
 
 pub(crate) fn to_received_note<P: consensus::Parameters>(
+    conn: &Connection,
     params: &P,
     pool: ShieldedPool,
     row: &Row,
@@ -44,6 +45,11 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
     // `ReceivedNoteId` must carry the pool the note was selected from, so that pool-filtered
     // exclusion (see `select_unspent_notes`) matches it rather than misrouting it to Orchard.
     let note_id = ReceivedNoteId(pool, row.get("id")?);
+    let one_time_key_id: Option<i64> = if pool == ShieldedPool::Ironwood {
+        row.get("one_time_key_id")?
+    } else {
+        None
+    };
     let txid = row.get::<_, [u8; 32]>("txid").map(TxId::from_bytes)?;
     let action_index = row.get("action_index")?;
     let diversifier = {
@@ -121,6 +127,18 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
                 .ok_or_else(|| {
                     SqliteClientError::CorruptedData("Diversifier invalid.".to_owned())
                 })?;
+            let one_time_key = one_time_key_id
+                .map(|id| {
+                    super::one_time_ivk::note_recipient(
+                        conn,
+                        id,
+                        &ufvk,
+                        spending_key_scope,
+                        diversifier,
+                    )
+                })
+                .transpose()?;
+            let recipient = one_time_key.map_or(recipient, |(_, recipient)| recipient);
 
             let note = Option::from(Note::from_parts(
                 recipient,
@@ -131,7 +149,7 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
             ))
             .ok_or_else(|| SqliteClientError::CorruptedData("Invalid Orchard note.".to_string()))?;
 
-            Ok(ReceivedNote::from_parts(
+            let received = ReceivedNote::from_parts(
                 note_id,
                 txid,
                 action_index,
@@ -140,7 +158,9 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
                 note_commitment_tree_position,
                 mined_height,
                 max_shielding_input_height,
-            ))
+            );
+            let received = received.with_one_time_key_id(one_time_key.map(|(id, _)| id));
+            Ok(received)
         })
         .transpose()
 }
@@ -160,7 +180,7 @@ pub(crate) fn get_spendable_orchard_note<P: consensus::Parameters>(
         index,
         ShieldedPool::Orchard,
         target_height,
-        to_received_note,
+        |params, pool, row| to_received_note(conn, params, pool, row),
         lock_filter,
     )
 }
@@ -183,7 +203,7 @@ pub(crate) fn get_spendable_ironwood_note<P: consensus::Parameters>(
         index,
         ShieldedPool::Ironwood,
         target_height,
-        to_received_note,
+        |params, pool, row| to_received_note(conn, params, pool, row),
         lock_filter,
     )
 }
@@ -211,7 +231,7 @@ pub(crate) fn select_spendable_ironwood_notes<P: consensus::Parameters>(
         confirmations_policy,
         exclude,
         ShieldedPool::Ironwood,
-        to_received_note,
+        |params, pool, row| to_received_note(conn, params, pool, row),
         lock_filter,
     )
 }
@@ -238,7 +258,7 @@ pub(crate) fn select_spendable_ironwood_notes_for_consolidation<P: consensus::Pa
         confirmations_policy,
         exclude,
         ShieldedPool::Ironwood,
-        to_received_note,
+        |params, pool, row| to_received_note(conn, params, pool, row),
         lock_filter,
         max_additional_notes,
     )
@@ -264,7 +284,7 @@ pub(crate) fn select_spendable_orchard_notes<P: consensus::Parameters>(
         confirmations_policy,
         exclude,
         ShieldedPool::Orchard,
-        to_received_note,
+        |params, pool, row| to_received_note(conn, params, pool, row),
         lock_filter,
     )
 }
@@ -291,7 +311,7 @@ pub(crate) fn select_spendable_orchard_notes_for_consolidation<P: consensus::Par
         confirmations_policy,
         exclude,
         ShieldedPool::Orchard,
-        to_received_note,
+        |params, pool, row| to_received_note(conn, params, pool, row),
         lock_filter,
         max_additional_notes,
     )
@@ -364,11 +384,16 @@ fn get_unspent_orchard_shaped_notes_at_historical_height<P: consensus::Parameter
     let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(shielded_pool)?;
     let external_scope = KeyScope::EXTERNAL.encode();
     let internal_scope = KeyScope::INTERNAL.encode();
+    let one_time_column = if shielded_pool == ShieldedPool::Ironwood {
+        " rn.one_time_key_id,"
+    } else {
+        ""
+    };
 
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT
              rn.id AS id, t.txid, rn.action_index,
-             rn.diversifier, rn.value, rn.rho, rn.rseed, rn.note_version,
+             rn.diversifier, rn.value, rn.rho, rn.rseed, rn.note_version,{one_time_column}
              rn.commitment_tree_position,
              accounts.ufvk AS ufvk, rn.recipient_key_scope,
              t.mined_height,
@@ -396,7 +421,7 @@ fn get_unspent_orchard_shaped_notes_at_historical_height<P: consensus::Parameter
             ":account_uuid": account.0,
             ":height": u32::from(height),
         ],
-        |row| to_received_note(params, shielded_pool, row),
+        |row| to_received_note(conn, params, shielded_pool, row),
     )?;
 
     rows.filter_map(|r| r.transpose()).collect()
@@ -507,7 +532,13 @@ pub(crate) fn put_received_note<
     let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(shielded_pool)?;
 
     let account_id = get_account_ref(conn, output.account_id())?;
-    let address_id = ensure_address(conn, params, output, target_or_mined_height)?;
+    let one_time_key_id =
+        super::one_time_ivk::received_note_key(conn, params, shielded_pool, output, tx_ref)?;
+    // One-time-key receivers are not addresses under the ordinary account UIVK.
+    let address_id = match one_time_key_id {
+        Some(_) => None,
+        None => ensure_address(conn, params, output, target_or_mined_height)?,
+    };
     let note_version = output.note().version();
     let mut stmt_upsert_received_note = conn.prepare_cached(&format!(
         "INSERT INTO {table_prefix}_received_notes (
@@ -563,6 +594,9 @@ pub(crate) fn put_received_note<
         .query_row(sql_args, |row| row.get::<_, i64>(0))
         .map_err(SqliteClientError::from)?;
 
+    if let Some(key) = one_time_key_id {
+        super::one_time_ivk::bind_received_note(conn, key, received_note_id)?;
+    }
     super::ironwood_hooks::put_received_note_encryption_fields(
         conn,
         shielded_pool,

@@ -82,6 +82,18 @@ pub enum SqliteClientError {
     #[cfg(feature = "transparent-inputs")]
     TransparentActivationBlocked(Vec<RecoveryBlocker>),
 
+    /// Blocks or a transaction were processed without the wallet's open one-time IVKs.
+    /// Scan with `scan_cached_blocks_with_one_time_ivks` and decrypt with
+    /// `decrypt_and_store_transaction_with_one_time_ivks`.
+    #[cfg(feature = "orchard")]
+    OneTimeIvksNotUsed,
+
+    /// A one-time IVK call's input was invalid, such as a passed deadline, a deposit address
+    /// for another network, a key, reservation or operation the account does not have, or
+    /// directory data that contradicts the wallet's own.
+    #[cfg(feature = "orchard")]
+    InvalidOneTimeIvkInput(&'static str),
+
     /// Decoding of a stored value from its serialized form has failed.
     CorruptedData(String),
 
@@ -476,6 +488,15 @@ impl fmt::Display for SqliteClientError {
                 f,
                 "Enhancement mode is not configured; call set_enhancement_mode before enumerating enhancement work"
             ),
+            #[cfg(feature = "orchard")]
+            SqliteClientError::OneTimeIvksNotUsed => write!(
+                f,
+                "This wallet has open one-time IVKs; scan and decrypt with the one-time IVK entry points"
+            ),
+            #[cfg(feature = "orchard")]
+            SqliteClientError::InvalidOneTimeIvkInput(reason) => {
+                write!(f, "Invalid one-time IVK input: {reason}")
+            }
             SqliteClientError::TransparentLedgerModeNotConfigured => write!(
                 f,
                 "Transparent ledger mode is not configured; call set_transparent_ledger_mode first"
@@ -723,6 +744,15 @@ impl From<zcash_protocol::memo::Error> for SqliteClientError {
 impl From<ShardTreeError<commitment_tree::Error>> for SqliteClientError {
     fn from(e: ShardTreeError<commitment_tree::Error>) -> Self {
         SqliteClientError::CommitmentTree(e)
+    }
+}
+
+/// An index whose derived `rivk` gives no valid viewing key, which happens with negligible
+/// probability, is a failure to derive the account's keys.
+#[cfg(feature = "orchard")]
+impl From<zakura_one_time_ivk::DerivationError> for SqliteClientError {
+    fn from(e: zakura_one_time_ivk::DerivationError) -> Self {
+        SqliteClientError::BadAccountData(e.to_string())
     }
 }
 
