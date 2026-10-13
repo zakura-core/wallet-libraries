@@ -140,10 +140,14 @@ Verify packages without uploading (also the default when no mode is specified):
 python3 scripts/publish-crates.py --dry-run
 ```
 
-`--plan`, `--dry-run`, and `--publish` are mutually exclusive. A separate dry run of a
-dependent crate requires its new dependencies to be published already: Cargo
-replaces local paths and Git locations with registry versions when packaging.
-The script reports that dependency prerequisite rather than bypassing verification.
+`--plan`, `--dry-run`, and `--publish` are mutually exclusive. Dry-run mode
+verifies every selected crate together, including versions already published.
+Cargo temporarily overlays the packaged workspace crates on the registry, so
+unpublished local dependencies do not block verification. It uses `--keep-going`
+to continue independent build verification after failures and uploads nothing.
+A successful run means all selected packages passed; a failed run must be
+investigated before publishing. This checks package contents and builds, not
+crates.io ownership or all wallet behavior. Required repository CI still applies.
 
 Transparent PIR requires the registry versions declared for its eight `wallet-pir`
 dependencies, including optional test support. Publish those upstream packages

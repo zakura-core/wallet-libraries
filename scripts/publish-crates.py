@@ -147,23 +147,27 @@ def run_release(root, publish=False, plan=False, without_transparent=False):
     # A fresh target directory belongs exclusively to this invocation. No shared
     # dev.py build lease or source-tree target is touched by Cargo packaging.
     with tempfile.TemporaryDirectory(prefix="wallet-crate-release-") as target:
+        if not publish:
+            # Cargo overlays all selected .crate archives on the registry while
+            # verifying, so unpublished workspace versions can resolve each other.
+            # Include published versions too: the goal is to verify this checkout.
+            command = ["cargo", "publish", "--manifest-path", str(root / "Cargo.toml"),
+                       "--registry", "crates-io", "--target-dir", target,
+                       "--dry-run", "--keep-going"]
+            for package in packages:
+                command.extend(["--package", package["name"]])
+            check_checkout(root, head)
+            print("Verify all selected release packages together.", flush=True)
+            subprocess.run(command, cwd=root, check=True)
+            check_checkout(root, head)
+            print("All selected release packages passed dry-run verification; nothing uploaded.", flush=True)
+            return
         for package in packages:
             name, version = package["name"], package["version"]
             if statuses[name] == "available":
                 print(f"Skip already published: {name} {version}", flush=True)
                 continue
             check_checkout(root, head)
-            if not publish:
-                # Separate dry runs cannot resolve unpublished local releases:
-                # packaging replaces the local path with a registry dependency.
-                for table in dependency_tables(package["manifest"]):
-                    for alias, dep in table.items():
-                        if isinstance(dep, dict) and dep.get("workspace"):
-                            dep = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]["dependencies"][alias]
-                        name_dep = dep.get("package", alias) if isinstance(dep, dict) else alias
-                        if name_dep in statuses and statuses[name_dep] != "available":
-                            raise ReleaseError(f"Dry run of {name} needs {name_dep} published first. "
-                                               "Use --publish for sequential verification and uploads.")
             command = ["cargo", "publish", "--manifest-path", str(package["path"]),
                        "--registry", "crates-io", "--target-dir", target]
             print(f"Verify package: {name} {version}", flush=True)
@@ -174,7 +178,7 @@ def run_release(root, publish=False, plan=False, without_transparent=False):
                 subprocess.run(command, cwd=root, check=True)
                 wait_for_publication(name, version)
                 check_checkout(root, head)
-    print("Selected crates published." if publish else "Selected dry runs passed.", flush=True)
+    print("Selected crates published.", flush=True)
 
 
 def main():

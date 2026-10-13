@@ -56,20 +56,32 @@ class PublishingTests(unittest.TestCase):
                 release.run_release(Path("."), publish=True)
             cargo.assert_not_called()
 
-    def test_default_does_not_upload_and_resume_skips_published_versions(self):
+    def test_default_verifies_all_crates_together_without_uploading(self):
         calls = self.run_with([package("first"), package("second")],
                               {"first": "available", "second": "absent"})
         self.assertEqual(len(calls), 1)
-        self.assertIn("--dry-run", calls[0].args[0])
+        command = calls[0].args[0]
+        self.assertIn("--dry-run", command)
+        self.assertIn("--keep-going", command)
+        self.assertEqual(command[-4:], ["--package", "first", "--package", "second"])
+        self.assertNotIn("--all-features", command)
+
+    def test_publish_resume_skips_already_published_versions(self):
+        calls = self.run_with([package("first"), package("second")],
+                              {"first": "available", "second": "absent"}, publish=True)
+        self.assertEqual(len(calls), 2)
         self.assertIn("second/Cargo.toml", calls[0].args[0])
+        self.assertIn("--dry-run", calls[0].args[0])
+        self.assertNotIn("--dry-run", calls[1].args[0])
 
     def test_plan_runs_no_cargo_commands(self):
         self.assertEqual(self.run_with([package("first")], {"first": "absent"}, plan=True), [])
 
-    def test_unpublished_local_dependency_blocks_separate_dry_run(self):
+    def test_unpublished_local_dependencies_are_included_in_whole_release_dry_run(self):
         packages = [package("first"), package("second", {"first": {"version": "1.0.0", "path": "../first"}})]
-        with self.assertRaisesRegex(release.ReleaseError, "needs first published first"):
-            self.run_with(packages, {"first": "absent", "second": "absent"})
+        calls = self.run_with(packages, {"first": "absent", "second": "absent"})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].args[0][-4:], ["--package", "first", "--package", "second"])
 
     def test_dirty_or_changed_checkout_is_refused(self):
         for responses in (("new-commit",), ("commit", " M Cargo.toml")):
