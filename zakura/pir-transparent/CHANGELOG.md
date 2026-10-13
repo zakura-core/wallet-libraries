@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Depend on the transparent PIR crates from crates.io (`=0.1.0-rc.2`, tagged
+  `transparent-v0.1.0-rc.2` in wallet-pir) instead of a git revision. The
+  published code matches the previous pin.
+
 ## [0.0.1-rc0] - PLANNED
 
 ### Packaging
