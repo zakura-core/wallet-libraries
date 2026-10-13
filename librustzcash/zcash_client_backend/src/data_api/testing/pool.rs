@@ -508,7 +508,10 @@ pub fn send_single_step_proposed_transfer<T: ShieldedPoolTester>(
     {
         let tx_1 = &tx_history[1];
         assert_eq!(tx_1.total_spent(), Zatoshis::const_from_u64(60000));
-        assert_eq!(tx_1.total_received(), Zatoshis::const_from_u64(40000));
+        assert_eq!(
+            tx_1.total_received(),
+            (Zatoshis::const_from_u64(50_000) - shielded_send_fee::<T>()).unwrap()
+        );
     }
 
     let network = *st.network();
@@ -2282,8 +2285,15 @@ pub fn send_with_multiple_change_outputs<T: ShieldedPoolTester>(
     {
         let tx_1 = &tx_history[1];
         assert_eq!(tx_1.total_spent(), Zatoshis::const_from_u64(650_0000));
-        assert_eq!(tx_1.total_received(), Zatoshis::const_from_u64(548_5000));
-        assert_eq!(tx_1.fee_paid(), Some(Zatoshis::const_from_u64(15000)));
+        assert_eq!(
+            tx_1.total_received(),
+            (value - Zatoshis::const_from_u64(1_000_000) - shielded_send_fee::<T>() - MARGINAL_FEE)
+                .unwrap()
+        );
+        assert_eq!(
+            tx_1.fee_paid(),
+            Some((shielded_send_fee::<T>() + MARGINAL_FEE).unwrap())
+        );
     }
 
     let network = *st.network();
@@ -2724,14 +2734,7 @@ pub fn spend_all_funds_single_step_proposed_transfer<T: ShieldedPoolTester>(
         .into_iter()
         .collect();
     let d_tx = decrypt_transaction(st.network(), None, Some(h), &tx, &ufvks);
-    assert_eq!(
-        decrypted_send_outputs_count::<T, _>(&d_tx),
-        if T::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
-            1
-        } else {
-            2
-        }
-    );
+    assert_eq!(decrypted_send_outputs_count::<T, _>(&d_tx), 2);
 
     let mut found_tx_change_memo = false;
     let mut found_tx_empty_memo = false;
@@ -2743,22 +2746,12 @@ pub fn spend_all_funds_single_step_proposed_transfer<T: ShieldedPoolTester>(
             found_tx_empty_memo = true
         }
     });
-    assert_eq!(
-        found_tx_change_memo,
-        T::SHIELDED_PROTOCOL != ShieldedPool::Orchard
-    );
+    assert!(found_tx_change_memo);
     assert!(found_tx_empty_memo);
 
     // Verify that the stored sent notes match what we're expecting
     let sent_note_ids = sent_note_ids::<T, _>(st.wallet(), &sent_tx_id);
-    assert_eq!(
-        sent_note_ids.len(),
-        if T::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
-            1
-        } else {
-            2
-        }
-    );
+    assert_eq!(sent_note_ids.len(), 2);
 
     // The sent memo should be the empty memo for the sent output, and the
     // change output's memo should be as specified.
@@ -2781,10 +2774,7 @@ pub fn spend_all_funds_single_step_proposed_transfer<T: ShieldedPoolTester>(
             None => panic!("Memo should not be stored as NULL"),
         }
     }
-    assert_eq!(
-        found_sent_change_memo,
-        T::SHIELDED_PROTOCOL != ShieldedPool::Orchard
-    );
+    assert!(found_sent_change_memo);
     assert!(found_sent_empty_memo);
 
     // Check that querying for a nonexistent sent note returns None
@@ -3251,10 +3241,19 @@ pub fn spend_fails_on_unverified_notes<T: ShieldedPoolTester>(
     let (h, _) = st.generate_next_block_including(txid);
     st.scan_cached_blocks(h, 1);
 
-    // TODO: send to an account so that we can check its balance.
+    // The Orchard spend pays two padded bundles and absorbs its 10,000-zatoshi
+    // change as dust; Sapling retains its change after paying the minimum fee.
     assert_eq!(
         st.get_total_balance(account_id),
-        ((value * 11u64).unwrap() - (amount_sent + shielded_send_fee::<T>()).unwrap()).unwrap()
+        ((value * 11u64).unwrap()
+            - (amount_sent
+                + if T::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
+                    Zatoshis::const_from_u64(30_000)
+                } else {
+                    MINIMUM_FEE
+                })
+            .unwrap())
+        .unwrap()
     );
 }
 
@@ -5126,9 +5125,11 @@ pub fn multi_pool_checkpoint<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
         usize::try_from(u32::from(max_height) - u32::from(next_to_scan) + 1).unwrap(),
     );
 
+    // The mixed payment uses Sapling, Orchard and Ironwood bundles, each padded
+    // to two logical actions, in addition to the first transaction's fee.
     let expected_final = (initial_balance + note_value
         - (transfer_amount * 3u64).unwrap()
-        - Zatoshis::const_from_u64(40_000))
+        - (expected_fee + Zatoshis::const_from_u64(30_000)).unwrap())
     .unwrap();
     assert_eq!(st.get_total_balance(acct_id), expected_final);
 
@@ -5139,22 +5140,8 @@ pub fn multi_pool_checkpoint<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
         (100002, Some(1)),
         (100007, Some(1)), // synthetic checkpoint in empty span from scan start
         (100013, Some(3)),
-        (
-            100014,
-            Some(if P0::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
-                3
-            } else {
-                4
-            }),
-        ),
-        (
-            100020,
-            Some(if P0::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
-                4
-            } else {
-                5
-            }),
-        ),
+        (100014, Some(5)),
+        (100020, Some(6)),
     ]
     .into_iter()
     .map(|(h, pos)| (BlockHeight::from(h), pos.map(Position::from)))
@@ -7680,7 +7667,7 @@ pub fn prefer_consolidation_does_not_grow_sapling_spends(
 
 /// Pre-NU6.3 Orchard can replace a dummy spend side without growing the action count.
 #[cfg(feature = "orchard")]
-pub fn prefer_consolidation_fills_existing_orchard_actions(
+pub fn consolidation_does_not_add_orchard_inputs_to_fill_ironwood_actions(
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {

@@ -1122,8 +1122,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn prefer_consolidation_fills_existing_orchard_actions() {
-        testing::pool::prefer_consolidation_fills_existing_orchard_actions();
+    fn consolidation_does_not_add_orchard_inputs_to_fill_ironwood_actions() {
+        testing::pool::consolidation_does_not_add_orchard_inputs_to_fill_ironwood_actions();
     }
 
     #[cfg(all(feature = "pczt-tests", feature = "transparent-inputs"))]

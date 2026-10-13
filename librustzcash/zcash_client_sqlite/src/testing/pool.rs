@@ -875,8 +875,8 @@ pub(crate) fn prefer_consolidation_does_not_grow_sapling_spends() {
 }
 
 #[cfg(feature = "orchard")]
-pub(crate) fn prefer_consolidation_fills_existing_orchard_actions() {
-    zcash_client_backend::data_api::testing::pool::prefer_consolidation_fills_existing_orchard_actions(
+pub(crate) fn consolidation_does_not_add_orchard_inputs_to_fill_ironwood_actions() {
+    zcash_client_backend::data_api::testing::pool::consolidation_does_not_add_orchard_inputs_to_fill_ironwood_actions(
         TestDbFactory::default(),
         BlockCache::new(),
     )
