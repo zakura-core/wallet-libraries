@@ -15,6 +15,16 @@ A batch stays bound to one accepted manifest. Queries are deduplicated by shard 
 
 On `ClientError::HttpStatus(409)` or `ClientError::HttpStatus(410)`, stop the batch, fetch a new pending manifest, repeat wallet acceptance, and reschedule unfinished durable work. Use bounded application scheduling for 429/503. Transport and validation errors must not trigger public LWD fallback.
 
+With the `wallet` feature, `PreparedWork::batches_by_tx_and_row` groups durable work into one
+batch per transaction and row. When a row reply arrives but a record fails to decode
+(`ClientError::Response`), pass `PreparedWork::requests_in_row(txid, row)` to
+`EnhancePirWrite::record_ironwood_enhance_unreadable`. Never report an HTTP refusal, a
+transport error, a timeout or a cancellation. The SQLite wallet suspends a request after three
+rejected or unreadable replies. The counts live in memory, in one `EnhancePirSession`: keep one
+session per wallet for the app's lifetime and share it with every database handle of that wallet.
+The three-failure bound holds per session; a new session, such as after an app restart, restores
+the full allowance.
+
 Transports should reject redirects and enforce a deadline covering the response body. They must stream into `Request::response_body()`, reject non-success status with `ClientError::HttpStatus(code)`, and honor cancellation and deadlines. Plaintext positions, rows, slots, txids, and action indexes stay out of requests and URLs; domain and routing revision are public.
 
 Refresh routing at sync start and before starting new work whenever `refresh_due()`
