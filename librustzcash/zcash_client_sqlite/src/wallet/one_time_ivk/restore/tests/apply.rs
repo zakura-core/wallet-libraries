@@ -664,6 +664,31 @@ fn a_corrected_answer_replaces_a_queued_candidate() {
     assert_eq!(queued[0].tx_index, candidate.tx_index);
 }
 
+/// An answer from an older publication than the key's queued lookup defers without
+/// touching the queue or its coverage: it cannot correct a payment above its anchor.
+#[test]
+fn an_older_answer_does_not_drop_a_newer_candidate() {
+    let (mut st, key, candidate, older, _) = fixture();
+    let account = st.test_account().unwrap().id();
+    let key = key.key_id();
+    forget_queued(&st);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    let newer = tip(&st);
+    let payment = directory_answer(&candidate);
+    let db = st.wallet_mut().db_mut();
+    let queued = db.queue_directory_lookup(account, key, newer, &[payment]);
+    assert_eq!(queued.unwrap(), Ok(()));
+    let queued = pending(db, account, key);
+    assert_eq!(queued.len(), 1);
+    let sql = "SELECT lookup_height FROM ironwood_one_time_sweeps WHERE one_time_key_id = ?1";
+    let coverage =
+        |db: &Db| -> u32 { value(&db.conn, sql, [key_ref(&db.conn, account, key).unwrap()]) };
+    let deferred = db.queue_directory_lookup(account, key, older, &[]);
+    assert_eq!(deferred.unwrap(), Err(SweepDeferral::StalePublication));
+    assert!(pending(db, account, key) == queued);
+    assert_eq!(coverage(db), u32::from(newer.height));
+}
+
 /// A payment from before the account's birthday is not tracked, as no note before it
 /// is, but its index is marked used (raising the recovery bound) and its sweep finishes,
 /// so a restore with a late birthday does not hold up incoming issuance. Its inclusion
