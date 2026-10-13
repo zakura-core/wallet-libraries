@@ -82,11 +82,16 @@ fn finish(st: &mut State, request: &str, out: &OperationOutcome) -> Result<(), S
     db.finish_receive_operation(account, request, out)
 }
 
-/// Starts `request`, returning its deposit or the policy that refused it.
+/// Starts `request` at [`NOW`], returning its deposit or the policy that refused it.
 fn start(st: &mut State, request: &str) -> Policy<ReceiveDeposit> {
+    start_at(st, request, NOW)
+}
+
+/// Starts `request` at `now`, returning its deposit or the policy that refused it.
+fn start_at(st: &mut State, request: &str, now: i64) -> Policy<ReceiveDeposit> {
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
-    db.start_receive_operation(account, request)
+    db.start_receive_operation(account, request, now)
 }
 
 /// Begins `request` and accepts it with deposit address `request` and a deadline of
@@ -105,7 +110,8 @@ fn observed(status: OperationStatus, funded: bool) -> Observation {
 }
 
 /// Records provider `observation` at `now` for the operation with this deposit address
-/// and memo, as an app does with each status it fetches. Returns whether one matched.
+/// and memo, as an app does with each status it fetches, with the chain agreeing (see
+/// [`chain_agrees`]). Returns whether one matched.
 fn report_with(
     st: &mut State,
     (deposit, memo): (&str, Option<&str>),
@@ -113,6 +119,7 @@ fn report_with(
     now: i64,
 ) -> bool {
     let account = st.test_account().unwrap().id();
+    chain_agrees(st.wallet().db(), now);
     let db = st.wallet_mut().db_mut();
     let recorded = db.record_operation_status(account, deposit, memo, observation, now);
     recorded.unwrap()
@@ -123,9 +130,11 @@ fn report(st: &mut State, deposit: &str, status: OperationStatus, funded: bool, 
     report_with(st, (deposit, None), observed(status, funded), now);
 }
 
-/// Reaps the test account's reservations at `now`, returning the reclaimed indices.
+/// Reaps the test account's reservations at `now`, with the chain agreeing (see
+/// [`chain_agrees`]), returning the reclaimed indices.
 fn reap(st: &mut State, now: i64) -> Vec<u64> {
     let account = st.test_account().unwrap().id();
+    chain_agrees(st.wallet().db(), now);
     tx(st.wallet_mut().db_mut(), |c, p| {
         store::swap::reservations::reap(c, p, account, now)
     })
@@ -222,6 +231,7 @@ fn issue(st: &mut State, seen: Option<(i64, i64, &[u64])>) -> Result<u64, Reserv
     });
     let account = st.test_account().unwrap().id();
     let through = tip(st).height;
+    chain_agrees(st.wallet().db(), NOW);
     let db = st.wallet_mut().db_mut();
     let issued = db.prepare_receive_reservation(account, NOW, through, seen.as_ref());
     issued.unwrap().map(|k| k.key_id().index())
@@ -272,6 +282,39 @@ fn reclamation_waits_for_the_latest_deadline_plus_cooldown() {
         }
         assert!(reap(&mut st, eligible_at - 1).is_empty(), "{case}");
         assert_eq!(reap(&mut st, eligible_at), [0], "{case}");
+    }
+}
+
+/// A device clock days ahead of the chain cannot reclaim a reservation, started or not,
+/// while its provider deadline has not passed by block time, since the provider may still
+/// take a deposit. Once the chain catches up, it is reclaimed.
+#[test]
+fn a_fast_clock_cannot_reclaim_before_the_deadline_by_block_time() {
+    for started in [false, true] {
+        let mut st = fixture();
+        let account = st.test_account().unwrap().id();
+        let r = prepare(&mut st, NOW);
+        begin(&mut st, &r, "quote").unwrap().unwrap();
+        finish(&mut st, "quote", &accepted("deposit", None, NOW + 60)).unwrap();
+        let fast = EXPIRED + 5 * 24 * 60 * 60;
+        // The chain is still before the deadline.
+        chain_agrees(st.wallet().db(), NOW);
+        if started {
+            start(&mut st, "quote").unwrap().unwrap();
+            let waiting = observed(AwaitingDeposit, false);
+            let db = st.wallet_mut().db_mut();
+            db.record_operation_status(account, "deposit", None, waiting, fast - 10)
+                .unwrap();
+        }
+        let reaped = tx(st.wallet_mut().db_mut(), |c, p| {
+            store::swap::reservations::reap(c, p, account, fast)
+        });
+        assert!(reaped.unwrap().is_empty(), "started={started}");
+        assert_eq!(
+            reap(&mut st, fast),
+            [r.key_id().index()],
+            "started={started}"
+        );
     }
 }
 
@@ -843,6 +886,80 @@ fn finish_refuses_an_accepted_deadline_that_has_passed() {
     let deadline = chain_time + 60 * 60;
     finish(&mut st, "fast", &accepted("deposit", None, deadline)).unwrap();
     assert_eq!(start(&mut st, "fast").unwrap().unwrap().deadline, deadline);
+}
+
+/// Starting refuses an accepted quote whose deadline has passed by the earlier of the
+/// caller's clock and the latest block time, on a first start or a restart, without
+/// marking it started. A device clock days fast or slow still starts a live quote.
+#[test]
+fn start_refuses_a_quote_past_its_deadline() {
+    const DAY: i64 = 24 * 60 * 60;
+    let started = |st: &State| -> bool {
+        let sql = "SELECT started FROM ironwood_one_time_operations WHERE request = 'quote'";
+        value(st.wallet().conn(), sql, [])
+    };
+    // Each case: the device clock when the quote is begun, the accepted deadline, the
+    // chain's time and the device clock at start, and whether it starts.
+    for (case, begun, deadline, chain, at, starts) in [
+        (
+            "late first start",
+            NOW,
+            NOW + 60,
+            NOW + 120,
+            NOW + 120,
+            false,
+        ),
+        ("fast device", NOW, NOW + 60, NOW, NOW + 5 * DAY, true),
+        (
+            "slow device",
+            NOW - 2 * DAY,
+            NOW + 3600,
+            NOW,
+            NOW - 2 * DAY + 10,
+            true,
+        ),
+    ] {
+        let mut st = fixture();
+        let r = prepare(&mut st, NOW);
+        begin_at(&mut st, &r, "quote", begun + 3600, begun)
+            .unwrap()
+            .unwrap();
+        finish(&mut st, "quote", &accepted("deposit", None, deadline)).unwrap();
+        chain_agrees(st.wallet().db(), chain);
+        let start = start_at(&mut st, "quote", at);
+        assert_eq!(start.unwrap().is_ok(), starts, "{case}");
+        assert_eq!(started(&st), starts, "{case}");
+    }
+    // A restart after the deadline is refused too.
+    let mut st = fixture();
+    let r = prepare(&mut st, NOW);
+    begin(&mut st, &r, "quote").unwrap().unwrap();
+    finish(&mut st, "quote", &accepted("deposit", None, NOW + 60)).unwrap();
+    chain_agrees(st.wallet().db(), NOW);
+    assert!(start_at(&mut st, "quote", NOW).unwrap().is_ok());
+    chain_agrees(st.wallet().db(), NOW + 120);
+    assert_eq!(refusal(start_at(&mut st, "quote", NOW + 120)), Some(Stale));
+}
+
+/// A reservation with two accepted quote requests starts only one: the other is refused
+/// once the first has started, while restarting the first returns its instructions again,
+/// so one receiver never has two quotes a user could fund.
+#[test]
+fn one_reservation_starts_only_one_accepted_quote() {
+    let mut st = fixture();
+    let r = prepare(&mut st, NOW);
+    for request in ["first", "second"] {
+        begin(&mut st, &r, request).unwrap().unwrap();
+        finish(&mut st, request, &accepted(request, None, NOW + 60)).unwrap();
+    }
+    for _ in 0..2 {
+        assert_eq!(start(&mut st, "first").unwrap().unwrap().address, "first");
+    }
+    assert_eq!(refusal(start(&mut st, "second")), Some(Stale));
+    let sql = "SELECT request FROM ironwood_one_time_operations WHERE started = 1";
+    let started: Vec<String> = column(st.wallet().conn(), sql, []);
+    assert_eq!(started, ["first"]);
+    assert_eq!(refusal(begin(&mut st, &r, "third")), Some(Stale));
 }
 
 /// Refund issuance skips a refund address the provider's seen set holds, such as one an

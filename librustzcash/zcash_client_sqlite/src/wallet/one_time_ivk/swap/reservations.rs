@@ -193,17 +193,32 @@ fn abandon(conn: &Connection, key: i64, now: i64) -> Result<(), SqliteClientErro
     Ok(())
 }
 
+/// The earlier of `now` and the latest block time. A provider sets deadlines by its own
+/// clock, so they are compared with this, which a fast device clock cannot move ahead.
+fn deadline_clock(conn: &Connection, now: i64) -> Result<i64, SqliteClientError> {
+    Ok(conn.query_row(
+        "SELECT MIN(?1, IFNULL((SELECT time FROM blocks ORDER BY height DESC LIMIT 1), ?1))",
+        [now],
+        |r| r.get(0),
+    )?)
+}
+
 /// Whether unpaid reserved key `key` can be reclaimed at `now`: every quote is past its
-/// deadline and the cooldown, and if the reservation was started, each accepted quote
-/// has a fresh conclusive status (a refund, once funded). A status from the future is
-/// not fresh.
-fn reusable(conn: &Connection, key: i64, now: i64) -> Result<bool, SqliteClientError> {
+/// deadline at `deadline_now` (see [`deadline_clock`]) and the cooldown, and if the
+/// reservation was started, each accepted quote has a fresh conclusive status (a refund,
+/// once funded). A status from the future is not fresh.
+fn reusable(
+    conn: &Connection,
+    key: i64,
+    now: i64,
+    deadline_now: i64,
+) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
         &format!(
             "SELECT {RESERVED} AND k.reserved_at <= :now - :reclaim AND k.used = 0
                 AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o
                     WHERE o.one_time_key_id = k.id AND o.request IS NOT NULL AND (
-                        o.deadline > :now - :reclaim
+                        o.deadline > :deadline_now - :reclaim
                         OR ({STARTED} AND o.reference IS NOT NULL AND NOT (
                             o.observed_at BETWEEN :now - :fresh AND :now
                             AND (o.expectation = 1
@@ -213,6 +228,7 @@ fn reusable(conn: &Connection, key: i64, now: i64) -> Result<bool, SqliteClientE
         named_params![
             ":key": key,
             ":now": now,
+            ":deadline_now": deadline_now,
             ":reclaim": RECEIVE_RECLAIM_SECONDS,
             ":fresh": STATUS_FRESH_SECONDS,
         ],
@@ -230,6 +246,7 @@ pub(in crate::wallet::one_time_ivk) fn reap<P: Parameters>(
     now: i64,
 ) -> Result<Vec<u64>, SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
+    let deadline_now = deadline_clock(conn, now)?;
     // A paid reservation keeps its key's used marker. Its unfunded quote edits finish
     // after the cooldown and a fresh status, and unknown outcomes after the cooldown.
     let paid = conn
@@ -238,17 +255,18 @@ pub(in crate::wallet::one_time_ivk) fn reap<P: Parameters>(
              WHERE k.account_id = :account AND k.used = 1 AND {RESERVED}
                AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o
                  WHERE o.one_time_key_id = k.id AND o.request IS NOT NULL AND (
-                   (o.reference IS NULL AND o.deadline > :now - :reclaim)
+                   (o.reference IS NULL AND o.deadline > :deadline_now - :reclaim)
                    OR (o.reference IS NOT NULL AND (o.observed_at > :now OR NOT (
                      o.expectation IN (1, 2, 3)
                      OR (o.expectation = 4 AND o.funded = 0
-                       AND o.deadline <= :now - :reclaim
+                       AND o.deadline <= :deadline_now - :reclaim
                        AND o.observed_at >= :now - :fresh))))))"
         ))?
         .query_map(
             named_params![
                 ":account": owner.0,
                 ":now": now,
+                ":deadline_now": deadline_now,
                 ":reclaim": RECEIVE_RECLAIM_SECONDS,
                 ":fresh": STATUS_FRESH_SECONDS,
             ],
@@ -267,7 +285,7 @@ pub(in crate::wallet::one_time_ivk) fn reap<P: Parameters>(
         .collect::<Result<Vec<_>, _>>()?;
     let mut reclaimed = Vec::new();
     for (key, index) in open {
-        if reusable(conn, key, now)? && scanned_empty(conn, key)? {
+        if reusable(conn, key, now, deadline_now)? && scanned_empty(conn, key)? {
             abandon(conn, key, now)?;
             reclaimed.push(decode_index(index)?);
         }
@@ -407,6 +425,7 @@ pub(in crate::wallet::one_time_ivk) fn start(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
     request: &str,
+    now: i64,
 ) -> Result<Result<ReceiveDeposit, ReservationPolicy>, SqliteClientError> {
     let id = operation(conn, account, request)?;
     let deposit = conn
@@ -429,6 +448,19 @@ pub(in crate::wallet::one_time_ivk) fn start(
     let Some(deposit) = deposit else {
         return Ok(Err(ReservationPolicy::Stale));
     };
+    // Instructions are shown for one request per reservation, since its receiver takes
+    // one quote, and only while the provider still takes a deposit.
+    let other_started: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_operations o
+             JOIN ironwood_one_time_operations other
+                 ON other.one_time_key_id = o.one_time_key_id
+             WHERE o.id = ?1 AND other.id != ?1 AND other.started = 1)",
+        [id],
+        |r| r.get(0),
+    )?;
+    if other_started || deposit.deadline <= deadline_clock(conn, now)? {
+        return Ok(Err(ReservationPolicy::Stale));
+    }
     conn.execute(
         "UPDATE ironwood_one_time_operations SET started = 1 WHERE id = ?1",
         [id],
