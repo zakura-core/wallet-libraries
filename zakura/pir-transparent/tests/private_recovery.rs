@@ -731,37 +731,14 @@ impl Fixture {
     /// Every row of the wallet's tables, those named `tpir_` excluded unless
     /// `ledger`, in a canonical order.
     fn dump(&self, ledger: bool) -> Vec<(String, Vec<String>)> {
-        let conn = self.st.wallet().conn();
-        let tables: Vec<String> = conn
-            .prepare(
-                "SELECT name FROM sqlite_master WHERE type = 'table'
-                 AND name NOT LIKE 'sqlite!_%' ESCAPE '!' ORDER BY name",
-            )
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        tables
-            .into_iter()
-            .filter(|table| ledger || !table.starts_with("tpir_"))
-            .map(|table| {
-                let mut statement = conn.prepare(&format!("SELECT * FROM \"{table}\"")).unwrap();
-                let columns = statement.column_count();
-                let mut rows: Vec<String> = statement
-                    .query_map([], |row| {
-                        (0..columns)
-                            .map(|i| row.get::<_, Value>(i))
-                            .collect::<Result<Vec<_>, _>>()
-                            .map(|values| format!("{values:?}"))
-                    })
-                    .unwrap()
-                    .collect::<Result<_, _>>()
-                    .unwrap();
-                rows.sort();
-                (table, rows)
-            })
-            .collect()
+        dump_tables(self.st.wallet().conn(), |table| {
+            ledger || !table.starts_with("tpir_")
+        })
+    }
+
+    /// Every row of the companion's tables, in a canonical order.
+    fn companion_dump(&self) -> Vec<(String, Vec<String>)> {
+        dump_tables(&self.companion_db(), |_| true)
     }
 
     /// A read-only connection to the companion's database.
@@ -1259,6 +1236,40 @@ fn transcript(f: &Fixture, from: usize) -> Vec<(String, String, Option<String>, 
         .collect()
 }
 
+/// Every row of `conn`'s tables that `keep` selects, by table, in a canonical order.
+fn dump_tables(conn: &Connection, keep: impl Fn(&str) -> bool) -> Vec<(String, Vec<String>)> {
+    let tables: Vec<String> = conn
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table'
+             AND name NOT LIKE 'sqlite!_%' ESCAPE '!' ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    tables
+        .into_iter()
+        .filter(|table| keep(table))
+        .map(|table| {
+            let mut statement = conn.prepare(&format!("SELECT * FROM \"{table}\"")).unwrap();
+            let columns = statement.column_count();
+            let mut rows: Vec<String> = statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|i| row.get::<_, Value>(i))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|values| format!("{values:?}"))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            rows.sort();
+            (table, rows)
+        })
+        .collect()
+}
+
 /// A service that forges a receive at the last address of the wallet's window learns
 /// nothing from the sync it answers: the wallet sends the same requests as it does to
 /// a service without the receive, and covers the grown window only at the next sync.
@@ -1341,7 +1352,7 @@ fn a_forged_receive_does_not_start_another_pass() {
     forged_receive_does_not_start_another_pass(false);
 }
 
-/// Publication lag must not let a forged receive steer a second pass after a wait.
+/// Publication lag must not let a forged receive steer the next sync's pass.
 #[test]
 fn a_forged_receive_with_publication_lag_does_not_start_another_pass() {
     forged_receive_does_not_start_another_pass(true);
@@ -1376,6 +1387,55 @@ fn a_lagging_publication_continues_at_the_next_sync() {
     assert_eq!(caught_up.batch.progress.outcome, Outcome::Complete);
     assert_eq!(caught_up.batch.progress.covered_through, t2);
     assert_eq!(caught_up.step, Step::Done(Some(Retry::Complete)));
+}
+
+/// A companion a format-6 build wrote (wallet-pir `0.1.0-rc.3`) opens under the
+/// same name and upgrades in place: it keeps every row it held, and its next sync
+/// asks the service exactly what the companion would have asked before.
+#[test]
+fn a_format_six_companion_upgrades_in_place() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let t1 = H0 + 649;
+    let mut f = Fixture::new(H0 + 250, t1);
+    let owned = Owned {
+        a0: f.derived(TransparentKeyScope::EXTERNAL, 0),
+        a1: f.derived(TransparentKeyScope::EXTERNAL, 1),
+        last: f.last_external(),
+    };
+    f.publish(&lifecycle(&owned, t1, 0, false), SEAL);
+    f.sync_until_complete(8);
+    let seen = f.server.requests().len();
+    let before = f.drive();
+    let asked = transcript(&f, seen);
+    let held = f.companion_dump();
+
+    // As a format-6 build leaves it: no content-failure counts.
+    f.companion = None;
+    Connection::open(f.companion_path())
+        .unwrap()
+        .execute_batch(
+            "DROP TABLE failed_entries;
+             UPDATE wallet_meta SET value = '6' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+
+    f.open();
+    assert_eq!(f.companion_dump(), held);
+    let seen = f.server.requests().len();
+    let after = f.drive();
+    assert_eq!(transcript(&f, seen), asked);
+    assert_eq!(after.report.progress.outcome, Outcome::Complete);
+    assert_eq!(after.step, before.step);
+    let companions: Vec<_> = std::fs::read_dir(f.companions().path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "sqlite")
+        })
+        .collect();
+    assert_eq!(companions, [f.companion_path()]);
+    f.assert_private(&[0]);
 }
 
 /// Restore latency at one pass per sync: receives at external indices 0, 9, 18 and
