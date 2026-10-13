@@ -4,6 +4,7 @@ use zcash_client_backend::wallet::IronwoodEnhanceCandidate;
 
 pub(super) fn queue(
     conn: &Connection,
+    session: &SessionState,
     tx_ref: crate::TxRef,
     candidates: &[IronwoodEnhanceCandidate<AccountUuid>],
 ) -> Result<(), SqliteClientError> {
@@ -31,6 +32,7 @@ pub(super) fn queue(
     } else if let Some(candidate) = candidates.iter().min_by_key(|c| c.output_index()) {
         bind(
             conn,
+            session,
             tx_ref,
             u64::from(candidate.position()),
             candidate.output_index() as u32,
@@ -55,6 +57,7 @@ pub(super) fn queue(
 
 pub(super) fn bind(
     conn: &Connection,
+    session: &SessionState,
     tx_ref: crate::TxRef,
     position: u64,
     index: u32,
@@ -75,10 +78,7 @@ pub(super) fn bind(
     // A newly bound position starts with a full allowance, whoever it was counted against before.
     // Rebinding the same position (discovery rebuilds every pass) must keep its count.
     if matches!(previous, Some(bound) if bound != Some(position)) {
-        conn.execute(
-            "DELETE FROM ironwood_enhance_rejections WHERE commitment_tree_position = :position",
-            named_params![":position": position],
-        )?;
+        session.rearm_position(position);
     }
     Ok(())
 }

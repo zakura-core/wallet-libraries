@@ -300,12 +300,10 @@ impl PreLedgerWallet {
                     table != "schemer_migrations" && table != "tx_reconfirmation_receipts"
                 })
                 // Txid enhancement tables are added empty: no wallet here has ledger-origin or
-                // route-2 transactions before the upgrade. The Enhance rejection count starts
-                // empty too.
+                // route-2 transactions before the upgrade.
                 .filter(|(table, rows)| {
                     !(table.starts_with("transparent_detail_work")
-                        || table.starts_with("transparent_tx_display")
-                        || table == "ironwood_enhance_rejections")
+                        || table.starts_with("transparent_tx_display"))
                         || {
                             assert!(rows.is_empty(), "{table} is not empty");
                             false

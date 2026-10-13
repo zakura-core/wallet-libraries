@@ -95,6 +95,7 @@ fn outgoing(st: &State, tx_ref: crate::TxRef, position: u64, index: usize) -> En
     queue_transaction(
         st.wallet().conn(),
         Some(TransparentLedgerMode::Public),
+        &st.wallet().db().enhance_pir_session,
         tx_ref,
         &IronwoodEnhancementPlan::Eligible {
             outgoing: vec![IronwoodEnhanceCandidate::from_parts(
@@ -228,6 +229,7 @@ fn either_transparent_flag_routes_the_entire_transaction_and_is_sticky() {
         queue_transaction(
             st.wallet().conn(),
             Some(TransparentLedgerMode::Public),
+            &st.wallet().db().enhance_pir_session,
             tx_ref,
             &IronwoodEnhancementPlan::Eligible { outgoing: vec![] },
         )
@@ -418,6 +420,7 @@ fn completion_retires_only_enhancement_and_survives_replay() {
     queue_transaction(
         st.wallet().conn(),
         Some(TransparentLedgerMode::Public),
+        &st.wallet().db().enhance_pir_session,
         tx_ref,
         &IronwoodEnhancementPlan::Eligible {
             outgoing: vec![IronwoodEnhanceCandidate::from_parts(
@@ -526,6 +529,7 @@ fn explicit_mixed_scan_discards_all_work_but_keeps_recovered_data() {
     queue_transaction(
         st.wallet().conn(),
         Some(TransparentLedgerMode::Public),
+        &st.wallet().db().enhance_pir_session,
         tx_ref,
         &IronwoodEnhancementPlan::Ineligible,
     )
@@ -545,6 +549,7 @@ fn explicit_mixed_scan_discards_all_work_but_keeps_recovered_data() {
     queue_transaction(
         st.wallet().conn(),
         Some(TransparentLedgerMode::Public),
+        &st.wallet().db().enhance_pir_session,
         tx_ref,
         &IronwoodEnhancementPlan::Eligible { outgoing: vec![] },
     )
@@ -842,6 +847,7 @@ fn rescanning_removes_outgoing_jobs_now_covered_by_incoming_decryption() {
     queue_transaction(
         st.wallet().conn(),
         Some(TransparentLedgerMode::Public),
+        &st.wallet().db().enhance_pir_session,
         tx_ref,
         &IronwoodEnhancementPlan::Eligible { outgoing: vec![] },
     )
@@ -896,6 +902,7 @@ fn a_mixed_spend_without_received_ironwood_notes_is_sticky() {
     queue_scanned(
         st.wallet().conn(),
         Some(TransparentLedgerMode::Public),
+        &st.wallet().db().enhance_pir_session,
         tx_ref,
         &scanned,
     )
@@ -905,6 +912,7 @@ fn a_mixed_spend_without_received_ironwood_notes_is_sticky() {
     queue_scanned(
         st.wallet().conn(),
         Some(TransparentLedgerMode::Public),
+        &st.wallet().db().enhance_pir_session,
         tx_ref,
         &provisional,
     )
@@ -924,7 +932,7 @@ fn a_mixed_spend_without_received_ironwood_notes_is_sticky() {
 // Test projections keep individual queue assertions readable while exercising the single
 // application read API. These helpers are not part of the production wallet interface.
 fn requests(conn: &Connection) -> Result<Vec<EnhancePirRequest>, SqliteClientError> {
-    Ok(work(conn)?
+    Ok(work(conn, &SessionState::default())?
         .into_iter()
         .filter_map(|work| match work {
             EnhancePirWork::Query(request) => Some(request),
@@ -944,7 +952,7 @@ fn apply_record<Db: EnhancePirWrite>(
 impl<C: std::borrow::Borrow<Connection>, P: Parameters, CL, R> crate::WalletDb<C, P, CL, R> {
     /// Mode-independent contents of the private queues, for storage assertions.
     fn private_work(&self) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
-        work(self.conn.borrow())
+        work(self.conn.borrow(), &self.enhance_pir_session)
     }
     fn query_requests(&self) -> Result<Vec<EnhancePirRequest>, SqliteClientError> {
         Ok(self
@@ -1276,6 +1284,7 @@ fn pir_recovers_history_and_backfills_without_losing_a_stored_memo() {
     queue_transaction(
         st.wallet().conn(),
         Some(TransparentLedgerMode::Public),
+        &st.wallet().db().enhance_pir_session,
         tx_ref,
         &IronwoodEnhancementPlan::Eligible { outgoing: vec![] },
     )
@@ -1504,7 +1513,7 @@ fn identical_anchor_suspensions_are_deduplicated() {
         },
     ));
     assert_eq!(
-        work(conn)
+        work(conn, &SessionState::default())
             .unwrap()
             .iter()
             .filter(|item| **item == anchor)
@@ -1516,7 +1525,7 @@ fn identical_anchor_suspensions_are_deduplicated() {
         [],
     )
     .unwrap();
-    let items = work(conn).unwrap();
+    let items = work(conn, &SessionState::default()).unwrap();
     assert!(items.contains(&anchor));
     assert!(
         items.contains(&EnhancePirWork::Suspended(EnhancePirSuspension::Discovery(
@@ -1567,12 +1576,15 @@ fn response_application_retries_after_another_connection_rolls_back() {
         [tx_ref.0],
     )
     .unwrap();
-    let before = work(st.wallet().conn()).unwrap();
+    let before = work(st.wallet().conn(), &st.wallet().db().enhance_pir_session).unwrap();
     let err = apply_record(st.wallet_mut().db_mut(), request, &record).unwrap_err();
     assert!(
         matches!(err, SqliteClientError::DbError(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::DatabaseBusy)
     );
-    assert_eq!(work(st.wallet().conn()).unwrap(), before);
+    assert_eq!(
+        work(st.wallet().conn(), &st.wallet().db().enhance_pir_session).unwrap(),
+        before
+    );
     assert!(
         st.wallet()
             .db()
@@ -1585,7 +1597,11 @@ fn response_application_retries_after_another_connection_rolls_back() {
         apply_record(st.wallet_mut().db_mut(), request, &record).unwrap(),
         EnhancePirStoreResult::Stored
     );
-    assert!(work(st.wallet().conn()).unwrap().is_empty());
+    assert!(
+        work(st.wallet().conn(), &st.wallet().db().enhance_pir_session)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         competing
             .query_row(
@@ -1825,21 +1841,18 @@ fn batch_rejects_shape_duplicates_and_metadata_conflicts_without_mutation() {
             }
         );
         // Each metadata conflict counts against the record's position; the third suspends it.
-        let suspended = rejections(st.wallet().conn(), outgoing) >= Some(MAX_REJECTIONS);
+        let suspended = rejections(st.wallet().db(), outgoing) >= Some(MAX_REJECTIONS);
         let expected: Vec<_> = before
             .iter()
             .copied()
             .filter(|request| !suspended || *request != outgoing)
             .collect();
-        assert_eq!(requests(st.wallet().conn()).unwrap(), expected);
+        assert_eq!(st.wallet().db().query_requests().unwrap(), expected);
     }
     // Shape rejections are not counted.
-    assert_eq!(rejections(st.wallet().conn(), incoming), None);
-    assert_eq!(rejections(st.wallet().conn(), other), None);
-    assert_eq!(
-        rejections(st.wallet().conn(), outgoing),
-        Some(MAX_REJECTIONS)
-    );
+    assert_eq!(rejections(st.wallet().db(), incoming), None);
+    assert_eq!(rejections(st.wallet().db(), other), None);
+    assert_eq!(rejections(st.wallet().db(), outgoing), Some(MAX_REJECTIONS));
 }
 
 #[test]
@@ -1853,6 +1866,7 @@ fn batch_transparent_routing_is_order_independent_and_sticky() {
         queue_transaction(
             st.wallet().conn(),
             Some(TransparentLedgerMode::Public),
+            &st.wallet().db().enhance_pir_session,
             tx_ref,
             &IronwoodEnhancementPlan::Eligible {
                 outgoing: [(98, 3), (99, 4)]
@@ -2530,6 +2544,7 @@ fn scan_time_mixed_routing_keeps_private_memo_work_under_private_required() {
     queue_transaction(
         st.wallet().conn(),
         Some(TransparentLedgerMode::PrivateRequired),
+        &st.wallet().db().enhance_pir_session,
         tx_ref,
         &IronwoodEnhancementPlan::Ineligible,
     )
@@ -2560,6 +2575,7 @@ fn scan_time_mixed_routing_keeps_private_memo_work_under_private_required() {
     queue_transaction(
         st.wallet().conn(),
         Some(TransparentLedgerMode::PrivateRequired),
+        &st.wallet().db().enhance_pir_session,
         tx_ref,
         &IronwoodEnhancementPlan::Ineligible,
     )
@@ -2577,6 +2593,7 @@ fn route_two_memo_work_follows_public_authority_across_policy_transitions() {
     queue_transaction(
         st.wallet().conn(),
         Some(TransparentLedgerMode::PrivateRequired),
+        &st.wallet().db().enhance_pir_session,
         tx_ref,
         &IronwoodEnhancementPlan::Ineligible,
     )
@@ -2708,14 +2725,11 @@ fn corrupt_incoming_record(st: &State, request: EnhancePirRequest) -> EnhanceRec
     })
 }
 
-fn rejections(conn: &Connection, request: EnhancePirRequest) -> Option<u32> {
-    conn.query_row(
-        "SELECT rejections FROM ironwood_enhance_rejections WHERE commitment_tree_position = ?",
-        [u64::from(request.position())],
-        |row| row.get(0),
-    )
-    .optional()
-    .unwrap()
+fn rejections<C, P, CL, R>(
+    db: &crate::WalletDb<C, P, CL, R>,
+    request: EnhancePirRequest,
+) -> Option<u32> {
+    db.enhance_pir_session.count(request)
 }
 
 fn query_work(request: EnhancePirRequest) -> TransactionEnhancementWork {
@@ -2738,7 +2752,7 @@ fn reject_three_times(st: &mut State, request: EnhancePirRequest) {
             apply_record(st.wallet_mut().db_mut(), request, &corrupt).unwrap(),
             EnhancePirStoreResult::Rejected
         );
-        assert_eq!(rejections(st.wallet().conn(), request), Some(attempt));
+        assert_eq!(rejections(st.wallet().db(), request), Some(attempt));
     }
 }
 
@@ -2749,6 +2763,19 @@ fn third_rejection_suspends_the_position() {
     st.wallet_mut()
         .db_mut()
         .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    let table_exists: bool = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'ironwood_enhance_rejections')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !table_exists,
+        "session failure counts must not add a database table"
+    );
     // Two rejections leave the position in the query work; the third suspends it.
     reject_three_times(&mut st, request);
     let work = st.wallet().db().transaction_enhancement_work().unwrap();
@@ -2759,7 +2786,7 @@ fn third_rejection_suspends_the_position() {
     assert!(is_protected(st.wallet().conn(), request.request_id().txid()).unwrap());
     assert!(!visible(&st, request));
 
-    // The count is durable.
+    // A newly opened wallet starts a new in-memory allowance.
     let reopened = crate::WalletDb::for_path(
         st.wallet().data_file_path(),
         *st.network(),
@@ -2769,8 +2796,14 @@ fn third_rejection_suspends_the_position() {
     .unwrap()
     .with_enhancement_mode(EnhancementMode::PrivateIronwood)
     .with_transparent_ledger_mode(TransparentLedgerMode::Public);
-    assert_eq!(rejections(&reopened.conn, request), Some(MAX_REJECTIONS));
-    assert_eq!(reopened.transaction_enhancement_work().unwrap(), work);
+    assert_eq!(rejections(&reopened, request), None);
+    assert!(
+        reopened
+            .transaction_enhancement_work()
+            .unwrap()
+            .contains(&query_work(request))
+    );
+    assert!(work.contains(&rejected_work(request)));
 }
 
 #[test]
@@ -2824,7 +2857,7 @@ fn a_rejection_after_position_reassignment_does_not_charge_the_replacement() {
     let replacement = st.wallet().db().query_requests().unwrap()[0];
     assert_eq!(replacement.position(), request.position());
     assert_ne!(replacement.request_id(), request.request_id());
-    assert_eq!(rejections(st.wallet().conn(), replacement), None);
+    assert_eq!(rejections(st.wallet().db(), replacement), None);
     // Only the replacement's own content failures consume its allowance.
     reject_three_times(&mut st, replacement);
     assert!(
@@ -2889,8 +2922,8 @@ fn a_rejection_still_rolls_back_and_is_counted() {
         .unwrap();
     assert_eq!(fee, None);
     // Only the rejected record's position is counted.
-    assert_eq!(rejections(st.wallet().conn(), incoming), Some(1));
-    assert_eq!(rejections(st.wallet().conn(), outgoing), None);
+    assert_eq!(rejections(st.wallet().db(), incoming), Some(1));
+    assert_eq!(rejections(st.wallet().db(), outgoing), None);
 
     // A batch the caller shaped wrongly says nothing about the service's content.
     let foreign = EnhancePirRequest::new(
@@ -2908,8 +2941,8 @@ fn a_rejection_still_rolls_back_and_is_counted() {
             reason: Reason::MixedTxid
         }
     );
-    assert_eq!(rejections(st.wallet().conn(), incoming), Some(1));
-    assert_eq!(rejections(st.wallet().conn(), foreign), None);
+    assert_eq!(rejections(st.wallet().db(), incoming), Some(1));
+    assert_eq!(rejections(st.wallet().db(), foreign), None);
 }
 
 #[test]
@@ -2936,7 +2969,7 @@ fn a_rescan_rearms_rejected_positions() {
         )
         .unwrap();
     st.scan_cached_blocks(BlockHeight::from_u32(height), 1);
-    assert_eq!(rejections(st.wallet().conn(), request), None);
+    assert_eq!(rejections(st.wallet().db(), request), None);
     let work = st.wallet().db().transaction_enhancement_work().unwrap();
     assert!(work.contains(&query_work(request)));
     assert!(!work.contains(&rejected_work(request)));
@@ -2971,22 +3004,19 @@ fn three_unreadable_replies_suspend_the_position() {
         );
         // A position counts once per report, however many of its identities the batch held.
         report_unreadable(&mut st, &[request, request, stale]);
-        assert_eq!(rejections(st.wallet().conn(), request), Some(attempt));
+        assert_eq!(rejections(st.wallet().db(), request), Some(attempt));
     }
     let work = st.wallet().db().transaction_enhancement_work().unwrap();
     assert!(work.contains(&rejected_work(request)));
     assert!(!work.contains(&query_work(request)));
     // A suspended position is no longer query work, so a late report does not count.
     report_unreadable(&mut st, &[request]);
-    assert_eq!(
-        rejections(st.wallet().conn(), request),
-        Some(MAX_REJECTIONS)
-    );
+    assert_eq!(rejections(st.wallet().db(), request), Some(MAX_REJECTIONS));
     // A stale identity alone never charges the position.
     let (mut st, _, request) = fixture();
     report_unreadable(&mut st, &[stale]);
     report_unreadable(&mut st, &[]);
-    assert_eq!(rejections(st.wallet().conn(), request), None);
+    assert_eq!(rejections(st.wallet().db(), request), None);
 }
 
 #[test]
@@ -3001,7 +3031,7 @@ fn rejections_and_unreadable_replies_share_one_allowance() {
         EnhancePirStoreResult::Rejected
     );
     report_unreadable(&mut st, &[request]);
-    assert_eq!(rejections(st.wallet().conn(), request), Some(2));
+    assert_eq!(rejections(st.wallet().db(), request), Some(2));
     let work = st.wallet().db().transaction_enhancement_work().unwrap();
     assert!(work.contains(&query_work(request)));
     assert_eq!(
@@ -3045,14 +3075,14 @@ fn an_outgoing_only_position_reaches_suspension() {
             .unwrap(),
             EnhancePirStoreResult::Rejected
         );
-        assert_eq!(rejections(st.wallet().conn(), outgoing), Some(attempt));
+        assert_eq!(rejections(st.wallet().db(), outgoing), Some(attempt));
     }
     let work = st.wallet().db().transaction_enhancement_work().unwrap();
     assert!(work.contains(&rejected_work(outgoing)));
     assert!(!work.contains(&query_work(outgoing)));
     // The suspension is per position: the incoming note is still queried.
     assert!(work.contains(&query_work(incoming)));
-    assert_eq!(rejections(st.wallet().conn(), incoming), None);
+    assert_eq!(rejections(st.wallet().db(), incoming), None);
 }
 
 #[test]
@@ -3062,6 +3092,7 @@ fn a_rescan_rearms_route_two_memo_positions() {
     queue_transaction(
         st.wallet().conn(),
         Some(TransparentLedgerMode::PrivateRequired),
+        &st.wallet().db().enhance_pir_session,
         tx_ref,
         &IronwoodEnhancementPlan::Ineligible,
     )
@@ -3088,7 +3119,7 @@ fn a_rescan_rearms_route_two_memo_positions() {
         .unwrap();
     st.scan_cached_blocks(BlockHeight::from_u32(height), 1);
     assert_eq!(route_of(&st, tx_ref), Some(PRIVATE_DETAILS_UNSUPPORTED));
-    assert_eq!(rejections(st.wallet().conn(), request), None);
+    assert_eq!(rejections(st.wallet().db(), request), None);
     assert_eq!(routed(&st), (vec![], vec![EnhancePirWork::Query(request)]));
     reject_three_times(&mut st, request);
 }
@@ -3128,6 +3159,7 @@ fn a_mixed_rescan_rearms_route_two_memo_positions() {
         queue_scanned(
             st.wallet().conn(),
             Some(TransparentLedgerMode::PrivateRequired),
+            &st.wallet().db().enhance_pir_session,
             tx_ref,
             &scanned,
         )
@@ -3147,7 +3179,7 @@ fn a_mixed_rescan_rearms_route_two_memo_positions() {
     );
     rescan(&st);
     assert_eq!(route_of(&st, tx_ref), Some(PRIVATE_DETAILS_UNSUPPORTED));
-    assert_eq!(rejections(st.wallet().conn(), request), None);
+    assert_eq!(rejections(st.wallet().db(), request), None);
     assert_eq!(routed(&st), (vec![], vec![EnhancePirWork::Query(request)]));
     reject_three_times(&mut st, request);
 }
@@ -3156,7 +3188,7 @@ fn a_mixed_rescan_rearms_route_two_memo_positions() {
 fn a_rewind_clears_the_counts_of_truncated_positions() {
     let (mut st, tx_ref, request) = fixture();
     report_unreadable(&mut st, &[request]);
-    assert_eq!(rejections(st.wallet().conn(), request), Some(1));
+    assert_eq!(rejections(st.wallet().db(), request), Some(1));
     let height: u32 = st
         .wallet()
         .conn()
@@ -3171,5 +3203,146 @@ fn a_rewind_clears_the_counts_of_truncated_positions() {
         .truncate_to_height(BlockHeight::from_u32(height - 1))
         .unwrap();
     // The rescan may give this position to another note, which must not inherit the count.
-    assert_eq!(rejections(st.wallet().conn(), request), None);
+    assert_eq!(rejections(st.wallet().db(), request), None);
+}
+
+#[test]
+fn one_session_shares_the_allowance_across_handles_and_transactions() {
+    use crate::testing::db::{test_clock, test_rng};
+    let (mut st, _, request) = fixture_with_factory(TestDbFactory::file_backed());
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    report_unreadable(&mut st, &[request]);
+    let session = st.wallet().db().enhance_pir_session();
+    let mut other = crate::WalletDb::for_path(
+        st.wallet().data_file_path(),
+        *st.network(),
+        test_clock(),
+        test_rng(),
+    )
+    .unwrap()
+    .with_enhancement_mode(EnhancementMode::PrivateIronwood)
+    .with_transparent_ledger_mode(TransparentLedgerMode::Public)
+    .with_enhance_pir_session(session);
+    other
+        .record_ironwood_enhance_unreadable(&[request])
+        .unwrap();
+    assert_eq!(rejections(st.wallet().db(), request), Some(2));
+    report_unreadable(&mut st, &[request]);
+    let expected = rejected_work(request);
+    assert!(
+        other
+            .transaction_enhancement_work()
+            .unwrap()
+            .contains(&expected)
+    );
+    st.wallet_mut()
+        .db_mut()
+        .transactionally::<_, _, SqliteClientError>(|db| {
+            assert!(db.transaction_enhancement_work()?.contains(&expected));
+            Ok(())
+        })
+        .unwrap();
+    st.wallet_mut()
+        .db_mut()
+        .with_immediate_read_transaction::<_, _, SqliteClientError>(|db| {
+            assert!(db.transaction_enhancement_work()?.contains(&expected));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(rejections(&other, request), Some(MAX_REJECTIONS));
+}
+
+#[test]
+fn independent_wallet_sessions_have_independent_allowances() {
+    let (mut first, _, request) = fixture();
+    first
+        .wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    let (second, _, same_request) = fixture();
+    assert_eq!(request.position(), same_request.position());
+    reject_three_times(&mut first, request);
+    assert_eq!(rejections(second.wallet().db(), same_request), None);
+    assert!(
+        second
+            .wallet()
+            .db()
+            .query_requests()
+            .unwrap()
+            .contains(&same_request)
+    );
+}
+
+#[test]
+fn a_rolled_back_rescan_keeps_the_suspension() {
+    let (mut st, tx_ref, request) = fixture();
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    reject_three_times(&mut st, request);
+    let result: Result<(), SqliteClientError> = st.wallet_mut().db_mut().transactionally(|db| {
+        queue_transaction(
+            db.conn.0,
+            db.transparent_ledger_mode,
+            &db.enhance_pir_session,
+            tx_ref,
+            &IronwoodEnhancementPlan::Ineligible,
+        )?;
+        assert_eq!(db.enhance_pir_session.count(request), None);
+        Err(SqliteClientError::CorruptedData(
+            "deliberately fail the rescan".into(),
+        ))
+    });
+    assert!(result.is_err());
+    assert_eq!(rejections(st.wallet().db(), request), Some(MAX_REJECTIONS));
+    assert!(
+        st.wallet()
+            .db()
+            .transaction_enhancement_work()
+            .unwrap()
+            .contains(&rejected_work(request))
+    );
+}
+
+#[test]
+fn a_failed_rescan_commit_keeps_the_suspension() {
+    let (mut st, tx_ref, request) = fixture();
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    reject_three_times(&mut st, request);
+    st.wallet().conn().execute_batch("CREATE TABLE session_test_parent (id INTEGER PRIMARY KEY);
+        CREATE TABLE session_test_child (id INTEGER REFERENCES session_test_parent(id) DEFERRABLE INITIALLY DEFERRED);").unwrap();
+    let result: Result<(), SqliteClientError> = st.wallet_mut().db_mut().transactionally(|db| {
+        queue_transaction(
+            db.conn.0,
+            db.transparent_ledger_mode,
+            &db.enhance_pir_session,
+            tx_ref,
+            &IronwoodEnhancementPlan::Ineligible,
+        )?;
+        db.conn
+            .0
+            .execute("INSERT INTO session_test_child VALUES (1)", [])?;
+        Ok(())
+    });
+    assert!(result.is_err(), "the deferred foreign key must fail commit");
+    assert_eq!(rejections(st.wallet().db(), request), Some(MAX_REJECTIONS));
+    assert!(st.wallet().db().query_requests().unwrap().is_empty());
+}
+
+#[test]
+fn completed_requests_release_their_session_count() {
+    let (mut st, _, request) = fixture();
+    report_unreadable(&mut st, &[request]);
+    let valid = authentic_incoming_record(&st, request);
+    assert_eq!(
+        apply_record(st.wallet_mut().db_mut(), request, &valid).unwrap(),
+        EnhancePirStoreResult::Stored
+    );
+    assert_eq!(rejections(st.wallet().db(), request), None);
+    report_unreadable(&mut st, &[request]);
+    assert_eq!(rejections(st.wallet().db(), request), None);
 }

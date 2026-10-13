@@ -1411,6 +1411,7 @@ fn reconstruction_cannot_take_an_outgoing_position_from_another_transaction() {
             queue_transaction(
             send.st.wallet().conn(),
             Some(zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public),
+            &send.st.wallet().db().enhance_pir_session,
             claimant,
                 &IronwoodEnhancementPlan::Eligible {
                     outgoing: vec![IronwoodEnhanceCandidate::from_parts(
@@ -2692,14 +2693,12 @@ fn a_metadata_only_position_is_rearmed_by_binding_and_reaches_suspension() {
     )
     .unwrap();
     // A count left on the position, as if a previous owner had exhausted it.
-    conn.execute(
-        "INSERT INTO ironwood_enhance_rejections VALUES (?, ?)",
-        rusqlite::params![u64::from(request.position()), MAX_REJECTIONS],
-    )
-    .unwrap();
+    for _ in 0..MAX_REJECTIONS {
+        send.st.wallet().db().enhance_pir_session.failure(request);
+    }
     send.rebuild();
     // Binding the metadata work to the position starts it with a full allowance.
-    assert_eq!(rejections(send.st.wallet().conn(), request), None);
+    assert_eq!(rejections(send.st.wallet().db(), request), None);
     assert_eq!(send.requests(), vec![request]);
 
     for attempt in 1..=MAX_REJECTIONS {
@@ -2712,11 +2711,14 @@ fn a_metadata_only_position_is_rearmed_by_binding_and_reaches_suspension() {
     }
     assert!(send.requests().is_empty());
     assert!(
-        work(send.st.wallet().conn())
-            .unwrap()
-            .contains(&EnhancePirWork::Suspended(EnhancePirSuspension::Rejected(
-                request
-            )))
+        work(
+            send.st.wallet().conn(),
+            &send.st.wallet().db().enhance_pir_session
+        )
+        .unwrap()
+        .contains(&EnhancePirWork::Suspended(EnhancePirSuspension::Rejected(
+            request
+        )))
     );
 }
 
@@ -2781,7 +2783,7 @@ fn rebinding_the_same_position_keeps_its_count() {
             }
         );
         assert_eq!(
-            rejections(send.st.wallet().conn(), request),
+            rejections(send.st.wallet().db(), request),
             Some(MAX_REJECTIONS)
         );
         assert!(send.requests().is_empty());

@@ -652,16 +652,6 @@ CREATE TABLE ironwood_enhance_outgoing_accounts (
     PRIMARY KEY(commitment_tree_position, account_id)
 )";
 
-/// Rejected Enhance PIR records per commitment tree position. A rejected batch rolls back,
-/// so the count is written afterwards in its own transaction. A position with three
-/// rejections leaves the query work and is listed as suspended until the transaction is
-/// queued again by a rescan, which deletes its row.
-pub(super) const TABLE_IRONWOOD_ENHANCE_REJECTIONS: &str = "
-CREATE TABLE ironwood_enhance_rejections (
-    commitment_tree_position INTEGER PRIMARY KEY,
-    rejections INTEGER NOT NULL CHECK (rejections > 0)
-)";
-
 pub(super) const TABLE_IRONWOOD_ENHANCE_ROUTING: &str = r#"
 CREATE TABLE "ironwood_enhance_routing" (
     transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,

@@ -72,23 +72,6 @@ pub(crate) fn truncate_before_unmine(
          ON CONFLICT(transaction_id) DO UPDATE SET suspended = excluded.suspended",
         named_params![":height": u32::from(truncation_height)],
     )?;
-    // Positions past the retained tree may be reused by the rescan, so their rejection counts
-    // go with the claims of the transactions being un-mined.
-    conn.execute(
-        "DELETE FROM ironwood_enhance_rejections
-         WHERE commitment_tree_position >= (
-             SELECT ironwood_commitment_tree_size FROM blocks WHERE height = :height
-         )
-         OR commitment_tree_position IN (
-             SELECT rn.commitment_tree_position FROM ironwood_received_notes rn
-             JOIN transactions t ON t.id_tx = rn.transaction_id WHERE t.mined_height > :height
-             UNION SELECT q.commitment_tree_position FROM ironwood_enhance_outgoing_queue q
-             JOIN transactions t ON t.id_tx = q.transaction_id WHERE t.mined_height > :height
-             UNION SELECT q.commitment_tree_position FROM ironwood_enhance_metadata_queue q
-             JOIN transactions t ON t.id_tx = q.transaction_id WHERE t.mined_height > :height
-         )",
-        named_params![":height": u32::from(truncation_height)],
-    )?;
     conn.execute(
         "DELETE FROM ironwood_enhance_outgoing_queue
          WHERE transaction_id IN (

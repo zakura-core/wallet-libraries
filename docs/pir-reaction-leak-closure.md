@@ -233,20 +233,26 @@ rolls back and nothing is recorded, so the item comes back at the next drain
 and is queried again without limit.
 
 - After the rollback, the wallet adds one to a rejection count for that
-  record's note position, in a table of its own. On the third, the position
+  record's lookup identity, in the open wallet's session memory. On the third, the position
   leaves the query work and is listed as a new suspension,
   `EnhancePirSuspension::Rejected`.
 - Request outcomes (409, 410, 429, 503) never reach the wallet store, so they
   do not count.
 - Requeuing the transaction on a rescan clears its counts, as it already
   clears `not_recoverable`.
-- The new table needs an additive migration, like change A.
+- No table or migration is added for this session-scoped allowance.
 
 Tests:
 
 - SQLite: two rejected applications leave the item in the query work; the
   third lists it as suspended. A rejected batch still leaves no effects. The
-  count survives a reopen, and a rescan returns the item.
+  count survives syncs and shared handles, a fresh session resets it, and a rescan returns the item.
+
+Enhance counts belong to the open wallet session, not the database. Retain the same
+`EnhancePirSession` across syncs and serialized database handles. A fresh session
+resets the allowance, so the limit bounds reactions within a session rather than
+across wallet restarts. Successful rescans and rewinds re-arm requests; failed or
+rolled-back operations do not clear their counts.
 
 ## 4. Order
 

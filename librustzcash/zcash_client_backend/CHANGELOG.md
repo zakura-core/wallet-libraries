@@ -14,7 +14,7 @@ workspace.
 
 - `EnhancePirSuspension::Rejected`, for an Enhance PIR position whose replies
   were rejected or unreadable three times. It is not queried again until a
-  rescan queues its transaction again.
+  rescan queues its transaction again or a fresh wallet session is opened.
 - `EnhancePirWrite::record_ironwood_enhance_unreadable`, which counts a reply
   whose row or record bytes failed to decode against the same three-strike
   allowance. Callers must call it for such a content failure and must not call

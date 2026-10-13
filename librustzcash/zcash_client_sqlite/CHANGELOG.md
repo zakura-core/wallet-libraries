@@ -27,20 +27,16 @@ workspace.
 
 ### Added
 
-- `ironwood_enhance_rejections` migration: a rejected Enhance PIR record is
-  counted against its commitment tree position after the batch rolls back. The
-  third rejection removes the position from the query work and lists it as
-  `EnhancePirSuspension::Rejected`. Queuing the transaction again on a rescan
-  (including route-2 memo work of a scanned mixed transaction), binding
-  metadata work to a different position, and rewinding past a position clear
-  its count. Only rejected records and
-  unreadable replies count; request failures never reach the store.
+- Enhance PIR replies rejected or unreadable three times suspend that request for the
+  open-wallet session. Counts are in memory, with no new table or migration. A fresh
+  session restores the allowance; rescans, different metadata positions and rewinds
+  re-arm existing work only after their database operation commits.
+- `EnhancePirSession` can be shared by serialized database handles for one wallet.
+  Keep it alive across syncs and temporary connections; transaction handles inherit
+  it automatically. Independently opened handles otherwise start a fresh session.
 - `WalletDb` implements `EnhancePirWrite::record_ironwood_enhance_unreadable`.
-  It counts each distinct position once per call and ignores requests that are
-  no longer query work.
-- Rejected records recheck the transaction and output identity in the transaction
-  saving their count, so a rewind between rollback and counting cannot charge a
-  replacement transaction at the same position.
+  Request failures do not consume the allowance. Late results recheck their complete
+  request identity so a reused position never inherits another transaction's failure.
 
 ## [0.1.0-rc8] - PLANNED
 

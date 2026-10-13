@@ -28,7 +28,6 @@ mod fix_v_transactions_expired_unmined;
 mod full_account_ids;
 mod initial_setup;
 mod ironwood_enhance;
-mod ironwood_enhance_rejections;
 mod ironwood_pool_code_views;
 mod ironwood_received_notes;
 mod ironwood_shardtree;
@@ -150,7 +149,6 @@ pub mod ids {
         full_account_ids::MIGRATION_ID as FULL_ACCOUNT_IDS,
         initial_setup::MIGRATION_ID as INITIAL_SETUP,
         ironwood_enhance::MIGRATION_ID as IRONWOOD_ENHANCE,
-        ironwood_enhance_rejections::MIGRATION_ID as IRONWOOD_ENHANCE_REJECTIONS,
         ironwood_pool_code_views::MIGRATION_ID as IRONWOOD_POOL_CODE_VIEWS,
         ironwood_received_notes::MIGRATION_ID as IRONWOOD_RECEIVED_NOTES,
         ironwood_shardtree::MIGRATION_ID as IRONWOOD_SHARDTREE,
@@ -437,7 +435,6 @@ pub(super) fn all_migrations<
         Box::new(ironwood_transparent_output_shape::Migration),
         Box::new(transparent_txid_enhancement::Migration),
         Box::new(transparent_detail_content_failures::Migration),
-        Box::new(ironwood_enhance_rejections::Migration),
     ]
 }
 
@@ -697,10 +694,7 @@ pub(crate) fn forget_txid_enhancement(conn: &rusqlite::Connection) {
 }
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
-    transparent_detail_content_failures::MIGRATION_ID,
-    ironwood_enhance_rejections::MIGRATION_ID,
-];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_detail_content_failures::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -883,7 +877,6 @@ pub(crate) mod tests {
             ids::IRONWOOD_TRANSPARENT_OUTPUT_SHAPE,
             ids::TRANSPARENT_TXID_ENHANCEMENT,
             ids::TRANSPARENT_DETAIL_CONTENT_FAILURES,
-            ids::IRONWOOD_ENHANCE_REJECTIONS,
             ids::ZIP318_CLASSIFICATION,
         ]);
 
