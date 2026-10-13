@@ -801,7 +801,9 @@ fn queue_transaction(
     }
     let route = route(conn, tx_ref)?;
     if route == Some(LWD_REQUIRED) || route == Some(PRIVATE_DETAILS_UNSUPPORTED) {
-        return route_transparent_details(conn, configured, tx_ref);
+        route_transparent_details(conn, configured, tx_ref)?;
+        // Route 2 keeps private memo work; the rescan re-arms it like any other.
+        return rearm_rejected_positions(conn, tx_ref);
     }
     let candidates = match plan {
         IronwoodEnhancementPlan::Eligible { outgoing } => outgoing,
@@ -813,6 +815,7 @@ fn queue_transaction(
             )?;
             if route.is_some() || has_notes {
                 route_transparent_details(conn, configured, tx_ref)?;
+                rearm_rejected_positions(conn, tx_ref)?;
             }
             return Ok(());
         }
@@ -917,17 +920,7 @@ fn queue_transaction(
 
     metadata::queue(conn, tx_ref, candidates)?;
     // A rescan re-arms rejected positions, as it resets `not_recoverable` above.
-    conn.execute(
-        "DELETE FROM ironwood_enhance_rejections WHERE commitment_tree_position IN (
-             SELECT commitment_tree_position FROM ironwood_received_notes
-             WHERE transaction_id = :tx AND commitment_tree_position IS NOT NULL
-             UNION SELECT commitment_tree_position FROM ironwood_enhance_outgoing_queue
-             WHERE transaction_id = :tx
-             UNION SELECT commitment_tree_position FROM ironwood_enhance_metadata_queue
-             WHERE transaction_id = :tx AND commitment_tree_position IS NOT NULL
-         )",
-        named_params![":tx": tx_ref.0],
-    )?;
+    rearm_rejected_positions(conn, tx_ref)?;
 
     let has_work: bool = conn.query_row(
         concat!("SELECT ", has_private_work!()),
@@ -944,6 +937,53 @@ fn queue_transaction(
     // No route + no work is not proof of completion. A previously completed
     // private transaction, however, must not gain a txid request on replay.
     retire_enhancement_if_complete(conn, tx_ref)
+}
+
+/// Clears the rejection counts of every position the transaction owns, after a rescan queued it.
+fn rearm_rejected_positions(conn: &Connection, tx_ref: crate::TxRef) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "DELETE FROM ironwood_enhance_rejections WHERE commitment_tree_position IN (
+             SELECT commitment_tree_position FROM ironwood_received_notes
+             WHERE transaction_id = :tx AND commitment_tree_position IS NOT NULL
+             UNION SELECT commitment_tree_position FROM ironwood_enhance_outgoing_queue
+             WHERE transaction_id = :tx
+             UNION SELECT commitment_tree_position FROM ironwood_enhance_metadata_queue
+             WHERE transaction_id = :tx AND commitment_tree_position IS NOT NULL
+         )",
+        named_params![":tx": tx_ref.0],
+    )?;
+    Ok(())
+}
+
+/// Counts an unreadable reply against each distinct position of `requests` that is still query
+/// work. A request that is stale, completed or already suspended is ignored, so a late report
+/// cannot charge a position that a rewind has since given to another transaction.
+pub(crate) fn record_unreadable(
+    conn: &Connection,
+    configured: Option<TransparentLedgerMode>,
+    requests: &[EnhancePirRequest],
+) -> Result<(), SqliteClientError> {
+    let public_authority = transparent_ledger::retains_public_authority(conn, configured)?;
+    let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(true, false))?;
+    let live: std::collections::BTreeSet<EnhancePirRequest> = read_work(
+        &mut stmt,
+        named_params![":public_authority": public_authority],
+    )?
+    .into_iter()
+    .filter_map(|work| match work {
+        TransactionEnhancementWork::Private(EnhancePirWork::Query(request)) => Some(request),
+        _ => None,
+    })
+    .collect();
+    let positions: std::collections::BTreeSet<u64> = requests
+        .iter()
+        .filter(|request| live.contains(request))
+        .map(|request| u64::from(request.position()))
+        .collect();
+    for position in positions {
+        record_rejection(conn, position)?;
+    }
+    Ok(())
 }
 
 /// Counts one rejected record against `position`. Called after the rejected batch rolled back.

@@ -85,8 +85,8 @@ pub enum EnhancePirSuspension {
     Discovery(IronwoodEnhanceDiscoveryFailure),
     /// Outgoing recovery failed; new funding/scanning may reactivate the action.
     OutgoingNotRecoverable(EnhancePirRequest),
-    /// Records for this position were rejected three times; it is not queried again until a
-    /// rescan queues its transaction again.
+    /// Replies for this position were rejected or unreadable three times; it is not queried
+    /// again until a rescan queues its transaction again.
     Rejected(EnhancePirRequest),
 }
 
@@ -321,6 +321,21 @@ pub trait EnhancePirWrite: EnhancePirRead {
         &mut self,
         records: &[(EnhancePirRequest, EnhanceRecord)],
     ) -> Result<EnhancePirBatchResult, Self::Error>;
+
+    /// Counts a content failure that never reached [`Self::apply_ironwood_enhance_records`]:
+    /// the reply for these requests arrived but its row or record bytes failed to decode.
+    /// Pass every request of the `(txid, row)` batch whose reply failed. Each distinct position
+    /// counts once per call, against the same allowance as a rejected record, and a position
+    /// reaching three is reported as [`EnhancePirSuspension::Rejected`]. Requests that are no
+    /// longer query work are ignored.
+    ///
+    /// Callers must not call this for a request failure (an HTTP refusal such as 409, 410, 429
+    /// or 503, a transport error or a timeout): those say nothing about the content and must
+    /// never suspend a position.
+    fn record_ironwood_enhance_unreadable(
+        &mut self,
+        requests: &[EnhancePirRequest],
+    ) -> Result<(), Self::Error>;
 
     /// Reconstructs pending outgoing candidates using a previously scanned compact block
     /// and the wallet's current durable funding associations, including already-spent notes.
