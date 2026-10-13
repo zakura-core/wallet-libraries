@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Depend on wallet-pir's `transparent-v0.1.0-rc.1` tag (crate versions
+  `=0.1.0-rc.1`) instead of a bare revision. The tagged code matches the
+  previous pin.
+
 ## [0.0.1-rc0] - PLANNED
 
 ### Packaging
