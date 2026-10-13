@@ -547,16 +547,21 @@ fn refund_memos_restore_keys_whatever_the_funding_outputs() {
 }
 
 /// A refund record retrieved over Enhance PIR restores its key from the memo alone.
-/// A funding transaction flagged as having transparent outputs takes the public path
-/// for its history first, as any such transaction does.
+/// While public lookups are allowed, a funding transaction flagged as having transparent
+/// outputs takes the public path for its history first, as any such transaction does.
+/// Under `PrivateRequired`, which every real funding transaction meets because it pays
+/// a transparent deposit, the record's memo is stored at once.
 #[test]
 fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
-    use zcash_client_backend::data_api::enhance_pir::{
-        EnhancePirRead, EnhancePirWork, EnhancePirWrite, EnhanceRecord, EnhanceRecordParts,
-        EnhanceTransactionMetadata, EnhancementMode, TransactionEnhancementWork,
+    use zcash_client_backend::data_api::{
+        enhance_pir::{
+            EnhancePirRead, EnhancePirWork, EnhancePirWrite, EnhanceRecord, EnhanceRecordParts,
+            EnhanceTransactionMetadata, EnhancementMode, TransactionEnhancementWork,
+        },
+        transparent_ledger::{TransparentLedgerMode, TransparentLedgerWrite},
     };
 
-    for flagged in [true, false] {
+    for (flagged, private) in [(true, false), (false, false), (true, true)] {
         let (mut st, first) = ironwood_funded_wallet();
         let network = *st.network();
         let account = st.test_account().cloned().unwrap();
@@ -573,9 +578,13 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
             .wallet_mut()
             .create_account("restored", &seed, account.birthday(), None)
             .unwrap();
-        st.wallet_mut()
-            .db_mut()
-            .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+        let db = st.wallet_mut().db_mut();
+        if private {
+            db.set_transparent_ledger_mode(TransparentLedgerMode::PrivateRequired);
+            db.apply_transparent_policy(TransparentLedgerMode::PrivateRequired)
+                .unwrap();
+        }
+        db.set_enhancement_mode(EnhancementMode::PrivateIronwood);
         st.wallet_mut().update_chain_tip(mined).unwrap();
         let blocks = u32::from(mined) - u32::from(first) + 1;
         st.scan_cached_blocks_with_one_time_ivks(first, blocks as usize);
@@ -624,14 +633,16 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
              WHERE t.txid = ?1 AND n.memo IS NOT NULL)",
             [txid.as_ref()],
         );
-        assert_eq!(memo_stored, !flagged, "flagged={flagged}");
-        if flagged {
-            let work = st.wallet().db().transaction_enhancement_work().unwrap();
-            assert!(
-                work.iter().any(
-                    |w| matches!(w, TransactionEnhancementWork::Public(p) if p.txid() == txid)
-                )
-            );
+        let public = flagged && !private;
+        assert_eq!(memo_stored, !public, "flagged={flagged} private={private}");
+        let work = st.wallet().db().transaction_enhancement_work().unwrap();
+        assert_eq!(
+            work.iter()
+                .any(|w| matches!(w, TransactionEnhancementWork::Public(p) if p.txid() == txid)),
+            public,
+            "flagged={flagged} private={private}"
+        );
+        if public {
             decrypt_and_store_transaction_with_one_time_ivks(
                 &network,
                 st.wallet_mut(),
