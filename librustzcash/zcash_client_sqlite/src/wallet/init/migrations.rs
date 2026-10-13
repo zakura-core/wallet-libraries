@@ -876,6 +876,7 @@ pub(crate) mod tests {
             ids::IRONWOOD_UNSUPPORTED_MEMO_RETRY,
             ids::IRONWOOD_TRANSPARENT_OUTPUT_SHAPE,
             ids::TRANSPARENT_TXID_ENHANCEMENT,
+            ids::TRANSPARENT_DETAIL_CONTENT_FAILURES,
             ids::ZIP318_CLASSIFICATION,
         ]);
 
