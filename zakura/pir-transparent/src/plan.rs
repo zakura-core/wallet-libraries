@@ -97,6 +97,10 @@ pub enum HoldCause {
     /// The batch resolves retired revisions, which only [`Trust::Trusted`]
     /// settlement reconciles. Each observed pass would add one more.
     Unreconciled,
+    /// A directory entry of the account's failed on content three times, so it is no
+    /// longer queried and the account cannot be covered. Each failure is something a
+    /// service could aim at chosen rows; only a new companion asks the entry again.
+    FailedEntries,
 }
 
 /// Why a run stops.
@@ -210,10 +214,15 @@ impl<A> PassPlan<A> {
     ///    elsewhere, and acknowledging it is not this plan's to know.
     /// 4. The pass counts, and it is the sync's only one. With no target in `fresh`
     ///    there is nothing left to pass: [`Step::Done`] with no retry.
-    /// 5. Every retry is [`Step::Done`] with it, including `After`: a lagging or
+    /// 5. A pass with a directory entry at three content failures
+    ///    ([`FailedEntries::held`](crate::FailedEntries::held)) is
+    ///    [`HoldCause::FailedEntries`]: everything else it read was settled above, but the
+    ///    entry is no longer queried, so the account cannot be covered.
+    /// 6. Every retry is [`Step::Done`] with it, including `After`: a lagging or
     ///    overloaded pass may already have processed private replies. Its delay
     ///    schedules the next sync, so a settled commit that grew the window, a
     ///    changed watch set, or `More` cannot start another pass in this sync.
+    ///    A pass with failed entries is [`Retry::Stalled`] whatever else stopped it.
     pub fn next(
         &mut self,
         report: &PassReport,
@@ -232,6 +241,9 @@ impl<A> PassPlan<A> {
         }
         if self.watch.target.is_none() {
             return Step::Done(None);
+        }
+        if report.failed_entries.held > 0 {
+            return Step::Hold(HoldCause::FailedEntries);
         }
         Step::Done(Some(report.retry()))
     }

@@ -3682,8 +3682,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pir-control"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "218ff42f9e0129b600cfd03d126c0964460a9d085b3a3ea69443e5742d4c7854"
+source = "git+https://github.com/valargroup/wallet-pir?rev=5239aab91b4d90eb27f1921634dd7512528e1309#5239aab91b4d90eb27f1921634dd7512528e1309"
 dependencies = [
  "hex",
  "rand 0.8.8",
@@ -3694,8 +3693,7 @@ dependencies = [
 [[package]]
 name = "pir-native"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d418b79cb9fca50a00e3cc4d2bf4ba9d9a4f3e4eeded0b52c9aedb0cbc956f4"
+source = "git+https://github.com/valargroup/wallet-pir?rev=5239aab91b4d90eb27f1921634dd7512528e1309#5239aab91b4d90eb27f1921634dd7512528e1309"
 dependencies = [
  "ipir-sp",
  "rand 0.8.8",
@@ -3707,8 +3705,7 @@ dependencies = [
 [[package]]
 name = "pir-observability"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1adddf7e3ac9297a7fbe939df8f23f0a4d01643b7523a5f376c5690eb96e89b"
+source = "git+https://github.com/valargroup/wallet-pir?rev=5239aab91b4d90eb27f1921634dd7512528e1309#5239aab91b4d90eb27f1921634dd7512528e1309"
 dependencies = [
  "axum",
  "http-body",
@@ -6757,9 +6754,8 @@ dependencies = [
 
 [[package]]
 name = "transparent-events"
-version = "0.1.0-rc.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97174cd9e5267cd9ea85e1bb34c5e570ed01f6878eb370eeab23b74df5ae0475"
+version = "0.1.0-rc.4"
+source = "git+https://github.com/valargroup/wallet-pir?rev=5239aab91b4d90eb27f1921634dd7512528e1309#5239aab91b4d90eb27f1921634dd7512528e1309"
 dependencies = [
  "hex",
  "thiserror 2.0.21",
@@ -6767,9 +6763,8 @@ dependencies = [
 
 [[package]]
 name = "transparent-filter"
-version = "0.1.0-rc.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "981e1353fe42122a6cc8ec2c512aea02232c4a722bc7c15d58918d05bfdcb823"
+version = "0.1.0-rc.4"
+source = "git+https://github.com/valargroup/wallet-pir?rev=5239aab91b4d90eb27f1921634dd7512528e1309#5239aab91b4d90eb27f1921634dd7512528e1309"
 dependencies = [
  "bitcoin",
  "hex",
@@ -6780,9 +6775,8 @@ dependencies = [
 
 [[package]]
 name = "transparent-native"
-version = "0.1.0-rc.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47480c507ae4341be15d1c33d8e7c56a9115d569eff9f9bf38724c8eeeb6a3ef"
+version = "0.1.0-rc.4"
+source = "git+https://github.com/valargroup/wallet-pir?rev=5239aab91b4d90eb27f1921634dd7512528e1309#5239aab91b4d90eb27f1921634dd7512528e1309"
 dependencies = [
  "hex",
  "pir-native",
@@ -6794,9 +6788,8 @@ dependencies = [
 
 [[package]]
 name = "transparent-shard"
-version = "0.1.0-rc.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc22fb860981f37255d5d0b029831e940c462cee3a3f00cbbf2d67c0beee32af"
+version = "0.1.0-rc.4"
+source = "git+https://github.com/valargroup/wallet-pir?rev=5239aab91b4d90eb27f1921634dd7512528e1309#5239aab91b4d90eb27f1921634dd7512528e1309"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -6810,9 +6803,8 @@ dependencies = [
 
 [[package]]
 name = "transparent-shard-server"
-version = "0.1.0-rc.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a15d529923eb270b6a35bc51d39fa385d2e9032f62bf795d290af77f249491e0"
+version = "0.1.0-rc.4"
+source = "git+https://github.com/valargroup/wallet-pir?rev=5239aab91b4d90eb27f1921634dd7512528e1309#5239aab91b4d90eb27f1921634dd7512528e1309"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -6844,9 +6836,8 @@ dependencies = [
 
 [[package]]
 name = "transparent-txid-client"
-version = "0.1.0-rc.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b753fee216ff05128572f86c94c30d342ab2619d16762d743f6411ed962a611d"
+version = "0.1.0-rc.4"
+source = "git+https://github.com/valargroup/wallet-pir?rev=5239aab91b4d90eb27f1921634dd7512528e1309#5239aab91b4d90eb27f1921634dd7512528e1309"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -6860,9 +6851,8 @@ dependencies = [
 
 [[package]]
 name = "transparent-wallet"
-version = "0.1.0-rc.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04a4fa4271fb868f371f3787bbb4357fa520678a85cec92a0db24481ebe452ad"
+version = "0.1.0-rc.4"
+source = "git+https://github.com/valargroup/wallet-pir?rev=5239aab91b4d90eb27f1921634dd7512528e1309#5239aab91b4d90eb27f1921634dd7512528e1309"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -6879,9 +6869,8 @@ dependencies = [
 
 [[package]]
 name = "transparent-wallet-store"
-version = "0.1.0-rc.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fca1b0a8faf4e8f53158fbf2cfe5753623c6bc7ff74ef851f1fba9987ce94d9"
+version = "0.1.0-rc.4"
+source = "git+https://github.com/valargroup/wallet-pir?rev=5239aab91b4d90eb27f1921634dd7512528e1309#5239aab91b4d90eb27f1921634dd7512528e1309"
 dependencies = [
  "hex",
  "rusqlite",

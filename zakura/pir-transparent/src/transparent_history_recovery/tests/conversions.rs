@@ -28,6 +28,7 @@ fn report_outcomes_map_to_progress() {
             incomplete(IncompleteReason::DiscoveryUnbounded),
             Outcome::Stalled,
         ),
+        (incomplete(IncompleteReason::ContentFailed), Outcome::Stalled),
     ] {
         let mut report = report(completion);
         report.covered_through = 77;
@@ -53,6 +54,32 @@ fn report_outcomes_map_to_progress() {
             }
         );
     }
+}
+
+/// A report's failed entries are counted, and those at three failures counted again
+/// as held.
+#[test]
+fn failed_entries_are_counted_from_the_report() {
+    let mut report = report(Completion::Incomplete {
+        reason: IncompleteReason::ContentFailed,
+        pending: 0,
+    });
+    assert_eq!(FailedEntries::of(&report), FailedEntries::default());
+    report.failed_entries = [(0, 1), (0, 3), (2, 2), (4, 3)]
+        .into_iter()
+        .map(|(shard_id, failures)| transparent_wallet::FailedEntry {
+            shard_id,
+            script: vec![failures as u8],
+            failures,
+        })
+        .collect();
+    assert_eq!(
+        FailedEntries::of(&report),
+        FailedEntries {
+            entries: 4,
+            held: 2
+        }
+    );
 }
 
 #[test]

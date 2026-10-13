@@ -7,7 +7,7 @@ use zcash_protocol::consensus::BlockHeight;
 
 use super::*;
 use crate::apply::{ApplyError, ApplyStats};
-use crate::progress::{Outcome, Progress};
+use crate::progress::{FailedEntries, Outcome, Progress};
 
 const OUTCOMES: [Outcome; 5] = [
     Outcome::Complete,
@@ -60,6 +60,15 @@ fn report(state: BatchState, outcome: Outcome) -> PassReport {
         commits: usize::from(state == BatchState::Ready),
         retired: 0,
         publication_changed: false,
+        failed_entries: FailedEntries::default(),
+    }
+}
+
+/// [`report`] with `entries` failed entries, `held` of them at the cap.
+fn failing(state: BatchState, outcome: Outcome, entries: usize, held: usize) -> PassReport {
+    PassReport {
+        failed_entries: FailedEntries { entries, held },
+        ..report(state, outcome)
     }
 }
 
@@ -379,4 +388,59 @@ fn the_table_never_retries_what_it_must_not() {
             }
         }
     }
+}
+
+/// A pass with failed entries ends the sync stalled, whatever else stopped it: a wait
+/// would pass again in the same sync and ask the failed entries again. Settled or
+/// pending, what it read stays settled.
+#[test]
+fn failed_entries_end_the_sync_stalled() {
+    for state in [BatchState::Ready, BatchState::Pending] {
+        let settled = if state == BatchState::Ready {
+            applied(false)
+        } else {
+            NOTHING
+        };
+        for outcome in OUTCOMES {
+            let mut plan = new_plan();
+            let pass = failing(state, outcome, 2, 0);
+            assert_eq!(pass.retry(), Retry::Stalled, "{state:?} {outcome:?}");
+            let step = plan.next(&pass, &settled, watch(1, false));
+            assert_eq!(step, Step::Done(Some(Retry::Stalled)), "{state:?} {outcome:?}");
+        }
+    }
+}
+
+/// An entry at three content failures holds the account once its pass is settled: it
+/// is no longer queried, so the account cannot be covered.
+#[test]
+fn an_entry_at_the_cap_holds_the_account() {
+    for state in [BatchState::Ready, BatchState::Pending] {
+        let settled = if state == BatchState::Ready {
+            applied(true)
+        } else {
+            NOTHING
+        };
+        for outcome in OUTCOMES {
+            let mut plan = new_plan();
+            let step = plan.next(&failing(state, outcome, 2, 1), &settled, watch(2, false));
+            assert_eq!(step, Step::Hold(HoldCause::FailedEntries), "{state:?} {outcome:?}");
+        }
+    }
+    // A withdrawn pass keeps its own cause, and a failed settlement its own step.
+    for cause in CAUSES {
+        let mut plan = new_plan();
+        let step = plan.next(
+            &failing(BatchState::Withdrawn(cause), Outcome::Stalled, 1, 1),
+            &NOTHING,
+            watch(1, false),
+        );
+        assert_eq!(step, Step::Hold(HoldCause::Withdrawn(cause)));
+    }
+    let mut plan = new_plan();
+    let held = failing(BatchState::Ready, Outcome::Stalled, 1, 1);
+    assert_eq!(plan.next(&held, &failed(stale()), watch(1, false)), Step::Refresh);
+    // With no target there is nothing to hold.
+    let mut plan = new_plan();
+    assert_eq!(plan.next(&held, &applied(false), watch(1, true)), Step::Done(None));
 }

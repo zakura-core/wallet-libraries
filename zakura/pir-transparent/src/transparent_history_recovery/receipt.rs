@@ -57,6 +57,7 @@ impl TransparentHistoryRecovery {
             state: BatchState::Ready,
             retired_revisions,
             receipt,
+            failed_entries: Default::default(),
         })
     }
 

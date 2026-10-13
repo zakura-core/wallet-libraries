@@ -186,6 +186,7 @@ fn sealed(start: u64, end: u64, events: Vec<(ScriptBytes, TransparentEvent)>) ->
         supersedes: String::new(),
         page_span: 0,
         events,
+        malformed_entries: Vec::new(),
     }
 }
 
@@ -200,6 +201,7 @@ fn tail(end: u64, revision: u32, events: Vec<(ScriptBytes, TransparentEvent)>) -
         supersedes: String::new(),
         page_span: 0,
         events,
+        malformed_entries: Vec::new(),
     }
 }
 
@@ -1844,6 +1846,7 @@ fn before_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
             supersedes: String::new(),
             page_span: 0,
             events: noise(H0 + 500, RECUT_TIP, 4),
+            malformed_entries: Vec::new(),
         },
     ]
 }
@@ -1870,6 +1873,7 @@ fn after_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
             supersedes: String::new(),
             page_span: 0,
             events: [s1.events, s2.events].concat(),
+            malformed_entries: Vec::new(),
         },
         ShardSpec { revision: 1, ..s3 },
         ShardSpec {
@@ -2938,6 +2942,7 @@ fn stale_middle_retirement_batch_preserves_reconciliation_across_reopen() {
         supersedes: String::new(),
         page_span: 0,
         events: noise(H0 + 1000, target, 5),
+        malformed_entries: Vec::new(),
     });
     f.publish(&shards, SEAL);
     let batch = f.recover().unwrap();

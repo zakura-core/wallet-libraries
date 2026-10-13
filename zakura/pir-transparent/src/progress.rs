@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use transparent_wallet::{Completion, IncompleteReason, SyncReport};
+use transparent_wallet::{Completion, IncompleteReason, MAX_CONTENT_FAILURES, SyncReport};
 
 /// Why a pass stopped. Only [`Outcome::Complete`] covers the whole target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,8 +18,40 @@ pub enum Outcome {
     /// The service refused for capacity throughout its retry budget.
     Overloaded,
     /// Progress needs more than a retry: an unknown chain block, spends the
-    /// watch set cannot resolve, or script discovery past its bound.
+    /// watch set cannot resolve, script discovery past its bound, or directory
+    /// entries whose private replies failed on content ([`FailedEntries`]).
     Stalled,
+}
+
+/// Directory entries (one watched script in one shard) a pass could not read
+/// because their private replies failed on content: a reply that did not decode
+/// or verify, or a record contradicting what the companion holds. It carries
+/// counts only, so it may be logged whole.
+///
+/// The reference client counts each entry's content failures in the companion
+/// and never resets them; at three an entry is no longer queried. Everything
+/// else the pass read is settled, but the entry's script stays uncovered over
+/// its shard, so the account cannot be activated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FailedEntries {
+    /// Entries this pass failed on content, or left unqueried at three failures.
+    pub entries: usize,
+    /// Of those, the entries at three failures. Only a new companion queries them again.
+    pub held: usize,
+}
+
+impl FailedEntries {
+    /// Counts the reference client's report.
+    pub(crate) fn of(report: &SyncReport) -> Self {
+        Self {
+            entries: report.failed_entries.len(),
+            held: report
+                .failed_entries
+                .iter()
+                .filter(|entry| entry.failures >= MAX_CONTENT_FAILURES)
+                .count(),
+        }
+    }
 }
 
 /// How far a pass covered the watch set, independent of the commits it returned.
@@ -93,7 +125,8 @@ impl Progress {
                 IncompleteReason::Overloaded { .. } => Outcome::Overloaded,
                 IncompleteReason::ChainUnknown { .. }
                 | IncompleteReason::UnresolvedSpends
-                | IncompleteReason::DiscoveryUnbounded => Outcome::Stalled,
+                | IncompleteReason::DiscoveryUnbounded
+                | IncompleteReason::ContentFailed => Outcome::Stalled,
             },
         };
         Self {
