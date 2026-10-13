@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use transparent_native::TableProfile;
 use transparent_shard::display::{
     DISPLAY_SCHEMA, DisplayBucket, DisplayLayout, DisplayManifest, DisplayMap, DisplayMapEntry,
-    DisplaySealParams, TXID_2K8,
+    DisplaySealParams, NATIVE_SCHEMA, TXID_2K8,
 };
 use transparent_shard::manifest::TableGeometry;
 use zcash_client_backend::data_api::transparent_ledger::{
@@ -102,19 +102,13 @@ pub struct TxidPublication {
 impl TxidPublication {
     /// A publication of one recent shard over `start..=end` holding no record.
     pub fn new(start: u64, end: u64) -> Self {
-        let directory = TableProfile::new(
-            transparent_shard::SCHEMA,
-            GEOMETRY,
-            "txdirectory",
-            ROWS,
-            ROW_BYTES,
-        )
-        .expect("the txid-2k8 directory profile");
+        let directory = TableProfile::new(NATIVE_SCHEMA, GEOMETRY, "txdirectory", ROWS, ROW_BYTES)
+            .expect("the txid-2k8 directory profile");
         let init = serde_json::to_vec(&serde_json::json!({
             "schema": DISPLAY_SCHEMA,
             "codec": transparent_shard::txid::CODEC,
             "bucket_domain": "transparent-txid-display/bucket/v2",
-            "native_schema": transparent_shard::SCHEMA,
+            "native_schema": NATIVE_SCHEMA,
             "geometries": [{
                 "name": GEOMETRY,
                 "txdirectory": {
@@ -252,7 +246,7 @@ pub fn unsupported_txid_init() -> HttpReply {
             "schema": DISPLAY_SCHEMA,
             "codec": "transparent-txid-display-v9",
             "bucket_domain": "transparent-txid-display/bucket/v2",
-            "native_schema": transparent_shard::SCHEMA,
+            "native_schema": NATIVE_SCHEMA,
             "geometries": [],
         }))
         .expect("an init document"),
@@ -269,12 +263,7 @@ fn not_found() -> HttpReply {
 
 /// The seed a table's public query setup derives from, as the service publishes it.
 fn setup_seed(kind: &str) -> u64 {
-    let digest = Sha256::new()
-        .chain_update(transparent_shard::SCHEMA.as_bytes())
-        .chain_update(b"/setup-seed\0txid-2k8\0")
-        .chain_update(kind.as_bytes())
-        .finalize();
-    u64::from_le_bytes(digest[..8].try_into().expect("eight bytes"))
+    transparent_shard::display::setup_seed_in(NATIVE_SCHEMA, GEOMETRY, kind)
 }
 
 fn base64_encode(bytes: &[u8]) -> String {

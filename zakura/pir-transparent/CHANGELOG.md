@@ -50,7 +50,9 @@ lookups. See the [README](README.md) and
 
 - Supports `transparent-shard-v12` with decoupled directory/page shards and
   recent `decoupled-2k-8k` / archive `decoupled-32k-32k` geometry. The txid
-  display client uses the one-query `txid-2k8` layout.
+  display client uses the one-query `txid-2k8` layout at the 8-bit profile under
+  its own native schema, `transparent-txid-display-p8-v1`; it reports a
+  `/v2/txid` served at the earlier 16-bit profile as unsupported.
 - Checked partial page walks survive restarts and enforce query/byte limits
   between requests. Verified run caches let catch-up stop at cached history.
 - Uses 44-bit dithered queries when the publication advertises supported schemes,
