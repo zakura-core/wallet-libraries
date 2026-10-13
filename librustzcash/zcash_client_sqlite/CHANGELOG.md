@@ -27,7 +27,19 @@ workspace.
 
 ### Changed
 
-- `CURRENT_LEAF_MIGRATIONS` has two leaves, `transparent_txid_enhancement` and
+- Transparent receipt lookups retry every content outcome (`Absent`, `Protocol`
+  and `Contradiction`) on one schedule: an hour, doubling to a day, plus up to
+  25% jitter. `Contradiction` no longer waits for a changed display map.
+- Retry jitter is drawn from the wallet's random source instead of being
+  derived from the txid, so `TransparentDetailWrite` for `WalletDb` now
+  requires `R: rand_core::Rng`.
+- Without public authority, the third content failure at one mined height
+  gives a receipt lookup up: it is neither due nor parked, and the receipt
+  reads as unavailable. Request failures (`Unavailable`) do not count; mining
+  the transaction at another height re-arms it. Under public authority nothing
+  counts, and work given up earlier is listed again. A new additive migration
+  adds `transparent_detail_work.content_failures`.
+- `CURRENT_LEAF_MIGRATIONS` has two leaves, `transparent_detail_content_failures` and
   `one_time_ivk`. An older build, such as 0.1.0-rc8, refuses a database this version has
   migrated, as it does any unknown migration.
 - Ironwood memo retrieval skips notes received with a one-time key

@@ -934,3 +934,30 @@ fn account_deletion_cascades_and_unknown_accounts_cannot_reserve() {
         Err(SqliteClientError::AccountUnknown)
     ));
 }
+
+/// A key with a note can't be deleted alone, but deleting its account removes both,
+/// also when the notes go only by the account's own cascade.
+#[test]
+fn a_key_with_notes_is_deleted_only_with_its_account() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let from = st.wallet().chain_height().unwrap().unwrap() + 1;
+    let key = reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, from);
+    pay(&mut st, key.full_viewing_key(), 10_000);
+    let count = |st: &State, table: &str| {
+        let sql = format!("SELECT COUNT(*) FROM {table}");
+        value::<u32>(st.wallet().conn(), &sql, [])
+    };
+    let sql = "SELECT COUNT(*) FROM ironwood_received_notes WHERE one_time_key_id IS NOT NULL";
+    assert_eq!(value::<u32>(st.wallet().conn(), sql, []), 1);
+    let conn = st.wallet().conn();
+    let deleted = conn.execute("DELETE FROM ironwood_one_time_keys", []);
+    assert!(matches!(deleted, Err(rusqlite::Error::SqliteFailure(e, _))
+        if e.code == rusqlite::ErrorCode::ConstraintViolation));
+    conn.execute_batch("SAVEPOINT s; DELETE FROM accounts; ROLLBACK TO s; RELEASE s;")
+        .unwrap();
+    assert_eq!(count(&st, "ironwood_one_time_keys"), 1);
+    st.wallet_mut().delete_account(account).unwrap();
+    assert_eq!(count(&st, "ironwood_one_time_keys"), 0);
+    assert_eq!(count(&st, "ironwood_received_notes"), 0);
+}

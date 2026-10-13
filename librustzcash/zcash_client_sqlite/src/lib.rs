@@ -2404,7 +2404,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
     }
 }
 
-impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> TransparentDetailWrite
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R: Rng> TransparentDetailWrite
     for WalletDb<C, P, CL, R>
 {
     fn store_transparent_display(
@@ -2419,6 +2419,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
             facts,
             expected_generation,
             now,
+            &mut self.rng,
         )
     }
 
@@ -2440,6 +2441,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
             map_sha256,
             expected_generation,
             now,
+            &mut self.rng,
         )
     }
 }

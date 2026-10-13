@@ -533,7 +533,7 @@ CREATE INDEX idx_orchard_received_note_spends_transaction_id ON orchard_received
 pub(super) const TABLE_IRONWOOD_ONE_TIME_KEYS: &str = "CREATE TABLE ironwood_one_time_keys (
                 id INTEGER PRIMARY KEY,
                 account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                purpose INTEGER NOT NULL CHECK (purpose IN (0, 1)),
+                purpose INTEGER NOT NULL CHECK (purpose BETWEEN 0 AND 255),
                 key_index BLOB NOT NULL CHECK (typeof(key_index) = 'blob' AND length(key_index) = 8),
                 receiver BLOB NOT NULL CHECK (typeof(receiver) = 'blob' AND length(receiver) = 43),
                 scan_from INTEGER NOT NULL CHECK (scan_from BETWEEN 0 AND 4294967295),
@@ -591,7 +591,7 @@ CREATE TABLE ironwood_received_notes (
     CHECK ((ephemeral_key IS NULL AND compact_ciphertext IS NULL) OR
            (ephemeral_key IS NOT NULL AND compact_ciphertext IS NOT NULL AND
             length(ephemeral_key) = 32 AND length(compact_ciphertext) = 52)), one_time_key_id INTEGER
-                REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
+                REFERENCES ironwood_one_time_keys(id),
     UNIQUE (transaction_id, action_index)
 )";
 pub(super) const INDEX_IRONWOOD_RECEIVED_NOTES_ACCOUNT: &str = "
@@ -2021,7 +2021,7 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_OPERATIONS: &str = "CREATE TABLE ironwo
                 funded INTEGER NOT NULL DEFAULT 0 CHECK (funded IN (0, 1)),
                 rejected INTEGER NOT NULL DEFAULT 0 CHECK (rejected IN (0, 1)),
                 observed_at INTEGER NOT NULL DEFAULT 0,
-                expectation INTEGER NOT NULL DEFAULT 0 CHECK (expectation IN (0, 1, 2, 3, 4)),
+                expectation INTEGER NOT NULL DEFAULT 0 CHECK (expectation BETWEEN 0 AND 255),
                 expected_value INTEGER CHECK (expected_value > 0),
                 CHECK (request IS NOT NULL OR reference IS NOT NULL)
             )";
@@ -2051,18 +2051,18 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_SPEND_RETENTION: &str =
             )";
 
 pub(super) const INDEX_IRONWOOD_ONE_TIME_KEYS_ACCOUNT_RECEIVER: &str =
-    "CREATE INDEX ironwood_one_time_keys_account_receiver
+    "CREATE INDEX idx_ironwood_one_time_keys_account_receiver
                 ON ironwood_one_time_keys(account_id, receiver)";
 
 pub(super) const INDEX_IRONWOOD_ONE_TIME_KEYS_SCANNING: &str =
-    "CREATE INDEX ironwood_one_time_keys_scanning
+    "CREATE INDEX idx_ironwood_one_time_keys_scanning
                 ON ironwood_one_time_keys(closed_at, active_from)";
 
 pub(super) const INDEX_IRONWOOD_ONE_TIME_OPERATIONS_KEY: &str =
-    "CREATE INDEX ironwood_one_time_operations_key
+    "CREATE INDEX idx_ironwood_one_time_operations_key
                 ON ironwood_one_time_operations(one_time_key_id)";
 
-pub(super) const INDEX_IRONWOOD_ONE_TIME_SWEEPS_DUE: &str = "CREATE INDEX ironwood_one_time_sweeps_due ON ironwood_one_time_sweeps(done_height, next_attempt_at)";
+pub(super) const INDEX_IRONWOOD_ONE_TIME_SWEEPS_DUE: &str = "CREATE INDEX idx_ironwood_one_time_sweeps_due ON ironwood_one_time_sweeps(done_height, next_attempt_at)";
 
 /// Source-bound transaction facts. No fee is attributed to an account by this table.
 pub(super) const TABLE_TPIR_TRANSACTION_METADATA: &str = r#"
@@ -2093,8 +2093,12 @@ CREATE TABLE tpir_transaction_metadata (
 ///   re-arms the row.
 /// - `last_outcome`: `NULL` before any attempt; otherwise 0 unavailable, 1 absent,
 ///   2 not covered, 3 unsupported, 4 protocol, 5 contradiction, 6 not yet published.
-/// - `last_map_sha256`: the display map of the last attempt. A row whose last outcome is 2 or
-///   5 is parked while the caller's map is this one or absent; 3 while the caller has no map.
+/// - `last_map_sha256`: the display map of the last attempt. A row whose last outcome is 2
+///   is parked while the caller's map is this one or absent; 3 while the caller has no map.
+/// - `content_failures`: failed lookups at `attempted_height` whose private reply failed on
+///   content (outcomes 1, 4 and 5), counted only without public authority. At 3 the row is
+///   given up and, without public authority, not listed until it is mined at another height,
+///   which resets the count.
 pub(super) const TABLE_TRANSPARENT_DETAIL_WORK: &str = r#"
 CREATE TABLE transparent_detail_work (
     transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
@@ -2104,7 +2108,8 @@ CREATE TABLE transparent_detail_work (
     attempted_at INTEGER,
     attempted_height INTEGER CHECK (attempted_height >= 0),
     last_outcome INTEGER CHECK (last_outcome BETWEEN 0 AND 6),
-    last_map_sha256 BLOB CHECK (length(last_map_sha256) = 32)
+    last_map_sha256 BLOB CHECK (length(last_map_sha256) = 32),
+    content_failures INTEGER NOT NULL DEFAULT 0 CHECK (content_failures >= 0)
 )"#;
 
 /// Validated transparent display facts of a transaction without raw bytes: one fixed-size

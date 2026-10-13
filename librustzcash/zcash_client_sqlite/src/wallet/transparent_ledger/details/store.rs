@@ -2,6 +2,7 @@
 
 use std::time::SystemTime;
 
+use rand_core::Rng;
 use rusqlite::{Connection, OptionalExtension as _, named_params};
 use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::transparent_ledger::{
@@ -104,9 +105,10 @@ pub(crate) fn store(
     facts: TransparentDisplayFacts,
     expected_generation: u64,
     now: SystemTime,
+    rng: &mut impl Rng,
 ) -> Result<TransparentDisplayStore, SqliteClientError> {
-    resolve_mode(conn, configured)?;
     with_read_snapshot(conn, |conn| {
+        let private = !resolve_mode(conn, configured)?.retains_public_authority();
         check_transparent_policy_generation(conn, expected_generation)?;
         let row = conn
             .query_row(
@@ -150,6 +152,8 @@ pub(crate) fn store(
                 TransparentDetailOutcome::Contradiction,
                 Some(facts.provenance.map_sha256),
                 now,
+                private,
+                rng,
             )?;
             return Ok(TransparentDisplayStore::Contradiction(kind));
         }
