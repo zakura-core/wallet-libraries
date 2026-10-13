@@ -2915,7 +2915,10 @@ fn three_unreadable_replies_suspend_the_position() {
     assert!(!work.contains(&query_work(request)));
     // A suspended position is no longer query work, so a late report does not count.
     report_unreadable(&mut st, &[request]);
-    assert_eq!(rejections(st.wallet().conn(), request), Some(MAX_REJECTIONS));
+    assert_eq!(
+        rejections(st.wallet().conn(), request),
+        Some(MAX_REJECTIONS)
+    );
     // A stale identity alone never charges the position.
     let (mut st, _, request) = fixture();
     report_unreadable(&mut st, &[stale]);
