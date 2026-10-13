@@ -74,6 +74,7 @@ fn observations_are_monotonic_and_a_seen_deposit_sticks() {
         (Terminal(Positive(None)), false, 300, (300, 2, None, true)),
         (expect(70_000), false, 400, (400, 2, Some(70_000), true)),
         (Active, false, 450, (450, 0, None, true)),
+        (AwaitingDeposit, false, 470, (470, 4, None, true)),
         (Terminal(Unknown), false, 500, (500, 3, None, true)),
     ] {
         let observation = Observation { status, funded };

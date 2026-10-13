@@ -1,8 +1,11 @@
 //! One-time IVKs: the key registry with its incoming reservations, provider operations,
 //! restore sweeps, and their spend evidence.
 //!
-//! A note's `one_time_key_id` cascades on delete like every key reference: key rows are
-//! deleted only with their account, which deletes the account's notes too.
+//! A note's `one_time_key_id` doesn't cascade: notes are funds, so a key can't be deleted
+//! while it has notes. Deleting the account removes both.
+//!
+//! The `purpose` and `expectation` codes are stable, and their CHECKs only bound them to a
+//! byte, leaving each set to code. A new code needs a migration that older builds refuse.
 
 use std::collections::HashSet;
 
@@ -13,7 +16,7 @@ use super::ironwood_enhance;
 use crate::wallet::init::WalletMigrationError;
 
 /// Identifier for the one-time IVK migration.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x23cd21bc_9c96_4b40_8fc0_725b734a1113);
+pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x1533018f_b6c7_4910_825b_21652c79e272);
 
 pub(super) struct Migration;
 
@@ -41,7 +44,7 @@ impl RusqliteMigration for Migration {
             "CREATE TABLE ironwood_one_time_keys (
                 id INTEGER PRIMARY KEY,
                 account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                purpose INTEGER NOT NULL CHECK (purpose IN (0, 1)),
+                purpose INTEGER NOT NULL CHECK (purpose BETWEEN 0 AND 255),
                 key_index BLOB NOT NULL CHECK (typeof(key_index) = 'blob' AND length(key_index) = 8),
                 receiver BLOB NOT NULL CHECK (typeof(receiver) = 'blob' AND length(receiver) = 43),
                 scan_from INTEGER NOT NULL CHECK (scan_from BETWEEN 0 AND 4294967295),
@@ -57,12 +60,12 @@ impl RusqliteMigration for Migration {
                 closed_at INTEGER,
                 UNIQUE (account_id, purpose, key_index)
             );
-            CREATE INDEX ironwood_one_time_keys_account_receiver
+            CREATE INDEX idx_ironwood_one_time_keys_account_receiver
                 ON ironwood_one_time_keys(account_id, receiver);
-            CREATE INDEX ironwood_one_time_keys_scanning
+            CREATE INDEX idx_ironwood_one_time_keys_scanning
                 ON ironwood_one_time_keys(closed_at, active_from);
             ALTER TABLE ironwood_received_notes ADD COLUMN one_time_key_id INTEGER
-                REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE;
+                REFERENCES ironwood_one_time_keys(id);
             CREATE INDEX idx_ironwood_received_notes_one_time_key ON ironwood_received_notes (
                 one_time_key_id ASC
             ) WHERE one_time_key_id IS NOT NULL;
@@ -78,11 +81,11 @@ impl RusqliteMigration for Migration {
                 funded INTEGER NOT NULL DEFAULT 0 CHECK (funded IN (0, 1)),
                 rejected INTEGER NOT NULL DEFAULT 0 CHECK (rejected IN (0, 1)),
                 observed_at INTEGER NOT NULL DEFAULT 0,
-                expectation INTEGER NOT NULL DEFAULT 0 CHECK (expectation IN (0, 1, 2, 3, 4)),
+                expectation INTEGER NOT NULL DEFAULT 0 CHECK (expectation BETWEEN 0 AND 255),
                 expected_value INTEGER CHECK (expected_value > 0),
                 CHECK (request IS NOT NULL OR reference IS NOT NULL)
             );
-            CREATE INDEX ironwood_one_time_operations_key
+            CREATE INDEX idx_ironwood_one_time_operations_key
                 ON ironwood_one_time_operations(one_time_key_id);
             CREATE TABLE ironwood_one_time_sweeps (
                 one_time_key_id INTEGER PRIMARY KEY REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
@@ -92,7 +95,7 @@ impl RusqliteMigration for Migration {
                 next_attempt_at INTEGER NOT NULL DEFAULT 0,
                 done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295)
             );
-            CREATE INDEX ironwood_one_time_sweeps_due ON ironwood_one_time_sweeps(done_height, next_attempt_at);
+            CREATE INDEX idx_ironwood_one_time_sweeps_due ON ironwood_one_time_sweeps(done_height, next_attempt_at);
             CREATE TABLE ironwood_one_time_payment_recovery (
                 one_time_key_id INTEGER NOT NULL REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
                 txid BLOB NOT NULL CHECK (length(txid) = 32),
