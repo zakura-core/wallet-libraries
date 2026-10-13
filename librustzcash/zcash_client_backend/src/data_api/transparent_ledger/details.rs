@@ -299,8 +299,8 @@ pub enum TransparentDisplayStore {
     /// transaction; nothing was saved.
     Superseded,
     /// The facts contradict the wallet; nothing was saved. When the looked-up height still
-    /// matches the transaction's mined height, the work is parked until the display map
-    /// changes; otherwise retry state is unchanged.
+    /// matches the transaction's mined height, the work is deferred as
+    /// [`TransparentDetailOutcome::Contradiction`]; otherwise retry state is unchanged.
     Contradiction(TransparentDisplayContradiction),
 }
 
@@ -316,16 +316,22 @@ pub enum TransparentDetailOutcome {
     /// The mined height is above the newest published shard: the transaction is newer than
     /// the publication. Retried after minutes; the view stays pending.
     NotYetPublished,
-    /// The covering shard has no record for the txid; retried after hours.
+    /// The covering shard has no record for the txid; a content outcome.
     Absent,
     /// No display shard covers the mined height (it is below the publication); held until the
     /// map changes.
     NotCovered,
     /// The service does not offer display lookups; held until any display map is seen.
     Unsupported,
-    /// The service answered with something unusable; retried like `Unavailable`.
+    /// The service's reply for the txid was unusable; a content outcome. A failure the service
+    /// chooses without knowing the txid, such as a malformed display map, is `Unavailable`.
     Protocol,
-    /// The caller found the facts inconsistent; held until the map changes.
+    /// The caller found the facts inconsistent; a content outcome.
+    ///
+    /// Content outcomes (`Absent`, `Protocol` and `Contradiction`) share one schedule, an hour
+    /// doubling to a day, so a retry time does not tell them apart. Without public authority,
+    /// the third at one mined height gives the lookup up until the transaction is mined at
+    /// another height.
     Contradiction,
 }
 
@@ -559,10 +565,10 @@ pub trait TransparentDetailRead: super::TransparentLedgerRead {
     ///
     /// A transaction is due when it is mined, lacks raw bytes, is still related to the
     /// wallet, and either its mined height changed since the last attempt or its next
-    /// attempt time has passed and it is not parked. A row whose last outcome was
-    /// `NotCovered` or `Contradiction` is parked while `map_sha256` is absent or names the
-    /// display map that produced it; an `Unsupported` row is parked while `map_sha256` is
-    /// absent. Parked rows become due anyway seven days after their last attempt. Under a mode
+    /// attempt time has passed, it is not parked and, without public authority, it has not
+    /// been given up after three content outcomes at its mined height. A row whose last outcome
+    /// was `NotCovered` is parked while `map_sha256` is absent or names the display map that
+    /// produced it; an `Unsupported` row is parked while `map_sha256` is absent. Parked rows become due anyway seven days after their last attempt. Under a mode
     /// retaining public authority, transactions whose payload retrieval is already queued, or
     /// which are privately protected Ironwood transactions, are omitted.
     fn transparent_detail_work(

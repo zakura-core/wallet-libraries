@@ -1993,8 +1993,9 @@ CREATE TABLE tpir_transaction_metadata (
 /// - `last_map_sha256`: the display map of the last attempt. A row whose last outcome is 2
 ///   is parked while the caller's map is this one or absent; 3 while the caller has no map.
 /// - `content_failures`: failed lookups at `attempted_height` whose private reply failed on
-///   content (outcomes 1, 4 and 5). At 3 the row is given up and not listed until it is mined
-///   at another height, which resets the count.
+///   content (outcomes 1, 4 and 5), counted only without public authority. At 3 the row is
+///   given up and, without public authority, not listed until it is mined at another height,
+///   which resets the count.
 pub(super) const TABLE_TRANSPARENT_DETAIL_WORK: &str = r#"
 CREATE TABLE transparent_detail_work (
     transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,

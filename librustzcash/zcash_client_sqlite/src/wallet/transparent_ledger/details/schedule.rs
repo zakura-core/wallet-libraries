@@ -190,9 +190,9 @@ fn exponential_backoff(base: u64, cap: u64, attempts: u32, rng: &mut impl Rng) -
     (delay + (delay as f64 * 0.25 * jitter(rng)) as u64).min(cap)
 }
 
-/// Whether `outcome` comes from the content of a private reply: "not in the table", a reply
-/// that failed to decode or verify, or facts that contradict the wallet. A dishonest service
-/// can aim these at chosen rows, so they share one schedule and count towards
+/// Whether `outcome` is about the content of a reply: "not in the table", a reply that failed
+/// to decode, or facts that contradict the wallet. A dishonest service can aim these at chosen
+/// rows, so they share one schedule, and those of private lookups count towards
 /// [`CONTENT_FAILURE_LIMIT`].
 fn is_content(outcome: TransparentDetailOutcome) -> bool {
     matches!(
@@ -259,8 +259,11 @@ fn outcome_class(code: i64) -> i64 {
 /// Does nothing when the transaction has no work row or is no longer mined at
 /// `looked_up_height`, so a late result never parks or backs off work for another placement.
 /// Consecutive failures of one outcome class at one placement lengthen the backoff; a new
-/// placement or class restarts it. Content failures at one placement are counted whatever
-/// came between them; a new placement resets the count. The caller provides the transaction.
+/// placement or class restarts it. Content failures of `private` lookups at one placement are
+/// counted whatever came between them; a new placement resets the count. Under public
+/// authority (`private` false) nothing is counted: the wallet has no privacy reason to give a
+/// lookup up. The caller provides the transaction.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn record_outcome(
     conn: &Connection,
     txid: &TxId,
@@ -268,6 +271,7 @@ pub(super) fn record_outcome(
     outcome: TransparentDetailOutcome,
     map_sha256: Option<[u8; 32]>,
     now: SystemTime,
+    private: bool,
     rng: &mut impl Rng,
 ) -> Result<(), SqliteClientError> {
     let row = conn
@@ -307,8 +311,8 @@ pub(super) fn record_outcome(
     } else {
         1
     };
-    let content_failures =
-        u32::from(is_content(outcome)) + if same_placement { content_failures } else { 0 };
+    let content_failures = u32::from(private && is_content(outcome))
+        + if same_placement { content_failures } else { 0 };
     let delay = i64_secs(backoff(outcome, attempts, rng));
     conn.execute(
         "UPDATE transparent_detail_work
@@ -331,6 +335,7 @@ pub(super) fn record_outcome(
 }
 
 /// Records a failed lookup; see `TransparentDetailWrite::defer_transparent_detail`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn defer(
     conn: &Connection,
     configured: Option<TransparentLedgerMode>,
@@ -342,10 +347,19 @@ pub(crate) fn defer(
     now: SystemTime,
     rng: &mut impl Rng,
 ) -> Result<(), SqliteClientError> {
-    resolve_mode(conn, configured)?;
     with_read_snapshot(conn, |conn| {
+        let private = !resolve_mode(conn, configured)?.retains_public_authority();
         check_transparent_policy_generation(conn, expected_generation)?;
-        record_outcome(conn, &txid, looked_up_height, outcome, map_sha256, now, rng)
+        record_outcome(
+            conn,
+            &txid,
+            looked_up_height,
+            outcome,
+            map_sha256,
+            now,
+            private,
+            rng,
+        )
     })
 }
 

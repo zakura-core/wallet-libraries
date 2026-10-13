@@ -384,7 +384,8 @@ checks for updates instead of repeating the same lookup continuously, and a
 check that fails counts too. Replies that fail on content (not in the table,
 malformed, or contradicting the wallet) share one schedule, and after the third
 at one mined height the lookup stops and the receipt reads as unavailable;
-refusals and outages do not count. Re-mining makes the lookup eligible again, and
+refusals, outages and failures of anything but the private reply itself (such
+as the display map) do not count, nor does anything under public authority. Re-mining makes the lookup eligible again, and
 old responses cannot overwrite newer state. Closing a receipt does not stop
 financial recovery.
 

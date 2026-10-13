@@ -107,8 +107,8 @@ pub(crate) fn store(
     now: SystemTime,
     rng: &mut impl Rng,
 ) -> Result<TransparentDisplayStore, SqliteClientError> {
-    resolve_mode(conn, configured)?;
     with_read_snapshot(conn, |conn| {
+        let private = !resolve_mode(conn, configured)?.retains_public_authority();
         check_transparent_policy_generation(conn, expected_generation)?;
         let row = conn
             .query_row(
@@ -152,6 +152,7 @@ pub(crate) fn store(
                 TransparentDetailOutcome::Contradiction,
                 Some(facts.provenance.map_sha256),
                 now,
+                private,
                 rng,
             )?;
             return Ok(TransparentDisplayStore::Contradiction(kind));

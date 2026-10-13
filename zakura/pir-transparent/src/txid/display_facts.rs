@@ -12,8 +12,8 @@ use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
 use crate::error::{RecoveryError, ensure_valid, failure};
 use transparent_txid_client::{
-    Address, AddressKind, DisplayEntry, OUTPUT_SLOTS, Placement, Provenance, Tag, TxidError,
-    TxidLookup,
+    Address, AddressKind, DisplayEntry, OUTPUT_SLOTS, Placement, ProtocolKind, Provenance, Tag,
+    TxidError, TxidLookup,
 };
 
 /// Decodes a display map digest as the client reports it (hex).
@@ -125,22 +125,38 @@ pub fn deferral(lookup: &Result<TxidLookup, TxidError>) -> Option<TransparentDet
                 retry_after: *retry_after,
             })
         }
-        // A refusal comes before the server evaluates the private query, so it says nothing
-        // about the row and is retried like any other unavailable service.
+        // Only a private reply that does not decode is about the row. Refusals, and everything
+        // else that fails validation (the init document, map, manifest, setup, a reply's
+        // framing or an unexpected status), the service chooses without knowing the row, so
+        // they are retried like any other unavailable service and do not count towards giving
+        // the row up.
+        Err(TxidError::Protocol(ProtocolKind::Decode)) => Some(TransparentDetailOutcome::Protocol),
         Err(
             TxidError::Stale
             | TxidError::Transport(_)
             | TxidError::Cancelled
-            | TxidError::Refused(_),
+            | TxidError::Refused(_)
+            | TxidError::Protocol(
+                ProtocolKind::Init
+                | ProtocolKind::Map
+                | ProtocolKind::MapCanonical
+                | ProtocolKind::MapHeader
+                | ProtocolKind::Manifest
+                | ProtocolKind::Profile
+                | ProtocolKind::Setup
+                | ProtocolKind::Binding
+                | ProtocolKind::Epoch
+                | ProtocolKind::Length
+                | ProtocolKind::Status(_),
+            ),
         ) => Some(TransparentDetailOutcome::Unavailable { retry_after: None }),
-        Err(TxidError::Protocol(_)) => Some(TransparentDetailOutcome::Protocol),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use transparent_txid_client::{EntryOutput, ProtocolKind, Tier};
+    use transparent_txid_client::{EntryOutput, Tier};
 
     const TXID: [u8; 32] = [9; 32];
 
@@ -335,6 +351,27 @@ mod tests {
             ),
         ] {
             assert_eq!(deferral(&lookup), expected, "{lookup:?}");
+        }
+        // Every other validation failure is the service's choice, made without the row.
+        for kind in [
+            ProtocolKind::Init,
+            ProtocolKind::Map,
+            ProtocolKind::MapCanonical,
+            ProtocolKind::MapHeader,
+            ProtocolKind::Manifest,
+            ProtocolKind::Profile,
+            ProtocolKind::Setup,
+            ProtocolKind::Binding,
+            ProtocolKind::Epoch,
+            ProtocolKind::Length,
+            ProtocolKind::Status(302),
+            ProtocolKind::Status(204),
+        ] {
+            assert_eq!(
+                deferral(&Err(TxidError::Protocol(kind))),
+                Some(O::Unavailable { retry_after: None }),
+                "{kind:?}"
+            );
         }
     }
 }

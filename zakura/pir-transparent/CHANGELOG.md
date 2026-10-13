@@ -11,10 +11,16 @@
 - The `testing` fake txid display publication and the txid end-to-end test use
   `txid-4k8` (4,096 rows, a 180,000-entry recent window), the geometry
   production serves.
-- `deferral` maps an HTTP refusal (`TxidError::Refused`) to `Unavailable`
-  instead of `Protocol`: the server refuses before it evaluates the private
-  query, so a refusal is not a content failure and does not count toward the
-  wallet's cap of three.
+- `deferral` maps an HTTP refusal (`TxidError::Refused`) and every
+  `TxidError::Protocol` kind except `ProtocolKind::Decode` (a bad init
+  document, map, map header, manifest, profile, setup, reply framing, epoch,
+  length or unexpected status) to `Unavailable` instead of `Protocol`: the
+  service chooses those without knowing the row, so they are not content
+  failures and do not count toward the wallet's cap of three.
+- `DetailRun::record` defers any public answer under a snapshot without public
+  transport as `Unavailable` (a public transaction was `Protocol`, a public
+  failure its own outcome): it comes from the caller racing a mode change, not
+  from a private reply.
 
 ## [0.0.1-rc0] - PLANNED
 

@@ -791,10 +791,17 @@ fn third_content_failure_gives_up() {
         now(),
     );
     assert_eq!(content_failures(&st, txid), 3);
-    for map in [None, Some(MAP_A), Some(MAP_B)] {
-        assert!(!listing_at(&st, far, map).contains(&txid));
-        assert_eq!(parked_under(&st, far, map, None).count, 0);
+    // Unlike parked work, neither a changed map nor the parked backstop brings it back.
+    let past_backstop = later(PARKED_BACKSTOP.as_secs() + DAY);
+    for at in [far, past_backstop] {
+        for map in [None, Some(MAP_A), Some(MAP_B)] {
+            assert!(!listing_at(&st, at, map).contains(&txid));
+        }
     }
+    // Nor does a later request failure, which leaves the count alone.
+    defer(&mut st, txid, unavailable(), now());
+    assert_eq!(content_failures(&st, txid), 3);
+    assert!(!listing_at(&st, past_backstop, None).contains(&txid));
     // The work remains, given up, and the receipt reads as unavailable.
     assert_eq!(reasons(&st, txid), Some(RECEIVE));
     assert_eq!(
@@ -816,6 +823,41 @@ fn third_content_failure_gives_up() {
     assert_eq!(content_failures(&st, txid), 1);
     assert_eq!(attempts(&st, txid), 1);
     assert!(listing_at(&st, far, None).contains(&txid));
+}
+
+/// Lookups under public authority never count towards giving up: the wallet could fetch the
+/// transaction publicly anyway, so it has no privacy reason to stop. Work given up under
+/// `PrivateRequired` is due again under public authority, on its usual schedule.
+#[test]
+fn public_lookups_do_not_count_towards_giving_up() {
+    let (mut st, _, unspent) = active_wallet();
+    let txid = txid_of(&unspent);
+    let far = later(30 * DAY);
+    for _ in 0..3 {
+        defer(&mut st, txid, TransparentDetailOutcome::Absent, now());
+    }
+    assert_eq!(content_failures(&st, txid), 3);
+    assert!(!listing_at(&st, far, None).contains(&txid));
+
+    set_policy(&mut st, Public);
+    assert!(listing_at(&st, far, None).contains(&txid));
+    // Absent keeps its schedule, an hour doubling to a day, without counting.
+    defer(&mut st, txid, TransparentDetailOutcome::Absent, now());
+    assert_eq!((attempts(&st, txid), content_failures(&st, txid)), (4, 3));
+    assert!(!listing_at(&st, later(8 * 3600 - 1), None).contains(&txid));
+    assert!(listing_at(&st, later(10 * 3600), None).contains(&txid));
+    let mut facts = facts_for(&unspent);
+    facts.coinbase = true;
+    assert!(matches!(
+        store(&mut st, facts),
+        TransparentDisplayStore::Contradiction(_)
+    ));
+    assert_eq!(content_failures(&st, txid), 3);
+    assert!(listing_at(&st, far, None).contains(&txid));
+
+    // Private again, it stays given up.
+    set_policy(&mut st, PrivateRequired);
+    assert!(!listing_at(&st, far, None).contains(&txid));
 }
 
 /// A contradiction is retried on the content schedule, like the other content outcomes, and

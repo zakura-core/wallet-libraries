@@ -27,9 +27,9 @@ pub(super) fn related_transaction_sql() -> String {
 }
 
 /// Rows of `transparent_detail_work w` the listing returns for transaction `t` once it is mined,
-/// before timing: without raw bytes, still related, not owned by public payload work, and not
-/// given up after [`CONTENT_FAILURE_LIMIT`] content failures unless mined at another height
-/// since.
+/// before timing: without raw bytes, still related, not owned by public payload work, and,
+/// without public authority, not given up after [`CONTENT_FAILURE_LIMIT`] content failures
+/// unless mined at another height since.
 ///
 /// Under public authority (`:public`), payload retrieval already fetches transactions queued
 /// in `tx_retrieval_queue`, and a privately protected Ironwood transaction (route 0) must not
@@ -37,7 +37,7 @@ pub(super) fn related_transaction_sql() -> String {
 pub(super) fn listable_work_sql() -> String {
     format!(
         "t.raw IS NULL AND {}
-         AND (w.content_failures < {CONTENT_FAILURE_LIMIT} OR {REARMED})
+         AND (:public OR w.content_failures < {CONTENT_FAILURE_LIMIT} OR {REARMED})
          AND NOT (:public AND (
              EXISTS (SELECT 1 FROM tx_retrieval_queue q
                      WHERE q.txid = t.txid AND q.query_type = :enhancement)
