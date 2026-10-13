@@ -140,9 +140,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     }
 
     /// Records how `request` ended. An accepted deadline only shortens the requested one,
-    /// and a repeat must keep the accepted deposit address and memo, which no other
-    /// operation in the account may hold. A request ends one way only: the other outcome
-    /// is refused afterwards. Either way the provider has the address (see
+    /// and is refused if it has already passed by the earlier of the request time and the
+    /// latest block time. A repeat must keep the accepted deposit address and memo, which
+    /// no other operation in the account may hold. A request ends one way only: the other
+    /// outcome is refused afterwards. Either way the provider has the address (see
     /// [`ProviderSeen`]).
     pub fn finish_receive_operation(
         &mut self,

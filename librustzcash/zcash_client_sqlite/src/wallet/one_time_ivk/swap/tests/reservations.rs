@@ -817,6 +817,34 @@ fn begin_needs_a_future_deadline_and_returns_a_fresh_request() {
     assert_eq!(start(&mut st, &first).unwrap().unwrap().address, "deposit");
 }
 
+/// An accepted deadline that has passed by the earlier of the request time and the latest
+/// block time is refused without changing the operation, but one only behind a fast
+/// device clock is kept, since the provider sets it by its own clock.
+#[test]
+fn finish_refuses_an_accepted_deadline_that_has_passed() {
+    let mut st = fixture();
+    let chain_time: i64 = value(
+        st.wallet().conn(),
+        "SELECT time FROM blocks ORDER BY height DESC LIMIT 1",
+        [],
+    );
+    // The device clock runs a day ahead of the chain.
+    let now = chain_time + 24 * 60 * 60;
+    let r = prepare(&mut st, NOW);
+    begin_at(&mut st, &r, "fast", now + 60, now)
+        .unwrap()
+        .unwrap();
+    let before = operation(&st, "fast");
+    for passed in [chain_time - 30 * 24 * 60 * 60, chain_time] {
+        let finished = finish(&mut st, "fast", &accepted("deposit", None, passed));
+        assert!(rejected_input(finished), "{passed}");
+        assert_eq!(operation(&st, "fast"), before);
+    }
+    let deadline = chain_time + 60 * 60;
+    finish(&mut st, "fast", &accepted("deposit", None, deadline)).unwrap();
+    assert_eq!(start(&mut st, "fast").unwrap().unwrap().deadline, deadline);
+}
+
 /// Refund issuance skips a refund address the provider's seen set holds, such as one an
 /// unfunded quote used before a restore, and registers it for a restore sweep, so a
 /// later reservation without a set does not issue it either.

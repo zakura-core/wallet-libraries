@@ -352,6 +352,19 @@ pub(in crate::wallet::one_time_ivk) fn finish(
             if deposit.address.is_empty() {
                 return Err(invalid("empty deposit address"));
             }
+            // The provider's clock sets this deadline, so it is checked against the earlier
+            // of the request time and the latest block time, which a fast device clock
+            // cannot move ahead (closing measures from the deadline the same way).
+            let expired: bool = conn.query_row(
+                "SELECT ?2 <= MIN(begun_at,
+                    IFNULL((SELECT time FROM blocks ORDER BY height DESC LIMIT 1), begun_at))
+                 FROM ironwood_one_time_operations WHERE id = ?1",
+                params![id, deposit.deadline],
+                |r| r.get(0),
+            )?;
+            if expired {
+                return Err(invalid("accepted deadline has passed"));
+            }
             // Statuses find operations by address and memo alone.
             let bound: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_operations o
