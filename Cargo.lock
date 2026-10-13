@@ -8141,6 +8141,7 @@ name = "zakura-one-time-ivk-scenarios"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "incrementalmerkletree",
  "receiver-directory",
  "receiver-pir",
  "receiver-pir-server",

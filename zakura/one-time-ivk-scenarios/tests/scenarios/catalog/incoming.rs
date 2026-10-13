@@ -326,6 +326,9 @@ fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
             };
             ctx.expect(b, "payout", &s.key, &payout, class, why);
             ctx.check_balance(b, ZEC);
+            if after == HOUR && fresh {
+                ctx.spend_one_time_notes(b);
+            }
         }),
     }
 }
@@ -467,6 +470,9 @@ fn provider_silent(after_deadline: i64) -> Scenario {
             };
             ctx.expect(a, "payout", &key, &payout, class, why);
             ctx.check_balance(a, ZEC);
+            if !within {
+                ctx.spend_one_time_notes(a);
+            }
         }),
     }
 }

@@ -856,8 +856,13 @@ impl Device {
     }
 
     /// Sends `value` to `to` as an ordinary payment, selecting notes as Vizor does for
-    /// ordinary sends (consolidating into spare input slots), and returns the transaction.
-    pub fn send_ordinary(&mut self, to: orchard::Address, value: u64) -> Transaction {
+    /// ordinary sends (consolidating into spare input slots), and returns the transaction,
+    /// or why the wallet could not build it.
+    pub fn send_ordinary(
+        &mut self,
+        to: orchard::Address,
+        value: u64,
+    ) -> Result<Transaction, String> {
         let to = Address::Unified(
             zcash_keys::address::UnifiedAddress::from_receivers(Some(to), None, None)
                 .expect("a unified address"),
@@ -893,7 +898,7 @@ impl Device {
             None,
             None,
         )
-        .expect("the payment proposal");
+        .map_err(|e| format!("no proposal: {e}"))?;
         let txids = create_proposed_transactions::<
             _,
             _,
@@ -911,11 +916,12 @@ impl Device {
             &proposal,
             None,
         )
-        .expect("the payment builds");
-        self.db
+        .map_err(|e| format!("the transaction does not build: {e}"))?;
+        Ok(self
+            .db
             .get_transaction(*txids.first())
             .expect("the stored transaction")
-            .expect("the wallet stored its transaction")
+            .expect("the wallet stored its transaction"))
     }
 
     /// Unspent value the wallet holds in notes one-time keys received, in zatoshis.

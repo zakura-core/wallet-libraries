@@ -252,6 +252,9 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
                 }
             }
             ctx.check_balance(b, swaps * VALUE);
+            if swaps == 10 {
+                ctx.spend_one_time_notes(b);
+            }
         }),
     }
 }
@@ -369,6 +372,7 @@ fn recheck_replay(age: i64, every: u32, parity: Parity) -> Scenario {
                 Class::FoundAfterRecheck,
                 "A later payment to a closed key that was already paid is found only by Check swap history.",
             );
+            ctx.spend_one_time_notes(a);
         }),
     }
 }

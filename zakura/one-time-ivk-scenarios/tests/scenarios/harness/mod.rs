@@ -6,7 +6,7 @@ pub mod device;
 pub mod directory;
 pub mod near;
 
-use orchard::keys::FullViewingKey;
+use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use zakura_one_time_ivk_scenarios::{Check, Class, Event, Metric, PaymentResult, zec};
 use zcash_client_sqlite::wallet::one_time_ivk::swap::ReservationPolicy;
 use zcash_protocol::consensus::BlockHeight;
@@ -14,6 +14,12 @@ use zcash_protocol::consensus::BlockHeight;
 use chain::{Chain, Mined, Payer, day_of};
 use device::{Device, IncomingSwap, RefundSwap, SyncReport};
 use near::Near;
+
+/// What each send of [`Ctx::spend_one_time_notes`] pays a stranger.
+const SPEND_PROBE: u64 = 10_000;
+/// Sends [`Ctx::spend_one_time_notes`] makes at most. Each should spend at least one
+/// one-time note, and no scenario applying it holds more than ten.
+const MAX_SPENDS: usize = 16;
 
 /// A wallet in a scenario.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -626,8 +632,90 @@ impl Ctx {
         );
     }
 
-    /// Payment observations, checks, metrics and the timeline.
-    pub fn finish(mut self) -> (Vec<Event>, Vec<PaymentResult>, Vec<Check>, Vec<Metric>) {
+    /// Settles every wallet and judges the balance checks registered so far, then spends
+    /// every one-time-key note `dev` holds through ordinary sends to a stranger, at most
+    /// [`MAX_SPENDS`] of them. Each send must be one consensus accepts
+    /// ([`Chain::accepts`]) before it is mined and `dev` syncs. Records one check: every
+    /// send was accepted, no one-time value is left, and the balance fell by exactly the
+    /// value sent plus fees.
+    pub fn spend_one_time_notes(&mut self, dev: Dev) {
+        self.settle();
+        self.judge_balances();
+        let name = self.name(dev);
+        let stranger = FullViewingKey::from(&SpendingKey::from_bytes([0xf5; 32]).expect("a key"))
+            .address_at(0u32, Scope::External);
+        let (value_before, balance_before) = {
+            let device = &self.devices[dev.0];
+            (device.unspent_one_time_value(), device.balance())
+        };
+        let mut paid = 0u64;
+        let mut sends = Vec::new();
+        let mut problem = None;
+        for _ in 0..MAX_SPENDS {
+            if self.devices[dev.0].unspent_one_time_value() == 0 {
+                break;
+            }
+            let tx = match self.devices[dev.0].send_ordinary(stranger, SPEND_PROBE) {
+                Ok(tx) => tx,
+                Err(why) => {
+                    problem = Some(format!("{name} cannot send: {why}"));
+                    break;
+                }
+            };
+            let fee = tx.fee_paid(|_| Ok::<_, zcash_protocol::value::BalanceError>(None));
+            let Some(fee) = fee.ok().flatten().map(|fee| fee.into_u64()) else {
+                problem = Some(format!("{} pays no readable fee", tx.txid()));
+                break;
+            };
+            let accepted = match self.chain.accepts(&tx) {
+                Ok(accepted) => accepted,
+                Err(why) => {
+                    problem = Some(format!("consensus would reject {}: {why}", tx.txid()));
+                    break;
+                }
+            };
+            let height = self.chain.mine_tx(&tx);
+            self.log(
+                &name,
+                format!(
+                    "sends {} to a stranger, fee {}: {} Ironwood actions verify, anchored at {}, mined at {}",
+                    zec(SPEND_PROBE),
+                    zec(fee),
+                    accepted.actions,
+                    u32::from(accepted.anchor_height),
+                    u32::from(height)
+                ),
+            );
+            paid += SPEND_PROBE + fee;
+            sends.push(u32::from(height));
+            self.sync(dev);
+        }
+        let device = &self.devices[dev.0];
+        let (value_after, balance_after) = (device.unspent_one_time_value(), device.balance());
+        let fell = balance_before.checked_sub(balance_after);
+        let ok = problem.is_none() && value_before > 0 && value_after == 0 && fell == Some(paid);
+        let mut detail = format!(
+            "{} sends mined at {sends:?}; one-time value {} before, {} after; balance {} before, {} after, sent plus fees {}",
+            sends.len(),
+            zec(value_before),
+            zec(value_after),
+            zec(balance_before),
+            zec(balance_after),
+            zec(paid)
+        );
+        if let Some(problem) = problem {
+            detail = format!("{problem}; {detail}");
+        }
+        self.check(
+            format!("every one-time note {name} found is spendable"),
+            ok,
+            detail,
+        );
+    }
+
+    /// Judges and clears the balance checks registered with [`Self::check_balance`] and
+    /// [`Self::check_same_balance`].
+    fn judge_balances(&mut self) {
         for (dev, expected) in std::mem::take(&mut self.final_balances) {
             let actual = self.devices[dev.0].balance();
             let name = self.name(dev);
@@ -646,6 +734,11 @@ impl Ctx {
                 format!("{na} {}, {nb} {}", zec(x), zec(y)),
             );
         }
+    }
+
+    /// Payment observations, checks, metrics and the timeline.
+    pub fn finish(mut self) -> (Vec<Event>, Vec<PaymentResult>, Vec<Check>, Vec<Metric>) {
+        self.judge_balances();
         let mut payments = Vec::new();
         for e in &self.expectations {
             let device = &self.devices[e.wallet.0];

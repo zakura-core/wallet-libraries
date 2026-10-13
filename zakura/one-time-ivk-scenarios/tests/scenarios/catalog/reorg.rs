@@ -114,6 +114,7 @@ fn payout_reorged_and_remined() -> Scenario {
             );
             ctx.check_balance(a, ZEC);
             ctx.check_same_balance(a, b);
+            ctx.spend_one_time_notes(a);
         }),
     }
 }
@@ -187,6 +188,7 @@ fn deep_reorg_after_close() -> Scenario {
                 "The wallet found it before the reorg; the rewind reopened the key, which finds it at its new height.",
             );
             ctx.check_balance(a, ZEC);
+            ctx.spend_one_time_notes(a);
         }),
     }
 }
@@ -324,6 +326,7 @@ fn restored_key_near_rewind() -> Scenario {
                 Class::FoundAfterRecheck,
                 "A later payment to a closed key that was already paid is found by Check swap history.",
             );
+            ctx.spend_one_time_notes(b);
         }),
     }
 }

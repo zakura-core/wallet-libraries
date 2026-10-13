@@ -2,20 +2,28 @@
 //! encryption, and a record of every payment the receiver directory could index.
 
 use std::{
-    collections::BTreeMap,
-    sync::{Arc, RwLock},
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex, PoisonError, RwLock},
     time::Duration,
 };
 
-use orchard::keys::{FullViewingKey, Scope, SpendingKey};
+use incrementalmerkletree::frontier::Frontier;
+use orchard::{
+    Anchor,
+    bundle::BatchValidator,
+    circuit::{OrchardCircuitVersion, VerifyingKey},
+    keys::{FullViewingKey, Scope, SpendingKey},
+    tree::MerkleHashOrchard,
+};
 use receiver_directory::{Payment, Receiver, Record};
+use transparent::{address::Script, sighash::TransparentAuthorizingContext};
 use zcash_client_backend::{
     data_api::{
         TransactionStatus,
         chain::{BlockSource, ChainState, error::Error as ChainError},
         testing::{
             AddressType, CacheInsertionResult, FakeCompactOutput, IronwoodFvk, TestBuilder,
-            TestCache, TestState,
+            TestCache, TestRng, TestState,
         },
     },
     proto::compact_formats::CompactBlock,
@@ -26,7 +34,11 @@ use zcash_client_sqlite::{
 };
 use zcash_primitives::{
     block::BlockHash,
-    transaction::{Transaction, TxId},
+    transaction::{
+        Authorization, Transaction, TransactionData, TxId,
+        sighash::{SignableInput, signature_hash},
+        txid::TxIdDigester,
+    },
 };
 use zcash_protocol::{
     consensus::{BlockHeight, BranchId},
@@ -183,6 +195,11 @@ impl Mined {
     }
 }
 
+/// `bytes` in lowercase hex, for diagnostics.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// The receiver bytes of `fvk`'s default external address.
 pub fn receiver_of(fvk: &FullViewingKey) -> [u8; 43] {
     fvk.address_at(0u32, Scope::External).to_raw_address_bytes()
@@ -221,6 +238,142 @@ pub struct Chain {
     /// Wallet-built transactions the chain mined, as raw bytes with their heights, for
     /// wallets that ask for them by txid.
     txs: BTreeMap<[u8; 32], (Vec<u8>, BlockHeight)>,
+    roots: Roots,
+}
+
+/// Blocks [`Chain::root_height`] searches first: wallets anchor at one of their last
+/// 100 tree checkpoints, which are blocks with shielded outputs.
+const RECENT_ROOTS: u32 = 2_000;
+
+/// Ironwood tree roots at block boundaries, computed from [`Chain::commitments`] on
+/// demand, since hashing every boundary of a long chain takes seconds.
+struct Roots {
+    /// The tree of the first `len` commitments.
+    frontier: Frontier<MerkleHashOrchard, 32>,
+    len: u64,
+    /// Roots computed so far, by tree size.
+    by_size: BTreeMap<u64, MerkleHashOrchard>,
+}
+
+impl Roots {
+    /// No roots computed yet.
+    fn new() -> Self {
+        Self {
+            frontier: Frontier::empty(),
+            len: 0,
+            by_size: BTreeMap::new(),
+        }
+    }
+
+    /// The root of the tree of the first `size` of `commitments`. Rebuilds the frontier
+    /// when `size` is below it, so callers ask in ascending order.
+    fn root(&mut self, commitments: &[[u8; 32]], size: u64) -> MerkleHashOrchard {
+        if let Some(root) = self.by_size.get(&size) {
+            return *root;
+        }
+        if size < self.len {
+            self.frontier = Frontier::empty();
+            self.len = 0;
+        }
+        for cmx in &commitments[usize::try_from(self.len).expect("fits")..] {
+            if self.len == size {
+                break;
+            }
+            let leaf = MerkleHashOrchard::from_bytes(cmx).expect("a canonical commitment");
+            assert!(self.frontier.append(leaf), "the tree has room");
+            self.len += 1;
+        }
+        assert_eq!(self.len, size, "the chain holds {size} commitments");
+        let root = self.frontier.root();
+        self.by_size.insert(size, root);
+        root
+    }
+
+    /// Forgets every root past `size`, as a rewind to that tree size does.
+    fn truncate(&mut self, size: u64) {
+        self.by_size.split_off(&(size + 1));
+        if self.len > size {
+            self.frontier = Frontier::empty();
+            self.len = 0;
+        }
+    }
+}
+
+/// What [`Chain::accepts`] found.
+pub struct Accepted {
+    /// The latest block whose final Ironwood tree root is the transaction's anchor.
+    pub anchor_height: BlockHeight,
+    /// Ironwood actions whose proofs and signatures verified.
+    pub actions: usize,
+}
+
+/// A transaction's authorization with its transparent inputs left out, which lets its
+/// shielded sighash be computed when it has none.
+struct ShieldedOnly;
+
+impl Authorization for ShieldedOnly {
+    type TransparentAuth = NoInputs;
+    type SaplingAuth = sapling::bundle::Authorized;
+    type OrchardAuth = orchard::bundle::Authorized;
+}
+
+/// A transparent bundle without inputs, so there is nothing for a sighash to commit to.
+#[derive(Debug)]
+struct NoInputs;
+
+impl transparent::bundle::Authorization for NoInputs {
+    type ScriptSig = ();
+}
+
+impl TransparentAuthorizingContext for NoInputs {
+    /// No inputs, so no amounts.
+    fn input_amounts(&self) -> Vec<Zatoshis> {
+        Vec::new()
+    }
+
+    /// No inputs, so no scripts.
+    fn input_scriptpubkeys(&self) -> Vec<Script> {
+        Vec::new()
+    }
+}
+
+/// The sighash `tx`'s spend authorizations and binding signatures sign, computed as the
+/// PCZT transaction extractor does, for a transaction without transparent inputs.
+fn shielded_sighash(tx: &Transaction) -> [u8; 32] {
+    let mut raw = Vec::new();
+    tx.write(&mut raw).expect("the transaction serializes");
+    let data = Transaction::read(&raw[..], tx.consensus_branch_id())
+        .expect("the transaction parses")
+        .into_data();
+    let data: TransactionData<ShieldedOnly> = data.map_bundles(
+        |t| {
+            t.map(|b| {
+                assert!(b.vin.is_empty(), "no transparent inputs");
+                transparent::bundle::Bundle {
+                    vin: Vec::new(),
+                    vout: b.vout,
+                    authorization: NoInputs,
+                }
+            })
+        },
+        |s| s,
+        |o| o,
+    );
+    let parts = data.digest(TxIdDigester);
+    *signature_hash(&data, &SignableInput::Shielded, &parts).as_ref()
+}
+
+/// The verifying key for `version`, built once per run, since building one takes
+/// seconds.
+fn verifying_key(version: OrchardCircuitVersion) -> &'static VerifyingKey {
+    static KEYS: Mutex<Vec<&'static VerifyingKey>> = Mutex::new(Vec::new());
+    let mut keys = KEYS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(key) = keys.iter().find(|k| k.circuit_version() == version) {
+        return key;
+    }
+    let key: &'static VerifyingKey = Box::leak(Box::new(VerifyingKey::build(version)));
+    keys.push(key);
+    key
 }
 
 impl Chain {
@@ -243,6 +396,7 @@ impl Chain {
                 &SpendingKey::from_bytes([7; 32]).expect("a valid spending key"),
             ),
             txs: BTreeMap::new(),
+            roots: Roots::new(),
         };
         chain.mine(1);
         chain
@@ -472,6 +626,7 @@ impl Chain {
         self.states.retain(|h, _| *h <= at);
         let size = usize::try_from(self.tree_size_at(to)).expect("fits");
         self.commitments.truncate(size);
+        self.roots.truncate(size as u64);
         self.mined.retain(|m| u32::from(m.height) <= at);
         self.txs.retain(|_, (_, height)| u32::from(*height) <= at);
         let state = self.states[&at].clone();
@@ -584,6 +739,93 @@ impl Chain {
         let branch = BranchId::for_height(&network(), *height);
         let tx = Transaction::read(&raw[..], branch).expect("the stored transaction parses");
         Some((tx, *height))
+    }
+
+    /// Checks that consensus would accept `tx`, a wallet-built transaction that spends
+    /// only Ironwood notes: its Ironwood anchor is the tree root at the end of some block
+    /// on this branch, it reveals no nullifier the chain already holds, and its proof,
+    /// spend authorizations and binding signature verify against its shielded sighash.
+    /// Returns why not otherwise.
+    pub fn accepts(&mut self, tx: &Transaction) -> Result<Accepted, String> {
+        if tx.sapling_bundle().is_some() || tx.orchard_bundle().is_some() {
+            return Err("it has Sapling or Orchard parts, which this check does not cover".into());
+        }
+        if tx.transparent_bundle().is_some_and(|b| !b.vin.is_empty()) {
+            return Err("it spends transparent inputs, which this check does not cover".into());
+        }
+        let bundle = tx.ironwood_bundle().ok_or("it has no Ironwood bundle")?;
+        let tip_size = self.tree_size_at(self.tip());
+        if tip_size != self.commitments.len() as u64 {
+            return Err(format!(
+                "the chain recorded {} commitments for a tree of {tip_size}",
+                self.commitments.len()
+            ));
+        }
+        let anchor_height = self.root_height(bundle.anchor()).ok_or_else(|| {
+            format!(
+                "its anchor {} is no block's Ironwood tree root",
+                hex(&bundle.anchor().to_bytes())
+            )
+        })?;
+        let spent = self.nullifiers();
+        let reused = bundle
+            .actions()
+            .iter()
+            .map(|action| action.nullifier().to_bytes())
+            .find(|nf| spent.contains(nf));
+        if let Some(nf) = reused {
+            return Err(format!(
+                "it reveals nullifier {}, already on chain",
+                hex(&nf)
+            ));
+        }
+        let sighash = shielded_sighash(tx);
+        let mut validator =
+            BatchValidator::new(verifying_key(bundle.bundle_version().circuit_version()));
+        validator
+            .add_bundle(bundle, sighash)
+            .map_err(|e| format!("the verifier refused its bundle: {e:?}"))?;
+        let seed = u64::from_le_bytes(tx.txid().as_ref()[..8].try_into().expect("8 bytes"));
+        if !validator.validate(TestRng::seed_from_u64(seed)) {
+            return Err("its proof or signatures do not verify".into());
+        }
+        Ok(Accepted {
+            anchor_height,
+            actions: bundle.actions().len(),
+        })
+    }
+
+    /// The latest block whose final Ironwood tree root is `anchor`, searching the last
+    /// [`RECENT_ROOTS`] blocks before the rest of the chain.
+    fn root_height(&mut self, anchor: &Anchor) -> Option<BlockHeight> {
+        let tip = u32::from(self.tip());
+        let first = *self.states.keys().next()?;
+        let recent = tip.saturating_sub(RECENT_ROOTS).max(first);
+        // Oldest first within each span, so the frontier mostly grows.
+        for span in [recent..=tip, first..=recent - 1] {
+            let mut found = None;
+            for height in span {
+                let size = self.tree_size_at(BlockHeight::from_u32(height));
+                if Anchor::from(self.roots.root(&self.commitments, size)) == *anchor {
+                    found = Some(BlockHeight::from_u32(height));
+                }
+            }
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+
+    /// Every Ironwood nullifier the chain's blocks reveal.
+    fn nullifiers(&self) -> BTreeSet<[u8; 32]> {
+        let blocks = self.st.cache().0.read().unwrap();
+        blocks
+            .values()
+            .flat_map(|block| &block.vtx)
+            .flat_map(|tx| &tx.ironwood_actions)
+            .map(|action| action.nullifier.as_slice().try_into().expect("32 bytes"))
+            .collect()
     }
 
     /// The cached compact block at `height`.

@@ -384,7 +384,10 @@ fn one_time_notes_spent_first() -> Scenario {
             let foreign =
                 FullViewingKey::from(&SpendingKey::from_bytes([0xf5; 32]).expect("a key"))
                     .address_at(0u32, Scope::External);
-            let tx = ctx.dev(a).send_ordinary(foreign, ZEC / 10);
+            let tx = ctx
+                .dev(a)
+                .send_ordinary(foreign, ZEC / 10)
+                .expect("the send builds");
             let height = ctx.chain.mine_tx(&tx);
             ctx.log(
                 "A",

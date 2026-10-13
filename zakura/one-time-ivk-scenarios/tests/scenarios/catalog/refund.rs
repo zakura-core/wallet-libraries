@@ -119,6 +119,9 @@ fn refund_once(delay: i64) -> Scenario {
             ctx.expect(f.a, "refund", &f.key, &refund, class, why);
             ctx.expect(b, "refund", &f.key, &refund, Class::FoundBySweep, RESTORE_MEMO);
             ctx.check_same_balance(f.a, b);
+            if delay == 30 * MINUTE {
+                ctx.spend_one_time_notes(f.a);
+            }
         }),
     }
 }
@@ -285,6 +288,9 @@ fn restore_before_refund(delay: i64) -> Scenario {
                 )
             };
             ctx.expect(b, "refund", &f.key, &refund, class, why);
+            if delay == 25 * HOUR {
+                ctx.spend_one_time_notes(b);
+            }
         }),
     }
 }

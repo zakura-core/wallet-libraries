@@ -18,7 +18,8 @@ serde_json.workspace = true
 
 [dev-dependencies]
 axum = "0.7"
-orchard.workspace = true
+incrementalmerkletree.workspace = true
+orchard = { workspace = true, features = ["circuit"] }
 receiver-directory = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.1" }
 receiver-pir = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.1", features = ["server"] }
 receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.1" }

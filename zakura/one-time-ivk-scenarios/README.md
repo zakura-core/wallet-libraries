@@ -70,6 +70,11 @@ Checks cover what is not a payment: balances after settling, address reuse, key
 states. Before a scenario is judged, every wallet keeps syncing until it is quiet, as
 Vizor's polling would, so a find that needs another sync still counts.
 
+Where finding a payment is not enough, a scenario then spends every one-time note the
+wallet holds through ordinary sends. Each send is checked as consensus would check it:
+its anchor is the Ironwood tree root at the end of some block, it reveals no nullifier
+already on chain, and its proofs and signatures verify.
+
 ## Layout
 
 - `src/`: the report model and its Markdown and HTML renderers.
