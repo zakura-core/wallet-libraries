@@ -923,7 +923,7 @@ impl Device {
         let conn = read_only(&self.path);
         conn.query_row(
             "SELECT COALESCE(SUM(n.value), 0) FROM ironwood_received_notes n
-             WHERE n.receiving_key_id IS NOT NULL
+             WHERE n.one_time_key_id IS NOT NULL
                AND NOT EXISTS (SELECT 1 FROM ironwood_received_note_spends s
                                JOIN transactions t ON t.id_tx = s.transaction_id
                                WHERE s.ironwood_received_note_id = n.id)",
@@ -953,7 +953,7 @@ impl Device {
         let mut stmt = conn
             .prepare(
                 "SELECT purpose, key_index, active_from, closed_at, used
-                 FROM ironwood_receiving_keys ORDER BY purpose, key_index",
+                 FROM ironwood_one_time_keys ORDER BY purpose, key_index",
             )
             .expect("a key query");
         stmt.query_map([], |row| {
