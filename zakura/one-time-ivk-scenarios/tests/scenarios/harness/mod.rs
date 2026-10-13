@@ -283,6 +283,24 @@ impl Ctx {
         self.devices[dev.0].begin_incoming(&self.chain, index, deadline_in)
     }
 
+    /// Restarts the app on `dev`: its wallet database closes and opens again.
+    pub fn restart(&mut self, dev: Dev) {
+        self.devices[dev.0].reopen();
+        let name = self.name(dev);
+        self.log(&name, "the app restarts and reopens its wallet database");
+    }
+
+    /// Starts `dev`'s accepted quote `request`, returning the deposit instructions the
+    /// store kept for it.
+    pub fn start_incoming(
+        &mut self,
+        dev: Dev,
+        request: &str,
+    ) -> Result<zcash_client_sqlite::wallet::one_time_ivk::swap::ReceiveDeposit, ReservationPolicy>
+    {
+        self.devices[dev.0].start_incoming(request)
+    }
+
     /// Records how `dev`'s quote request ended.
     pub fn finish_incoming(
         &mut self,

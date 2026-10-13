@@ -2,12 +2,18 @@
 //! an address NEAR was given is never issued for another swap, and neither is one that
 //! was paid.
 
-use zcash_client_sqlite::wallet::one_time_ivk::swap::{OperationOutcome, ReservationPolicy};
+use zakura_one_time_ivk::Purpose;
+use zakura_one_time_ivk_scenarios::Class;
+use zcash_client_sqlite::wallet::one_time_ivk::swap::{
+    OperationOutcome, RECEIVE_GAP_LIMIT, ReceiveDeposit, ReservationPolicy,
+};
 
 use super::{ISSUANCE, Scenario, span};
 use crate::harness::{
     Ctx, Dev,
-    chain::{DAY, HOUR, MINUTE, Payer, ZEC},
+    chain::{DAY, HOUR, MINUTE, Payer, ZEC, receiver_of},
+    device::IncomingSwap,
+    near::Role,
 };
 
 const SEED: [u8; 32] = [0x33; 32];
@@ -19,6 +25,12 @@ pub fn all() -> Vec<Scenario> {
         refund_indices_across_restore(),
         unknown_outcomes_hit_the_limit(),
     ];
+    for lag in [MINUTE, 6 * HOUR] {
+        scenarios.push(lost_answer_near_saw(lag));
+    }
+    for started in [false, true] {
+        scenarios.push(restart_resumes_request(started));
+    }
     for covered in [true, false] {
         scenarios.push(restore_never_reissues(covered));
     }
@@ -41,6 +53,26 @@ fn wallet(ctx: &mut Ctx, name: &str) -> Dev {
     let dev = ctx.device(name, SEED, birthday);
     ctx.sync(dev);
     dev
+}
+
+/// Reserves an address on `dev` and saves a quote request for it with a one-hour
+/// deadline, as the app does before the request leaves. Like the app, it answers `Gap`
+/// and `Coverage` by syncing and trying again, at most three times. Returns the index and
+/// the request, or the refusal.
+fn request_quote(ctx: &mut Ctx, dev: Dev) -> Result<(u64, String), ReservationPolicy> {
+    let mut attempt = 0;
+    loop {
+        let saved = ctx
+            .prepare_incoming(dev)
+            .and_then(|index| Ok((index, ctx.begin_incoming(dev, index, HOUR)?)));
+        match saved {
+            Err(ReservationPolicy::Gap | ReservationPolicy::Coverage) if attempt < 3 => {
+                attempt += 1;
+                ctx.sync(dev);
+            }
+            saved => return saved,
+        }
+    }
 }
 
 fn incoming_indices_advance() -> Scenario {
@@ -198,6 +230,237 @@ fn unknown_outcomes_hit_the_limit() -> Scenario {
                     "reserved {after:?}; reservations.rs: an address the provider was given without seeing it is reissued only when the gap rule leaves no fresh one"
                 ),
             );
+        }),
+    }
+}
+
+/// Saves quote requests on `dev` that never reach NEAR, a block apart, until issuance
+/// refuses one. Returns the indices issued and the refusal.
+fn requests_until_refused(ctx: &mut Ctx, dev: Dev) -> (Vec<u64>, ReservationPolicy) {
+    let mut issued = Vec::new();
+    loop {
+        match request_quote(ctx, dev) {
+            Ok((index, _)) => issued.push(index),
+            Err(policy) => return (issued, policy),
+        }
+        assert!(
+            issued.len() <= 2 * RECEIVE_GAP_LIMIT as usize,
+            "issuance never waits"
+        );
+        ctx.mine(1);
+        ctx.sync(dev);
+    }
+}
+
+/// Wallet A sends a quote request for I0 that reaches NEAR, but its answer is lost, and
+/// the app restarts. A then saves quote requests that never reach NEAR until issuance
+/// waits, and NEAR's feed, `lag` behind, catches up. After the deadlines and cooldown, A
+/// goes through the window again, reusing only addresses NEAR never received.
+fn lost_answer_near_saw(lag: i64) -> Scenario {
+    let behind = lag > HOUR;
+    Scenario {
+        id: format!("A4-lost-answer-near-saw-feed-{}-behind", span(lag)),
+        group: ISSUANCE,
+        title: format!(
+            "NEAR receives a quote request whose answer is lost, the app restarts, and later quotes fill the window; NEAR feed {} behind",
+            span(lag)
+        ),
+        summary: "A request whose answer was lost still gave NEAR the address. Once NEAR's seen \
+            set holds it, the address is never issued again. When later requests that never \
+            reached NEAR fill the 30-index window, issuance waits, then reuses only those, \
+            never the address NEAR saw."
+            .into(),
+        params: vec![
+            ("feed read lag".into(), span(lag)),
+            (
+                "later requests".into(),
+                "until issuance waits, twice".into(),
+            ),
+        ],
+        slow: false,
+        run: Box::new(move |ctx| {
+            ctx.near.read_lag = lag;
+            let a = wallet(ctx, "A");
+            let (index, _) = request_quote(ctx, a).expect("the request is saved");
+            let exposed = receiver_of(&ctx.get(a).key(Purpose::Receive, index));
+            ctx.near.give(exposed, ctx.chain.now(), Role::Payout);
+            ctx.log(
+                "A",
+                format!("NEAR receives the quote request for I{index}, but its answer is lost"),
+            );
+            ctx.restart(a);
+            ctx.mine(1);
+            ctx.sync(a);
+            let (issued, refused) = requests_until_refused(ctx, a);
+            ctx.log(
+                "A",
+                format!(
+                    "{} more quote requests, none reaching NEAR, then issuance refuses: {refused:?}",
+                    issued.len()
+                ),
+            );
+            ctx.check(
+                "issuance waits once the window holds no fresh address",
+                refused == ReservationPolicy::Limit,
+                format!("{refused:?} after issuing {issued:?}"),
+            );
+            ctx.wait(3 * HOUR);
+            ctx.sync(a);
+            if behind {
+                let waiting = ctx.prepare_incoming(a);
+                ctx.check(
+                    "issuance still waits while NEAR's feed has not read the requests",
+                    waiting == Err(ReservationPolicy::Limit),
+                    format!(
+                        "{waiting:?}; ProviderSeen: a quote outside the set's read, widened by SEEN_SLACK_SECONDS, counts as seen"
+                    ),
+                );
+                ctx.near.read_lag = MINUTE;
+                ctx.log("directory", "NEAR feed catches up: it trails by a minute");
+                ctx.mine(1);
+                ctx.sync(a);
+            }
+            let (again, refused_again) = requests_until_refused(ctx, a);
+            ctx.log(
+                "A",
+                format!(
+                    "after the deadlines and cooldown, {} more quote requests, then issuance refuses: {refused_again:?}",
+                    again.len()
+                ),
+            );
+            // NEAR's set holds I0, which moves the gap one past it; with the feed behind,
+            // the first pass filled only the 29 indices up to the old bound.
+            let expected = if behind { RECEIVE_GAP_LIMIT } else { 1 };
+            ctx.check(
+                format!("issuance resumes at I{expected}"),
+                again.first() == Some(&expected),
+                format!(
+                    "issued {again:?}; reservations.rs: an address the provider was given without seeing it is reissued only when the gap rule leaves no fresh one, and one the set holds moves the gap"
+                ),
+            );
+            let given: Vec<u64> = again
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    let receiver = receiver_of(&ctx.get(a).key(Purpose::Receive, i));
+                    ctx.near.was_given(&receiver)
+                })
+                .collect();
+            ctx.check(
+                "the second pass issues only addresses NEAR never received",
+                !again.is_empty() && given.is_empty(),
+                format!("issued {again:?}, NEAR received {given:?}"),
+            );
+            ctx.check(
+                format!("I{index}, which NEAR received, is never issued again"),
+                !issued.contains(&index) && !again.contains(&index),
+                format!("first pass {issued:?}, second pass {again:?}"),
+            );
+        }),
+    }
+}
+
+/// Wallet A's quote for I0 is accepted (and, when `started`, started), then the app
+/// restarts. A resumes the request by its identity, NEAR pays the receiver stored with
+/// it, and A credits that payment once.
+fn restart_resumes_request(started: bool) -> Scenario {
+    let stage = if started { "start" } else { "acceptance" };
+    Scenario {
+        id: format!("A11-restart-after-{stage}-resumes-the-request"),
+        group: ISSUANCE,
+        title: format!(
+            "The app restarts after a quote is {}, then resumes it by its request",
+            if started { "started" } else { "accepted" }
+        ),
+        summary: "A quote request's identity is saved before it leaves the device. After a \
+            restart the app resumes the request, shows the deposit instructions the store kept, \
+            and NEAR pays the address stored with the request. The wallet credits that payment \
+            once, and the next quote takes another address."
+            .into(),
+        params: vec![("restart after".into(), stage.into())],
+        slow: false,
+        run: Box::new(move |ctx| {
+            let a = wallet(ctx, "A");
+            let (index, request) = request_quote(ctx, a).expect("the request is saved");
+            let fvk = ctx.get(a).key(Purpose::Receive, index);
+            ctx.near
+                .give(receiver_of(&fvk), ctx.chain.now(), Role::Payout);
+            let deposit = ReceiveDeposit {
+                address: ctx.near.deposit_address(),
+                memo: None,
+                deadline: ctx.chain.now() + HOUR,
+            };
+            ctx.finish_incoming(a, &request, &OperationOutcome::Accepted(deposit.clone()));
+            ctx.log(
+                "A",
+                format!(
+                    "NEAR accepts the quote for I{index}: deposit to {}",
+                    deposit.address
+                ),
+            );
+            if started {
+                let shown = ctx.start_incoming(a, &request);
+                ctx.check(
+                    "the quote starts",
+                    shown.as_ref() == Ok(&deposit),
+                    format!("{shown:?}"),
+                );
+            }
+            ctx.restart(a);
+            ctx.mine(1);
+            ctx.sync(a);
+            let resumed = ctx.start_incoming(a, &request);
+            ctx.log("A", format!("resumes request {request}: {resumed:?}"));
+            ctx.check(
+                "the resumed request shows NEAR's deposit instructions",
+                resumed.as_ref() == Ok(&deposit),
+                format!("{resumed:?}"),
+            );
+            let stored = ctx.get(a).request_receiver(&request);
+            ctx.check(
+                format!("the request's stored receiver is I{index}, the address NEAR was given"),
+                stored == Some((index, receiver_of(&fvk))),
+                format!("stored {:?}", stored.map(|(i, _)| i)),
+            );
+            let (stored_index, stored_receiver) = stored.expect("the request is stored");
+            let payee = ctx.get(a).key(Purpose::Receive, stored_index);
+            assert_eq!(
+                receiver_of(&payee),
+                stored_receiver,
+                "the payee is the stored receiver"
+            );
+            let next = ctx.quote_incoming(a, HOUR).expect("another quote issues");
+            ctx.check(
+                "the next quote takes another address",
+                next.index != stored_index,
+                format!("resumed I{stored_index}, next {}", next.label()),
+            );
+            ctx.wait(20 * MINUTE);
+            let key = format!("I{stored_index}");
+            let payout = ctx.pay("payout", &key, &payee, ZEC, Payer::Near);
+            let swap = IncomingSwap {
+                index: stored_index,
+                fvk: payee,
+                deposit,
+            };
+            ctx.observe_incoming(a, &swap, "SUCCESS", Some(ZEC));
+            ctx.mine(12);
+            ctx.sync(a);
+            let receipts = ctx.get(a).incoming_receipts(stored_index);
+            ctx.check(
+                format!("A credits one payment to {key}"),
+                receipts == 1,
+                format!("{receipts} receipts"),
+            );
+            ctx.expect(
+                a,
+                "payout",
+                &key,
+                &payout,
+                Class::FoundLive,
+                "The resumed reservation keeps its key open until its swap settles.",
+            );
+            ctx.check_balance(a, ZEC);
         }),
     }
 }

@@ -42,6 +42,11 @@ impl Near {
         self.given.push((receiver, at, role));
     }
 
+    /// Whether NEAR was ever given `receiver`, whatever its feed has read.
+    pub fn was_given(&self, receiver: &[u8; 43]) -> bool {
+        self.given.iter().any(|(r, _, _)| r == receiver)
+    }
+
     /// A fresh deposit address on the source chain, for an incoming quote.
     pub fn deposit_address(&mut self) -> String {
         self.deposits += 1;

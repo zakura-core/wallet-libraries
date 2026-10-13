@@ -185,6 +185,10 @@ pub struct Device {
     pub fvk: FullViewingKey,
     usk: UnifiedSpendingKey,
     skew: i64,
+    /// The device's clock, which follows the chain; a restart reopens with it.
+    clock: FixedClock,
+    /// Times the app restarted, which seeds each reopened database's randomness.
+    restarts: u64,
     found: BTreeMap<([u8; 32], u32), Found>,
     phase: Phase,
     pub syncs: u32,
@@ -216,18 +220,9 @@ impl Device {
     ) -> Self {
         let file = NamedTempFile::new().expect("a temporary wallet file");
         let path = file.path().to_path_buf();
-        let mut db = WalletDb::for_path(
-            &path,
-            network(),
-            chain.clock(skew),
-            TestRng::seed_from_u64(7),
-        )
-        .expect("the wallet opens");
+        let clock = chain.clock(skew);
+        let mut db = open(&path, &clock, 0);
         init_wallet_db(&mut db, Some(SecretVec::new(seed.to_vec()))).expect("the schema migrates");
-        // Payload retrieval over the public path: the simulator serves raw transactions.
-        db.set_enhancement_mode(EnhancementMode::Standard);
-        db.set_transparent_ledger_mode(TransparentLedgerMode::Public);
-        db.set_status_mode(TransactionStatusMode::Public);
         let birthday = AccountBirthday::from_parts(chain.state_below(birthday), None);
         let (account, usk) = db
             .create_account(name, &SecretVec::new(seed.to_vec()), &birthday, None)
@@ -241,6 +236,8 @@ impl Device {
             fvk: FullViewingKey::from(usk.orchard()),
             usk,
             skew,
+            clock,
+            restarts: 0,
             found: BTreeMap::new(),
             phase: Phase::Scan,
             syncs: 0,
@@ -253,6 +250,15 @@ impl Device {
             bytes_received: 0,
             reach: Reach::default(),
         }
+    }
+
+    /// Restarts the app, as after a crash: closes the wallet database and opens it again,
+    /// as Vizor does at launch. Only what the database stored survives.
+    pub fn reopen(&mut self) {
+        self.restarts += 1;
+        let mut db = open(&self.path, &self.clock, self.restarts);
+        init_wallet_db(&mut db, None).expect("the schema is current");
+        self.db = db;
     }
 
     /// The device's Unix time.
@@ -593,6 +599,47 @@ impl Device {
             .expect("the outcome records");
     }
 
+    /// Starts the accepted quote `request`, returning the deposit instructions the store
+    /// kept for it.
+    pub fn start_incoming(&mut self, request: &str) -> Result<ReceiveDeposit, ReservationPolicy> {
+        self.db
+            .start_receive_operation(self.account, request)
+            .expect("the operation starts")
+    }
+
+    /// The incoming index and receiver of the key the quote `request` was begun on, as
+    /// the wallet stored them.
+    pub fn request_receiver(&self, request: &str) -> Option<(u64, [u8; 43])> {
+        let conn = read_only(&self.path);
+        conn.query_row(
+            "SELECT k.key_index, k.receiver FROM ironwood_one_time_operations o
+             JOIN ironwood_one_time_keys k ON k.id = o.one_time_key_id
+             WHERE o.request = ?1 AND k.purpose = 1",
+            [request],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .ok()
+        .map(|(index, receiver)| {
+            (
+                u64::from_be_bytes(index.try_into().expect("8-byte index")),
+                receiver.try_into().expect("43-byte receiver"),
+            )
+        })
+    }
+
+    /// Notes the wallet holds from incoming key `index`, spent or not.
+    pub fn incoming_receipts(&self, index: u64) -> usize {
+        let conn = read_only(&self.path);
+        conn.query_row(
+            "SELECT COUNT(*) FROM ironwood_received_notes n
+             JOIN ironwood_one_time_keys k ON k.id = n.one_time_key_id
+             WHERE k.purpose = 1 AND k.key_index = ?1",
+            [index.to_be_bytes()],
+            |row| row.get(0),
+        )
+        .expect("a receipt count")
+    }
+
     /// Quotes an X-to-ZEC swap: reserves an incoming address, saves the request before
     /// it leaves, records NEAR's acceptance and starts it.
     pub fn quote_incoming(
@@ -613,9 +660,7 @@ impl Device {
             deadline: chain.now() + deadline_in,
         };
         self.finish_incoming(&request, &OperationOutcome::Accepted(deposit.clone()));
-        self.db
-            .start_receive_operation(self.account, &request)
-            .expect("the operation starts")?;
+        self.start_incoming(&request)?;
         Ok(IncomingSwap {
             index,
             fvk,
@@ -1054,6 +1099,22 @@ fn checkpoints(path: &Path) -> String {
         },
     )
     .unwrap_or_else(|e| format!("checkpoints unreadable: {e}"))
+}
+
+/// Opens the wallet file at `path` with randomness seeded from `seed`, serving payloads
+/// over the public path, since the simulator serves raw transactions.
+fn open(path: &Path, clock: &FixedClock, seed: u64) -> Wallet {
+    let mut db = WalletDb::for_path(
+        path,
+        network(),
+        clock.clone(),
+        TestRng::seed_from_u64(7 + seed),
+    )
+    .expect("the wallet opens");
+    db.set_enhancement_mode(EnhancementMode::Standard);
+    db.set_transparent_ledger_mode(TransparentLedgerMode::Public);
+    db.set_status_mode(TransactionStatusMode::Public);
+    db
 }
 
 /// A read-only connection to a wallet file.
