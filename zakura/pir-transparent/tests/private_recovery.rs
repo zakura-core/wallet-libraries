@@ -28,10 +28,10 @@ use transparent_events::{ReceiveEvent, SpendEvent, TransparentEvent, Txid};
 use transparent_filter::{Recut, ScriptBytes, SealParameters, ShardMap};
 use transparent_wallet::http::{HttpOptions, HttpShardTransport};
 use zakura_pir_transparent::{
-    ApplyAction, ApplyError, BatchState, Companion, CompanionDir, ForgetError, HoldCause,
-    Interrupted, Outcome, PassError, PassLimits, PassPlan, PassReport, Progress, RecoveryBatch,
-    Retry, ShardTransport, Step, TransparentHistoryRecoveryConfig, Trust, Ungated, WalletChain,
-    WithdrawnCause, WriteGate, forget_private_recovery,
+    ApplyAction, ApplyError, BatchState, Companion, CompanionDir, FailedEntries, ForgetError,
+    HoldCause, Interrupted, Outcome, PassError, PassLimits, PassPlan, PassReport, Progress,
+    RecoveryBatch, Retry, ShardTransport, Step, TransparentHistoryRecoveryConfig, Trust, Ungated,
+    WalletChain, WithdrawnCause, WriteGate, forget_private_recovery,
 };
 use zcash_client_backend::data_api::{
     Account as _, CoinbaseFilter, InputSource as _, WalletRead as _,
@@ -1426,6 +1426,161 @@ fn restore_needs_one_sync_per_window_step() {
             .receives
             .len();
     assert_eq!(received, 4);
+}
+
+/// A publication paying A0 in S1 and A1 in S2, both above the birthday at `H0 + 250`,
+/// through `t1`. With `malformed`, S1 publishes A0's directory entry malformed. A0's
+/// one receive is inline in its entry, so an honest S1 sends no page query for it.
+fn failing_entry(
+    a0: TransparentAddress,
+    a1: TransparentAddress,
+    t1: u64,
+    malformed: bool,
+) -> Vec<ShardSpec> {
+    let mut s1 = noise(H0 + 200, H0 + 399, 1);
+    s1.push((script(a0), receive(H0 + 300, txid(1), 0, 10_000)));
+    let mut s2 = noise(H0 + 400, H0 + 599, 2);
+    s2.push((script(a1), receive(H0 + 450, txid(2), 0, 20_000)));
+    let mut shards = vec![
+        sealed(H0, H0 + 199, noise(H0, H0 + 199, 0)),
+        sealed(H0 + 200, H0 + 399, s1),
+        sealed(H0 + 400, H0 + 599, s2),
+        tail(t1, 0, noise(H0 + 600, t1, 3)),
+    ];
+    if malformed {
+        shards[1].malformed_entries = vec![script(a0)];
+    }
+    shards
+}
+
+/// The receives the wallet holds as candidate recovery, by txid.
+fn candidate_receives(f: &Fixture) -> BTreeSet<[u8; 32]> {
+    f.st.wallet()
+        .db()
+        .transparent_candidate_recovery(f.account)
+        .unwrap()
+        .receives
+        .iter()
+        .map(|event| *event.outpoint.hash())
+        .collect()
+}
+
+/// Directory queries the service received for shard `shard_id` from `from` on.
+fn directory_queries(f: &Fixture, shard_id: u64, from: usize) -> usize {
+    let route = Regex::new(&format!(
+        "^/v2/shards/{shard_id}/revisions/[0-9a-f]{{64}}/query/directory$"
+    ))
+    .unwrap();
+    f.server.requests()[from..]
+        .iter()
+        .filter(|request| route.is_match(&request.path))
+        .count()
+}
+
+/// A service that publishes A0's directory entry malformed fails that one entry, not
+/// the sync: every other shard settles, A1's receive among them, but A0 stays
+/// uncovered over S1, so the account cannot be activated. Each sync asks the entry
+/// once more, never twice in one sync, and the third failure holds the account. The
+/// entry is not queried again.
+#[test]
+fn a_malformed_entry_fails_alone_and_its_third_failure_holds_the_account() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let t1 = H0 + 649;
+    let mut f = Fixture::new(H0 + 250, t1);
+    let (a0, a1) = (
+        f.derived(TransparentKeyScope::EXTERNAL, 0),
+        f.derived(TransparentKeyScope::EXTERNAL, 1),
+    );
+    f.publish(&failing_entry(a0, a1, t1, true), SEAL);
+
+    for sync in 1..=3usize {
+        let seen = f.server.requests().len();
+        let pass = f.drive();
+        assert_eq!(directory_queries(&f, 1, seen), 2, "sync {sync}");
+        assert_eq!(pass.report.state, BatchState::Ready, "sync {sync}");
+        assert_eq!(
+            pass.report.progress.outcome,
+            Outcome::Stalled,
+            "sync {sync}"
+        );
+        assert!(pass.report.progress.covered_through < t1, "sync {sync}");
+        let held = usize::from(sync == 3);
+        assert_eq!(
+            pass.report.failed_entries,
+            FailedEntries { entries: 1, held },
+            "sync {sync}"
+        );
+        assert_eq!(pass.report.retry(), Retry::Stalled, "sync {sync}");
+        let expected = if sync < 3 {
+            Step::Done(Some(Retry::Stalled))
+        } else {
+            Step::Hold(HoldCause::FailedEntries)
+        };
+        assert_eq!(pass.step, expected, "sync {sync}");
+
+        // The other shards settled: A1's receive in S2 is the wallet's, A0's is not.
+        assert_eq!(
+            candidate_receives(&f),
+            BTreeSet::from([txid(2).0]),
+            "sync {sync}"
+        );
+        assert!(
+            f.st.wallet_mut()
+                .db_mut()
+                .activate_transparent_ledger(f.account)
+                .is_err(),
+            "sync {sync}"
+        );
+    }
+
+    // A caller that passed the held account anyway: the entry is no longer queried.
+    let seen = f.server.requests().len();
+    let pass = f.drive();
+    assert_eq!(directory_queries(&f, 1, seen), 0);
+    assert_eq!(
+        pass.report.failed_entries,
+        FailedEntries {
+            entries: 1,
+            held: 1
+        }
+    );
+    assert_eq!(pass.step, Step::Hold(HoldCause::FailedEntries));
+    f.assert_private(&[0]);
+}
+
+/// A service that publishes the wallet's directory entry malformed learns nothing
+/// from the sync it answers when the honest entry is inline: the wallet sends the
+/// same requests as it does to the honest service.
+#[test]
+fn a_malformed_entry_sends_what_an_inline_one_does() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let t1 = H0 + 649;
+    let sync = |malformed: bool| {
+        let mut f = Fixture::new(H0 + 250, t1);
+        let (a0, a1) = (
+            f.derived(TransparentKeyScope::EXTERNAL, 0),
+            f.derived(TransparentKeyScope::EXTERNAL, 1),
+        );
+        f.publish(&failing_entry(a0, a1, t1, malformed), SEAL);
+        let seen = f.server.requests().len();
+        let pass = f.drive();
+        (pass, transcript(&f, seen))
+    };
+    let (corrupt, corrupt_requests) = sync(true);
+    let (honest, honest_requests) = sync(false);
+
+    assert_eq!(honest.step, Step::Done(Some(Retry::Complete)));
+    assert_eq!(honest.report.failed_entries, FailedEntries::default());
+    assert_eq!(corrupt.step, Step::Done(Some(Retry::Stalled)));
+    assert_eq!(corrupt.report.failed_entries.entries, 1);
+    let pages = Regex::new(PAGES_QUERY).unwrap();
+    assert!(
+        !honest_requests
+            .iter()
+            .any(|(_, path, _, _)| pages.is_match(path))
+    );
+    assert!(!honest_requests.is_empty());
+    assert_eq!(corrupt_requests, honest_requests);
 }
 
 /// Through a real pass: a caller that is stopping is not retried after a publication change,

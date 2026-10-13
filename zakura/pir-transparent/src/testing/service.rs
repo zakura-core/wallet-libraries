@@ -32,11 +32,11 @@ use transparent_shard::build::{Block, build_directory_shard, candidate_rows};
 use transparent_shard::layout::{
     DECOUPLED_2K_8K, DECOUPLED_32K_32K, Geometry, MAX_PAGE_CHILDREN, split_row,
 };
-use transparent_shard::records::decode_directory_row;
 use transparent_shard::manifest::{
     ManifestLayout, ManifestOccupancy, ManifestSeal, SCHEMA, ShardManifest, TableGeometry,
     pages_table,
 };
+use transparent_shard::records::decode_directory_row;
 use transparent_shard_server::service::{ServiceConfig, ServiceState, router};
 use transparent_shard_server::shardset::{DEFAULT_RETAIN_REVISIONS, ShardSet};
 
@@ -170,7 +170,12 @@ pub fn publish(
             spec.sealed,
         )
         .expect("a buildable shard");
-        malform(&mut built.directory, shard_id, geometry, &spec.malformed_entries);
+        malform(
+            &mut built.directory,
+            shard_id,
+            geometry,
+            &spec.malformed_entries,
+        );
         let page_children: Vec<_> = children
             .iter()
             .map(|child| child.describe(geometry))

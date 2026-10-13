@@ -406,7 +406,11 @@ fn failed_entries_end_the_sync_stalled() {
             let pass = failing(state, outcome, 2, 0);
             assert_eq!(pass.retry(), Retry::Stalled, "{state:?} {outcome:?}");
             let step = plan.next(&pass, &settled, watch(1, false));
-            assert_eq!(step, Step::Done(Some(Retry::Stalled)), "{state:?} {outcome:?}");
+            assert_eq!(
+                step,
+                Step::Done(Some(Retry::Stalled)),
+                "{state:?} {outcome:?}"
+            );
         }
     }
 }
@@ -424,7 +428,11 @@ fn an_entry_at_the_cap_holds_the_account() {
         for outcome in OUTCOMES {
             let mut plan = new_plan();
             let step = plan.next(&failing(state, outcome, 2, 1), &settled, watch(2, false));
-            assert_eq!(step, Step::Hold(HoldCause::FailedEntries), "{state:?} {outcome:?}");
+            assert_eq!(
+                step,
+                Step::Hold(HoldCause::FailedEntries),
+                "{state:?} {outcome:?}"
+            );
         }
     }
     // A withdrawn pass keeps its own cause, and a failed settlement its own step.
@@ -439,8 +447,14 @@ fn an_entry_at_the_cap_holds_the_account() {
     }
     let mut plan = new_plan();
     let held = failing(BatchState::Ready, Outcome::Stalled, 1, 1);
-    assert_eq!(plan.next(&held, &failed(stale()), watch(1, false)), Step::Refresh);
+    assert_eq!(
+        plan.next(&held, &failed(stale()), watch(1, false)),
+        Step::Refresh
+    );
     // With no target there is nothing to hold.
     let mut plan = new_plan();
-    assert_eq!(plan.next(&held, &applied(false), watch(1, true)), Step::Done(None));
+    assert_eq!(
+        plan.next(&held, &applied(false), watch(1, true)),
+        Step::Done(None)
+    );
 }

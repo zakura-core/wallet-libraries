@@ -215,11 +215,25 @@ can be pending rather than contradictory.
 | `Behind` | Publication ends below the target; coverage may reach its end; retry after a delay |
 | `More` | A work budget stopped retrieval; resume from saved continuation |
 | `Overloaded` | Capacity refusals exhausted the retry budget; retry after a delay |
-| `Stalled` | Unknown chain blocks, unresolved spends, or bounded discovery prevent progress; new information is needed |
+| `Stalled` | Unknown chain blocks, unresolved spends, bounded discovery, or directory entries whose private replies failed on content prevent progress; new information is needed |
 
 Prefer `RecoveryBatch::retry()` (or `PassReport::retry()`) to
 `Progress::retry()`: it also treats any withdrawn batch as stalled, even when
-retrieval reports complete. Read a fresh watch set when applying commits grows
+retrieval reports complete, and any batch with failed entries as stalled,
+whatever else stopped its pass.
+
+A private reply that fails to decode or verify, or a record that contradicts
+the companion, fails one directory entry (one watched script in one shard),
+not the pass. The reference client finishes every other planned query in the
+same order and commits everything else, and the batch settles it.
+`RecoveryBatch::failed_entries()` and `PassReport::failed_entries` count the
+failed entries (`FailedEntries`), naming no script. The entry's script stays
+uncovered over its shard, so the account cannot be activated. The companion
+counts content failures per entry and never resets them, not even when a
+publication change resets its store; at three the entry is no longer queried,
+and only a new companion asks it again. A content failure the client cannot
+lay at one entry settles what the sync committed before it, as `Stalled`.
+Request failures (refusals, overload, a stale revision) do not count. Read a fresh watch set when applying commits grows
 an address window. `PassPlan::next` turns both into the next step.
 
 ## Execution modes
@@ -305,6 +319,7 @@ After each pass, `next` applies the first row that matches, in this order:
 | `ApplyAction::Fail` | `Fail`: report the `ApplyFailure` |
 | A ready batch nobody settled | `Skip` |
 | The fresh watch set has no target | `Done(None)`; the pass counts |
+| A directory entry at three content failures (`FailedEntries::held`) | `Hold(HoldCause::FailedEntries)`: everything else the pass read is settled, but the entry is no longer queried, so the account cannot be covered |
 | Any retry, including `Retry::After(wait)` | `Done(Some(retry))`; schedule the next sync after any reported delay |
 
 A counted pass is the sync's only one: `next` never returns `Pass`, so no reply
@@ -315,6 +330,9 @@ may already have read private replies and grown the address window before it
 reported either condition. `Retry::After` gives the caller the delay before
 scheduling the next sync, which reads the fresh watch set and resumes from the
 companion. A restore therefore takes one sync per step of the address window.
+A pass with failed entries is `Retry::Stalled` even when its publication lags
+or the service refused for capacity, so a failed entry is asked again only at
+the next sync.
 
 A `PassError` never reaches the plan. `Outage` ends the run: the service failed
 every account alike. `Invalid`, `Failure` and `PublicationChanged` end the

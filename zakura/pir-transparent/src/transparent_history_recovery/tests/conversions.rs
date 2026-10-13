@@ -28,7 +28,10 @@ fn report_outcomes_map_to_progress() {
             incomplete(IncompleteReason::DiscoveryUnbounded),
             Outcome::Stalled,
         ),
-        (incomplete(IncompleteReason::ContentFailed), Outcome::Stalled),
+        (
+            incomplete(IncompleteReason::ContentFailed),
+            Outcome::Stalled,
+        ),
     ] {
         let mut report = report(completion);
         report.covered_through = 77;
