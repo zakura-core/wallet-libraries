@@ -663,11 +663,16 @@ impl Device {
             .expect("the outcome records");
     }
 
-    /// Starts the accepted quote `request`, returning the deposit instructions the store
-    /// kept for it.
-    pub fn start_incoming(&mut self, request: &str) -> Result<ReceiveDeposit, ReservationPolicy> {
+    /// Starts the accepted quote `request` at the device's own clock, returning the
+    /// deposit instructions the store kept for it.
+    pub fn start_incoming(
+        &mut self,
+        chain: &Chain,
+        request: &str,
+    ) -> Result<ReceiveDeposit, ReservationPolicy> {
+        let now = self.now(chain);
         self.db
-            .start_receive_operation(self.account, request)
+            .start_receive_operation(self.account, request, now)
             .expect("the operation starts")
     }
 
@@ -779,7 +784,7 @@ impl Device {
             deadline: chain.now() + deadline_in,
         };
         self.finish_incoming(&request, &OperationOutcome::Accepted(deposit.clone()));
-        self.start_incoming(&request)?;
+        self.start_incoming(chain, &request)?;
         Ok(IncomingSwap {
             index,
             fvk,

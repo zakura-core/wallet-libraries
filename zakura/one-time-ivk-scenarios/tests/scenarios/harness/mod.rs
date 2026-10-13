@@ -309,7 +309,7 @@ impl Ctx {
         request: &str,
     ) -> Result<zcash_client_sqlite::wallet::one_time_ivk::swap::ReceiveDeposit, ReservationPolicy>
     {
-        self.devices[dev.0].start_incoming(request)
+        self.devices[dev.0].start_incoming(&self.chain, request)
     }
 
     /// Records how `dev`'s quote request ended.
