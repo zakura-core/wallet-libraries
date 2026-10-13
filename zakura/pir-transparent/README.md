@@ -220,11 +220,13 @@ can be pending rather than contradictory.
 Prefer `RecoveryBatch::retry()` (or `PassReport::retry()`) to
 `Progress::retry()`: it also treats any withdrawn batch as stalled, even when
 retrieval reports complete, and any batch with failed entries as stalled,
-whatever else stopped its pass.
+whatever else stopped its pass. Read a fresh watch set when applying commits
+grows an address window. `PassPlan::next` turns both into the next step.
 
-A private reply that fails to decode or verify, or a record that contradicts
-the companion, fails one directory entry (one watched script in one shard),
-not the pass. The reference client finishes every other planned query in the
+A private row whose content fails to decode or check out (a directory entry or
+page fragment that is malformed, missing, held twice or out of place, or a run
+link the shard cannot follow), or a record that contradicts the companion,
+fails one directory entry (one watched script in one shard), not the pass. The reference client finishes every other planned query in the
 same order and commits everything else, and the batch settles it.
 `RecoveryBatch::failed_entries()` and `PassReport::failed_entries` count the
 failed entries (`FailedEntries`), naming no script. The entry's script stays
@@ -233,8 +235,9 @@ counts content failures per entry and never resets them, not even when a
 publication change resets its store; at three the entry is no longer queried,
 and only a new companion asks it again. A content failure the client cannot
 lay at one entry settles what the sync committed before it, as `Stalled`.
-Request failures (refusals, overload, a stale revision) do not count. Read a fresh watch set when applying commits grows
-an address window. `PassPlan::next` turns both into the next step.
+Request failures do not count: refusals, overload, a stale revision, and a
+reply whose length, revision binding or parameter epoch does not verify, which
+fails its request and the pass (`PassError::Failure`) as before.
 
 ## Execution modes
 

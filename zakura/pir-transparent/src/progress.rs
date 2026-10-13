@@ -24,9 +24,10 @@ pub enum Outcome {
 }
 
 /// Directory entries (one watched script in one shard) a pass could not read
-/// because their private replies failed on content: a reply that did not decode
-/// or verify, or a record contradicting what the companion holds. It carries
-/// counts only, so it may be logged whole.
+/// because their private replies failed on content: a row whose content did not
+/// decode or check out, or a record contradicting what the companion holds. A
+/// reply failing its length, binding or epoch check fails its request instead,
+/// and is not counted here. It carries counts only, so it may be logged whole.
 ///
 /// The reference client counts each entry's content failures in the companion
 /// and never resets them; at three an entry is no longer queried. Everything

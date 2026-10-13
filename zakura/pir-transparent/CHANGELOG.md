@@ -30,20 +30,21 @@
 - The recovery example ends its bounded run when a pass reports lag or overload,
   leaving its saved continuation for a later invocation instead of waiting forever.
 
-- A private reply that fails to decode or verify, or a record that contradicts the
-  companion, fails one directory entry instead of the pass: everything else the sync
+- A private row whose content fails to decode or check out, or a record that
+  contradicts the companion, fails one directory entry instead of the pass: everything else the sync
   read settles, and the account stays uncovered and inactive. A pass with failed
   entries is `Retry::Stalled`, so a failed entry is asked again only at the next
   sync, and the companion stops asking after three failures. A content failure the
   reference client cannot lay at one entry is no longer `PassError::Failure`: what
   the sync committed settles, as `Outcome::Stalled`. `Outcome::Stalled` now also
-  covers `IncompleteReason::ContentFailed`.
+  covers `IncompleteReason::ContentFailed`. A reply whose length, revision binding
+  or parameter epoch does not verify still fails its request, and the pass.
 - The companion's reference store is format 7, which counts content failures per
   entry; a companion in format 6 is refused and must be recreated. A publication
   change that resets the store keeps the counts.
-- Depend on the transparent PIR crates from wallet-pir's `main` at `5239aab9`
+- Depend on the transparent PIR crates from wallet-pir's `main` at `0bb2f1a2`
   (`0.1.0-rc.4`, not yet on crates.io), which fails one entry rather than the sync
-  for a bad reply. Previously `=0.1.0-rc.3` from crates.io.
+  for bad row content. Previously `=0.1.0-rc.3` from crates.io.
 - Txid lookups read the 4,096-row display tables the `/v2/txid` service now
   publishes; earlier clients refuse them. History recovery is unchanged.
 - The `testing` fake txid display publication and the txid end-to-end test use
