@@ -102,7 +102,8 @@ class PublishingTests(unittest.TestCase):
         members = {release.tomllib.loads((release.ROOT / directory / "Cargo.toml").read_text())["package"]["name"]
                    for directory in workspace["members"]}
         self.assertEqual({p["name"] for p in packages}, members)
-        self.assertEqual(len(upstream), 8)
+        # wallet-pir's crates come from crates.io, so no git prerequisite remains.
+        self.assertEqual(upstream, [])
         selected, upstream = release.release_packages(release.ROOT, without_transparent=True)
         self.assertEqual(len(selected), len(packages) - 1)
         self.assertEqual(upstream, [])

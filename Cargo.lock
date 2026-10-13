@@ -6757,9 +6757,9 @@ dependencies = [
 
 [[package]]
 name = "transparent-events"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "508458432990bf0a00d176e879241f2d268326c3df0d65400f1548e1b1c20796"
+checksum = "97174cd9e5267cd9ea85e1bb34c5e570ed01f6878eb370eeab23b74df5ae0475"
 dependencies = [
  "hex",
  "thiserror 2.0.21",
@@ -6767,9 +6767,9 @@ dependencies = [
 
 [[package]]
 name = "transparent-filter"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a4f3fe3893427641e73d002c5aa9852ab2ad65e0eed069790d0e3b2ba134705"
+checksum = "981e1353fe42122a6cc8ec2c512aea02232c4a722bc7c15d58918d05bfdcb823"
 dependencies = [
  "bitcoin",
  "hex",
@@ -6780,9 +6780,9 @@ dependencies = [
 
 [[package]]
 name = "transparent-native"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9352b80cf01075c36dba048f76f3e6d228ca7ed69e1ea0768c4d89363395bc7"
+checksum = "47480c507ae4341be15d1c33d8e7c56a9115d569eff9f9bf38724c8eeeb6a3ef"
 dependencies = [
  "hex",
  "pir-native",
@@ -6794,9 +6794,9 @@ dependencies = [
 
 [[package]]
 name = "transparent-shard"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5f5eecdfd47d124184b9a8c7ed1ca5ba3630eb6f9088a0d7aa2466c7dfffae0"
+checksum = "cc22fb860981f37255d5d0b029831e940c462cee3a3f00cbbf2d67c0beee32af"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -6810,9 +6810,9 @@ dependencies = [
 
 [[package]]
 name = "transparent-shard-server"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26af2279c84314f1502292e434ef6de6c274423b0c5617adbd777aaa871cced4"
+checksum = "a15d529923eb270b6a35bc51d39fa385d2e9032f62bf795d290af77f249491e0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -6844,9 +6844,9 @@ dependencies = [
 
 [[package]]
 name = "transparent-txid-client"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3413563e25937199da487d94fa8d51b10680e160d82cf619a19119afce1945d"
+checksum = "b753fee216ff05128572f86c94c30d342ab2619d16762d743f6411ed962a611d"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -6860,9 +6860,9 @@ dependencies = [
 
 [[package]]
 name = "transparent-wallet"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "376fd5efb69013abd9d73783467d8a20e507e54cded34bc0508fc9adc0cb70c2"
+checksum = "04a4fa4271fb868f371f3787bbb4357fa520678a85cec92a0db24481ebe452ad"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -6879,9 +6879,9 @@ dependencies = [
 
 [[package]]
 name = "transparent-wallet-store"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f1fd1687d1fa839b0751b497aa24f34153dc1f18e7acac85f8c6cf55d87d971"
+checksum = "4fca1b0a8faf4e8f53158fbf2cfe5753623c6bc7ff74ef851f1fba9987ce94d9"
 dependencies = [
  "hex",
  "rusqlite",
