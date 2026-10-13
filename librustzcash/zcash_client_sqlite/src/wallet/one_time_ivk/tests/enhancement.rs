@@ -94,8 +94,8 @@ fn externally_paid_refund_key(
 }
 
 /// Self-payments to both purposes, found as outgoing by ordinary OVK recovery, decrypt
-/// with the one-time keys as one incoming record each, whether the full transaction is
-/// stored before or after its compact block, and idempotently across a reopen.
+/// with the one-time keys as one incoming record each, not change, whether the full
+/// transaction is stored before or after its compact block, and idempotently across a reopen.
 #[test]
 fn one_time_ivk_full_transaction_before_or_after_compact_scan() {
     for full_first in [false, true] {
@@ -170,14 +170,16 @@ fn one_time_ivk_full_transaction_before_or_after_compact_scan() {
                 .find(|n| n.one_time_key_id() == Some(key.key_id()));
             let note = note.unwrap();
             assert_eq!(note.note().recipient(), key.receiver());
-            let memo_stored: Vec<u8> = value(
+            let (memo_stored, is_change): (Vec<u8>, bool) = row(
                 st.wallet().conn(),
-                "SELECT rn.memo FROM ironwood_received_notes rn
+                "SELECT rn.memo, rn.is_change FROM ironwood_received_notes rn
                  JOIN transactions t ON t.id_tx = rn.transaction_id
                  WHERE t.txid = ?1 AND rn.action_index = ?2",
                 rusqlite::params![txid.as_ref(), note.output_index()],
             );
             assert_eq!(memo_stored, memo.as_slice());
+            // The account funded the payment, but it stays incoming in either order.
+            assert!(!is_change);
         }
         assert_eq!(stored.len(), 3); // Both swap payments and ordinary internal change.
     }
