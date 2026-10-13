@@ -56,6 +56,7 @@ mod support_zcashd_wallet_import;
 mod transaction_reconfirmation_receipts;
 mod transparent_activation_schema;
 mod transparent_activity_metadata;
+mod transparent_detail_content_failures;
 mod transparent_gap_limit_handling;
 mod transparent_ledger_schema;
 mod transparent_policy_generation;
@@ -175,6 +176,7 @@ pub mod ids {
         transaction_reconfirmation_receipts::MIGRATION_ID as TRANSACTION_RECONFIRMATION_RECEIPTS,
         transparent_activation_schema::MIGRATION_ID as TRANSPARENT_ACTIVATION_SCHEMA,
         transparent_activity_metadata::MIGRATION_ID as TRANSPARENT_ACTIVITY_METADATA,
+        transparent_detail_content_failures::MIGRATION_ID as TRANSPARENT_DETAIL_CONTENT_FAILURES,
         transparent_gap_limit_handling::MIGRATION_ID as TRANSPARENT_GAP_LIMIT_HANDLING,
         transparent_ledger_schema::MIGRATION_ID as TRANSPARENT_LEDGER_SCHEMA,
         transparent_policy_generation::MIGRATION_ID as TRANSPARENT_POLICY_GENERATION,
@@ -432,6 +434,7 @@ pub(super) fn all_migrations<
         Box::new(ironwood_unsupported_memo_retry::Migration),
         Box::new(ironwood_transparent_output_shape::Migration),
         Box::new(transparent_txid_enhancement::Migration),
+        Box::new(transparent_detail_content_failures::Migration),
     ]
 }
 
@@ -667,8 +670,9 @@ pub(crate) fn forget_output_shape_and_later(conn: &rusqlite::Connection) {
     .unwrap();
 }
 
-/// Test support: forgets that `transparent_txid_enhancement` was applied, dropping its tables,
-/// so the next migration run applies it to an existing wallet.
+/// Test support: forgets that `transparent_txid_enhancement` and the migrations extending its
+/// tables were applied, dropping its tables, so the next migration run applies them to an
+/// existing wallet.
 #[cfg(test)]
 pub(crate) fn forget_txid_enhancement(conn: &rusqlite::Connection) {
     conn.execute_batch(
@@ -677,17 +681,20 @@ pub(crate) fn forget_txid_enhancement(conn: &rusqlite::Connection) {
          DROP TABLE transparent_detail_work;",
     )
     .unwrap();
-    conn.execute(
-        "DELETE FROM schemer_migrations WHERE id = ?1",
-        [transparent_txid_enhancement::MIGRATION_ID
-            .as_bytes()
-            .to_vec()],
-    )
-    .unwrap();
+    for id in [
+        transparent_txid_enhancement::MIGRATION_ID,
+        transparent_detail_content_failures::MIGRATION_ID,
+    ] {
+        conn.execute(
+            "DELETE FROM schemer_migrations WHERE id = ?1",
+            [id.as_bytes().to_vec()],
+        )
+        .unwrap();
+    }
 }
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_txid_enhancement::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_detail_content_failures::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -869,6 +876,7 @@ pub(crate) mod tests {
             ids::IRONWOOD_UNSUPPORTED_MEMO_RETRY,
             ids::IRONWOOD_TRANSPARENT_OUTPUT_SHAPE,
             ids::TRANSPARENT_TXID_ENHANCEMENT,
+            ids::TRANSPARENT_DETAIL_CONTENT_FAILURES,
             ids::ZIP318_CLASSIFICATION,
         ]);
 

@@ -1,7 +1,8 @@
 //! SQL conditions over detail work rows `w` and their transactions `t`.
 
 use super::super::output_observation_condition;
-use super::codes::{CONTRADICTION, NOT_COVERED, UNSUPPORTED};
+use super::codes::{NOT_COVERED, UNSUPPORTED};
+use super::schedule::CONTENT_FAILURE_LIMIT;
 
 /// Whether the wallet still records an effect of transaction `t`: an owned output or a spend
 /// of one that financial queries count (a withdrawn ledger-only receive does not), a spend link,
@@ -26,7 +27,9 @@ pub(super) fn related_transaction_sql() -> String {
 }
 
 /// Rows of `transparent_detail_work w` the listing returns for transaction `t` once it is mined,
-/// before timing: without raw bytes, still related, and not owned by public payload work.
+/// before timing: without raw bytes, still related, not owned by public payload work, and,
+/// without public authority, not given up after [`CONTENT_FAILURE_LIMIT`] content failures
+/// unless mined at another height since.
 ///
 /// Under public authority (`:public`), payload retrieval already fetches transactions queued
 /// in `tx_retrieval_queue`, and a privately protected Ironwood transaction (route 0) must not
@@ -34,6 +37,7 @@ pub(super) fn related_transaction_sql() -> String {
 pub(super) fn listable_work_sql() -> String {
     format!(
         "t.raw IS NULL AND {}
+         AND (:public OR w.content_failures < {CONTENT_FAILURE_LIMIT} OR {REARMED})
          AND NOT (:public AND (
              EXISTS (SELECT 1 FROM tx_retrieval_queue q
                      WHERE q.txid = t.txid AND q.query_type = :enhancement)
@@ -53,8 +57,11 @@ pub(super) fn eligible_work_sql() -> String {
 pub(super) const REARMED: &str =
     "(w.attempted_height IS NOT NULL AND w.attempted_height != t.mined_height)";
 
-/// Parked under caller map `:map`: `NotCovered` and `Contradiction` until the map differs from
-/// the one that produced them, `Unsupported` until any map is seen; never past the backstop.
+/// Parked under caller map `:map`: `NotCovered` until the map differs from the one that
+/// produced it, `Unsupported` until any map is seen; never past the backstop.
+///
+/// Content outcomes, `Contradiction` among them, are never parked: they all retry on one
+/// timer, so the schedule does not tell them apart.
 ///
 /// Only without public authority (`:public`): a map is the private source's, and a public
 /// lookup answers with the raw transaction whatever the publication covers, so under public
@@ -62,7 +69,7 @@ pub(super) const REARMED: &str =
 pub(super) fn parked_work_sql() -> String {
     format!(
         "NOT :public
-         AND ((w.last_outcome IN ({NOT_COVERED}, {CONTRADICTION})
+         AND ((w.last_outcome = {NOT_COVERED}
            AND (:map IS NULL OR w.last_map_sha256 IS :map))
           OR (w.last_outcome = {UNSUPPORTED} AND :map IS NULL))
          AND IFNULL(w.attempted_at, 0) + :backstop > :now"

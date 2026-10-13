@@ -2,6 +2,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use zcash_client_backend::data_api::testing::TestRng;
 use zcash_client_backend::data_api::transparent_ledger::{
     AccountActivity, Attribution, DetailCompleteness, FeeState, ReceiptSource, SourcePool,
     TRANSPARENT_DISPLAY_MAP_RECHECK, TransactionMetadata, TransactionReceipt,
@@ -78,6 +79,30 @@ fn attempts(st: &State, txid: TxId) -> u32 {
     conn(st)
         .query_row(
             "SELECT w.attempts FROM transparent_detail_work w
+             JOIN transactions t ON t.id_tx = w.transaction_id WHERE t.txid = ?1",
+            [txid.as_ref()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// The work row's content failures at its last placement.
+fn content_failures(st: &State, txid: TxId) -> u32 {
+    conn(st)
+        .query_row(
+            "SELECT w.content_failures FROM transparent_detail_work w
+             JOIN transactions t ON t.id_tx = w.transaction_id WHERE t.txid = ?1",
+            [txid.as_ref()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// When the work row is next due, in Unix seconds.
+fn next_attempt_at(st: &State, txid: TxId) -> i64 {
+    conn(st)
+        .query_row(
+            "SELECT w.next_attempt_at FROM transparent_detail_work w
              JOIN transactions t ON t.id_tx = w.transaction_id WHERE t.txid = ?1",
             [txid.as_ref()],
             |row| row.get(0),
@@ -635,8 +660,9 @@ fn priority_and_backoff_order() {
         vec![unspent, spent, spending]
     );
 
-    // Backoff schedule.
-    let secs = |outcome, attempts| backoff(outcome, attempts, &spending).as_secs();
+    // Backoff schedule, with jitter from a seeded source.
+    let secs =
+        |outcome, attempts| backoff(outcome, attempts, &mut TestRng::seed_from_u64(0)).as_secs();
     assert!((30..=38).contains(&secs(unavailable(), 1)));
     assert!((60..=75).contains(&secs(unavailable(), 2)));
     assert_eq!(secs(unavailable(), 20), 3600);
@@ -672,24 +698,187 @@ fn priority_and_backoff_order() {
     let not_yet = TransparentDetailOutcome::NotYetPublished;
     assert!((60..=75).contains(&secs(not_yet, 1)));
     assert_eq!(secs(not_yet, 20), 300);
-    assert_eq!(
-        secs(TransparentDetailOutcome::Protocol, 20),
-        secs(unavailable(), 20)
-    );
-    assert!((3600..=4500).contains(&secs(TransparentDetailOutcome::Absent, 1)));
-    assert_eq!(secs(TransparentDetailOutcome::Absent, 10), 24 * 3600);
+    // Every content outcome follows one schedule: an hour, doubling to a day.
+    for content in [
+        TransparentDetailOutcome::Absent,
+        TransparentDetailOutcome::Protocol,
+        TransparentDetailOutcome::Contradiction,
+    ] {
+        assert!((3600..=4500).contains(&secs(content, 1)));
+        assert!((7200..=9000).contains(&secs(content, 2)));
+        assert_eq!(secs(content, 10), 24 * 3600);
+        for attempts in 1..=6 {
+            assert_eq!(
+                secs(content, attempts),
+                secs(TransparentDetailOutcome::Absent, attempts)
+            );
+        }
+    }
     for held in [
         TransparentDetailOutcome::NotCovered,
         TransparentDetailOutcome::Unsupported,
-        TransparentDetailOutcome::Contradiction,
     ] {
         assert!((24 * 3600..=30 * 3600).contains(&secs(held, 1)));
     }
-    // Jitter spreads rows apart.
-    assert_ne!(
-        backoff(TransparentDetailOutcome::Absent, 1, &spending),
-        backoff(TransparentDetailOutcome::Absent, 1, &unspent)
+}
+
+/// Wallets with the same random source schedule the next lookup at the same time after any
+/// content outcome, whichever transaction it is for: the schedule does not tell the outcomes
+/// apart.
+#[test]
+fn content_outcomes_share_one_schedule() {
+    let unspent = txid_of(&active_wallet().2);
+    let rows = [
+        (unspent, TransparentDetailOutcome::Absent),
+        (
+            TxId::from_bytes([2; 32]),
+            TransparentDetailOutcome::Protocol,
+        ),
+        (
+            TxId::from_bytes([3; 32]),
+            TransparentDetailOutcome::Contradiction,
+        ),
+    ];
+    let schedules: Vec<Vec<i64>> = rows
+        .into_iter()
+        .map(|(txid, outcome)| {
+            // A fresh wallet each, so each draws from the same seeded source.
+            let (mut st, _, _) = active_wallet();
+            (0..3u64)
+                .map(|i| {
+                    defer(&mut st, txid, outcome, later(i * DAY));
+                    next_attempt_at(&st, txid)
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(schedules[0], schedules[1]);
+    assert_eq!(schedules[0], schedules[2]);
+    // Each wait lies on the content schedule: an hour, then two, then four, plus jitter.
+    for (i, (base, at)) in [3600, 7200, 14400]
+        .into_iter()
+        .zip(&schedules[0])
+        .enumerate()
+    {
+        let wait = at - (1_000_000_000 + i64::try_from(i).unwrap() * i64::try_from(DAY).unwrap());
+        assert!((base..=base + base / 4).contains(&wait), "{wait}");
+    }
+}
+
+/// The third content failure at one placement gives the lookup up: it is neither due nor
+/// parked, and reads as unavailable. Request failures do not count, and mining the
+/// transaction at another height re-arms it with the count reset.
+#[test]
+fn third_content_failure_gives_up() {
+    let (mut st, account, unspent) = active_wallet();
+    let txid = txid_of(&unspent);
+    let far = later(30 * DAY);
+    let deferrals = [
+        (TransparentDetailOutcome::Absent, 1),
+        (unavailable(), 1),
+        (TransparentDetailOutcome::Protocol, 2),
+        (unavailable(), 2),
+    ];
+    for (outcome, failures) in deferrals {
+        defer(&mut st, txid, outcome, now());
+        assert_eq!(content_failures(&st, txid), failures);
+        assert!(listing_at(&st, far, None).contains(&txid));
+    }
+    defer(
+        &mut st,
+        txid,
+        TransparentDetailOutcome::Contradiction,
+        now(),
     );
+    assert_eq!(content_failures(&st, txid), 3);
+    // Unlike parked work, neither a changed map nor the parked backstop brings it back.
+    let past_backstop = later(PARKED_BACKSTOP.as_secs() + DAY);
+    for at in [far, past_backstop] {
+        for map in [None, Some(MAP_A), Some(MAP_B)] {
+            assert!(!listing_at(&st, at, map).contains(&txid));
+        }
+    }
+    // Nor does a later request failure, which leaves the count alone.
+    defer(&mut st, txid, unavailable(), now());
+    assert_eq!(content_failures(&st, txid), 3);
+    assert!(!listing_at(&st, past_backstop, None).contains(&txid));
+    // The work remains, given up, and the receipt reads as unavailable.
+    assert_eq!(reasons(&st, txid), Some(RECEIVE));
+    assert_eq!(
+        view(&st, account, txid),
+        Some(TransparentDisplayView::Unavailable)
+    );
+
+    // Mined again at another height: due at once, and counting from zero.
+    let floor = unspent.mined_height - 2;
+    st.truncate_to_height(floor);
+    scan_new_blocks(&mut st, 4);
+    let remined = ReceiveEvent {
+        mined_height: floor + 3,
+        ..unspent.clone()
+    };
+    cover(&mut st, account, &revision(1, true), vec![remined]);
+    assert!(listing(&st).contains(&txid));
+    defer(&mut st, txid, TransparentDetailOutcome::Absent, now());
+    assert_eq!(content_failures(&st, txid), 1);
+    assert_eq!(attempts(&st, txid), 1);
+    assert!(listing_at(&st, far, None).contains(&txid));
+}
+
+/// Lookups under public authority never count towards giving up: the wallet could fetch the
+/// transaction publicly anyway, so it has no privacy reason to stop. Work given up under
+/// `PrivateRequired` is due again under public authority, on its usual schedule.
+#[test]
+fn public_lookups_do_not_count_towards_giving_up() {
+    let (mut st, _, unspent) = active_wallet();
+    let txid = txid_of(&unspent);
+    let far = later(30 * DAY);
+    for _ in 0..3 {
+        defer(&mut st, txid, TransparentDetailOutcome::Absent, now());
+    }
+    assert_eq!(content_failures(&st, txid), 3);
+    assert!(!listing_at(&st, far, None).contains(&txid));
+
+    set_policy(&mut st, Public);
+    assert!(listing_at(&st, far, None).contains(&txid));
+    // Absent keeps its schedule, an hour doubling to a day, without counting.
+    defer(&mut st, txid, TransparentDetailOutcome::Absent, now());
+    assert_eq!((attempts(&st, txid), content_failures(&st, txid)), (4, 3));
+    assert!(!listing_at(&st, later(8 * 3600 - 1), None).contains(&txid));
+    assert!(listing_at(&st, later(10 * 3600), None).contains(&txid));
+    let mut facts = facts_for(&unspent);
+    facts.coinbase = true;
+    assert!(matches!(
+        store(&mut st, facts),
+        TransparentDisplayStore::Contradiction(_)
+    ));
+    assert_eq!(content_failures(&st, txid), 3);
+    assert!(listing_at(&st, far, None).contains(&txid));
+
+    // Private again, it stays given up.
+    set_policy(&mut st, PrivateRequired);
+    assert!(!listing_at(&st, far, None).contains(&txid));
+}
+
+/// A contradiction is retried on the content schedule, like the other content outcomes, and
+/// does not wait for a changed display map.
+#[test]
+fn contradiction_is_retried_on_the_content_schedule() {
+    let (mut st, _, unspent) = active_wallet();
+    let txid = txid_of(&unspent);
+    let mut facts = facts_for(&unspent);
+    facts.coinbase = true;
+    assert!(matches!(
+        store(&mut st, facts),
+        TransparentDisplayStore::Contradiction(_)
+    ));
+    assert_eq!(content_failures(&st, txid), 1);
+    assert!(!listing_at(&st, later(3600 - 1), Some(MAP_A)).contains(&txid));
+    // Due under the map that produced it, or without one, once the backoff ends.
+    for map in [None, Some(MAP_A)] {
+        assert!(listing_at(&st, later(4500), map).contains(&txid));
+        assert_eq!(parked_under(&st, later(4500), map, None).count, 0);
+    }
 }
 
 #[test]
@@ -781,15 +970,8 @@ fn not_covered_rearmed_on_map_change() {
 fn held_work_due_at_ordinary_retry_under_public_authority() {
     let (mut st, _, unspent) = active_wallet();
     let txid = txid_of(&unspent);
-    let contradicted = TxId::from_bytes([2; 32]);
     let unsupported = TxId::from_bytes([3; 32]);
     defer(&mut st, txid, TransparentDetailOutcome::NotCovered, now());
-    defer(
-        &mut st,
-        contradicted,
-        TransparentDetailOutcome::Contradiction,
-        now(),
-    );
     let unsupported_height = mined_height(&st, unsupported);
     let generation = generation(&st);
     st.wallet_mut()
@@ -803,11 +985,11 @@ fn held_work_due_at_ordinary_retry_under_public_authority() {
             now(),
         )
         .unwrap();
-    let held = [txid, contradicted, unsupported];
+    let held = [txid, unsupported];
     // Without public authority they wait for a map change.
     let at = later(2 * DAY);
     assert!(held.iter().all(|t| !listing_at(&st, at, None).contains(t)));
-    assert_eq!(parked(&st, at).count, 3);
+    assert_eq!(parked(&st, at).count, 2);
 
     set_policy(&mut st, Public);
     // Not before their ordinary retry...
@@ -858,7 +1040,8 @@ fn store_valid_resolves_work() {
     assert!(!details.is_complete());
 }
 
-/// Stores facts that contradict the wallet, checking that nothing is saved and the work is held.
+/// Stores facts that contradict the wallet, checking that nothing is saved and the work is
+/// retried later.
 fn contradicted(
     st: &mut State,
     facts: TransparentDisplayFacts,
@@ -873,8 +1056,17 @@ fn contradicted(
     );
     assert_eq!(display_rows(st), before);
     assert!(reasons(st, txid).is_some());
-    assert!(!listing_at(st, later(6 * 24 * 3600), Some(MAP_A)).contains(&txid));
-    assert!(listing_at(st, later(6 * 24 * 3600), Some(MAP_B)).contains(&txid));
+    // Retried on the content schedule under any map, until the third content failure.
+    assert!(!listing_at(st, now(), Some(MAP_B)).contains(&txid));
+    let retried = content_failures(st, txid) < 3;
+    assert_eq!(
+        listing_at(st, later(DAY), Some(MAP_A)).contains(&txid),
+        retried
+    );
+    assert_eq!(
+        listing_at(st, later(DAY), Some(MAP_B)).contains(&txid),
+        retried
+    );
 }
 
 /// Coinbase facts for `facts`' transaction: no input, no fee.
@@ -1454,11 +1646,11 @@ fn parked_without_map_reported_and_backstop_rearms() {
     let (mut st, _, unspent) = active_wallet();
     let txid = txid_of(&unspent);
     defer(&mut st, txid, TransparentDetailOutcome::NotCovered, now());
-    let contradicted = TxId::from_bytes([2; 32]);
+    let other = TxId::from_bytes([2; 32]);
     defer(
         &mut st,
-        contradicted,
-        TransparentDetailOutcome::Contradiction,
+        other,
+        TransparentDetailOutcome::NotCovered,
         later(60),
     );
     // Within the minimum wait nothing is parked: a map refresh could not help yet.
@@ -1477,7 +1669,7 @@ fn parked_without_map_reported_and_backstop_rearms() {
     // Without any map change, the backstop makes them due again.
     let backstop = later(PARKED_BACKSTOP.as_secs() + 60);
     let listed = listing_at(&st, backstop, None);
-    assert!(listed.contains(&txid) && listed.contains(&contradicted));
+    assert!(listed.contains(&txid) && listed.contains(&other));
     assert_eq!(parked(&st, backstop).count, 0);
 }
 
@@ -1809,11 +2001,20 @@ fn not_yet_published_does_not_inflate_backoff() {
     assert_eq!(attempts(&st, txid), 1);
     assert!(!listing_at(&st, later(29), None).contains(&txid));
     assert!(listing_at(&st, later(40), None).contains(&txid));
-    // Outcomes of one class keep counting.
-    defer(&mut st, txid, TransparentDetailOutcome::Protocol, now());
+    // Outcomes of one class keep counting: the content outcomes form one.
+    defer(&mut st, txid, unavailable(), now());
     assert_eq!(attempts(&st, txid), 2);
-    defer(&mut st, txid, TransparentDetailOutcome::Absent, now());
+    defer(&mut st, txid, TransparentDetailOutcome::Protocol, now());
     assert_eq!(attempts(&st, txid), 1);
+    defer(&mut st, txid, TransparentDetailOutcome::Absent, now());
+    assert_eq!(attempts(&st, txid), 2);
+    defer(
+        &mut st,
+        txid,
+        TransparentDetailOutcome::Contradiction,
+        now(),
+    );
+    assert_eq!(attempts(&st, txid), 3);
     defer(
         &mut st,
         txid,
