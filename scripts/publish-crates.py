@@ -181,6 +181,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--plan", action="store_true", help="Check registry prerequisites and print versions without building or uploading")
+    mode.add_argument("--dry-run", action="store_true", help="Verify packages without uploading (the default)")
     mode.add_argument("--publish", action="store_true", help="Verify then upload each unpublished version to crates.io")
     parser.add_argument("--without-transparent", action="store_true", help="Exclude transparent PIR and its wallet-pir prerequisites")
     args = parser.parse_args()

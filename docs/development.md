@@ -134,7 +134,13 @@ A yanked version or a dirty or changed checkout stops the release. Already
 published versions are skipped by name and version; the script does not claim
 that their contents match this checkout.
 
-Without `--publish`, the script performs dry runs only. A separate dry run of a
+Verify packages without uploading (also the default when no mode is specified):
+
+```sh
+python3 scripts/publish-crates.py --dry-run
+```
+
+`--plan`, `--dry-run`, and `--publish` are mutually exclusive. A separate dry run of a
 dependent crate requires its new dependencies to be published already: Cargo
 replaces local paths and Git locations with registry versions when packaging.
 The script reports that dependency prerequisite rather than bypassing verification.

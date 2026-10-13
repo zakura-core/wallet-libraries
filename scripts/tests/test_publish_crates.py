@@ -82,6 +82,20 @@ class PublishingTests(unittest.TestCase):
             with self.assertRaises(release.ReleaseError):
                 release.registry_version("first", "1.0.0")
 
+    def test_explicit_dry_run_selects_no_uploads(self):
+        with patch.object(release.sys, "argv", ["publish-crates.py", "--dry-run"]), \
+             patch.object(release, "run_release") as run:
+            self.assertEqual(release.main(), 0)
+            run.assert_called_once_with(release.ROOT, False, False, False)
+
+    def test_dry_run_cannot_be_combined_with_publish(self):
+        with patch.object(release.sys, "argv", ["publish-crates.py", "--dry-run", "--publish"]), \
+             patch.object(release, "run_release") as run:
+            with self.assertRaises(SystemExit) as error:
+                release.main()
+            self.assertEqual(error.exception.code, 2)
+            run.assert_not_called()
+
     def test_real_manifest_order_covers_all_workspace_crates(self):
         packages, upstream = release.release_packages(release.ROOT)
         workspace = release.tomllib.loads((release.ROOT / "Cargo.toml").read_text())["workspace"]
