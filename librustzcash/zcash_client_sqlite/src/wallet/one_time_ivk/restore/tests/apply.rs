@@ -197,6 +197,36 @@ fn directory_payment_applies_unscanned_key_note_atomically_and_reopens() {
     assert!(witness.is_some());
 }
 
+/// A payment whose sibling leaf the wallet already holds unpruned applies with that
+/// sibling intact. Here the sibling is the change after it, its block's last leaf, which
+/// the wallet keeps as a reference once a later scan starts after that block. Inserting
+/// the sibling's hash before the marked payment let the pair prune, and inserting the
+/// payment under the pruned node then lost the sibling.
+#[test]
+fn directory_payment_keeps_a_sibling_the_wallet_already_holds() {
+    let foreign = orchard::keys::FullViewingKey::from(
+        &orchard::keys::SpendingKey::from_bytes([3; 32]).unwrap(),
+    );
+    // The payment is the first of its bundle's two actions in some attempts.
+    for _ in 0..40 {
+        let paid = external_payment(key8_receiver(), &MemoBytes::empty());
+        let (mut st, candidate, _, _) = mine_unscanned(&paid);
+        if candidate.position != 0 {
+            continue;
+        }
+        // A later scan starts after the payment's block.
+        pay(&mut st, &foreign, 10_000);
+        let (through, path) = (tip(&st), witness_at(&st, candidate.position));
+        assert_eq!(
+            watch_and_apply(&mut st, &candidate, through, &path),
+            Applied
+        );
+        assert_eq!(notes(&st, through.height).len(), 1);
+        return;
+    }
+    panic!("the payment was never its bundle's first action");
+}
+
 /// A restore sweep credits a one-time-key note without a memo, and private memo retrieval
 /// skips it (see `wallet::one_time_ivk`); only its full transaction stores one.
 #[test]

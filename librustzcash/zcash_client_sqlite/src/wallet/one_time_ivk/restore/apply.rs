@@ -258,6 +258,16 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         [u32::from(checkpoint)],
         |r| r.get(0),
     )?;
+    // The marked leaf goes in before its siblings, since it keeps its pair from pruning.
+    // A sibling inserted first can strip a reference that held the pair unpruned, and the
+    // leaf's insertion under the pruned node would then drop that sibling.
+    tree.batch_insert(
+        Position::from(position),
+        std::iter::once((
+            MerkleHashOrchard::from_cmx(&recovered.note().commitment().into()),
+            Retention::Marked,
+        )),
+    )?;
     // Persist only complete sibling subtrees. A partial right subtree includes empty
     // future leaves and must not become a fixed hash for future appends.
     for (level, hash) in path.auth_path().into_iter().enumerate() {
@@ -266,13 +276,6 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
             tree.insert(address, hash)?;
         }
     }
-    tree.batch_insert(
-        Position::from(position),
-        std::iter::once((
-            MerkleHashOrchard::from_cmx(&recovered.note().commitment().into()),
-            Retention::Marked,
-        )),
-    )?;
     let stored_path = tree
         .witness_at_checkpoint_id(Position::from(position), &checkpoint)?
         .ok_or_else(|| corrupt("stored one-time-key witness missing"))?;
