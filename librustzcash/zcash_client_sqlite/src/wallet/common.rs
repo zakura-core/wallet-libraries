@@ -914,12 +914,20 @@ where
     push_lock_params(&mut sql_params, lock_filter, &overridable_owners);
 
     // Largest-first funding walks past its covering prefix only to find one-time-key notes to
-    // swap in (see `prefer_one_time_funding`), so only for a wallet holding one-time IVK state,
+    // swap in (see `prefer_one_time_funding`), so only for an account holding one-time keys,
     // and then skips reconstructing the other rows.
     #[cfg(feature = "orchard")]
     let prefer_one_time = selection == ValueSelection::LargestFirst
         && protocol == ShieldedPool::Ironwood
-        && super::holds_one_time_state(conn)?;
+        && conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM ironwood_one_time_keys k
+                 JOIN accounts ON accounts.id = k.account_id
+                 WHERE accounts.uuid = :account_uuid
+             )",
+            named_params![":account_uuid": account_uuid],
+            |row| row.get::<_, bool>(0),
+        )?;
     #[cfg(feature = "orchard")]
     let funding_covered = Cell::new(false);
     let notes = stmt_select_notes.query_and_then(&sql_params[..], |row| {

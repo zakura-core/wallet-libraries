@@ -329,8 +329,9 @@ fn one_time_key_notes_are_spent_first_without_adding_actions() {
     }
 }
 
-/// Without one-time IVK state, largest-first funding stops at its covering prefix instead of
-/// walking the remaining notes for one-time-key notes to swap in.
+/// Without one-time keys, largest-first funding stops at its covering prefix instead of
+/// walking the remaining notes for one-time-key notes to swap in. Another account's keys do
+/// not change that.
 #[test]
 fn funding_without_one_time_state_stops_at_the_covering_note() {
     use std::sync::{
@@ -340,6 +341,10 @@ fn funding_without_one_time_state_stops_at_the_covering_note() {
 
     let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
+    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+    let birthday = st.test_account().unwrap().birthday().clone();
+    let db = st.wallet_mut().db_mut();
+    let (other, _) = db.create_account("other", &seed, &birthday, None).unwrap();
     let (first, _) = st.generate_empty_block();
     let values = [5_000_000].into_iter().chain([200_000; 20]);
     for value in values.clone() {
@@ -388,6 +393,12 @@ fn funding_without_one_time_state_stops_at_the_covering_note() {
         count.load(Ordering::Relaxed)
     };
     let without_state = steps(&st);
+    reserve_key(st.wallet_mut().db_mut(), other, Purpose::Refund, tip + 1);
+    let other_state = steps(&st);
+    assert!(
+        other_state < without_state + 20,
+        "{without_state} steps without one-time keys, {other_state} with another account's"
+    );
     reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, tip + 1);
     let with_state = steps(&st);
     assert!(
