@@ -68,7 +68,8 @@ pub struct DirectoryPayment {
 pub enum SweepDeferral {
     /// A block the step relies on is not on the wallet's scanned chain.
     UnknownAnchor,
-    /// The publication is more than [`MAX_PUBLICATION_LAG`] blocks behind the wallet.
+    /// The publication is more than [`MAX_PUBLICATION_LAG`] blocks behind the wallet, or
+    /// older than a lookup the wallet already queued from.
     StalePublication,
 }
 
@@ -178,7 +179,10 @@ pub trait OneTimeIvkRestoreWrite: OneTimeIvkWrite + OneTimeIvkRestoreRead {
     /// credited yet. Payments already imported or queued unchanged are skipped; a payment
     /// that contradicts an imported output is an error. Queued candidates that `payments`
     /// no longer repeats unchanged, from an earlier answer the directory has since
-    /// corrected, are dropped.
+    /// corrected, are dropped. A lookup at an anchor below the key's queued lookup, while
+    /// that lookup is still on the wallet's chain, is deferred with
+    /// [`SweepDeferral::StalePublication`] instead, since an older answer cannot correct
+    /// payments above its anchor.
     fn queue_directory_lookup(
         &mut self,
         account: <Self as WalletRead>::AccountId,
