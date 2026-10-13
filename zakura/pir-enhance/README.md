@@ -18,7 +18,10 @@ On `ClientError::HttpStatus(409)` or `ClientError::HttpStatus(410)`, stop the ba
 With the `wallet` feature, `PreparedWork::batches_by_tx_and_row` groups durable work into one
 batch per transaction and row. When a row reply arrives but a record fails to decode
 (`ClientError::Response`), pass `PreparedWork::requests_in_row(txid, row)` to
-`EnhancePirWrite::record_ironwood_enhance_unreadable`. Never report an HTTP refusal, a
+`EnhancePirWrite::record_ironwood_enhance_unreadable`. Only a record-level
+`ClientError::Response` counts: the row reply arrived and decoded, but a record in it did not.
+A `ClientError::Row` error means the row query itself failed (session setup, an oversized body,
+a binding or length mismatch) and is never reported. Never report an HTTP refusal, a
 transport error, a timeout or a cancellation. The SQLite wallet suspends a request after three
 rejected or unreadable replies. The counts live in memory, in one `EnhancePirSession`: keep one
 session per wallet for the app's lifetime and share it with every database handle of that wallet.
