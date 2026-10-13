@@ -1411,6 +1411,7 @@ fn reconstruction_cannot_take_an_outgoing_position_from_another_transaction() {
             queue_transaction(
             send.st.wallet().conn(),
             Some(zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public),
+            &send.st.wallet().db().enhance_pir_session,
             claimant,
                 &IronwoodEnhancementPlan::Eligible {
                     outgoing: vec![IronwoodEnhanceCandidate::from_parts(
@@ -2801,5 +2802,125 @@ fn one_time_key_notes_bind_metadata_without_private_memos_after_reopen() {
             apply_record(st.wallet_mut().db_mut(), request, &record).unwrap(),
             EnhancePirStoreResult::AlreadyResolved
         );
+    }
+}
+
+#[test]
+fn a_metadata_only_position_is_rearmed_by_binding_and_reaches_suspension() {
+    let mut send = Send::new(false);
+    send.scan_funding();
+    send.scan_send();
+    let request = send.requests()[0];
+    assert_eq!(
+        apply_record(send.st.wallet_mut().db_mut(), request, &send.record).unwrap(),
+        EnhancePirStoreResult::Stored
+    );
+    let tx_ref = send.tx_ref();
+    let conn = send.st.wallet().conn();
+    conn.execute(
+        "UPDATE transactions SET fee = NULL, expiry_height = NULL WHERE id_tx = ?",
+        [tx_ref.0],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO ironwood_enhance_metadata_queue (transaction_id) VALUES (?)",
+        [tx_ref.0],
+    )
+    .unwrap();
+    // A count left on the position, as if a previous owner had exhausted it.
+    for _ in 0..MAX_REJECTIONS {
+        send.st.wallet().db().enhance_pir_session.failure(request);
+    }
+    send.rebuild();
+    // Binding the metadata work to the position starts it with a full allowance.
+    assert_eq!(rejections(send.st.wallet().db(), request), None);
+    assert_eq!(send.requests(), vec![request]);
+
+    for attempt in 1..=MAX_REJECTIONS {
+        assert_eq!(send.requests(), vec![request], "attempt {attempt}");
+        send.st
+            .wallet_mut()
+            .db_mut()
+            .record_ironwood_enhance_unreadable(&[request])
+            .unwrap();
+    }
+    assert!(send.requests().is_empty());
+    assert!(
+        work(
+            send.st.wallet().conn(),
+            &send.st.wallet().db().enhance_pir_session
+        )
+        .unwrap()
+        .contains(&EnhancePirWork::Suspended(EnhancePirSuspension::Rejected(
+            request
+        )))
+    );
+}
+
+#[test]
+fn rebinding_the_same_position_keeps_its_count() {
+    let mut send = Send::new(false);
+    send.scan_funding();
+    send.scan_send();
+    let request = send.requests()[0];
+    assert_eq!(
+        apply_record(send.st.wallet_mut().db_mut(), request, &send.record).unwrap(),
+        EnhancePirStoreResult::Stored
+    );
+    let tx_ref = send.tx_ref();
+    let conn = send.st.wallet().conn();
+    conn.execute(
+        "UPDATE transactions SET fee = NULL, expiry_height = NULL WHERE id_tx = ?",
+        [tx_ref.0],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO ironwood_enhance_metadata_queue (transaction_id) VALUES (?)",
+        [tx_ref.0],
+    )
+    .unwrap();
+    send.rebuild();
+    for _ in 0..MAX_REJECTIONS {
+        send.st
+            .wallet_mut()
+            .db_mut()
+            .record_ironwood_enhance_unreadable(&[request])
+            .unwrap();
+    }
+    assert!(send.requests().is_empty());
+
+    // An outgoing job that keeps failing reconstruction rebinds the metadata work to the same
+    // position on every pass; that must not reset the count.
+    send.st
+        .wallet()
+        .conn()
+        .execute(
+            "INSERT INTO ironwood_enhance_discovery_queue (transaction_id) VALUES (?)",
+            [tx_ref.0],
+        )
+        .unwrap();
+    let mut bad = send.block.clone();
+    bad.vtx[0].ironwood_actions[0].nullifier = vec![8; 32];
+    for _ in 0..2 {
+        let discovery = send.discovery();
+        assert_eq!(
+            send.st
+                .wallet_mut()
+                .db_mut()
+                .rebuild_ironwood_enhancement(discovery, &bad)
+                .unwrap(),
+            Incomplete {
+                rebuilt: 0,
+                unresolved: vec![IronwoodEnhanceDiscoveryFailure {
+                    txid: send.block.vtx[0].txid(),
+                    reason: ContextMismatch,
+                }]
+            }
+        );
+        assert_eq!(
+            rejections(send.st.wallet().db(), request),
+            Some(MAX_REJECTIONS)
+        );
+        assert!(send.requests().is_empty());
     }
 }

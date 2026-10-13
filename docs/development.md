@@ -108,6 +108,57 @@ proving-key caches and the cargo test runner.
 
 ## Publishing the release candidates
 
+### GitHub Actions
+
+Use **Publish crates** from `main` in `zakura-core/wallet-libraries`. The workflow
+uses the exact commit selected by the dispatch, and reads versions from all ten
+crate manifests. It does not create tags, change versions, or publish wallet-pir.
+Successful **Verify wallet libraries** CI for that exact main commit is required;
+wait for it to finish before dispatching the release workflow.
+
+Choose **verify** first (the default). All packages are fully dry-run together
+without registry credentials. The workflow saves a verification receipt and
+summarizes the crate versions and registry availability. After Sean approves the
+`crates-io` environment, a separate job exchanges and revokes a temporary token
+without uploading. This proves the authentication exchange; it does not prove
+that each crate has the right publisher configuration.
+
+Before the first run, a repository administrator must create the `crates-io`
+GitHub Environment, allow only the `main` branch, and require approval by `ebfull`
+(self-approval is allowed, matching Zakura). An owner of **each of the ten crates**
+must configure this Trusted Publisher on crates.io:
+
+| Setting | Value |
+| --- | --- |
+| GitHub owner | `zakura-core` |
+| Repository | `wallet-libraries` |
+| Workflow filename | `publish-crates.yml` |
+| Environment | `crates-io` |
+
+Use `python3 scripts/publish-crates.py --plan` to list the ten names and versions.
+Check every crate's publisher settings, including names already reserved by a
+placeholder release. Trusted Publishing needs existing crate names. No permanent
+API token or new Infisical secret is required.
+
+Choose **publish** for an actual release. It repeats verification for the dispatch
+commit, requires environment approval, then acquires its temporary credential.
+Only the upload step sees that credential. It validates the verification receipt,
+uploads without recompiling, and waits for each version before its dependents.
+The final check confirms availability and checks crates.io's workflow attribution
+for newly published versions. Already available versions are checked without
+claiming this run published them.
+
+Only one release workflow runs at a time. On failure, inspect the full registry
+response in the failed step and the retained `crate-publication-<attempt>` artifact and
+summary. Results distinguish `published`, `previously_available`, `failed`,
+`uploaded_unconfirmed`, and `remaining`. Redispatch from the **same main commit**
+(or rerun the failed workflow if main has advanced); available versions are
+skipped. Do not change versions merely to retry a transient failure. Crate
+versions cannot be overwritten. Fix source errors in a reviewed new commit and
+use new versions for any packages whose earlier versions were already uploaded.
+
+### Local maintainer commands
+
 A maintainer with crates.io ownership and publishing credentials runs the release
 from a clean, reviewed checkout of `main`, using the pinned Rust toolchain and
 Python 3.11 or newer. Supply the publishing credential through the approved
@@ -155,3 +206,10 @@ first. To release the other nine crates separately, add `--without-transparent`
 to any of the commands above. This script does not publish `wallet-pir` or change
 credentials, changelog dates, tags, or source files. After publication, confirm the
 registry versions and update the corresponding `PLANNED` changelog dates.
+
+`--output PATH` writes a JSON receipt and partial progress outside the checkout.
+CI uses `--publish-verified RECEIPT` instead of `--publish` to upload without
+recompiling only after checking a successful receipt against the clean checkout,
+commit, selection, and ordered versions. Ordinary `--publish` retains its dry-run
+checks before uploads. Every packaging command uses `--locked`; release commands
+must not rewrite the workspace lockfile.

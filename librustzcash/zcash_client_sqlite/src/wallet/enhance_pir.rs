@@ -83,6 +83,8 @@ macro_rules! has_private_work {
 
 pub(crate) mod discovery;
 mod metadata;
+pub(crate) mod session;
+use session::SessionState;
 
 // A route is transaction-wide. LwdRequired is sticky, including across rescans.
 // PrivateProtected survives completion and rewinds; only an explicit LWD decision or
@@ -321,6 +323,7 @@ fn require_lwd(
 pub(crate) fn finish_private_receipt(
     conn: &Transaction<'_>,
     configured: Option<TransparentLedgerMode>,
+    session: &SessionState,
     tx_ref: crate::TxRef,
     txid: TxId,
 ) -> Result<(), SqliteClientError> {
@@ -335,6 +338,7 @@ pub(crate) fn finish_private_receipt(
         return queue_transaction(
             conn,
             configured,
+            session,
             tx_ref,
             &IronwoodEnhancementPlan::Ineligible,
         );
@@ -444,6 +448,9 @@ const PUBLIC: u8 = 2;
 const DISCOVERY_SUSPENDED: u8 = 3;
 const OUTGOING_SUSPENDED: u8 = 4;
 
+/// Content failures after which a request leaves query work until a rescan or fresh session.
+pub(crate) const MAX_REJECTIONS: u32 = 3;
+
 /// Selects enhancement rows from `tx_retrieval_queue q` (joined with `transactions t`) that may use
 /// ordinary public transport. When `:protect_ironwood` is set, privately protected transactions
 /// (`ironwood_enhance_routing.route = 0`) are excluded. Sticky route 2 (mixed details under a
@@ -479,7 +486,8 @@ fn transaction_enhancement_work_sql(private: bool, public: bool) -> String {
          FROM discovery WHERE reason IS NOT NULL
          UNION ALL
          SELECT {OUTGOING_SUSPENDED}, q.commitment_tree_position, t.txid, q.output_index, NULL, NULL
-           {OUTSTANDING_OUTGOING} AND q.not_recoverable = 1"
+           {OUTSTANDING_OUTGOING} AND q.not_recoverable = 1
+"
     );
     let public_rows = format!(
         "SELECT {PUBLIC} AS kind, 0 AS ordinal, q.txid AS identity, NULL AS output_index,
@@ -581,17 +589,22 @@ fn read_work(
 /// Mode-independent private queue contents from one statement, for storage tests. Route-2 memo
 /// work is included, as it is without public authority.
 #[cfg(test)]
-pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
+pub(crate) fn work(
+    conn: &Connection,
+    session: &SessionState,
+) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
     let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(true, false))?;
-    Ok(
-        read_work(&mut stmt, named_params![":public_authority": false])?
-            .into_iter()
-            .map(|work| match work {
-                TransactionEnhancementWork::Private(work) => work,
-                TransactionEnhancementWork::Public(_) => unreachable!("public rows not selected"),
-            })
-            .collect(),
-    )
+    Ok(session
+        .filter(read_work(
+            &mut stmt,
+            named_params![":public_authority": false],
+        )?)
+        .into_iter()
+        .map(|work| match work {
+            TransactionEnhancementWork::Private(work) => work,
+            TransactionEnhancementWork::Public(_) => unreachable!("public rows not selected"),
+        })
+        .collect())
 }
 
 /// Routes public and private payload work from one snapshot: resolved mode, generation, and
@@ -606,15 +619,22 @@ pub(crate) fn transaction_enhancement_work(
     conn: &Connection,
     mode: EnhancementMode,
     configured: Option<TransparentLedgerMode>,
+    session: &SessionState,
 ) -> Result<Vec<TransactionEnhancementWork>, SqliteClientError> {
+    // A caller-owned transaction can expose temporary removals that later roll back.
+    // Only prune committed state, or stage cleanup in the wallet's commit journal.
+    let can_prune = conn.is_autocommit() || session.has_transaction_journal();
     transparent_ledger::with_read_snapshot(conn, |conn| {
+        if can_prune {
+            retain_live_failures(conn, session)?;
+        }
         let private = mode == EnhancementMode::PrivateIronwood;
         let public_authority = transparent_ledger::retains_public_authority(conn, configured)?;
         let current_generation = transparent_ledger::durable_policy(conn)?
             .map(|p| p.generation)
             .unwrap_or(0);
         let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(private, true))?;
-        read_work(
+        let work = read_work(
             &mut stmt,
             named_params![
                 ":enhancement_type": TxQueryType::Enhancement.code(),
@@ -624,7 +644,8 @@ pub(crate) fn transaction_enhancement_work(
                     SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
                 })?,
             ],
-        )
+        )?;
+        Ok(session.filter(work))
     })
 }
 
@@ -775,6 +796,7 @@ pub(crate) fn pending_outgoing(
 pub(crate) fn queue_scanned(
     conn: &Connection,
     configured: Option<TransparentLedgerMode>,
+    session: &SessionState,
     tx_ref: crate::TxRef,
     tx: &WalletTx<AccountUuid>,
 ) -> Result<(), SqliteClientError> {
@@ -786,7 +808,9 @@ pub(crate) fn queue_scanned(
         IronwoodEnhancementPlan::Ineligible
     ) && (!tx.ironwood_spends().is_empty() || !tx.ironwood_outputs().is_empty())
     {
-        return route_transparent_details(conn, configured, tx_ref);
+        route_transparent_details(conn, configured, tx_ref)?;
+        // Route 2 keeps private memo work; this rescan re-arms it as queue_transaction does.
+        return rearm_rejected_positions(conn, session, tx_ref);
     }
     // Ordinary rescans load only unspent nullifiers. They must not erase outgoing work
     // merely because an already-linked spend is absent from this scan's account set.
@@ -801,12 +825,19 @@ pub(crate) fn queue_scanned(
     {
         discovery::queue(conn, configured, tx_ref)?;
     }
-    queue_transaction(conn, configured, tx_ref, tx.ironwood_enhancement_plan())
+    queue_transaction(
+        conn,
+        configured,
+        session,
+        tx_ref,
+        tx.ironwood_enhancement_plan(),
+    )
 }
 
 fn queue_transaction(
     conn: &Connection,
     configured: Option<TransparentLedgerMode>,
+    session: &SessionState,
     tx_ref: crate::TxRef,
     plan: &IronwoodEnhancementPlan<AccountUuid>,
 ) -> Result<(), SqliteClientError> {
@@ -820,7 +851,9 @@ fn queue_transaction(
     }
     let route = route(conn, tx_ref)?;
     if route == Some(LWD_REQUIRED) || route == Some(PRIVATE_DETAILS_UNSUPPORTED) {
-        return route_transparent_details(conn, configured, tx_ref);
+        route_transparent_details(conn, configured, tx_ref)?;
+        // Route 2 keeps private memo work; the rescan re-arms it like any other.
+        return rearm_rejected_positions(conn, session, tx_ref);
     }
     let candidates = match plan {
         IronwoodEnhancementPlan::Eligible { outgoing } => outgoing,
@@ -832,6 +865,7 @@ fn queue_transaction(
             )?;
             if route.is_some() || has_notes {
                 route_transparent_details(conn, configured, tx_ref)?;
+                rearm_rejected_positions(conn, session, tx_ref)?;
             }
             return Ok(());
         }
@@ -935,7 +969,9 @@ fn queue_transaction(
         }
     }
 
-    metadata::queue(conn, tx_ref, candidates)?;
+    metadata::queue(conn, session, tx_ref, candidates)?;
+    // A rescan re-arms rejected positions, as it resets `not_recoverable` above.
+    rearm_rejected_positions(conn, session, tx_ref)?;
 
     let has_work: bool = conn.query_row(
         concat!("SELECT ", has_private_work!()),
@@ -952,6 +988,76 @@ fn queue_transaction(
     // No route + no work is not proof of completion. A previously completed
     // private transaction, however, must not gain a txid request on replay.
     retire_enhancement_if_complete(conn, tx_ref)
+}
+
+/// Clears the rejection counts of every position the transaction owns, after a rescan queued it.
+fn rearm_rejected_positions(
+    conn: &Connection,
+    session: &SessionState,
+    tx_ref: crate::TxRef,
+) -> Result<(), SqliteClientError> {
+    let txid: [u8; 32] = conn.query_row(
+        "SELECT txid FROM transactions WHERE id_tx = ?",
+        [tx_ref.0],
+        |row| row.get(0),
+    )?;
+    session.rearm_transaction(TxId::from_bytes(txid));
+    Ok(())
+}
+
+/// Counts a content failure against each distinct position of `requests` that is still query
+/// work. Called in a transaction after a rejected batch rolled back or a reply failed to decode.
+/// A request that is stale, completed or already suspended is ignored, so a late result cannot
+/// charge a position that a rewind has since given to another transaction. The caller's
+/// transaction keeps the identity checks and increments in one snapshot.
+pub(crate) fn record_content_failures(
+    conn: &Connection,
+    configured: Option<TransparentLedgerMode>,
+    session: &SessionState,
+    requests: &[EnhancePirRequest],
+) -> Result<(), SqliteClientError> {
+    let public_authority = transparent_ledger::retains_public_authority(conn, configured)?;
+    let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(true, false))?;
+    let live: std::collections::BTreeSet<_> = session
+        .filter(read_work(
+            &mut stmt,
+            named_params![":public_authority": public_authority],
+        )?)
+        .into_iter()
+        .filter_map(|work| match work {
+            TransactionEnhancementWork::Private(EnhancePirWork::Query(request)) => Some(request),
+            _ => None,
+        })
+        .collect();
+    let distinct: std::collections::BTreeSet<_> = requests
+        .iter()
+        .copied()
+        .filter(|request| live.contains(request))
+        .collect();
+    for request in distinct {
+        session.failure(request);
+    }
+    Ok(())
+}
+
+/// Forget completed or removed requests after a successful wallet operation.
+pub(crate) fn retain_live_failures(
+    conn: &Connection,
+    session: &SessionState,
+) -> Result<(), SqliteClientError> {
+    if session.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(true, false))?;
+    let live = read_work(&mut stmt, named_params![":public_authority": false])?
+        .into_iter()
+        .filter_map(|work| match work {
+            TransactionEnhancementWork::Private(EnhancePirWork::Query(request)) => Some(request),
+            _ => None,
+        })
+        .collect();
+    session.retain(live);
+    Ok(())
 }
 
 pub(super) fn outgoing_position_owned_by_other(

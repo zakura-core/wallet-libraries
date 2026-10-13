@@ -802,11 +802,11 @@ fn third_content_failure_gives_up() {
     defer(&mut st, txid, unavailable(), now());
     assert_eq!(content_failures(&st, txid), 3);
     assert!(!listing_at(&st, past_backstop, None).contains(&txid));
-    // The work remains, given up, and the receipt reads as unavailable.
+    // The work remains, and the receipt reads as given up.
     assert_eq!(reasons(&st, txid), Some(RECEIVE));
     assert_eq!(
         view(&st, account, txid),
-        Some(TransparentDisplayView::Unavailable)
+        Some(TransparentDisplayView::GaveUp)
     );
 
     // Mined again at another height: due at once, and counting from zero.
@@ -819,6 +819,10 @@ fn third_content_failure_gives_up() {
     };
     cover(&mut st, account, &revision(1, true), vec![remined]);
     assert!(listing(&st).contains(&txid));
+    assert_eq!(
+        view(&st, account, txid),
+        Some(TransparentDisplayView::Unavailable)
+    );
     defer(&mut st, txid, TransparentDetailOutcome::Absent, now());
     assert_eq!(content_failures(&st, txid), 1);
     assert_eq!(attempts(&st, txid), 1);
@@ -2061,6 +2065,32 @@ fn view_matches_listability() {
         view(&st, account, protected),
         Some(TransparentDisplayView::Unavailable)
     );
+
+    // Without public authority, three content failures give both up: neither is listed, and
+    // both read as given up rather than unavailable.
+    set_policy(&mut st, PrivateRequired);
+    for t in [txid, protected] {
+        for _ in 0..3 {
+            defer(&mut st, t, TransparentDetailOutcome::Absent, now());
+        }
+        assert!(!listing_at(&st, later(30 * DAY), None).contains(&t));
+        assert_eq!(view(&st, account, t), Some(TransparentDisplayView::GaveUp));
+    }
+    // Under public authority nothing is given up, so each reads as it did before.
+    set_policy(&mut st, Public);
+    assert_eq!(
+        view(&st, account, txid),
+        Some(TransparentDisplayView::Pending)
+    );
+    assert_eq!(
+        view(&st, account, protected),
+        Some(TransparentDisplayView::Unavailable)
+    );
+    // Private again, both are given up again.
+    set_policy(&mut st, PrivateRequired);
+    for t in [txid, protected] {
+        assert_eq!(view(&st, account, t), Some(TransparentDisplayView::GaveUp));
+    }
 }
 
 #[cfg(feature = "orchard")]

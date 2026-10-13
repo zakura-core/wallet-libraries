@@ -48,6 +48,18 @@ pub(super) fn listable_work_sql() -> String {
     )
 }
 
+/// Rows of `transparent_detail_work w` that only their content failures keep from
+/// [`listable_work_sql`] without public authority: given up after [`CONTENT_FAILURE_LIMIT`]
+/// and not re-armed. An unmined transaction is not re-armed until it is mined at another
+/// height.
+pub(super) fn given_up_work_sql() -> String {
+    format!(
+        "t.raw IS NULL AND {}
+         AND w.content_failures >= {CONTENT_FAILURE_LIMIT} AND NOT IFNULL({REARMED}, FALSE)",
+        related_transaction_sql()
+    )
+}
+
 /// Rows the listing may return now, before timing: [`listable_work_sql`] and mined.
 pub(super) fn eligible_work_sql() -> String {
     format!("t.mined_height IS NOT NULL AND {}", listable_work_sql())

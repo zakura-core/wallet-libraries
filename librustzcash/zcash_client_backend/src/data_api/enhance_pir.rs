@@ -85,6 +85,9 @@ pub enum EnhancePirSuspension {
     Discovery(IronwoodEnhanceDiscoveryFailure),
     /// Outgoing recovery failed; new funding/scanning may reactivate the action.
     OutgoingNotRecoverable(EnhancePirRequest),
+    /// Replies for this position were rejected or unreadable three times; it is not queried
+    /// again until a rescan queues its transaction again or the wallet session is reopened.
+    Rejected(EnhancePirRequest),
 }
 
 /// Result of atomically applying independently validated discovery plans from a block.
@@ -312,10 +315,30 @@ pub trait EnhancePirWrite: EnhancePirRead {
     /// Any live rejection or database error rolls back the entire batch. Stale
     /// requests are harmless no-ops. Server association and metadata are trusted
     /// where no incoming or outgoing decryption authenticates the action.
+    /// Storage may count a rejected record in the open wallet session after rolling back;
+    /// a position rejected three times is reported as [`EnhancePirSuspension::Rejected`].
+    /// Counting must recheck the request identity against a database snapshot: a rewind may have
+    /// reassigned its position after the application transaction rolled back.
     fn apply_ironwood_enhance_records(
         &mut self,
         records: &[(EnhancePirRequest, EnhanceRecord)],
     ) -> Result<EnhancePirBatchResult, Self::Error>;
+
+    /// Counts a content failure that never reached [`Self::apply_ironwood_enhance_records`]:
+    /// the reply for these requests arrived but its row or record bytes failed to decode.
+    /// Pass every request of the `(txid, row)` batch whose reply failed. Each distinct position
+    /// counts once per call, against the same allowance as a rejected record, and a position
+    /// reaching three is reported as [`EnhancePirSuspension::Rejected`]. Requests that are no
+    /// longer query work are ignored. Counts are in memory for the open wallet session;
+    /// reopening a fresh session resets them, while ordinary syncs must retain them.
+    ///
+    /// Callers must not call this for a request failure (an HTTP refusal such as 409, 410, 429
+    /// or 503, a transport error or a timeout): those say nothing about the content and must
+    /// never suspend a position.
+    fn record_ironwood_enhance_unreadable(
+        &mut self,
+        requests: &[EnhancePirRequest],
+    ) -> Result<(), Self::Error>;
 
     /// Reconstructs pending outgoing candidates using a previously scanned compact block
     /// and the wallet's current durable funding associations, including already-spent notes.

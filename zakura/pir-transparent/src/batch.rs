@@ -5,7 +5,7 @@ use zcash_client_backend::data_api::transparent_ledger::{
     RecoveryRevision, TransparentLedgerCommit,
 };
 
-use crate::progress::{Outcome, Progress, Retry};
+use crate::progress::{FailedEntries, Outcome, Progress, Retry};
 #[cfg(doc)]
 use crate::{RecoveryError, TransparentHistoryRecovery};
 
@@ -106,6 +106,8 @@ pub struct RecoveryBatch<AccountId> {
     // Only settlement (feature `sqlite`) acknowledges a batch.
     #[cfg_attr(not(any(test, feature = "sqlite")), allow(dead_code))]
     pub(crate) receipt: [u8; 32],
+    /// The directory entries the pass's sync failed on content or held at the cap.
+    pub(crate) failed_entries: FailedEntries,
 }
 
 impl<A> RecoveryBatch<A> {
@@ -127,14 +129,22 @@ impl<A> RecoveryBatch<A> {
         self.state
     }
 
+    /// The directory entries this pass could not read because their private replies
+    /// failed on content, counted. The batch still holds everything else the pass read.
+    pub fn failed_entries(&self) -> FailedEntries {
+        self.failed_entries
+    }
+
     /// When to pass the account again. A [`BatchState::Withdrawn`] batch is
     /// [`Retry::Stalled`] whatever its progress, which can even be
     /// [`Outcome::Complete`]: the publication contradicts the catalog, and
     /// passing again on a timer reads the same contradiction. Keep the
-    /// companion and pass again for new work. Otherwise this is
-    /// [`Progress::retry`].
+    /// companion and pass again for new work. So is a batch with
+    /// [`Self::failed_entries`], whatever else stopped its pass: a pass again on
+    /// a timer would ask a failed entry again in the same sync, a reaction a
+    /// service could aim at chosen rows. Otherwise this is [`Progress::retry`].
     pub fn retry(&self) -> Retry {
-        retry(self.state, self.progress)
+        retry(self.state, self.progress, self.failed_entries)
     }
 
     /// Exactly the retired provisional revisions this batch resolves: each was
@@ -183,15 +193,18 @@ impl<A> RecoveryBatch<A> {
             state,
             retired_revisions,
             receipt: [0; 32],
+            failed_entries: FailedEntries::default(),
         }
     }
 }
 
-/// When to pass an account again after a pass in `state` with `progress`: never on a
-/// timer for a [`BatchState::Withdrawn`] one, otherwise as its progress says.
-pub(crate) fn retry(state: BatchState, progress: Progress) -> Retry {
+/// When to pass an account again after a pass in `state` with `progress` that failed
+/// `failed` entries: never on a timer for a [`BatchState::Withdrawn`] one or one with
+/// failed entries, otherwise as its progress says.
+pub(crate) fn retry(state: BatchState, progress: Progress, failed: FailedEntries) -> Retry {
     match state {
         BatchState::Withdrawn(_) => Retry::Stalled,
+        _ if failed.entries > 0 => Retry::Stalled,
         BatchState::Ready | BatchState::Pending => progress.retry(),
     }
 }
@@ -205,6 +218,7 @@ pub(crate) fn unready_batch<A>(state: BatchState, progress: Progress) -> Recover
         state,
         retired_revisions: vec![],
         receipt: [0; 32],
+        failed_entries: FailedEntries::default(),
     }
 }
 

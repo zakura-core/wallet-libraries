@@ -133,6 +133,7 @@ fn shard(
         supersedes: String::new(),
         page_span: 0,
         events,
+        malformed_entries: Vec::new(),
     }
 }
 

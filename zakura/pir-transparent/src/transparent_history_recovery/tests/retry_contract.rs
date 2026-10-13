@@ -39,6 +39,7 @@ fn a_withdrawn_batch_waits_for_new_work() {
         state,
         retired_revisions: Vec::new(),
         receipt: [0; 32],
+        failed_entries: FailedEntries::default(),
     };
     for outcome in [
         Outcome::Complete,
@@ -59,6 +60,16 @@ fn a_withdrawn_batch_waits_for_new_work() {
         for state in [BatchState::Ready, BatchState::Pending] {
             let progress = batch(state, outcome).progress();
             assert_eq!(batch(state, outcome).retry(), progress.retry());
+            // Failed entries stall it whatever else stopped the pass: a timer would ask
+            // them again in the same sync.
+            let failing = RecoveryBatch {
+                failed_entries: FailedEntries {
+                    entries: 1,
+                    held: 0,
+                },
+                ..batch(state, outcome)
+            };
+            assert_eq!(failing.retry(), Retry::Stalled, "{state:?} {outcome:?}");
         }
     }
 }

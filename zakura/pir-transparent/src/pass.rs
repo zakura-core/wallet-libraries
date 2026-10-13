@@ -7,7 +7,7 @@ use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchS
 use crate::batch::{self, BatchState, RecoveryBatch};
 use crate::error::RecoveryError;
 use crate::http::{HttpExchange, TransparentPirHttp};
-use crate::progress::{Progress, Retry};
+use crate::progress::{FailedEntries, Progress, Retry};
 use crate::transparent_history_recovery::TransparentHistoryRecovery;
 
 /// What one [`TransparentHistoryRecovery::pass`] found. It carries no commit, address or
@@ -27,12 +27,15 @@ pub struct PassReport {
     /// Whether the first attempt found the publication set changed and the pass
     /// retried with the reset companion.
     pub publication_changed: bool,
+    /// The batch's [`RecoveryBatch::failed_entries`]: directory entries whose private
+    /// replies failed on content, counted. Any makes the pass [`Retry::Stalled`].
+    pub failed_entries: FailedEntries,
 }
 
 impl PassReport {
     /// When to pass the account again: [`RecoveryBatch::retry`] of the batch.
     pub fn retry(&self) -> Retry {
-        batch::retry(self.state, self.progress)
+        batch::retry(self.state, self.progress, self.failed_entries)
     }
 
     /// Whether the pass held its batch for settlement: exactly when it is
@@ -48,6 +51,7 @@ impl PassReport {
             commits: batch.commits().len(),
             retired: batch.retired_revisions().len(),
             publication_changed,
+            failed_entries: batch.failed_entries(),
         }
     }
 }

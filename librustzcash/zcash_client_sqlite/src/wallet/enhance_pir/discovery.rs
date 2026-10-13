@@ -117,6 +117,7 @@ pub(super) fn funding(
 pub(crate) fn rebuild(
     conn: &Transaction<'_>,
     configured: Option<TransparentLedgerMode>,
+    session: &super::SessionState,
     request: IronwoodEnhanceDiscoveryRequest,
     block: &CompactBlock,
 ) -> Result<IronwoodEnhanceDiscoveryResult, SqliteClientError> {
@@ -298,7 +299,7 @@ pub(crate) fn rebuild(
     let rebuilt = plans.len() + metadata_rebuilt;
     for (tx_ref, position, eligible) in metadata_plans {
         if eligible {
-            super::metadata::bind(conn, tx_ref, u64::from(position), 0)?;
+            super::metadata::bind(conn, session, tx_ref, u64::from(position), 0)?;
         } else {
             super::route_transparent_details(conn, configured, tx_ref)?;
         }
@@ -314,7 +315,7 @@ pub(crate) fn rebuild(
     }
     for (tx_ref, plan, received_context) in plans {
         restore_received_context(conn, tx_ref, received_context)?;
-        queue_transaction(conn, configured, tx_ref, &plan)?;
+        queue_transaction(conn, configured, session, tx_ref, &plan)?;
         conn.execute(
             "DELETE FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx",
             named_params![":tx": tx_ref.0],
