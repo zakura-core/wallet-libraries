@@ -424,7 +424,7 @@ fn underpaid_reservation(st: &mut State) -> (OneTimeKey, i64) {
     .unwrap();
     db.finish_receive_operation(account, "swap", &accepted("swap", None, deadline))
         .unwrap();
-    db.start_receive_operation(account, "swap")
+    db.start_receive_operation(account, "swap", now)
         .unwrap()
         .unwrap();
     record_receive_status(st, Active, now + HOUR);
@@ -592,7 +592,7 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
         db.finish_receive_operation(account, request, &accepted(request, None, deadline))
             .unwrap();
     }
-    db.start_receive_operation(account, "accepted")
+    db.start_receive_operation(account, "accepted", now)
         .unwrap()
         .unwrap();
     pay(&mut st, reservation.full_viewing_key(), 70_000);

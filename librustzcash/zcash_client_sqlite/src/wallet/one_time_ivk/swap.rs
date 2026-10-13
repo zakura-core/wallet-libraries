@@ -155,13 +155,16 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     }
 
     /// Starts the accepted operation `request` and returns its deposit instructions,
-    /// which the UI shows rather than a copy held elsewhere.
+    /// which the UI shows rather than a copy held elsewhere. Refused as
+    /// [`ReservationPolicy::Stale`] once the deposit deadline has passed by the earlier of
+    /// `now`, the caller's clock in Unix seconds, and the latest block time.
     pub fn start_receive_operation(
         &mut self,
         account: AccountUuid,
         request: &str,
+        now: i64,
     ) -> Result<Result<ReceiveDeposit, ReservationPolicy>, SqliteClientError> {
-        self.transactionally(|db| reservations::start(db.conn.0, account, request))
+        self.transactionally(|db| reservations::start(db.conn.0, account, request, now))
     }
 
     /// Records a provider status, requested at `now` and normalized by the app's provider

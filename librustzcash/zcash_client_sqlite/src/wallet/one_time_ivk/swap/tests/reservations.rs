@@ -82,11 +82,16 @@ fn finish(st: &mut State, request: &str, out: &OperationOutcome) -> Result<(), S
     db.finish_receive_operation(account, request, out)
 }
 
-/// Starts `request`, returning its deposit or the policy that refused it.
+/// Starts `request` at [`NOW`], returning its deposit or the policy that refused it.
 fn start(st: &mut State, request: &str) -> Policy<ReceiveDeposit> {
+    start_at(st, request, NOW)
+}
+
+/// Starts `request` at `now`, returning its deposit or the policy that refused it.
+fn start_at(st: &mut State, request: &str, now: i64) -> Policy<ReceiveDeposit> {
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
-    db.start_receive_operation(account, request)
+    db.start_receive_operation(account, request, now)
 }
 
 /// Begins `request` and accepts it with deposit address `request` and a deadline of
@@ -881,6 +886,59 @@ fn finish_refuses_an_accepted_deadline_that_has_passed() {
     let deadline = chain_time + 60 * 60;
     finish(&mut st, "fast", &accepted("deposit", None, deadline)).unwrap();
     assert_eq!(start(&mut st, "fast").unwrap().unwrap().deadline, deadline);
+}
+
+/// Starting refuses an accepted quote whose deadline has passed by the earlier of the
+/// caller's clock and the latest block time, on a first start or a restart, without
+/// marking it started. A device clock days fast or slow still starts a live quote.
+#[test]
+fn start_refuses_a_quote_past_its_deadline() {
+    const DAY: i64 = 24 * 60 * 60;
+    let started = |st: &State| -> bool {
+        let sql = "SELECT started FROM ironwood_one_time_operations WHERE request = 'quote'";
+        value(st.wallet().conn(), sql, [])
+    };
+    // Each case: the device clock when the quote is begun, the accepted deadline, the
+    // chain's time and the device clock at start, and whether it starts.
+    for (case, begun, deadline, chain, at, starts) in [
+        (
+            "late first start",
+            NOW,
+            NOW + 60,
+            NOW + 120,
+            NOW + 120,
+            false,
+        ),
+        ("fast device", NOW, NOW + 60, NOW, NOW + 5 * DAY, true),
+        (
+            "slow device",
+            NOW - 2 * DAY,
+            NOW + 3600,
+            NOW,
+            NOW - 2 * DAY + 10,
+            true,
+        ),
+    ] {
+        let mut st = fixture();
+        let r = prepare(&mut st, NOW);
+        begin_at(&mut st, &r, "quote", begun + 3600, begun)
+            .unwrap()
+            .unwrap();
+        finish(&mut st, "quote", &accepted("deposit", None, deadline)).unwrap();
+        chain_agrees(st.wallet().db(), chain);
+        let start = start_at(&mut st, "quote", at);
+        assert_eq!(start.unwrap().is_ok(), starts, "{case}");
+        assert_eq!(started(&st), starts, "{case}");
+    }
+    // A restart after the deadline is refused too.
+    let mut st = fixture();
+    let r = prepare(&mut st, NOW);
+    begin(&mut st, &r, "quote").unwrap().unwrap();
+    finish(&mut st, "quote", &accepted("deposit", None, NOW + 60)).unwrap();
+    chain_agrees(st.wallet().db(), NOW);
+    assert!(start_at(&mut st, "quote", NOW).unwrap().is_ok());
+    chain_agrees(st.wallet().db(), NOW + 120);
+    assert_eq!(refusal(start_at(&mut st, "quote", NOW + 120)), Some(Stale));
 }
 
 /// Refund issuance skips a refund address the provider's seen set holds, such as one an

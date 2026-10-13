@@ -425,6 +425,7 @@ pub(in crate::wallet::one_time_ivk) fn start(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
     request: &str,
+    now: i64,
 ) -> Result<Result<ReceiveDeposit, ReservationPolicy>, SqliteClientError> {
     let id = operation(conn, account, request)?;
     let deposit = conn
@@ -447,6 +448,10 @@ pub(in crate::wallet::one_time_ivk) fn start(
     let Some(deposit) = deposit else {
         return Ok(Err(ReservationPolicy::Stale));
     };
+    // The provider no longer takes a deposit, so its instructions must not be shown.
+    if deposit.deadline <= deadline_clock(conn, now)? {
+        return Ok(Err(ReservationPolicy::Stale));
+    }
     conn.execute(
         "UPDATE ironwood_one_time_operations SET started = 1 WHERE id = ?1",
         [id],
