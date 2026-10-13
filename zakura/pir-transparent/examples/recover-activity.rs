@@ -316,6 +316,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             PassLimits::default(),
         );
         step = plan.first();
+        // A grown window is covered by the next sync, not this one.
+        let mut grew_window = false;
         loop {
             match step {
                 Step::Pass | Step::Refresh => {}
@@ -372,6 +374,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 None => Ok(None),
             };
             let grew = matches!(&settled, Ok(Some(applied)) if applied.stats.window_grew);
+            grew_window |= grew;
             passes.push(json!({
                 "sync": sync,
                 "pass": passes.len(),
@@ -397,7 +400,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             drop(reference);
             reference = TransparentHistoryRecovery::open(&companion_path, config.clone())?;
         }
-        if step == Step::Done(Some(Retry::Complete)) {
+        if step == Step::Done(Some(Retry::Complete)) && !grew_window {
             break;
         }
     }
