@@ -311,12 +311,15 @@ fn completion_does_not_enable_discovery_for_an_unregistered_account() {
 /// Queuing spend history again while its replay is queued leaves the scan queue alone.
 #[test]
 fn repeated_missing_history_does_not_restart_the_public_replay() {
-    let (mut st, _, _, through, _) = fixture();
+    let (mut st, _, candidate, through, _) = fixture();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
     let replay = |db: &mut Db| {
         let queue = store::restore::retention::queue_spend_history;
-        tx(db, |c, p| queue(c, p, account, through.height)).unwrap()
+        tx(db, |c, p| {
+            queue(c, p, account, candidate.height, through.height)
+        })
+        .unwrap()
     };
     replay(db);
     let count = "CREATE TEMP TABLE writes(n INTEGER); INSERT INTO writes VALUES (0);
@@ -326,6 +329,57 @@ fn repeated_missing_history_does_not_restart_the_public_replay() {
     db.conn.execute_batch(count).unwrap();
     replay(db);
     assert_eq!(value::<u32>(&db.conn, "SELECT n FROM writes", []), 0);
+}
+
+/// Missing spend history is replayed from the payment's block, not the account's
+/// birthday: blocks below the payment stay out of the scan queue, and blocks whose
+/// nullifiers are already retained aren't scanned again.
+#[test]
+fn spend_history_replays_from_the_payment_not_the_birthday() {
+    let (mut st, _, candidate, _, _) = fixture();
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(6);
+    let through = tip(&st);
+    let from = candidate.height + 3;
+    let db = st.wallet_mut().db_mut();
+    let unmark = "DELETE FROM ironwood_nullifier_scan_blocks WHERE height < ?1";
+    exec(&db.conn, unmark, [u32::from(from + 2)]);
+    // As after a finished restore, which releases retained nullifiers.
+    let release = "UPDATE ironwood_one_time_spend_retention SET nullifier_retention_height = ?1";
+    exec(&db.conn, release, [u32::from(through.height + 1)]);
+    let queue = store::restore::retention::queue_spend_history;
+    tx(db, |c, p| queue(c, p, account, from, through.height)).unwrap();
+    assert!(suggests_scanning(&st, from));
+    assert!(suggests_scanning(&st, from + 1));
+    assert!(!suggests_scanning(&st, from - 1));
+    assert!(!suggests_scanning(&st, from + 2));
+    assert_eq!(retained_from(st.wallet().db()), Some(from));
+}
+
+/// A later payment older than a queued replay's start extends the replay down to its own
+/// block, so it doesn't wait on a replay that will never cover it.
+#[test]
+fn an_older_payment_extends_a_queued_replay_downward() {
+    let (mut st, _, candidate, _, _) = fixture();
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(6);
+    let through = tip(&st);
+    let db = st.wallet_mut().db_mut();
+    exec(&db.conn, "DELETE FROM ironwood_nullifier_scan_blocks", []);
+    let queue = store::restore::retention::queue_spend_history;
+    let newer = candidate.height + 4;
+    tx(db, |c, p| queue(c, p, account, newer, through.height)).unwrap();
+    assert!(!suggests_scanning(&st, newer - 1));
+    let older = candidate.height + 1;
+    let db = st.wallet_mut().db_mut();
+    tx(db, |c, p| queue(c, p, account, older, through.height)).unwrap();
+    for height in u32::from(older)..=u32::from(through.height) {
+        assert!(
+            suggests_scanning(&st, BlockHeight::from(height)),
+            "{height}"
+        );
+    }
+    assert!(!suggests_scanning(&st, older - 1));
 }
 
 /// A payment before the account's birthday is dropped as applied, without queuing a
