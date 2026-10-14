@@ -136,7 +136,7 @@ fn retire_enhancement_if_complete(
             ":enhancement": TxQueryType::Enhancement.code(),
         ],
     )?;
-    super::ironwood_hooks::prune_not_before(tx)
+    Ok(())
 }
 
 /// Selects the undecryptable outgoing candidates of `:tx` that the wallet's own value
@@ -410,11 +410,6 @@ const QUERY: u8 = 1;
 const PUBLIC: u8 = 2;
 const DISCOVERY_SUSPENDED: u8 = 3;
 const OUTGOING_SUSPENDED: u8 = 4;
-const WAITING: u8 = 5;
-
-/// Binds `:now` so that every waiting position reads as due: for reads that must treat waiting
-/// work as live, such as content-failure bookkeeping.
-const ALL_DUE: i64 = i64::MAX;
 
 /// Content failures after which a request leaves query work until a rescan or fresh session.
 pub(crate) const MAX_REJECTIONS: u32 = 3;
@@ -452,10 +447,6 @@ fn transaction_enhancement_work_sql(private: bool, public: bool) -> String {
          FROM discovery WHERE reason IS NULL
          UNION ALL
          SELECT {QUERY}, position, txid, output_index, NULL, NULL FROM queries
-         WHERE position NOT IN (SELECT position FROM waiting)
-         UNION ALL
-         SELECT {WAITING}, q.position, q.txid, q.output_index, w.not_before, NULL
-         FROM queries q JOIN waiting w ON w.position = q.position
          UNION ALL
          SELECT DISTINCT {DISCOVERY_SUSPENDED}, height, txid, NULL, reason, tx_index
          FROM discovery WHERE reason IS NOT NULL
@@ -509,9 +500,6 @@ fn transaction_enhancement_work_sql(private: bool, public: bool) -> String {
              JOIN transactions t ON t.id_tx = q.transaction_id
              {ACTIVE_MEMO_TX}
                AND q.commitment_tree_position IS NOT NULL
-         ), waiting AS (
-             SELECT commitment_tree_position AS position, not_before
-             FROM ironwood_enhance_not_before WHERE not_before > :now
          )
          {rows}
          ORDER BY kind, ordinal, tx_index, identity, output_index"
@@ -557,11 +545,6 @@ fn read_work(
             OUTGOING_SUSPENDED => TransactionEnhancementWork::Private(EnhancePirWork::Suspended(
                 EnhancePirSuspension::OutgoingNotRecoverable(private_request(row.get(1)?)?),
             )),
-            WAITING => TransactionEnhancementWork::Private(EnhancePirWork::Waiting {
-                request: private_request(row.get(1)?)?,
-                not_before: std::time::SystemTime::UNIX_EPOCH
-                    + std::time::Duration::from_secs(row.get(4)?),
-            }),
             _ => unreachable!("closed SQL UNION"),
         })
     })?
@@ -578,10 +561,10 @@ pub(crate) fn work(
 ) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
     let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(true, false))?;
     Ok(session
-        .filter(read_work(
-            &mut stmt,
-            named_params![":public_authority": false, ":now": ALL_DUE],
-        )?)
+        .filter(
+            read_work(&mut stmt, named_params![":public_authority": false])?,
+            None,
+        )
         .into_iter()
         .map(|work| match work {
             TransactionEnhancementWork::Private(work) => work,
@@ -604,6 +587,7 @@ pub(crate) fn transaction_enhancement_work(
     configured: Option<TransparentLedgerMode>,
     session: &SessionState,
     now: std::time::SystemTime,
+    max_delay: std::time::Duration,
 ) -> Result<Vec<TransactionEnhancementWork>, SqliteClientError> {
     // A caller-owned transaction can expose temporary removals that later roll back.
     // Only prune committed state, or stage cleanup in the wallet's commit journal.
@@ -627,10 +611,9 @@ pub(crate) fn transaction_enhancement_work(
                 ":current_generation": i64::try_from(current_generation).map_err(|_| {
                     SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
                 })?,
-                ":now": unix_seconds(now),
             ],
         )?;
-        Ok(session.filter(work))
+        Ok(session.filter(work, Some((now, max_delay))))
     })
 }
 
@@ -989,55 +972,52 @@ fn rearm_rejected_positions(
     Ok(())
 }
 
-fn unix_seconds(time: std::time::SystemTime) -> i64 {
-    time.duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+/// Every position an Enhance queue holds, or with `tx_ref`, every one of that transaction.
+fn queued_positions(
+    conn: &Connection,
+    tx_ref: Option<crate::TxRef>,
+) -> Result<std::collections::BTreeSet<u64>, SqliteClientError> {
+    conn.prepare_cached(
+        "SELECT q.commitment_tree_position
+         FROM ironwood_memo_retrieval_queue q
+         JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
+         WHERE :tx IS NULL OR rn.transaction_id = :tx
+         UNION
+         SELECT commitment_tree_position FROM ironwood_enhance_outgoing_queue
+         WHERE :tx IS NULL OR transaction_id = :tx
+         UNION
+         SELECT commitment_tree_position FROM ironwood_enhance_metadata_queue
+         WHERE commitment_tree_position IS NOT NULL
+           AND (:tx IS NULL OR transaction_id = :tx)",
+    )?
+    .query_map(named_params![":tx": tx_ref.map(|t| t.0)], |row| {
+        row.get::<_, u64>(0)
+    })?
+    .collect::<Result<_, _>>()
+    .map_err(Into::into)
 }
 
 /// Draws a not-before time for each queued position of `tx_ref` (every queued position, without
-/// one) that has none: `now` plus a delay drawn uniformly from zero to `max_delay` with `rng`,
-/// independently per position. An existing time is kept, so a rescan does not draw again.
+/// one) that `session` has none for: `now` plus a delay drawn uniformly from zero to `max_delay`
+/// with `rng`, independently per position, in position order. An existing time is kept, so a
+/// rescan in the same session does not draw again.
+///
+/// The time is session memory, not wallet state: a fresh session draws again at its first
+/// write. A restart is the application's doing, not a reply's, so it cannot steer the query.
 pub(crate) fn arm_not_before<R: rand::Rng + ?Sized>(
     conn: &Connection,
+    session: &SessionState,
     tx_ref: Option<crate::TxRef>,
     now: std::time::SystemTime,
     max_delay: std::time::Duration,
     rng: &mut R,
 ) -> Result<(), SqliteClientError> {
     use rand::RngExt;
-    let positions = conn
-        .prepare_cached(
-            "SELECT position FROM (
-                 SELECT q.commitment_tree_position AS position
-                 FROM ironwood_memo_retrieval_queue q
-                 JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
-                 WHERE :tx IS NULL OR rn.transaction_id = :tx
-                 UNION
-                 SELECT commitment_tree_position FROM ironwood_enhance_outgoing_queue
-                 WHERE :tx IS NULL OR transaction_id = :tx
-                 UNION
-                 SELECT commitment_tree_position FROM ironwood_enhance_metadata_queue
-                 WHERE commitment_tree_position IS NOT NULL
-                   AND (:tx IS NULL OR transaction_id = :tx)
-             )
-             WHERE position NOT IN (SELECT commitment_tree_position FROM ironwood_enhance_not_before)
-             ORDER BY position",
-        )?
-        .query_map(named_params![":tx": tx_ref.map(|t| t.0)], |row| {
-            row.get::<_, i64>(0)
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let now = unix_seconds(now);
-    for position in positions {
-        let delay = rng.random_range(0..=max_delay.as_secs());
-        conn.execute(
-            "INSERT INTO ironwood_enhance_not_before (commitment_tree_position, not_before)
-             VALUES (:position, :not_before)",
-            named_params![
-                ":position": position,
-                ":not_before": now.saturating_add(i64::try_from(delay).unwrap_or(i64::MAX)),
-            ],
-        )?;
+    for position in queued_positions(conn, tx_ref)? {
+        if session.not_before(position).is_none() {
+            let delay = rng.random_range(0..=max_delay.as_secs());
+            session.set_not_before(position, now + std::time::Duration::from_secs(delay));
+        }
     }
     Ok(())
 }
@@ -1056,10 +1036,13 @@ pub(crate) fn record_content_failures(
     let public_authority = transparent_ledger::retains_public_authority(conn, configured)?;
     let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(true, false))?;
     let live: std::collections::BTreeSet<_> = session
-        .filter(read_work(
-            &mut stmt,
-            named_params![":public_authority": public_authority, ":now": ALL_DUE],
-        )?)
+        .filter(
+            read_work(
+                &mut stmt,
+                named_params![":public_authority": public_authority],
+            )?,
+            None,
+        )
         .into_iter()
         .filter_map(|work| match work {
             TransactionEnhancementWork::Private(EnhancePirWork::Query(request)) => Some(request),
@@ -1086,17 +1069,15 @@ pub(crate) fn retain_live_failures(
         return Ok(());
     }
     let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(true, false))?;
-    let live = read_work(
-        &mut stmt,
-        named_params![":public_authority": false, ":now": ALL_DUE],
-    )?
-    .into_iter()
-    .filter_map(|work| match work {
-        TransactionEnhancementWork::Private(EnhancePirWork::Query(request)) => Some(request),
-        _ => None,
-    })
-    .collect();
+    let live = read_work(&mut stmt, named_params![":public_authority": false])?
+        .into_iter()
+        .filter_map(|work| match work {
+            TransactionEnhancementWork::Private(EnhancePirWork::Query(request)) => Some(request),
+            _ => None,
+        })
+        .collect();
     session.retain(live);
+    session.retain_not_before(queued_positions(conn, None)?);
     Ok(())
 }
 

@@ -244,11 +244,6 @@ mod tests {
         ] {
             assert!(after.remove(table).unwrap_or_default().is_empty());
         }
-        // A wallet without a scanned tip opens no status poll windows, and no Enhance position
-        // waits.
-        for table in ["tx_status_polls", "ironwood_enhance_not_before"] {
-            assert!(after.remove(table).unwrap_or_default().is_empty());
-        }
         let queued_before = before.remove("tx_retrieval_queue").unwrap_or_default();
         let queued_after = after.remove("tx_retrieval_queue").unwrap_or_default();
         assert!(queued_before.iter().all(|row| queued_after.contains(row)));

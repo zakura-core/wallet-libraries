@@ -1,5 +1,5 @@
 //! The first private query of a newly queued position waits a random time drawn from the
-//! wallet's random source (`docs/pir-remaining-leaks-plan.md`, change D).
+//! wallet's random source and kept in the session (`docs/pir-remaining-leaks-plan.md`, change D).
 use std::time::{Duration, SystemTime};
 
 use zcash_client_backend::data_api::testing::{FakeCompactOutput, TestRng};
@@ -159,16 +159,8 @@ fn completing_a_position_deletes_its_time() {
     );
     assert_eq!(queries(&st), vec![request]);
     finish_incoming(&mut st, request);
-    let rows: i64 = st
-        .wallet()
-        .conn()
-        .query_row(
-            "SELECT COUNT(*) FROM ironwood_enhance_not_before",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(rows, 0);
+    assert!(private_work(&st).is_empty());
+    assert_eq!(st.wallet().db().enhance_pir_session.waits(), 0);
 }
 
 /// A restart is the application's doing, not a reply's. A fresh session draws a new wait for a

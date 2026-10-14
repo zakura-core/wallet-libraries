@@ -887,7 +887,6 @@ mod tests {
             db::TABLE_BLOCKS,
             db::TABLE_IRONWOOD_ENHANCE_DISCOVERY_QUEUE,
             db::TABLE_IRONWOOD_ENHANCE_METADATA_QUEUE,
-            db::TABLE_IRONWOOD_ENHANCE_NOT_BEFORE,
             db::TABLE_IRONWOOD_ENHANCE_OUTGOING_ACCOUNTS,
             db::TABLE_IRONWOOD_ENHANCE_OUTGOING_QUEUE,
             db::TABLE_IRONWOOD_ENHANCE_ROUTING,
@@ -947,7 +946,6 @@ mod tests {
             db::TABLE_TX_LOCATOR_MAP,
             db::TABLE_TX_RECONFIRMATION_RECEIPTS,
             db::TABLE_TX_RETRIEVAL_QUEUE,
-            db::TABLE_TX_STATUS_POLLS,
         ];
 
         let rows = describe_tables(&st.wallet().db().conn).unwrap();

@@ -52,7 +52,7 @@ impl PublicTransactionStatusRequest {
 /// A private observation with wallet-held inclusion evidence. Unknown evidence does not
 /// authorize public lookup or a negative observation, but positive observations remain useful.
 ///
-/// Private polls follow a schedule fixed when the work was queued, not the replies: see
+/// Private polls follow a fixed schedule, not the replies: see
 /// [`TransactionStatusWrite::record_private_status_poll`] and [`Self::settled`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PrivateTransactionStatusRequest {
@@ -102,9 +102,10 @@ pub trait TransactionStatusRead: WalletRead {
     /// Stores may retain expired obligations as dormant work that becomes eligible after
     /// a rewind. Omission from this batch is not conclusive evidence of transaction absence.
     ///
-    /// Private work follows a schedule fixed when the obligation was queued, so that replies
-    /// cannot steer which transactions are asked about: a window of consecutive chain tips and,
-    /// past it, the transaction's expiry height. At each scheduled tip the transaction is
+    /// Private work follows a fixed schedule, so that replies cannot steer which transactions
+    /// are asked about: a window of consecutive chain tips and, past it, the transaction's
+    /// expiry height. A store may keep part of the schedule in memory; reopening the wallet may
+    /// then repeat a poll at the current tip, which the application, not a reply, decides. At each scheduled tip the transaction is
     /// returned until a reply is recorded with
     /// [`TransactionStatusWrite::record_private_status_poll`], whether or not it is already
     /// mined; [`PrivateTransactionStatusRequest::settled`] then says not to apply the answer.

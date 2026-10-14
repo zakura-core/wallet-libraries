@@ -309,6 +309,7 @@ struct AddressRef(pub(crate) i64);
 
 #[cfg(feature = "orchard")]
 pub use wallet::enhance_pir::session::EnhancePirSession;
+pub use wallet::status_polls::StatusPollSession;
 
 /// A wrapper for the SQLite connection to the wallet database, along with a capability to read the
 /// system from the clock. A `WalletDb` encapsulates the full set of capabilities that are required
@@ -318,6 +319,7 @@ pub struct WalletDb<C, P, CL, R> {
     params: P,
     clock: CL,
     rng: R,
+    status_poll_session: wallet::status_polls::StatusPollSession,
     #[cfg(feature = "orchard")]
     enhance_pir_session: wallet::enhance_pir::session::SessionState,
     #[cfg(feature = "orchard")]
@@ -546,6 +548,7 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
                 params,
                 clock,
                 rng,
+                status_poll_session: Default::default(),
                 #[cfg(feature = "orchard")]
                 enhance_pir_session: Default::default(),
                 #[cfg(feature = "orchard")]
@@ -744,6 +747,7 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             params,
             clock,
             rng,
+            status_poll_session: Default::default(),
             #[cfg(feature = "orchard")]
             enhance_pir_session: Default::default(),
             #[cfg(feature = "orchard")]
@@ -760,8 +764,22 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
-    /// Shares the in-memory Enhance allowance across serialized handles of this wallet.
-    /// Keep the session alive across syncs; a fresh session resets the allowance.
+    /// Shares the in-memory private status polls across serialized handles of this wallet.
+    /// Keep the session alive across syncs; a fresh session rebuilds each window the database
+    /// fixes and starts the rest anew (see [`StatusPollSession`]).
+    pub fn with_status_poll_session(mut self, session: StatusPollSession) -> Self {
+        self.status_poll_session = session;
+        self
+    }
+
+    /// The private status polls of this open wallet, for additional database handles.
+    pub fn status_poll_session(&self) -> StatusPollSession {
+        self.status_poll_session.clone()
+    }
+
+    /// Shares the in-memory Enhance allowance and waits across serialized handles of this
+    /// wallet. Keep the session alive across syncs; a fresh session resets the allowance and
+    /// draws each queued position's wait again.
     /// Work reads inside caller-owned SQL transactions defer count cleanup until a later
     /// autocommit read. Use [`Self::transactionally`] to commit cleanup with wallet writes.
     #[cfg(feature = "orchard")]
@@ -770,7 +788,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         self
     }
 
-    /// The content-failure allowance of this open wallet, for additional database handles.
+    /// The content-failure allowance and Enhance waits of this open wallet, for additional
+    /// database handles.
     #[cfg(feature = "orchard")]
     pub fn enhance_pir_session(&self) -> EnhancePirSession {
         self.enhance_pir_session.session.clone()
@@ -809,6 +828,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
                 params: &self.params,
                 clock: &self.clock,
                 rng: &mut self.rng,
+                status_poll_session: self.status_poll_session.clone(),
                 #[cfg(feature = "orchard")]
                 enhance_pir_session: self.enhance_pir_session.transaction(),
                 #[cfg(feature = "orchard")]
@@ -854,6 +874,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             params: &self.params,
             clock: &self.clock,
             rng: &mut self.rng,
+            status_poll_session: self.status_poll_session.clone(),
             #[cfg(feature = "orchard")]
             enhance_pir_session: session.clone(),
             #[cfg(feature = "orchard")]
@@ -924,6 +945,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             params: &self.params,
             clock: &self.clock,
             rng: &mut self.rng,
+            status_poll_session: self.status_poll_session.clone(),
             #[cfg(feature = "orchard")]
             enhance_pir_session: session.clone(),
             #[cfg(feature = "orchard")]
@@ -1909,7 +1931,12 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
         if wallet::chain_tip_height(self.conn.borrow())?.is_none() {
             return Ok(vec![]);
         }
-        wallet::transaction_status_work(self.conn.borrow(), mode, self.transparent_ledger_mode)
+        wallet::transaction_status_work(
+            self.conn.borrow(),
+            &self.status_poll_session,
+            mode,
+            self.transparent_ledger_mode,
+        )
     }
     fn transaction_status_work_for(
         &self,
@@ -1943,7 +1970,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
         txid: TxId,
         tip: BlockHeight,
     ) -> Result<(), Self::Error> {
-        wallet::status_polls::record_poll(self.conn.borrow(), txid, tip)
+        wallet::status_polls::record_poll(self.conn.borrow(), &self.status_poll_session, txid, tip)
     }
 }
 
@@ -2514,6 +2541,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R> En
             self.transparent_ledger_mode,
             &self.enhance_pir_session,
             self.clock.now(),
+            self.enhance_pir_max_delay,
         );
         #[cfg(not(feature = "orchard"))]
         return wallet::public_enhancement_work(self.conn.borrow(), self.transparent_ledger_mode);
@@ -2581,6 +2609,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
             // queued position still lacking a time gets one here.
             wallet::enhance_pir::arm_not_before(
                 wdb.conn.0,
+                &wdb.enhance_pir_session,
                 None,
                 wdb.clock.now(),
                 wdb.enhance_pir_max_delay,
@@ -3422,6 +3451,16 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         tip_height: BlockHeight,
     ) -> Result<(), <Self as WalletRead>::Error> {
         wallet::scanning::update_chain_tip(self.conn.0, &self.params, tip_height)?;
+        // A session's first write after a restart draws the waits the restart lost.
+        #[cfg(feature = "orchard")]
+        wallet::enhance_pir::arm_not_before(
+            self.conn.0,
+            &self.enhance_pir_session,
+            None,
+            self.clock.now(),
+            self.enhance_pir_max_delay,
+            &mut self.rng,
+        )?;
         Ok(())
     }
 
@@ -4071,6 +4110,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         )?;
         wallet::enhance_pir::arm_not_before(
             self.conn.borrow(),
+            &self.enhance_pir_session,
             Some(tx_ref),
             self.clock.now(),
             self.enhance_pir_max_delay,

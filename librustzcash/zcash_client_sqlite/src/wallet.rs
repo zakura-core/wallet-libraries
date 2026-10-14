@@ -4341,6 +4341,7 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
             params: params.clone(),
             clock: (),
             rng: (),
+            status_poll_session: Default::default(),
             #[cfg(feature = "orchard")]
             enhance_pir_session: Default::default(),
             #[cfg(feature = "orchard")]
@@ -5456,15 +5457,15 @@ pub(crate) fn queue_tx_retrieval(
 /// transaction. The entry is durable across mined states so that it can become active again
 /// following a chain rewind.
 ///
-/// Newly queued work also fixes its private poll window at the current tip; work already queued
-/// keeps its window (see [`status_polls`]).
+/// Its private poll window follows from the transaction's target height, or opens at its first
+/// recorded poll (see [`status_polls`]).
 pub(crate) fn queue_tx_status(
     conn: &rusqlite::Transaction<'_>,
     txid: TxId,
 ) -> Result<(), SqliteClientError> {
     let expected = transparent_ledger::capture_policy_generation(conn)?;
     transparent_ledger::check_transparent_policy_generation(conn, expected)?;
-    let queued = conn.execute(
+    conn.execute(
         "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation)
          VALUES (:txid, :status_type, :policy_generation)
          ON CONFLICT (txid, query_type) DO NOTHING",
@@ -5476,7 +5477,6 @@ pub(crate) fn queue_tx_status(
             })?,
         ],
     )?;
-    status_polls::open(conn, txid, queued != 0)?;
 
     Ok(())
 }
@@ -5488,7 +5488,8 @@ pub(crate) fn queue_tx_status(
 /// obligation is exempt from expiry dormancy until one status observation completes (see
 /// `tx_retrieval_queue.reconfirm_mined`).
 ///
-/// Each of them gets a fresh private poll window at the current tip, so a rewind re-arms polling.
+/// Each of them gets a fresh private poll window at its next recorded poll, so a rewind re-arms
+/// polling (see [`status_polls`]).
 pub(crate) fn queue_status_for_unobservable_transactions(
     conn: &rusqlite::Transaction<'_>,
     above: Option<BlockHeight>,
@@ -5496,18 +5497,14 @@ pub(crate) fn queue_status_for_unobservable_transactions(
     let expected = transparent_ledger::capture_policy_generation(conn)?;
     transparent_ledger::check_transparent_policy_generation(conn, expected)?;
     let unobservable = transaction_reconfirmation::UNOBSERVABLE_TRANSACTION;
-    let selected = format!(
-        "CASE WHEN :above IS NULL THEN t.mined_height IS NULL
-              ELSE t.mined_height > :above END
-         AND ({unobservable})"
-    );
-    let above = above.map(u32::from);
     conn.execute(
         &format!(
             "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation, reconfirm_mined)
              SELECT t.txid, :status_type, :policy_generation, 1
              FROM transactions t
-             WHERE {selected}
+             WHERE CASE WHEN :above IS NULL THEN t.mined_height IS NULL
+                        ELSE t.mined_height > :above END
+             AND ({unobservable})
              ON CONFLICT (txid, query_type) DO UPDATE SET reconfirm_mined = 1"
         ),
         named_params![
@@ -5515,10 +5512,9 @@ pub(crate) fn queue_status_for_unobservable_transactions(
             ":policy_generation": i64::try_from(expected).map_err(|_| {
                 SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
             })?,
-            ":above": above,
+            ":above": above.map(u32::from),
         ],
     )?;
-    status_polls::reopen_where(conn, &selected, named_params![":above": above])?;
     Ok(())
 }
 
@@ -5534,6 +5530,7 @@ pub(crate) fn queue_status_for_unobservable_transactions(
 /// `enhance_pir::transaction_enhancement_work`.
 pub(crate) fn transaction_status_work(
     conn: &rusqlite::Connection,
+    session: &status_polls::StatusPollSession,
     mode: TransactionStatusMode,
     configured: Option<zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode>,
 ) -> Result<Vec<TransactionStatusWork>, SqliteClientError> {
@@ -5631,8 +5628,8 @@ pub(crate) fn transaction_status_work(
             .iter()
             .map(|work| work.txid())
             .collect::<std::collections::HashSet<_>>();
-        let windowed = status_polls::windowed(conn)?;
-        let mut work = status_polls::due(conn, tip)?
+        let (due, windowed) = status_polls::due(conn, session, tip)?;
+        let mut work = due
             .into_iter()
             .map(|poll| {
                 let settled = !unsettled_txids.contains(&poll.txid);

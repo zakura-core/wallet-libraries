@@ -1,4 +1,4 @@
-//! Private status polls follow the window fixed when the work was queued, not the replies
+//! Private status polls follow a fixed window, not the replies
 //! (`docs/pir-remaining-leaks-plan.md`, change A). Each test drives the wallet as an
 //! application must: send every due query, record every reply that came back, and apply only
 //! answers to work that is not yet settled.

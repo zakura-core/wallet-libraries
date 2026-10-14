@@ -28,7 +28,6 @@ mod fix_v_transactions_expired_unmined;
 mod full_account_ids;
 mod initial_setup;
 mod ironwood_enhance;
-mod ironwood_enhance_not_before;
 mod ironwood_pool_code_views;
 mod ironwood_received_notes;
 mod ironwood_shardtree;
@@ -69,7 +68,6 @@ mod tx_observation_height;
 mod tx_retrieval_queue;
 mod tx_retrieval_queue_expiry;
 mod tx_status_observation_intent;
-mod tx_status_poll_window;
 mod ufvk_support;
 mod unmined_status_obligations;
 mod utxos_table;
@@ -151,7 +149,6 @@ pub mod ids {
         full_account_ids::MIGRATION_ID as FULL_ACCOUNT_IDS,
         initial_setup::MIGRATION_ID as INITIAL_SETUP,
         ironwood_enhance::MIGRATION_ID as IRONWOOD_ENHANCE,
-        ironwood_enhance_not_before::MIGRATION_ID as IRONWOOD_ENHANCE_NOT_BEFORE,
         ironwood_pool_code_views::MIGRATION_ID as IRONWOOD_POOL_CODE_VIEWS,
         ironwood_received_notes::MIGRATION_ID as IRONWOOD_RECEIVED_NOTES,
         ironwood_shardtree::MIGRATION_ID as IRONWOOD_SHARDTREE,
@@ -191,7 +188,6 @@ pub mod ids {
         tx_retrieval_queue::MIGRATION_ID as TX_RETRIEVAL_QUEUE,
         tx_retrieval_queue_expiry::MIGRATION_ID as TX_RETRIEVAL_QUEUE_EXPIRY,
         tx_status_observation_intent::MIGRATION_ID as TX_STATUS_OBSERVATION_INTENT,
-        tx_status_poll_window::MIGRATION_ID as TX_STATUS_POLL_WINDOW,
         ufvk_support::MIGRATION_ID as UFVK_SUPPORT,
         unmined_status_obligations::MIGRATION_ID as UNMINED_STATUS_OBLIGATIONS,
         utxos_table::MIGRATION_ID as UTXOS_TABLE, utxos_to_txos::MIGRATION_ID as UTXOS_TO_TXOS,
@@ -439,8 +435,6 @@ pub(super) fn all_migrations<
         Box::new(ironwood_transparent_output_shape::Migration),
         Box::new(transparent_txid_enhancement::Migration),
         Box::new(transparent_detail_content_failures::Migration),
-        Box::new(tx_status_poll_window::Migration),
-        Box::new(ironwood_enhance_not_before::Migration),
     ]
 }
 
@@ -700,7 +694,7 @@ pub(crate) fn forget_txid_enhancement(conn: &rusqlite::Connection) {
 }
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[ironwood_enhance_not_before::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_detail_content_failures::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -883,8 +877,6 @@ pub(crate) mod tests {
             ids::IRONWOOD_TRANSPARENT_OUTPUT_SHAPE,
             ids::TRANSPARENT_TXID_ENHANCEMENT,
             ids::TRANSPARENT_DETAIL_CONTENT_FAILURES,
-            ids::TX_STATUS_POLL_WINDOW,
-            ids::IRONWOOD_ENHANCE_NOT_BEFORE,
             ids::ZIP318_CLASSIFICATION,
         ]);
 

@@ -51,11 +51,11 @@ entries over 8,192 rows. One row is close to one transaction.
 
 ## 2. What increment 2 enforces
 
-**Status queries are fixed when the work is queued.** For each transaction
-whose status is asked privately, the wallet fixes two things when it queues
-the work:
+**Status queries follow a fixed window.** For each transaction whose status
+is asked privately, two things are fixed:
 
-- a window of 10 chain tips, starting at the tip it was queued at;
+- a window of 10 chain tips, starting at the tip the wallet built the
+  transaction at, about when it was broadcast;
 - an expiry poll at the transaction's expiry height, when that height is past
   the window.
 
@@ -69,6 +69,14 @@ retry a refused request at the same tip. The status service therefore sees
 the same queries from an honest wallet whether its transaction mined at the
 first tip, at the ninth, never, or whether the service lied about it.
 
+**State lost on restart is the app's doing, not a reply's.** No table holds
+the polls or the Enhance waits. Each window is rebuilt from durable columns
+when the wallet reopens; the tips already polled, and windows no column fixes,
+live in session memory. A restart happens when the app or the user decides,
+so a service cannot cause one to aim at a transaction, and the rules above
+still hold within each session. The worst a restart costs is one more poll at
+the same tip, an expiry poll asked again, or a fresh 0–2 minute Enhance wait.
+
 **Enhance replies do not steer the rest of the sync.** An unreadable reply or
 a rejected record fails that position only. The other positions are still
 queried in the same order, and the failure counts toward the existing cap of
@@ -76,7 +84,8 @@ three.
 
 **Enhance items wait a random time before their first query.** When an item
 is first queued, the wallet draws a delay of 0 to 2 minutes from its random
-source and does not query the item before then. A rescan keeps the drawn time.
+source and does not query the item before then. A rescan in the same session
+keeps the drawn time.
 
 **A restore watches a fixed window.** Until an account is activated, its
 transparent recovery watches 50 external and 25 internal addresses, whatever
@@ -102,28 +111,35 @@ recorded by `record_mined_transaction`, which overwrites any earlier mined
 height. Status work exists only for transactions that compact scanning cannot
 see (`detectable_via_scanning`), so nothing later checks a forged answer.
 
-Schema, one additive migration chained after
-`transparent_detail_content_failures`:
+No table or migration. The window comes from columns `transactions` already
+has, and the rest lives in the open wallet's session memory:
 
-| Table | Columns | Written |
-| --- | --- | --- |
-| `tx_status_polls` | `txid` (key), `window_start_height`, `window_end_height`, `expiry_poll_height` (nullable), `last_polled_height` (nullable) | When `queue_tx_status` or `queue_status_for_unobservable_transactions` queues private status work |
-
-- `window_end_height` is the queue tip plus 10.
-- `expiry_poll_height` is the expiry height when it is nonzero and past the
-  window, and NULL otherwise.
-- A rewind that queues reconfirmation writes a fresh window, so a rewind
-  re-arms polling.
-- Existing rows get a window starting at the tip the migration runs at, so an
-  upgrade never strands a pending transaction.
+- The window starts at `target_height - 1`, the tip a transaction this wallet
+  built was built at, and ends 10 tips later. `queue_tx_status` runs when such
+  a transaction is stored for sending, just before it is broadcast.
+- The expiry poll is the expiry height when it is nonzero and past the
+  window.
+- Status work without a target height (a transaction this wallet did not
+  build) opens a window in session memory at its first recorded poll.
+- A rewind that queues reconfirmation (`reconfirm_mined`) opens a fresh window
+  in session memory when the wallet next reads the work, so a rewind re-arms
+  polling.
+- The tip of the last recorded poll is kept in session memory
+  (`StatusPollSession`, shared across a wallet's handles the way
+  `EnhancePirSession` is).
+- After a restart, windows anchored to a target height are rebuilt as they
+  were. The polled-tip marks and the session windows start fresh, so a
+  restart costs at most one more poll at the current tip, an expiry poll asked
+  again, or a new window for work without a target height. The restart is the
+  app's doing, not a reply's.
 
 Library changes:
 
 - `transaction_status_work` returns a transaction as private work when two
   things hold:
   - the current tip is inside its window or is the first tip at or past
-    `expiry_poll_height`;
-  - `last_polled_height` is below the current tip.
+    its expiry poll;
+  - the session's last polled tip is below the current tip.
 
   This holds whether or not the transaction is mined. Public work keeps
   today's rules: in public mode the txid is already disclosed.
@@ -169,9 +185,9 @@ Tests, in `zcash_client_sqlite` beside
   Reverted, it is *h2*.
 - **Expiry poll.** A transaction mined at *h* + 1 is still asked at *h* + 40.
   One never mined is settled as expired by that poll.
-- **Durability.** The window survives a reopen. A rewind that requeues
-  reconfirmation opens a new window.
-- **Migration.** Existing rows gain a window at the migration tip.
+- **Restart.** Restarting the wallet mid-window gives the same transcript for
+  honest, forging and unreadable services, with one more poll at the restart
+  tip. A rewind that requeues reconfirmation opens a new window.
 - **pir-status.** A corrupted row returns `Unreadable`, and a wrong header
   echo returns the request-level error. Reverted, both are `Malformed`.
 
@@ -201,6 +217,9 @@ Changes:
 - `status/store.rs`: call `record_private_status_poll` for every private
   reply. For `settled()` work, send the query and discard the answer. Discard
   also means no resubmission through `ready_resubmission`.
+- Keep one `StatusPollSession` per open wallet and share it across its
+  database handles, as Vizor shares `EnhancePirSession`. A handle with a fresh
+  session polls again at the current tip.
 - `sync_provider.dart`: drop the status coverage stop. Restarts at an
   unchanged tip send no status query, because work is due once per tip.
 
@@ -257,25 +276,26 @@ has no time condition. `queue_transaction` deletes and re-inserts the memo and
 outgoing rows on every scan, so a time kept in those rows would be drawn again
 at every rescan.
 
-Schema, one additive migration chained after change A's:
-
-| Table | Columns | Written |
-| --- | --- | --- |
-| `ironwood_enhance_not_before` | `commitment_tree_position` (key), `not_before` (Unix seconds) | In `queue_transaction` and `metadata::queue`, only when no row exists for the position |
+No table or migration. Each position's not-before time is kept in the
+`EnhancePirSession`, beside #180's content-failure counts.
 
 Library changes:
 
 - The delay is drawn uniformly from 0 to 120 seconds with the wallet's
-  `rng`, and added to the wallet's `clock`. Both are already in scope in the
-  `LowLevelWalletWrite` impl that queues the item.
-- `transaction_enhancement_work_sql` leaves out of `queries` any position
-  whose `not_before` is later than now. The read impl gains a `CL: Clock`
-  bound, so the signature does not change.
+  `rng`, and added to the wallet's `clock`, when a wallet write first sees the
+  position in the session: when scanning queues it, when rediscovery rebuilds
+  it, or at the session's first `update_chain_tip`. A read cannot draw, so a
+  position read before any write waits the full 2 minutes.
+- `transaction_enhancement_work` lists any position whose time is later than
+  now as waiting. The read impl gains a `CL: Clock` bound, so the signature
+  does not change.
 - `EnhancePirWork` gains `Waiting { request, not_before }`.
   `zakura/pir-enhance` `PreparedWork` counts these as `waiting`, and treats
   work with waiting items as incomplete, as it does suspended items.
-- The row is deleted when the position's work completes. A rewind that
-  truncates the position deletes it, so a later requeue draws a new time.
+- The time is forgotten when the position's work completes. A rewind that
+  truncates the position forgets it, so a later requeue draws a new time.
+- A fresh session draws each queued position's wait again. The restart is the
+  app's doing, not a reply's; it costs at most a fresh 0–2 minute wait.
 
 Tests, in `wallet/enhance_pir/tests.rs`, with `test_clock` and a seeded
 `test_rng`:
@@ -286,8 +306,9 @@ Tests, in `wallet/enhance_pir/tests.rs`, with `test_clock` and a seeded
   independent times.
 - **Rescan.** A rescan keeps the time. Reverted to storing the time in the
   memo row, it changes.
-- **Migration and completeness.** The migration test passes, and
-  `PreparedWork` is incomplete while an item waits.
+- **Fresh session.** A new session draws the wait again and keeps it across a
+  rescan.
+- **Completeness.** `PreparedWork` is incomplete while an item waits.
 
 Vizor needs one change for D, carried in its pull request: show waiting items
 as pending. Its checkpoint at each block picks them up once due.

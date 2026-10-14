@@ -771,12 +771,22 @@ fn expiry_dormancy_preserves_obligations_and_reactivates_after_rewind() {
                 [missing.as_ref()],
             )
             .unwrap();
+        // Work whose answer the wallet would apply. In private mode a transaction this wallet
+        // built is also polled across its window, settled while dormant: sent, never applied.
         let active = |st: &State, txid| {
             st.wallet()
                 .transaction_status_work()
                 .unwrap()
                 .iter()
-                .any(|work| work.txid() == txid)
+                .any(|work| {
+                    work.txid() == txid
+                        && !matches!(
+                            work,
+                            zcash_client_backend::data_api::status::TransactionStatusWork::Private(
+                                request
+                            ) if request.settled()
+                        )
+                })
         };
         let evidence = [unknown, legacy, never]
             .map(|txid| st.wallet().transaction_status_work_for(txid).unwrap());

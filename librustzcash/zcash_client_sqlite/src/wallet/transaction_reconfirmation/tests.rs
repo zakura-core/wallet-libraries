@@ -68,6 +68,7 @@ fn receipts(conn: &Connection) -> i64 {
 fn work(conn: &Connection) -> Vec<TransactionStatusWork> {
     super::super::transaction_status_work(
         conn,
+        &Default::default(),
         TransactionStatusMode::Public,
         Some(TransparentLedgerMode::Public),
     )
@@ -159,6 +160,7 @@ fn changed_block_exposes_private_fallback_without_manufacturing_inclusion_bounds
     .unwrap();
     let pending = super::super::transaction_status_work(
         &db.conn,
+        &Default::default(),
         TransactionStatusMode::Public,
         Some(TransparentLedgerMode::PrivateRequired),
     )
@@ -181,6 +183,7 @@ fn changed_block_exposes_private_fallback_without_manufacturing_inclusion_bounds
     assert!(
         super::super::transaction_status_work(
             &db.conn,
+            &Default::default(),
             TransactionStatusMode::Public,
             Some(TransparentLedgerMode::PrivateRequired)
         )
@@ -378,7 +381,7 @@ fn six_wallet_shielded_associations_are_excluded_from_capture_and_queue() {
         "ironwood_received_note_spends",
     ] {
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE transactions(id_tx INTEGER PRIMARY KEY, txid BLOB, mined_height INTEGER, tx_index INTEGER, expiry_height INTEGER); CREATE TABLE blocks(height INTEGER, hash BLOB); CREATE TABLE tpir_meta(id INTEGER, applied_mode INTEGER, policy_generation INTEGER, min_reader_version INTEGER); INSERT INTO tpir_meta VALUES(0,0,0,1); CREATE TABLE tx_retrieval_queue(txid BLOB, query_type INTEGER, policy_generation INTEGER, reconfirm_mined INTEGER, UNIQUE(txid,query_type)); CREATE TABLE scan_queue(block_range_start INTEGER, block_range_end INTEGER); INSERT INTO scan_queue VALUES(0, 101); CREATE TABLE tx_status_polls(txid BLOB PRIMARY KEY, window_start_height INTEGER, window_end_height INTEGER, expiry_poll_height INTEGER, last_polled_height INTEGER);").unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE transactions(id_tx INTEGER PRIMARY KEY, txid BLOB, mined_height INTEGER, tx_index INTEGER); CREATE TABLE blocks(height INTEGER, hash BLOB); CREATE TABLE tpir_meta(id INTEGER, applied_mode INTEGER, policy_generation INTEGER, min_reader_version INTEGER); INSERT INTO tpir_meta VALUES(0,0,0,1); CREATE TABLE tx_retrieval_queue(txid BLOB, query_type INTEGER, policy_generation INTEGER, reconfirm_mined INTEGER, UNIQUE(txid,query_type));").unwrap();
         for pool in ["sapling", "orchard", "ironwood"] {
             for suffix in ["received_notes", "received_note_spends"] {
                 conn.execute_batch(&format!(
@@ -389,7 +392,7 @@ fn six_wallet_shielded_associations_are_excluded_from_capture_and_queue() {
         }
         conn.execute_batch(RECEIPT_SCHEMA).unwrap();
         conn.execute(
-            "INSERT INTO transactions VALUES(1, ?1, 100, 3, 0)",
+            "INSERT INTO transactions VALUES(1, ?1, 100, 3)",
             [[9u8; 32]],
         )
         .unwrap();
@@ -405,14 +408,12 @@ fn six_wallet_shielded_associations_are_excluded_from_capture_and_queue() {
         )
         .unwrap();
         assert_eq!(receipts(&tx), 0, "{table}");
-        for queue in ["tx_retrieval_queue", "tx_status_polls"] {
-            assert_eq!(
-                tx.query_row(&format!("SELECT COUNT(*) FROM {queue}"), [], |r| r
-                    .get::<_, i64>(0))
-                    .unwrap(),
-                0,
-                "{table} {queue}"
-            );
-        }
+        assert_eq!(
+            tx.query_row("SELECT COUNT(*) FROM tx_retrieval_queue", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "{table}"
+        );
     }
 }

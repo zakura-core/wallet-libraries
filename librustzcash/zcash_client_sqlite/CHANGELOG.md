@@ -12,22 +12,32 @@ workspace.
 
 ### Changed
 
-- Private status polls are fixed when status work is queued: once at each of 10
-  chain tips from the queue tip, and once at the expiry height when that is past
+- Private status polls follow a fixed window: once at each of 10 chain tips
+  from the tip a transaction this wallet built was built at (its
+  `target_height` minus one), and once at the expiry height when that is past
   the window. Each poll is returned whether or not the transaction is mined, and
   whatever earlier replies said, and is marked `settled` when the wallet already
   holds a conclusive status. After its window and expiry poll, a transaction
-  without a conclusive status leaves automatic work but stays pending. A rewind
-  that queues reconfirmation opens a fresh window. Public status work is
-  unchanged. A new additive migration adds `tx_status_polls`; pending work
-  queued before it gets a window at the tip the migration runs at.
+  without a conclusive status leaves automatic work but stays pending. Status
+  work without a target height opens its window at its first recorded poll, and
+  a rewind that queues reconfirmation opens a fresh one when the wallet next
+  reads the work. Public status work is unchanged.
+- The tips already polled, and windows that no column fixes, are kept in memory
+  in a new `StatusPollSession`, with no new table or migration. Share it across
+  serialized handles of one wallet with `WalletDb::with_status_poll_session`, as
+  with `EnhancePirSession`. A fresh session rebuilds each window from
+  `target_height` and `expiry_height`; it may poll once more at the current tip,
+  ask an expiry poll again, and opens new windows for work without a target
+  height.
 - Each newly queued Ironwood Enhance position waits a delay drawn uniformly
   from 0 to 2 minutes (1 minute on average) with the wallet's random source
   before its first private query, and is listed as `EnhancePirWork::Waiting`
-  until then. A rescan keeps the time; completing the position or a rewind that
-  removes it deletes it, so a requeue draws a new one. A new additive migration adds
-  `ironwood_enhance_not_before`; positions queued before it are due at once.
-  `EnhancePirRead` for `WalletDb` now requires `CL: Clock`.
+  until then. The time is kept in the `EnhancePirSession`, with no new table or
+  migration. A rescan in the session keeps it; completing the position or a
+  rewind that removes it forgets it, so a requeue draws a new one. A fresh
+  session draws each queued position's wait again at its first wallet write
+  (`update_chain_tip` among them); a position it reads before any write waits
+  the full 2 minutes. `EnhancePirRead` for `WalletDb` now requires `CL: Clock`.
 - `WalletDb::set_enhance_pir_max_delay` (test dependencies only) bounds that
   delay; the test database sets it to zero.
 - `set_transaction_status` keeps the first mined height: `Mined` at a different
@@ -60,6 +70,9 @@ workspace.
 
 ### Added
 
+- `StatusPollSession`, `WalletDb::with_status_poll_session` and
+  `WalletDb::status_poll_session`: the private status polls of one open wallet,
+  shared by its serialized handles. Keep it alive across syncs.
 - Enhance PIR replies rejected or unreadable three times suspend that request for the
   open-wallet session. Counts are in memory, with no new table or migration. A fresh
   session restores the allowance; rescans, different metadata positions and rewinds
