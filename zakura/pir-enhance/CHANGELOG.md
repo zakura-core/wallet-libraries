@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.0.1-rc3] - PLANNED
+## [0.0.1-rc3] - 2026-10-14
 
 ### Added
 

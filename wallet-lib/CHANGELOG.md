@@ -7,7 +7,7 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
-## [0.1.0-rc8] - PLANNED
+## [0.1.0-rc8] - 2026-10-14
 
 ### Changed
 

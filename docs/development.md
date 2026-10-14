@@ -211,7 +211,7 @@ dependencies, including optional test support. Publish those upstream packages
 first. To release the other nine crates separately, add `--without-transparent`
 to any of the commands above. This script does not publish `wallet-pir` or change
 credentials, changelog dates, tags, or source files. After publication, confirm the
-registry versions and update the corresponding `PLANNED` changelog dates.
+registry versions and confirm the corresponding changelog dates.
 
 `--output PATH` writes a JSON receipt and partial progress outside the checkout.
 CI uses `--publish-verified RECEIPT` instead of `--publish` to upload without
