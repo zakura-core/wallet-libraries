@@ -16,6 +16,8 @@
 //!
 //! Seeds come from `ONE_TIME_IVK_FUZZ_SEEDS`, as `start..end` or one seed, so a failing
 //! seed reruns exactly: `ONE_TIME_IVK_FUZZ_SEEDS=17 ... Z-fuzz-000017`.
+//! `ONE_TIME_IVK_FUZZ_PROFILE` biases the worlds: `reorg` always reorgs, `devices` always
+//! has a second device and a restore. Its name joins the scenario ID.
 //!
 //! Left out, because the harness cannot express them faithfully: device clock skew on a
 //! wallet that quotes alongside another device or sweeps another device's keys (the
@@ -174,11 +176,37 @@ fn seeds() -> (u64, u64) {
     }
 }
 
+/// How `ONE_TIME_IVK_FUZZ_PROFILE` biases the generated worlds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Profile {
+    Default,
+    /// Every world reorgs, most aimed past a payout's tenth confirmation.
+    Reorg,
+    /// Every world has a second device and a restore, and devices quote together.
+    Devices,
+}
+
+/// The profile `ONE_TIME_IVK_FUZZ_PROFILE` names.
+fn profile() -> Profile {
+    match std::env::var("ONE_TIME_IVK_FUZZ_PROFILE").as_deref() {
+        Ok("reorg") => Profile::Reorg,
+        Ok("devices") => Profile::Devices,
+        Ok("") | Err(_) => Profile::Default,
+        Ok(other) => panic!("unknown ONE_TIME_IVK_FUZZ_PROFILE {other}"),
+    }
+}
+
 /// The scenario seed `seed` generates.
 fn scenario(seed: u64) -> Scenario {
-    let plan = Plan::generate(seed);
+    let profile = profile();
+    let plan = Plan::generate(seed, profile);
+    let name = match profile {
+        Profile::Default => String::new(),
+        Profile::Reorg => "reorg-".into(),
+        Profile::Devices => "devices-".into(),
+    };
     Scenario {
-        id: format!("Z-fuzz-{seed:06}"),
+        id: format!("Z-fuzz-{name}{seed:06}"),
         group: FUZZ,
         title: format!("Randomized world, seed {seed}"),
         summary: plan.notes.join("; "),
@@ -327,7 +355,7 @@ struct Plan {
 
 impl Plan {
     /// The world seed `seed` generates.
-    fn generate(seed: u64) -> Self {
+    fn generate(seed: u64, profile: Profile) -> Self {
         let mut r = Rng::new(seed);
         let horizon = r.weighted(&[
             (6 * HOUR, 30),
@@ -341,10 +369,16 @@ impl Plan {
         } else {
             0
         };
-        let a2 = skew == 0 && r.chance(30);
+        let a2 = skew == 0 && (profile == Profile::Devices || r.chance(30));
         let read_lag = r.weighted(&[(MINUTE, 85), (30 * MINUTE, 10), (6 * HOUR, 5)]);
-        let restores = r.weighted(&[(0usize, 35), (1, 50), (2, 15)]);
-        let reorg = r.chance(15);
+        let restores = if profile == Profile::Devices {
+            r.weighted(&[(1usize, 60), (2, 40)])
+        } else {
+            r.weighted(&[(0usize, 35), (1, 50), (2, 15)])
+        };
+        let reorg = profile == Profile::Reorg || r.chance(15);
+        let together = if profile == Profile::Devices { 60 } else { 20 };
+        let restore_quotes = if profile == Profile::Devices { 60 } else { 30 };
         let count = r.weighted(&[(1usize, 15), (2, 30), (3, 30), (4, 25)]);
         let zero_change = r.chance(8);
         let mut s = Schedule::new();
@@ -409,7 +443,7 @@ impl Plan {
         }
         // A2 quotes in the same second as one of A's incoming quotes, inside NEAR's
         // feed lag, so both can give NEAR one address.
-        if a2 && r.chance(20) {
+        if a2 && r.chance(together) {
             let first = swaps
                 .iter()
                 .position(|sp| sp.kind == Kind::Incoming && sp.slot == A);
@@ -483,7 +517,7 @@ impl Plan {
             restore_at.push((slot, at));
         }
         // A restored device sometimes quotes an incoming swap of its own.
-        if skew == 0 && !restore_at.is_empty() && r.chance(30) {
+        if skew == 0 && !restore_at.is_empty() && r.chance(restore_quotes) {
             let (slot, at) = restore_at[0];
             let quote_at = at + r.range(30 * MINUTE, 3 * HOUR);
             let id = swaps.len();
@@ -535,7 +569,8 @@ impl Plan {
         }
         // A reorg aimed just past a payout's tenth confirmation, after the paid wallet
         // synced, so it can un-mine a receipt whose key just closed.
-        let aimed = (reorg && !payouts.is_empty() && r.chance(60)).then(|| {
+        let aim = if profile == Profile::Reorg { 80 } else { 60 };
+        let aimed = (reorg && !payouts.is_empty() && r.chance(aim)).then(|| {
             let i = r.range(0, payouts.len() as i64) as usize;
             let (at, outs, _) = &payouts[i];
             let paid = swaps[outs[0].0].slot;
@@ -2030,6 +2065,33 @@ impl<'p> Exec<'p> {
             return;
         };
         let dev = self.slots[plan.slot].expect("A");
+        // A rescan a sweep queued, such as a spend-history replay, holds notes back until
+        // the next sync finishes it, so the app syncs until the deposit is spendable.
+        let ready = |ctx: &Ctx| {
+            let (spendable, total) = (ctx.get(dev).spendable_balance(), ctx.get(dev).balance());
+            match deposit {
+                Deposit::Amount(v) => spendable >= v + 4 * FUNDING_FEE,
+                Deposit::ZeroChange => spendable == total && total > FUNDING_FEE,
+            }
+        };
+        for attempt in 0..6 {
+            if ready(ctx) {
+                break;
+            }
+            let held = ctx.get(dev).balance() - ctx.get(dev).spendable_balance();
+            ctx.log(
+                NAMES[plan.slot],
+                format!("cannot fund yet: {} of its balance is not spendable; syncs", zec(held)),
+            );
+            if attempt > 0 {
+                ctx.mine(1);
+            }
+            self.sync(ctx, plan.slot);
+        }
+        if !ready(ctx) {
+            ctx.log(NAMES[plan.slot], "gives up funding: not enough is spendable");
+            return;
+        }
         let amount = match deposit {
             Deposit::Amount(v) => v,
             Deposit::ZeroChange => ctx.get(dev).spendable_balance() - FUNDING_FEE,
@@ -2084,6 +2146,10 @@ impl<'p> Exec<'p> {
         let Some(key) = self.swaps[swap].key else {
             return;
         };
+        if key.refund && plan.deposit.is_some() && !self.swaps[swap].funded {
+            // The wallet gave up funding it, so NEAR saw no deposit.
+            return;
+        }
         let dev = self.slots[plan.slot].expect("quoted on it");
         let purpose = if key.refund { Purpose::Refund } else { Purpose::Receive };
         let zats = amount.map(Zatoshis::const_from_u64);
@@ -2312,6 +2378,25 @@ impl<'p> Exec<'p> {
             if !late {
                 ctx.check_balance(dev, u64::try_from(balance.max(0)).expect("non-negative"));
             }
+            // As F4 checks after a rewind: a swept key scans or is closed.
+            let limbo: Vec<String> = ctx
+                .get(dev)
+                .keys()
+                .into_iter()
+                .filter(|k| k.active_from.is_none() && k.closed_at.is_none())
+                .filter(|k| {
+                    let purpose = if k.purpose == 0 { Purpose::Refund } else { Purpose::Receive };
+                    ctx.get(dev)
+                        .sweep_state(purpose, k.index)
+                        .is_some_and(|s| s.done_height.is_some())
+                })
+                .map(|k| k.label())
+                .collect();
+            ctx.check(
+                format!("every key {} swept scans or is closed", NAMES[slot]),
+                limbo.is_empty(),
+                format!("neither scanning nor closed after a finished sweep: {limbo:?}"),
+            );
             if found_all && !late {
                 all_found.push(slot);
             }
