@@ -183,28 +183,51 @@ impl Ctx {
     }
 
     /// Keeps every wallet syncing a block at a time, as Vizor's polling would, until each
-    /// is quiet: nothing pending, deferred or left to scan. At most six rounds per wallet.
-    /// Runs after every scenario so a find that needs another sync (a spend-history replay,
-    /// a sweep's rescan) counts.
+    /// is quiet: nothing pending, deferred or left to scan. A wallet that goes 40 syncs
+    /// without finding a payment or finishing a sweep, or 1,000 syncs in all, fails the
+    /// scenario. Runs after every scenario so a find that needs another sync (a
+    /// spend-history replay, a sweep's rescan) counts.
     pub fn settle(&mut self) {
+        const STALLED: usize = 40;
+        const ROUNDS: usize = 1_000;
         // Let the directory, which publishes two blocks behind the tip, catch up.
         self.chain.mine(3);
         for i in 0..self.devices.len() {
             let dev = Dev(i);
-            for round in 0..40 {
+            let (mut idle, mut syncs) = (0, 0);
+            let stuck = loop {
                 let report = self.devices[i].sync(&self.chain, &self.near);
+                syncs += 1;
                 let quiet =
                     !report.pending && report.problems.is_empty() && report.scanned_blocks <= 1;
-                if report.found_live + report.found_by_sweep > 0
+                let found = report.found_live + report.found_by_sweep;
+                if found > 0
                     || !report.problems.is_empty()
-                    || round == 0 && report.scanned_blocks > 1
+                    || syncs == 1 && report.scanned_blocks > 1
                 {
                     self.log_sync(dev, &report);
                 }
                 if quiet {
-                    break;
+                    break None;
+                }
+                idle = if found + report.sweeps_finished > 0 {
+                    0
+                } else {
+                    idle + 1
+                };
+                if idle >= STALLED || syncs >= ROUNDS {
+                    break Some(report);
                 }
                 self.chain.mine(1);
+            };
+            if let Some(report) = stuck {
+                let detail = format!(
+                    "after {syncs} syncs, {idle} without progress: history pending {}, scanned {} \
+                     blocks, problems {:?}",
+                    report.pending, report.scanned_blocks, report.problems
+                );
+                let name = self.name(dev);
+                self.check(format!("{name} settles"), false, detail);
             }
         }
     }
