@@ -811,6 +811,28 @@ fn reservations_survive_reopen_and_keep_purposes_and_accounts_separate() {
     assert_ne!(key.receiver(), refund.receiver());
 }
 
+/// Two accounts register the same key identity, and a payment to the second account's
+/// key is stored under that account and key, never checked against the first's.
+#[test]
+fn a_payment_matches_the_key_of_its_own_account() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+    let birthday = st.test_account().unwrap().birthday().clone();
+    let from = st.wallet().chain_height().unwrap().unwrap() + 1;
+    let db = st.wallet_mut().db_mut();
+    let (other, _) = db.create_account("other", &seed, &birthday, None).unwrap();
+    let mine = reserve_key(db, account, Purpose::Receive, from);
+    let theirs = reserve_key(db, other, Purpose::Receive, from);
+    assert_eq!(mine.key_id(), theirs.key_id());
+    pay(&mut st, theirs.full_viewing_key(), 10_000);
+    let sql = "SELECT a.uuid = ?1, k.account_id = n.account_id, n.value
+               FROM ironwood_received_notes n JOIN accounts a ON a.id = n.account_id
+               JOIN ironwood_one_time_keys k ON k.id = n.one_time_key_id";
+    let stored: Vec<(bool, bool, i64)> = rows(st.wallet().conn(), sql, [other.0]);
+    assert_eq!(stored, [(true, true, 10_000)]);
+}
+
 /// Lookahead keys wait for their sweeps without advancing allocation, so issuance never
 /// skips them; recovery evidence promotes a key and only widens its history, and the
 /// lookahead extends only above the highest recovered index.
