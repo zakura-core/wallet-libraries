@@ -22,8 +22,9 @@ use zakura_one_time_ivk_scenarios::{Meta, Outcome, Report, ScenarioResult, rende
 use catalog::Scenario;
 use harness::Ctx;
 
-/// Command-line options. Unknown flags, such as the ones `cargo test` forwards, are
-/// ignored.
+/// Command-line options. Output flags `cargo test` users commonly pass are ignored, and
+/// any other flag is rejected, so a harness option such as `--skip` or `--test-threads`
+/// can't be misread as a filter.
 struct Args {
     filter: Option<String>,
     exact: bool,
@@ -65,8 +66,10 @@ impl Args {
                 "--report" => {
                     args.report = PathBuf::from(it.next().expect("--report takes a directory"))
                 }
-                flag if flag.starts_with('-') => {}
-                filter => args.filter = Some(filter.into()),
+                "--nocapture" | "--no-capture" | "--show-output" | "-q" | "--quiet" => {}
+                flag if flag.starts_with('-') => usage(&format!("unsupported flag {flag}")),
+                filter if args.filter.is_none() => args.filter = Some(filter.into()),
+                filter => usage(&format!("a second filter {filter:?}; pass one")),
             }
         }
         args
@@ -81,6 +84,15 @@ impl Args {
         // A filter that names a slow scenario runs it.
         named && (self.slow || !scenario.slow || self.filter.is_some())
     }
+}
+
+/// Reports a command-line error and exits with status 2, as `dev.py` does for an empty
+/// selection.
+fn usage(error: &str) -> ! {
+    eprintln!(
+        "{error}\nusage: scenarios [FILTER] [--exact] [--list] [--slow] [--jobs N] [--report DIR]"
+    );
+    std::process::exit(2);
 }
 
 fn main() {
