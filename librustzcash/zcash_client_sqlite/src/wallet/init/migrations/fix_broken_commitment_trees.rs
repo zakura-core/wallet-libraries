@@ -211,7 +211,6 @@ fn truncate_to_height<P: consensus::Parameters>(
             params: params.clone(),
             clock: (),
             rng: (),
-            status_poll_session: Default::default(),
             #[cfg(feature = "orchard")]
             enhance_pir_session: Default::default(),
             #[cfg(feature = "orchard")]

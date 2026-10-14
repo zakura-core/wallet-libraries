@@ -55,7 +55,6 @@ fn accept(conn: &mut Connection, hash: [u8; 32]) {
         #[cfg(feature = "transparent-inputs")]
         &GapLimits::default(),
         &[(BlockHeight::from_u32(100), BlockHash(hash))],
-        false,
     )
     .unwrap();
     tx.commit().unwrap();
@@ -69,7 +68,6 @@ fn receipts(conn: &Connection) -> i64 {
 fn work(conn: &Connection) -> Vec<TransactionStatusWork> {
     super::super::transaction_status_work(
         conn,
-        &Default::default(),
         TransactionStatusMode::Public,
         Some(TransparentLedgerMode::Public),
     )
@@ -82,8 +80,6 @@ fn observed(conn: &mut Connection, txid: TxId, status: TransactionStatus) {
         &Network::TestNetwork,
         #[cfg(feature = "transparent-inputs")]
         &GapLimits::default(),
-        Some(TransactionStatusMode::Public),
-        Some(TransparentLedgerMode::Public),
         txid,
         status,
     )
@@ -115,7 +111,6 @@ fn receipt_survives_reopen_and_restores_index_without_network_or_payload_complet
         #[cfg(feature = "transparent-inputs")]
         &GapLimits::default(),
         &[],
-        false,
     )
     .unwrap();
     tx.commit().unwrap();
@@ -164,7 +159,6 @@ fn changed_block_exposes_private_fallback_without_manufacturing_inclusion_bounds
     .unwrap();
     let pending = super::super::transaction_status_work(
         &db.conn,
-        &Default::default(),
         TransactionStatusMode::Public,
         Some(TransparentLedgerMode::PrivateRequired),
     )
@@ -187,7 +181,6 @@ fn changed_block_exposes_private_fallback_without_manufacturing_inclusion_bounds
     assert!(
         super::super::transaction_status_work(
             &db.conn,
-            &Default::default(),
             TransactionStatusMode::Public,
             Some(TransparentLedgerMode::PrivateRequired)
         )
@@ -332,8 +325,7 @@ fn capture_and_reconciliation_failure_roll_back_receipts_metadata_and_flags() {
                 &Network::TestNetwork,
                 #[cfg(feature = "transparent-inputs")]
                 &GapLimits::default(),
-                &[(BlockHeight::from_u32(100), BlockHash([7; 32]))],
-                false,
+                &[(BlockHeight::from_u32(100), BlockHash([7; 32]))]
             )
             .is_err()
         );

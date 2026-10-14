@@ -7,9 +7,8 @@ contained. Across syncs, a record that fails on content is asked at most three
 times.
 
 This plan covers what is left. It ranks the remaining leaks, sets the scope of
-increment 2, and sketches the later increments. Increment 2 changes only the
-wallet and Vizor. It needs no server change and adds no load to the PIR
-services beyond a few more status queries per transaction.
+increment 2, and sketches the later increments. Increment 2 changes the wallet and Vizor. The status polling change is
+dropped; the remaining wallet changes delay Enhance queries and widen restores.
 
 Terms, as in increment 1. A **content outcome** is anything the wallet reads
 from a private reply: a record, "not in the table", or bytes that fail to
@@ -23,8 +22,8 @@ watch.
 
 | Leak | Who can use it | What it reveals | Cost to fix | Test | Increment |
 | --- | --- | --- | --- | --- | --- |
-| Status replies steer polling: a forged "mined" stops it, one bad reply stops all private status for the session, a missing record fails the sync | Active | The transaction's status bucket, about 4 transactions today | Wallet and Vizor | Exact transcript | 2 |
-| Status polling stops at the mined block | Passive | The mined height; with the broadcast time, often the transaction | Wallet; about 10 status queries per transaction instead of 1 or 2 | Exact transcript | 2 |
+| Status replies steer polling: a forged "mined" stops it, one bad reply stops all private status for the session, a missing record fails the sync | Active | The transaction's status bucket, about 4 transactions today | Wallet and Vizor | Exact transcript | Deferred |
+| Status polling stops at the mined block | Passive | The mined height; with the broadcast time, often the transaction | Needs traffic cover | Exact transcript | Deferred |
 | Vizor stops private Enhance for the rest of the sync after an unreadable or rejected reply | Active | The note position | Vizor only | Exact transcript | 2 |
 | The first Enhance query follows the sync that found the transaction | Passive | The block range of a recent transaction | Wallet only | Seeded timing | 2 |
 | The Enhance content-failure cap resets when the wallet is reopened | Active, across restarts | As the row above, two bits per record per session | Wallet only | Exact | Open question |
@@ -51,31 +50,16 @@ entries over 8,192 rows. One row is close to one transaction.
 
 ## 2. What increment 2 enforces
 
-**Status queries follow a fixed window.** For each transaction whose status
-is asked privately, two things are fixed:
+**Status polling is unchanged.** The proposed fixed status window and expiry
+cover poll are dropped from increment 2. The wallet continues polling unresolved
+transactions and stops after a conclusive status; there is no new attempt cap.
+The broadcast height is already visible to the broadcast service, and status
+query timing remains observable. Hiding traffic timing needs broader cover
+traffic rather than a per-transaction window.
 
-- a window of 10 chain tips, starting at the tip the wallet built the
-  transaction at, about when it was broadcast;
-- an expiry poll at the transaction's expiry height, when that height is past
-  the window.
-
-At each new tip inside the window the wallet asks once about that
-transaction, and at the expiry poll once more. Each poll is sent whether the
-transaction has been seen mined or not, and whatever the earlier replies said.
-After the window and the expiry poll, the wallet stops asking on its own.
-
-The only thing that can change the polls is a request outcome: the wallet may
-retry a refused request at the same tip. The status service therefore sees
-the same queries from an honest wallet whether its transaction mined at the
-first tip, at the ninth, never, or whether the service lied about it.
-
-**State lost on restart is the app's doing, not a reply's.** No table holds
-the polls or the Enhance waits. Each window is rebuilt from durable columns
-when the wallet reopens; the tips already polled, and windows no column fixes,
-live in session memory. A restart happens when the app or the user decides,
-so a service cannot cause one to aim at a transaction, and the rules above
-still hold within each session. The worst a restart costs is one more poll at
-the same tip, an expiry poll asked again, or a fresh 0–2 minute Enhance wait.
+**Enhance waits stay in session memory.** Reopening draws queued waits again.
+A restart is an application action, and the fresh wait is between zero and two
+minutes; a position first read before a write waits the full two minutes.
 
 **Enhance replies do not steer the rest of the sync.** An unreadable reply or
 a rejected record fails that position only. The other positions are still
@@ -93,8 +77,7 @@ the replies show, so a typical restore completes in one sync (change F).
 
 ## 3. Changes
 
-Increment 2 has two pull requests, one per repository (section 5). Changes A,
-D and F are in wallet-libraries; B and C are in Vizor. Each change lists the
+Increment 2 has two pull requests, one per repository (section 5). Changes D and F are in wallet-libraries; A is dropped. B and C are separate Vizor work. Each change lists the
 files, the rule, and its tests.
 
 Every test lands in a first commit that contains only the tests. That commit
@@ -102,144 +85,20 @@ must fail on its parent, and the pull request names the assertion that fails
 there. An increment 1 test passed against the old code; this step shows each
 new test can catch the regression it is meant for.
 
-### A. Status poll window (wallet-libraries)
+### A. Status poll window (dropped)
 
-Today, `transaction_status_work`
-(`zcash_client_sqlite/src/wallet.rs`) returns every eligible status row on
-every call. It drops a row as soon as `mined_height` is set. `Mined` is
-recorded by `record_mined_transaction`, which overwrites any earlier mined
-height. Status work exists only for transactions that compact scanning cannot
-see (`detectable_via_scanning`), so nothing later checks a forged answer.
+This change is not part of increment 2. No fixed-height window, expiry cover
+query, status-poll session, settled-query API, or status-row error split is added.
+Status polling keeps the existing unresolved-work and expiry rules. Replies can
+still influence when it stops; closing traffic-analysis leaks is deferred.
 
-No table or migration. The window comes from columns `transactions` already
-has, and the rest lives in the open wallet's session memory:
+### B. Status reply handling (separate future work)
 
-- The window starts at `target_height - 1`, the tip a transaction this wallet
-  built was built at, and ends 10 tips later. `queue_tx_status` runs when such
-  a transaction is stored for sending, just before it is broadcast.
-- The expiry poll is the expiry height when it is nonzero and past the
-  window.
-- Status work without a target height (a transaction this wallet did not
-  build) opens a window in session memory at its first work read, even when settled.
-- A rewind that queues reconfirmation (`reconfirm_mined`) opens a fresh window
-  in session memory when the wallet next reads the work, so a rewind re-arms
-  polling for every queued private transaction, whether or not a reply said it mined.
-  Private replies retain that scheduling marker after the answer is applied, so
-  reopening rebuilds the same kind of window. Each committed rewind clears the previous session window and polled
-  tip, including a second rewind before any read observes reconfirmation complete.
-  Rolled-back wallet transactions leave the live session unchanged.
-- The tip of the last recorded poll is kept in session memory
-  (`StatusPollSession`, shared across a wallet's handles the way
-  `EnhancePirSession` is).
-- After a restart, windows anchored to a target height are rebuilt as they
-  were. The polled-tip marks and the session windows start fresh, so a
-  restart costs at most one more poll at the current tip, an expiry poll asked
-  again, or a new window for work without a target height. The restart is the
-  app's doing, not a reply's.
-
-Library changes:
-
-- `transaction_status_work` returns a transaction as private work when two
-  things hold:
-  - the current tip is inside its window or is the first tip at or past
-    its expiry poll;
-  - the session's last polled tip is below the current tip.
-
-  This holds whether or not the transaction is mined. Public work keeps
-  today's rules: in public mode the txid is already disclosed.
-- `PrivateTransactionStatusRequest` gains `settled()`. It is true when the
-  transaction already has a conclusive status, and the caller then sends the
-  query but does not apply the answer.
-- A new `TransactionStatusWrite::record_private_status_poll(txid, tip)`
-  records that a reply came back. The caller calls it for every private reply,
-  readable or not. A request outcome records nothing.
-- A conclusive negative reply keeps the private status queue entry. It no longer
-  represents unresolved status work, but still anchors the remaining cover polls
-  and an equivalent expiry poll after reopening. Public queue retirement is unchanged.
-- `set_transaction_status` keeps the first conclusive answer inside the
-  window. `Mined(h)` for a transaction that status already recorded as mined
-  is ignored rather than overwriting its height.
-- `zakura/pir-status` splits `Error::Malformed` in two:
-  - a reply envelope that does not match the session (header echo, manifest,
-    length) stays a request outcome;
-  - a row that fails to decode, or fails to decrypt (today `Pir`, mapped to
-    `Unavailable`), becomes the new `StatusError::Unreadable`, a content
-    outcome.
-
-  `CoverageIncomplete` is a content outcome, because it follows from a
-  missing record.
-- A transaction still without a conclusive answer once its window and expiry
-  poll have passed leaves automatic work. It stays pending.
-  `transaction_status_work_for`, a rewind, transparent recovery or a rescan
-  can still settle it.
-
-Tests, in `zcash_client_sqlite` beside
-`wallet/request_lifecycle_tests.rs`:
-
-- **Transcript.** Queue a transaction at tip *h* with expiry *h* + 40. Walk
-  the tip from *h* to *h* + 45, and at each tip record the private work
-  returned and the replies fed back. Run four services:
-  - honest, mining the transaction at *h* + 2;
-  - a "mined" answer forged at *h*;
-  - unreadable replies;
-  - `CoverageIncomplete` throughout.
-
-  The four lists of (tip, txid) are equal. Reverted, the honest and forging
-  lists drop the transaction at *h* + 3 and *h* + 1.
-- **At most once per tip.** Read the work twice at one tip after recording a
-  poll: the transaction appears once. Reverted, it appears on every call.
-- **No overwrite.** `Mined(h1)` then `Mined(h2)` leaves the height at *h1*.
-  Reverted, it is *h2*.
-- **Expiry poll.** A transaction mined at *h* + 1 is still asked at *h* + 40.
-  One never mined is settled as expired by that poll.
-- **Restart.** Restarting the wallet mid-window gives the same transcript for
-  honest, forging and unreadable services, with one more poll at the restart
-  tip. A rewind that requeues reconfirmation opens a new window.
-- **pir-status.** A corrupted row returns `Unreadable`, and a wrong header
-  echo returns the request-level error. Reverted, both are `Malformed`.
-
-### B. Vizor status driver (Vizor)
-
-Vizor polls status in `run_requests`
-(`rust/src/wallet/sync_engine/enhancement/status/mod.rs`) at each checkpoint,
-about once per new block.
-
-- **Any failure.** Any private error sets `private_failed`, and the rest of the
-  session's private status work is skipped.
-- **Coverage.** `CoverageIncomplete` returns
-  `SyncError::PrivateStatusCoverageIncomplete`, and Dart stops its poll timer
-  (`lib/src/providers/sync_provider.dart`,
-  `_privateStatusCoverageNeedsSettings`).
-- **Restart gate.** The gate (`RecoveryRestartGate`) restarts syncs at an
-  unchanged tip, and resets its backoff whenever the count of status work
-  changes.
-
-Changes:
-
-- `run_requests`:
-  - `Unreadable`, `Malformed` from a row, and `CoverageIncomplete` record the
-    poll and move on to the next txid.
-  - `private_failed` is set only by request outcomes.
-  - `CoverageIncomplete` no longer fails the sync.
-- `status/store.rs`: call `record_private_status_poll` for every private
-  reply. For `settled()` work, send the query and discard the answer. Discard
-  also means no resubmission through `ready_resubmission`.
-- Keep one `StatusPollSession` per open wallet and share it across its
-  database handles, as Vizor shares `EnhancePirSession`. A handle with a fresh
-  session polls again at the current tip.
-- `sync_provider.dart`: drop the status coverage stop. Restarts at an
-  unchanged tip send no status query, because work is due once per tip.
-
-Tests use `FakeStatusSource` in
-`rust/src/wallet/sync_engine/enhancement/tests.rs`:
-
-- **One bad txid.** An unreadable reply for txid A does not skip txid B in
-  the same checkpoint. Reverted, B is skipped.
-- **Honest versus forging.** Over 12 tips, the requests from a wallet whose
-  source mines at the second tip equal those from one whose source forges
-  "mined" at the first. Reverted, the forged run sends fewer.
-- **Request outcome.** A 503 still defers the rest of the checkpoint.
-- **Coverage.** `CoverageIncomplete` leaves the sync successful.
+Vizor still needs an independent design for handling a failed status lookup
+without skipping unrelated transactions or turning an inconclusive reply into
+absence. The removed status-window APIs are not prerequisites or caller
+requirements. No status-poll session, settled cover work, or private-poll
+acknowledgment is introduced by this increment.
 
 ### C. Vizor Enhance after a bad reply (Vizor)
 
@@ -419,7 +278,7 @@ Questions for the PIR operators:
 | Pull request | Repository | Contains | Base | Depends on |
 | --- | --- | --- | --- | --- |
 | This plan | wallet-libraries | This doc | `main` | None |
-| Increment 2, library | wallet-libraries | Changes A, D and F | This plan's branch, then `main` | Increment 1 (#180–#182, merged) |
+| Increment 2, library | wallet-libraries | Changes D and F | This plan's branch, then `main` | Increment 1 (#180–#182, merged) |
 | Increment 2, Vizor | chainapsis/vizor-wallet, branch `transparent-privacy-inc2` | Changes B and C, D's waiting state, and a repin of every wallet-libraries dependency to the library pull request's tip | `transparent-privacy-inc1` | Vizor increment 1, and the library pull request's tip |
 | Filter bound | wallet-pir | Change E | `main` | None |
 
@@ -482,8 +341,5 @@ None of the PIR changes above touches the transport.
   arrive about a minute after the sync on average. It spreads the first
   Enhance query over about 2 blocks. A longer delay hides the block better but
   holds memos back.
-- **How often will a transaction stay unresolved after its window?** With 10
-  polls, a transaction slower than 10 blocks is settled by its expiry poll,
-  transparent recovery or a rescan. If this happens often, a second fixed poll
-  at the midpoint would cost one query.
+
 - **Should Enhance cover go on now, while it is free?** See section 6.

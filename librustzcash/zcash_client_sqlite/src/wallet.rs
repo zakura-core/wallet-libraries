@@ -200,7 +200,6 @@ pub(crate) mod locking;
 pub(crate) mod orchard;
 pub(crate) mod sapling;
 pub(crate) mod scanning;
-pub(crate) mod status_polls;
 pub(crate) mod transaction_reconfirmation;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) mod transparent;
@@ -3817,17 +3816,12 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
     conn: &rusqlite::Transaction,
     _params: &P,
     #[cfg(feature = "transparent-inputs")] gap_limits: &GapLimits,
-    status_mode: Option<TransactionStatusMode>,
-    configured: Option<zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode>,
     txid: TxId,
     status: TransactionStatus,
 ) -> Result<(), SqliteClientError> {
     let chain_tip = chain_tip_height(conn)?.ok_or(SqliteClientError::ChainHeightUnknown)?;
 
-    // A conclusive negative answer retires public work, but cannot remove a private
-    // scheduling obligation: it is still needed for cover polls and after reopening.
-    let retain_private_schedule = status_polls::uses_private_mode(conn, status_mode, configured)?;
-    transaction_reconfirmation::complete_observation(conn, txid, retain_private_schedule)?;
+    transaction_reconfirmation::complete_observation(conn, txid)?;
 
     match status {
         TransactionStatus::TxidNotRecognized | TransactionStatus::NotInMainChain => {
@@ -3842,56 +3836,44 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
                 ],
             )?;
 
-            if !retain_private_schedule {
-                conn.execute(
-                    "DELETE FROM tx_retrieval_queue
-                     WHERE txid = :txid
-                     AND query_type = :status_type
-                     AND NOT EXISTS (
-                        SELECT 1
-                        FROM transactions t
-                        WHERE t.txid = :txid
-                        AND t.mined_height IS NULL
-                        AND (
-                            t.expiry_height = 0
-                            OR (
-                                t.expiry_height > 0
-                                AND t.confirmed_unmined_at_height < t.expiry_height
-                            )
-                            OR (
-                                t.expiry_height IS NULL
-                                AND t.confirmed_unmined_at_height
-                                    < COALESCE(t.target_height, t.min_observed_height) + :certainty_depth
-                            )
+            conn.execute(
+                "DELETE FROM tx_retrieval_queue
+                 WHERE txid = :txid
+                 AND query_type = :status_type
+                 AND NOT EXISTS (
+                    SELECT 1
+                    FROM transactions t
+                    WHERE t.txid = :txid
+                    AND t.mined_height IS NULL
+                    AND (
+                        t.expiry_height = 0
+                        OR (
+                            t.expiry_height > 0
+                            AND t.confirmed_unmined_at_height < t.expiry_height
                         )
-                     )",
-                    named_params![
-                        ":txid": txid.as_ref(),
-                        ":status_type": TxQueryType::Status.code(),
-                        ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA,
-                    ],
-                )?;
-            }
+                        OR (
+                            t.expiry_height IS NULL
+                            AND t.confirmed_unmined_at_height
+                                < COALESCE(t.target_height, t.min_observed_height) + :certainty_depth
+                        )
+                    )
+                 )",
+                named_params![
+                    ":txid": txid.as_ref(),
+                    ":status_type": TxQueryType::Status.code(),
+                    ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA,
+                ],
+            )?;
         }
         TransactionStatus::Mined(height) => {
-            // The first mined answer stands: a different height for a transaction already
-            // mined is ignored, so a later reply cannot move it. A rewind un-mines it first.
-            let other_height: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM transactions
-                 WHERE txid = :txid AND mined_height IS NOT NULL AND mined_height != :height)",
-                named_params![":txid": txid.as_ref(), ":height": u32::from(height)],
-                |row| row.get(0),
+            record_mined_transaction(
+                conn,
+                _params,
+                #[cfg(feature = "transparent-inputs")]
+                gap_limits,
+                txid,
+                height,
             )?;
-            if !other_height {
-                record_mined_transaction(
-                    conn,
-                    _params,
-                    #[cfg(feature = "transparent-inputs")]
-                    gap_limits,
-                    txid,
-                    height,
-                )?;
-            }
         }
     }
 
@@ -4348,7 +4330,6 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
             params: params.clone(),
             clock: (),
             rng: (),
-            status_poll_session: Default::default(),
             #[cfg(feature = "orchard")]
             enhance_pir_session: Default::default(),
             #[cfg(feature = "orchard")]
@@ -5463,9 +5444,6 @@ pub(crate) fn queue_tx_retrieval(
 /// Records that the wallet must query by txid in order to learn the mined status of a
 /// transaction. The entry is durable across mined states so that it can become active again
 /// following a chain rewind.
-///
-/// Its private poll window follows from the transaction's target height, or opens at its first
-/// work read (see [`status_polls`]).
 pub(crate) fn queue_tx_status(
     conn: &rusqlite::Transaction<'_>,
     txid: TxId,
@@ -5492,12 +5470,8 @@ pub(crate) fn queue_tx_status(
 /// compact-block scanning cannot observe, because the wallet has neither a shielded spend nor a
 /// shielded output in it: those mined above `above`, which a truncation is about to un-mine, or,
 /// without a height, those already unmined. Such a transaction was mined before, so its
-/// public obligation is exempt from expiry dormancy until one status observation completes.
-/// Private replies retain `tx_retrieval_queue.reconfirm_mined` as a scheduling marker so
-/// reopening cannot change the window according to the answer.
-///
-/// The wallet's rewind methods also rearm every queued private transaction independently of
-/// these mined-state predicates (see [`status_polls::rearm_reconfirmation`]).
+/// obligation is exempt from expiry dormancy until one status observation completes (see
+/// `tx_retrieval_queue.reconfirm_mined`).
 pub(crate) fn queue_status_for_unobservable_transactions(
     conn: &rusqlite::Transaction<'_>,
     above: Option<BlockHeight>,
@@ -5529,16 +5503,10 @@ pub(crate) fn queue_status_for_unobservable_transactions(
 /// Returns routed status work representing the observations needed
 /// by the wallet backend in order to be able to present a complete view of wallet history.
 ///
-/// Public work lists every eligible obligation. Private work follows each transaction's poll
-/// window instead (see [`status_polls`]): it lists every poll due at the current tip, mined or
-/// not, and marks it settled when public work would not list it. Unanchored work opens a
-/// window at its first work read even when already settled, including after reopening.
-///
 /// Payload retrieval is returned only by [`public_enhancement_work`] or, with Orchard support,
 /// `enhance_pir::transaction_enhancement_work`.
 pub(crate) fn transaction_status_work(
     conn: &rusqlite::Connection,
-    session: &status_polls::StatusPollSession,
     mode: TransactionStatusMode,
     configured: Option<zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode>,
 ) -> Result<Vec<TransactionStatusWork>, SqliteClientError> {
@@ -5591,11 +5559,6 @@ pub(crate) fn transaction_status_work(
          )",
         )?;
 
-        let effective = if force_private {
-            TransactionStatusMode::Private
-        } else {
-            mode
-        };
         let rows = tx_retrieval_stmt
             .query_and_then(
                 named_params![
@@ -5612,47 +5575,23 @@ pub(crate) fn transaction_status_work(
                     // Stale generations are omitted from the public batch, left queued, and not
                     // treated as absence.
                     if public_authority
-                        && effective == TransactionStatusMode::Public
+                        && !force_private
+                        && mode == TransactionStatusMode::Public
                         && row_generation != current_generation
                     {
                         return Ok(None);
                     }
+                    let effective = if force_private {
+                        TransactionStatusMode::Private
+                    } else {
+                        mode
+                    };
                     Ok(Some(route_status_work(effective, txid, earliest)))
                 },
             )?
             .collect::<Result<Vec<_>, _>>()?;
-        let unsettled = rows.into_iter().flatten();
-        if effective == TransactionStatusMode::Public {
-            return Ok(unsettled.collect());
-        }
 
-        // Private work: every windowed poll due at this tip, then the unsettled work that has
-        // no window yet.
-        let Some(tip) = chain_tip_height(conn)? else {
-            return Ok(unsettled.collect());
-        };
-        let unsettled = unsettled.collect::<Vec<_>>();
-        let unsettled_txids = unsettled
-            .iter()
-            .map(|work| work.txid())
-            .collect::<std::collections::HashSet<_>>();
-        let (due, windowed) = status_polls::due(conn, session, tip)?;
-        let mut work = due
-            .into_iter()
-            .map(|poll| {
-                let settled = !unsettled_txids.contains(&poll.txid);
-                TransactionStatusWork::Private(
-                    PrivateTransactionStatusRequest::new(poll.txid, poll.earliest)
-                        .with_settled(settled),
-                )
-            })
-            .collect::<Vec<_>>();
-        work.extend(
-            unsettled
-                .into_iter()
-                .filter(|work| !windowed.contains(&work.txid())),
-        );
-        Ok(work)
+        Ok(rows.into_iter().flatten().collect())
     })
 }
 
@@ -8350,9 +8289,6 @@ mod tests {
 
 #[cfg(test)]
 mod request_lifecycle_tests;
-
-#[cfg(test)]
-mod status_poll_tests;
 
 #[cfg(test)]
 mod rewind_floor_tests;

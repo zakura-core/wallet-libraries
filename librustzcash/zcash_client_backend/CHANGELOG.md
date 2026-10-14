@@ -15,12 +15,6 @@ workspace.
 - `EnhancePirWork::Waiting { request, not_before }`: a newly queued position is
   not queried before `not_before`. Show it as pending; it becomes `Query` once
   due.
-- `PrivateTransactionStatusRequest::settled`, true when the wallet already holds
-  a conclusive status. Send the query and record the poll, but do not apply the
-  answer. `PrivateTransactionStatusRequest::with_settled` sets it.
-- `TransactionStatusWrite::record_private_status_poll(txid, tip)`, which records
-  that a private status reply came back at `tip`, readable or not. Do not call
-  it for a request outcome (HTTP refusal, overload, stale publication, timeout).
 
 - `EnhancePirSuspension::Rejected`, for an Enhance PIR position whose replies
   were rejected or unreadable three times. It is not queried again until a
@@ -37,13 +31,8 @@ workspace.
 
 ### Changed
 
-- Private status work follows a fixed schedule instead of the replies:
-  `TransactionStatusRead::transaction_status_work` returns a private
-  transaction at each scheduled tip, mined or not, until its poll is recorded.
 - `EnhancePirWork` has the new `Waiting` variant: exhaustive matches must
   handle it.
-- `TransactionStatusWrite` has the new required method
-  `record_private_status_poll`: implementors must provide it.
 
 - `TransparentDisplayView` has the new `GaveUp` variant: exhaustive matches
   must handle it.
@@ -118,7 +107,6 @@ enhancement and makes Enhance PIR part of Orchard support.
   existing local-creation fields, with rewind handling, a data-only legacy migration,
   and a transactional outbox evidence writer. No new columns are added.
   See `docs/transaction_status_work.md` for consumer migration instructions.
-
 
 ### Added
 - Add a typed `WalletRead::transaction_status_requests` view of
@@ -2764,7 +2752,6 @@ funds to those addresses. See [ZIP 320](https://zips.z.cash/zip-0320) for detail
 - Default implementations of `zcash_client_backend::data_api::WalletRead::{
     get_target_and_anchor_heights, get_max_height_hash
   }` have been removed. These should be implemented in a backend-specific fashion.
-
 
 ## [0.9.0] - 2023-04-28
 ### Added

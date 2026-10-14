@@ -771,22 +771,12 @@ fn expiry_dormancy_preserves_obligations_and_reactivates_after_rewind() {
                 [missing.as_ref()],
             )
             .unwrap();
-        // Work whose answer the wallet would apply. In private mode a transaction this wallet
-        // built is also polled across its window, settled while dormant: sent, never applied.
         let active = |st: &State, txid| {
             st.wallet()
                 .transaction_status_work()
                 .unwrap()
                 .iter()
-                .any(|work| {
-                    work.txid() == txid
-                        && !matches!(
-                            work,
-                            zcash_client_backend::data_api::status::TransactionStatusWork::Private(
-                                request
-                            ) if request.settled()
-                        )
-                })
+                .any(|work| work.txid() == txid)
         };
         let evidence = [unknown, legacy, never]
             .map(|txid| st.wallet().transaction_status_work_for(txid).unwrap());
@@ -891,4 +881,57 @@ fn expiry_dormancy_requires_contiguous_scanning() {
             .iter()
             .any(|w| w.txid() == txid)
     );
+}
+
+#[test]
+fn private_status_polling_stops_after_a_mined_reply() {
+    let (mut st, height) = fixture();
+    st.wallet_mut()
+        .db_mut()
+        .set_status_mode(zcash_client_backend::data_api::status::TransactionStatusMode::Private);
+    let txid = TxId::from_bytes([110; 32]);
+    queue_both(&st, txid, height, None);
+    assert!(
+        st.wallet()
+            .transaction_status_work()
+            .unwrap()
+            .iter()
+            .any(|work| work.txid() == txid)
+    );
+    st.wallet_mut()
+        .set_transaction_status(txid, TransactionStatus::Mined(height))
+        .unwrap();
+    st.wallet_mut().update_chain_tip(height + 1).unwrap();
+    assert!(
+        !st.wallet()
+            .transaction_status_work()
+            .unwrap()
+            .iter()
+            .any(|work| work.txid() == txid)
+    );
+    assert!(
+        queued(&st, txid, 1),
+        "status completion preserves payload work"
+    );
+}
+
+#[test]
+fn private_status_polling_keeps_unresolved_work_after_ten_heights() {
+    let (mut st, height) = fixture();
+    st.wallet_mut()
+        .db_mut()
+        .set_status_mode(zcash_client_backend::data_api::status::TransactionStatusMode::Private);
+    let txid = TxId::from_bytes([111; 32]);
+    queue_both(&st, txid, height, None);
+    for offset in 0..15 {
+        st.wallet_mut().update_chain_tip(height + offset).unwrap();
+        assert!(
+            st.wallet()
+                .transaction_status_work()
+                .unwrap()
+                .iter()
+                .any(|work| work.txid() == txid),
+            "unresolved status remains due at height offset {offset}"
+        );
+    }
 }

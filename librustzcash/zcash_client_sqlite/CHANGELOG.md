@@ -12,28 +12,6 @@ workspace.
 
 ### Changed
 
-- Private status polls follow a fixed window: once at each of 10 chain tips
-  from the tip a transaction this wallet built was built at (its
-  `target_height` minus one), and once at the expiry height when that is past
-  the window. Each poll is returned whether or not the transaction is mined, and
-  whatever earlier replies said, and is marked `settled` when the wallet already
-  holds a conclusive status. After its window and expiry poll, a transaction
-  without a conclusive status leaves automatic work but stays pending. Status
-  work without a target height opens its window at its first work read, and
-  a rewind that queues reconfirmation opens a fresh one when the wallet next
-  reads the work. A conclusive negative reply keeps its private scheduling
-  obligation, including after expiry and reopening. Each committed rewind resets
-  private polling for every queued transaction, regardless of earlier replies.
-  Local historical inclusion restoration also retains private scheduling.
-  Reopening unanchored or rewound work also polls settled transactions; rolled-back writes
-  leave session polling unchanged. Public status work is unchanged.
-- The tips already polled, and windows that no column fixes, are kept in memory
-  in a new `StatusPollSession`, with no new table or migration. Share it across
-  serialized handles of one wallet with `WalletDb::with_status_poll_session`, as
-  with `EnhancePirSession`. A fresh session rebuilds each window from
-  `target_height` and `expiry_height`; it may poll once more at the current tip,
-  ask an expiry poll again, and opens new windows for work without a target
-  height.
 - Each newly queued Ironwood Enhance position waits a delay drawn uniformly
   from 0 to 2 minutes (1 minute on average) with the wallet's random source
   before its first private query, and is listed as `EnhancePirWork::Waiting`
@@ -45,8 +23,7 @@ workspace.
   the full 2 minutes. `EnhancePirRead` for `WalletDb` now requires `CL: Clock`.
 - `WalletDb::set_enhance_pir_max_delay` (test dependencies only) bounds that
   delay; the test database sets it to zero.
-- `set_transaction_status` keeps the first mined height: `Mined` at a different
-  height for a transaction already mined is ignored.
+
 - While an account's transparent recovery is a candidate, its watch set holds a
   fixed restore window: every external index below 50 and internal index below 25,
   past the gap limits. Ephemeral addresses keep their gap limit. The window is
@@ -75,9 +52,6 @@ workspace.
 
 ### Added
 
-- `StatusPollSession`, `WalletDb::with_status_poll_session` and
-  `WalletDb::status_poll_session`: the private status polls of one open wallet,
-  shared by its serialized handles. Keep it alive across syncs.
 - Enhance PIR replies rejected or unreadable three times suspend that request for the
   open-wallet session. Counts are in memory, with no new table or migration. A fresh
   session restores the allowance; rescans, different metadata positions and rewinds
@@ -673,7 +647,6 @@ PIR storage integration release using `zakura-client-backend 0.1.0-rc6`.
   note that the truncation now succeeds, resetting any tree whose scanned
   contents lie entirely above the truncation height to only the roots of
   subtrees completed at or below it.
-
 
 ### Fixed
 - The coinbase branch of the transparent account-balance tally now classifies

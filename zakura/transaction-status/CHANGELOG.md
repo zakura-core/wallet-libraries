@@ -2,13 +2,6 @@
 
 ## [Unreleased]
 
-### Added
-
-- `StatusError::Unreadable`, converted from the private status protocol's
-  `Unreadable`: the row a private reply carried failed to decrypt or decode.
-  Unlike the other errors it is a content outcome. Exhaustive matches must
-  handle it.
-
 ## [0.0.1-rc1] - PLANNED
 
 ### Packaging

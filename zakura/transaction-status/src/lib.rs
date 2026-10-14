@@ -39,10 +39,6 @@ pub enum StatusError {
     Stale,
     Timeout,
     Malformed,
-    /// A private reply matched its session, but the row it carried failed to decrypt or
-    /// decode. Unlike the other errors this is a content outcome: the service could aim it
-    /// at chosen rows, so callers must not let it change which transactions they ask about.
-    Unreadable,
     Cancelled,
     Transport {
         code: i32,
@@ -72,7 +68,6 @@ impl From<zakura_pir_status::Error> for StatusError {
             Error::Timeout => Self::Timeout,
             Error::Cancelled => Self::Cancelled,
             Error::Malformed => Self::Malformed,
-            Error::Unreadable => Self::Unreadable,
             Error::Capacity | Error::Unavailable | Error::Pir => Self::Unavailable,
         }
     }
@@ -327,17 +322,11 @@ mod tests {
             Error::Timeout,
             Error::Cancelled,
             Error::Malformed,
-            Error::Unreadable,
             Error::Unavailable,
             Error::Pir,
         ] {
             assert_ne!(StatusError::from(error), StatusError::LocalStorage);
         }
-        // An unreadable row stays a content outcome, apart from every request outcome.
-        assert_eq!(
-            StatusError::from(Error::Unreadable),
-            StatusError::Unreadable
-        );
         for code in 0..=16 {
             let status = tonic::Status::new(tonic::Code::from(code), "");
             assert_ne!(StatusError::from(status), StatusError::LocalStorage);

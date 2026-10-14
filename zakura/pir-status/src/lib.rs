@@ -40,15 +40,8 @@ pub type Hash = [u8; 32];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Error {
-    /// The service's reply did not match the session: a manifest, header echo or length.
-    /// The service chooses this without knowing which row was asked, so it is a request
-    /// outcome.
     #[error("malformed status data")]
     Malformed,
-    /// The reply matched the session, but its row failed to decrypt or decode. The row is
-    /// what the private query selected, so this is a content outcome.
-    #[error("unreadable status row")]
-    Unreadable,
     #[error("unsupported status protocol")]
     Unsupported,
     #[error("status coverage incomplete")]
@@ -314,10 +307,9 @@ impl LocalCoverageContext {
 }
 
 /// Validates the whole row before returning the observation for `txid`. The row
-/// is [`Error::Unreadable`] if it holds more records than the manifest, is
-/// unsorted or sparse, holds an invalid record, a record from another bucket or
-/// one inconsistent with the accepted anchor, or matches `txid` below
-/// `earliest`.
+/// is malformed if it holds more records than the manifest, is unsorted or
+/// sparse, holds a record from another bucket or one inconsistent with the
+/// accepted anchor, or matches `txid` below `earliest`.
 pub(crate) fn decode_row(
     manifest: &Manifest,
     txid: &Hash,
@@ -325,14 +317,14 @@ pub(crate) fn decode_row(
     row: &[u8],
 ) -> Result<Observation, Error> {
     if row.len() != ROW_BYTES || row[SLOTS * SLOT_BYTES..].iter().any(|b| *b != 0) {
-        return Err(Error::Unreadable);
+        return Err(Error::Malformed);
     }
     let mut found = None;
     let mut previous = None;
     let mut empty = false;
     let mut records = 0;
     for bytes in row[..SLOTS * SLOT_BYTES].as_chunks::<SLOT_BYTES>().0 {
-        match Record::decode(bytes).map_err(|_| Error::Unreadable)? {
+        match Record::decode(bytes)? {
             None => empty = true,
             Some(r) => {
                 records += 1;
@@ -343,14 +335,14 @@ pub(crate) fn decode_row(
                         != bucket(&manifest.network, &manifest.salt, txid)
                     || !r.consistent_with(manifest)
                 {
-                    return Err(Error::Unreadable);
+                    return Err(Error::Malformed);
                 }
                 previous = Some(r.txid);
                 if r.txid == *txid {
                     if r.tag != 1 && earliest.is_some_and(|e| r.height < e) {
-                        return Err(Error::Unreadable);
+                        return Err(Error::Malformed);
                     }
-                    found = Some(r.observation().map_err(|_| Error::Unreadable)?);
+                    found = Some(r.observation()?);
                 }
             }
         }
@@ -485,14 +477,13 @@ impl Client {
     }
     pub fn decode(&self, query: Query, response: &[u8], now_ms: u64) -> Result<Observation, Error> {
         self.check_response(&query.header, response, now_ms)?;
-        // The reply matched the session; from here on, failures come from the row.
         let row = zakura_pir_native::decode_cols(
             &query.secret,
             &self.public,
             &response[HEADER_BYTES..],
             COLS,
         )
-        .map_err(|_| Error::Unreadable)?;
+        .map_err(|_| Error::Pir)?;
         decode_row(&self.manifest, &query.txid, query.earliest, &row)
     }
 }
@@ -783,14 +774,10 @@ mod tests {
             Ok(Observation::Mined(11))
         );
         row[ROW_BYTES - 1] = 1;
-        assert_eq!(decode_row(&m, &txid, None, &row), Err(Error::Unreadable));
+        assert_eq!(decode_row(&m, &txid, None, &row), Err(Error::Malformed));
         row[ROW_BYTES - 1] = 0;
         row[SLOT_BYTES..SLOT_BYTES * 2].copy_from_slice(&r.encode().unwrap());
-        assert_eq!(decode_row(&m, &txid, None, &row), Err(Error::Unreadable));
-        // A slot that fails the record codec makes the whole row unreadable too.
-        row[SLOT_BYTES..SLOT_BYTES * 2].fill(0);
-        row[SLOT_BYTES + 33] = 1;
-        assert_eq!(decode_row(&m, &txid, None, &row), Err(Error::Unreadable));
+        assert_eq!(decode_row(&m, &txid, None, &row), Err(Error::Malformed));
     }
     fn single(tag: u8, height: u32) -> Vec<u8> {
         let mut row = vec![0; ROW_BYTES];
@@ -811,7 +798,7 @@ mod tests {
             Ok(Observation::Mined(11))
         );
         m.entries = 0;
-        assert_eq!(decode_row(&m, &[9; 32], None, &row), Err(Error::Unreadable));
+        assert_eq!(decode_row(&m, &[9; 32], None, &row), Err(Error::Malformed));
     }
     #[test]
     fn records_at_the_anchor_are_status_observations() {
@@ -826,12 +813,12 @@ mod tests {
     }
 
     #[test]
-    fn match_below_local_inclusion_bound_is_unreadable() {
+    fn match_below_local_inclusion_bound_is_malformed() {
         let m = manifest();
         for (tag, height, earliest, expected) in [
-            (2, 11, Some(15), Err(Error::Unreadable)),
+            (2, 11, Some(15), Err(Error::Malformed)),
             (2, 11, Some(11), Ok(Observation::Mined(11))),
-            (3, 11, Some(15), Err(Error::Unreadable)),
+            (3, 11, Some(15), Err(Error::Malformed)),
             (1, 0, Some(15), Ok(Observation::Mempool)),
         ] {
             let row = single(tag, height);

@@ -2,17 +2,6 @@
 
 ## [Unreleased]
 
-### Added
-
-- `Error::Unreadable`: a reply that matched its session but whose row failed to
-  decrypt or decode. It is a content outcome. A reply that does not match the
-  session (manifest, header echo, length) stays `Malformed`, a request outcome.
-
-### Changed
-
-- A row that fails validation, which was `Malformed`, and a row that fails to
-  decrypt, which was `Pir`, are now `Unreadable`.
-
 ## [0.0.1-rc1] - PLANNED
 
 ### Packaging

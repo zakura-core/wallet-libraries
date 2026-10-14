@@ -51,14 +51,10 @@ impl PublicTransactionStatusRequest {
 
 /// A private observation with wallet-held inclusion evidence. Unknown evidence does not
 /// authorize public lookup or a negative observation, but positive observations remain useful.
-///
-/// Private polls follow a fixed schedule, not the replies: see
-/// [`TransactionStatusWrite::record_private_status_poll`] and [`Self::settled`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PrivateTransactionStatusRequest {
     txid: TxId,
     earliest_possible_inclusion: Option<BlockHeight>,
-    settled: bool,
 }
 impl PrivateTransactionStatusRequest {
     /// `earliest_possible_inclusion` must be a conservative inclusive lower bound established
@@ -68,12 +64,7 @@ impl PrivateTransactionStatusRequest {
         Self {
             txid,
             earliest_possible_inclusion,
-            settled: false,
         }
-    }
-    /// Marks whether the wallet already holds a conclusive status for the transaction.
-    pub fn with_settled(self, settled: bool) -> Self {
-        Self { settled, ..self }
     }
     /// Returns the transaction to observe.
     pub fn txid(self) -> TxId {
@@ -82,13 +73,6 @@ impl PrivateTransactionStatusRequest {
     /// Returns the inclusive lower bound, or `None` when creation provenance is unknown.
     pub fn earliest_possible_inclusion(self) -> Option<BlockHeight> {
         self.earliest_possible_inclusion
-    }
-    /// True when the wallet already holds a conclusive status for the transaction, such as a
-    /// mined height. The poll is still due: send the query, record the poll, and discard the
-    /// answer rather than applying it. Skipping the query would tell the service that the
-    /// wallet had learned the status.
-    pub fn settled(self) -> bool {
-        self.settled
     }
 }
 
@@ -101,16 +85,6 @@ pub trait TransactionStatusRead: WalletRead {
     /// Returns each currently actionable status obligation once, with its selected route.
     /// Stores may retain expired obligations as dormant work that becomes eligible after
     /// a rewind. Omission from this batch is not conclusive evidence of transaction absence.
-    ///
-    /// Private work follows a fixed schedule, so that replies cannot steer which transactions
-    /// are asked about: a window of consecutive chain tips and, past it, the transaction's
-    /// expiry height. A store may keep part of the schedule in memory; reopening the wallet may
-    /// then repeat a poll at the current tip, which the application, not a reply, decides. At each scheduled tip the transaction is
-    /// returned until a reply is recorded with
-    /// [`TransactionStatusWrite::record_private_status_poll`], whether or not it is already
-    /// mined; [`PrivateTransactionStatusRequest::settled`] then says not to apply the answer.
-    /// After its schedule, a transaction without a conclusive status leaves this batch but stays
-    /// pending; [`Self::transaction_status_work_for`], a rewind or a rescan can still settle it.
     fn transaction_status_work(&self) -> Result<Vec<TransactionStatusWork>, Self::Error>;
 
     /// Routes an individual lookup without enqueueing it or requiring an actionable queue entry.
@@ -134,19 +108,5 @@ pub trait TransactionStatusWrite: TransactionStatusRead {
         &mut self,
         txid: TxId,
         earliest_possible_inclusion: BlockHeight,
-    ) -> Result<(), Self::Error>;
-
-    /// Records that a private status query for `txid`, read from
-    /// [`TransactionStatusRead::transaction_status_work`] at chain tip `tip`, came back.
-    ///
-    /// Call this for every private reply, whether it was readable, unreadable, or reported
-    /// missing coverage, and before applying any answer. Do not call it for a request outcome
-    /// (an HTTP refusal, overload, a stale publication, a timeout, or a cancellation): the work
-    /// then stays due at the same tip and may be retried. Once recorded, the transaction is not
-    /// returned as private work again until a later tip.
-    fn record_private_status_poll(
-        &mut self,
-        txid: TxId,
-        tip: BlockHeight,
     ) -> Result<(), Self::Error>;
 }

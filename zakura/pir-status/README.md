@@ -56,10 +56,6 @@ inclusion bound inside the published window. The application implements
 `transport::Transport` with its own route, timeouts, and cancellation policy,
 and must not collect a body beyond the bound passed to it; session and query
 responses are bounded to their exact protocol lengths. No status error authorizes a public txid lookup.
-A reply that does not match its session (manifest, header echo, length) is
-`Malformed`, a request outcome the service chooses without knowing the row. A
-row that fails to decrypt or decode is `Unreadable`, a content outcome: it must
-not change which transactions the wallet asks about next.
 
 This crate alone does not enable private status in a wallet or qualify a live
 Status PIR service. The server and client must use the same frozen release
