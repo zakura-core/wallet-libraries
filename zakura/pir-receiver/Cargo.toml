@@ -19,15 +19,15 @@ thiserror = { version = "2", optional = true }
 zakura-one-time-ivk = { version = "=0.0.1-rc0", path = "../one-time-ivk", optional = true }
 zcash_client_backend = { workspace = true, features = ["orchard"], optional = true }
 zcash_protocol = { workspace = true, optional = true }
-# The receiver crates use the wallet-pir release aligned with Common 3.
-receiver-directory = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.7" }
-receiver-pir = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.7" }
+# Receiver protocol packages share this workspace's Common release family.
+receiver-directory = { package = "zakura-receiver-directory", version = "=0.0.1-rc0", path = "../receiver-directory" }
+receiver-pir = { package = "zakura-receiver-pir", version = "=0.0.1-rc0", path = "../receiver-pir" }
 
 [dev-dependencies]
 axum = "0.7"
 orchard.workspace = true
-receiver-pir = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.7", features = ["server"] }
-receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.7" }
+receiver-pir = { package = "zakura-receiver-pir", version = "=0.0.1-rc0", path = "../receiver-pir", features = ["server"] }
+receiver-pir-server = { package = "zakura-receiver-pir-server", version = "=0.0.1-rc0", path = "../receiver-pir-server" }
 rusqlite = { workspace = true, features = ["hooks"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower = { workspace = true, features = ["util"] }

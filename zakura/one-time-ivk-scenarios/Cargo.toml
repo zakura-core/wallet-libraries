@@ -20,9 +20,9 @@ serde_json.workspace = true
 axum = "0.7"
 incrementalmerkletree.workspace = true
 orchard = { workspace = true, features = ["circuit"] }
-receiver-directory = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.7" }
-receiver-pir = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.7", features = ["server"] }
-receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.7" }
+receiver-directory = { package = "zakura-receiver-directory", version = "=0.0.1-rc0", path = "../receiver-directory" }
+receiver-pir = { package = "zakura-receiver-pir", version = "=0.0.1-rc0", path = "../receiver-pir", features = ["server"] }
+receiver-pir-server = { package = "zakura-receiver-pir-server", version = "=0.0.1-rc0", path = "../receiver-pir-server" }
 rusqlite.workspace = true
 sapling = { workspace = true, features = ["test-dependencies"] }
 secrecy.workspace = true

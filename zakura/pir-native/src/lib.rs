@@ -1,79 +1,97 @@
-//! Native two-mask packing primitives shared by the Zakura PIR clients.
-//!
-//! The client uploads one `K_g` packing key and a selection query per request,
-//! and decodes each response block under the two published masks, which are
-//! rounded to [`MASK_BITS`]. The selection is either rounded to nearest at
-//! [`QUERY_BITS`] ([`prepare_with`]) or dithered to [`DITHERED_QUERY_BITS`]
-//! ([`prepare_dithered`]); a server tells the two apart by exact length.
-//! Setup seeds, database shapes and request envelopes belong to each protocol;
-//! nothing here is protocol-specific.
-//!
-//! This profile is experimental: ipir-sp's cryptographic gates for the native
-//! path remain open, and correctness certificates are snapshot-specific.
-use ipir_sp::{
-    bits::{contiguous_bytes_to_u64s, u64s_to_contiguous_bytes},
-    native::{NativeProfile, NativePublicSetup},
+//! Native PIR client facade and shared client/server profiles.
+//! Protocol envelopes and seeds remain with each protocol.
+pub mod profile;
+pub use profile::{
+    D, DITHERED_QUERY_BITS, KEY_BYTES, MASK_BITS, NativeSecret, NativeSetup, Q, Q_BITS, QUERY_BITS,
+    RESPONSE_BITS,
 };
-use rand::{RngCore, SeedableRng};
+#[cfg(test)]
+use rand::RngCore;
+#[cfg(test)]
 use rand_chacha::ChaCha20Rng;
-use reinspiring::native::{NativeKeys, NativeParams, NativeTwoMaskCiphertext, SecretDistribution};
-
-pub use reinspiring::native::{NativeSecret, NativeSetup};
-
-pub const Q: u64 = 1 << 54;
-pub const Q_BITS: usize = 54;
-pub const D: usize = 2048;
-pub const MASK_BITS: usize = 29;
-pub const QUERY_BITS: usize = 49;
-/// Selection width of [`prepare_dithered`] requests.
-pub const DITHERED_QUERY_BITS: usize = 44;
-pub const RESPONSE_BITS: usize = 22;
 pub const KEY_WORDS: usize = 2 * D;
-pub const KEY_BYTES: usize = KEY_WORDS * Q_BITS / 8;
-
-pub fn params() -> NativeParams {
-    NativeParams::new(D, 54, 16, 19, 2, SecretDistribution::Gaussian)
-        .expect("fixed experimental profile")
-}
-
-/// Packing key-switching setup derived from a protocol's packing seed.
+pub use profile::{
+    decode_cols, params, prepare_dithered, prepare_with, public_len, request_len, request_len_bits,
+    response_len,
+};
+/// Derive the packing setup from the protocol's packing seed.
 pub fn packing_setup(seed: [u8; 32]) -> NativeSetup {
     NativeSetup::new(params(), seed)
 }
-
-/// Domain-separated first-dimension masks for a `rows` by `cols` database.
+/// Masks over a valid protocol geometry; invalid geometry panics, as before.
 pub fn public_query_masks(seed: [u8; 32], rows: usize, cols: usize) -> Vec<Vec<u64>> {
-    NativePublicSetup::new(
-        NativeProfile::new(params(), rows, cols).expect("fixed experimental profile"),
-        seed,
-        [0; 32],
+    profile::public_query_masks(seed, rows, cols).expect("fixed experimental profile")
+}
+#[cfg(test)]
+fn prepare_from(
+    setup: &NativeSetup,
+    masks: &[Vec<u64>],
+    rows: usize,
+    target: usize,
+    dithered: bool,
+    rng: &mut ChaCha20Rng,
+) -> Result<(NativeSecret, Vec<u8>), String> {
+    profile::P16.prepare_rounded(
+        setup,
+        masks,
+        rows,
+        target,
+        (
+            if dithered {
+                DITHERED_QUERY_BITS
+            } else {
+                QUERY_BITS
+            },
+            dithered,
+        ),
+        rng,
     )
-    .query_masks()
-    .to_vec()
 }
-
-/// Canonical published bytes for two-mask blocks: every first mask, then
-/// every second mask, each coefficient rounded to [`MASK_BITS`].
-pub fn public_len(cols: usize) -> usize {
-    (2 * cols * MASK_BITS).div_ceil(8)
+/// In-process protocol test evaluator using the production native operations.
+#[cfg(any(test, feature = "test-server"))]
+pub mod test_server {
+    use super::*;
+    pub struct Database {
+        db: Vec<Vec<u16>>,
+        setup: NativeSetup,
+        blocks: Vec<profile::NativePreprocessed>,
+        public: Vec<u8>,
+    }
+    impl Database {
+        pub fn new(db: Vec<Vec<u16>>, masks: &[Vec<u64>], packing_seed: [u8; 32]) -> Self {
+            let setup = packing_setup(packing_seed);
+            let hint =
+                profile::hint(masks, db[0].len(), db.len(), |col| db[col].as_slice()).unwrap();
+            let blocks = profile::preprocess(&setup, &hint).unwrap();
+            let public = profile::publish(&blocks).unwrap();
+            Self {
+                db,
+                setup,
+                blocks,
+                public,
+            }
+        }
+        pub fn public(&self) -> &[u8] {
+            &self.public
+        }
+        pub fn answer(&self, payload: &[u8]) -> Vec<u8> {
+            let (keys, query) =
+                profile::parse_selection(&self.setup, payload, self.db[0].len(), self.db[0].len())
+                    .unwrap();
+            let scan: Vec<u64> = self
+                .db
+                .iter()
+                .map(|col| {
+                    col.iter().zip(&query).fold(0u64, |a, (&x, &q)| {
+                        a.wrapping_add((x as u64).wrapping_mul(q))
+                    }) & (Q - 1)
+                })
+                .collect();
+            profile::pack(&self.blocks, &keys, &scan).unwrap()
+        }
+    }
 }
-
-/// Response body length for `cols` packed columns at [`RESPONSE_BITS`].
-pub fn response_len(cols: usize) -> usize {
-    (cols * RESPONSE_BITS).div_ceil(8)
-}
-
-/// Request payload length for `rows`: one `K_g` key and a [`QUERY_BITS`] selection.
-pub fn request_len(rows: usize) -> usize {
-    request_len_bits(rows, QUERY_BITS)
-}
-
-/// Request payload length for `rows`: one `K_g` key and a `bits`-bit selection.
-pub fn request_len_bits(rows: usize, bits: usize) -> usize {
-    KEY_BYTES + (rows * bits).div_ceil(8)
-}
-
-/// Round `x` in `[0, Q)` to `bits` bits, nearest, with wraparound at `2^bits`.
+#[cfg(test)]
 fn round(x: u64, bits: usize) -> u64 {
     (((x as u128 * (1u128 << bits) + (Q / 2) as u128) / Q as u128) as u64) & ((1 << bits) - 1)
 }
@@ -81,6 +99,7 @@ fn round(x: u64, bits: usize) -> u64 {
 /// Round each `x` in `[0, Q)` to `bits` bits, with wraparound at `2^bits`:
 /// up with probability equal to the dropped fraction, otherwise down, so the
 /// rounding error has zero mean. Draws one coin per word from `rng`.
+#[cfg(test)]
 fn dither(words: &[u64], bits: usize, rng: &mut ChaCha20Rng) -> Vec<u64> {
     let shift = Q_BITS - bits;
     let low = (1u64 << shift) - 1;
@@ -93,235 +112,13 @@ fn dither(words: &[u64], bits: usize, rng: &mut ChaCha20Rng) -> Vec<u64> {
         .collect()
 }
 
-/// Fresh secret, one-key packing upload and 49-bit selection query.
-pub fn prepare_with(
-    setup: &NativeSetup,
-    masks: &[Vec<u64>],
-    rows: usize,
-    target: usize,
-) -> Result<(NativeSecret, Vec<u8>), String> {
-    prepare_from(setup, masks, rows, target, false, &mut fresh_rng())
-}
-
-/// Fresh secret, one-key packing upload and a selection query dithered to
-/// [`DITHERED_QUERY_BITS`]: [`request_len_bits`]`(rows, DITHERED_QUERY_BITS)`
-/// bytes. Each coefficient's rounding coin is fresh, so rounding errors are
-/// independent and zero-mean.
-pub fn prepare_dithered(
-    setup: &NativeSetup,
-    masks: &[Vec<u64>],
-    rows: usize,
-    target: usize,
-) -> Result<(NativeSecret, Vec<u8>), String> {
-    prepare_from(setup, masks, rows, target, true, &mut fresh_rng())
-}
-
-fn fresh_rng() -> ChaCha20Rng {
-    let mut entropy = [0; 32];
-    rand::rngs::OsRng.fill_bytes(&mut entropy);
-    ChaCha20Rng::from_seed(entropy)
-}
-
-/// Draws the secret, the packing key and the encrypted selection from `rng`
-/// in that order, then, when `dithered`, one rounding coin per row. `rng` must
-/// be freshly seeded from OS entropy for every request.
-fn prepare_from(
-    setup: &NativeSetup,
-    masks: &[Vec<u64>],
-    rows: usize,
-    target: usize,
-    dithered: bool,
-    rng: &mut ChaCha20Rng,
-) -> Result<(NativeSecret, Vec<u8>), String> {
-    if target >= rows || !rows.is_multiple_of(D) || masks.len() < rows / D {
-        return Err("native query shape".into());
-    }
-    let secret = NativeSecret::sample(&params(), rng);
-    let keys = NativeKeys::generate_one_key(setup, &secret, rng).map_err(|e| e.to_string())?;
-    let query = secret
-        .encrypt_selection(&masks[..rows / D], target, rng)
-        .map_err(|e| e.to_string())?;
-    let mut bytes = u64s_to_contiguous_bytes(&keys.kg_words(), Q_BITS);
-    let (bits, switched) = if dithered {
-        (
-            DITHERED_QUERY_BITS,
-            dither(&query, DITHERED_QUERY_BITS, rng),
-        )
-    } else {
-        (
-            QUERY_BITS,
-            query.iter().map(|&x| round(x, QUERY_BITS)).collect(),
-        )
-    };
-    bytes.extend(u64s_to_contiguous_bytes(&switched, bits));
-    Ok((secret, bytes))
-}
-
-/// Decode every little-endian u16 plaintext coefficient of a two-mask response.
-pub fn decode_cols(
-    secret: &NativeSecret,
-    public: &[u8],
-    body: &[u8],
-    cols: usize,
-) -> Result<Vec<u8>, String> {
-    if !cols.is_multiple_of(D)
-        || public.len() != public_len(cols)
-        || body.len() != response_len(cols)
-    {
-        return Err("native response shape".into());
-    }
-    let masks: Vec<_> = contiguous_bytes_to_u64s(public, MASK_BITS)
-        .into_iter()
-        .map(|x| x << (Q_BITS - MASK_BITS))
-        .collect();
-    let (a, a_other) = masks[..2 * cols].split_at(cols);
-    let b: Vec<_> = contiguous_bytes_to_u64s(body, RESPONSE_BITS)
-        .into_iter()
-        .map(|x| x << (Q_BITS - RESPONSE_BITS))
-        .collect();
-    let mut out = Vec::with_capacity(cols * 2);
-    for ((a, a_other), b) in a
-        .as_chunks::<D>()
-        .0
-        .iter()
-        .zip(a_other.as_chunks::<D>().0)
-        .zip(b[..cols].as_chunks::<D>().0)
-    {
-        let ct =
-            NativeTwoMaskCiphertext::from_rows(&params(), a.to_vec(), a_other.to_vec(), b.to_vec())
-                .map_err(|e| e.to_string())?;
-        for x in secret.decrypt_two_mask(&ct).map_err(|e| e.to_string())? {
-            out.extend((x as u16).to_le_bytes());
-        }
-    }
-    Ok(out)
-}
-
-/// Server-side counterparts of the client primitives, so protocol crates can
-/// exercise their clients over the library operations a server performs
-/// without depending on a server implementation.
-#[cfg(any(test, feature = "test-server"))]
-pub mod test_server {
-    use super::*;
-    use reinspiring::native::NativePreprocessed;
-
-    /// An in-memory database of u16 coefficients, `db[col][row]`, with the
-    /// preprocessing and published two-mask material a server would hold.
-    pub struct Database {
-        db: Vec<Vec<u16>>,
-        setup: NativeSetup,
-        blocks: Vec<NativePreprocessed>,
-        public: Vec<u8>,
-    }
-
-    impl Database {
-        /// `rows` and `cols` must be multiples of [`D`]; `masks` come from
-        /// [`public_query_masks`] over the same shape, and `packing_seed` is
-        /// the seed the client passes to [`packing_setup`].
-        pub fn new(db: Vec<Vec<u16>>, masks: &[Vec<u64>], packing_seed: [u8; 32]) -> Self {
-            let setup = packing_setup(packing_seed);
-            let cols = db.len();
-            let rows = db[0].len();
-            assert!(cols.is_multiple_of(D) && rows.is_multiple_of(D));
-            let lift = reinspiring::lift_ntt::LiftContext::new(D, Q).unwrap();
-            let public = lift.prepare_public_dot(masks, 65535).unwrap();
-            let hint: Vec<_> = db
-                .iter()
-                .map(|col| {
-                    let poly: Vec<Vec<u64>> = col
-                        .as_chunks::<D>()
-                        .0
-                        .iter()
-                        .map(|c| c.iter().map(|&x| x as u64).collect())
-                        .collect();
-                    lift.public_dot(&public, &poly).unwrap()
-                })
-                .collect();
-            let blocks: Vec<_> = hint
-                .as_chunks::<D>()
-                .0
-                .iter()
-                .map(|h| NativePreprocessed::build_two_mask(&setup, h).unwrap())
-                .collect();
-            let words: Vec<_> = blocks
-                .iter()
-                .flat_map(|b| b.mask().iter())
-                .chain(
-                    blocks
-                        .iter()
-                        .flat_map(|b| b.other_mask().expect("two-mask preprocessing").iter()),
-                )
-                .map(|&x| round(x, MASK_BITS))
-                .collect();
-            let public = u64s_to_contiguous_bytes(&words, MASK_BITS);
-            Self {
-                db,
-                setup,
-                blocks,
-                public,
-            }
-        }
-
-        /// Published two-mask material, [`public_len`] bytes.
-        pub fn public(&self) -> &[u8] {
-            &self.public
-        }
-
-        /// Answers a [`prepare_with`] or [`prepare_dithered`] payload with a
-        /// [`response_len`] body. The selection may cover every row or, as a
-        /// client omits rows that hold no data, a whole-block prefix; its
-        /// row count and width come from the exact payload length, and any
-        /// other length panics.
-        pub fn answer(&self, payload: &[u8]) -> Vec<u8> {
-            let (rows, bits) = (D..=self.db[0].len())
-                .step_by(D)
-                .flat_map(|rows| [QUERY_BITS, DITHERED_QUERY_BITS].map(|bits| (rows, bits)))
-                .find(|&(rows, bits)| payload.len() == request_len_bits(rows, bits))
-                .expect("a full or whole-block prefix selection at a supported width");
-            let keys = NativeKeys::from_kg_words(
-                &self.setup,
-                &contiguous_bytes_to_u64s(&payload[..KEY_BYTES], Q_BITS),
-            )
-            .unwrap();
-            let query: Vec<u64> = contiguous_bytes_to_u64s(&payload[KEY_BYTES..], bits)
-                .into_iter()
-                .take(rows)
-                .map(|x| x << (Q_BITS - bits))
-                .collect();
-            let scan: Vec<u64> = self
-                .db
-                .iter()
-                .map(|col| {
-                    col.iter().zip(&query).fold(0u64, |a, (&x, &q)| {
-                        a.wrapping_add((x as u64).wrapping_mul(q))
-                    }) & (Q - 1)
-                })
-                .collect();
-            let prepared = self.blocks[0].prepare_keys(&keys).unwrap();
-            let values: Vec<u64> = self
-                .blocks
-                .iter()
-                .zip(scan.as_chunks::<D>().0)
-                .flat_map(|(p, b)| {
-                    p.prepare_pack(&prepared)
-                        .unwrap()
-                        .finish_two_mask(b)
-                        .unwrap()
-                        .rows()
-                        .2
-                        .to_vec()
-                })
-                .collect();
-            let switched: Vec<_> = values.iter().map(|&x| round(x, RESPONSE_BITS)).collect();
-            u64s_to_contiguous_bytes(&switched, RESPONSE_BITS)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::Rng;
+    use ipir_sp::bits::u64s_to_contiguous_bytes;
+    use profile::NativeKeys;
+    use rand::{Rng, RngCore};
+    use rand_chacha::rand_core::SeedableRng;
 
     /// End-to-end over the library primitives a server uses: two-mask
     /// preprocessing, one-key upload, 29-bit masks and 22-bit responses.

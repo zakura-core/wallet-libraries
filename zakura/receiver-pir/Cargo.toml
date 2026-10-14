@@ -1,0 +1,40 @@
+[package]
+readme = "README.md"
+name = "zakura-receiver-pir"
+version = "0.0.1-rc0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license = "MIT"
+description = "Private lookups for immutable Ironwood receiver publications"
+
+[features]
+# The evaluator, which scans the rows with ipir-sp as Transparent's workers do.
+server = ["dep:ipir-sp"]
+
+[dependencies]
+hex = "0.4"
+receiver-directory = { package = "zakura-receiver-directory", version = "=0.0.1-rc0", path = "../receiver-directory" }
+ipir-sp = { version = "=0.1.0-rc.7", optional = true }
+pir-native = { package = "zakura-pir-native", version = "=0.0.1-rc2", path = "../pir-native" }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+rand_chacha = "0.3"
+
+[[test]]
+name = "golden"
+required-features = ["server"]
+
+[lib]
+name = "receiver_pir"
+
+[dev-dependencies.receiver-directory]
+package = "zakura-receiver-directory"
+version = "=0.0.1-rc0"
+path = "../receiver-directory"
+features = ["test-support"]

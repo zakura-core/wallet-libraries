@@ -26,10 +26,11 @@ CONFIGS = {
     "transparent-pir": (["-p", "zakura-pir-transparent"], ["wallet"]),
     "transparent-pir-sqlite": (["-p", "zakura-pir-transparent"], ["sqlite"]),
     "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing"]),
+    "receiver-libraries": (["-p", "zakura-receiver-directory", "-p", "zakura-receiver-pir", "-p", "zakura-receiver-pir-server", "-p", "zakura-pir-admission", "-p", "zakura-pir-native"], ["zakura-receiver-directory/test-support", "zakura-receiver-pir/server"]),
     "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
 }
-VERIFY = ("zakura-graph", "wallet-lib-modes", "vendor-ancestry")
+VERIFY = ("zakura-graph", "wallet-lib-modes", "vendor-ancestry", "receiver-consumers")
 
 
 def capture(argv: list[str], **kwargs) -> str:

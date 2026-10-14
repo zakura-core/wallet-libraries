@@ -17,6 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 ORDER = (
     "zakura/pir-enhance-types",
     "zakura/pir-native",
+    "zakura/pir-admission",
+    "zakura/receiver-directory",
+    "zakura/receiver-pir",
+    "zakura/receiver-pir-server",
     "zakura/one-time-ivk",
     "zakura/near-intents",
     "librustzcash/pczt",

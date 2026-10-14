@@ -1,0 +1,15 @@
+[package]
+readme = "README.md"
+name = "zakura-pir-admission"
+version = "0.0.1-rc0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded uploads, client concurrency and evaluation admission for PIR HTTP services"
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["sync", "time"] }
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio-stream = "0.1"

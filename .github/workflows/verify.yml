@@ -38,6 +38,7 @@ jobs:
       - run: rustup show
       - run: python3 -m unittest discover -s scripts/tests -v
       - run: cargo fmt --all -- --check
+      - run: python3 scripts/check-receiver-dependencies.py
       - run: git diff --exit-code
 
   repository-checks:
@@ -54,6 +55,7 @@ jobs:
             fetch-depth: 1
           - check: wallet-lib-modes
             fetch-depth: 1
+          - check: receiver-consumers
           - check: vendor-ancestry
             fetch-depth: 0
     env:
@@ -79,7 +81,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        config: [default, orchard, transparent, transparent-import, pczt, sqlite, enhance-wallet, enhance, transparent-pir, transparent-pir-sqlite, transparent-pir-testing, pir-receiver]
+        config: [default, orchard, transparent, transparent-import, pczt, sqlite, enhance-wallet, enhance, transparent-pir, transparent-pir-sqlite, transparent-pir-testing, pir-receiver, receiver-libraries, one-time-ivk-scenarios]
     env:
       WALLET_LIB_BUILD_ROOT: ${{ github.workspace }}/target/dev-lanes
     steps:

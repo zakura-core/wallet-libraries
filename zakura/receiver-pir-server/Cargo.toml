@@ -1,0 +1,32 @@
+[package]
+readme = "README.md"
+name = "zakura-receiver-pir-server"
+version = "0.0.1-rc0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license = "MIT"
+description = "Receiver PIR serving with immutable publications and atomic session revocation"
+
+[dependencies]
+receiver-pir = { package = "zakura-receiver-pir", version = "=0.0.1-rc0", path = "../receiver-pir", features = ["server"] }
+receiver-directory = { package = "zakura-receiver-directory", version = "=0.0.1-rc0", path = "../receiver-directory" }
+axum = "0.7"
+hex = "0.4"
+pir-admission = { package = "zakura-pir-admission", version = "=0.0.1-rc0", path = "../pir-admission" }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["io-util", "macros", "net"] }
+
+[lib]
+name = "receiver_pir_server"
+
+[dev-dependencies.receiver-directory]
+package = "zakura-receiver-directory"
+version = "=0.0.1-rc0"
+path = "../receiver-directory"
+features = ["test-support"]

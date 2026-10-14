@@ -18,6 +18,7 @@ python3 scripts/dev.py verify
 
 | Configuration | Packages and features |
 | --- | --- |
+| `receiver-libraries` | Receiver formats, PIR evaluator, real HTTP serving, admission and native interoperability |
 | `default` | Workspace except the facade, Enhance PIR, the transparent PIR adapter, receiver PIR and the one-time IVK scenarios; default features |
 | `orchard` | Backend + SQLite; `orchard,test-dependencies` |
 | `transparent` | Backend + SQLite; `orchard,transparent-inputs,test-dependencies,unstable` |

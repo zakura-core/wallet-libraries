@@ -11,6 +11,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$repo_root/manifests/sources.toml"
+python3 "$repo_root/scripts/check-receiver-dependencies.py"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target/verify-zakura-graph}"
 

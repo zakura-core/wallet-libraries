@@ -24,6 +24,10 @@ members = [
     "zakura/pir-receiver",
     "zakura/near-intents",
     "zakura/one-time-ivk-scenarios",
+    "zakura/receiver-directory",
+    "zakura/receiver-pir",
+    "zakura/receiver-pir-server",
+    "zakura/pir-admission",
 ]
 
 resolver = "2"
