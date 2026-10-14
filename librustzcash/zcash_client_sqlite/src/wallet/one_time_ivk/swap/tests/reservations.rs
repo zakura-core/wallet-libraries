@@ -414,6 +414,25 @@ fn lost_requests_are_reused_only_once_a_seen_set_shows_them_unseen() {
     }
 }
 
+/// A started reservation stays reserved while its conclusive status is stale, and its key
+/// keeps scanning when keys close, so a fresh status can still find it scanned empty and
+/// reclaim it. A key closed while reserved would hold its address forever.
+#[test]
+fn a_reserved_key_stays_open_until_a_fresh_status_reclaims_it() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let r = prepare(&mut st, NOW);
+    quote(&mut st, &r, "refunded", true);
+    report(&mut st, "refunded", NO_RECEIPT, false, NOW + 61);
+    let height = tip(&st).height;
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(close_at(db, account, EXPIRED, height), 0);
+    assert!(reserved(&st, &r));
+    assert!(active_from(&st, r.key_id()).is_some());
+    report(&mut st, "refunded", NO_RECEIPT, false, EXPIRED);
+    assert!(!reserved(&st, &r));
+}
+
 /// A started reservation needs a fresh conclusive status: a funded swap's is a refund,
 /// and an older status arriving late does not replace a newer one, though its deposit
 /// evidence sticks, so a later fresh unfunded status cannot reclaim the address.
