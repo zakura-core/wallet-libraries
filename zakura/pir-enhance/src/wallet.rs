@@ -148,6 +148,30 @@ impl PreparedWork {
         batches
     }
 
+    /// The requests of one `(txid, row)` batch of [`Self::batches_by_tx_and_row`], in the same
+    /// order; empty when the batch is not part of this work. `row` is the global row
+    /// (`position / RECORDS_PER_ROW`), as in [`RowQueryResult::row`].
+    ///
+    /// Use it to report the batch with `EnhancePirWrite::record_ironwood_enhance_unreadable`
+    /// when its row reply fails to decode, under the same rules as
+    /// [`Self::batches_by_tx_and_row`].
+    pub fn requests_in_row(
+        &self,
+        txid: zcash_primitives::transaction::TxId,
+        row: u64,
+    ) -> Vec<EnhancePirRequest> {
+        let records = crate::RECORDS_PER_ROW as u64;
+        let Some(start) = row.checked_mul(records) else {
+            return Vec::new();
+        };
+        self.requests
+            .range(start..start.saturating_add(records))
+            .flat_map(|(_, requests)| requests)
+            .filter(|request| request.request_id().txid() == txid)
+            .copied()
+            .collect()
+    }
+
     pub fn positions(&self) -> impl Iterator<Item = u64> + '_ {
         self.requests.keys().copied()
     }
@@ -221,6 +245,36 @@ mod tests {
         assert_eq!(batches[&(txid, 1)], [b]);
         assert_eq!(batches[&(other, 1)], [c]);
         assert_eq!(prepared.positions().collect::<Vec<_>>(), [32, 33, 34]);
+    }
+
+    #[test]
+    fn requests_in_row_match_their_batch() {
+        let txid = TxId::from_bytes([1; 32]);
+        let other = TxId::from_bytes([2; 32]);
+        let request = |position, txid, index| {
+            EnhancePirRequest::new(
+                Position::from(position),
+                IronwoodEnhanceRequestId::new(txid, index),
+            )
+        };
+        // Position 40 carries two identities of `txid`; 65 is the last slot of row 1.
+        let a = request(33, txid, 0);
+        let b = request(40, txid, 1);
+        let c = request(40, txid, 2);
+        let d = request(65, txid, 3);
+        let e = request(34, other, 0);
+        let f = request(66, txid, 4);
+        let prepared = PreparedWork::new([f, d, c, e, b, a, b].map(EnhancePirWork::Query));
+        let batches = prepared.batches_by_tx_and_row();
+        for (&(txid, row), batch) in &batches {
+            assert_eq!(&prepared.requests_in_row(txid, row), batch);
+        }
+        assert_eq!(prepared.requests_in_row(txid, 1), [a, c, b, d]);
+        assert_eq!(prepared.requests_in_row(other, 1), [e]);
+        assert_eq!(prepared.requests_in_row(txid, 2), [f]);
+        assert!(prepared.requests_in_row(other, 2).is_empty());
+        assert!(prepared.requests_in_row(txid, 0).is_empty());
+        assert!(prepared.requests_in_row(txid, u64::MAX).is_empty());
     }
 
     #[test]

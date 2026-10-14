@@ -13,6 +13,12 @@
   record bytes fail to decode with
   `EnhancePirWrite::record_ironwood_enhance_unreadable`, and never reporting
   request failures.
+- `PreparedWork::requests_in_row(txid, row)` returns the requests of one
+  `batches_by_tx_and_row` batch, so a caller holding only the transaction and
+  row of an undecodable reply can report it.
+- The rejection cap counts per `EnhancePirSession` (in `zakura-client-sqlite`),
+  in memory. Callers keep one session per wallet for the app's lifetime; a new
+  session, such as after an app restart, restores the full allowance.
 
 ### Changed
 

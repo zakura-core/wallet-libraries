@@ -118,12 +118,8 @@ class PublishingTests(unittest.TestCase):
         members = {release.tomllib.loads((release.ROOT / directory / "Cargo.toml").read_text())["package"]["name"]
                    for directory in workspace["members"]}
         self.assertEqual({p["name"] for p in packages}, members)
-        # Until 0.1.0-rc.4 is on crates.io, wallet-pir's eight crates are git
-        # prerequisites; the repin to crates.io makes this empty again.
-        self.assertEqual(upstream, sorted((name, "0.1.0-rc.4") for name in (
-            "transparent-events", "transparent-filter", "transparent-native", "transparent-shard",
-            "transparent-shard-server", "transparent-txid-client", "transparent-wallet",
-            "transparent-wallet-store")))
+        # wallet-pir's crates come from crates.io, so no git prerequisite remains.
+        self.assertEqual(upstream, [])
         selected, upstream = release.release_packages(release.ROOT, without_transparent=True)
         self.assertEqual(len(selected), len(packages) - 1)
         self.assertEqual(upstream, [])

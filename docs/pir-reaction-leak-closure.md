@@ -98,9 +98,10 @@ one, and compare.
 
 ### A. One receipt schedule for every content outcome
 
-Receipt lookups now back off by outcome
-(`zcash_client_sqlite/src/wallet/transparent_ledger/details/schedule.rs:193`),
-and the jitter is a hash of the txid and attempt count (`schedule.rs:173`).
+Receipt lookups back off by outcome
+(`zcash_client_sqlite/src/wallet/transparent_ledger/details/schedule.rs:207`).
+Before this change, content outcomes had schedules of their own and the jitter
+was a hash of the txid and attempt count.
 
 - Content outcomes (`Absent`, `Protocol` from a reply that failed to decode,
   and `Contradiction`) use one schedule: one hour, doubling to a day, plus up
