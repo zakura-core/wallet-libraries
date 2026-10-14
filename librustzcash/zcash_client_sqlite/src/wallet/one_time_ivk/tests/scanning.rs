@@ -228,7 +228,7 @@ fn one_time_ivk_rejects_mismatched_note_metadata() {
     let value = orchard::value::NoteValue::from_raw(50_000);
     let note = Note::from_parts(key.receiver(), value, rho, seed, NoteVersion::V3).unwrap();
     let nf = note.nullifier(key.full_viewing_key());
-    let validate = |pool, key_id, scope, nf| {
+    let validate = |note: Note, pool, key_id, scope, nf| {
         let (ephemeral, position) = (EphemeralKeyBytes([0; 32]), Position::from(0));
         let note = (note, orchard::ValuePool::Ironwood);
         let output = WalletOutput::from_parts(
@@ -245,17 +245,22 @@ fn one_time_ivk_rejects_mismatched_note_metadata() {
         validate_received_key(st.wallet().conn(), st.network(), pool, &output)
     };
     let (ironwood, external) = (ShieldedPool::Ironwood, Scope::External);
-    let valid = validate(ironwood, key.key_id(), external, nf);
+    let valid = validate(note, ironwood, key.key_id(), external, nf);
     assert!(valid.unwrap().is_some());
     let wrong_nf = orchard::note::Nullifier::from_bytes(&[1; 32]).unwrap();
     let unregistered = KeyId::new(Purpose::Receive, 5);
-    for (pool, key_id, scope, nf) in [
-        (ShieldedPool::Orchard, key.key_id(), external, nf),
-        (ironwood, key.key_id(), Scope::Internal, nf),
-        (ironwood, key.key_id(), external, wrong_nf),
-        (ironwood, unregistered, external, nf),
+    // Another of the key's diversified addresses is not its registered receiver.
+    let other = key.full_viewing_key().address_at(1u32, external);
+    let other = Note::from_parts(other, value, rho, seed, NoteVersion::V3).unwrap();
+    let other_nf = other.nullifier(key.full_viewing_key());
+    for (note, pool, key_id, scope, nf) in [
+        (note, ShieldedPool::Orchard, key.key_id(), external, nf),
+        (note, ironwood, key.key_id(), Scope::Internal, nf),
+        (note, ironwood, key.key_id(), external, wrong_nf),
+        (note, ironwood, unregistered, external, nf),
+        (other, ironwood, key.key_id(), external, other_nf),
     ] {
-        assert!(validate(pool, key_id, scope, nf).is_err());
+        assert!(validate(note, pool, key_id, scope, nf).is_err());
     }
     // Validation alone is not evidence committed to the wallet.
     assert!(!key_state(st.wallet().db(), key.key_id()).1);
