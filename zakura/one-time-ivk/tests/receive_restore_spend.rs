@@ -17,7 +17,8 @@ use zakura_one_time_ivk::{KeyId, Purpose, swap::RefundMemo};
 #[test]
 fn receive_restore_and_spend_both_purposes_with_ordinary_change() {
     let mut rng = rng();
-    let pk = ProvingKey::build(OrchardCircuitVersion::PostNu6_3);
+    let pk = ProvingKey::build(OrchardCircuitVersion::PostNu6_3)
+        .expect("the current Ironwood circuit supports proving");
     let vk = VerifyingKey::build(OrchardCircuitVersion::PostNu6_3);
     let public_ovk = OutgoingViewingKey::from([0; 32]);
     // Public deterministic fixture, never a live wallet seed.
