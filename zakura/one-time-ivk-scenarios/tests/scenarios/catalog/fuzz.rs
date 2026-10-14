@@ -72,7 +72,87 @@ const NAMES: [&str; 4] = ["A", "A2", "B1", "B2"];
 
 pub fn all() -> Vec<Scenario> {
     let (start, end) = seeds();
-    (start..end).map(scenario).collect()
+    let mut scenarios = findings();
+    scenarios.extend((start..end).map(scenario));
+    scenarios
+}
+
+/// Minimal reproductions of what the randomized worlds found.
+fn findings() -> Vec<Scenario> {
+    vec![refund_after_a_later_birthday()]
+}
+
+/// A funds a ZEC-to-X swap, then its device is lost. The seed is restored on B with a
+/// birthday a few blocks after the funding, as a user who enters the day they restore
+/// would. NEAR refunds the deposit after B's birthday. Control: an incoming payout to a
+/// key quoted before the birthday and paid after it.
+fn refund_after_a_later_birthday() -> Scenario {
+    Scenario {
+        id: "Z-finding-refund-funded-before-restore-birthday".into(),
+        group: FUZZ,
+        title: "A refund paid after the restore's birthday to a key funded before it".into(),
+        summary: "A restore recovers refund keys only from funding memos it scans, and it scans \
+            from its birthday. When the birthday falls after the funding but before NEAR's \
+            refund, the refund is a note after the birthday that the restored wallet should \
+            track. Checks whether it is found, and whether Check swap history finds it."
+            .into(),
+        params: vec![("birthday".into(), "5 blocks after the funding".into())],
+        slow: false,
+        run: Box::new(|ctx| {
+            ctx.mine(20);
+            let birthday = ctx.chain.tip() + 1;
+            ctx.mine(5);
+            let a = ctx.device("A", SEED, birthday);
+            let fvk = ctx.get(a).fvk.clone();
+            ctx.pay("A's Ironwood funds", "A's address", &fvk, 3 * ZEC, Payer::Wallet);
+            ctx.mine(10);
+            ctx.sync(a);
+            let swap = ctx.quote_refund(a, HOUR).expect("a refund key");
+            let incoming = ctx.quote_incoming(a, HOUR).expect("an incoming quote");
+            let (funded_at, _) = ctx.fund_refund(a, &swap, ZEC);
+            ctx.mine(5);
+            ctx.sync(a);
+            ctx.observe_refund(a, &swap, "PROCESSING", None);
+            ctx.log("A", "the device is lost");
+            ctx.mine(4);
+            let b = ctx.device("B", SEED, funded_at + 5);
+            ctx.sync(b);
+            ctx.sync(b);
+            ctx.wait(30 * MINUTE);
+            let refund = ctx.pay("refund", &swap.label(), &swap.fvk, ZEC - 10_000, Payer::Near);
+            let payout = ctx.pay("payout", &incoming.label(), &incoming.fvk, ZEC / 2, Payer::Near);
+            ctx.mine(1);
+            ctx.sync(b);
+            ctx.wait(DAY);
+            ctx.sync(b);
+            ctx.sync(b);
+            let found = ctx.get(b).found(refund.id()).is_some();
+            ctx.check_swap_history(b);
+            let after = ctx.get(b).found(refund.id()).is_some();
+            let keys: Vec<String> = ctx.get(b).keys().iter().map(|k| k.label()).collect();
+            ctx.check(
+                format!("B holds the refund to {} after Check swap history", swap.label()),
+                after,
+                format!("found before the recheck: {found}; B's keys {keys:?}"),
+            );
+            ctx.expect(
+                b,
+                "refund",
+                &swap.label(),
+                &refund,
+                Class::FoundAutomatically,
+                "The refund is a note after B's birthday. A restore recovers refund keys from funding memos; no documented rule leaves a note after the birthday unfound.",
+            );
+            ctx.expect(
+                b,
+                "payout",
+                &incoming.label(),
+                &payout,
+                Class::FoundAutomatically,
+                "A restore sweeps the incoming lookahead through the receiver directory.",
+            );
+        }),
+    }
 }
 
 /// The seeds `ONE_TIME_IVK_FUZZ_SEEDS` names, as `start..end` or one seed.
@@ -194,6 +274,9 @@ enum Step {
         slot: usize,
         down: bool,
         fault: Option<u16>,
+        /// The restore's birthday, as a percentage of the way from A's birthday to the
+        /// tip, for a user who enters a later date; `None` restores from A's birthday.
+        late_birthday: Option<u32>,
     },
     Quote(usize),
     Fund(usize),
@@ -219,6 +302,8 @@ enum Step {
         tail: u32,
     },
     Recheck(usize),
+    /// The app restarts and reopens its wallet database.
+    Restart(usize),
 }
 
 /// A generated world.
@@ -364,7 +449,19 @@ impl Plan {
             } else {
                 (false, None)
             };
-            s.at(at, Step::Restore { slot, down, fault });
+            let late_birthday = r.chance(15).then(|| r.range(10, 95) as u32);
+            s.at(at, Step::Restore {
+                slot,
+                down,
+                fault,
+                late_birthday,
+            });
+            if let Some(pct) = late_birthday {
+                notes.push(format!(
+                    "{} restores with a birthday {pct}% of the way from A's to the tip",
+                    NAMES[slot]
+                ));
+            }
             if down {
                 let len = r.range(10 * MINUTE, 6 * HOUR);
                 s.at(at + len, Step::Directory { slot, up: true });
@@ -436,6 +533,17 @@ impl Plan {
                 }
             }
         }
+        // A reorg aimed just past a payout's tenth confirmation, after the paid wallet
+        // synced, so it can un-mine a receipt whose key just closed.
+        let aimed = (reorg && !payouts.is_empty() && r.chance(60)).then(|| {
+            let i = r.range(0, payouts.len() as i64) as usize;
+            let (at, outs, _) = &payouts[i];
+            let paid = swaps[outs[0].0].slot;
+            let k = r.range(11, 19);
+            let depth = (k + r.range(-2, 4)).max(2) as u32;
+            s.at(at + 11 * BLOCK_SECS + 30, Step::Sync(paid));
+            (at + k * BLOCK_SECS, depth)
+        });
         let mut last = horizon;
         for (at, outs, _) in payouts {
             last = last.max(at);
@@ -471,11 +579,24 @@ impl Plan {
             notes.push(format!("A's directory down at +{} for {}", span_of(at), span_of(len)));
         }
         if reorg {
-            let at = r.range(horizon * 15 / 100, horizon * 85 / 100).max(HOUR);
-            let depth = r.pick(&[2u32, 4, 7, 9, 10, 11, 12, 14, 18, 25]);
+            let (at, depth) = aimed.unwrap_or_else(|| {
+                (
+                    r.range(horizon * 15 / 100, horizon * 85 / 100).max(HOUR),
+                    r.pick(&[2u32, 4, 7, 9, 10, 11, 12, 14, 18, 25]),
+                )
+            });
             let tail = r.range(0, 6) as u32;
             s.at(at, Step::Reorg { depth, tail });
-            notes.push(format!("{depth}-block reorg at +{}", span_of(at)));
+            notes.push(format!(
+                "{depth}-block reorg at +{}{}",
+                span_of(at),
+                if aimed.is_some() { ", aimed past a payout's tenth confirmation" } else { "" }
+            ));
+        }
+        if r.chance(10) {
+            let at = r.range(HOUR, horizon);
+            s.at(at, Step::Restart(A));
+            notes.push(format!("A's app restarts at +{}", span_of(at)));
         }
         if r.chance(10) {
             let at = r.range(horizon / 2, horizon);
@@ -867,6 +988,8 @@ struct MKey {
     seen: bool,
     advances: bool,
     used: bool,
+    /// A sweep found a payment before the account's birthday, which it does not track.
+    paid_before_birthday: bool,
     ops: Vec<Op>,
 }
 
@@ -950,6 +1073,11 @@ impl Model {
         self.devs[slot].as_mut().expect("the device exists")
     }
 
+    /// The birthday height of the wallet in `slot`.
+    fn dev_birthday(&self, slot: usize) -> u32 {
+        self.devs[slot].as_ref().expect("the device exists").birthday
+    }
+
     /// Whether NEAR's seen set read until `until` holds `key`.
     fn seen_at(&self, key: KeyRef, until: i64) -> bool {
         self.given
@@ -988,6 +1116,7 @@ impl Model {
             seen: false,
             advances: false,
             used: false,
+            paid_before_birthday: false,
             ops: Vec::new(),
         });
         if entry.id == id {
@@ -1051,7 +1180,7 @@ impl Model {
         let memos: Vec<(KeyRef, u32)> = self
             .fundings
             .iter()
-            .filter(|f| f.alive && f.height <= scanned)
+            .filter(|f| f.alive && f.height <= scanned && f.height >= self.dev_birthday(slot))
             .map(|f| (f.key, f.height))
             .collect();
         for (key, height) in memos {
@@ -1346,8 +1475,17 @@ impl Model {
             s.attempts = (s.attempts + 1).min(30);
             s.next_at = now + delay;
             let name = self.dev(slot).name.clone();
+            let birthday = self.dev_birthday(slot);
             for pay in paid {
                 let height = u32::from(self.pays[pay].mined.height);
+                if height < birthday {
+                    // Marked paid, never credited (`apply_payment`).
+                    let k = self.dev(slot).keys.get_mut(&key).expect("a key");
+                    k.paid_before_birthday = true;
+                    k.used = true;
+                    k.advances = true;
+                    continue;
+                }
                 self.credit(
                     slot,
                     pay,
@@ -1381,6 +1519,7 @@ impl Model {
             .iter()
             .filter(|(key, k)| {
                 k.closed
+                    && !k.paid_before_birthday
                     && !self.receipts(slot, **key).iter().any(|(_, known)| matches!(known, Known::Mined(_)))
                     && k.sweep.as_ref().is_none_or(|s| s.done.is_some_and(|d| d < end))
             })
@@ -1662,12 +1801,17 @@ impl<'p> Exec<'p> {
 
     /// Creates the wallet in `slot`.
     fn create(&mut self, ctx: &mut Ctx, slot: usize, skew: i64) {
-        let dev = ctx.device_with_skew(NAMES[slot], SEED, self.birthday, skew);
+        self.create_at(ctx, slot, skew, self.birthday);
+    }
+
+    /// Creates the wallet in `slot` with its birthday at `birthday`.
+    fn create_at(&mut self, ctx: &mut Ctx, slot: usize, skew: i64, birthday: BlockHeight) {
+        let dev = ctx.device_with_skew(NAMES[slot], SEED, birthday, skew);
         self.slots[slot] = Some(dev);
         self.m.devs[slot] = Some(MDev {
             name: NAMES[slot].into(),
             skew,
-            birthday: u32::from(self.birthday),
+            birthday: u32::from(birthday),
             scanned: None,
             keys: BTreeMap::new(),
             next_id: 0,
@@ -1701,8 +1845,17 @@ impl<'p> Exec<'p> {
                     self.sync(ctx, slot);
                 }
             }
-            Step::Restore { slot, down, fault } => {
-                self.create(ctx, slot, 0);
+            Step::Restore {
+                slot,
+                down,
+                fault,
+                late_birthday,
+            } => {
+                let birthday = late_birthday.map(|pct| {
+                    let (from, tip) = (u32::from(self.birthday), u32::from(ctx.chain.tip()));
+                    BlockHeight::from(from + (tip - from) * pct / 100)
+                });
+                self.create_at(ctx, slot, 0, birthday.unwrap_or(self.birthday));
                 let dev = self.slots[slot].expect("just created");
                 if down {
                     ctx.dev(dev).reach.directory = false;
@@ -1747,6 +1900,11 @@ impl<'p> Exec<'p> {
             Step::Recheck(slot) => {
                 if self.slots[slot].is_some() {
                     self.recheck(ctx, slot);
+                }
+            }
+            Step::Restart(slot) => {
+                if let Some(dev) = self.slots[slot] {
+                    ctx.restart(dev);
                 }
             }
         }
@@ -2148,8 +2306,13 @@ impl<'p> Exec<'p> {
                     );
                 }
             }
-            ctx.check_balance(dev, u64::try_from(balance.max(0)).expect("non-negative"));
-            if found_all {
+            // A later birthday hides the funds and spends below it, so the balance it
+            // should hold is not this sum; its classes are still judged.
+            let late = self.m.dev_birthday(slot) != u32::from(self.birthday);
+            if !late {
+                ctx.check_balance(dev, u64::try_from(balance.max(0)).expect("non-negative"));
+            }
+            if found_all && !late {
                 all_found.push(slot);
             }
         }
@@ -2181,7 +2344,25 @@ impl<'p> Exec<'p> {
             return (class, why);
         }
         let p = &self.m.pays[pay];
+        if u32::from(p.mined.height) < dev.birthday {
+            return (
+                Class::MissedDocumented,
+                format!(
+                    "it predates {}'s birthday {}; like any note before the birthday it is not tracked",
+                    dev.name, dev.birthday
+                ),
+            );
+        }
         match dev.keys.get(&p.key) {
+            None if p.key.refund => (
+                Class::FoundAutomatically,
+                format!(
+                    "{} never recovered {} (its funding predates the birthday {}), but this refund came after the birthday, and no documented rule leaves a note after the birthday unfound",
+                    dev.name,
+                    p.key.label(),
+                    dev.birthday
+                ),
+            ),
             None if !p.key.refund => (
                 Class::MissedDocumented,
                 format!(
