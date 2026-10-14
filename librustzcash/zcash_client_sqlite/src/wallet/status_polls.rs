@@ -16,8 +16,8 @@
 //! - A rewound transaction awaiting reconfirmation is polled from a new window, opened in the
 //!   session at the tip the wallet first reads its work at, whether or not local evidence
 //!   already settles it.
-//! - Other status work without a target height keeps the eligibility rules of public work until
-//!   its first recorded poll, which opens a window at that poll's tip in the session.
+//! - Other status work without a target height opens a window at its first work read,
+//!   even for settled work, so replies cannot steer queries after reopening.
 //! - The tip of the last recorded poll is kept in the session.
 //!
 //! Reopening the wallet starts a fresh session. That is the application's doing, not a reply's,
@@ -34,6 +34,9 @@ use zcash_protocol::consensus::BlockHeight;
 
 use super::TxQueryType;
 use crate::error::SqliteClientError;
+use zcash_client_backend::data_api::{
+    status::TransactionStatusMode, transparent_ledger::TransparentLedgerMode,
+};
 
 /// The number of consecutive chain tips at which a queued transaction is polled.
 pub(crate) const WINDOW: u32 = 10;
@@ -55,7 +58,7 @@ struct Polls {
     opened: BTreeMap<TxId, Opened>,
 }
 
-/// A window opened at a first recorded poll.
+/// A window opened at a first work read (or a poll recorded before that read).
 #[derive(Clone, Copy)]
 struct Opened {
     start: BlockHeight,
@@ -189,13 +192,14 @@ pub(crate) fn due(
                 opened.reconfirm = o.reconfirm;
             }
         }
-        if o.reconfirm && !polls.opened.contains_key(&o.txid) {
-            // A rewind re-arms polling: tips polled before it say nothing about the new window.
+        if o.durable_start().is_none() && !polls.opened.contains_key(&o.txid) {
+            // A fresh unanchored window opens even for settled work. Earlier replies
+            // cannot decide whether a restarted wallet asks about the transaction.
             polls.opened.insert(
                 o.txid,
                 Opened {
                     start: tip,
-                    reconfirm: true,
+                    reconfirm: o.reconfirm,
                 },
             );
             polls.polled.remove(&o.txid);
@@ -235,7 +239,18 @@ pub(crate) fn due(
 pub(crate) fn rearm_reconfirmation(
     conn: &Connection,
     session: &StatusPollSession,
+    mode: Option<TransactionStatusMode>,
+    configured: Option<TransparentLedgerMode>,
 ) -> Result<(), SqliteClientError> {
+    if uses_private_mode(conn, mode, configured)? {
+        // Every queued private transaction receives the same rewind schedule, regardless
+        // of whether the service previously said it mined. Keep this scheduling marker
+        // after private answers so reopening cannot choose a reply-dependent anchor.
+        conn.execute(
+            "UPDATE tx_retrieval_queue SET reconfirm_mined = 1 WHERE query_type = :status_type",
+            named_params![":status_type": TxQueryType::Status.code()],
+        )?;
+    }
     let txids = conn
         .prepare_cached("SELECT txid FROM tx_retrieval_queue WHERE query_type = :status_type AND reconfirm_mined = 1")?
         .query_map(named_params![":status_type": TxQueryType::Status.code()], |row| {
@@ -248,4 +263,17 @@ pub(crate) fn rearm_reconfirmation(
         polls.polled.remove(&txid);
     }
     Ok(())
+}
+
+/// Private status mode and either transparent policy require reply-independent polls.
+/// Unconfigured status writes keep the prior public behavior unless durable policy is private.
+pub(crate) fn uses_private_mode(
+    conn: &Connection,
+    mode: Option<TransactionStatusMode>,
+    configured: Option<TransparentLedgerMode>,
+) -> Result<bool, SqliteClientError> {
+    let durable = super::transparent_ledger::durable_policy(conn)?;
+    Ok(mode == Some(TransactionStatusMode::Private)
+        || configured == Some(TransparentLedgerMode::PrivateRequired)
+        || durable.is_some_and(|policy| policy.mode == TransparentLedgerMode::PrivateRequired))
 }

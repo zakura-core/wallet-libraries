@@ -3635,7 +3635,12 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             &self.gap_limits,
             max_height,
         )?;
-        wallet::status_polls::rearm_reconfirmation(self.conn.0, &self.status_poll_session)?;
+        wallet::status_polls::rearm_reconfirmation(
+            self.conn.0,
+            &self.status_poll_session,
+            self.status_mode,
+            self.transparent_ledger_mode,
+        )?;
         #[cfg(feature = "orchard")]
         wallet::enhance_pir::retain_live_failures(self.conn.0, &self.enhance_pir_session)?;
         Ok(height)
@@ -3646,7 +3651,12 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         chain_state: ChainState,
     ) -> Result<(), <Self as WalletRead>::Error> {
         wallet::truncate_to_chain_state(self, chain_state)?;
-        wallet::status_polls::rearm_reconfirmation(self.conn.0, &self.status_poll_session)?;
+        wallet::status_polls::rearm_reconfirmation(
+            self.conn.0,
+            &self.status_poll_session,
+            self.status_mode,
+            self.transparent_ledger_mode,
+        )?;
         #[cfg(feature = "orchard")]
         wallet::enhance_pir::retain_live_failures(self.conn.0, &self.enhance_pir_session)?;
         Ok(())
@@ -3665,8 +3675,13 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             &chain_state,
             reset_account_birthdays,
         )?;
-        wallet::status_polls::rearm_reconfirmation(self.conn.0, &self.status_poll_session)
-            .map_err(RewindError::DataSource)?;
+        wallet::status_polls::rearm_reconfirmation(
+            self.conn.0,
+            &self.status_poll_session,
+            self.status_mode,
+            self.transparent_ledger_mode,
+        )
+        .map_err(RewindError::DataSource)?;
         #[cfg(feature = "orchard")]
         wallet::enhance_pir::retain_live_failures(self.conn.0, &self.enhance_pir_session)
             .map_err(RewindError::DataSource)?;

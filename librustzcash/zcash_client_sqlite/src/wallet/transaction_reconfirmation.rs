@@ -91,12 +91,22 @@ pub(super) fn reset_validation_after_rewind(
 }
 
 /// A completed observation supersedes pending historical evidence, without touching payload
-/// work. Errors are not observations and must never call this transition.
-pub(super) fn complete_observation(conn: &Connection, txid: TxId) -> Result<(), SqliteClientError> {
+/// work. Private observations retain the rewind's scheduling marker so reopening cannot
+/// reconstruct a different window according to the reply. It grants no inclusion authority.
+/// Errors are not observations and must never call this transition.
+pub(super) fn complete_observation(
+    conn: &Connection,
+    txid: TxId,
+    retain_private_window: bool,
+) -> Result<(), SqliteClientError> {
     conn.execute(
         "UPDATE tx_retrieval_queue SET reconfirm_mined = 0
-         WHERE txid = :txid AND query_type = :status_type",
-        named_params![":txid": txid.as_ref(), ":status_type": TxQueryType::Status.code()],
+         WHERE txid = :txid AND query_type = :status_type AND NOT :retain_private_window",
+        named_params![
+            ":txid": txid.as_ref(),
+            ":status_type": TxQueryType::Status.code(),
+            ":retain_private_window": retain_private_window,
+        ],
     )?;
     conn.execute(
         "DELETE FROM tx_reconfirmation_receipts
@@ -136,7 +146,7 @@ pub(crate) fn reconcile_scanned_blocks<P: consensus::Parameters>(
         for (txid, previous_hash, tx_index, already_mined) in receipts {
             if already_mined {
                 // A newer payload or shielded scan already established inclusion. Never overwrite it.
-                complete_observation(conn, txid)?;
+                complete_observation(conn, txid, false)?;
             } else if previous_hash.as_slice() == hash.0 {
                 super::record_mined_transaction(
                     conn,
@@ -150,7 +160,7 @@ pub(crate) fn reconcile_scanned_blocks<P: consensus::Parameters>(
                     "UPDATE transactions SET tx_index = :index WHERE txid = :txid",
                     named_params![":index": tx_index, ":txid": txid.as_ref()],
                 )?;
-                complete_observation(conn, txid)?;
+                complete_observation(conn, txid, false)?;
             } else {
                 conn.execute(
                     "UPDATE tx_reconfirmation_receipts SET replacement_observed = 1

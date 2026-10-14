@@ -3824,15 +3824,10 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
 ) -> Result<(), SqliteClientError> {
     let chain_tip = chain_tip_height(conn)?.ok_or(SqliteClientError::ChainHeightUnknown)?;
 
-    use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
     // A conclusive negative answer retires public work, but cannot remove a private
     // scheduling obligation: it is still needed for cover polls and after reopening.
-    let retain_private_schedule = status_mode == Some(TransactionStatusMode::Private)
-        || configured == Some(TransparentLedgerMode::PrivateRequired)
-        || transparent_ledger::durable_policy(conn)?
-            .is_some_and(|policy| policy.mode == TransparentLedgerMode::PrivateRequired);
-
-    transaction_reconfirmation::complete_observation(conn, txid)?;
+    let retain_private_schedule = status_polls::uses_private_mode(conn, status_mode, configured)?;
+    transaction_reconfirmation::complete_observation(conn, txid, retain_private_schedule)?;
 
     match status {
         TransactionStatus::TxidNotRecognized | TransactionStatus::NotInMainChain => {
@@ -5470,7 +5465,7 @@ pub(crate) fn queue_tx_retrieval(
 /// following a chain rewind.
 ///
 /// Its private poll window follows from the transaction's target height, or opens at its first
-/// recorded poll (see [`status_polls`]).
+/// work read (see [`status_polls`]).
 pub(crate) fn queue_tx_status(
     conn: &rusqlite::Transaction<'_>,
     txid: TxId,
@@ -5497,11 +5492,12 @@ pub(crate) fn queue_tx_status(
 /// compact-block scanning cannot observe, because the wallet has neither a shielded spend nor a
 /// shielded output in it: those mined above `above`, which a truncation is about to un-mine, or,
 /// without a height, those already unmined. Such a transaction was mined before, so its
-/// obligation is exempt from expiry dormancy until one status observation completes (see
-/// `tx_retrieval_queue.reconfirm_mined`).
+/// public obligation is exempt from expiry dormancy until one status observation completes.
+/// Private replies retain `tx_retrieval_queue.reconfirm_mined` as a scheduling marker so
+/// reopening cannot change the window according to the answer.
 ///
-/// Each of them gets a fresh private poll window at its next recorded poll, so a rewind re-arms
-/// polling (see [`status_polls`]).
+/// The wallet's rewind methods also rearm every queued private transaction independently of
+/// these mined-state predicates (see [`status_polls::rearm_reconfirmation`]).
 pub(crate) fn queue_status_for_unobservable_transactions(
     conn: &rusqlite::Transaction<'_>,
     above: Option<BlockHeight>,
@@ -5535,8 +5531,8 @@ pub(crate) fn queue_status_for_unobservable_transactions(
 ///
 /// Public work lists every eligible obligation. Private work follows each transaction's poll
 /// window instead (see [`status_polls`]): it lists every poll due at the current tip, mined or
-/// not, and marks it settled when public work would not list it. Status work without a window
-/// is listed as public work would list it, until its first recorded poll opens one.
+/// not, and marks it settled when public work would not list it. Unanchored work opens a
+/// window at its first work read even when already settled, including after reopening.
 ///
 /// Payload retrieval is returned only by [`public_enhancement_work`] or, with Orchard support,
 /// `enhance_pir::transaction_enhancement_work`.

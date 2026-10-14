@@ -19,11 +19,12 @@ workspace.
   whatever earlier replies said, and is marked `settled` when the wallet already
   holds a conclusive status. After its window and expiry poll, a transaction
   without a conclusive status leaves automatic work but stays pending. Status
-  work without a target height opens its window at its first recorded poll, and
+  work without a target height opens its window at its first work read, and
   a rewind that queues reconfirmation opens a fresh one when the wallet next
   reads the work. A conclusive negative reply keeps its private scheduling
   obligation, including after expiry and reopening. Each committed rewind resets
-  reconfirmation polling even without an intervening work read; rolled-back writes
+  private polling for every queued transaction, regardless of earlier replies.
+  Reopening unanchored or rewound work also polls settled transactions; rolled-back writes
   leave session polling unchanged. Public status work is unchanged.
 - The tips already polled, and windows that no column fixes, are kept in memory
   in a new `StatusPollSession`, with no new table or migration. Share it across

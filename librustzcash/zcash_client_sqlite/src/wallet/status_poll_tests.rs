@@ -595,35 +595,74 @@ fn a_rewind_after_the_original_window_polls_every_private_outcome_alike() {
 
 #[test]
 fn a_restart_after_reconfirmation_polls_every_private_outcome_alike() {
-    for service in [
-        Service::Honest { mined: 2 },
-        Service::Unreadable,
-        Service::NotFound,
-    ] {
-        let (mut st, prior) = fixture();
-        let txid = TxId::from_bytes([20; 32]);
-        queue(&st, txid, 0);
-        st.wallet_mut().update_chain_tip(prior + 1).unwrap();
-        serve(&mut st, prior, prior + 1, Service::Forging { at: 1 });
-        st.wallet_mut().db_mut().truncate_to_height(prior).unwrap();
-        for offset in 0..=15 {
-            let tip = prior + offset;
-            st.wallet_mut().update_chain_tip(tip).unwrap();
-            serve(&mut st, prior, tip, service);
+    for short_expiry in [false, true] {
+        for service in [
+            Service::Honest { mined: 2 },
+            Service::Unreadable,
+            Service::NotFound,
+        ] {
+            let (mut st, prior) = fixture();
+            let txid = TxId::from_bytes([20; 32]);
+            queue(
+                &st,
+                txid,
+                if short_expiry {
+                    u32::from(prior) + 5
+                } else {
+                    0
+                },
+            );
+            st.wallet_mut().update_chain_tip(prior + 1).unwrap();
+            serve(&mut st, prior, prior + 1, Service::Forging { at: 1 });
+            st.wallet_mut().db_mut().truncate_to_height(prior).unwrap();
+            for offset in 0..=15 {
+                let tip = prior + offset;
+                st.wallet_mut().update_chain_tip(tip).unwrap();
+                serve(&mut st, prior, tip, service);
+            }
+            let mut reopened = reopen(&st);
+            let mut seen = vec![];
+            for offset in 0..2 * WINDOW {
+                let tip = prior + 15 + offset;
+                reopened.update_chain_tip(tip).unwrap();
+                if !serve_db(&mut reopened, prior, tip, service).is_empty() {
+                    seen.push(offset);
+                }
+            }
+            assert_eq!(
+                seen,
+                (0..WINDOW).collect::<Vec<_>>(),
+                "after reconfirmation restart: {service:?}"
+            );
         }
-        let mut reopened = reopen(&st);
-        let mut seen = vec![];
-        for offset in 0..2 * WINDOW {
-            let tip = prior + 15 + offset;
-            reopened.update_chain_tip(tip).unwrap();
-            if !serve_db(&mut reopened, prior, tip, service).is_empty() {
-                seen.push(offset);
+    }
+}
+
+#[test]
+fn a_private_transparent_policy_preserves_polls_with_a_public_status_handle() {
+    use zcash_client_backend::data_api::transparent_ledger::{
+        TransparentLedgerMode, TransparentLedgerWrite,
+    };
+    for durable_private in [false, true] {
+        let (mut st, h) = fixture();
+        let db = st.wallet_mut().db_mut();
+        db.set_status_mode(TransactionStatusMode::Public);
+        if durable_private {
+            db.apply_transparent_policy(TransparentLedgerMode::PrivateRequired)
+                .unwrap();
+        } else {
+            db.set_transparent_ledger_mode(TransparentLedgerMode::PrivateRequired);
+        }
+        let txid = TxId::from_bytes([21; 32]);
+        queue(&st, txid, u32::from(h) + 1);
+        for offset in 0..WINDOW {
+            let tip = h + offset;
+            st.wallet_mut().update_chain_tip(tip).unwrap();
+            assert_eq!(serve(&mut st, h, tip, Service::NotFound), vec![txid]);
+            if offset >= 1 {
+                assert!(queued(&st, txid));
             }
         }
-        assert_eq!(
-            seen,
-            (0..WINDOW).collect::<Vec<_>>(),
-            "after reconfirmation restart: {service:?}"
-        );
+        assert!(private_work(&st, txid).is_empty());
     }
 }

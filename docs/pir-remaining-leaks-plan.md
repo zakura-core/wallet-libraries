@@ -120,10 +120,12 @@ has, and the rest lives in the open wallet's session memory:
 - The expiry poll is the expiry height when it is nonzero and past the
   window.
 - Status work without a target height (a transaction this wallet did not
-  build) opens a window in session memory at its first recorded poll.
+  build) opens a window in session memory at its first work read, even when settled.
 - A rewind that queues reconfirmation (`reconfirm_mined`) opens a fresh window
   in session memory when the wallet next reads the work, so a rewind re-arms
-  polling. Each committed rewind clears the previous session window and polled
+  polling for every queued private transaction, whether or not a reply said it mined.
+  Private replies retain that scheduling marker after the answer is applied, so
+  reopening rebuilds the same kind of window. Each committed rewind clears the previous session window and polled
   tip, including a second rewind before any read observes reconfirmation complete.
   Rolled-back wallet transactions leave the live session unchanged.
 - The tip of the last recorded poll is kept in session memory
