@@ -120,10 +120,10 @@ use zakura_wallet_lib::{client_backend, orchard};
 
 ```toml
 # Vizor: complete Zakura capability set, the default
-zakura-wallet-lib = "0.1.0-rc7"
+zakura-wallet-lib = "0.1.0-rc8"
 
 # Gemini: equivalent upstream LRZ capability set
-zakura-wallet-lib = { version = "0.1.0-rc7", default-features = false, features = ["lrz"] }
+zakura-wallet-lib = { version = "0.1.0-rc8", default-features = false, features = ["lrz"] }
 ```
 
 The two features are mutually exclusive. Cargo features are additive and there
@@ -146,8 +146,8 @@ all — it declares the packages it wants directly, as below.
 The dependency keys keep their upstream names, so wallet source needs no changes:
 
 ```toml
-zcash_client_backend = { version = "0.1.0-rc8", package = "zakura-client-backend" }
-zcash_client_sqlite = { version = "0.1.0-rc8", package = "zakura-client-sqlite" }
+zcash_client_backend = { version = "0.1.0-rc9", package = "zakura-client-backend" }
+zcash_client_sqlite = { version = "0.1.0-rc9", package = "zakura-client-sqlite" }
 pczt = { version = "0.1.0-rc5", package = "zakura-pczt" }
 ```
 

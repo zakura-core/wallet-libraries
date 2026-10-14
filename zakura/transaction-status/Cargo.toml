@@ -1,6 +1,6 @@
 [package]
 name = "zakura-transaction-status"
-version = "0.0.1-rc1"
+version = "0.0.1-rc2"
 description = "Policy-bound transaction status observation for Zakura wallets"
 edition.workspace = true
 rust-version.workspace = true

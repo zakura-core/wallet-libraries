@@ -112,6 +112,37 @@ proving-key caches and the cargo test runner.
 
 ## Publishing the release candidates
 
+### Next release candidates
+
+The next publication uploads the following versions. `PLANNED` changelog dates
+remain pending until registry publication is confirmed.
+
+| Crate | Next version |
+| --- | --- |
+| `zakura-one-time-ivk` | `0.0.1-rc0` |
+| `zakura-near-intents` | `0.0.1-rc0` |
+| `zakura-client-backend` | `0.1.0-rc9` |
+| `zakura-client-sqlite` | `0.1.0-rc9` |
+| `zakura-pir-enhance` | `0.0.1-rc3` |
+| `zakura-transaction-status` | `0.0.1-rc2` |
+| `zakura-wallet-lib` | `0.1.0-rc8` |
+| `zakura-pir-transparent` | `0.0.1-rc1` |
+
+The unchanged `zakura-pir-enhance-types 0.0.1-rc1`, `zakura-pir-native 0.0.1-rc1`,
+`zakura-pczt 0.1.0-rc5` and `zakura-pir-status 0.0.1-rc1` are already published;
+the workflow verifies them and skips their uploads. `zakura-pir-receiver` and
+`zakura-one-time-ivk-scenarios` remain unpublished (`publish = false`). This train
+uses Common 2.0.0; the Common 3.0.0 upgrade is a separate change.
+
+After merging the release preparation, wait for the main commit's **Verify wallet
+libraries** run to succeed, then dispatch **Publish crates** from `main` in
+**verify** mode. After the package and authentication checks succeed, dispatch
+**publish** for the same commit and approve the environment when prompted.
+A Git tag alone does not start publication; this workflow is manual and reads
+each crate's version from its manifest. If tagging the release, tag the verified
+main commit. Do not include intervening source changes under versions that have
+already been uploaded.
+
 ### GitHub Actions
 
 Use **Publish crates** from `main` in `zakura-core/wallet-libraries`. The workflow
@@ -142,9 +173,9 @@ must configure this Trusted Publisher on crates.io:
 Use `python3 scripts/publish-crates.py --plan` to list the twelve names and versions.
 Check every crate's publisher settings, including names already reserved by a
 placeholder release. Trusted Publishing needs existing crate names.
-`zakura-one-time-ivk` and `zakura-near-intents` have no crates.io release yet, so
-reserve both names and configure their Trusted Publisher before the first run that
-includes them. No permanent API token or new Infisical secret is required.
+`zakura-one-time-ivk` and `zakura-near-intents` have placeholder `0.0.0`
+reservations. Their owners must configure the same Trusted Publisher before the
+first run that includes their release candidates. No permanent API token or new Infisical secret is required.
 
 Choose **publish** for an actual release. It repeats verification for the dispatch
 commit, requires environment approval, then acquires its temporary credential.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc1] - PLANNED
+
 ### Added
 
 - `FailedEntries`, `RecoveryBatch::failed_entries` and `PassReport::failed_entries`:
@@ -20,6 +22,8 @@
   the current sync. Callers use `Step::Done(Some(Retry::After(delay)))`.
 
 ### Changed
+
+- Update the wallet backend and SQLite dependencies to `0.1.0-rc9`.
 
 - `PassPlan::next` ends the sync after every counted pass, including publication
   lag and capacity refusals, with `Step::Done` and its retry. A grown address
@@ -67,7 +71,7 @@
   failure its own outcome): it comes from the caller racing a mode change, not
   from a private reply.
 
-## [0.0.1-rc0] - PLANNED
+## [0.0.1-rc0] - 2026-10-13
 
 Initial release candidate for transparent PIR discovery, recovery and receipt
 lookups. See the [README](README.md) and

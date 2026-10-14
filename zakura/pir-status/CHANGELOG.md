@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.0.1-rc1] - PLANNED
+## [0.0.1-rc1] - 2026-10-13
 
 ### Packaging
 

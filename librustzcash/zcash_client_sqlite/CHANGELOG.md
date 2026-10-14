@@ -10,6 +10,8 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc9] - PLANNED
+
 ### Added
 
 - One-time IVKs (with `orchard`): per-swap Ironwood refund and incoming addresses derived
@@ -93,7 +95,7 @@ workspace.
   Request failures do not consume the allowance. Late results recheck their complete
   request identity so a reused position never inherits another transaction's failure.
 
-## [0.1.0-rc8] - PLANNED
+## [0.1.0-rc8] - 2026-10-13
 
 ### Packaging
 

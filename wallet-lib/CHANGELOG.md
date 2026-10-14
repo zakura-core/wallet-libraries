@@ -7,7 +7,14 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
-## [0.1.0-rc7] - PLANNED
+## [0.1.0-rc8] - PLANNED
+
+### Changed
+
+- Update the Zakura backend and SQLite dependencies to `0.1.0-rc9`, including
+  one-time incoming keys and the private recovery and receipt retry changes.
+
+## [0.1.0-rc7] - 2026-10-13
 
 ### Packaging
 

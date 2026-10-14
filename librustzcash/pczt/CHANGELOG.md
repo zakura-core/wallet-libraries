@@ -10,7 +10,7 @@ workspace.
 
 ## [Unreleased]
 
-## [0.1.0-rc5] - PLANNED
+## [0.1.0-rc5] - 2026-10-13
 
 ### Fixed
 

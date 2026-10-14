@@ -7880,7 +7880,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-backend"
-version = "0.1.0-rc8"
+version = "0.1.0-rc9"
 dependencies = [
  "ambassador",
  "arti-client",
@@ -7958,7 +7958,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-sqlite"
-version = "0.1.0-rc8"
+version = "0.1.0-rc9"
 dependencies = [
  "ambassador",
  "assert_matches",
@@ -8270,7 +8270,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-enhance"
-version = "0.0.1-rc2"
+version = "0.0.1-rc3"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -8346,7 +8346,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-transparent"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -8526,7 +8526,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-transaction-status"
-version = "0.0.1-rc1"
+version = "0.0.1-rc2"
 dependencies = [
  "tokio",
  "tonic",
@@ -8564,7 +8564,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-wallet-lib"
-version = "0.1.0-rc7"
+version = "0.1.0-rc8"
 dependencies = [
  "orchard",
  "pczt",

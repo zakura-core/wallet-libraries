@@ -1,6 +1,6 @@
 [package]
 name = "zakura-pir-transparent"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 description = "Bounded reference transparent PIR recovery into candidate wallet evidence"
 edition.workspace = true
 rust-version.workspace = true
@@ -22,7 +22,7 @@ testing = ["wallet", "dep:transparent-shard", "dep:transparent-shard-server", "d
 
 [dependencies]
 zcash_client_backend = { workspace = true, optional = true, features = ["transparent-inputs"] }
-zcash_client_sqlite = { version = "0.1.0-rc8", path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", optional = true, features = ["transparent-inputs"] }
+zcash_client_sqlite = { version = "0.1.0-rc9", path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", optional = true, features = ["transparent-inputs"] }
 zcash_primitives = { workspace = true, optional = true }
 zcash_protocol = { workspace = true, optional = true }
 transparent = { workspace = true, optional = true }
@@ -53,7 +53,7 @@ rustix = { version = "1", optional = true, default-features = false, features = 
 [dev-dependencies]
 tempfile = "3"
 serde_json.workspace = true
-zcash_client_sqlite = { version = "0.1.0-rc8", path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "transparent-inputs", "test-dependencies", "unstable"] }
+zcash_client_sqlite = { version = "0.1.0-rc9", path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "transparent-inputs", "test-dependencies", "unstable"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 zcash_keys = { workspace = true, features = ["transparent-inputs"] }
 # The end-to-end tests read the service's init and manifests, and run discovery,

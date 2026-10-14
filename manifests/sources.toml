@@ -70,12 +70,12 @@ version = "0.1.0-rc5"
 [[crate]]
 path = "zcash_client_backend"
 package = "zakura-client-backend"
-version = "0.1.0-rc8"
+version = "0.1.0-rc9"
 
 [[crate]]
 path = "zcash_client_sqlite"
 package = "zakura-client-sqlite"
-version = "0.1.0-rc8"
+version = "0.1.0-rc9"
 
 # Workspace dependencies redirected onto the Common v2.0.0 release.
 # The upstream dependency key is kept, so crate sources continue to say

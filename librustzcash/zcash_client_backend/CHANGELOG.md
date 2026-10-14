@@ -10,6 +10,8 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc9] - PLANNED
+
 ### Added
 
 - One-time IVKs (with `orchard`): Ironwood receiving keys that keep an account's spending
@@ -71,14 +73,12 @@ workspace.
 - `EnhancePirWrite` has the new required method
   `record_ironwood_enhance_unreadable`: implementors must provide it.
 
-### Changed
-
 - `enhance_pir::storage::PendingIronwoodMemo` carries the incoming key that detected the
   note, `ivk`, in place of `scope`. Storage resolves it, so a note a one-time key found
   binds its transaction's metadata with that key. `PendingIronwoodMetadata::Incoming`
   boxes it.
 
-## [0.1.0-rc8] - PLANNED
+## [0.1.0-rc8] - 2026-10-13
 
 Breaking release for explicit transparent disclosure policy, private recovery,
 and account-scoped history and receipts. See the

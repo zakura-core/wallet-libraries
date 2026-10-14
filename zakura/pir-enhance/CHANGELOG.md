@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc3] - PLANNED
+
 ### Added
 
 - `PreparedWork::waiting` counts positions not yet due
@@ -22,11 +24,9 @@
 
 ### Changed
 
-- Depend on ipir-sp `0.1.0-rc.7` (with `reinspiring 0.1.3-rc.1` and
-  `inspiring 0.1.0-rc.3`), the release the published transparent PIR crates
-  use. ipir-sp keeps every setup ID, wire layout and certificate unchanged.
+- Update the wallet backend and SQLite dependencies to `0.1.0-rc9`.
 
-## [0.0.1-rc2] - PLANNED
+## [0.0.1-rc2] - 2026-10-13
 
 ### Packaging
 
@@ -38,6 +38,10 @@
   `request_len_bits` from `zakura-pir-native`.
 
 ### Changed
+
+- Depend on ipir-sp `0.1.0-rc.7` (with `reinspiring 0.1.3-rc.1` and
+  `inspiring 0.1.0-rc.3`), the release the published transparent PIR crates
+  use. ipir-sp keeps every setup ID, wire layout and certificate unchanged.
 
 - Updated the shared enhancement record and native PIR dependencies to
   `0.0.1-rc1`, and the wallet backend and SQLite dependencies to `0.1.0-rc8`.
