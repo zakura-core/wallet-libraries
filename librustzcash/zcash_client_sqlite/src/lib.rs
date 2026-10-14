@@ -828,7 +828,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
                 params: &self.params,
                 clock: &self.clock,
                 rng: &mut self.rng,
-                status_poll_session: self.status_poll_session.clone(),
+                status_poll_session: self.status_poll_session.transaction(),
                 #[cfg(feature = "orchard")]
                 enhance_pir_session: self.enhance_pir_session.transaction(),
                 #[cfg(feature = "orchard")]
@@ -869,12 +869,13 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         let tx = self.conn.borrow_mut().transaction()?;
         #[cfg(feature = "orchard")]
         let session = self.enhance_pir_session.transaction();
+        let status_session = self.status_poll_session.transaction();
         let mut wdb = WalletDb {
             conn: SqlTransaction(&tx),
             params: &self.params,
             clock: &self.clock,
             rng: &mut self.rng,
-            status_poll_session: self.status_poll_session.clone(),
+            status_poll_session: status_session.clone(),
             #[cfg(feature = "orchard")]
             enhance_pir_session: session.clone(),
             #[cfg(feature = "orchard")]
@@ -889,6 +890,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         };
         let result = f(&mut wdb)?;
         tx.commit()?;
+        status_session.commit_into(&self.status_poll_session);
         #[cfg(feature = "orchard")]
         session.commit();
         Ok(result)
@@ -940,12 +942,13 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         let tx = self.conn.borrow_mut().transaction()?;
         #[cfg(feature = "orchard")]
         let session = self.enhance_pir_session.transaction();
+        let status_session = self.status_poll_session.transaction();
         let mut wdb = WalletDb {
             conn: SqlTransaction(&tx),
             params: &self.params,
             clock: &self.clock,
             rng: &mut self.rng,
-            status_poll_session: self.status_poll_session.clone(),
+            status_poll_session: status_session.clone(),
             #[cfg(feature = "orchard")]
             enhance_pir_session: session.clone(),
             #[cfg(feature = "orchard")]
@@ -962,6 +965,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         let ext = ExtensionTransaction { conn: &tx };
         let result = f(&mut wdb, &ext)?;
         tx.commit()?;
+        status_session.commit_into(&self.status_poll_session);
         #[cfg(feature = "orchard")]
         session.commit();
         Ok(result)
@@ -3631,6 +3635,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             &self.gap_limits,
             max_height,
         )?;
+        wallet::status_polls::rearm_reconfirmation(self.conn.0, &self.status_poll_session)?;
         #[cfg(feature = "orchard")]
         wallet::enhance_pir::retain_live_failures(self.conn.0, &self.enhance_pir_session)?;
         Ok(height)
@@ -3641,6 +3646,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         chain_state: ChainState,
     ) -> Result<(), <Self as WalletRead>::Error> {
         wallet::truncate_to_chain_state(self, chain_state)?;
+        wallet::status_polls::rearm_reconfirmation(self.conn.0, &self.status_poll_session)?;
         #[cfg(feature = "orchard")]
         wallet::enhance_pir::retain_live_failures(self.conn.0, &self.enhance_pir_session)?;
         Ok(())
@@ -3659,6 +3665,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             &chain_state,
             reset_account_birthdays,
         )?;
+        wallet::status_polls::rearm_reconfirmation(self.conn.0, &self.status_poll_session)
+            .map_err(RewindError::DataSource)?;
         #[cfg(feature = "orchard")]
         wallet::enhance_pir::retain_live_failures(self.conn.0, &self.enhance_pir_session)
             .map_err(RewindError::DataSource)?;
@@ -3715,6 +3723,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             &self.params,
             #[cfg(feature = "transparent-inputs")]
             &self.gap_limits,
+            self.status_mode,
+            self.transparent_ledger_mode,
             txid,
             status,
         )
@@ -4013,6 +4023,8 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             &self.params,
             #[cfg(feature = "transparent-inputs")]
             &self.gap_limits,
+            self.status_mode,
+            self.transparent_ledger_mode,
             txid,
             status,
         )

@@ -81,6 +81,8 @@ fn observed(conn: &mut Connection, txid: TxId, status: TransactionStatus) {
         &Network::TestNetwork,
         #[cfg(feature = "transparent-inputs")]
         &GapLimits::default(),
+        Some(TransactionStatusMode::Public),
+        Some(TransparentLedgerMode::Public),
         txid,
         status,
     )

@@ -123,7 +123,9 @@ has, and the rest lives in the open wallet's session memory:
   build) opens a window in session memory at its first recorded poll.
 - A rewind that queues reconfirmation (`reconfirm_mined`) opens a fresh window
   in session memory when the wallet next reads the work, so a rewind re-arms
-  polling.
+  polling. Each committed rewind clears the previous session window and polled
+  tip, including a second rewind before any read observes reconfirmation complete.
+  Rolled-back wallet transactions leave the live session unchanged.
 - The tip of the last recorded poll is kept in session memory
   (`StatusPollSession`, shared across a wallet's handles the way
   `EnhancePirSession` is).
@@ -149,6 +151,9 @@ Library changes:
 - A new `TransactionStatusWrite::record_private_status_poll(txid, tip)`
   records that a reply came back. The caller calls it for every private reply,
   readable or not. A request outcome records nothing.
+- A conclusive negative reply keeps the private status queue entry. It no longer
+  represents unresolved status work, but still anchors the remaining cover polls
+  and an equivalent expiry poll after reopening. Public queue retirement is unchanged.
 - `set_transaction_status` keeps the first conclusive answer inside the
   window. `Mined(h)` for a transaction that status already recorded as mined
   is ignored rather than overwriting its height.

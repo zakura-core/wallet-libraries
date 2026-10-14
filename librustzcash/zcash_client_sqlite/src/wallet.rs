@@ -3817,10 +3817,20 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
     conn: &rusqlite::Transaction,
     _params: &P,
     #[cfg(feature = "transparent-inputs")] gap_limits: &GapLimits,
+    status_mode: Option<TransactionStatusMode>,
+    configured: Option<zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode>,
     txid: TxId,
     status: TransactionStatus,
 ) -> Result<(), SqliteClientError> {
     let chain_tip = chain_tip_height(conn)?.ok_or(SqliteClientError::ChainHeightUnknown)?;
+
+    use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
+    // A conclusive negative answer retires public work, but cannot remove a private
+    // scheduling obligation: it is still needed for cover polls and after reopening.
+    let retain_private_schedule = status_mode == Some(TransactionStatusMode::Private)
+        || configured == Some(TransparentLedgerMode::PrivateRequired)
+        || transparent_ledger::durable_policy(conn)?
+            .is_some_and(|policy| policy.mode == TransparentLedgerMode::PrivateRequired);
 
     transaction_reconfirmation::complete_observation(conn, txid)?;
 
@@ -3837,34 +3847,36 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
                 ],
             )?;
 
-            conn.execute(
-                "DELETE FROM tx_retrieval_queue
-                 WHERE txid = :txid
-                 AND query_type = :status_type
-                 AND NOT EXISTS (
-                    SELECT 1
-                    FROM transactions t
-                    WHERE t.txid = :txid
-                    AND t.mined_height IS NULL
-                    AND (
-                        t.expiry_height = 0
-                        OR (
-                            t.expiry_height > 0
-                            AND t.confirmed_unmined_at_height < t.expiry_height
+            if !retain_private_schedule {
+                conn.execute(
+                    "DELETE FROM tx_retrieval_queue
+                     WHERE txid = :txid
+                     AND query_type = :status_type
+                     AND NOT EXISTS (
+                        SELECT 1
+                        FROM transactions t
+                        WHERE t.txid = :txid
+                        AND t.mined_height IS NULL
+                        AND (
+                            t.expiry_height = 0
+                            OR (
+                                t.expiry_height > 0
+                                AND t.confirmed_unmined_at_height < t.expiry_height
+                            )
+                            OR (
+                                t.expiry_height IS NULL
+                                AND t.confirmed_unmined_at_height
+                                    < COALESCE(t.target_height, t.min_observed_height) + :certainty_depth
+                            )
                         )
-                        OR (
-                            t.expiry_height IS NULL
-                            AND t.confirmed_unmined_at_height
-                                < COALESCE(t.target_height, t.min_observed_height) + :certainty_depth
-                        )
-                    )
-                 )",
-                named_params![
-                    ":txid": txid.as_ref(),
-                    ":status_type": TxQueryType::Status.code(),
-                    ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA,
-                ],
-            )?;
+                     )",
+                    named_params![
+                        ":txid": txid.as_ref(),
+                        ":status_type": TxQueryType::Status.code(),
+                        ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA,
+                    ],
+                )?;
+            }
         }
         TransactionStatus::Mined(height) => {
             // The first mined answer stands: a different height for a transaction already

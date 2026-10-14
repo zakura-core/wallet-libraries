@@ -21,7 +21,10 @@ workspace.
   without a conclusive status leaves automatic work but stays pending. Status
   work without a target height opens its window at its first recorded poll, and
   a rewind that queues reconfirmation opens a fresh one when the wallet next
-  reads the work. Public status work is unchanged.
+  reads the work. A conclusive negative reply keeps its private scheduling
+  obligation, including after expiry and reopening. Each committed rewind resets
+  reconfirmation polling even without an intervening work read; rolled-back writes
+  leave session polling unchanged. Public status work is unchanged.
 - The tips already polled, and windows that no column fixes, are kept in memory
   in a new `StatusPollSession`, with no new table or migration. Share it across
   serialized handles of one wallet with `WalletDb::with_status_poll_session`, as

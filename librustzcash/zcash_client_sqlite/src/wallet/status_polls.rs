@@ -47,7 +47,7 @@ pub(crate) const WINDOW: u32 = 10;
 #[derive(Clone, Default)]
 pub struct StatusPollSession(Arc<Mutex<Polls>>);
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Polls {
     /// The tip of the last private reply recorded, per txid.
     polled: BTreeMap<TxId, BlockHeight>,
@@ -102,6 +102,16 @@ fn obligation(row: &rusqlite::Row<'_>) -> Result<Obligation, rusqlite::Error> {
 }
 
 impl StatusPollSession {
+    /// Copies the session for one SQL transaction. Serialized wallet handles publish
+    /// the copy only after SQL commits; a rollback leaves the open session unchanged.
+    pub(crate) fn transaction(&self) -> Self {
+        Self(Arc::new(Mutex::new(self.lock().clone())))
+    }
+
+    pub(crate) fn commit_into(&self, session: &Self) {
+        *session.lock() = self.lock().clone();
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Polls> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -217,4 +227,25 @@ pub(crate) fn due(
         }
     }
     Ok((due, windowed))
+}
+
+/// A rewind starts fresh polling for every queued reconfirmation, even if no intervening
+/// read observed the previous obligation complete. Called on the transaction's session
+/// copy so a failed rewind cannot reset the open wallet's polls.
+pub(crate) fn rearm_reconfirmation(
+    conn: &Connection,
+    session: &StatusPollSession,
+) -> Result<(), SqliteClientError> {
+    let txids = conn
+        .prepare_cached("SELECT txid FROM tx_retrieval_queue WHERE query_type = :status_type AND reconfirm_mined = 1")?
+        .query_map(named_params![":status_type": TxQueryType::Status.code()], |row| {
+            Ok(TxId::from_bytes(row.get(0)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut polls = session.lock();
+    for txid in txids {
+        polls.opened.remove(&txid);
+        polls.polled.remove(&txid);
+    }
+    Ok(())
 }

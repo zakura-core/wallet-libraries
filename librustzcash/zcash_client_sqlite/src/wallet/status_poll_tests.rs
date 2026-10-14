@@ -294,7 +294,14 @@ fn the_expiry_poll_is_sent_mined_or_not_and_settles_an_expired_transaction() {
         }
     }
     assert_eq!(seen, (0..WINDOW).chain([EXPIRY_DELTA]).collect::<Vec<_>>());
-    assert!(!queued(&st, never), "settled as expired by the expiry poll");
+    assert!(
+        queued(&st, never),
+        "the private schedule survives expiry settlement"
+    );
+    assert!(
+        private_work(&st, never).is_empty(),
+        "settled work stays dormant after the expiry poll"
+    );
     let expired_at: Option<u32> = st
         .wallet()
         .conn()
@@ -486,4 +493,30 @@ fn a_second_rewind_before_a_work_read_opens_a_full_new_private_window() {
         }
     }
     assert_eq!(seen, (0..WINDOW).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_rolled_back_rewind_keeps_the_previous_private_poll_window() {
+    let (mut st, prior) = fixture();
+    let (mined_at, _) = st.generate_empty_block();
+    st.scan_cached_blocks(mined_at, 1);
+    let txid = TxId::from_bytes([17; 32]);
+    queue(&st, txid, 0);
+    serve(&mut st, mined_at, mined_at, Service::Forging { at: 0 });
+    st.wallet_mut().db_mut().truncate_to_height(prior).unwrap();
+    serve(&mut st, prior, prior, Service::Unreadable);
+    assert!(private_work(&st, txid).is_empty());
+
+    let result = st.wallet_mut().db_mut().transactionally(|db| {
+        db.truncate_to_height(prior)?;
+        assert_eq!(db.transaction_status_work()?.len(), 1);
+        Err::<(), _>(crate::error::SqliteClientError::AccountUnknown)
+    });
+    assert!(result.is_err());
+    assert!(
+        private_work(&st, txid).is_empty(),
+        "rollback keeps the recorded poll"
+    );
+    st.wallet_mut().update_chain_tip(prior + 1).unwrap();
+    assert_eq!(private_work(&st, txid).len(), 1);
 }
