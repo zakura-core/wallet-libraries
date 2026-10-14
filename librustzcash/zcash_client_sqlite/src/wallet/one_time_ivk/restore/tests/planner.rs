@@ -412,9 +412,19 @@ fn a_lagging_recent_sweep_watches_its_keys() {
 /// again only on request.
 #[test]
 fn restored_keys_are_watched_then_closed_and_reissued_without_rescan() {
-    for (purpose, index) in [(Purpose::Receive, 0), (Purpose::Refund, 0)] {
+    // The lookup block's time after registration: none, or a day for a late sweep.
+    for (purpose, index, swept_after) in [
+        (Purpose::Receive, 0, None),
+        (Purpose::Refund, 0, None),
+        (Purpose::Refund, 0, Some(24 * 60 * 60)),
+    ] {
         let key = KeyId::new(purpose, index);
         let (mut st, account, anchor) = setup();
+        if let Some(after) = swept_after {
+            let sql = "UPDATE blocks SET time = ?2 WHERE height = ?1";
+            let (height, time) = (u32::from(anchor.height), clock_now() + after);
+            exec(st.wallet().conn(), sql, params![height, time]);
+        }
         let db = st.wallet_mut().db_mut();
         restore(db, account, key, anchor.height);
         finish_sweep(db, account, key, anchor);
