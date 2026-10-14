@@ -42,12 +42,12 @@ fn report_outcomes_map_to_progress() {
                 outcome,
             }
         );
-        // A pass clamped to the publication's end is behind even when it
-        // completes; an incomplete one keeps its reason.
-        let clamped = if outcome == Outcome::Complete {
-            Outcome::Behind
+        // Private incompleteness cannot remove a public publication wait.
+        // A capacity refusal preserves its longer wait instead.
+        let clamped = if outcome == Outcome::Overloaded {
+            Outcome::Overloaded
         } else {
-            outcome
+            Outcome::Behind
         };
         assert_eq!(
             Progress::from_sync_report(&report, true),

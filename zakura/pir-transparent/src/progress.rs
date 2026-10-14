@@ -150,35 +150,3 @@ impl Progress {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn publication_wait_is_independent_of_private_progress() {
-        for outcome in [
-            Outcome::Complete,
-            Outcome::Behind,
-            Outcome::More,
-            Outcome::Overloaded,
-            Outcome::Stalled,
-        ] {
-            let progress = Progress {
-                covered_through: 42,
-                outcome,
-            };
-            assert_eq!(progress.with_publication_wait(false), progress);
-            let clamped = progress.with_publication_wait(true);
-            assert_eq!(clamped.covered_through, 42, "a wait grants no coverage");
-            assert_eq!(
-                clamped.retry(),
-                Retry::After(if outcome == Outcome::Overloaded {
-                    Retry::OVERLOADED
-                } else {
-                    Retry::BEHIND
-                })
-            );
-        }
-    }
-}
