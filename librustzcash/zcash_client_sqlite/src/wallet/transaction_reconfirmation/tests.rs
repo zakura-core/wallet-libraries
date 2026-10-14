@@ -332,7 +332,7 @@ fn capture_and_reconciliation_failure_roll_back_receipts_metadata_and_flags() {
                 &Network::TestNetwork,
                 #[cfg(feature = "transparent-inputs")]
                 &GapLimits::default(),
-                &[(BlockHeight::from_u32(100), BlockHash([7; 32]))]
+                &[(BlockHeight::from_u32(100), BlockHash([7; 32]))],
                 false,
             )
             .is_err()
