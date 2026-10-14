@@ -37,8 +37,7 @@ workspace.
 
 ### Changed
 
-- Private status work follows a schedule fixed when it is queued instead of the
-  replies: `TransactionStatusRead::transaction_status_work` returns a private
+- Private status work follows a fixed schedule instead of the replies: `TransactionStatusRead::transaction_status_work` returns a private
   transaction at each scheduled tip, mined or not, until its poll is recorded.
 - `EnhancePirWork` has the new `Waiting` variant: exhaustive matches must
   handle it.
