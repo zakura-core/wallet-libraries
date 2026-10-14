@@ -1,6 +1,6 @@
 //! The one-time IVK scenario suite. Runs every scenario in the catalog against a
-//! simulated chain, NEAR and receiver directory, then writes `report.json`, `report.md`
-//! and `report.html`. See the crate README for options.
+//! simulated chain, NEAR and receiver directory, then writes `report.json` and
+//! `report.md`. See the crate README for options.
 
 mod catalog;
 mod harness;
@@ -17,9 +17,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use zakura_one_time_ivk_scenarios::{
-    Meta, Outcome, Report, ScenarioResult, render_html, render_html_page, render_markdown,
-};
+use zakura_one_time_ivk_scenarios::{Meta, Outcome, Report, ScenarioResult, render_markdown};
 
 use catalog::Scenario;
 use harness::Ctx;
@@ -123,12 +121,6 @@ fn main() {
     let json = serde_json::to_string_pretty(&report).expect("the report serializes");
     std::fs::write(args.report.join("report.json"), json).expect("report.json");
     std::fs::write(args.report.join("report.md"), render_markdown(&report)).expect("report.md");
-    std::fs::write(args.report.join("report.html"), render_html(&report)).expect("report.html");
-    std::fs::write(
-        args.report.join("report.page.html"),
-        render_html_page(&report),
-    )
-    .expect("report.page.html");
     let totals = report.totals();
     println!(
         "\n{} passed, {} failed, {} errors in {:.1} s",
@@ -137,7 +129,7 @@ fn main() {
         totals.errors,
         report.meta.duration_ms as f64 / 1000.0
     );
-    println!("report: {}", args.report.join("report.html").display());
+    println!("report: {}", args.report.join("report.md").display());
     if totals.failed + totals.errors > 0 {
         std::process::exit(1);
     }

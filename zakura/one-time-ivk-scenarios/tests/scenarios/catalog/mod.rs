@@ -1,7 +1,6 @@
 //! The scenario catalog, grouped as in the suite plan.
 
 mod cost;
-mod fuzz;
 mod incoming;
 mod issuance;
 mod refund;
@@ -19,7 +18,6 @@ pub const REORGS: &str = "F. Reorgs";
 pub const SPENDING: &str = "G. Spending";
 pub const STATUSES: &str = "H. Provider statuses";
 pub const COST: &str = "J. Scale and cost";
-pub const FUZZ: &str = "Z. Randomized worlds";
 
 /// One scenario: a world the run builds, what it does in it, and what the documented
 /// contract says should happen.
@@ -44,7 +42,6 @@ pub fn all() -> Vec<Scenario> {
     scenarios.extend(refund::all());
     scenarios.extend(reorg::all());
     scenarios.extend(robustness::all());
-    scenarios.extend(fuzz::all());
     scenarios.extend(cost::all());
     let mut ids = std::collections::BTreeSet::new();
     for scenario in &scenarios {

@@ -1,17 +1,15 @@
 //! The report of the one-time IVK scenario suite.
 //!
 //! The scenarios themselves are this crate's `scenarios` test target (see the README).
-//! Each run writes a [`Report`] as JSON and renders it as Markdown and HTML, so a
-//! reader can see every simulated case, what happened in it, and whether that matched
-//! the documented behavior of one-time IVKs.
+//! Each run writes a [`Report`] as JSON and renders it as Markdown, so a reader can see
+//! every simulated case, what happened in it, and whether that matched the documented
+//! behavior of one-time IVKs.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-mod html;
 mod markdown;
 
-pub use html::{render_html, render_html_page};
 pub use markdown::render_markdown;
 
 use serde::{Deserialize, Serialize};
