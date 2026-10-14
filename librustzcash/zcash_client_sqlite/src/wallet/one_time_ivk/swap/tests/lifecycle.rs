@@ -139,10 +139,15 @@ fn equal_time_observations_never_lower_the_expected_receipt() {
 }
 
 /// A refund key whose deposit this wallet did not fund starts once the provider reports
-/// a refund owed, unless a newer status, answered first, reports none.
+/// a refund owed or an inconclusive end, unless a newer status, answered first, reports
+/// none.
 #[test]
 fn a_refund_owed_starts_an_unfunded_refund_key() {
-    for settled_first in [false, true] {
+    for (owed, settled_first) in [
+        (Terminal(Positive(None)), false),
+        (Terminal(Positive(None)), true),
+        (Terminal(Unknown), false),
+    ] {
         let mut st = scanned_wallet();
         let account = st.test_account().unwrap().id();
         let from = next_height(&st);
@@ -161,9 +166,9 @@ fn a_refund_owed_starts_an_unfunded_refund_key() {
         if settled_first {
             assert!(record(db, Terminal(NoReceipt), 300));
         }
-        assert!(record(db, Terminal(Positive(None)), 200));
+        assert!(record(db, owed, 200));
         let expected = if settled_first { vec![] } else { vec![key] };
-        assert_eq!(scanning_keys(&st), expected, "{settled_first}");
+        assert_eq!(scanning_keys(&st), expected, "{owed:?} {settled_first}");
     }
 }
 
