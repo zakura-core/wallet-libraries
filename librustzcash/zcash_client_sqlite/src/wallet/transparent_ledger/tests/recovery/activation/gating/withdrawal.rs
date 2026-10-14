@@ -229,6 +229,9 @@ fn withdrawn_receive_is_not_public_value_and_does_not_block_reactivation() {
         .is_some()
     );
     set_policy(&mut st, PrivateRequired);
+    // A candidate again, the account watches its restore window, which a pass covers
+    // before it activates.
+    cover(&mut st, account, &replacement, vec![]);
     activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(
         snapshot(&st, account).authorized.unwrap().regular.total(),

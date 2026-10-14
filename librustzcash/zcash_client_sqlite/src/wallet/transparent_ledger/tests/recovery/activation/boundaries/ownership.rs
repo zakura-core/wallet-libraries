@@ -16,7 +16,10 @@ fn future_receiver(
         .addresses
         .iter()
         .filter_map(|w| match w.origin {
-            WatchOrigin::Derived { scope, index } if scope == TransparentKeyScope::EXTERNAL => {
+            WatchOrigin::Derived { scope, index }
+            | WatchOrigin::CandidateWindow { scope, index }
+                if scope == TransparentKeyScope::EXTERNAL =>
+            {
                 Some((w.address, index))
             }
             _ => None,

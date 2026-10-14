@@ -25,6 +25,34 @@ workspace.
 
 ### Changed
 
+- Each newly queued Ironwood Enhance position waits a delay drawn uniformly
+  from 0 to 75 seconds (37.5 seconds on average) with the wallet's random source
+  before its first private query, and is listed as `EnhancePirWork::Waiting`
+  until then. The time is kept in the `EnhancePirSession`, with no new table or
+  migration. A rescan in the session keeps it; completing the position or a
+  rewind that removes it forgets it, so a requeue draws a new one. A fresh
+  session schedules queued positions at its first wallet write (`update_chain_tip`
+  among them); a position read before any write instead waits the full 75 seconds
+  from its first read. Later writes preserve that existing deadline. Read-only snapshots retain that deadline;
+  rolled-back writes do not publish tentative deadlines. Batch work reads and
+  scheduling snapshot session state once, rather than cloning it per position.
+  `EnhancePirRead` for `WalletDb` now requires `CL: Clock`.
+- `WalletDb::set_enhance_pir_max_delay` (test dependencies only) bounds that
+  delay; the test database sets it to zero.
+
+- While an account's transparent recovery is a candidate, its watch set holds a
+  fixed restore window: every external index below 50 and internal index below 25,
+  past the gap limits. Ephemeral addresses keep their gap limit. The window is
+  fixed in code and does not follow replies, so a restore whose used addresses
+  and their trailing address gaps lie inside it completes in one pass. Activation makes only the gap-limit
+  window the wallet's own, so an active account's watch set follows the gap limits as before.
+  An account that becomes a candidate again, as after a public policy round trip,
+  watches the restore window again and needs a pass covering it before it
+  activates. No migration.
+- `CommitOutcome::window_grew` reports whether the watched addresses grew. Growth
+  inside the restore window does not count, and an active account's growth past
+  an unused run as long as the gap limit now does.
+
 - Transparent receipt lookups retry every content outcome (`Absent`, `Protocol`
   and `Contradiction`) on one schedule: an hour, doubling to a day, plus up to
   25% jitter. `Contradiction` no longer waits for a changed display map.
@@ -54,6 +82,8 @@ workspace.
 - `EnhancePirSession` can be shared by serialized database handles for one wallet.
   Keep it alive across syncs and temporary connections; transaction handles inherit
   it automatically. Independently opened handles otherwise start a fresh session.
+  The three-failure cap holds per session, so callers keep one session per wallet
+  for the app's lifetime; an app restart starts a new session and a full allowance.
 - Enhancement work reads in caller-owned SQL transactions preserve session counts
   until committed work is read, so a rolled-back removal cannot re-arm a suspension.
 - `WalletDb` implements `EnhancePirWrite::record_ironwood_enhance_unreadable`.
@@ -642,7 +672,6 @@ PIR storage integration release using `zakura-client-backend 0.1.0-rc6`.
   note that the truncation now succeeds, resetting any tree whose scanned
   contents lie entirely above the truncation height to only the roots of
   subtrees completed at or below it.
-
 
 ### Fixed
 - The coinbase branch of the transparent account-balance tally now classifies

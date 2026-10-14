@@ -274,13 +274,15 @@ fn script_of(address: &TransparentAddress) -> Vec<u8> {
 /// Each pass reads the watch set, resumes the pages it lists, and covers every watched address
 /// from its required start through the target. Recovery ends at the first pass that finds no
 /// open page and the same addresses as the pass before. Only that address set is carried
-/// between passes; coverage is never read.
+/// between passes; coverage is read only to model the companion's memory of what it retrieved.
 ///
 /// Delivery varies by address position: one commit, then a replay; spends first, then receives
 /// with coverage; or one commit. In the third position, an address the window added since the
-/// previous pass is instead delivered through a page opened with its receives and left for the
-/// next pass to resume. Only such an address gets a page, because a revision cannot reopen
-/// retrieval over a range it already covered.
+/// previous pass, and that `revision` has never covered, is instead delivered through a page
+/// opened with its receives and left for the next pass to resume. Only such an address gets a
+/// page, because a revision cannot reopen retrieval over a range it already covered. An
+/// address can return to the window covered: a candidate's restore window covers addresses
+/// that activation leaves out until activity grows the window over them again.
 pub(super) fn recover(
     st: &mut State,
     account: AccountUuid,
@@ -334,7 +336,8 @@ pub(super) fn recover(
             let (receives, spends) = source(chain, &BTreeSet::from([*address]), target.height);
             let fresh = previous
                 .as_ref()
-                .is_some_and(|previous| !previous.contains_key(address));
+                .is_some_and(|previous| !previous.contains_key(address))
+                && !covered_under(st, address, revision);
             match index % 3 {
                 0 => {
                     let mut c = base();
@@ -383,6 +386,24 @@ pub(super) fn recover(
 
 /// Every derived external and internal address of the test account within reach of the
 /// fixture chains below.
+/// Whether `revision` covers any range of `address` in the wallet.
+fn covered_under(st: &State, address: &TransparentAddress, revision: &RecoveryRevision) -> bool {
+    conn(st)
+        .query_row(
+            "SELECT EXISTS (
+                 SELECT 1 FROM tpir_coverage c JOIN tpir_revisions r ON r.id = c.revision_id
+                 WHERE c.script = ?1 AND r.source = ?2 AND r.revision = ?3
+             )",
+            rusqlite::params![
+                Script::from(address.script()).0.0,
+                revision.source,
+                revision.revision
+            ],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 pub(super) fn owned_addresses(st: &State) -> BTreeSet<TransparentAddress> {
     let key = st
         .test_account()
@@ -602,7 +623,8 @@ pub(super) fn recovery_oracle_wallet() -> (
     let r1 = chain.fund(b + 1, &[(e(0), 50_000), (foreign(1), 9_000)]);
     let r2 = chain.fund(b + 2, &[(e(0), 20_000)]);
     chain.coinbase(b + 3, &[(e(1), 625_000)]);
-    // Activity near each window's end extends it, twice for the external scope.
+    // Activity near each gap window's end extends it, twice for the external scope. All of it
+    // lies inside the restore window.
     let r3 = chain.fund(b + 4, &[(e(9), 31_000), (i(3), 7_000)]);
     let r4 = chain.fund(b + 5, &[(e(17), 12_000), (e(17), 13_000)]);
     // An owned output spent in the block that received it.
@@ -682,8 +704,9 @@ fn candidate_recovery_activation_and_active_commits_match_the_oracle() {
 
     // Candidate recovery reaches the oracle's exact view and leaves the wallet untouched.
     let before = production_dump(conn(&st));
-    // Window growth takes several passes.
-    assert!(recover(&mut st, account, &chain, &fixture) >= 3);
+    // The restore window holds every address the chain pays: one pass, and one that confirms
+    // no address was added.
+    assert_eq!(recover(&mut st, account, &chain, &fixture), 2);
     let expected = assert_diagnostics_agree(&st, account, &chain, &owned);
     assert_eq!(production_dump(conn(&st)), before);
     // The chain reached external index 26 and internal index 7, far past the initial windows.
