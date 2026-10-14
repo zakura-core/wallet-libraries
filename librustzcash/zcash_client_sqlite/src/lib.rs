@@ -1921,10 +1921,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
 
     fn record_private_status_poll(
         &mut self,
-        _txid: TxId,
-        _tip: BlockHeight,
+        txid: TxId,
+        tip: BlockHeight,
     ) -> Result<(), Self::Error> {
-        Ok(())
+        wallet::status_polls::record_poll(self.conn.borrow(), txid, tip)
     }
 }
 

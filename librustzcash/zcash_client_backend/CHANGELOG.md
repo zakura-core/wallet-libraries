@@ -12,6 +12,13 @@ workspace.
 
 ### Added
 
+- `PrivateTransactionStatusRequest::settled`, true when the wallet already holds
+  a conclusive status. Send the query and record the poll, but do not apply the
+  answer. `PrivateTransactionStatusRequest::with_settled` sets it.
+- `TransactionStatusWrite::record_private_status_poll(txid, tip)`, which records
+  that a private status reply came back at `tip`, readable or not. Do not call
+  it for a request outcome (HTTP refusal, overload, stale publication, timeout).
+
 - `EnhancePirSuspension::Rejected`, for an Enhance PIR position whose replies
   were rejected or unreadable three times. It is not queried again until a
   rescan queues its transaction again or a fresh wallet session is opened.
@@ -26,6 +33,12 @@ workspace.
   granted.
 
 ### Changed
+
+- Private status work follows a schedule fixed when it is queued instead of the
+  replies: `TransactionStatusRead::transaction_status_work` returns a private
+  transaction at each scheduled tip, mined or not, until its poll is recorded.
+- `TransactionStatusWrite` has the new required method
+  `record_private_status_poll`: implementors must provide it.
 
 - `TransparentDisplayView` has the new `GaveUp` variant: exhaustive matches
   must handle it.

@@ -314,9 +314,10 @@ impl LocalCoverageContext {
 }
 
 /// Validates the whole row before returning the observation for `txid`. The row
-/// is malformed if it holds more records than the manifest, is unsorted or
-/// sparse, holds a record from another bucket or one inconsistent with the
-/// accepted anchor, or matches `txid` below `earliest`.
+/// is [`Error::Unreadable`] if it holds more records than the manifest, is
+/// unsorted or sparse, holds an invalid record, a record from another bucket or
+/// one inconsistent with the accepted anchor, or matches `txid` below
+/// `earliest`.
 pub(crate) fn decode_row(
     manifest: &Manifest,
     txid: &Hash,
@@ -324,14 +325,14 @@ pub(crate) fn decode_row(
     row: &[u8],
 ) -> Result<Observation, Error> {
     if row.len() != ROW_BYTES || row[SLOTS * SLOT_BYTES..].iter().any(|b| *b != 0) {
-        return Err(Error::Malformed);
+        return Err(Error::Unreadable);
     }
     let mut found = None;
     let mut previous = None;
     let mut empty = false;
     let mut records = 0;
     for bytes in row[..SLOTS * SLOT_BYTES].as_chunks::<SLOT_BYTES>().0 {
-        match Record::decode(bytes)? {
+        match Record::decode(bytes).map_err(|_| Error::Unreadable)? {
             None => empty = true,
             Some(r) => {
                 records += 1;
@@ -342,14 +343,14 @@ pub(crate) fn decode_row(
                         != bucket(&manifest.network, &manifest.salt, txid)
                     || !r.consistent_with(manifest)
                 {
-                    return Err(Error::Malformed);
+                    return Err(Error::Unreadable);
                 }
                 previous = Some(r.txid);
                 if r.txid == *txid {
                     if r.tag != 1 && earliest.is_some_and(|e| r.height < e) {
-                        return Err(Error::Malformed);
+                        return Err(Error::Unreadable);
                     }
-                    found = Some(r.observation()?);
+                    found = Some(r.observation().map_err(|_| Error::Unreadable)?);
                 }
             }
         }
@@ -484,13 +485,14 @@ impl Client {
     }
     pub fn decode(&self, query: Query, response: &[u8], now_ms: u64) -> Result<Observation, Error> {
         self.check_response(&query.header, response, now_ms)?;
+        // The reply matched the session; from here on, failures come from the row.
         let row = zakura_pir_native::decode_cols(
             &query.secret,
             &self.public,
             &response[HEADER_BYTES..],
             COLS,
         )
-        .map_err(|_| Error::Pir)?;
+        .map_err(|_| Error::Unreadable)?;
         decode_row(&self.manifest, &query.txid, query.earliest, &row)
     }
 }

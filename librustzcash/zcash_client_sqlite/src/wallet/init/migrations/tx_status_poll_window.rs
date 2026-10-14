@@ -2,7 +2,9 @@
 //! of chain tips and an optional poll at its expiry height, so that the replies cannot steer
 //! when polling stops.
 //!
-//! Additive.
+//! Additive. Status work for a transaction not known to be mined gets a window starting at the
+//! tip the migration runs at, so an upgrade never strands it; without a known tip it gets one at
+//! its first recorded poll.
 use std::collections::HashSet;
 
 use schemerz_rusqlite::RusqliteMigration;
@@ -45,7 +47,16 @@ impl RusqliteMigration for Migration {
                 last_polled_height INTEGER,
                 CHECK (window_end_height > window_start_height),
                 CHECK (expiry_poll_height IS NULL OR expiry_poll_height >= window_end_height)
-            );",
+            );
+            INSERT INTO tx_status_polls
+                (txid, window_start_height, window_end_height, expiry_poll_height)
+            SELECT q.txid, tip.h, tip.h + 10,
+                   CASE WHEN t.expiry_height > 0 AND t.expiry_height >= tip.h + 10
+                        THEN t.expiry_height END
+            FROM tx_retrieval_queue q
+            JOIN (SELECT MAX(MAX(block_range_end) - 1, 0) AS h FROM scan_queue) tip
+            LEFT JOIN transactions t ON t.txid = q.txid
+            WHERE q.query_type = 0 AND tip.h IS NOT NULL AND t.mined_height IS NULL;",
         )?;
         Ok(())
     }

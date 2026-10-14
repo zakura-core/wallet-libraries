@@ -14,13 +14,18 @@ fn tip(st: &State) -> BlockHeight {
     st.wallet().chain_height().unwrap().unwrap()
 }
 
+/// Status work whose answer the wallet would apply. A rewind re-arms private status polls, but
+/// while local evidence decides the transaction they are settled: sent on schedule, never applied.
 fn status_work(st: &State) -> Vec<TxId> {
-    use zcash_client_backend::data_api::status::TransactionStatusRead as _;
+    use zcash_client_backend::data_api::status::{
+        TransactionStatusRead as _, TransactionStatusWork,
+    };
     st.wallet()
         .db()
         .transaction_status_work()
         .unwrap()
         .into_iter()
+        .filter(|work| !matches!(work, TransactionStatusWork::Private(r) if r.settled()))
         .map(|work| work.txid())
         .collect()
 }

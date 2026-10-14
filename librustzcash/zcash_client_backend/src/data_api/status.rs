@@ -101,6 +101,15 @@ pub trait TransactionStatusRead: WalletRead {
     /// Returns each currently actionable status obligation once, with its selected route.
     /// Stores may retain expired obligations as dormant work that becomes eligible after
     /// a rewind. Omission from this batch is not conclusive evidence of transaction absence.
+    ///
+    /// Private work follows a schedule fixed when the obligation was queued, so that replies
+    /// cannot steer which transactions are asked about: a window of consecutive chain tips and,
+    /// past it, the transaction's expiry height. At each scheduled tip the transaction is
+    /// returned until a reply is recorded with
+    /// [`TransactionStatusWrite::record_private_status_poll`], whether or not it is already
+    /// mined; [`PrivateTransactionStatusRequest::settled`] then says not to apply the answer.
+    /// After its schedule, a transaction without a conclusive status leaves this batch but stays
+    /// pending; [`Self::transaction_status_work_for`], a rewind or a rescan can still settle it.
     fn transaction_status_work(&self) -> Result<Vec<TransactionStatusWork>, Self::Error>;
 
     /// Routes an individual lookup without enqueueing it or requiring an actionable queue entry.

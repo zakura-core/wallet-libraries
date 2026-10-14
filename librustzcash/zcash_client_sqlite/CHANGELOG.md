@@ -12,6 +12,18 @@ workspace.
 
 ### Changed
 
+- Private status polls are fixed when status work is queued: once at each of 10
+  chain tips from the queue tip, and once at the expiry height when that is past
+  the window. Each poll is returned whether or not the transaction is mined, and
+  whatever earlier replies said, and is marked `settled` when the wallet already
+  holds a conclusive status. After its window and expiry poll, a transaction
+  without a conclusive status leaves automatic work but stays pending. A rewind
+  that queues reconfirmation opens a fresh window. Public status work is
+  unchanged. A new additive migration adds `tx_status_polls`; pending work
+  queued before it gets a window at the tip the migration runs at.
+- `set_transaction_status` keeps the first mined height: `Mined` at a different
+  height for a transaction already mined is ignored.
+
 - Transparent receipt lookups retry every content outcome (`Absent`, `Protocol`
   and `Contradiction`) on one schedule: an hour, doubling to a day, plus up to
   25% jitter. `Contradiction` no longer waits for a changed display map.
