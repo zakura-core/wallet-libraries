@@ -161,9 +161,13 @@ fn reopen(st: &State) -> Db {
 
 /// Walks the tip from the queue tip `h` to `h + 45` and records each (tip, txid) queried.
 fn transcript(service: Service) -> (Vec<(u32, TxId)>, State, TxId) {
+    transcript_with_expiry(service, EXPIRY_DELTA)
+}
+
+fn transcript_with_expiry(service: Service, expiry_delta: u32) -> (Vec<(u32, TxId)>, State, TxId) {
     let (mut st, h) = fixture();
     let txid = TxId::from_bytes([7; 32]);
-    queue(&st, txid, u32::from(h) + EXPIRY_DELTA);
+    queue(&st, txid, u32::from(h) + expiry_delta);
     let mut seen = vec![];
     for tip in u32::from(h)..=u32::from(h) + 45 {
         let tip = BlockHeight::from(tip);
@@ -389,6 +393,95 @@ fn a_rewind_that_requeues_reconfirmation_opens_a_new_window() {
         let at = tip + offset;
         st.wallet_mut().update_chain_tip(at).unwrap();
         if !serve(&mut st, tip, at, Service::CoverageIncomplete).is_empty() {
+            seen.push(offset);
+        }
+    }
+    assert_eq!(seen, (0..WINDOW).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_negative_reply_at_short_expiry_keeps_the_remaining_private_polls() {
+    for expiry_delta in [1, WINDOW - 1, WINDOW] {
+        for service in [
+            Service::Honest { mined: 1 },
+            Service::NotFound,
+            Service::Unreadable,
+            Service::CoverageIncomplete,
+        ] {
+            let (seen, _, txid) = transcript_with_expiry(service, expiry_delta);
+            let expected = (0..WINDOW)
+                .chain((expiry_delta >= WINDOW).then_some(expiry_delta))
+                .map(|offset| (offset, txid))
+                .collect::<Vec<_>>();
+            assert_eq!(seen, expected, "expiry offset {expiry_delta}, {service:?}");
+        }
+    }
+}
+
+#[test]
+fn a_restart_after_expiry_repeats_the_same_private_poll_for_every_reply() {
+    for service in [
+        Service::Honest { mined: 2 },
+        Service::NotFound,
+        Service::Unreadable,
+        Service::CoverageIncomplete,
+    ] {
+        let (seen, st, txid) = transcript_with_expiry(service, EXPIRY_DELTA);
+        assert_eq!(seen, expected(txid));
+        let h = st.wallet().chain_height().unwrap().unwrap() - 45;
+        let mut reopened = reopen(&st);
+        assert_eq!(
+            serve_db(&mut reopened, h, h + 45, service),
+            vec![txid],
+            "one repeated expiry poll after reopening: {service:?}"
+        );
+        assert!(reopened.transaction_status_work().unwrap().is_empty());
+        if matches!(service, Service::NotFound) {
+            assert!(matches!(
+                reopened.transaction_status_work_for(txid).unwrap(),
+                TransactionStatusWork::Private(_)
+            ));
+        }
+    }
+}
+
+#[test]
+fn a_second_rewind_before_a_work_read_opens_a_full_new_private_window() {
+    let (mut st, prior) = fixture();
+    let (mined_at, _) = st.generate_empty_block();
+    st.scan_cached_blocks(mined_at, 1);
+    let txid = TxId::from_bytes([16; 32]);
+    queue(&st, txid, 0);
+    // The prior inclusion is above locally scanned blocks, so no historical block
+    // receipt suppresses applying the later status answer.
+    st.wallet_mut().update_chain_tip(mined_at + 1).unwrap();
+    serve(&mut st, mined_at, mined_at + 1, Service::Forging { at: 1 });
+    st.wallet_mut().db_mut().truncate_to_height(prior).unwrap();
+
+    // Reconfirm on the final tip of the first rewind's window.
+    for offset in 0..WINDOW {
+        let tip = prior + offset;
+        st.wallet_mut().update_chain_tip(tip).unwrap();
+        let service = if offset == WINDOW - 1 {
+            Service::Honest { mined: WINDOW - 1 }
+        } else {
+            Service::Unreadable
+        };
+        assert_eq!(serve(&mut st, prior, tip, service), vec![txid]);
+    }
+    assert_eq!(
+        st.wallet().get_tx_height(txid).unwrap(),
+        Some(prior + WINDOW - 1)
+    );
+
+    // No work read observes the completed obligation before the second rewind.
+    st.wallet_mut().db_mut().truncate_to_height(prior).unwrap();
+    assert_eq!(st.wallet().get_tx_height(txid).unwrap(), None);
+    let mut seen = vec![];
+    for offset in 0..2 * WINDOW {
+        let tip = prior + offset;
+        st.wallet_mut().update_chain_tip(tip).unwrap();
+        if !serve(&mut st, prior, tip, Service::Unreadable).is_empty() {
             seen.push(offset);
         }
     }
