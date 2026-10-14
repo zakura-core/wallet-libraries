@@ -42,17 +42,19 @@ fn directory_payment_queue_authenticates_retries_and_survives_reopen_without_cre
         encrypted_note: EncryptedNote::from_bytes(bytes),
         ..candidate.clone()
     };
+    let wrong_block = PendingPayment {
+        block_hash: BlockHash([99; 32]),
+        ..candidate.clone()
+    };
     let db = st.wallet_mut().db_mut();
-    assert!(queue_payment(db, account, id, &tampered).is_err());
+    for bad in [&tampered, &wrong_block] {
+        assert!(queue_payment(db, account, id, bad).is_err());
+    }
     assert!(pending(db, account, id).is_empty());
     queue_payment(db, account, id, &candidate).unwrap();
     queue_payment(db, account, id, &candidate).unwrap();
     let conflict = PendingPayment {
         position: 1,
-        ..candidate.clone()
-    };
-    let wrong_block = PendingPayment {
-        block_hash: BlockHash([99; 32]),
         ..candidate.clone()
     };
     for bad in [conflict, wrong_block] {
