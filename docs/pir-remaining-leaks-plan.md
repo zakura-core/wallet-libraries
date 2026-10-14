@@ -78,10 +78,14 @@ three.
 is first queued, the wallet draws a delay of 0 to 2 minutes from its random
 source and does not query the item before then. A rescan keeps the drawn time.
 
+**A restore watches a fixed window.** Until an account is activated, its
+transparent recovery watches 50 external and 25 internal addresses, whatever
+the replies show, so a typical restore completes in one sync (change F).
+
 ## 3. Changes
 
-Increment 2 has two pull requests, one per repository (section 5). Changes A
-and D are in wallet-libraries; B and C are in Vizor. Each change lists the
+Increment 2 has two pull requests, one per repository (section 5). Changes A,
+D and F are in wallet-libraries; B and C are in Vizor. Each change lists the
 files, the rule, and its tests.
 
 Every test lands in a first commit that contains only the tests. That commit
@@ -316,6 +320,48 @@ reopen the leak:
 
 This is a small wallet-pir change outside the two increment 2 pull requests.
 
+### F. Restore window (wallet-libraries)
+
+Increment 1 made transparent recovery one counted pass per account per sync. A
+pass that finds activity near the end of the address window grows it, and only
+the next sync checks the new addresses. A restore whose used addresses run past
+the gap limit took one sync per window step: receives at external indices 0, 9,
+18 and 25 under the gap of 10 took 4 syncs.
+
+While an account is a candidate, `AccountRecoveryAddresses::load`
+(`zcash_client_sqlite/src/wallet/transparent_ledger/recovery/recovery_addresses.rs`)
+now watches a fixed restore window: every external index below 50 and internal
+index below 25. Ephemeral addresses keep their gap limit.
+
+- The window is a constant in code. No reply, setting or migration changes it.
+- The gap-limit window is kept apart from it. Window growth, the stored
+  `tpir_candidate_windows` and activation follow the gap limits only, so
+  activation makes only the gap-limit window the wallet's own. An active
+  account's watch set follows the gap limits as before.
+- Growth inside the restore window adds no address, so it is not reported as
+  `window_grew` and starts no new work. Activity near the restore window's end
+  grows the window by one gap, covered at the next sync.
+- An account that becomes a candidate again, as after a public policy round
+  trip, watches the restore window again and needs one pass covering it before
+  it activates.
+
+Cost: 60 more watched addresses during a restore (40 external, 20 internal). An
+unused address costs a directory query only when a shard's filter matches it by
+chance, at most 1 in 1,024 per shard (change E). That is about
+60 × shards in range ÷ 1,024 extra directory queries per restore: about 2 from
+genesis (33 shards). Filter downloads do not change.
+
+Tests, in `zakura/pir-transparent/tests/private_recovery.rs`:
+
+- **One sync.** Receives at 0, 9, 18 and 25 restore in one sync. Reverted, 4.
+- **Past the window.** Receives at 0, 45, 52 and 60 take 4 syncs, one per
+  window step. Reverted, the restore stops at index 0 in one sync.
+- **Transcript.** The first sync's requests are the same whether or not a
+  service forges a receive at the window's last address; only the next sync
+  covers the grown window. Reverted, the forged receive is not watched.
+- **Activation.** After activation the watch set ends one gap past the last used
+  address. Reverted, the restore takes 4 syncs.
+
 ## 4. Cost of cover and padding
 
 Increment 3 sends dummy queries so that the shards and sizes a wallet queries
@@ -345,7 +391,7 @@ Questions for the PIR operators:
 | Pull request | Repository | Contains | Base | Depends on |
 | --- | --- | --- | --- | --- |
 | This plan | wallet-libraries | This doc | `main` | None |
-| Increment 2, library | wallet-libraries | Changes A and D | This plan's branch, then `main` | Increment 1 (#180–#182, merged) |
+| Increment 2, library | wallet-libraries | Changes A, D and F | This plan's branch, then `main` | Increment 1 (#180–#182, merged) |
 | Increment 2, Vizor | chainapsis/vizor-wallet, branch `transparent-privacy-inc2` | Changes B and C, D's waiting state, and a repin of every wallet-libraries dependency to the library pull request's tip | `transparent-privacy-inc1` | Vizor increment 1, and the library pull request's tip |
 | Filter bound | wallet-pir | Change E | `main` | None |
 

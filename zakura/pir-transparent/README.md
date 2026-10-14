@@ -336,7 +336,10 @@ next sync. Publication lag and capacity refusals also end the sync: the pass
 may already have read private replies and grown the address window before it
 reported either condition. `Retry::After` gives the caller the delay before
 scheduling the next sync, which reads the fresh watch set and resumes from the
-companion. A restore therefore takes one sync per step of the address window.
+companion. While the account is a candidate, the wallet's watch set holds a
+fixed restore window of 50 external and 25 internal addresses, so a restore
+whose used addresses lie inside it completes in one sync. Past it, a restore
+takes one sync per step of the address window.
 A pass with failed entries is `Retry::Stalled` even when its publication lags
 or the service refused for capacity, so a failed entry is asked again only at
 the next sync.

@@ -12,6 +12,13 @@ pub(super) const WINDOW_SCOPES: [TransparentKeyScope; 3] = [
     TransparentKeyScope::EPHEMERAL,
 ];
 
+/// The fixed restore window, per window scope: while an account is a candidate, it watches
+/// every derivable index below this end, whatever replies have shown. A restore whose used
+/// addresses lie within it completes in one pass. It is fixed in code and never follows
+/// reply content; ephemeral addresses keep their gap limit.
+#[cfg(feature = "transparent-inputs")]
+pub(super) const RESTORE_WINDOW: [u32; 3] = [50, 25, 0];
+
 /// One past the highest non-hardened child index.
 #[cfg(feature = "transparent-inputs")]
 pub(super) const WINDOW_LIMIT: u32 = 1 << 31;
@@ -34,7 +41,11 @@ pub(super) struct AccountRecoveryAddresses {
     /// One past the highest index in the wallet's own address table, per window scope.
     pub(super) production_end: [u32; 3],
     /// The effective candidate window end, including activity recorded by other accounts.
+    /// It follows the gap limits only; activation materializes addresses up to it.
     pub(super) candidate_end: [u32; 3],
+    /// The restore window a candidate watches, per window scope: [`RESTORE_WINDOW`] where the
+    /// scope is derivable, and 0 once the account is active.
+    pub(super) restore_end: [u32; 3],
     /// Whether the account's keys can derive further addresses, per window scope.
     pub(super) derivable: [bool; 3],
 }
@@ -46,7 +57,8 @@ impl AccountRecoveryAddresses {
     /// The recovery address selection holds every address the wallet's address table assigns the account, its
     /// legacy external address, and the candidate window's addresses beyond them. The window
     /// is extended, without writing, until the account's mined candidate activity needs no
-    /// further gap. Addresses another account owns in production stay in the window that
+    /// further gap. A candidate also watches its fixed restore window, which activation does
+    /// not materialize. Addresses another account owns in production stay in the window that
     /// drives gap expansion but are left out of the recovery address selection.
     pub(super) fn load<P: consensus::Parameters>(
         conn: &rusqlite::Connection,
@@ -133,8 +145,19 @@ impl AccountRecoveryAddresses {
         }
 
         let derivable = WINDOW_SCOPES.map(|scope| derive(&account, scope, None).is_some());
+        let restore_end = if account_lifecycle(conn, account_ref)? == AccountLifecycle::Candidate {
+            let mut ends = RESTORE_WINDOW;
+            for (end, derivable) in ends.iter_mut().zip(derivable) {
+                if !derivable {
+                    *end = 0;
+                }
+            }
+            ends
+        } else {
+            [0; 3]
+        };
         for (slot, scope) in WINDOW_SCOPES.into_iter().enumerate() {
-            for index in production_end[slot]..candidate_end[slot] {
+            for index in production_end[slot]..candidate_end[slot].max(restore_end[slot]) {
                 let index = NonHardenedChildIndex::from_index(index).expect("below WINDOW_LIMIT");
                 if let Some(address) = derive(&account, scope, Some(index)) {
                     addresses
@@ -152,6 +175,7 @@ impl AccountRecoveryAddresses {
             addresses,
             production_end,
             candidate_end,
+            restore_end,
             derivable,
         };
         // Activation retains only the indices it skipped, rather than re-deriving every address
@@ -189,8 +213,7 @@ impl AccountRecoveryAddresses {
             for (slot, needed) in needs.into_iter().enumerate() {
                 if let Some(end) = needed.filter(|_| recovery_addresses.derivable[slot]) {
                     let scope = WINDOW_SCOPES[slot];
-                    let start = recovery_addresses.production_end[slot]
-                        .max(recovery_addresses.candidate_end[slot]);
+                    let start = recovery_addresses.watched_end(slot);
                     for index in start..end {
                         let index =
                             NonHardenedChildIndex::from_index(index).expect("below WINDOW_LIMIT");
@@ -216,6 +239,13 @@ impl AccountRecoveryAddresses {
         Ok(Some(recovery_addresses))
     }
 
+    /// One past the highest index the account watches in window scope `slot`.
+    pub(super) fn watched_end(&self, slot: usize) -> u32 {
+        self.production_end[slot]
+            .max(self.candidate_end[slot])
+            .max(self.restore_end[slot])
+    }
+
     fn watched_addresses(&self) -> Vec<WatchedAddress> {
         self.addresses
             .iter()
@@ -228,7 +258,8 @@ impl AccountRecoveryAddresses {
     }
 
     /// The window end each scope needs for the account's mined candidate activity: one gap
-    /// beyond the highest index with activity, where that exceeds the current window.
+    /// beyond the highest index with activity, where that exceeds the current window. The
+    /// restore window does not count here: it is watched, not part of the gap window.
     pub(super) fn window_needs(
         &self,
         conn: &rusqlite::Connection,

@@ -32,6 +32,18 @@ workspace.
   delay; the test database sets it to zero.
 - `set_transaction_status` keeps the first mined height: `Mined` at a different
   height for a transaction already mined is ignored.
+- While an account's transparent recovery is a candidate, its watch set holds a
+  fixed restore window: every external index below 50 and internal index below 25,
+  past the gap limits. Ephemeral addresses keep their gap limit. The window is
+  fixed in code and does not follow replies, so a restore whose used addresses lie
+  inside it completes in one pass. Activation makes only the gap-limit window the
+  wallet's own, so an active account's watch set follows the gap limits as before.
+  An account that becomes a candidate again, as after a public policy round trip,
+  watches the restore window again and needs a pass covering it before it
+  activates. No migration.
+- `CommitOutcome::window_grew` reports whether the watched addresses grew. Growth
+  inside the restore window does not count, and an active account's growth past
+  an unused run as long as the gap limit now does.
 
 - Transparent receipt lookups retry every content outcome (`Absent`, `Protocol`
   and `Contradiction`) on one schedule: an hour, doubling to a day, plus up to

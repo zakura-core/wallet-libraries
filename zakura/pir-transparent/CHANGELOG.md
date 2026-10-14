@@ -27,6 +27,10 @@
   pass at once; they continue at the next sync. A service that forges a receive
   near the end of the window can no longer tell from the wallet's next requests
   whether its directory row was the one forged.
+- A restore whose used addresses lie within the wallet's restore window (with
+  `zakura-client-sqlite`, 50 external and 25 internal addresses) completes in one
+  sync instead of one sync per window step. The window is fixed in the wallet and
+  never follows replies.
 - The recovery example ends its bounded run when a pass reports lag or overload,
   leaving its saved continuation for a later invocation instead of waiting forever.
 
