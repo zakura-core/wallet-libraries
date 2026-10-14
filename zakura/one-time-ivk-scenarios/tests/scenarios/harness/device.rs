@@ -399,30 +399,37 @@ impl Device {
                 &chain.state_below(start),
                 batch as usize,
             );
-            match scan {
-                Ok(_) => scanned += u64::from(batch),
-                // A reorg: rewind ten blocks below the conflict and scan again, as wallets do.
-                Err(ChainError::Scan(e)) if e.is_continuity_error() => {
-                    let below = e.at_height().saturating_sub(10);
-                    // Not below the wallet's history: rewind as far as it allows. Near the
-                    // birthday the reported safe height itself can be refused, so step up.
-                    let mut target = below;
-                    let to = loop {
-                        match self.db.truncate_to_height(target) {
-                            Ok(to) => break to,
-                            Err(SqliteClientError::RequestedRewindInvalid {
-                                safe_rewind_height: Some(safe),
-                                ..
-                            }) if target < e.at_height() => {
-                                target = if safe > target { safe } else { target + 1 };
-                            }
-                            Err(error) => panic!("the wallet rewinds: {error:?}"),
-                        }
-                    };
-                    self.rewinds.push((u32::from(e.at_height()), u32::from(to)));
-                    self.db.update_chain_tip(tip).expect("the tip updates");
+            // A reorg: a block that does not chain to the scanned one, or, when a rescan
+            // reaches a replaced block whose parent survived, a stored block with another
+            // hash. Vizor treats both as a continuity break at that height.
+            let conflict = match scan {
+                Ok(_) => {
+                    scanned += u64::from(batch);
+                    None
                 }
+                Err(ChainError::Scan(e)) if e.is_continuity_error() => Some(e.at_height()),
+                Err(ChainError::Wallet(SqliteClientError::BlockConflict(at))) => Some(at),
                 Err(e) => panic!("blocks scan: {e:?}"),
+            };
+            if let Some(at) = conflict {
+                // Rewind ten blocks below the conflict and scan again, as wallets do, but
+                // not below the wallet's history: rewind as far as it allows. Near the
+                // birthday the reported safe height itself can be refused, so step up.
+                let mut target = at.saturating_sub(10);
+                let to = loop {
+                    match self.db.truncate_to_height(target) {
+                        Ok(to) => break to,
+                        Err(SqliteClientError::RequestedRewindInvalid {
+                            safe_rewind_height: Some(safe),
+                            ..
+                        }) if target < at => {
+                            target = if safe > target { safe } else { target + 1 };
+                        }
+                        Err(error) => panic!("the wallet rewinds: {error:?}"),
+                    }
+                };
+                self.rewinds.push((u32::from(at), u32::from(to)));
+                self.db.update_chain_tip(tip).expect("the tip updates");
             }
         }
         self.db
