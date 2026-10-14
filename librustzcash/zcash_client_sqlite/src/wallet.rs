@@ -863,7 +863,6 @@ pub(crate) fn delete_account(
 
 /// Whether a one-time key is open, so that blocks scanned or transactions decrypted
 /// without it must not be stored.
-#[cfg(feature = "orchard")]
 pub(crate) fn one_time_key_open(conn: &Connection) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys

@@ -21,7 +21,8 @@ workspace.
   `SqliteClientError::OneTimeIvksNotUsed` and `SqliteClientError::InvalidOneTimeIvkInput`.
   ZeWIF import also decrypts with the wallet's one-time keys.
 - `wallet::init::migrations::ids::ONE_TIME_IVK`, the one-time IVK migration, which runs in
-  every build.
+  every build. Builds without `orchard` refuse blocks and transactions with
+  `SqliteClientError::OneTimeIvksNotUsed` while a one-time key is open.
 
 ### Changed
 

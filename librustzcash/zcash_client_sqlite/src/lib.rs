@@ -3415,15 +3415,17 @@ where
 impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P, CL, R> {
     /// Stores scanned blocks for `put_blocks` and, with `one_time_keys`, the one-time key
     /// snapshot that scanned them, for `put_blocks_with_one_time_ivks`. Blocks scanned
-    /// without one-time keys are refused while `wallet::one_time_key_open`: storing them
-    /// would mark a key's payments scanned without finding them.
+    /// without one-time keys, as every build without `orchard` scans them, are refused while
+    /// `wallet::one_time_key_open`: storing them would mark a key's payments scanned without
+    /// finding them.
     fn store_scanned_blocks(
         &mut self,
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<AccountUuid>>,
         #[cfg(feature = "orchard")] one_time_keys: Option<&[(AccountUuid, KeyId)]>,
     ) -> Result<(), SqliteClientError> {
-        #[cfg(feature = "orchard")]
+        #[cfg(not(feature = "orchard"))]
+        let one_time_keys: Option<()> = None;
         if one_time_keys.is_none() && wallet::one_time_key_open(self.conn.0)? {
             return Err(SqliteClientError::OneTimeIvksNotUsed);
         }
@@ -3796,7 +3798,10 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         // As with scanned blocks, a transaction decrypted without the open one-time keys
         // would store their payments as someone else's.
         #[cfg(feature = "orchard")]
-        if !d_tx.one_time_ivks_applied() && wallet::one_time_key_open(self.conn.0)? {
+        let one_time_ivks_applied = d_tx.one_time_ivks_applied();
+        #[cfg(not(feature = "orchard"))]
+        let one_time_ivks_applied = false;
+        if !one_time_ivks_applied && wallet::one_time_key_open(self.conn.0)? {
             return Err(SqliteClientError::OneTimeIvksNotUsed);
         }
         let chain_tip = wallet::chain_tip_height(self.conn.borrow())?

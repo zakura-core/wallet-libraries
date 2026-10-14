@@ -193,8 +193,11 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::EnhancementModeNotConfigured => {
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
+        SqliteClientError::OneTimeIvksNotUsed => {
+            unreachable!("migrations do not use one-time IVKs")
+        }
         #[cfg(feature = "orchard")]
-        SqliteClientError::OneTimeIvksNotUsed | SqliteClientError::InvalidOneTimeIvkInput(_) => {
+        SqliteClientError::InvalidOneTimeIvkInput(_) => {
             unreachable!("migrations do not use one-time IVKs")
         }
         SqliteClientError::TransparentLedgerModeNotConfigured
