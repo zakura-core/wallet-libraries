@@ -13,13 +13,13 @@ workspace.
 ### Changed
 
 - Each newly queued Ironwood Enhance position waits a delay drawn uniformly
-  from 0 to 2 minutes (1 minute on average) with the wallet's random source
+  from 0 to 75 seconds (37.5 seconds on average) with the wallet's random source
   before its first private query, and is listed as `EnhancePirWork::Waiting`
   until then. The time is kept in the `EnhancePirSession`, with no new table or
   migration. A rescan in the session keeps it; completing the position or a
   rewind that removes it forgets it, so a requeue draws a new one. A fresh
   session schedules queued positions at its first wallet write (`update_chain_tip`
-  among them); a position read before any write instead waits the full 2 minutes
+  among them); a position read before any write instead waits the full 75 seconds
   from its first read. Later writes preserve that existing deadline. Read-only snapshots retain that deadline;
   rolled-back writes do not publish tentative deadlines. Batch work reads and
   scheduling snapshot session state once, rather than cloning it per position.

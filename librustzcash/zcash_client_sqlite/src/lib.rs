@@ -779,7 +779,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     }
 
     /// Sets the longest random delay before the first private query of a newly queued Enhance
-    /// position (two minutes by default). Tests that do not exercise the delay set it to zero.
+    /// position (75 seconds by default). Tests that do not exercise the delay set it to zero.
     #[cfg(all(feature = "orchard", any(test, feature = "test-dependencies")))]
     pub fn set_enhance_pir_max_delay(&mut self, delay: std::time::Duration) {
         self.enhance_pir_max_delay = delay;

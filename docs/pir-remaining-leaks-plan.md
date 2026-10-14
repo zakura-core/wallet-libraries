@@ -58,8 +58,8 @@ query timing remains observable. Hiding traffic timing needs broader cover
 traffic rather than a per-transaction window.
 
 **Enhance waits stay in session memory.** Reopening draws queued waits again.
-A restart is an application action, and the fresh wait is between zero and two
-minutes; a position first read before a write waits the full two minutes.
+A restart is an application action, and the fresh wait is between zero and 75
+seconds; a position first read before a write waits the full 75 seconds.
 
 **Enhance replies do not steer the rest of the sync.** An unreadable reply or
 a rejected record fails that position only. The other positions are still
@@ -67,7 +67,7 @@ queried in the same order, and the failure counts toward the existing cap of
 three.
 
 **Enhance items wait a random time before their first query.** When an item
-is first queued, the wallet draws a delay of 0 to 2 minutes from its random
+is first queued, the wallet draws a delay of 0 to 75 seconds from its random
 source and does not query the item before then. A rescan in the same session
 keeps the drawn time.
 
@@ -147,11 +147,11 @@ No table or migration. Each position's not-before time is kept in the
 
 Library changes:
 
-- The delay is drawn uniformly from 0 to 120 seconds with the wallet's
+- The delay is drawn uniformly from 0 to 75 seconds with the wallet's
   `rng`, and added to the wallet's `clock`, when a wallet write first sees the
   position in the session: when scanning queues it, when rediscovery rebuilds
   it, or at the session's first `update_chain_tip`. A read cannot draw, so a
-  position read before any write waits the full 2 minutes.
+  position read before any write waits the full 75 seconds.
 - `transaction_enhancement_work` lists any position whose time is later than
   now as waiting. The read impl gains a `CL: Clock` bound, so the signature
   does not change.
@@ -161,7 +161,7 @@ Library changes:
 - The time is forgotten when the position's work completes. A rewind that
   truncates the position forgets it, so a later requeue draws a new time.
 - A fresh session draws each queued position's wait again. The restart is the
-  app's doing, not a reply's; it costs at most a fresh 0–2 minute wait.
+  app's doing, not a reply's; it costs at most a fresh 0–75 second wait.
 
 Tests, in `wallet/enhance_pir/tests.rs`, with `test_clock` and a seeded
 `test_rng`:
@@ -340,9 +340,8 @@ None of the PIR changes above touches the transport.
   open wallet's session. Reopening the wallet resets them. A service can
   therefore learn up to two bits per record per session, rather than two bits
   in all. A durable count needs one small table.
-- **Is 2 minutes enough?** It was set from 10 minutes down to 2, so memos
-  arrive about a minute after the sync on average. It spreads the first
-  Enhance query over about 2 blocks. A longer delay hides the block better but
+- **Is 75 seconds enough?** The first Enhance query waits 37.5 seconds on
+  average, with a maximum of 75 seconds, roughly one target block interval. A longer delay hides the block better but
   holds memos back.
 
 - **Should Enhance cover go on now, while it is free?** See section 6.
