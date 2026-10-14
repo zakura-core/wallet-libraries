@@ -239,6 +239,22 @@ mod tests {
             assert_eq!(work.incomplete_count(), 1);
         }
     }
+
+    #[test]
+    fn waiting_items_are_incomplete_without_active_queries() {
+        let request = EnhancePirRequest::new(
+            Position::from(0),
+            IronwoodEnhanceRequestId::new(TxId::from_bytes([1; 32]), 0),
+        );
+        let work = PreparedWork::new([EnhancePirWork::Waiting {
+            request,
+            not_before: std::time::SystemTime::UNIX_EPOCH,
+        }]);
+        assert_eq!(work.query_count(), 0);
+        assert_eq!(work.positions().count(), 0);
+        assert_eq!(work.waiting, 1);
+        assert_eq!(work.incomplete_count(), 1);
+    }
 }
 
 #[cfg(test)]
