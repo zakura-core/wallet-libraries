@@ -709,6 +709,25 @@ fn issuance_skips_restored_addresses_the_provider_saw() {
     assert_eq!(issued.key_id().index(), RECEIVE_GAP_LIMIT + 3);
 }
 
+/// A payment moves the recovery bound only once it has the untrusted confirmations, so a
+/// reorg that drops it cannot leave an issued address past the bound. Here quotes with
+/// unknown outcomes hold every other address in the window.
+#[test]
+fn only_a_confirmed_payment_moves_the_bound() {
+    let mut st = fixture();
+    let first = prepare(&mut st, NOW);
+    begin(&mut st, &first, "lost").unwrap().unwrap();
+    pay(&mut st, first.full_viewing_key(), 100_000);
+    for i in 1..RECEIVE_GAP_LIMIT {
+        let r = prepare(&mut st, NOW);
+        begin(&mut st, &r, &format!("lost-{i}")).unwrap().unwrap();
+    }
+    let limited = refusal(try_prepare(&mut st, NOW, None));
+    assert_eq!(limited, Some(ReservationPolicy::Limit));
+    confirm(&mut st);
+    assert_eq!(prepare(&mut st, NOW).key_id().index(), RECEIVE_GAP_LIMIT);
+}
+
 /// A rewind removes a payment but not its used marker, and the provider saw every
 /// earlier address, so the draft past them stays within recovery and the paid address
 /// is never reissued. A paid swap with an inconclusive outcome is not reclaimed.
