@@ -1042,6 +1042,9 @@ fn shape_only_recovery_obeys_public_authority_transitions() {
     );
     assert_eq!(queued(&case.st, case.tx_ref), 0);
     set_policy(&mut case.st, PrivateRequired);
+    // A candidate again, the account watches its restore window, which a pass covers
+    // before it activates.
+    cover(&mut case.st, case.account, &revision(1, true), vec![]);
     activate_recovered_ledger(&mut case.st, case.account).unwrap();
     assert_eq!(private_queries(&case.st), vec![request]);
     assert_eq!(

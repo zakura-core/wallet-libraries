@@ -1721,6 +1721,9 @@ fn no_requeue_after_stored() {
     // Leaving and re-entering PrivateRequired activates, and so projects, the ledger again.
     set_policy(&mut st, Public);
     set_policy(&mut st, PrivateRequired);
+    // A candidate again, the account watches its restore window, which a pass covers
+    // before it activates.
+    cover(&mut st, account, &revision(1, true), vec![]);
     activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(reasons(&st, txid), None);
     assert!(!listing(&st).contains(&txid));

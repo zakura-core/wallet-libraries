@@ -435,13 +435,17 @@ impl Fixture {
             .address
     }
 
-    /// The highest external index the account's own window derives.
+    /// The account's watched external address with the highest index: activity there
+    /// grows its window.
     fn last_external(&self) -> TransparentAddress {
         self.watch()
             .addresses
             .iter()
             .filter_map(|watched| match watched.origin {
-                WatchOrigin::Derived { scope, index } if scope == TransparentKeyScope::EXTERNAL => {
+                WatchOrigin::Derived { scope, index }
+                | WatchOrigin::CandidateWindow { scope, index }
+                    if scope == TransparentKeyScope::EXTERNAL =>
+                {
                     Some((index.index(), watched.address))
                 }
                 _ => None,
@@ -1270,15 +1274,17 @@ fn dump_tables(conn: &Connection, keep: impl Fn(&str) -> bool) -> Vec<(String, V
         .collect()
 }
 
-/// A service that forges a receive at the last address of the wallet's window learns
-/// nothing from the sync it answers: the wallet sends the same requests as it does to
-/// a service without the receive, and covers the grown window only at the next sync.
+/// A service that forges a receive at the last address of the wallet's restore window
+/// learns nothing from the sync it answers: the wallet sends the same requests as it
+/// does to a service without the receive, and covers the grown window only at the next
+/// sync. The restore window itself is fixed, whatever the replies hold.
 ///
 /// Both services hold one receive for that address in S1, which straddles the
 /// birthday, so its filter matches and its directory row is read alike. The forged
 /// one lies above the birthday; the other below, where the wallet ignores it. No
-/// other event pays the wallet, so the honest window never grows, and the forged
-/// wallet's grown window would cost another pass's requests if it started one.
+/// other event pays the wallet, so the honest window never grows past the restore
+/// window, and the forged wallet's grown window would cost another pass's requests if
+/// it started one.
 fn forged_receive_does_not_start_another_pass(publication_behind: bool) {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
     let (birthday, t1) = (H0 + 250, H0 + 649);
@@ -1298,9 +1304,10 @@ fn forged_receive_does_not_start_another_pass(publication_behind: bool) {
         };
         let mut shards = lifecycle(&owned, t1, 0, false);
         let at = if forged { birthday + 60 } else { birthday - 40 };
+        let edge = external_at(&f, RESTORE_EXTERNAL - 1);
         shards[1]
             .events
-            .push((script(f.last_external()), receive(at, txid(3), 1, 7_000)));
+            .push((script(edge), receive(at, txid(3), 1, 7_000)));
         f.publish(&shards, SEAL);
         let seen = f.server.requests().len();
         let pass = f.drive();
@@ -1317,7 +1324,8 @@ fn forged_receive_does_not_start_another_pass(publication_behind: bool) {
     assert_eq!(forged_requests, honest_requests);
 
     // The forged receive at the last address grows the forged wallet's window by a
-    // whole gap, which only its next sync covers; the honest window stays empty.
+    // whole gap, which only its next sync covers; the honest window stays the restore
+    // window, which the first sync covered.
     let window = |f: &Fixture| -> BTreeSet<_> {
         f.watch()
             .addresses
@@ -1327,10 +1335,15 @@ fn forged_receive_does_not_start_another_pass(publication_behind: bool) {
             .collect()
     };
     let (forged_window, honest_window) = (window(&forged), window(&honest));
-    assert!(honest_window.is_empty());
-    assert!(!forged_window.is_empty());
     assert!(
-        forged_window
+        honest_window
+            .iter()
+            .all(|address| honest.watched.contains(&pubkey_hash(*address)))
+    );
+    let grown: BTreeSet<_> = forged_window.difference(&honest_window).copied().collect();
+    assert!(!grown.is_empty());
+    assert!(
+        grown
             .iter()
             .all(|address| !forged.watched.contains(&pubkey_hash(*address)))
     );
@@ -1341,7 +1354,7 @@ fn forged_receive_does_not_start_another_pass(publication_behind: bool) {
     assert!(!next.new_work);
     assert_eq!(next.report.progress.covered_through, t1);
     assert!(
-        forged_window
+        grown
             .iter()
             .all(|address| forged.watched.contains(&pubkey_hash(*address)))
     );
@@ -1438,45 +1451,68 @@ fn a_format_six_companion_upgrades_in_place() {
     f.assert_private(&[0]);
 }
 
-/// Restore latency at one pass per sync: receives at external indices 0, 9, 18 and
-/// 25 under the default external gap of 10 take one sync per window step.
-#[test]
-fn restore_needs_one_sync_per_window_step() {
-    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+/// The account's external restore window: a candidate watches every external index
+/// below it from its first sync.
+const RESTORE_EXTERNAL: u32 = 50;
+
+/// The account's external address at `index`.
+fn external_at(f: &Fixture, index: u32) -> TransparentAddress {
+    f.st.test_account()
+        .unwrap()
+        .usk()
+        .transparent()
+        .to_account_pubkey()
+        .derive_external_ivk()
+        .unwrap()
+        .derive_address(NonHardenedChildIndex::from_index(index).unwrap())
+        .unwrap()
+}
+
+/// The highest index the watch set names in `scope`.
+fn last_watched(
+    watch: &TransparentAddressWatchSet<AccountUuid>,
+    scope: TransparentKeyScope,
+) -> u32 {
+    watch
+        .addresses
+        .iter()
+        .filter_map(|watched| match watched.origin {
+            WatchOrigin::Derived { scope: s, index }
+            | WatchOrigin::CandidateWindow { scope: s, index }
+                if s == scope =>
+            {
+                Some(index.index())
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap()
+}
+
+/// A restore of an account that received once at each external index of `indices`,
+/// spread over S1, S2 and the tail: the fixture after the restore completes, and the
+/// syncs it took.
+fn restore(indices: &[u32], trusted: bool) -> (Fixture, usize) {
     let t1 = H0 + 649;
     let mut f = Fixture::new(H0 + 250, t1);
-    let external =
-        f.st.test_account()
-            .unwrap()
-            .usk()
-            .transparent()
-            .to_account_pubkey()
-            .derive_external_ivk()
-            .unwrap();
-    let at = |index: u32| {
-        external
-            .derive_address(NonHardenedChildIndex::from_index(index).unwrap())
-            .unwrap()
-    };
-    assert_eq!(f.last_external(), at(9));
-    let mut s1 = noise(H0 + 200, H0 + 399, 1);
-    s1.push((script(at(0)), receive(H0 + 300, txid(1), 0, 10_000)));
-    s1.push((script(at(9)), receive(H0 + 350, txid(2), 0, 20_000)));
-    let mut s2 = noise(H0 + 400, H0 + 599, 2);
-    s2.push((script(at(18)), receive(H0 + 450, txid(3), 0, 30_000)));
-    let mut tail_events = noise(H0 + 600, t1, 3);
-    tail_events.push((script(at(25)), receive(H0 + 620, txid(4), 0, 40_000)));
-    f.publish(
-        &[
-            sealed(H0, H0 + 199, noise(H0, H0 + 199, 0)),
-            sealed(H0 + 200, H0 + 399, s1),
-            sealed(H0 + 400, H0 + 599, s2),
-            tail(t1, 0, tail_events),
-        ],
-        SEAL,
-    );
+    let mut shards = vec![
+        sealed(H0, H0 + 199, noise(H0, H0 + 199, 0)),
+        sealed(H0 + 200, H0 + 399, noise(H0 + 200, H0 + 399, 1)),
+        sealed(H0 + 400, H0 + 599, noise(H0 + 400, H0 + 599, 2)),
+        tail(t1, 0, noise(H0 + 600, t1, 3)),
+    ];
+    for (n, index) in indices.iter().enumerate() {
+        let (shard, height) = [(1, H0 + 300), (2, H0 + 450), (3, H0 + 620)][n % 3];
+        shards[shard].events.push((
+            script(external_at(&f, *index)),
+            receive(height + n as u64, txid(n as u64 + 1), 0, 10_000),
+        ));
+    }
+    f.publish(&shards, SEAL);
+    if trusted {
+        f.trust_service();
+    }
     let (last, syncs) = f.sync_until_complete(8);
-    assert_eq!(syncs, 4);
     assert_eq!(last.report.progress.covered_through, t1);
     let received =
         f.st.wallet()
@@ -1485,7 +1521,56 @@ fn restore_needs_one_sync_per_window_step() {
             .unwrap()
             .receives
             .len();
-    assert_eq!(received, 4);
+    assert_eq!(received, indices.len());
+    (f, syncs)
+}
+
+/// Restore latency inside the restore window: receives at external indices 0, 9, 18
+/// and 25, past the default external gap of 10 from one another's window, all lie
+/// below the fixed restore window, so the first sync finds every one.
+#[test]
+fn a_restore_inside_the_restore_window_takes_one_sync() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (_, syncs) = restore(&[0, 9, 18, 25], false);
+    assert_eq!(syncs, 1);
+}
+
+/// Past the restore window, the window grows one gap per sync: a receive at 45 grows it
+/// to 56, one at 52 to 63, and one at 60 to 71, which the fourth sync covers.
+#[test]
+fn a_restore_past_the_restore_window_takes_one_sync_per_window_step() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (_, syncs) = restore(&[0, 45, 52, 60], false);
+    assert_eq!(syncs, 4);
+}
+
+/// The restore window is for candidates only: once the account is active, its watch
+/// set follows the gap limits beyond its last used address, as before the restore.
+#[test]
+fn an_activated_account_returns_to_the_gap_limits() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut f, syncs) = restore(&[0, 9, 18, 25], true);
+    assert_eq!(syncs, 1);
+    let candidate = f.watch();
+    assert_eq!(candidate.lifecycle, AccountLifecycle::Candidate);
+    assert_eq!(
+        last_watched(&candidate, TransparentKeyScope::EXTERNAL),
+        RESTORE_EXTERNAL - 1
+    );
+    assert_eq!(last_watched(&candidate, TransparentKeyScope::INTERNAL), 24);
+
+    f.activate();
+    let active = f.watch();
+    assert_eq!(active.lifecycle, AccountLifecycle::Active);
+    // One external gap of 10 past index 25, and the internal gap of 5 with no use.
+    assert_eq!(last_watched(&active, TransparentKeyScope::EXTERNAL), 35);
+    assert_eq!(last_watched(&active, TransparentKeyScope::INTERNAL), 4);
+    assert!(
+        active
+            .addresses
+            .iter()
+            .all(|watched| !matches!(watched.origin, WatchOrigin::CandidateWindow { .. }))
+    );
 }
 
 /// A publication paying A0 in S1 and A1 in S2, both above the birthday at `H0 + 250`,
