@@ -4,6 +4,9 @@
 
 ### Added
 
+- `PreparedWork::waiting` counts positions not yet due
+  (`EnhancePirWork::Waiting`). They are not queried, and work with waiting
+  positions is incomplete, as with suspended ones.
 - Rejected-position suspensions (`EnhancePirSuspension::Rejected`) are counted
   as incomplete and are not queried, like other suspensions.
 - `PreparedWork::batches_by_tx_and_row` documents reporting a batch whose

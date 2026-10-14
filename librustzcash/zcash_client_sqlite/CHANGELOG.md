@@ -21,6 +21,15 @@ workspace.
   that queues reconfirmation opens a fresh window. Public status work is
   unchanged. A new additive migration adds `tx_status_polls`; pending work
   queued before it gets a window at the tip the migration runs at.
+- Each newly queued Ironwood Enhance position waits a delay drawn uniformly
+  from 0 to 10 minutes with the wallet's random source before its first private
+  query, and is listed as `EnhancePirWork::Waiting` until then. A rescan keeps
+  the time; completing the position or a rewind that removes it deletes it, so
+  a requeue draws a new one. A new additive migration adds
+  `ironwood_enhance_not_before`; positions queued before it are due at once.
+  `EnhancePirRead` for `WalletDb` now requires `CL: Clock`.
+- `WalletDb::set_enhance_pir_max_delay` (test dependencies only) bounds that
+  delay; the test database sets it to zero.
 - `set_transaction_status` keeps the first mined height: `Mined` at a different
   height for a transaction already mined is ignored.
 

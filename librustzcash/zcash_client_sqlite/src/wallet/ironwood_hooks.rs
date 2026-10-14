@@ -105,6 +105,21 @@ pub(crate) fn truncate_after_unmine(conn: &rusqlite::Transaction) -> Result<(), 
              WHERE t.mined_height IS NULL
          )",
     )?;
+    prune_not_before(conn)?;
+    Ok(())
+}
+
+/// Deletes the not-before time of every position no Enhance queue holds any more: its work
+/// completed, or a rewind removed it. A later requeue then draws a new time.
+pub(crate) fn prune_not_before(conn: &Connection) -> Result<(), SqliteClientError> {
+    conn.execute_batch(
+        "DELETE FROM ironwood_enhance_not_before
+         WHERE commitment_tree_position NOT IN (
+             SELECT commitment_tree_position FROM ironwood_memo_retrieval_queue
+             UNION SELECT commitment_tree_position FROM ironwood_enhance_outgoing_queue
+             UNION SELECT commitment_tree_position FROM ironwood_enhance_metadata_queue
+             WHERE commitment_tree_position IS NOT NULL)",
+    )?;
     Ok(())
 }
 

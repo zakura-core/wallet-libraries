@@ -1681,6 +1681,7 @@ mod handles {
             EnhancementMode::Standard,
             Some(Public),
             &crate::wallet::enhance_pir::session::SessionState::default(),
+            std::time::SystemTime::UNIX_EPOCH,
         )
         .unwrap();
         assert!(enhancement.contains(&TransactionEnhancementWork::Public(
@@ -1712,6 +1713,7 @@ mod handles {
             EnhancementMode::Standard,
             Some(Public),
             &crate::wallet::enhance_pir::session::SessionState::default(),
+            std::time::SystemTime::UNIX_EPOCH,
         )
         .unwrap();
         assert!(

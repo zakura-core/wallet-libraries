@@ -118,7 +118,7 @@ impl PreparedWork {
                 }
                 EnhancePirWork::Rediscover(request) => prepared.rediscover.push(request),
                 EnhancePirWork::Suspended(_) => prepared.suspended += 1,
-                EnhancePirWork::Waiting { .. } => {}
+                EnhancePirWork::Waiting { .. } => prepared.waiting += 1,
             }
         }
         prepared
@@ -155,7 +155,7 @@ impl PreparedWork {
         self.requests.values().map(Vec::len).sum()
     }
     pub fn incomplete_count(&self) -> usize {
-        self.query_count() + self.rediscover.len() + self.suspended
+        self.query_count() + self.rediscover.len() + self.suspended + self.waiting
     }
     pub fn map_record(
         &self,

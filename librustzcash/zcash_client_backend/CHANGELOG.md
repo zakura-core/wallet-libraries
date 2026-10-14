@@ -12,6 +12,9 @@ workspace.
 
 ### Added
 
+- `EnhancePirWork::Waiting { request, not_before }`: a newly queued position is
+  not queried before `not_before`. Show it as pending; it becomes `Query` once
+  due.
 - `PrivateTransactionStatusRequest::settled`, true when the wallet already holds
   a conclusive status. Send the query and record the poll, but do not apply the
   answer. `PrivateTransactionStatusRequest::with_settled` sets it.
@@ -37,6 +40,8 @@ workspace.
 - Private status work follows a schedule fixed when it is queued instead of the
   replies: `TransactionStatusRead::transaction_status_work` returns a private
   transaction at each scheduled tip, mined or not, until its poll is recorded.
+- `EnhancePirWork` has the new `Waiting` variant: exhaustive matches must
+  handle it.
 - `TransactionStatusWrite` has the new required method
   `record_private_status_poll`: implementors must provide it.
 

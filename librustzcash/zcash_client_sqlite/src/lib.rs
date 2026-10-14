@@ -2491,7 +2491,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R: Rng> Tran
 
 /// Without Orchard support, only public payload work exists: no transaction can be privately
 /// protected, and no Enhance PIR snapshot can be accepted.
-impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePirRead
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R> EnhancePirRead
     for WalletDb<C, P, CL, R>
 {
     fn transaction_enhancement_work(&self) -> Result<Vec<TransactionEnhancementWork>, Self::Error> {
@@ -2513,6 +2513,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
             mode,
             self.transparent_ledger_mode,
             &self.enhance_pir_session,
+            self.clock.now(),
         );
         #[cfg(not(feature = "orchard"))]
         return wallet::public_enhancement_work(self.conn.borrow(), self.transparent_ledger_mode);
@@ -2569,13 +2570,23 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         block: &CompactBlock,
     ) -> Result<IronwoodEnhanceDiscoveryResult, Self::Error> {
         self.transactionally(|wdb| {
-            wallet::enhance_pir::discovery::rebuild(
+            let result = wallet::enhance_pir::discovery::rebuild(
                 wdb.conn.0,
                 wdb.transparent_ledger_mode,
                 &wdb.enhance_pir_session,
                 request,
                 block,
-            )
+            )?;
+            // Rebuilt positions wait like scanned ones. Without a transaction to scope to, any
+            // queued position still lacking a time gets one here.
+            wallet::enhance_pir::arm_not_before(
+                wdb.conn.0,
+                None,
+                wdb.clock.now(),
+                wdb.enhance_pir_max_delay,
+                &mut wdb.rng,
+            )?;
+            Ok(result)
         })
     }
 
@@ -4057,6 +4068,13 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             &self.enhance_pir_session,
             tx_ref,
             tx,
+        )?;
+        wallet::enhance_pir::arm_not_before(
+            self.conn.borrow(),
+            Some(tx_ref),
+            self.clock.now(),
+            self.enhance_pir_max_delay,
+            &mut self.rng,
         )
     }
 
