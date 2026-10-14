@@ -192,3 +192,102 @@ fn a_fresh_session_draws_the_wait_again_and_keeps_it_within_the_session() {
         "the session keeps it across a rescan"
     );
 }
+
+#[test]
+fn a_fresh_session_read_snapshot_keeps_its_deadline_until_the_query_is_due() {
+    let mut st = delayed_state(7);
+    scan_notes(&mut st, 1);
+    st.wallet_mut().db_mut().enhance_pir_session = Default::default();
+    let first_read = now(&st);
+    let read = |st: &mut State| {
+        st.wallet_mut()
+            .db_mut()
+            .with_immediate_read_transaction(|db| db.transaction_enhancement_work())
+            .unwrap()
+    };
+    let work = read(&mut st);
+    let TransactionEnhancementWork::Private(EnhancePirWork::Waiting {
+        request,
+        not_before,
+    }) = work[0]
+    else {
+        panic!("a fresh session starts with waiting work");
+    };
+    assert_eq!(not_before, first_read + MAX_DELAY);
+    st.wallet()
+        .db()
+        .clock
+        .tick(MAX_DELAY - Duration::from_secs(1));
+    assert_eq!(
+        read(&mut st),
+        work,
+        "a later snapshot keeps the first deadline"
+    );
+    st.wallet().db().clock.tick(Duration::from_secs(1));
+    assert_eq!(
+        read(&mut st),
+        vec![TransactionEnhancementWork::Private(EnhancePirWork::Query(
+            request
+        ))]
+    );
+}
+
+#[test]
+fn a_failed_read_snapshot_keeps_committed_work_waiting_from_its_first_read() {
+    let mut st = delayed_state(8);
+    scan_notes(&mut st, 1);
+    st.wallet_mut().db_mut().enhance_pir_session = Default::default();
+    let result = st
+        .wallet_mut()
+        .db_mut()
+        .with_immediate_read_transaction(|db| {
+            assert!(matches!(
+                db.transaction_enhancement_work()?.as_slice(),
+                [TransactionEnhancementWork::Private(
+                    EnhancePirWork::Waiting { .. }
+                )]
+            ));
+            Err::<(), _>(SqliteClientError::AccountUnknown)
+        });
+    assert!(result.is_err());
+    st.wallet().db().clock.tick(MAX_DELAY);
+    let work = st
+        .wallet_mut()
+        .db_mut()
+        .with_immediate_read_transaction(|db| db.transaction_enhancement_work())
+        .unwrap();
+    assert!(matches!(
+        work.as_slice(),
+        [TransactionEnhancementWork::Private(EnhancePirWork::Query(
+            _
+        ))]
+    ));
+}
+
+#[test]
+fn a_rolled_back_write_does_not_publish_fresh_session_waits() {
+    let mut st = delayed_state(9);
+    scan_notes(&mut st, 1);
+    st.wallet_mut().db_mut().enhance_pir_session = Default::default();
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let result = st.wallet_mut().db_mut().transactionally(|db| {
+        db.update_chain_tip(tip)?;
+        assert_eq!(db.enhance_pir_session.waits(), 1);
+        Err::<(), _>(SqliteClientError::AccountUnknown)
+    });
+    assert!(result.is_err());
+    assert_eq!(
+        st.wallet().db().enhance_pir_session.waits(),
+        0,
+        "rolled-back deadlines stay private to their transaction"
+    );
+    let first_read = now(&st);
+    let work = st
+        .wallet_mut()
+        .db_mut()
+        .with_immediate_read_transaction(|db| db.transaction_enhancement_work())
+        .unwrap();
+    assert!(matches!(work.as_slice(),
+        [TransactionEnhancementWork::Private(EnhancePirWork::Waiting { not_before, .. })]
+            if *not_before == first_read + MAX_DELAY));
+}
