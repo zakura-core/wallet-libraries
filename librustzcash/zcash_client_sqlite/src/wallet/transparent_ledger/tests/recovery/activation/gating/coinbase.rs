@@ -134,6 +134,9 @@ fn maturity_boundary_governs_every_selector_and_final_storage() {
         assert_eq!(selection.unwrap(), vec![]);
     }
     set_policy(&mut st, PrivateRequired);
+    // A candidate again, the account watches its restore window, which a pass covers
+    // before it activates.
+    cover(&mut st, account, &fixture, vec![]);
     activate_recovered_ledger(&mut st, account).unwrap();
 
     scan_new_blocks(&mut st, 1);

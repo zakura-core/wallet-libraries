@@ -27,6 +27,10 @@
   pass at once; they continue at the next sync. A service that forges a receive
   near the end of the window can no longer tell from the wallet's next requests
   whether its directory row was the one forged.
+- A restore whose used addresses and their trailing unused-address gaps fit in
+  the wallet's restore window (with `zakura-client-sqlite`, 50 external and 25
+  internal addresses) completes in one sync instead of one sync per window step. The window is fixed in the wallet and
+  never follows replies.
 - The recovery example ends its bounded run when a pass reports lag or overload,
   leaving its saved continuation for a later invocation instead of waiting forever.
 
@@ -44,9 +48,9 @@
   and the format marker are added atomically, preserving recovery history,
   coverage, unfinished work and catalog evidence. A publication change that
   resets the store keeps the counts.
-- Depend on the transparent PIR crates from wallet-pir's `main` at `4bbcb697`
-  (`0.1.0-rc.4`, not yet on crates.io), which fails one entry rather than the sync
-  for bad row content. Previously `=0.1.0-rc.3` from crates.io.
+- Depend on the transparent PIR crates from crates.io at `=0.1.0-rc.4` (tagged
+  `transparent-v0.1.0-rc.4` in wallet-pir), which fails one entry rather than the
+  sync for bad row content. Previously `=0.1.0-rc.3`.
 - Txid lookups read the 4,096-row display tables the `/v2/txid` service now
   publishes; earlier clients refuse them. History recovery is unchanged.
 - The `testing` fake txid display publication and the txid end-to-end test use
