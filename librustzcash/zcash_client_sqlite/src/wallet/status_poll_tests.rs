@@ -666,3 +666,34 @@ fn a_private_transparent_policy_preserves_polls_with_a_public_status_handle() {
         assert!(private_work(&st, txid).is_empty());
     }
 }
+
+#[test]
+fn local_reconfirmation_then_restart_keeps_private_transcripts_equal() {
+    for service in [Service::Honest { mined: 0 }, Service::Unreadable] {
+        let (mut st, prior) = fixture();
+        let (mined_at, _) = st.generate_empty_block();
+        st.scan_cached_blocks(mined_at, 1);
+        let txid = TxId::from_bytes([22; 32]);
+        queue(&st, txid, 0);
+        serve(&mut st, mined_at, mined_at, service);
+        st.wallet_mut().db_mut().truncate_to_height(prior).unwrap();
+        // The same accepted block restores an existing historical inclusion receipt.
+        // Both wallets scan the same block, whether or not the earlier reply made a receipt.
+        st.scan_cached_blocks(mined_at, 1);
+        st.wallet_mut().update_chain_tip(prior + 15).unwrap();
+        let mut reopened = reopen(&st);
+        let mut seen = vec![];
+        for offset in 0..2 * WINDOW {
+            let tip = prior + 15 + offset;
+            reopened.update_chain_tip(tip).unwrap();
+            if !serve_db(&mut reopened, prior, tip, Service::Unreadable).is_empty() {
+                seen.push(offset);
+            }
+        }
+        assert_eq!(
+            seen,
+            (0..WINDOW).collect::<Vec<_>>(),
+            "local restoration then restart: {service:?}"
+        );
+    }
+}
