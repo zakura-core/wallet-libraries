@@ -91,7 +91,8 @@ fn observations_are_monotonic_and_a_seen_deposit_sticks() {
 }
 
 /// Conflicting observations requested in the same second leave the same row whichever
-/// arrives last: an expected receipt is never replaced by no receipt or a smaller amount,
+/// arrives last: an expected receipt, even of an unreported amount, is never replaced by
+/// no receipt or a smaller amount,
 /// nor an inconclusive end by no receipt, so a stale answer cannot settle the key before
 /// its receipt arrives.
 #[test]
@@ -112,6 +113,11 @@ fn equal_time_observations_never_lower_the_expected_receipt() {
             expect(70_000),
             expect(50_000),
             (100, 2, Some(70_000), false),
+        ),
+        (
+            Terminal(Positive(None)),
+            Terminal(NoReceipt),
+            (100, 2, None, false),
         ),
         (
             Terminal(Unknown),
