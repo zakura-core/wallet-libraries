@@ -683,7 +683,9 @@ enum ValueSelection {
     LargestFirst,
     /// Return up to `limit` notes in ascending value order from the specified lock tier.
     /// Ironwood one-time-key notes come first but take at most half of `limit`, so ordinary
-    /// notes stay available for the slots where the input selector rejects them.
+    /// notes stay available for the slots where the input selector rejects them. Other notes
+    /// take at most the other half, the selector's slot count (it asks Ironwood for twice its
+    /// slots), so a wallet without one-time keys walks no further than for its slots.
     SmallestFirst { lock_tier: i64, limit: usize },
 }
 
@@ -961,7 +963,7 @@ where
     let mut result = vec![];
     let mut selected_value = Zatoshis::ZERO;
     #[cfg(feature = "orchard")]
-    let (mut later_one_time, mut one_time_count) = (vec![], 0);
+    let (mut later_one_time, mut one_time_count, mut other_count) = (vec![], 0, 0);
     for result_maybe_note in notes {
         let Some((
             note,
@@ -1005,12 +1007,20 @@ where
             }
             #[cfg(feature = "orchard")]
             if let ValueSelection::SmallestFirst { limit, .. } = selection
-                && note.one_time_key_id().is_some()
+                && protocol == ShieldedPool::Ironwood
             {
-                if one_time_count >= limit / 2 {
-                    continue;
+                if note.one_time_key_id().is_some() {
+                    if one_time_count >= limit / 2 {
+                        continue;
+                    }
+                    one_time_count += 1;
+                } else {
+                    // Other notes sort after every one-time-key note.
+                    if other_count >= limit - limit / 2 {
+                        break;
+                    }
+                    other_count += 1;
                 }
-                one_time_count += 1;
             }
             result.push(SpendableNoteCandidate {
                 note,

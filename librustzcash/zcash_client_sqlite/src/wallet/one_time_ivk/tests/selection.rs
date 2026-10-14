@@ -3,6 +3,7 @@ use std::{convert::Infallible, num::NonZeroUsize};
 use zcash_client_backend::{
     data_api::{
         InputSource as _, OutputLockStore as _,
+        testing::FakeCompactOutput,
         wallet::{
             ConfirmationsPolicy, TargetHeight,
             input_selection::{
@@ -405,6 +406,59 @@ fn funding_without_one_time_state_stops_at_the_covering_note() {
         with_state >= without_state + 20,
         "{without_state} steps without one-time state, {with_state} with it"
     );
+}
+
+/// The input selector asks for twice its spare Ironwood slots (see
+/// `select_spendable_notes_for_consolidation`), but a wallet without one-time keys gets only
+/// as many ordinary candidates as the slots, the smallest ones, and stops there rather than
+/// reconstructing notes short of their confirmations.
+#[test]
+fn ordinary_consolidation_candidates_stay_within_the_spare_slots() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let (first, _) = st.generate_empty_block();
+    let small: Vec<u64> = (0..6).map(|i| 20_000 + 1_000 * i).collect();
+    for value in [5_000_000].iter().chain(&small) {
+        let fvk = IronwoodFvk(parent(&st));
+        let value = Zatoshis::const_from_u64(*value);
+        st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+    }
+    for _ in 0..10 {
+        st.generate_empty_block();
+    }
+    // Past the anchor but short of the default policy's confirmations.
+    let fvk = IronwoodFvk(parent(&st));
+    let value = Zatoshis::const_from_u64(100_000);
+    let unconfirmed = FakeCompactOutput::new(fvk, AddressType::DefaultExternal, value);
+    st.generate_next_block_multi(&vec![unconfirmed; 30]);
+    for _ in 0..2 {
+        st.generate_empty_block();
+    }
+    let tip = st.generate_empty_block().0;
+    let blocks = u32::from(tip) - u32::from(first) + 1;
+    st.scan_cached_blocks_with_one_time_ivks(first, blocks as usize);
+    // Reconstructing an unconfirmed note now fails, so selection must not reach them.
+    let sql = "UPDATE ironwood_received_notes SET rho = ?1 WHERE value = 100000";
+    exec(st.wallet().conn(), sql, [[0xff; 32]]);
+
+    let (_, additional) = st
+        .wallet()
+        .db()
+        .select_spendable_notes_for_consolidation(
+            account,
+            Zatoshis::const_from_u64(1_000_000),
+            ShieldedPool::Ironwood,
+            TargetHeight::from(tip + 1),
+            ConfirmationsPolicy::default(),
+            &[],
+            LockFilter::Policy(&LockedInputPolicy::Exclude),
+            8,
+        )
+        .unwrap()
+        .into_parts();
+    let values = additional.ironwood().iter();
+    let values: Vec<u64> = values.map(|n| n.note().value().inner()).collect();
+    assert_eq!(values, small[..4]);
 }
 
 /// Swapping a smaller one-time-key note into funding can leave less change to split, so the
