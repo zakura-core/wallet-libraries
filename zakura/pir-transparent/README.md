@@ -338,8 +338,10 @@ reported either condition. `Retry::After` gives the caller the delay before
 scheduling the next sync, which reads the fresh watch set and resumes from the
 companion. While the account is a candidate, the wallet's watch set holds a
 fixed restore window of 50 external and 25 internal addresses, so a restore
-whose used addresses lie inside it completes in one sync. Past it, a restore
-takes one sync per step of the address window.
+whose used addresses and their trailing unused-address gaps fit inside it
+completes in one sync. With the default gaps, that means used external indices
+up to 39 and internal indices up to 19. Activity near the edge or beyond it
+requires later syncs to cover the expanded address range.
 A pass with failed entries is `Retry::Stalled` even when its publication lags
 or the service refused for capacity, so a failed entry is asked again only at
 the next sync.

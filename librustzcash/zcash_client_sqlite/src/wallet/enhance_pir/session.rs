@@ -24,7 +24,7 @@ struct State {
     /// Content failures per request.
     counts: BTreeMap<EnhancePirRequest, u32>,
     /// The time before which each queued position is not queried, per commitment tree position
-    /// (`docs/pir-remaining-leaks-plan.md`, change D).
+    /// Kept stable across reads until the queued work completes or is rewound.
     not_before: BTreeMap<u64, SystemTime>,
 }
 
@@ -68,6 +68,9 @@ impl Change {
 pub(crate) struct SessionState {
     pub(crate) session: EnhancePirSession,
     pending: Option<Arc<Mutex<Vec<Change>>>>,
+    /// Read-only SQL snapshots see committed queues, so their first-read deadlines
+    /// survive the snapshot without publishing its other journaled changes.
+    persist_read_waits: bool,
 }
 
 impl SessionState {
@@ -75,6 +78,7 @@ impl SessionState {
         Self {
             session,
             pending: None,
+            persist_read_waits: false,
         }
     }
 
@@ -82,7 +86,16 @@ impl SessionState {
         Self {
             session: self.session.clone(),
             pending: Some(Arc::new(Mutex::new(Vec::new()))),
+            persist_read_waits: false,
         }
+    }
+
+    /// A read-only snapshot may retain fallback deadlines for committed queued work.
+    /// Count changes and pruning still stay in its discarded transaction journal.
+    pub(crate) fn read_transaction(&self) -> Self {
+        let mut view = self.transaction();
+        view.persist_read_waits = true;
+        view
     }
 
     pub(crate) fn has_transaction_journal(&self) -> bool {
@@ -139,16 +152,15 @@ impl SessionState {
         self.state().not_before.len()
     }
 
-    /// The time before which `position` is not queried, if this session has one.
-    pub(crate) fn not_before(&self, position: u64) -> Option<SystemTime> {
-        self.state().not_before.get(&position).copied()
+    /// Snapshots the queued positions' deadlines once for batch scheduling.
+    pub(crate) fn deadlines(&self) -> BTreeMap<u64, SystemTime> {
+        self.state().not_before
     }
 
-    /// Sets the time before which `position` is not queried, unless it already has one.
+    /// Stages a deadline. Applying it keeps any existing deadline, including an earlier
+    /// change in the same transaction; callers need no per-position state clone.
     pub(crate) fn set_not_before(&self, position: u64, time: SystemTime) {
-        if self.not_before(position).is_none() {
-            self.change(Change::NotBefore(position, time));
-        }
+        self.change(Change::NotBefore(position, time));
     }
 
     /// Forgets the wait of every position not in `live`: its work completed, or a rewind
@@ -197,13 +209,15 @@ impl SessionState {
 
     /// Suspends requests at the content-failure limit. With `waits`, also lists each query
     /// whose position is not yet due at `now` as waiting. A position this session has no time
-    /// for waits the longest delay from `now`: wallet writes draw the times, and a read cannot.
+    /// for waits the longest delay from its first read: wallet writes draw the times, and a
+    /// read cannot. Read-only SQL snapshots retain that first deadline in the shared session;
+    /// reads of tentative work in write transactions keep it staged until commit.
     pub(crate) fn filter(
         &self,
         mut work: Vec<TransactionEnhancementWork>,
         waits: Option<(SystemTime, std::time::Duration)>,
     ) -> Vec<TransactionEnhancementWork> {
-        let counts = self.counts();
+        let mut state = self.state();
         for item in &mut work {
             if let TransactionEnhancementWork::Private(EnhancePirWork::Query(request)) = *item
                 && counts
@@ -219,8 +233,17 @@ impl SessionState {
             for item in &mut work {
                 if let TransactionEnhancementWork::Private(EnhancePirWork::Query(request)) = *item {
                     let position = u64::from(request.position());
-                    self.set_not_before(position, now + max_delay);
-                    let not_before = self.not_before(position).expect("set above");
+                    let not_before = *state.not_before.entry(position).or_insert_with(|| {
+                        let deadline = now + max_delay;
+                        if self.persist_read_waits {
+                            let mut shared =
+                                self.session.0.lock().unwrap_or_else(|e| e.into_inner());
+                            *shared.not_before.entry(position).or_insert(deadline)
+                        } else {
+                            self.set_not_before(position, deadline);
+                            deadline
+                        }
+                    });
                     if not_before > now {
                         *item = TransactionEnhancementWork::Private(EnhancePirWork::Waiting {
                             request,

@@ -812,7 +812,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
                 clock: &self.clock,
                 rng: &mut self.rng,
                 #[cfg(feature = "orchard")]
-                enhance_pir_session: self.enhance_pir_session.transaction(),
+                enhance_pir_session: self.enhance_pir_session.read_transaction(),
                 #[cfg(feature = "orchard")]
                 enhance_pir_max_delay: self.enhance_pir_max_delay,
                 anchor_retention_interval: self.anchor_retention_interval,

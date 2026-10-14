@@ -14,7 +14,7 @@ pub(super) const WINDOW_SCOPES: [TransparentKeyScope; 3] = [
 
 /// The fixed restore window, per window scope: while an account is a candidate, it watches
 /// every derivable index below this end, whatever replies have shown. A restore whose used
-/// addresses lie within it completes in one pass. It is fixed in code and never follows
+/// addresses and their trailing gaps lie within it completes in one pass. It is fixed in code and never follows
 /// reply content; ephemeral addresses keep their gap limit.
 #[cfg(feature = "transparent-inputs")]
 pub(super) const RESTORE_WINDOW: [u32; 3] = [50, 25, 0];

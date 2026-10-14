@@ -218,7 +218,10 @@ the gap limit took one sync per window step: receives at external indices 0, 9,
 While an account is a candidate, `AccountRecoveryAddresses::load`
 (`zcash_client_sqlite/src/wallet/transparent_ledger/recovery/recovery_addresses.rs`)
 now watches a fixed restore window: every external index below 50 and internal
-index below 25. Ephemeral addresses keep their gap limit.
+index below 25. Ephemeral addresses keep their gap limit. A one-sync restore
+requires both used addresses and their trailing gaps to fit in that range.
+With the default gaps, the highest used external index can be 39 and the highest
+used internal index 19; activity nearer the edge grows the next sync's range.
 
 - The window is a constant in code. No reply, setting or migration changes it.
 - The gap-limit window is kept apart from it. Window growth, the stored

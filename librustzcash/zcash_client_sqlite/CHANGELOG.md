@@ -20,15 +20,18 @@ workspace.
   rewind that removes it forgets it, so a requeue draws a new one. A fresh
   session draws each queued position's wait again at its first wallet write
   (`update_chain_tip` among them); a position it reads before any write waits
-  the full 2 minutes. `EnhancePirRead` for `WalletDb` now requires `CL: Clock`.
+  the full 2 minutes from its first read. Read-only snapshots retain that deadline;
+  rolled-back writes do not publish tentative deadlines. Batch work reads and
+  scheduling snapshot session state once, rather than cloning it per position.
+  `EnhancePirRead` for `WalletDb` now requires `CL: Clock`.
 - `WalletDb::set_enhance_pir_max_delay` (test dependencies only) bounds that
   delay; the test database sets it to zero.
 
 - While an account's transparent recovery is a candidate, its watch set holds a
   fixed restore window: every external index below 50 and internal index below 25,
   past the gap limits. Ephemeral addresses keep their gap limit. The window is
-  fixed in code and does not follow replies, so a restore whose used addresses lie
-  inside it completes in one pass. Activation makes only the gap-limit window the
+  fixed in code and does not follow replies, so a restore whose used addresses
+  and their trailing address gaps lie inside it completes in one pass. Activation makes only the gap-limit window the
   wallet's own, so an active account's watch set follows the gap limits as before.
   An account that becomes a candidate again, as after a public policy round trip,
   watches the restore window again and needs a pass covering it before it

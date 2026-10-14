@@ -1013,8 +1013,9 @@ pub(crate) fn arm_not_before<R: rand::Rng + ?Sized>(
     rng: &mut R,
 ) -> Result<(), SqliteClientError> {
     use rand::RngExt;
+    let deadlines = session.deadlines();
     for position in queued_positions(conn, tx_ref)? {
-        if session.not_before(position).is_none() {
+        if !deadlines.contains_key(&position) {
             let delay = rng.random_range(0..=max_delay.as_secs());
             session.set_not_before(position, now + std::time::Duration::from_secs(delay));
         }
