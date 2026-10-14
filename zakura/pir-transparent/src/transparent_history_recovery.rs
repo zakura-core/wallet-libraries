@@ -251,7 +251,8 @@ impl TransparentHistoryRecovery {
                 Progress {
                     covered_through: 0,
                     outcome: Outcome::Stalled,
-                },
+                }
+                .with_publication_wait(sync_target.clamped),
                 FailedEntries::default(),
             ),
         };
