@@ -19,12 +19,17 @@
 //! `ONE_TIME_IVK_FUZZ_PROFILE` biases the worlds: `reorg` always reorgs, `devices` always
 //! has a second device and a restore. Its name joins the scenario ID.
 //!
-//! Left out, because the harness cannot express them faithfully: device clock skew on a
-//! wallet that quotes alongside another device or sweeps another device's keys (the
-//! harness dates NEAR's feed by each device's clock, where the real directory dates it by
-//! its own), payouts reorged out for good (fake outputs have no transaction to expire),
-//! statuses requested before an earlier response arrived (the harness records statuses
-//! at the device's current time), and app restarts during a sweep.
+//! Left out, because the harness or an oracle cannot express them faithfully: device
+//! clock skew on a wallet that quotes alongside another device or sweeps another device's
+//! keys (the harness dates NEAR's feed by each device's clock, where the real directory
+//! dates it by its own); payouts reorged out for good (fake outputs have no transaction
+//! to expire); statuses requested before an earlier response arrived (the harness
+//! records statuses at the device's current time); app restarts during a sweep and
+//! failures of one directory endpoint mid-lookup (the model covers only failures of a
+//! whole sweep run); refund swaps on the second device (both devices would spend the
+//! seed's shared notes); payers other than NEAR's zero OVK, and payouts seen in the
+//! mempool; and the balance of a restore with a later birthday, which does not see the
+//! funds and spends below it (its payments are still judged).
 
 use std::collections::BTreeMap;
 
