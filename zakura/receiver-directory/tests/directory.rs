@@ -15,7 +15,7 @@ fn public_refund_requires_authenticated_recovery() {
     // Recovery must yield exactly the independently decoded receiver, which the
     // fixture also carries for the probe.
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/zero-ovk-action.json")).unwrap();
+        serde_json::from_str(include_str!("../src/test-fixtures/zero-ovk-action.json")).unwrap();
     assert_eq!(fixture["receiver"], RECEIVER_HEX);
     let recovered = action().recover_receiver().unwrap().unwrap();
     assert_eq!(

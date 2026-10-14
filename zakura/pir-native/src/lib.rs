@@ -75,9 +75,12 @@ pub mod test_server {
             &self.public
         }
         pub fn answer(&self, payload: &[u8]) -> Vec<u8> {
-            let (keys, query) =
-                profile::parse_selection(&self.setup, payload, self.db[0].len(), self.db[0].len())
-                    .unwrap();
+            let (rows, bits) = (D..=self.db[0].len())
+                .step_by(D)
+                .flat_map(|rows| [QUERY_BITS, DITHERED_QUERY_BITS].map(|bits| (rows, bits)))
+                .find(|&(rows, bits)| payload.len() == request_len_bits(rows, bits))
+                .expect("a full or whole-block prefix selection at a supported width");
+            let (keys, query) = profile::parse_bits(&self.setup, payload, rows, bits).unwrap();
             let scan: Vec<u64> = self
                 .db
                 .iter()
