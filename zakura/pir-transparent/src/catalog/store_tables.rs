@@ -14,8 +14,9 @@ use crate::error::{RecoveryError, failure};
 // version under `schema_version`, and that `last_commit` reads only the highest
 // commit id, before accepting another store schema.
 //
-// Schema 7 is a fresh format with saved run fragments and per-entry content failures: the
-// store refuses a file at any other version. A companion's file name commits to the shard
+// Schema 7 holds saved run fragments and per-entry content failures. The store upgrades
+// schema 6 in place, preserving its history and catalog, and refuses other versions.
+// A companion's file name commits to the shard
 // schema (see `companion`), so a schema-v12 companion never opens a file a schema-v11
 // build wrote.
 const _: () = assert!(transparent_wallet_store::SCHEMA_VERSION == 7);

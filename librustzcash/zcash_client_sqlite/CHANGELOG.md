@@ -20,7 +20,7 @@ workspace.
   requires `R: rand_core::Rng`.
 - Without public authority, the third content failure at one mined height
   gives a receipt lookup up: it is neither due nor parked, and the receipt
-  reads as unavailable. Request failures (`Unavailable`) do not count; mining
+  reads as `TransparentDisplayView::GaveUp`. Request failures (`Unavailable`) do not count; mining
   the transaction at another height re-arms it. Under public authority nothing
   counts, and work given up earlier is listed again. A new additive migration
   adds `transparent_detail_work.content_failures`.
