@@ -139,6 +139,14 @@ impl TestCache for TimedCache {
     fn insert(&mut self, cb: &CompactBlock) -> Self::InsertResult {
         let mut cb = cb.clone();
         cb.time = u32::try_from(block_time(cb.height())).expect("block times fit u32");
+        // A fake block has no coinbase. Number its transactions as if it had one, as the
+        // directory's records do, so a wallet that stores a transaction from scanning
+        // agrees with the directory on its index.
+        if cb.vtx.first().is_some_and(|tx| tx.index == 0) {
+            for tx in &mut cb.vtx {
+                tx.index += 1;
+            }
+        }
         let txids = cb.vtx.iter().map(|tx| tx.txid()).collect();
         self.0.0.write().unwrap().insert(u32::from(cb.height()), cb);
         Inserted(txids)
@@ -569,8 +577,8 @@ impl Chain {
                     height: u32::from(height),
                     block_hash: block.hash().0,
                     txid: *txid.as_ref(),
-                    // The fake block has no coinbase; the directory reads index 0 as one.
-                    tx_index: u32::try_from(tx.index).expect("small index") + 1,
+                    // The cache numbers transactions after a coinbase (see `TimedCache`).
+                    tx_index: u32::try_from(tx.index).expect("small index"),
                     action_index,
                     position,
                     action_nullifier: compact
