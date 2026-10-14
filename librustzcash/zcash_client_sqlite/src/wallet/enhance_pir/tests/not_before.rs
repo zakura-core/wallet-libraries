@@ -13,7 +13,7 @@ const MAX_DELAY: Duration = Duration::from_secs(75);
 fn delayed_state(seed: u64) -> State {
     let mut st = state_with_factory(TestDbFactory::default());
     let db = st.wallet_mut().db_mut();
-    db.set_enhance_pir_max_delay(MAX_DELAY);
+    db.set_enhance_pir_max_delay(MAX_NOT_BEFORE_DELAY);
     db.set_enhancement_mode(EnhancementMode::PrivateIronwood);
     db.rng = TestRng::seed_from_u64(seed);
     st
