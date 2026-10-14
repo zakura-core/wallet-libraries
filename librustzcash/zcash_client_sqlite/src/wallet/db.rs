@@ -2032,7 +2032,8 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_SWEEPS: &str = "CREATE TABLE ironwood_o
                 lookup_hash BLOB CHECK (length(lookup_hash) = 32),
                 attempts INTEGER NOT NULL DEFAULT 0,
                 next_attempt_at INTEGER NOT NULL DEFAULT 0,
-                done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295)
+                done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295),
+                content_failures INTEGER NOT NULL DEFAULT 0 CHECK (content_failures >= 0)
             )";
 
 /// Accounts whose seed has no one-time key history to restore (see

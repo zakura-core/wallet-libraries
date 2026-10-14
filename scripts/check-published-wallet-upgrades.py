@@ -31,7 +31,7 @@ UNCONDITIONAL_MIGRATIONS = {
     "ironwood_unsupported_memo_retry": "3d1c7a52-8e0b-4f6d-9a47-5be2c0f19e84",
     "ironwood_transparent_output_shape": "8f4c3210-04e1-49eb-9de2-d713ee0a8426",
     "transparent_txid_enhancement": "73d751a3-dbdc-461a-9154-e061903aae4f",
-    "one_time_ivk": "1533018f-b6c7-4910-825b-21652c79e272",
+    "one_time_ivk": "57756102-9583-4af5-b411-5eead49fc9f0",
 }
 # Tables the one_time_ivk migration creates, which an upgrade must leave empty.
 ONE_TIME_IVK_TABLES = (
