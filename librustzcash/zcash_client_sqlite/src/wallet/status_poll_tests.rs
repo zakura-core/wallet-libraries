@@ -520,3 +520,110 @@ fn a_rolled_back_rewind_keeps_the_previous_private_poll_window() {
     st.wallet_mut().update_chain_tip(prior + 1).unwrap();
     assert_eq!(private_work(&st, txid).len(), 1);
 }
+
+#[test]
+fn a_restart_without_a_construction_height_polls_settled_and_unsettled_work_alike() {
+    for service in [
+        Service::Honest { mined: 2 },
+        Service::NotFound,
+        Service::Unreadable,
+        Service::CoverageIncomplete,
+    ] {
+        let (mut st, h) = fixture();
+        let txid = TxId::from_bytes([18; 32]);
+        queue(&st, txid, u32::from(h) + EXPIRY_DELTA);
+        st.wallet()
+            .conn()
+            .execute(
+                "UPDATE transactions SET target_height = NULL WHERE txid = ?1",
+                [txid.as_ref()],
+            )
+            .unwrap();
+        for offset in 0..=45 {
+            let tip = h + offset;
+            st.wallet_mut().update_chain_tip(tip).unwrap();
+            serve(&mut st, h, tip, service);
+        }
+        let mut reopened = reopen(&st);
+        let mut seen = vec![];
+        for offset in 0..2 * WINDOW {
+            let tip = h + 45 + offset;
+            reopened.update_chain_tip(tip).unwrap();
+            if !serve_db(&mut reopened, h, tip, service).is_empty() {
+                seen.push(offset);
+            }
+        }
+        assert_eq!(
+            seen,
+            (0..WINDOW).collect::<Vec<_>>(),
+            "fresh unanchored window: {service:?}"
+        );
+    }
+}
+
+#[test]
+fn a_rewind_after_the_original_window_polls_every_private_outcome_alike() {
+    for service in [
+        Service::Honest { mined: 2 },
+        Service::Unreadable,
+        Service::NotFound,
+    ] {
+        let (mut st, h) = fixture();
+        let txid = TxId::from_bytes([19; 32]);
+        queue(&st, txid, 0);
+        for offset in 0..2 * WINDOW {
+            let tip = h + offset;
+            st.wallet_mut().update_chain_tip(tip).unwrap();
+            serve(&mut st, h, tip, service);
+        }
+        st.wallet_mut().db_mut().truncate_to_height(h).unwrap();
+        let mut seen = vec![];
+        for offset in 0..2 * WINDOW {
+            let tip = h + offset;
+            st.wallet_mut().update_chain_tip(tip).unwrap();
+            if !serve(&mut st, h, tip, Service::Unreadable).is_empty() {
+                seen.push(offset);
+            }
+        }
+        assert_eq!(
+            seen,
+            (0..WINDOW).collect::<Vec<_>>(),
+            "after rewind: {service:?}"
+        );
+    }
+}
+
+#[test]
+fn a_restart_after_reconfirmation_polls_every_private_outcome_alike() {
+    for service in [
+        Service::Honest { mined: 2 },
+        Service::Unreadable,
+        Service::NotFound,
+    ] {
+        let (mut st, prior) = fixture();
+        let txid = TxId::from_bytes([20; 32]);
+        queue(&st, txid, 0);
+        st.wallet_mut().update_chain_tip(prior + 1).unwrap();
+        serve(&mut st, prior, prior + 1, Service::Forging { at: 1 });
+        st.wallet_mut().db_mut().truncate_to_height(prior).unwrap();
+        for offset in 0..=15 {
+            let tip = prior + offset;
+            st.wallet_mut().update_chain_tip(tip).unwrap();
+            serve(&mut st, prior, tip, service);
+        }
+        let mut reopened = reopen(&st);
+        let mut seen = vec![];
+        for offset in 0..2 * WINDOW {
+            let tip = prior + 15 + offset;
+            reopened.update_chain_tip(tip).unwrap();
+            if !serve_db(&mut reopened, prior, tip, service).is_empty() {
+                seen.push(offset);
+            }
+        }
+        assert_eq!(
+            seen,
+            (0..WINDOW).collect::<Vec<_>>(),
+            "after reconfirmation restart: {service:?}"
+        );
+    }
+}
