@@ -12,18 +12,18 @@ python3 scripts/dev.py test --config one-time-ivk-scenarios
 ```
 
 That runs the default set. To run everything, including the cases that wait months
-of chain time, set `ONE_TIME_IVK_SLOW=1`. To pick cases by name, pass a filter to the
-`scenarios` target (flags after `--` reach only that target with `--test scenarios`):
+of chain time, set `ONE_TIME_IVK_SLOW=1`. To pick cases, pass a scenario ID substring
+(or a whole ID with `--exact`). `dev.py` lists the matching IDs before running them,
+and a filter that names a slow scenario runs it:
 
 ```sh
 ONE_TIME_IVK_SLOW=1 python3 scripts/dev.py test --config one-time-ivk-scenarios
-cargo test --profile test -p zakura-one-time-ivk-scenarios --test scenarios -- E2-restore
-cargo test --profile test -p zakura-one-time-ivk-scenarios --test scenarios -- --list
+python3 scripts/dev.py test --config one-time-ivk-scenarios E2-restore
 ```
 
-Other options: `--report <dir>` (or `ONE_TIME_IVK_REPORT_DIR`), `--jobs <n>` and
-`--exact`. A run writes `report.json` and `report.md` (short enough to paste into a
-PR). It exits nonzero if any scenario fails or a filter selects none.
+A run writes `report.json` and `report.md` (short enough to paste into a PR) to
+`ONE_TIME_IVK_REPORT_DIR`, or under Cargo's test temp directory by default. It exits
+nonzero if any scenario fails or a filter selects none.
 
 CI doesn't run the suite on PRs, since it takes about 45 minutes on a hosted runner.
 The **One-time IVK scenarios** workflow runs everything, slow scenarios included,
