@@ -55,6 +55,7 @@ fn accept(conn: &mut Connection, hash: [u8; 32]) {
         #[cfg(feature = "transparent-inputs")]
         &GapLimits::default(),
         &[(BlockHeight::from_u32(100), BlockHash(hash))],
+        false,
     )
     .unwrap();
     tx.commit().unwrap();
@@ -114,6 +115,7 @@ fn receipt_survives_reopen_and_restores_index_without_network_or_payload_complet
         #[cfg(feature = "transparent-inputs")]
         &GapLimits::default(),
         &[],
+        false,
     )
     .unwrap();
     tx.commit().unwrap();
@@ -331,6 +333,7 @@ fn capture_and_reconciliation_failure_roll_back_receipts_metadata_and_flags() {
                 #[cfg(feature = "transparent-inputs")]
                 &GapLimits::default(),
                 &[(BlockHeight::from_u32(100), BlockHash([7; 32]))]
+                false,
             )
             .is_err()
         );

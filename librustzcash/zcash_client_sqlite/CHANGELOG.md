@@ -24,6 +24,7 @@ workspace.
   reads the work. A conclusive negative reply keeps its private scheduling
   obligation, including after expiry and reopening. Each committed rewind resets
   private polling for every queued transaction, regardless of earlier replies.
+  Local historical inclusion restoration also retains private scheduling.
   Reopening unanchored or rewound work also polls settled transactions; rolled-back writes
   leave session polling unchanged. Public status work is unchanged.
 - The tips already polled, and windows that no column fixes, are kept in memory

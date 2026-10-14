@@ -125,6 +125,7 @@ pub(crate) fn reconcile_scanned_blocks<P: consensus::Parameters>(
     params: &P,
     #[cfg(feature = "transparent-inputs")] gap_limits: &GapLimits,
     scanned_blocks: &[(BlockHeight, BlockHash)],
+    retain_private_window: bool,
 ) -> Result<(), SqliteClientError> {
     for &(height, hash) in scanned_blocks {
         let receipts = conn
@@ -146,7 +147,7 @@ pub(crate) fn reconcile_scanned_blocks<P: consensus::Parameters>(
         for (txid, previous_hash, tx_index, already_mined) in receipts {
             if already_mined {
                 // A newer payload or shielded scan already established inclusion. Never overwrite it.
-                complete_observation(conn, txid, false)?;
+                complete_observation(conn, txid, retain_private_window)?;
             } else if previous_hash.as_slice() == hash.0 {
                 super::record_mined_transaction(
                     conn,
@@ -160,7 +161,7 @@ pub(crate) fn reconcile_scanned_blocks<P: consensus::Parameters>(
                     "UPDATE transactions SET tx_index = :index WHERE txid = :txid",
                     named_params![":index": tx_index, ":txid": txid.as_ref()],
                 )?;
-                complete_observation(conn, txid, false)?;
+                complete_observation(conn, txid, retain_private_window)?;
             } else {
                 conn.execute(
                     "UPDATE tx_reconfirmation_receipts SET replacement_observed = 1

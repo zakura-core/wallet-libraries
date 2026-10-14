@@ -3524,6 +3524,11 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             #[cfg(feature = "transparent-inputs")]
             &self.gap_limits,
             &scanned_block_identities,
+            wallet::status_polls::uses_private_mode(
+                self.conn.0,
+                self.status_mode,
+                self.transparent_ledger_mode,
+            )?,
         )
     }
 
