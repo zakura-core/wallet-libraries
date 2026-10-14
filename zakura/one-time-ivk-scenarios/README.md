@@ -25,8 +25,12 @@ Other options: `--report <dir>` (or `ONE_TIME_IVK_REPORT_DIR`), `--jobs <n>` and
 `--exact`. A run writes `report.json` and `report.md` (short enough to paste into a
 PR). It exits nonzero if any scenario fails.
 
-When the library changes, run the suite again at the new revision. The report is
-stamped with the wallet-libraries commit and the wallet-pir revision it ran against.
+CI doesn't run the suite on PRs, since it takes about 45 minutes on a hosted runner.
+The **One-time IVK scenarios** workflow runs everything, slow scenarios included,
+nightly on `main` and on demand for any branch from the Actions tab, and keeps the
+report as a run artifact. When a PR changes one-time IVK behavior, run the suite
+locally or dispatch the workflow on its branch. The report is stamped with the
+wallet-libraries commit and the wallet-pir revision it ran against.
 
 ## What is real and what is simulated
 

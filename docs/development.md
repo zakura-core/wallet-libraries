@@ -29,7 +29,7 @@ python3 scripts/dev.py verify
 | `transparent-pir-sqlite` | Transparent PIR adapter; `sqlite` (`wallet` plus the SQLite apply-and-acknowledge integration and the in-process end-to-end tests) |
 | `transparent-pir-testing` | Transparent PIR adapter; `sqlite` and `testing` (the test support applications build their recovery and txid display tests on) |
 | `pir-receiver` | Receiver PIR; `wallet` (which enables the backend's `orchard`; its tests use SQLite with `orchard`) |
-| `one-time-ivk-scenarios` | One-time IVK scenario suite (see its README); `ONE_TIME_IVK_SLOW=1` adds the scenarios that wait months of chain time |
+| `one-time-ivk-scenarios` | One-time IVK scenario suite (see its README); `ONE_TIME_IVK_SLOW=1` adds the scenarios that wait months of chain time. CI runs it nightly, not on PRs |
 
 `default` builds the backend and SQLite crates without Orchard or transparent
 inputs, which `orchard` and `transparent` test, so items used only under those
@@ -98,8 +98,10 @@ Source packages without `.proto` files keep using checked-in bindings.
 ## CI and completion
 
 CI runs existing configurations independently, retains doctests and repository
-checks, and publishes a final `tests` result. Documentation/guidance-only PRs
-run lightweight checks. Unknown file types conservatively trigger full checks.
+checks, and publishes a final `tests` result. The exception is
+`one-time-ivk-scenarios`, which takes about 45 minutes on a hosted runner, so the
+**One-time IVK scenarios** workflow runs it nightly and on demand instead of on
+PRs. Documentation/guidance-only PRs run lightweight checks. Unknown file types conservatively trigger full checks.
 Older revisions of the same PR cancel; main runs remain independent. Compiler
 and configuration specific caches accelerate compilation without retaining the
 fresh external-consumer lockfiles.
