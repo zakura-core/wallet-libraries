@@ -220,7 +220,8 @@ impl SessionState {
         let mut state = self.state();
         for item in &mut work {
             if let TransactionEnhancementWork::Private(EnhancePirWork::Query(request)) = *item
-                && counts
+                && state
+                    .counts
                     .get(&request)
                     .is_some_and(|count| *count >= MAX_REJECTIONS)
             {
