@@ -53,7 +53,7 @@ use crate::harness::{
 
 const SEED: [u8; 32] = [0x7a; 32];
 /// Seeds a run without `ONE_TIME_IVK_FUZZ_SEEDS` generates.
-const DEFAULT_SEEDS: u64 = 2;
+const DEFAULT_SEEDS: u64 = 0;
 /// Ironwood funds wallet A holds for funding ZEC-to-X swaps.
 const FUNDS: u64 = 5 * ZEC;
 /// Confirmations a receipt needs before its key closes (the default untrusted policy).

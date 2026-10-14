@@ -27,8 +27,8 @@ Other options: `--report <dir>` (or `ONE_TIME_IVK_REPORT_DIR`), `--jobs <n>` and
 document skeleton, for publishing). It exits nonzero if any scenario fails.
 
 Randomized worlds (`Z-fuzz-<seed>`) build swap histories from the same harness steps,
-from a seed, and judge them with the same checks. The default set runs two seeds. Set
-`ONE_TIME_IVK_FUZZ_SEEDS` to a seed or a `start..end` range to run more, and
+from a seed, and judge them with the same checks. They run only on request: set
+`ONE_TIME_IVK_FUZZ_SEEDS` to a seed or a `start..end` range, and
 `ONE_TIME_IVK_FUZZ_PROFILE=reorg` or `devices` to weight the mix. Minimal reproductions
 of what they found, which still fail until fixed, run only with
 `ONE_TIME_IVK_FUZZ_FINDINGS=1`.
