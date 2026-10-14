@@ -7,6 +7,17 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- Newly queued Ironwood Enhance positions no longer wait a random time before
+  their first private query. The shared session still tracks content failures.
+  `EnhancePirRead` for `WalletDb` no longer requires `CL: Clock`.
+
+### Removed
+
+- `WalletDb::set_enhance_pir_max_delay` and the session's in-memory query deadlines.
+  No database migration is required.
+
 ## [0.1.0-rc9] - 2026-10-14
 
 ### Added

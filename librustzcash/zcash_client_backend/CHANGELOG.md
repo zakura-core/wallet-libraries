@@ -7,6 +7,12 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Removed
+
+- `EnhancePirWork::Waiting`: newly queued private payload work is eligible through
+  the ordinary recovery schedule without a randomized first-query delay.
+  Consumers must remove waiting-state handling.
+
 ## [0.1.0-rc9] - 2026-10-14
 
 ### Added

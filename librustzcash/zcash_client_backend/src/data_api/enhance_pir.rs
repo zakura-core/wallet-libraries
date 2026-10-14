@@ -62,15 +62,6 @@ pub enum EnhancePirWork {
     Rediscover(IronwoodEnhanceDiscoveryRequest),
     /// Surface incomplete work without automatically retrying it.
     Suspended(EnhancePirSuspension),
-    /// Do not query the position before `not_before`. Each newly queued position waits a random
-    /// time first, so that its first query does not follow the sync that found its transaction.
-    /// Show it as pending; it becomes [`Self::Query`] once due.
-    Waiting {
-        /// The request to send once due.
-        request: EnhancePirRequest,
-        /// The earliest time at which the position may be queried.
-        not_before: std::time::SystemTime,
-    },
 }
 
 /// One payload-retrieval obligation, routed to exactly one transport.

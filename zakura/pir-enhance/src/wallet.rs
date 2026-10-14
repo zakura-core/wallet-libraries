@@ -99,8 +99,6 @@ pub struct PreparedWork {
     pub rediscover:
         Vec<zcash_client_backend::data_api::enhance_pir::IronwoodEnhanceDiscoveryRequest>,
     pub suspended: usize,
-    /// Positions not yet due: see [`EnhancePirWork::Waiting`].
-    pub waiting: usize,
 }
 impl PreparedWork {
     pub fn new(work: impl IntoIterator<Item = EnhancePirWork>) -> Self {
@@ -118,7 +116,6 @@ impl PreparedWork {
                 }
                 EnhancePirWork::Rediscover(request) => prepared.rediscover.push(request),
                 EnhancePirWork::Suspended(_) => prepared.suspended += 1,
-                EnhancePirWork::Waiting { .. } => prepared.waiting += 1,
             }
         }
         prepared
@@ -179,7 +176,7 @@ impl PreparedWork {
         self.requests.values().map(Vec::len).sum()
     }
     pub fn incomplete_count(&self) -> usize {
-        self.query_count() + self.rediscover.len() + self.suspended + self.waiting
+        self.query_count() + self.rediscover.len() + self.suspended
     }
     pub fn map_record(
         &self,
@@ -292,22 +289,6 @@ mod tests {
             assert_eq!(work.positions().count(), 0);
             assert_eq!(work.incomplete_count(), 1);
         }
-    }
-
-    #[test]
-    fn waiting_items_are_incomplete_without_active_queries() {
-        let request = EnhancePirRequest::new(
-            Position::from(0),
-            IronwoodEnhanceRequestId::new(TxId::from_bytes([1; 32]), 0),
-        );
-        let work = PreparedWork::new([EnhancePirWork::Waiting {
-            request,
-            not_before: std::time::SystemTime::UNIX_EPOCH,
-        }]);
-        assert_eq!(work.query_count(), 0);
-        assert_eq!(work.positions().count(), 0);
-        assert_eq!(work.waiting, 1);
-        assert_eq!(work.incomplete_count(), 1);
     }
 }
 

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Removed
+
+- `PreparedWork::waiting`, following removal of the randomized first-query delay.
+  Suspended work still counts as incomplete.
+
 ## [0.0.1-rc3] - 2026-10-14
 
 ### Added

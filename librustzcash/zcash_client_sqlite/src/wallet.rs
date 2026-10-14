@@ -4359,8 +4359,6 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
             rng: (),
             #[cfg(feature = "orchard")]
             enhance_pir_session: Default::default(),
-            #[cfg(feature = "orchard")]
-            enhance_pir_max_delay: crate::wallet::enhance_pir::MAX_NOT_BEFORE_DELAY,
             // Truncation removes checkpoints; it never establishes them, so no anchor retention
             // decision is made through this handle and the interval is immaterial.
             anchor_retention_interval: AnchorRetentionInterval::default(),
