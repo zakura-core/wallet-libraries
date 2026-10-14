@@ -26,6 +26,17 @@ Other options: `--report <dir>` (or `ONE_TIME_IVK_REPORT_DIR`), `--jobs <n>` and
 `report.html` (open it from disk) and `report.page.html` (the same page without a
 document skeleton, for publishing). It exits nonzero if any scenario fails.
 
+Randomized worlds (`Z-fuzz-<seed>`) build swap histories from the same harness steps,
+from a seed, and judge them with the same checks. The default set runs two seeds. Set
+`ONE_TIME_IVK_FUZZ_SEEDS` to a seed or a `start..end` range to run more, and
+`ONE_TIME_IVK_FUZZ_PROFILE=reorg` or `devices` to weight the mix. Minimal reproductions
+of what they found, which still fail until fixed, run only with
+`ONE_TIME_IVK_FUZZ_FINDINGS=1`.
+
+```sh
+ONE_TIME_IVK_SLOW=1 ONE_TIME_IVK_FUZZ_SEEDS=0..200 python3 scripts/dev.py test --config one-time-ivk-scenarios Z-fuzz
+```
+
 When the library changes, run the suite again at the new revision. The report is
 stamped with the wallet-libraries commit and the wallet-pir revision it ran against.
 
