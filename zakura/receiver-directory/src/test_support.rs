@@ -1,6 +1,6 @@
 //! Fixtures shared by the receiver crates' integration tests, included with `#[path]`.
 #![allow(dead_code)]
-use crate::{
+use receiver_directory::{
     Payment, Receiver, Record,
     extract::Action,
     snapshot::{Manifest, PROFILE},
@@ -52,8 +52,8 @@ pub fn manifest(rows: u32) -> Manifest {
         salt: [4; 32],
         records: 0,
         data_sha256: [0; 32],
-        filters: vec![crate::snapshot::FilterSet {
-            label: crate::filter::PAID.into(),
+        filters: vec![receiver_directory::snapshot::FilterSet {
+            label: receiver_directory::filter::PAID.into(),
             count: 0,
             window_secs: None,
             since_unix: None,

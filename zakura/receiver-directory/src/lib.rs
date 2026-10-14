@@ -1,4 +1,6 @@
 //! Receiver discovery records. A match is a candidate, never proof of ownership or spendability.
+extern crate self as receiver_directory;
+
 pub mod extract;
 pub mod filter;
 pub mod record;

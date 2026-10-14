@@ -21,7 +21,7 @@ zeroize.workspace = true
 [dev-dependencies]
 hex.workspace = true
 incrementalmerkletree.workspace = true
-orchard = { workspace = true, features = ["circuit"] }
+orchard = { workspace = true, features = ["circuit", "zip32-addresses"] }
 rand = { workspace = true, features = ["thread_rng"] }
 shardtree.workspace = true
 
