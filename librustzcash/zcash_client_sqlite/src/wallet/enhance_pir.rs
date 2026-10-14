@@ -451,6 +451,9 @@ const OUTGOING_SUSPENDED: u8 = 4;
 /// Content failures after which a request leaves query work until a rescan or fresh session.
 pub(crate) const MAX_REJECTIONS: u32 = 3;
 
+/// The longest random delay before the first private query of a newly queued position.
+pub(crate) const MAX_NOT_BEFORE_DELAY: std::time::Duration = std::time::Duration::from_secs(75);
+
 /// Selects enhancement rows from `tx_retrieval_queue q` (joined with `transactions t`) that may use
 /// ordinary public transport. When `:protect_ironwood` is set, privately protected transactions
 /// (`ironwood_enhance_routing.route = 0`) are excluded. Sticky route 2 (mixed details under a
@@ -595,10 +598,10 @@ pub(crate) fn work(
 ) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
     let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(true, false))?;
     Ok(session
-        .filter(read_work(
-            &mut stmt,
-            named_params![":public_authority": false],
-        )?)
+        .filter(
+            read_work(&mut stmt, named_params![":public_authority": false])?,
+            None,
+        )
         .into_iter()
         .map(|work| match work {
             TransactionEnhancementWork::Private(work) => work,
@@ -620,6 +623,8 @@ pub(crate) fn transaction_enhancement_work(
     mode: EnhancementMode,
     configured: Option<TransparentLedgerMode>,
     session: &SessionState,
+    now: std::time::SystemTime,
+    max_delay: std::time::Duration,
 ) -> Result<Vec<TransactionEnhancementWork>, SqliteClientError> {
     // A caller-owned transaction can expose temporary removals that later roll back.
     // Only prune committed state, or stage cleanup in the wallet's commit journal.
@@ -645,7 +650,7 @@ pub(crate) fn transaction_enhancement_work(
                 })?,
             ],
         )?;
-        Ok(session.filter(work))
+        Ok(session.filter(work, Some((now, max_delay))))
     })
 }
 
@@ -1005,6 +1010,57 @@ fn rearm_rejected_positions(
     Ok(())
 }
 
+/// Every position an Enhance queue holds, or with `tx_ref`, every one of that transaction.
+fn queued_positions(
+    conn: &Connection,
+    tx_ref: Option<crate::TxRef>,
+) -> Result<std::collections::BTreeSet<u64>, SqliteClientError> {
+    conn.prepare_cached(
+        "SELECT q.commitment_tree_position
+         FROM ironwood_memo_retrieval_queue q
+         JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
+         WHERE :tx IS NULL OR rn.transaction_id = :tx
+         UNION
+         SELECT commitment_tree_position FROM ironwood_enhance_outgoing_queue
+         WHERE :tx IS NULL OR transaction_id = :tx
+         UNION
+         SELECT commitment_tree_position FROM ironwood_enhance_metadata_queue
+         WHERE commitment_tree_position IS NOT NULL
+           AND (:tx IS NULL OR transaction_id = :tx)",
+    )?
+    .query_map(named_params![":tx": tx_ref.map(|t| t.0)], |row| {
+        row.get::<_, u64>(0)
+    })?
+    .collect::<Result<_, _>>()
+    .map_err(Into::into)
+}
+
+/// Draws a not-before time for each queued position of `tx_ref` (every queued position, without
+/// one) that `session` has none for: `now` plus a delay drawn uniformly from zero to `max_delay`
+/// with `rng`, independently per position, in position order. An existing time is kept, so a
+/// rescan in the same session does not draw again.
+///
+/// The time is session memory, not wallet state: a fresh session draws again at its first
+/// write. A restart is the application's doing, not a reply's, so it cannot steer the query.
+pub(crate) fn arm_not_before<R: rand::Rng + ?Sized>(
+    conn: &Connection,
+    session: &SessionState,
+    tx_ref: Option<crate::TxRef>,
+    now: std::time::SystemTime,
+    max_delay: std::time::Duration,
+    rng: &mut R,
+) -> Result<(), SqliteClientError> {
+    use rand::RngExt;
+    let deadlines = session.deadlines();
+    for position in queued_positions(conn, tx_ref)? {
+        if !deadlines.contains_key(&position) {
+            let delay = rng.random_range(0..=max_delay.as_secs());
+            session.set_not_before(position, now + std::time::Duration::from_secs(delay));
+        }
+    }
+    Ok(())
+}
+
 /// Counts a content failure against each distinct position of `requests` that is still query
 /// work. Called in a transaction after a rejected batch rolled back or a reply failed to decode.
 /// A request that is stale, completed or already suspended is ignored, so a late result cannot
@@ -1019,10 +1075,13 @@ pub(crate) fn record_content_failures(
     let public_authority = transparent_ledger::retains_public_authority(conn, configured)?;
     let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(true, false))?;
     let live: std::collections::BTreeSet<_> = session
-        .filter(read_work(
-            &mut stmt,
-            named_params![":public_authority": public_authority],
-        )?)
+        .filter(
+            read_work(
+                &mut stmt,
+                named_params![":public_authority": public_authority],
+            )?,
+            None,
+        )
         .into_iter()
         .filter_map(|work| match work {
             TransactionEnhancementWork::Private(EnhancePirWork::Query(request)) => Some(request),
@@ -1057,6 +1116,7 @@ pub(crate) fn retain_live_failures(
         })
         .collect();
     session.retain(live);
+    session.retain_not_before(queued_positions(conn, None)?);
     Ok(())
 }
 

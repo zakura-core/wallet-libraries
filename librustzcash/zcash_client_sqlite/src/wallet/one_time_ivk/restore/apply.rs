@@ -199,12 +199,13 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         return Ok(Ok(PaymentApplication::Applied));
     }
     // An unmined transaction is one a rewind or the mempool left: its note may move to a
-    // new position, but a transaction holding no such note is not this one.
+    // new position, but a rewound one holding no such note is not this one. One with raw
+    // bytes may predate the key, so the action check below decides it.
     let conflict: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM transactions WHERE txid = ?1 AND mined_height IS NOT NULL
              AND (mined_height != ?2 OR tx_index != ?3))
          OR EXISTS(SELECT 1 FROM transactions t WHERE t.txid = ?1 AND t.mined_height IS NULL
-             AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n
+             AND t.raw IS NULL AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n
                  WHERE n.transaction_id = t.id_tx AND n.action_index = ?4
                    AND n.one_time_key_id = ?6))
          OR EXISTS(SELECT 1 FROM ironwood_received_notes n

@@ -42,6 +42,9 @@ workspace.
 - `ll::wallet::{put_blocks_with_nullifier_retention, put_blocks_rows_with_nullifier_retention}`
   (with `orchard`): `put_blocks` and `put_blocks_rows` with a height from which Ironwood
   nullifiers stay tracked, for a store that finds Ironwood notes after scanning past them.
+- `EnhancePirWork::Waiting { request, not_before }`: a newly queued position is
+  not queried before `not_before`. Show it as pending; it becomes `Query` once
+  due.
 - `EnhancePirSuspension::Rejected`, for an Enhance PIR position whose replies
   were rejected or unreadable three times. It is not queried again until a
   rescan queues its transaction again or a fresh wallet session is opened.
@@ -56,6 +59,9 @@ workspace.
   granted.
 
 ### Changed
+
+- `EnhancePirWork` has the new `Waiting` variant: exhaustive matches must
+  handle it.
 
 - `TransparentDisplayView` has the new `GaveUp` variant: exhaustive matches
   must handle it.
@@ -137,7 +143,6 @@ enhancement and makes Enhance PIR part of Orchard support.
   existing local-creation fields, with rewind handling, a data-only legacy migration,
   and a transactional outbox evidence writer. No new columns are added.
   See `docs/transaction_status_work.md` for consumer migration instructions.
-
 
 ### Added
 - Add a typed `WalletRead::transaction_status_requests` view of
@@ -2783,7 +2788,6 @@ funds to those addresses. See [ZIP 320](https://zips.z.cash/zip-0320) for detail
 - Default implementations of `zcash_client_backend::data_api::WalletRead::{
     get_target_and_anchor_heights, get_max_height_hash
   }` have been removed. These should be implemented in a backend-specific fashion.
-
 
 ## [0.9.0] - 2023-04-28
 ### Added

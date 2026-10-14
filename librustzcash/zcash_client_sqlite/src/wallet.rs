@@ -863,7 +863,6 @@ pub(crate) fn delete_account(
 
 /// Whether a one-time key is open, so that blocks scanned or transactions decrypted
 /// without it must not be stored.
-#[cfg(feature = "orchard")]
 pub(crate) fn one_time_key_open(conn: &Connection) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys
@@ -4360,6 +4359,8 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
             rng: (),
             #[cfg(feature = "orchard")]
             enhance_pir_session: Default::default(),
+            #[cfg(feature = "orchard")]
+            enhance_pir_max_delay: crate::wallet::enhance_pir::MAX_NOT_BEFORE_DELAY,
             // Truncation removes checkpoints; it never establishes them, so no anchor retention
             // decision is made through this handle and the interval is immaterial.
             anchor_retention_interval: AnchorRetentionInterval::default(),

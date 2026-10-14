@@ -276,10 +276,13 @@ fn apply_facts<P: consensus::Parameters>(
         for spend in &commit.spends {
             projection::project_spend(conn, params, gap_limits, spend)?;
         }
+        // The wallet's gap rule stops at the first unused run as long as the gap limit, so
+        // growth past one is read-time window growth, which the next commit materializes.
         let after =
             AccountRecoveryAddresses::load(conn, params, gap_limits, commit.context.account)?
                 .ok_or(SqliteClientError::AccountUnknown)?;
-        after.production_end != recovery_addresses.production_end
+        (0..WINDOW_SCOPES.len())
+            .any(|slot| after.watched_end(slot) > recovery_addresses.watched_end(slot))
     } else {
         let mut window_grew = false;
         for (slot, needed) in recovery_addresses
@@ -299,7 +302,8 @@ fn apply_facts<P: consensus::Parameters>(
                         ":end_index": needed,
                     ],
                 )?;
-                window_grew = true;
+                // Growth inside the restore window adds no watched address.
+                window_grew |= needed > recovery_addresses.watched_end(slot);
             }
         }
         window_grew

@@ -226,7 +226,8 @@ fn a_restored_one_time_note_stores_no_memo() {
 
 /// The inclusion path does not authenticate a claimed transaction ID or action index, so
 /// a stored raw transaction must hold the claimed action; a contradicted claim is rejected
-/// and the stored transaction keeps its location. The path also does not show whether the
+/// and the stored transaction keeps its location. An unmined one is checked the same way,
+/// since it may have been stored before the key was. The path also does not show whether the
 /// transaction has transparent parts, so a claim applied without the raw transaction
 /// leaves it to enhancement, while one checked against it marks it privately complete.
 #[test]
@@ -236,6 +237,7 @@ fn a_claim_is_checked_against_a_stored_raw_transaction() {
     enum Raw {
         Absent,
         Matching,
+        MatchingUnmined,
         OtherAction,
         OutOfRange,
         NoIronwood,
@@ -253,6 +255,7 @@ fn a_claim_is_checked_against_a_stored_raw_transaction() {
     for raw in [
         Raw::Absent,
         Raw::Matching,
+        Raw::MatchingUnmined,
         Raw::OtherAction,
         Raw::OutOfRange,
         Raw::NoIronwood,
@@ -262,7 +265,7 @@ fn a_claim_is_checked_against_a_stored_raw_transaction() {
         let mut candidate = genuine.clone();
         let stored = match raw {
             Raw::Absent => None,
-            Raw::Matching => Some(&paid),
+            Raw::Matching | Raw::MatchingUnmined => Some(&paid),
             Raw::OtherAction => {
                 candidate.action_index = (genuine.action_index + 1) % actions;
                 Some(&paid)
@@ -276,14 +279,24 @@ fn a_claim_is_checked_against_a_stored_raw_transaction() {
                 Some(&empty)
             }
         };
-        if let Some(stored) = stored {
-            store_mined(st.wallet_mut().db_mut(), stored, genuine.height);
+        match stored {
+            // As the mempool stores it, before the key was registered.
+            Some(stored) if raw == Raw::MatchingUnmined => tx(st.wallet_mut().db_mut(), |c, _| {
+                crate::wallet::put_tx_data(c, stored, None, None, None, genuine.height)
+            })
+            .map(|_| ())
+            .unwrap(),
+            Some(stored) => store_mined(st.wallet_mut().db_mut(), stored, genuine.height),
+            None => {}
         }
         let applied = watch_and_apply(&mut st, &candidate, through, &path);
         let conn = st.wallet().conn();
-        if matches!(raw, Raw::Absent | Raw::Matching) {
+        if matches!(raw, Raw::Absent | Raw::Matching | Raw::MatchingUnmined) {
             assert_eq!(applied, Applied, "{raw:?}");
             assert_eq!(note_txids(&st), [txid], "{raw:?}");
+            let sql = "SELECT mined_height FROM transactions WHERE txid = ?1";
+            let mined: u32 = value(conn, sql, [txid.as_ref()]);
+            assert_eq!(mined, u32::from(genuine.height), "{raw:?}");
             let sql = "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue
                        WHERE txid = ?1 AND query_type = ?2)";
             let enhancement = crate::wallet::TxQueryType::Enhancement.code();

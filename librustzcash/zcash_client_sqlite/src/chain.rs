@@ -549,19 +549,23 @@ mod tests {
         testing::pool::scan_cached_blocks_detects_spends_out_of_order::<OrchardPoolTester>()
     }
 
-    /// Blocks scanned without the wallet's open one-time keys are refused, leaving the
-    /// scanned chain unchanged. Inactive and closed keys do not block them.
+    /// Blocks scanned and transactions decrypted without the wallet's open one-time keys
+    /// are refused, leaving the scanned chain unchanged, also in builds without `orchard`,
+    /// which cannot use them. Inactive and closed keys do not block them.
     #[test]
-    #[cfg(feature = "orchard")]
     fn scanning_without_one_time_ivks_refuses_open_one_time_keys() {
         use crate::{error::SqliteClientError, testing::db::TestDb};
         use zcash_client_backend::data_api::{
             WalletRead,
             chain::error::Error,
             testing::{AddressType, TestBuilder, TestState, pool::ShieldedPoolTester},
+            wallet::decrypt_and_store_transaction,
         };
-        use zcash_primitives::block::BlockHash;
-        use zcash_protocol::value::Zatoshis;
+        use zcash_primitives::{
+            block::BlockHash,
+            transaction::{Authorized, TransactionData, TxVersion},
+        };
+        use zcash_protocol::{consensus::BranchId, value::Zatoshis};
 
         let mut st = TestBuilder::new()
             .with_data_store_factory(testing::db::TestDbFactory::default())
@@ -606,6 +610,26 @@ mod tests {
             Err(Error::Wallet(SqliteClientError::OneTimeIvksNotUsed))
         ));
         assert_eq!(scanned(&st), before);
+        let empty = TransactionData::<Authorized>::from_parts(
+            TxVersion::V5,
+            BranchId::Nu5,
+            0,
+            h2,
+            None,
+            None,
+            None,
+            None,
+        );
+        let network = *st.network();
+        assert!(matches!(
+            decrypt_and_store_transaction(
+                &network,
+                st.wallet_mut(),
+                &empty.freeze().unwrap(),
+                None
+            ),
+            Err(SqliteClientError::OneTimeIvksNotUsed)
+        ));
         st.wallet()
             .conn()
             .execute_batch("UPDATE ironwood_one_time_keys SET active_from = NULL")

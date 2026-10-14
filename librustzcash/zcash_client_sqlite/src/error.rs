@@ -84,8 +84,7 @@ pub enum SqliteClientError {
 
     /// Blocks or a transaction were processed without the wallet's open one-time IVKs.
     /// Scan with `scan_cached_blocks_with_one_time_ivks` and decrypt with
-    /// `decrypt_and_store_transaction_with_one_time_ivks`.
-    #[cfg(feature = "orchard")]
+    /// `decrypt_and_store_transaction_with_one_time_ivks`, which need `orchard`.
     OneTimeIvksNotUsed,
 
     /// A one-time IVK call's input was invalid, such as a passed deadline, a deposit address
@@ -488,7 +487,6 @@ impl fmt::Display for SqliteClientError {
                 f,
                 "Enhancement mode is not configured; call set_enhancement_mode before enumerating enhancement work"
             ),
-            #[cfg(feature = "orchard")]
             SqliteClientError::OneTimeIvksNotUsed => write!(
                 f,
                 "This wallet has open one-time IVKs; scan and decrypt with the one-time IVK entry points"

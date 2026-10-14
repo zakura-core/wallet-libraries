@@ -472,7 +472,10 @@ fn last_external(ws: &TransparentAddressWatchSet<AccountUuid>) -> (TransparentAd
     ws.addresses
         .iter()
         .filter_map(|w| match w.origin {
-            WatchOrigin::Derived { scope, index } if scope == TransparentKeyScope::EXTERNAL => {
+            WatchOrigin::Derived { scope, index }
+            | WatchOrigin::CandidateWindow { scope, index }
+                if scope == TransparentKeyScope::EXTERNAL =>
+            {
                 Some((w.address, index.index()))
             }
             _ => None,
@@ -1138,10 +1141,20 @@ fn active_window_growth_uses_the_wallets_own_addresses() {
     let mut c = commit(&ws);
     c.receives = vec![receive(5, last, 60_000, below_target(&ws, 0))];
     assert!(apply(&mut st, c).unwrap().window_grew);
+    // Growth the wallet's own gap rule leaves out, past an unused run as long as the gap
+    // limit, becomes the wallet's own address at the next commit.
+    let c = commit(&watch(&st, account));
+    apply(&mut st, c).unwrap();
     assert!(count(&st, "addresses") > addresses);
     assert_eq!(count(&st, "tpir_candidate_windows"), 0);
-    let (_, grown) = last_external(&watch(&st, account));
-    assert!(grown > index);
+    let grown = watch(&st, account);
+    assert!(last_external(&grown).1 > index);
+    assert!(
+        grown
+            .addresses
+            .iter()
+            .all(|w| !matches!(w.origin, WatchOrigin::CandidateWindow { .. }))
+    );
 }
 
 #[test]
