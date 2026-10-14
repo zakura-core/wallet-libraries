@@ -1694,7 +1694,6 @@ mod handles {
 
         let status = crate::wallet::transaction_status_work(
             &snapshot,
-            &Default::default(),
             TransactionStatusMode::Public,
             Some(Public),
         )
@@ -1727,7 +1726,6 @@ mod handles {
         );
         let status = crate::wallet::transaction_status_work(
             &reader.conn,
-            &Default::default(),
             TransactionStatusMode::Public,
             Some(Public),
         )
