@@ -95,6 +95,11 @@ fn main() {
         }
         return;
     }
+    // A misspelled filter would otherwise report a pass without running anything.
+    if scenarios.is_empty() {
+        eprintln!("no scenarios selected by {:?}", args.filter);
+        std::process::exit(2);
+    }
     let started = Instant::now();
     let started_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)

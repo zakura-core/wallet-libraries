@@ -23,7 +23,7 @@ cargo test --profile test -p zakura-one-time-ivk-scenarios --test scenarios -- -
 
 Other options: `--report <dir>` (or `ONE_TIME_IVK_REPORT_DIR`), `--jobs <n>` and
 `--exact`. A run writes `report.json` and `report.md` (short enough to paste into a
-PR). It exits nonzero if any scenario fails.
+PR). It exits nonzero if any scenario fails or a filter selects none.
 
 CI doesn't run the suite on PRs, since it takes about 45 minutes on a hosted runner.
 The **One-time IVK scenarios** workflow runs everything, slow scenarios included,
