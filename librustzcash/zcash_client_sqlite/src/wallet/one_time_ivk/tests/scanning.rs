@@ -203,7 +203,8 @@ fn pczt_signs_and_proves_a_one_time_spend() {
         bundle_version_for_branch(branch, orchard::ValuePool::Ironwood)
             .unwrap()
             .circuit_version(),
-    );
+    )
+    .expect("the current Ironwood circuit supports proving");
     let proven = pczt::roles::prover::Prover::new(signed)
         .create_ironwood_proof(pk)
         .unwrap()
