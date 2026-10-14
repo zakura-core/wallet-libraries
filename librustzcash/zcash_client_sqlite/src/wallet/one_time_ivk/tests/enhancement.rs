@@ -385,6 +385,50 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert_eq!(refund_keys(&st), registered);
 }
 
+/// Funding verification refuses the recovery memo on change outside Ironwood, where
+/// refund recovery never looks. Spending pre-Ironwood Orchard funds returns change to
+/// Orchard, and a restored wallet would never find that refund key.
+#[test]
+fn refund_funding_refuses_its_memo_on_orchard_change() {
+    use zcash_client_backend::{
+        data_api::wallet::{ConfirmationsPolicy, input_selection::GreedyInputSelector},
+        fees::{DustOutputPolicy, StandardFeeRule, standard::SingleOutputChangeStrategy},
+    };
+    use zcash_protocol::PoolType;
+    let mut st = ironwood_wallet();
+    let orchard = Zatoshis::const_from_u64(1_000_000);
+    let (funded, _, _) =
+        st.generate_next_block(&parent(&st), AddressType::DefaultExternal, orchard);
+    st.scan_cached_blocks_with_one_time_ivks(funded, 1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(5);
+    let account = st.test_account().unwrap().id();
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let deposit = p2pkh(7).encode(st.network());
+    let now = clock_now();
+    let db = st.wallet_mut().db_mut();
+    let key = db.reserve_refund_key(account, tip, None).unwrap().unwrap();
+    let index = key.key_id().index();
+    db.record_refund_operation(account, index, &deposit, now + 3_600, now)
+        .unwrap();
+    let memo = db.refund_funding_memo(account, index, &deposit).unwrap();
+    let strategy = SingleOutputChangeStrategy::<TestDb>::new(
+        StandardFeeRule::Zip317,
+        Some(memo.clone()),
+        ShieldedPool::Orchard,
+        DustOutputPolicy::default(),
+    );
+    let request = zip321::TransactionRequest::new(vec![payment(&p2pkh(7), 100_000, None)]);
+    let selector = GreedyInputSelector::new();
+    let policy = ConfirmationsPolicy::MIN;
+    let proposal = st
+        .propose_transfer(account, &selector, &strategy, request.unwrap(), policy)
+        .unwrap();
+    let change = proposal.steps().first().balance().proposed_change();
+    assert!(change.iter().all(|c| c.output_pool() == PoolType::ORCHARD));
+    assert!(change.iter().any(|c| c.memo() == Some(&memo)));
+    assert!(verify_refund_funding_proposal(&proposal, &memo, &deposit).is_err());
+}
+
 /// A refund key's funding memo is issued only for the deposit its quote recorded, and a
 /// transaction whose memo names another key than the deposit it pays fails to store,
 /// starting no key and pairing nothing. Storing a matching funding transaction starts
