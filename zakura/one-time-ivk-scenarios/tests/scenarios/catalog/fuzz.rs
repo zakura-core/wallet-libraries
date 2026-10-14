@@ -2458,18 +2458,20 @@ impl<'p> Exec<'p> {
             ),
             Some(k)
                 if k.closed
-                    && self
-                        .m
-                        .receipts(slot, p.key)
-                        .iter()
-                        .any(|(_, known)| matches!(known, Known::Mined(_))) =>
+                    && (k.paid_before_birthday
+                        || self
+                            .m
+                            .receipts(slot, p.key)
+                            .iter()
+                            .any(|(_, known)| matches!(known, Known::Mined(_)))) =>
             {
                 (
                     Class::MissedDocumented,
                     format!(
-                        "{} had closed {} after a known payment: a later payment to a closed key that was already paid is found only by Check swap history",
+                        "{} had closed {} after a known payment{}: a later payment to a closed key that was already paid is found only by Check swap history",
                         dev.name,
-                        p.key.label()
+                        p.key.label(),
+                        if k.paid_before_birthday { " (one before its birthday, which marks the key paid)" } else { "" }
                     ),
                 )
             }
