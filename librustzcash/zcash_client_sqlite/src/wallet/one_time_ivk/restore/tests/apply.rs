@@ -486,6 +486,34 @@ fn private_payment_uses_its_witness_anchor_and_survives_a_rewind() {
     assert_eq!(found[0].note().value().inner(), 100_000);
 }
 
+/// An answer that claims the transaction and action of a note the wallet scanned is
+/// rejected, so it cannot overwrite that note. Without the raw transaction, only the
+/// stored transaction's height and note contradict the claim.
+#[test]
+fn an_answer_claiming_a_scanned_note_is_rejected() {
+    let (mut st, key, candidate, anchor, path) = fixture();
+    let account = st.test_account().unwrap().id();
+    let ordinary = parent(&st);
+    pay(&mut st, &ordinary, 10_000);
+    let through = tip(&st);
+    let scanned = notes(&st, through.height);
+    assert_eq!(scanned.len(), 1);
+    let forged = PendingPayment {
+        txid: *scanned[0].txid(),
+        action_index: scanned[0].output_index().into(),
+        ..candidate
+    };
+    let db = st.wallet_mut().db_mut();
+    queue_payment(db, account, key.key_id(), &forged).unwrap();
+    let proof = (anchor, &path);
+    let applied = apply_payment(db, account, key.key_id(), &forged, through, proof);
+    assert_eq!(applied.unwrap(), Rejected);
+    let kept = notes(&st, through.height);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].note().value().inner(), 10_000);
+    assert_eq!(kept[0].one_time_key_id(), None);
+}
+
 /// A sweep checks its publication anchor, queues the directory's lookup (leaving the
 /// attempt's backoff lease alone, and skipping a repeat), waits for a valid witness and
 /// applies the payment once, finishing the key's history. A repeated answer then skips
