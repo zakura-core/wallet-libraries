@@ -1071,7 +1071,10 @@ fn window_growth_stays_out_of_the_address_table() {
         .addresses
         .iter()
         .filter_map(|w| match w.origin {
-            WatchOrigin::Derived { scope, index } if scope == TransparentKeyScope::EXTERNAL => {
+            WatchOrigin::Derived { scope, index }
+            | WatchOrigin::CandidateWindow { scope, index }
+                if scope == TransparentKeyScope::EXTERNAL =>
+            {
                 Some((w.address, index))
             }
             _ => None,
@@ -1096,7 +1099,9 @@ fn window_growth_stays_out_of_the_address_table() {
     let window: Vec<_> = grown
         .addresses
         .iter()
-        .filter(|w| matches!(w.origin, WatchOrigin::CandidateWindow { .. }))
+        .filter(|w| {
+            matches!(w.origin, WatchOrigin::CandidateWindow { .. }) && !ws.addresses.contains(w)
+        })
         .collect();
     assert!(!window.is_empty());
     assert!(window.iter().all(|w| matches!(

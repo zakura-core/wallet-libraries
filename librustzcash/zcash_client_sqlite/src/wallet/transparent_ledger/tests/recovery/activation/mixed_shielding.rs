@@ -1042,6 +1042,9 @@ fn shape_only_recovery_obeys_public_authority_transitions() {
     );
     assert_eq!(queued(&case.st, case.tx_ref), 0);
     set_policy(&mut case.st, PrivateRequired);
+    // A candidate again, the account watches its restore window, which a pass covers
+    // before it activates.
+    cover(&mut case.st, case.account, &revision(1, true), vec![]);
     activate_recovered_ledger(&mut case.st, case.account).unwrap();
     assert_eq!(private_queries(&case.st), vec![request]);
     assert_eq!(
@@ -1105,6 +1108,8 @@ fn deleting_the_shape_binding_account_rebinds_to_a_surviving_note() {
     )
     .unwrap()
     .with_transparent_ledger_mode(PrivateRequired);
+    // Its fresh session would also draw the position's wait again.
+    reopened.set_enhance_pir_max_delay(std::time::Duration::ZERO);
     reopened.set_enhancement_mode(EnhancementMode::PrivateIronwood);
     assert_eq!(
         reopened.transaction_enhancement_work().unwrap(),

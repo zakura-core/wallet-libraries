@@ -7,9 +7,8 @@ contained. Across syncs, a record that fails on content is asked at most three
 times.
 
 This plan covers what is left. It ranks the remaining leaks, sets the scope of
-increment 2, and sketches the later increments. Increment 2 changes only the
-wallet and Vizor. It needs no server change and adds no load to the PIR
-services beyond a few more status queries per transaction.
+increment 2, and sketches the later increments. Increment 2 changes the wallet and Vizor. The status polling change is
+dropped; the remaining wallet changes delay Enhance queries and widen restores.
 
 Terms, as in increment 1. A **content outcome** is anything the wallet reads
 from a private reply: a record, "not in the table", or bytes that fail to
@@ -23,8 +22,8 @@ watch.
 
 | Leak | Who can use it | What it reveals | Cost to fix | Test | Increment |
 | --- | --- | --- | --- | --- | --- |
-| Status replies steer polling: a forged "mined" stops it, one bad reply stops all private status for the session, a missing record fails the sync | Active | The transaction's status bucket, about 4 transactions today | Wallet and Vizor | Exact transcript | 2 |
-| Status polling stops at the mined block | Passive | The mined height; with the broadcast time, often the transaction | Wallet; about 10 status queries per transaction instead of 1 or 2 | Exact transcript | 2 |
+| Status replies steer polling: a forged "mined" stops it, one bad reply stops all private status for the session, a missing record fails the sync | Active | The transaction's status bucket, about 4 transactions today | Wallet and Vizor | Exact transcript | Deferred |
+| Status polling stops at the mined block | Passive | The mined height; with the broadcast time, often the transaction | Needs traffic cover | Exact transcript | Deferred |
 | Vizor stops private Enhance for the rest of the sync after an unreadable or rejected reply | Active | The note position | Vizor only | Exact transcript | 2 |
 | The first Enhance query follows the sync that found the transaction | Passive | The block range of a recent transaction | Wallet only | Seeded timing | 2 |
 | The Enhance content-failure cap resets when the wallet is reopened | Active, across restarts | As the row above, two bits per record per session | Wallet only | Exact | Open question |
@@ -51,23 +50,16 @@ entries over 8,192 rows. One row is close to one transaction.
 
 ## 2. What increment 2 enforces
 
-**Status queries are fixed when the work is queued.** For each transaction
-whose status is asked privately, the wallet fixes two things when it queues
-the work:
+**Status polling is unchanged.** The proposed fixed status window and expiry
+cover poll are dropped from increment 2. The wallet continues polling unresolved
+transactions and stops after a conclusive status; there is no new attempt cap.
+The broadcast height is already visible to the broadcast service, and status
+query timing remains observable. Hiding traffic timing needs broader cover
+traffic rather than a per-transaction window.
 
-- a window of 10 chain tips, starting at the tip it was queued at;
-- an expiry poll at the transaction's expiry height, when that height is past
-  the window.
-
-At each new tip inside the window the wallet asks once about that
-transaction, and at the expiry poll once more. Each poll is sent whether the
-transaction has been seen mined or not, and whatever the earlier replies said.
-After the window and the expiry poll, the wallet stops asking on its own.
-
-The only thing that can change the polls is a request outcome: the wallet may
-retry a refused request at the same tip. The status service therefore sees
-the same queries from an honest wallet whether its transaction mined at the
-first tip, at the ninth, never, or whether the service lied about it.
+**Enhance waits stay in session memory.** Reopening draws queued waits again.
+A restart is an application action, and the fresh wait is between zero and 75
+seconds; a position first read before a write waits the full 75 seconds.
 
 **Enhance replies do not steer the rest of the sync.** An unreadable reply or
 a rejected record fails that position only. The other positions are still
@@ -75,13 +67,17 @@ queried in the same order, and the failure counts toward the existing cap of
 three.
 
 **Enhance items wait a random time before their first query.** When an item
-is first queued, the wallet draws a delay of 0 to 10 minutes from its random
-source and does not query the item before then. A rescan keeps the drawn time.
+is first queued, the wallet draws a delay of 0 to 75 seconds from its random
+source and does not query the item before then. A rescan in the same session
+keeps the drawn time.
+
+**A restore watches a fixed window.** Until an account is activated, its
+transparent recovery watches 50 external and 25 internal addresses, whatever
+the replies show, so a typical restore completes in one sync (change F).
 
 ## 3. Changes
 
-Increment 2 has two pull requests, one per repository (section 5). Changes A
-and D are in wallet-libraries; B and C are in Vizor. Each change lists the
+Increment 2 has two pull requests, one per repository (section 5). Changes D and F are in wallet-libraries; A is dropped. B and C are separate Vizor work. Each change lists the
 files, the rule, and its tests.
 
 Every test lands in a first commit that contains only the tests. That commit
@@ -89,127 +85,20 @@ must fail on its parent, and the pull request names the assertion that fails
 there. An increment 1 test passed against the old code; this step shows each
 new test can catch the regression it is meant for.
 
-### A. Status poll window (wallet-libraries)
+### A. Status poll window (dropped)
 
-Today, `transaction_status_work`
-(`zcash_client_sqlite/src/wallet.rs`) returns every eligible status row on
-every call. It drops a row as soon as `mined_height` is set. `Mined` is
-recorded by `record_mined_transaction`, which overwrites any earlier mined
-height. Status work exists only for transactions that compact scanning cannot
-see (`detectable_via_scanning`), so nothing later checks a forged answer.
+This change is not part of increment 2. No fixed-height window, expiry cover
+query, status-poll session, settled-query API, or status-row error split is added.
+Status polling keeps the existing unresolved-work and expiry rules. Replies can
+still influence when it stops; closing traffic-analysis leaks is deferred.
 
-Schema, one additive migration chained after
-`transparent_detail_content_failures`:
+### B. Status reply handling (separate future work)
 
-| Table | Columns | Written |
-| --- | --- | --- |
-| `tx_status_polls` | `txid` (key), `window_start_height`, `window_end_height`, `expiry_poll_height` (nullable), `last_polled_height` (nullable) | When `queue_tx_status` or `queue_status_for_unobservable_transactions` queues private status work |
-
-- `window_end_height` is the queue tip plus 10.
-- `expiry_poll_height` is the expiry height when it is nonzero and past the
-  window, and NULL otherwise.
-- A rewind that queues reconfirmation writes a fresh window, so a rewind
-  re-arms polling.
-- Existing rows get a window starting at the tip the migration runs at, so an
-  upgrade never strands a pending transaction.
-
-Library changes:
-
-- `transaction_status_work` returns a transaction as private work when two
-  things hold:
-  - the current tip is inside its window or is the first tip at or past
-    `expiry_poll_height`;
-  - `last_polled_height` is below the current tip.
-
-  This holds whether or not the transaction is mined. Public work keeps
-  today's rules: in public mode the txid is already disclosed.
-- `PrivateTransactionStatusRequest` gains `settled()`. It is true when the
-  transaction already has a conclusive status, and the caller then sends the
-  query but does not apply the answer.
-- A new `TransactionStatusWrite::record_private_status_poll(txid, tip)`
-  records that a reply came back. The caller calls it for every private reply,
-  readable or not. A request outcome records nothing.
-- `set_transaction_status` keeps the first conclusive answer inside the
-  window. `Mined(h)` for a transaction that status already recorded as mined
-  is ignored rather than overwriting its height.
-- `zakura/pir-status` splits `Error::Malformed` in two:
-  - a reply envelope that does not match the session (header echo, manifest,
-    length) stays a request outcome;
-  - a row that fails to decode, or fails to decrypt (today `Pir`, mapped to
-    `Unavailable`), becomes the new `StatusError::Unreadable`, a content
-    outcome.
-
-  `CoverageIncomplete` is a content outcome, because it follows from a
-  missing record.
-- A transaction still without a conclusive answer once its window and expiry
-  poll have passed leaves automatic work. It stays pending.
-  `transaction_status_work_for`, a rewind, transparent recovery or a rescan
-  can still settle it.
-
-Tests, in `zcash_client_sqlite` beside
-`wallet/request_lifecycle_tests.rs`:
-
-- **Transcript.** Queue a transaction at tip *h* with expiry *h* + 40. Walk
-  the tip from *h* to *h* + 45, and at each tip record the private work
-  returned and the replies fed back. Run four services:
-  - honest, mining the transaction at *h* + 2;
-  - a "mined" answer forged at *h*;
-  - unreadable replies;
-  - `CoverageIncomplete` throughout.
-
-  The four lists of (tip, txid) are equal. Reverted, the honest and forging
-  lists drop the transaction at *h* + 3 and *h* + 1.
-- **At most once per tip.** Read the work twice at one tip after recording a
-  poll: the transaction appears once. Reverted, it appears on every call.
-- **No overwrite.** `Mined(h1)` then `Mined(h2)` leaves the height at *h1*.
-  Reverted, it is *h2*.
-- **Expiry poll.** A transaction mined at *h* + 1 is still asked at *h* + 40.
-  One never mined is settled as expired by that poll.
-- **Durability.** The window survives a reopen. A rewind that requeues
-  reconfirmation opens a new window.
-- **Migration.** Existing rows gain a window at the migration tip.
-- **pir-status.** A corrupted row returns `Unreadable`, and a wrong header
-  echo returns the request-level error. Reverted, both are `Malformed`.
-
-### B. Vizor status driver (Vizor)
-
-Vizor polls status in `run_requests`
-(`rust/src/wallet/sync_engine/enhancement/status/mod.rs`) at each checkpoint,
-about once per new block.
-
-- **Any failure.** Any private error sets `private_failed`, and the rest of the
-  session's private status work is skipped.
-- **Coverage.** `CoverageIncomplete` returns
-  `SyncError::PrivateStatusCoverageIncomplete`, and Dart stops its poll timer
-  (`lib/src/providers/sync_provider.dart`,
-  `_privateStatusCoverageNeedsSettings`).
-- **Restart gate.** The gate (`RecoveryRestartGate`) restarts syncs at an
-  unchanged tip, and resets its backoff whenever the count of status work
-  changes.
-
-Changes:
-
-- `run_requests`:
-  - `Unreadable`, `Malformed` from a row, and `CoverageIncomplete` record the
-    poll and move on to the next txid.
-  - `private_failed` is set only by request outcomes.
-  - `CoverageIncomplete` no longer fails the sync.
-- `status/store.rs`: call `record_private_status_poll` for every private
-  reply. For `settled()` work, send the query and discard the answer. Discard
-  also means no resubmission through `ready_resubmission`.
-- `sync_provider.dart`: drop the status coverage stop. Restarts at an
-  unchanged tip send no status query, because work is due once per tip.
-
-Tests use `FakeStatusSource` in
-`rust/src/wallet/sync_engine/enhancement/tests.rs`:
-
-- **One bad txid.** An unreadable reply for txid A does not skip txid B in
-  the same checkpoint. Reverted, B is skipped.
-- **Honest versus forging.** Over 12 tips, the requests from a wallet whose
-  source mines at the second tip equal those from one whose source forges
-  "mined" at the first. Reverted, the forged run sends fewer.
-- **Request outcome.** A 503 still defers the rest of the checkpoint.
-- **Coverage.** `CoverageIncomplete` leaves the sync successful.
+Vizor still needs an independent design for handling a failed status lookup
+without skipping unrelated transactions or turning an inconclusive reply into
+absence. The removed status-window APIs are not prerequisites or caller
+requirements. No status-poll session, settled cover work, or private-poll
+acknowledgment is introduced by this increment.
 
 ### C. Vizor Enhance after a bad reply (Vizor)
 
@@ -253,25 +142,26 @@ has no time condition. `queue_transaction` deletes and re-inserts the memo and
 outgoing rows on every scan, so a time kept in those rows would be drawn again
 at every rescan.
 
-Schema, one additive migration chained after change A's:
-
-| Table | Columns | Written |
-| --- | --- | --- |
-| `ironwood_enhance_not_before` | `commitment_tree_position` (key), `not_before` (Unix seconds) | In `queue_transaction` and `metadata::queue`, only when no row exists for the position |
+No table or migration. Each position's not-before time is kept in the
+`EnhancePirSession`, beside #180's content-failure counts.
 
 Library changes:
 
-- The delay is drawn uniformly from 0 to 600 seconds with the wallet's
-  `rng`, and added to the wallet's `clock`. Both are already in scope in the
-  `LowLevelWalletWrite` impl that queues the item.
-- `transaction_enhancement_work_sql` leaves out of `queries` any position
-  whose `not_before` is later than now. The read impl gains a `CL: Clock`
-  bound, so the signature does not change.
+- The delay is drawn uniformly from 0 to 75 seconds with the wallet's
+  `rng`, and added to the wallet's `clock`, when a wallet write first sees the
+  position in the session: when scanning queues it, when rediscovery rebuilds
+  it, or at the session's first `update_chain_tip`. A read cannot draw, so a
+  position read before any write waits the full 75 seconds.
+- `transaction_enhancement_work` lists any position whose time is later than
+  now as waiting. The read impl gains a `CL: Clock` bound, so the signature
+  does not change.
 - `EnhancePirWork` gains `Waiting { request, not_before }`.
   `zakura/pir-enhance` `PreparedWork` counts these as `waiting`, and treats
   work with waiting items as incomplete, as it does suspended items.
-- The row is deleted when the position's work completes. A rewind that
-  truncates the position deletes it, so a later requeue draws a new time.
+- The time is forgotten when the position's work completes. A rewind that
+  truncates the position forgets it, so a later requeue draws a new time.
+- A fresh session draws each queued position's wait again. The restart is the
+  app's doing, not a reply's; it costs at most a fresh 0–75 second wait.
 
 Tests, in `wallet/enhance_pir/tests.rs`, with `test_clock` and a seeded
 `test_rng`:
@@ -282,8 +172,9 @@ Tests, in `wallet/enhance_pir/tests.rs`, with `test_clock` and a seeded
   independent times.
 - **Rescan.** A rescan keeps the time. Reverted to storing the time in the
   memo row, it changes.
-- **Migration and completeness.** The migration test passes, and
-  `PreparedWork` is incomplete while an item waits.
+- **Fresh session.** A new session draws the wait again and keeps it across a
+  rescan.
+- **Completeness.** `PreparedWork` is incomplete while an item waits.
 
 Vizor needs one change for D, carried in its pull request: show waiting items
 as pending. Its checkpoint at each block picks them up once due.
@@ -316,6 +207,51 @@ reopen the leak:
 
 This is a small wallet-pir change outside the two increment 2 pull requests.
 
+### F. Restore window (wallet-libraries)
+
+Increment 1 made transparent recovery one counted pass per account per sync. A
+pass that finds activity near the end of the address window grows it, and only
+the next sync checks the new addresses. A restore whose used addresses run past
+the gap limit took one sync per window step: receives at external indices 0, 9,
+18 and 25 under the gap of 10 took 4 syncs.
+
+While an account is a candidate, `AccountRecoveryAddresses::load`
+(`zcash_client_sqlite/src/wallet/transparent_ledger/recovery/recovery_addresses.rs`)
+now watches a fixed restore window: every external index below 50 and internal
+index below 25. Ephemeral addresses keep their gap limit. A one-sync restore
+requires both used addresses and their trailing gaps to fit in that range.
+With the default gaps, the highest used external index can be 39 and the highest
+used internal index 19; activity nearer the edge grows the next sync's range.
+
+- The window is a constant in code. No reply, setting or migration changes it.
+- The gap-limit window is kept apart from it. Window growth, the stored
+  `tpir_candidate_windows` and activation follow the gap limits only, so
+  activation makes only the gap-limit window the wallet's own. An active
+  account's watch set follows the gap limits as before.
+- Growth inside the restore window adds no address, so it is not reported as
+  `window_grew` and starts no new work. Activity near the restore window's end
+  grows the window by one gap, covered at the next sync.
+- An account that becomes a candidate again, as after a public policy round
+  trip, watches the restore window again and needs one pass covering it before
+  it activates.
+
+Cost: 60 more watched addresses during a restore (40 external, 20 internal). An
+unused address costs a directory query only when a shard's filter matches it by
+chance, at most 1 in 1,024 per shard (change E). That is about
+60 × shards in range ÷ 1,024 extra directory queries per restore: about 2 from
+genesis (33 shards). Filter downloads do not change.
+
+Tests, in `zakura/pir-transparent/tests/private_recovery.rs`:
+
+- **One sync.** Receives at 0, 9, 18 and 25 restore in one sync. Reverted, 4.
+- **Past the window.** Receives at 0, 45, 52 and 60 take 4 syncs, one per
+  window step. Reverted, the restore stops at index 0 in one sync.
+- **Transcript.** The first sync's requests are the same whether or not a
+  service forges a receive at the window's last address; only the next sync
+  covers the grown window. Reverted, the forged receive is not watched.
+- **Activation.** After activation the watch set ends one gap past the last used
+  address. Reverted, the restore takes 4 syncs.
+
 ## 4. Cost of cover and padding
 
 Increment 3 sends dummy queries so that the shards and sizes a wallet queries
@@ -345,7 +281,7 @@ Questions for the PIR operators:
 | Pull request | Repository | Contains | Base | Depends on |
 | --- | --- | --- | --- | --- |
 | This plan | wallet-libraries | This doc | `main` | None |
-| Increment 2, library | wallet-libraries | Changes A and D | This plan's branch, then `main` | Increment 1 (#180–#182, merged) |
+| Increment 2, library | wallet-libraries | Changes D and F | This plan's branch, then `main` | Increment 1 (#180–#182, merged) |
 | Increment 2, Vizor | chainapsis/vizor-wallet, branch `transparent-privacy-inc2` | Changes B and C, D's waiting state, and a repin of every wallet-libraries dependency to the library pull request's tip | `transparent-privacy-inc1` | Vizor increment 1, and the library pull request's tip |
 | Filter bound | wallet-pir | Change E | `main` | None |
 
@@ -404,10 +340,8 @@ None of the PIR changes above touches the transport.
   open wallet's session. Reopening the wallet resets them. A service can
   therefore learn up to two bits per record per session, rather than two bits
   in all. A durable count needs one small table.
-- **Is 10 minutes enough?** It spreads the first Enhance query over about 8
-  blocks. A longer delay hides the block better but holds memos back.
-- **How often will a transaction stay unresolved after its window?** With 10
-  polls, a transaction slower than 10 blocks is settled by its expiry poll,
-  transparent recovery or a rescan. If this happens often, a second fixed poll
-  at the midpoint would cost one query.
+- **Is 75 seconds enough?** The first Enhance query waits 37.5 seconds on
+  average, with a maximum of 75 seconds, roughly one target block interval. A longer delay hides the block better but
+  holds memos back.
+
 - **Should Enhance cover go on now, while it is free?** See section 6.
