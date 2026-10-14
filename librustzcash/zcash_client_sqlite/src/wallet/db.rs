@@ -1982,6 +1982,19 @@ CREATE TABLE ironwood_enhance_metadata_queue (
     CHECK (compact_bound = 0 OR commitment_tree_position IS NOT NULL)
 )";
 
+/// When each queued Ironwood Enhance position may first be queried.
+///
+/// ### Columns
+/// - `not_before`: Unix seconds; the time the position was first queued plus a random delay of
+///   up to ten minutes. A rescan keeps it. The row is deleted when the position's work completes
+///   or a rewind removes it, so a later requeue draws a new time. A position without a row is due
+///   at once.
+pub(super) const TABLE_IRONWOOD_ENHANCE_NOT_BEFORE: &str = "
+CREATE TABLE ironwood_enhance_not_before (
+    commitment_tree_position INTEGER PRIMARY KEY CHECK (commitment_tree_position >= 0),
+    not_before INTEGER NOT NULL CHECK (not_before >= 0)
+)";
+
 /// Source-bound transaction facts. No fee is attributed to an account by this table.
 pub(super) const TABLE_TPIR_TRANSACTION_METADATA: &str = r#"
 CREATE TABLE tpir_transaction_metadata (

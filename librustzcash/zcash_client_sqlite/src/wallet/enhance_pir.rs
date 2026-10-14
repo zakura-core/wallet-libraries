@@ -414,6 +414,9 @@ const OUTGOING_SUSPENDED: u8 = 4;
 /// Content failures after which a request leaves query work until a rescan or fresh session.
 pub(crate) const MAX_REJECTIONS: u32 = 3;
 
+/// The longest random delay before the first private query of a newly queued position.
+pub(crate) const MAX_NOT_BEFORE_DELAY: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Selects enhancement rows from `tx_retrieval_queue q` (joined with `transactions t`) that may use
 /// ordinary public transport. When `:protect_ironwood` is set, privately protected transactions
 /// (`ironwood_enhance_routing.route = 0`) are excluded. Sticky route 2 (mixed details under a

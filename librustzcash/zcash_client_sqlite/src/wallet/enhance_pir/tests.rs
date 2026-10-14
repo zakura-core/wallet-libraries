@@ -2202,6 +2202,7 @@ fn routed(st: &State) -> (Vec<TxId>, Vec<EnhancePirWork>) {
     for work in &private {
         let txid = match work {
             EnhancePirWork::Query(request)
+            | EnhancePirWork::Waiting { request, .. }
             | EnhancePirWork::Suspended(
                 EnhancePirSuspension::OutgoingNotRecoverable(request)
                 | EnhancePirSuspension::Rejected(request),

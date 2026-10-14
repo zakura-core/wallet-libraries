@@ -320,6 +320,8 @@ pub struct WalletDb<C, P, CL, R> {
     rng: R,
     #[cfg(feature = "orchard")]
     enhance_pir_session: wallet::enhance_pir::session::SessionState,
+    #[cfg(feature = "orchard")]
+    enhance_pir_max_delay: std::time::Duration,
     anchor_retention_interval: AnchorRetentionInterval,
     #[cfg(feature = "orchard")]
     enhancement_mode: Option<EnhancementMode>,
@@ -546,6 +548,8 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
                 rng,
                 #[cfg(feature = "orchard")]
                 enhance_pir_session: Default::default(),
+                #[cfg(feature = "orchard")]
+                enhance_pir_max_delay: wallet::enhance_pir::MAX_NOT_BEFORE_DELAY,
                 anchor_retention_interval: AnchorRetentionInterval::default(),
                 status_mode: None,
                 transparent_ledger_mode: None,
@@ -742,6 +746,8 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             rng,
             #[cfg(feature = "orchard")]
             enhance_pir_session: Default::default(),
+            #[cfg(feature = "orchard")]
+            enhance_pir_max_delay: wallet::enhance_pir::MAX_NOT_BEFORE_DELAY,
             anchor_retention_interval: AnchorRetentionInterval::default(),
             status_mode: None,
             transparent_ledger_mode: None,
@@ -768,6 +774,13 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     #[cfg(feature = "orchard")]
     pub fn enhance_pir_session(&self) -> EnhancePirSession {
         self.enhance_pir_session.session.clone()
+    }
+
+    /// Sets the longest random delay before the first private query of a newly queued Enhance
+    /// position (ten minutes by default). Tests that do not exercise the delay set it to zero.
+    #[cfg(all(feature = "orchard", any(test, feature = "test-dependencies")))]
+    pub fn set_enhance_pir_max_delay(&mut self, delay: std::time::Duration) {
+        self.enhance_pir_max_delay = delay;
     }
 
     /// Reads one wallet snapshot while excluding concurrent SQLite writers.
@@ -798,6 +811,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
                 rng: &mut self.rng,
                 #[cfg(feature = "orchard")]
                 enhance_pir_session: self.enhance_pir_session.transaction(),
+                #[cfg(feature = "orchard")]
+                enhance_pir_max_delay: self.enhance_pir_max_delay,
                 anchor_retention_interval: self.anchor_retention_interval,
                 status_mode: self.status_mode,
                 transparent_ledger_mode: self.transparent_ledger_mode,
@@ -841,6 +856,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             rng: &mut self.rng,
             #[cfg(feature = "orchard")]
             enhance_pir_session: session.clone(),
+            #[cfg(feature = "orchard")]
+            enhance_pir_max_delay: self.enhance_pir_max_delay,
             anchor_retention_interval: self.anchor_retention_interval,
             status_mode: self.status_mode,
             transparent_ledger_mode: self.transparent_ledger_mode,
@@ -909,6 +926,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             rng: &mut self.rng,
             #[cfg(feature = "orchard")]
             enhance_pir_session: session.clone(),
+            #[cfg(feature = "orchard")]
+            enhance_pir_max_delay: self.enhance_pir_max_delay,
             anchor_retention_interval: self.anchor_retention_interval,
             status_mode: self.status_mode,
             transparent_ledger_mode: self.transparent_ledger_mode,
