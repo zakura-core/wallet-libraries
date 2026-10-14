@@ -249,7 +249,7 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     let spent = match spend_status(conn, candidate, recovered.nullifier(), through)? {
         Ok(SpendStatus::Unknown) => {
             // Authenticate inclusion before a directory answer can trigger a replay.
-            queue_spend_history(conn, params, account, through.height)?;
+            queue_spend_history(conn, params, account, candidate.height, through.height)?;
             return Ok(Ok(PaymentApplication::AwaitingSpendHistory));
         }
         Ok(spent) => spent,
