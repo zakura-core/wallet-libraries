@@ -124,6 +124,25 @@ mod tests {
         );
     }
 
+    /// A deposit seen but not yet swapped stays in progress for either key purpose. An
+    /// underpayment (`INCOMPLETE_DEPOSIT`) is refunded around the deadline, so treating
+    /// it as final could close a refund key before its refund arrives.
+    #[test]
+    fn deposits_in_progress_are_not_final() {
+        for status in ["KNOWN_DEPOSIT_TX", "INCOMPLETE_DEPOSIT", "PROCESSING"] {
+            for purpose in [Refund, Receive] {
+                let observed = observe(
+                    purpose,
+                    NearStatus {
+                        status,
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(observed, Some(OperationStatus::Active), "{status}");
+            }
+        }
+    }
+
     #[test]
     fn amounts_set_receipt_expectations() {
         let amount = Zatoshis::const_from_u64(1_000);
