@@ -21,7 +21,7 @@ workspace.
   `SqliteClientError::OneTimeIvksNotUsed` and `SqliteClientError::InvalidOneTimeIvkInput`.
   ZeWIF import also decrypts with the wallet's one-time keys. With
   `NoteSelection::PreferConsolidation`, one-time-key notes are spent first where that adds
-  no inputs, actions or fee.
+  no actions or fee.
 - `wallet::init::migrations::ids::ONE_TIME_IVK`, the one-time IVK migration, which runs in
   every build.
 
