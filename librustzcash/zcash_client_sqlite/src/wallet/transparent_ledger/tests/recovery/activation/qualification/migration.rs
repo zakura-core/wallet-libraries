@@ -296,14 +296,20 @@ impl PreLedgerWallet {
         let wallet_rows = |conn: &Connection| {
             production_dump(conn)
                 .into_iter()
+                // The upgrade opens a status poll window for every pending status obligation;
+                // the obligations themselves are compared through the retrieval queue below.
                 .filter(|(table, _)| {
-                    table != "schemer_migrations" && table != "tx_reconfirmation_receipts"
+                    table != "schemer_migrations"
+                        && table != "tx_reconfirmation_receipts"
+                        && table != "tx_status_polls"
                 })
                 // Txid enhancement tables are added empty: no wallet here has ledger-origin or
-                // route-2 transactions before the upgrade.
+                // route-2 transactions before the upgrade. Enhance not-before times are added
+                // empty too: no wallet here has Enhance work.
                 .filter(|(table, rows)| {
                     !(table.starts_with("transparent_detail_work")
-                        || table.starts_with("transparent_tx_display"))
+                        || table.starts_with("transparent_tx_display")
+                        || table == "ironwood_enhance_not_before")
                         || {
                             assert!(rows.is_empty(), "{table} is not empty");
                             false
