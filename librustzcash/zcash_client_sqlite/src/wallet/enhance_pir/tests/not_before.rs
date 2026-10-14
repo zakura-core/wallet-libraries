@@ -7,7 +7,7 @@ use zcash_client_backend::data_api::testing::{FakeCompactOutput, TestRng};
 use super::*;
 use crate::util::Clock;
 
-const MAX_DELAY: Duration = Duration::from_secs(600);
+const MAX_DELAY: Duration = Duration::from_secs(120);
 
 /// A wallet with the production delay bound, private Enhance and a random source seeded `seed`.
 fn delayed_state(seed: u64) -> State {

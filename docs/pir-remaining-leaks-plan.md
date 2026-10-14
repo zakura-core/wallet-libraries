@@ -75,7 +75,7 @@ queried in the same order, and the failure counts toward the existing cap of
 three.
 
 **Enhance items wait a random time before their first query.** When an item
-is first queued, the wallet draws a delay of 0 to 10 minutes from its random
+is first queued, the wallet draws a delay of 0 to 2 minutes from its random
 source and does not query the item before then. A rescan keeps the drawn time.
 
 ## 3. Changes
@@ -261,7 +261,7 @@ Schema, one additive migration chained after change A's:
 
 Library changes:
 
-- The delay is drawn uniformly from 0 to 600 seconds with the wallet's
+- The delay is drawn uniformly from 0 to 120 seconds with the wallet's
   `rng`, and added to the wallet's `clock`. Both are already in scope in the
   `LowLevelWalletWrite` impl that queues the item.
 - `transaction_enhancement_work_sql` leaves out of `queries` any position
@@ -404,8 +404,10 @@ None of the PIR changes above touches the transport.
   open wallet's session. Reopening the wallet resets them. A service can
   therefore learn up to two bits per record per session, rather than two bits
   in all. A durable count needs one small table.
-- **Is 10 minutes enough?** It spreads the first Enhance query over about 8
-  blocks. A longer delay hides the block better but holds memos back.
+- **Is 2 minutes enough?** It was set from 10 minutes down to 2, so memos
+  arrive about a minute after the sync on average. It spreads the first
+  Enhance query over about 2 blocks. A longer delay hides the block better but
+  holds memos back.
 - **How often will a transaction stay unresolved after its window?** With 10
   polls, a transaction slower than 10 blocks is settled by its expiry poll,
   transparent recovery or a rescan. If this happens often, a second fixed poll

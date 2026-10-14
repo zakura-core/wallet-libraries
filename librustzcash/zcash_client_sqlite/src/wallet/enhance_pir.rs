@@ -420,7 +420,7 @@ const ALL_DUE: i64 = i64::MAX;
 pub(crate) const MAX_REJECTIONS: u32 = 3;
 
 /// The longest random delay before the first private query of a newly queued position.
-pub(crate) const MAX_NOT_BEFORE_DELAY: std::time::Duration = std::time::Duration::from_secs(600);
+pub(crate) const MAX_NOT_BEFORE_DELAY: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Selects enhancement rows from `tx_retrieval_queue q` (joined with `transactions t`) that may use
 /// ordinary public transport. When `:protect_ironwood` is set, privately protected transactions

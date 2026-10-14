@@ -1986,7 +1986,7 @@ CREATE TABLE ironwood_enhance_metadata_queue (
 ///
 /// ### Columns
 /// - `not_before`: Unix seconds; the time the position was first queued plus a random delay of
-///   up to ten minutes. A rescan keeps it. The row is deleted when the position's work completes
+///   up to two minutes. A rescan keeps it. The row is deleted when the position's work completes
 ///   or a rewind removes it, so a later requeue draws a new time. A position without a row is due
 ///   at once.
 pub(super) const TABLE_IRONWOOD_ENHANCE_NOT_BEFORE: &str = "
