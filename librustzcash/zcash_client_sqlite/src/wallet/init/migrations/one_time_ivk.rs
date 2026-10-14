@@ -6,6 +6,10 @@
 //!
 //! The `purpose` and `expectation` codes are stable, and their CHECKs only bound them to a
 //! byte, leaving each set to code. A new code needs a migration that older builds refuse.
+//!
+//! A sweep's `content_failures` counts lookups whose answer failed on content, apart from
+//! `attempts`, which also counts transport failures. Nothing writes it yet. It lets the
+//! sweep cap content failures as the other PIR clients do (#186) without a new migration.
 
 use std::collections::HashSet;
 
@@ -16,7 +20,7 @@ use super::ironwood_enhance;
 use crate::wallet::init::WalletMigrationError;
 
 /// Identifier for the one-time IVK migration.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x1533018f_b6c7_4910_825b_21652c79e272);
+pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x57756102_9583_4af5_b411_5eead49fc9f0);
 
 pub(super) struct Migration;
 
@@ -93,7 +97,8 @@ impl RusqliteMigration for Migration {
                 lookup_hash BLOB CHECK (length(lookup_hash) = 32),
                 attempts INTEGER NOT NULL DEFAULT 0,
                 next_attempt_at INTEGER NOT NULL DEFAULT 0,
-                done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295)
+                done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295),
+                content_failures INTEGER NOT NULL DEFAULT 0 CHECK (content_failures >= 0)
             );
             CREATE INDEX idx_ironwood_one_time_sweeps_due ON ironwood_one_time_sweeps(done_height, next_attempt_at);
             CREATE TABLE ironwood_one_time_payment_recovery (
