@@ -170,3 +170,33 @@ fn completing_a_position_deletes_its_time() {
         .unwrap();
     assert_eq!(rows, 0);
 }
+
+/// A restart is the application's doing, not a reply's. A fresh session draws a new wait for a
+/// position whose earlier one has passed, at its first wallet write, and keeps it across
+/// rescans within the session.
+#[test]
+fn a_fresh_session_draws_the_wait_again_and_keeps_it_within_the_session() {
+    let mut st = delayed_state(6);
+    let height = scan_notes(&mut st, 1);
+    let (request, _) = single_wait(&st);
+    st.wallet().db().clock.tick(MAX_DELAY * 2);
+    assert_eq!(queries(&st), vec![request], "the first wait has passed");
+
+    // The application restarts: a new session over the same database.
+    st.wallet_mut().db_mut().enhance_pir_session = Default::default();
+    let restarted_at = now(&st);
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    st.wallet_mut().update_chain_tip(tip).unwrap();
+    let (again, not_before) = single_wait(&st);
+    assert_eq!(again, request);
+    assert!(not_before > restarted_at && not_before <= restarted_at + MAX_DELAY);
+    assert!(queries(&st).is_empty(), "not due before the new wait");
+
+    st.wallet().db().clock.tick(Duration::from_secs(1));
+    st.scan_cached_blocks(height, 1);
+    assert_eq!(
+        single_wait(&st),
+        (request, not_before),
+        "the session keeps it across a rescan"
+    );
+}

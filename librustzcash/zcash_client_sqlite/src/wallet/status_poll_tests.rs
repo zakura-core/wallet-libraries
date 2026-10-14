@@ -39,14 +39,15 @@ fn fixture() -> (State, BlockHeight) {
 }
 
 /// Queues private status work for `txid` at the current tip, as storing a sent transaction that
-/// compact scanning cannot observe does.
+/// compact scanning cannot observe does: the transaction was built for the next block.
 fn queue(st: &State, txid: TxId, expiry: u32) {
+    let tip = st.wallet().chain_height().unwrap().unwrap();
     st.wallet()
         .conn()
         .execute(
-            "INSERT INTO transactions (txid, expiry_height, min_observed_height)
-             VALUES (?1, ?2, 0)",
-            params![txid.as_ref(), expiry],
+            "INSERT INTO transactions (txid, expiry_height, target_height, min_observed_height)
+             VALUES (?1, ?2, ?3, 0)",
+            params![txid.as_ref(), expiry, u32::from(tip) + 1],
         )
         .unwrap();
     let tx = st.wallet().conn().unchecked_transaction().unwrap();
@@ -113,26 +114,49 @@ impl Service {
     }
 }
 
+type Db = crate::WalletDb<
+    rusqlite::Connection,
+    LocalNetwork,
+    crate::util::testing::FixedClock,
+    zcash_client_backend::data_api::testing::TestRng,
+>;
+
 /// Serves the due work at the current tip `tip` and returns the txids queried.
 fn serve(st: &mut State, queued: BlockHeight, tip: BlockHeight, service: Service) -> Vec<TxId> {
-    let work = st.wallet().transaction_status_work().unwrap();
+    serve_db(st.wallet_mut().db_mut(), queued, tip, service)
+}
+
+/// As [`serve`], through the wallet handle `db`.
+fn serve_db(db: &mut Db, queued: BlockHeight, tip: BlockHeight, service: Service) -> Vec<TxId> {
+    let work = db.transaction_status_work().unwrap();
     let mut asked = vec![];
     for item in work {
         let TransactionStatusWork::Private(request) = item else {
             panic!("expected private work");
         };
         asked.push(request.txid());
-        st.wallet_mut()
-            .db_mut()
-            .record_private_status_poll(request.txid(), tip)
-            .unwrap();
+        db.record_private_status_poll(request.txid(), tip).unwrap();
         if let (false, Some(status)) = (request.settled(), service.answer(queued, tip)) {
-            st.wallet_mut()
-                .set_transaction_status(request.txid(), status)
-                .unwrap();
+            db.set_transaction_status(request.txid(), status).unwrap();
         }
     }
     asked
+}
+
+/// The wallet of `st` opened again, as an application does after a restart: a new handle with
+/// a fresh session over the same database file.
+fn reopen(st: &State) -> Db {
+    crate::WalletDb::for_path(
+        st.wallet().conn().path().unwrap(),
+        *st.network(),
+        st.wallet().db().clock.clone(),
+        crate::testing::db::test_rng(),
+    )
+    .unwrap()
+    .with_status_mode(TransactionStatusMode::Private)
+    .with_transparent_ledger_mode(
+        zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+    )
 }
 
 /// Walks the tip from the queue tip `h` to `h + 45` and records each (tip, txid) queried.
@@ -300,35 +324,48 @@ fn an_unresolved_transaction_leaves_automatic_work_but_stays_pending() {
     ));
 }
 
-#[test]
-fn the_window_survives_a_reopen() {
+/// Walks the tip from the queue tip `h` to `h + 45` as [`transcript`] does, but restarts the
+/// wallet after serving the tip at offset `restart`, and serves that tip again from the new
+/// handle, as an application that restarts mid-sync does.
+fn transcript_across_a_restart(service: Service, restart: u32) -> Vec<(u32, TxId)> {
     let (mut st, h) = fixture();
-    let txid = TxId::from_bytes([14; 32]);
-    queue(&st, txid, 0);
-    for tip in u32::from(h)..u32::from(h) + 3 {
-        let tip = BlockHeight::from(tip);
-        st.wallet_mut().update_chain_tip(tip).unwrap();
-        serve(&mut st, h, tip, Service::Unreadable);
+    let txid = TxId::from_bytes([7; 32]);
+    queue(&st, txid, u32::from(h) + EXPIRY_DELTA);
+    let mut seen = vec![];
+    let serve_at = |db: &mut Db, offset: u32, seen: &mut Vec<(u32, TxId)>| {
+        let tip = h + offset;
+        db.update_chain_tip(tip).unwrap();
+        for asked in serve_db(db, h, tip, service) {
+            seen.push((offset, asked));
+        }
+    };
+    for offset in 0..=restart {
+        serve_at(st.wallet_mut().db_mut(), offset, &mut seen);
     }
-    let reopen = |st: &State| {
-        let conn = rusqlite::Connection::open(st.wallet().conn().path().unwrap()).unwrap();
-        crate::WalletDb::from_connection(conn, *st.network(), (), ())
-            .with_status_mode(TransactionStatusMode::Private)
-            .with_transparent_ledger_mode(
-                zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
-            )
-    };
-    let has = |db: &crate::WalletDb<rusqlite::Connection, LocalNetwork, (), ()>| {
-        db.transaction_status_work()
-            .unwrap()
-            .iter()
-            .any(|work| work.txid() == txid)
-    };
-    assert!(!has(&reopen(&st)), "polled at h + 2 before the reopen");
-    st.wallet_mut().update_chain_tip(h + WINDOW - 1).unwrap();
-    assert!(has(&reopen(&st)), "the last tip of the window");
-    st.wallet_mut().update_chain_tip(h + WINDOW).unwrap();
-    assert!(!has(&reopen(&st)), "past the window");
+    let mut reopened = reopen(&st);
+    for offset in restart..=45 {
+        serve_at(&mut reopened, offset, &mut seen);
+    }
+    seen
+}
+
+/// A restart is the application's doing, not a reply's: after it the wallet rebuilds each
+/// window from the transaction's target height and expiry height, and only the marks of tips
+/// already polled are lost. Restarting mid-window costs one more poll at the restart tip, the
+/// same for every service.
+#[test]
+fn a_restart_mid_window_keeps_the_transcript_independent_of_replies() {
+    let restart = 4;
+    let honest = transcript_across_a_restart(Service::Honest { mined: 2 }, restart);
+    let forging = transcript_across_a_restart(Service::Forging { at: 0 }, restart);
+    let unreadable = transcript_across_a_restart(Service::Unreadable, restart);
+    assert_eq!(honest, forging, "honest and forging services");
+    assert_eq!(honest, unreadable, "honest service and unreadable rows");
+
+    let txid = TxId::from_bytes([7; 32]);
+    let mut expected = expected(txid);
+    expected.insert(restart as usize + 1, (restart, txid));
+    assert_eq!(honest, expected, "one more poll at the restart tip");
 }
 
 #[test]
