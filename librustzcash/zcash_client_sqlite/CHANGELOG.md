@@ -18,9 +18,9 @@ workspace.
   until then. The time is kept in the `EnhancePirSession`, with no new table or
   migration. A rescan in the session keeps it; completing the position or a
   rewind that removes it forgets it, so a requeue draws a new one. A fresh
-  session draws each queued position's wait again at its first wallet write
-  (`update_chain_tip` among them); a position it reads before any write waits
-  the full 2 minutes from its first read. Read-only snapshots retain that deadline;
+  session schedules queued positions at its first wallet write (`update_chain_tip`
+  among them); a position read before any write instead waits the full 2 minutes
+  from its first read. Later writes preserve that existing deadline. Read-only snapshots retain that deadline;
   rolled-back writes do not publish tentative deadlines. Batch work reads and
   scheduling snapshot session state once, rather than cloning it per position.
   `EnhancePirRead` for `WalletDb` now requires `CL: Clock`.
@@ -31,8 +31,8 @@ workspace.
   fixed restore window: every external index below 50 and internal index below 25,
   past the gap limits. Ephemeral addresses keep their gap limit. The window is
   fixed in code and does not follow replies, so a restore whose used addresses
-  and their trailing address gaps lie inside it completes in one pass. Activation makes only the gap-limit window the
-  wallet's own, so an active account's watch set follows the gap limits as before.
+  and their trailing address gaps lie inside it completes in one pass. Activation makes only the gap-limit
+  window the wallet's own, so an active account's watch set follows the gap limits as before.
   An account that becomes a candidate again, as after a public policy round trip,
   watches the restore window again and needs a pass covering it before it
   activates. No migration.
