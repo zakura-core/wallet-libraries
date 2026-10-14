@@ -566,6 +566,40 @@ fn a_mislabeled_answer_yields_to_the_scanned_transaction() {
     }
 }
 
+/// Adoption is only for one-time-key notes. A wallet with no one-time keys refuses an
+/// ordinary note found again in a reorg's replacement transaction, as without adoption,
+/// rather than moving it there with the old transaction's memo.
+#[test]
+fn an_ordinary_note_is_not_moved_to_a_replacement_transaction() {
+    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
+    let mut st = scanned_wallet();
+    let memo = MemoBytes::from_bytes(b"the first transaction's memo").unwrap();
+    let paid = external_payment(parent(&st).address_at(0u32, Scope::External), &memo);
+    let (height, _) = st.generate_next_block_from_tx(1, &paid);
+    st.scan_cached_blocks(height, 1);
+    let network = *st.network();
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &paid, Some(height)).unwrap();
+    let sql = "SELECT memo FROM ironwood_received_notes";
+    let stored_memo = |st: &State| value::<Option<Vec<u8>>>(st.wallet().conn(), sql, []);
+    assert_eq!(stored_memo(&st), Some(memo.as_slice().to_vec()));
+    // The reorg mines the same note in a transaction with another ID.
+    st.truncate_to_height_retaining_cache(height - 1);
+    let sql = "SELECT data FROM compactblocks WHERE height = ?1";
+    let data: Vec<u8> = value(&st.cache().0, sql, [u32::from(height)]);
+    let mut block = CompactBlock::decode(data.as_slice()).unwrap();
+    let replacement = TxId::from_bytes([9; 32]);
+    block.vtx[0].txid = replacement.as_ref().to_vec();
+    let sql = "UPDATE compactblocks SET data = ?2 WHERE height = ?1";
+    exec(
+        &st.cache().0,
+        sql,
+        (u32::from(height), block.encode_to_vec()),
+    );
+    assert!(st.try_scan_cached_blocks(height, 1).is_err());
+    assert_eq!(note_txids(&st), [paid.txid()]);
+    assert_eq!(stored_memo(&st), Some(memo.as_slice().to_vec()));
+}
+
 /// A seen hit is stored with the attempt that observed it, before any payment work, so
 /// it survives that work deferring, a reopen, and a later publication's seen sets
 /// missing the receiver while its corrected lookup drops the candidate.

@@ -570,9 +570,9 @@ pub(crate) fn queued_note_ivk(
     Ok(ivk)
 }
 
-/// Validates an output's one-time key before it is stored, moving an Ironwood note found
-/// here from a directory's claimed transaction (see [`adopt_found_note`]), and returns its
-/// registry ID. A stored note keeps its key identity.
+/// Validates an output's one-time key before it is stored, moving a one-time-key note
+/// found here from a directory's claimed transaction (see [`adopt_found_note`]), and
+/// returns its registry ID. A stored note keeps its key identity.
 pub(super) fn received_note_key<
     P: Parameters,
     T: zcash_client_backend::data_api::ll::ReceivedOrchardOutput<AccountId = AccountUuid>,
@@ -656,9 +656,11 @@ pub(super) fn validate_received_key<
     Ok(Some(id))
 }
 
-/// Moves a stored Ironwood note with nullifier `nf` to `action_index` of `tx_ref`, where
-/// it was just found, from the transaction a directory claimed for it, which is deleted
-/// once nothing refers to it. Only the note itself was authenticated.
+/// Moves a stored one-time-key note with nullifier `nf` to `action_index` of `tx_ref`,
+/// where it was just found, from the transaction a directory claimed for it, which is
+/// deleted once nothing refers to it. Only the note itself was authenticated. An ordinary
+/// note stays put, so storing it again fails on its nullifier as without one-time keys;
+/// moved, it would keep the old transaction's memo.
 fn adopt_found_note(
     conn: &Connection,
     nf: &[u8; 32],
@@ -669,7 +671,8 @@ fn adopt_found_note(
     let stored: Option<(i64, i64)> = conn
         .query_row(
             "SELECT id, transaction_id FROM ironwood_received_notes
-             WHERE nf = ?1 AND (transaction_id != ?2 OR action_index != ?3)",
+             WHERE nf = ?1 AND one_time_key_id IS NOT NULL
+               AND (transaction_id != ?2 OR action_index != ?3)",
             rusqlite::params![nf, tx_ref.0, index],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
