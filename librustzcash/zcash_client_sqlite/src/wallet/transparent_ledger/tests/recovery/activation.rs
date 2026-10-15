@@ -1475,6 +1475,7 @@ mod public_fixtures;
 mod attribution;
 mod history_summaries;
 mod rewind_reconfirmation;
+mod same_target_window;
 mod transparent_detail;
 
 mod qualification;
