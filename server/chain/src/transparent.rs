@@ -141,6 +141,33 @@ pub trait PreviousOutputs {
     fn previous_output(&mut self, txid: [u8; 32], index: u32) -> Result<Option<Output>, BoxError>;
 }
 
+/// A transaction's identity and transparent outputs, for a caller holding a raw
+/// transaction outside any block, such as a fixture's spent parents.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransactionOutputs {
+    /// The transaction ID in protocol byte order.
+    pub txid: [u8; 32],
+    /// Every transparent output, in order, scripts raw.
+    pub outputs: Vec<Output>,
+}
+
+/// The transaction serialized in `raw`: its identity and transparent outputs.
+pub fn read_transaction(raw: &[u8]) -> Result<TransactionOutputs, NodeError> {
+    let transaction = Transaction::zcash_deserialize(raw)
+        .map_err(|error| NodeError::Transaction("<raw>".into(), error.to_string()))?;
+    Ok(TransactionOutputs {
+        txid: transaction.hash().0,
+        outputs: transaction
+            .outputs()
+            .iter()
+            .map(|o| Output {
+                value: u64::from(o.value),
+                script: o.lock_script.as_raw_bytes().to_vec(),
+            })
+            .collect(),
+    })
+}
+
 /// A decoded block, read over RPC or from the node's database.
 #[derive(Clone, Debug)]
 pub struct FetchedBlock(Arc<Block>);

@@ -7,6 +7,7 @@ use zakura_server_chain::{
     testing::*,
     transparent::{
         BoxError, ExtractError, Fee, FetchedBlock, Output, OutputCache, PreviousOutputs,
+        read_transaction,
     },
 };
 
@@ -142,6 +143,23 @@ async fn rpc_blocks_resolve_every_spent_script_raw_with_exact_fees() {
         fetched.transparent(10, &mut known).unwrap(),
         read.transactions
     );
+    // A transaction outside any block reads with the same identity and outputs.
+    let alone = read_transaction(&earlier.bytes()).unwrap();
+    assert_eq!(alone.txid, earlier.txid());
+    assert_eq!(
+        alone.outputs,
+        vec![
+            Output {
+                value: 50_000,
+                script: ODD.to_vec()
+            },
+            Output {
+                value: 7,
+                script: vec![]
+            }
+        ]
+    );
+    assert!(read_transaction(&earlier.bytes()[1..]).is_err());
     // A later block spending those outputs again reads them from the cache.
     let again = transfer(vec![spend(&earlier, 0)], &[(1, P2PKH)]);
     chain.lock().unwrap().push_block(11, &[again], 2);
