@@ -1,0 +1,25 @@
+[package]
+name = "zakura-receiver-crypto"
+version = "0.0.1-rc0"
+publish = false
+description = "Receiver directory validation: addresses, zero-OVK recovery, records and inclusion proofs"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[dependencies]
+incrementalmerkletree.workspace = true
+orchard.workspace = true
+zcash_note_encryption.workspace = true
+thiserror = "2"
+# The only receiver record codec. Pinned to an exact wallet-pir revision; the
+# package has no dependencies, so it never brings PIR serving into a wallet.
+receiver-wire = { git = "https://github.com/valargroup/wallet-pir", rev = "3cb83315258dcfada296e35df00a5c9b2bcec5c6" }
+
+[dev-dependencies]
+hex.workspace = true
+incrementalmerkletree = { workspace = true, features = ["legacy-api"] }
+orchard = { workspace = true, features = ["zip32-addresses"] }
+serde_json.workspace = true
