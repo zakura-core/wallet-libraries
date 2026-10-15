@@ -72,6 +72,18 @@ impl Tx {
     }
 }
 
+/// The Ironwood tree root, as the node's `z_gettreestate` encodes it, after the
+/// Actions of `transactions` in order, from the empty tree.
+pub fn ironwood_root_of(transactions: &[Tx]) -> [u8; 32] {
+    let mut tree = zakura_chain::orchard::tree::NoteCommitmentTree::default();
+    for tx in transactions {
+        for action in tx.0.ironwood_actions() {
+            tree.append(action.cm_x).unwrap();
+        }
+    }
+    tree.root().bytes_in_display_order()
+}
+
 /// A transparent input of a synthetic transaction.
 #[derive(Clone, Debug)]
 pub struct Spend(Input);
