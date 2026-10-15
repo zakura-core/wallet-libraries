@@ -3577,6 +3577,7 @@ pub(crate) fn get_max_height_hash(
 
 pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
     conn: &rusqlite::Transaction,
+    #[cfg(feature = "orchard")]
     tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
     params: &P,
     #[cfg(feature = "transparent-inputs")] gap_limits: &GapLimits,

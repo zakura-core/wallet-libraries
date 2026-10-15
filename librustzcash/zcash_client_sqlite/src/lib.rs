@@ -3893,6 +3893,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             }
             wallet::store_transaction_to_be_sent(
                 self.conn.0,
+                #[cfg(feature = "orchard")]
                 &self.transparent_pir_session,
                 &self.params,
                 #[cfg(feature = "transparent-inputs")]
