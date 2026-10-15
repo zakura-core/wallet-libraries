@@ -110,6 +110,23 @@ bip32 = "0.6"
 secp256k1 = "0.33"
 zcash_script = "0.6"
 
+# The Zakura node's crates. Only the server-only workspace in `server/`, which has
+# its own lockfile, may use them: a wallet build must never resolve one.
+[server]
+workspace = "server"
+node_packages = [
+  "zakura-chain",
+  "zakura-consensus",
+  "zakura-header-chain",
+  "zakura-mmr-tree",
+  "zakura-network",
+  "zakura-node-services",
+  "zakura-rpc",
+  "zakura-script",
+  "zakura-state",
+  "zakura-test",
+]
+
 # Crate names that must never appear in a built graph: the crates.io originals
 # of everything `libraries` forks. Any one of them means an edge escaped the
 # rewiring, and two copies of a type that looks identical are not the same type.
