@@ -7,6 +7,14 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- `TransparentLedgerRead::transparent_watch_set` may keep each derived window at
+  one target where the first read there left it, and `CommitOutcome::window_grew`
+  now says the new addresses are recovered at the next target rather than at the
+  same one. The SQLite store does so: window growth a reply causes is watched from
+  the next target.
+
 ### Removed
 
 - `EnhancePirWork::Waiting`: newly queued private payload work is eligible through

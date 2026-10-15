@@ -399,9 +399,16 @@ fn pending_pages(
 
 /// Returns `account`'s watched addresses, capture context, and pending pages. The caller
 /// provides the read snapshot.
+///
+/// At a given target, each window scope watches no further than the first read at that target
+/// did, as recorded in `session`, or than a candidate's restore window: growth a reply causes
+/// there, though stored at once, is watched from the next target, whether it rose or a reorg
+/// lowered it. Coverage and completion reads see the growth, so the account stays incomplete
+/// until a pass at a later target covers it.
 #[cfg(feature = "transparent-inputs")]
 pub(crate) fn watch_set<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
+    session: &SessionState,
     params: &P,
     gap_limits: &GapLimits,
     configured: Option<TransparentLedgerMode>,
@@ -410,12 +417,32 @@ pub(crate) fn watch_set<P: consensus::Parameters>(
     resolve_mode(conn, configured)?;
     let recovery_addresses = AccountRecoveryAddresses::load(conn, params, gap_limits, account)?
         .ok_or(SqliteClientError::AccountUnknown)?;
+    let target = local_target(conn)?;
+    let mut addresses = recovery_addresses.watched_addresses();
+    if let Some(target) = target {
+        let ends = session.watched_ends(
+            account,
+            target,
+            std::array::from_fn(|slot| recovery_addresses.watched_end(slot)),
+        );
+        // The restore window is fixed in code, whatever replies showed, so a candidate watches
+        // it whole even when the account was active at the first read.
+        addresses.retain(|watched| match watched.origin {
+            WatchOrigin::Derived { scope, index }
+            | WatchOrigin::CandidateWindow { scope, index } => {
+                scope_slot(scope).is_none_or(|slot| {
+                    index.index() < ends[slot].max(recovery_addresses.restore_end[slot])
+                })
+            }
+            WatchOrigin::Standalone => true,
+        });
+    }
     Ok(TransparentAddressWatchSet {
         account,
         lifecycle: account_lifecycle(conn, recovery_addresses.account.internal_id())?,
         policy_generation: capture_policy_generation(conn)?,
-        target: local_target(conn)?,
-        addresses: recovery_addresses.watched_addresses(),
+        target,
+        addresses,
         pending_pages: pending_pages(conn, recovery_addresses.account.internal_id())?,
     })
 }
