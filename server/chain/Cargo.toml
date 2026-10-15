@@ -32,8 +32,13 @@ zakura-receiver-crypto = { path = "../../zakura/receiver-crypto" }
 
 [dev-dependencies]
 axum = "0.7"
+chrono = { version = "0.4", default-features = false }
 hex = "0.4"
+tempfile = "3"
 tokio = { version = "1", features = ["full"] }
+# A primary database for the RocksDB reader's tests, and the public genesis block.
+zakura-state.workspace = true
+zakura-test.workspace = true
 
 [[test]]
 name = "enhance"
@@ -50,3 +55,7 @@ required-features = ["testing"]
 [[test]]
 name = "transparent"
 required-features = ["testing"]
+
+[[test]]
+name = "state"
+required-features = ["testing", "rocksdb"]

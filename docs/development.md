@@ -31,7 +31,7 @@ python3 scripts/dev.py verify
 | `transparent-pir-testing` | Transparent PIR adapter; `sqlite` and `testing` (the test support applications build their recovery and txid display tests on) |
 | `pir-receiver` | Receiver PIR; `wallet` (which enables the backend's `orchard`; its tests use SQLite with `orchard`) |
 | `receiver-wire` | Library-owned receiver codec with default features disabled |
-| `server` | Separate server workspace, including the node fixture helpers under `testing`; `-p` retains this workspace and doctor checks its lockfile |
+| `server` | Separate server workspace, including the node fixture helpers under `testing` and the opt-in RocksDB reader under `rocksdb`; `-p` retains this workspace and doctor checks its lockfile |
 | `one-time-ivk-scenarios` | One-time IVK scenario suite (see its README); `ONE_TIME_IVK_SLOW=1` adds the scenarios that wait months of chain time. CI runs it nightly, not on PRs |
 
 `default` builds the backend and SQLite crates without Orchard or transparent

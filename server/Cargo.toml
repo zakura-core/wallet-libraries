@@ -22,3 +22,5 @@ zakura-chain = { git = "https://github.com/zakura-core/zakura.git", rev = "83738
 # `rocksdb` reader opens the node's database directly, so its format must match
 # the running node's.
 zakura-state = { git = "https://github.com/zakura-core/zakura.git", rev = "83738c07468bee30a7db8a8d678cb27bf60094f4" }
+# Test vectors from the same node revision.
+zakura-test = { git = "https://github.com/zakura-core/zakura.git", rev = "83738c07468bee30a7db8a8d678cb27bf60094f4" }

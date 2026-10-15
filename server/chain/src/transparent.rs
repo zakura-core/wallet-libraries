@@ -696,7 +696,7 @@ mod tests {
         assert_eq!(read[1].inputs[0].spent.script, vec![0x76, 0xa9]);
         assert_eq!(read[1].fee, Fee::Exact(1000));
         assert!(matches!(
-            extract(&[spender.clone()], &mut Map::default(), 7),
+            extract(std::slice::from_ref(&spender), &mut Map::default(), 7),
             Err(ExtractError::MissingPreviousOutput(_))
         ));
         struct Failing;
@@ -737,5 +737,104 @@ mod tests {
         cache.insert_transaction(&second);
         assert!(cache.get(&out).is_none());
         assert_eq!(cache.len(), 3);
+    }
+
+    // The transparent filter service's cache tests, moved with the cache.
+
+    /// A transaction with `outputs` outputs, standing in for the early-chain
+    /// mining-pool coinbases that made a transaction-bounded cache unbounded.
+    fn wide_transaction(tag: u8, outputs: usize) -> Arc<Transaction> {
+        tx(
+            Vec::new(),
+            (0..outputs)
+                .map(|index| output(1, &[0x76, 0xa9, 0x14, tag, index as u8]))
+                .collect(),
+        )
+    }
+
+    fn outpoint_of(transaction: &Transaction, index: u32) -> OutPoint {
+        OutPoint {
+            hash: transaction.hash(),
+            index,
+        }
+    }
+
+    /// The budget is outputs, not transactions. A transaction-bounded cache
+    /// grew without limit over early-chain blocks, whose mining-pool coinbases
+    /// carry thousands of outputs each, and a genesis backfill was killed by
+    /// the OOM killer partway through because of it.
+    #[test]
+    fn one_huge_transaction_counts_for_all_its_outputs() {
+        let mut cache = OutputCache::new(100);
+        let wide = wide_transaction(0, 250);
+        cache.insert_transaction(&wide);
+        // A transaction larger than the whole budget is kept: evicting it would
+        // leave the block being extracted unable to resolve its own outputs.
+        assert!(cache.get(&outpoint_of(&wide, 0)).is_some());
+
+        // The next insert evicts it, because the budget is now exceeded by a
+        // transaction that is not the only one held.
+        let next = wide_transaction(1, 10);
+        cache.insert_transaction(&next);
+        assert!(
+            cache.get(&outpoint_of(&wide, 0)).is_none(),
+            "the oversized transaction should be evicted once another arrives"
+        );
+        assert!(cache.get(&outpoint_of(&next, 0)).is_some());
+    }
+
+    /// Many small transactions evict by output count rather than by count of
+    /// transactions, so a fixed budget holds a predictable amount of memory
+    /// whatever the shape of the blocks.
+    #[test]
+    fn eviction_is_by_output_count_not_transaction_count() {
+        let mut cache = OutputCache::new(20);
+        let first = wide_transaction(0, 8);
+        cache.insert_transaction(&first);
+        for tag in 1..4u8 {
+            cache.insert_transaction(&wide_transaction(tag, 8));
+        }
+        // Four transactions of eight outputs is 32, past a 20-output budget, so
+        // the earliest are gone even though only four transactions were seen.
+        assert!(cache.get(&outpoint_of(&first, 0)).is_none());
+        assert!(cache.len() <= 24, "held {} outputs", cache.len());
+    }
+
+    #[test]
+    fn an_empty_cache_answers_nothing() {
+        let cache = OutputCache::new(4);
+        assert!(cache.is_empty());
+        assert!(
+            cache
+                .get(&OutPoint {
+                    hash: transaction::Hash([1; 32]),
+                    index: 0,
+                })
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn eviction_bounds_the_cache_without_losing_recent_entries() {
+        let make = |tag: u8| tx(vec![], vec![output(i64::from(tag) + 1, &[0x76, 0xa9, tag])]);
+
+        let mut cache = OutputCache::new(2);
+        let first = make(1);
+        let second = make(2);
+        let third = make(3);
+        cache.insert_transaction(&first);
+        cache.insert_transaction(&second);
+        cache.insert_transaction(&third);
+
+        // The oldest was evicted.
+        assert_eq!(cache.len(), 2);
+        assert!(
+            cache.get(&outpoint_of(&first, 0)).is_none(),
+            "oldest entry should be evicted"
+        );
+        assert_eq!(
+            cache.get(&outpoint_of(&third, 0)),
+            Some(&third.outputs()[0])
+        );
     }
 }

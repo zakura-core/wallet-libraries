@@ -16,6 +16,14 @@ node or Zakura Common types.
   resolving spent outputs from the same block, a bounded cache, then batched reads;
   an unresolved output fails the block.
 - `status`: canonical blocks' transaction IDs and the mempool's.
+- `transparent`: every transaction's transparent outputs and the outputs its inputs
+  spend, as raw scripts with exact fees, resolving same-block spends first, then a
+  bounded cache, then batched reads; an unresolved output fails the block. Also
+  compact blocks rebuilt from raw blocks, and the raw JSON-RPC calls the services'
+  independent spot checks make.
+- `rocksdb` (feature): `transparent::state::StateReader`, which opens an archive
+  node's finalized state as a RocksDB secondary and reads the same transparent
+  blocks from it. Its `zakura-state` revision must match the running node's format.
 - `testing` (feature): synthetic transactions, block envelopes and a JSON-RPC node
   double built with the node's own encoders, for service tests.
 

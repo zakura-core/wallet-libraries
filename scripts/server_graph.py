@@ -62,10 +62,14 @@ def main():
              'fn main() { let _ = zakura_server_chain::NodeClient::new("http://127.0.0.1:1".into(), None); }\n'),
             ("server", f'zakura-server-chain = {{ path = "{ROOT / "server/chain"}", features = ["testing"] }}',
              '''use zakura_server_chain::{Network, NodeClient, NodeError, receiver::ReceiverBlock, enhance::EnhanceBlock, status::StatusBlock};
-fn public_results(receiver: ReceiverBlock, enhance: EnhanceBlock, status: StatusBlock) {
+use zakura_server_chain::transparent::{CompactBlock, Fee, TransparentBlock};
+fn public_results(receiver: ReceiverBlock, enhance: EnhanceBlock, status: StatusBlock, transparent: TransparentBlock, compact: CompactBlock) {
     let _: Vec<[u8; 32]> = receiver.commitments;
     let _: Vec<[u8; 32]> = status.txids;
     let _: Option<u64> = enhance.actions.into_iter().next().and_then(|a| a.fee_zatoshis);
+    let _: Option<Fee> = transparent.transactions.first().map(|t| t.fee);
+    let _: Option<Vec<u8>> = transparent.transactions.into_iter().next().and_then(|t| t.outputs.into_iter().next()).map(|o| o.script);
+    let _: u32 = compact.ironwood_tree_size;
 }
 fn main() {
     let _: Result<NodeClient, NodeError> = NodeClient::new("http://127.0.0.1:1".into(), None);

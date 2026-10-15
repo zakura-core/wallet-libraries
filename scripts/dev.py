@@ -29,8 +29,9 @@ CONFIGS = {
     "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),
     "receiver-wire": (["-p", "zakura-receiver-crypto", "--no-default-features"], []),
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
-    # The server-only workspace, with its own lockfile; see server/Cargo.toml.
-    "server": (["--manifest-path", "server/Cargo.toml", "--workspace"], ["testing"]),
+    # The server-only workspace, with its own lockfile; see server/Cargo.toml. The
+    # opt-in RocksDB reader is tested here; fresh consumers check the feature off.
+    "server": (["--manifest-path", "server/Cargo.toml", "--workspace"], ["testing", "rocksdb"]),
 }
 VERIFY = ("server-graph", "zakura-graph", "wallet-lib-modes", "vendor-ancestry")
 
