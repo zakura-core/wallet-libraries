@@ -31,6 +31,8 @@ fn coinbase_exclusion_preserves_position_and_compact_context() {
     );
     assert_eq!(indexed.payments.len(), 1);
     let (receiver, p) = &indexed.payments[0];
+    // Services can pass the canonical record directly to the receiver codec.
+    let p: &zakura_receiver_crypto::wire::Payment = p;
     assert_eq!(hex::encode(receiver), RECEIVER_HEX);
     assert_eq!((p.tx_index, p.action_index, p.position), (1, 0, 610503));
     assert_eq!(p.txid, b.txids()[1]);
