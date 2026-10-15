@@ -108,9 +108,9 @@ fn store_mined(db: &mut Db, raw: &Transaction, height: BlockHeight) {
         vec![],
         vec![],
     );
-    tx(db, |c, _| {
-        crate::wallet::put_tx_meta(c, &Default::default(), &meta, height)?;
-        crate::wallet::put_tx_data(c, raw, None, None, None, height)
+    db.transactionally(|db| {
+        crate::wallet::put_tx_meta(db.conn.0, &db.transparent_pir_session, &meta, height)?;
+        crate::wallet::put_tx_data(db.conn.0, raw, None, None, None, height)
     })
     .unwrap();
 }

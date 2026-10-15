@@ -376,6 +376,12 @@ impl<'conn> SqlTransaction<'conn> {
     /// The caller retains responsibility for committing or rolling back. Wallet operations
     /// on the resulting handle share this transaction with application-owned cleanup; no
     /// nested transaction is started and dropping the wrapper does not commit it.
+    ///
+    /// Operations that can queue transparent lookups require a wallet-owned session journal
+    /// and return [`SqliteClientError::TransparentSessionTransactionRequired`] through this
+    /// wrapper. Use [`WalletDb::transactionally`] or
+    /// [`WalletDb::transactionally_with_extension`] for those writes, so SQL and in-memory
+    /// privacy holds commit or roll back together.
     pub fn new(transaction: &'conn rusqlite::Transaction<'conn>) -> Self {
         Self(transaction)
     }

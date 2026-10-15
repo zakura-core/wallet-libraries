@@ -172,13 +172,17 @@ fn a_crash_before_commit_leaves_the_prior_state() {
     let before = full_dump(conn(&st));
 
     // The process dies after activation's writes, before its transaction commits.
-    conn(&st).execute_batch("BEGIN IMMEDIATE").unwrap();
-    activate_recovered_ledger(&mut st, account).unwrap();
-    let (_dir, crashed) = crash_copy(&path);
-    assert_eq!(full_dump(&crashed), before);
+    st.wallet_mut()
+        .db_mut()
+        .transactionally(|db| {
+            db.activate_transparent_ledger(account)?;
+            let (_dir, crashed) = crash_copy(&path);
+            assert_eq!(full_dump(&crashed), before);
+            Ok::<_, SqliteClientError>(())
+        })
+        .unwrap();
 
     // Once committed, a restart sees the activated wallet.
-    conn(&st).execute_batch("COMMIT").unwrap();
     let after = full_dump(conn(&st));
     assert_ne!(after, before);
     let (_dir, restarted) = crash_copy(&path);

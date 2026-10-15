@@ -1025,7 +1025,7 @@ impl<C: std::borrow::BorrowMut<Connection>, P: Parameters, CL: crate::util::Cloc
                 crate::wallet::transparent_ledger::capture_policy_generation(wdb.conn.0)?;
             apply(
                 wdb.conn.0,
-                &Default::default(),
+                &wdb.transparent_pir_session,
                 wdb.params,
                 wdb.transparent_ledger_mode,
                 expected,
@@ -3310,7 +3310,7 @@ fn a_rolled_back_rescan_keeps_the_suspension() {
     let result: Result<(), SqliteClientError> = st.wallet_mut().db_mut().transactionally(|db| {
         queue_transaction(
             db.conn.0,
-            &Default::default(),
+            &db.transparent_pir_session,
             db.transparent_ledger_mode,
             &db.enhance_pir_session,
             tx_ref,
@@ -3344,7 +3344,7 @@ fn a_failed_rescan_commit_keeps_the_suspension() {
     let result: Result<(), SqliteClientError> = st.wallet_mut().db_mut().transactionally(|db| {
         queue_transaction(
             db.conn.0,
-            &Default::default(),
+            &db.transparent_pir_session,
             db.transparent_ledger_mode,
             &db.enhance_pir_session,
             tx_ref,

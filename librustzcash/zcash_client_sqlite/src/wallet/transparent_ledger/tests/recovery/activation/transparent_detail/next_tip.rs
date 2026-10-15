@@ -107,3 +107,127 @@ fn handles_sharing_a_session_hold_the_same_work_and_a_fresh_session_lists_it() {
     assert!(listing(&st).contains(&txid));
     assert!(list(&other).contains(&txid));
 }
+
+#[test]
+fn a_caller_owned_transaction_cannot_release_an_existing_hold() {
+    use zcash_client_backend::data_api::WalletWrite as _;
+
+    let (mut st, c, held) = recovered_receive(0);
+    apply(&mut st, c).unwrap();
+    assert!(!listing(&st).contains(&held));
+    let account = st.test_account().unwrap().id();
+    let ws = watch(&st, account);
+    let fresh = receive(6, external(&ws), 70_000, below_target(&ws, 0));
+    let mut c = commit(&ws);
+    c.receives = vec![fresh.clone()];
+    c.coverage = full_coverage(&ws);
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let network = *st.network();
+    let session = st.wallet().db().transparent_pir_session();
+    let result = {
+        let tx = st.wallet_mut().conn_mut().transaction().unwrap();
+        let mut db = crate::WalletDb::from_connection(
+            crate::SqlTransaction::new(&tx),
+            network,
+            test_clock(),
+            test_rng(),
+        )
+        .with_transparent_ledger_mode(PrivateRequired)
+        .with_transparent_pir_session(session);
+        db.update_chain_tip(tip + 1).unwrap();
+        assert!(matches!(
+            db.apply_transparent_policy(PrivateRequired),
+            Err(SqliteClientError::TransparentSessionTransactionRequired)
+        ));
+        assert!(matches!(
+            db.activate_transparent_ledger(account),
+            Err(SqliteClientError::TransparentSessionTransactionRequired)
+        ));
+        assert!(matches!(
+            db.set_transaction_status(
+                held,
+                zcash_client_backend::data_api::TransactionStatus::Mined(tip)
+            ),
+            Err(SqliteClientError::TransparentSessionTransactionRequired)
+        ));
+        let result = db.apply_transparent_ledger_commit(c);
+        drop(db);
+        tx.rollback().unwrap();
+        result
+    };
+    assert!(matches!(
+        result,
+        Err(SqliteClientError::TransparentSessionTransactionRequired)
+    ));
+    assert_eq!(st.wallet().chain_height().unwrap(), Some(tip));
+    assert_eq!(reasons(&st, txid_of(&fresh)), None);
+    assert!(!listing(&st).contains(&held));
+}
+
+#[test]
+fn wallet_owned_transactions_publish_holds_only_after_commit() {
+    use zcash_client_backend::data_api::WalletWrite as _;
+
+    for fail_commit in [false, true] {
+        let (mut st, first, held) = recovered_receive(0);
+        apply(&mut st, first).unwrap();
+        let account = st.test_account().unwrap().id();
+        let ws = watch(&st, account);
+        let fresh = receive(6, external(&ws), 70_000, below_target(&ws, 0));
+        let txid = txid_of(&fresh);
+        let mut c = commit(&ws);
+        c.receives = vec![fresh];
+        c.coverage = full_coverage(&ws);
+        let tip = st.wallet().chain_height().unwrap().unwrap();
+        if fail_commit {
+            conn(&st).commit_hook(Some(|| true));
+        }
+        let result: Result<(), SqliteClientError> =
+            st.wallet_mut().db_mut().transactionally(|db| {
+                db.update_chain_tip(tip + 1)?;
+                db.apply_transparent_ledger_commit(c.clone())?;
+                assert!(
+                    !db.transparent_detail_work(now(), 100, &[txid], None)?
+                        .requests
+                        .iter()
+                        .any(|r| r.txid == txid)
+                );
+                if fail_commit {
+                    Ok(())
+                } else {
+                    Err(SqliteClientError::CorruptedData(
+                        "abort the test transaction".into(),
+                    ))
+                }
+            });
+        conn(&st).commit_hook(None::<fn() -> bool>);
+        if fail_commit {
+            assert!(matches!(result, Err(SqliteClientError::DbError(_))));
+        } else {
+            assert!(
+                matches!(result, Err(SqliteClientError::CorruptedData(ref message)) if message == "abort the test transaction")
+            );
+        }
+        assert_eq!(st.wallet().chain_height().unwrap(), Some(tip));
+        assert_eq!(reasons(&st, txid), None);
+        assert!(!listing(&st).contains(&held));
+        assert!(
+            !st.wallet()
+                .db()
+                .transparent_pir_session
+                .held(tip + 1)
+                .contains(&txid)
+        );
+        st.wallet_mut()
+            .db_mut()
+            .transactionally_with_extension(|db, _| {
+                db.apply_transparent_ledger_commit(c)?;
+                Ok::<_, SqliteClientError>(())
+            })
+            .unwrap();
+        assert_eq!(reasons(&st, txid), Some(RECEIVE));
+        assert!(!listing(&st).contains(&txid));
+        scan_new_blocks(&mut st, 1);
+        assert!(listing(&st).contains(&txid));
+    }
+}

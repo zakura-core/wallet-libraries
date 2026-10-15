@@ -3,7 +3,7 @@ use super::*;
 use crate::{
     WalletDb,
     testing::db::{test_clock, test_rng},
-    wallet::init::WalletMigrator,
+    wallet::{init::WalletMigrator, transparent_ledger::session::SessionState},
 };
 use zcash_client_backend::data_api::{
     TransactionStatus,
@@ -47,11 +47,12 @@ fn rewind(conn: &mut Connection) {
     tx.commit().unwrap();
 }
 fn accept(conn: &mut Connection, hash: [u8; 32]) {
+    let session = SessionState::default().transaction();
     let tx = conn.transaction().unwrap();
     tx.execute("INSERT INTO blocks (height, hash, time, sapling_tree) VALUES (100, ?1, 0, X'00') ON CONFLICT (height) DO UPDATE SET hash=excluded.hash", [hash]).unwrap();
     reconcile_scanned_blocks(
         &tx,
-        &Default::default(),
+        &session,
         &Network::TestNetwork,
         #[cfg(feature = "transparent-inputs")]
         &GapLimits::default(),
@@ -59,6 +60,7 @@ fn accept(conn: &mut Connection, hash: [u8; 32]) {
     )
     .unwrap();
     tx.commit().unwrap();
+    session.commit();
 }
 fn receipts(conn: &Connection) -> i64 {
     conn.query_row("SELECT COUNT(*) FROM tx_reconfirmation_receipts", [], |r| {
@@ -75,10 +77,11 @@ fn work(conn: &Connection) -> Vec<TransactionStatusWork> {
     .unwrap()
 }
 fn observed(conn: &mut Connection, txid: TxId, status: TransactionStatus) {
+    let session = SessionState::default().transaction();
     let tx = conn.transaction().unwrap();
     super::super::set_transaction_status(
         &tx,
-        &Default::default(),
+        &session,
         &Network::TestNetwork,
         #[cfg(feature = "transparent-inputs")]
         &GapLimits::default(),
@@ -87,6 +90,7 @@ fn observed(conn: &mut Connection, txid: TxId, status: TransactionStatus) {
     )
     .unwrap();
     tx.commit().unwrap();
+    session.commit();
 }
 
 #[test]
@@ -106,10 +110,11 @@ fn receipt_survives_reopen_and_restores_index_without_network_or_payload_complet
     let mut db = database(file.path());
     assert_eq!(receipts(&db.conn), 1);
     // Neither a high contiguous scan frontier nor an empty batch is inclusion evidence.
+    let session = db.transparent_pir_session.transaction();
     let tx = db.conn.transaction().unwrap();
     reconcile_scanned_blocks(
         &tx,
-        &Default::default(),
+        &session,
         &Network::TestNetwork,
         #[cfg(feature = "transparent-inputs")]
         &GapLimits::default(),
@@ -117,6 +122,7 @@ fn receipt_survives_reopen_and_restores_index_without_network_or_payload_complet
     )
     .unwrap();
     tx.commit().unwrap();
+    session.commit();
     assert!(work(&db.conn).is_empty());
     accept(&mut db.conn, [7; 32]);
     assert_eq!(receipts(&db.conn), 0);
@@ -317,23 +323,24 @@ fn capture_and_reconciliation_failure_roll_back_receipts_metadata_and_flags() {
     rewind(&mut db.conn);
     db.conn.execute_batch("CREATE TRIGGER reject_resolution BEFORE DELETE ON tx_reconfirmation_receipts BEGIN SELECT RAISE(ABORT, 'resolution failure'); END").unwrap();
     {
+        let session = db.transparent_pir_session.transaction();
         let tx = db.conn.transaction().unwrap();
         tx.execute(
             "INSERT INTO blocks (height,hash,time,sapling_tree) VALUES (100,?1,0,X'00')",
             [[7u8; 32]],
         )
         .unwrap();
-        assert!(
-            reconcile_scanned_blocks(
-                &tx,
-                &Default::default(),
-                &Network::TestNetwork,
-                #[cfg(feature = "transparent-inputs")]
-                &GapLimits::default(),
-                &[(BlockHeight::from_u32(100), BlockHash([7; 32]))]
-            )
-            .is_err()
+        let result = reconcile_scanned_blocks(
+            &tx,
+            &session,
+            &Network::TestNetwork,
+            #[cfg(feature = "transparent-inputs")]
+            &GapLimits::default(),
+            &[(BlockHeight::from_u32(100), BlockHash([7; 32]))],
         );
+        assert!(matches!(result,
+            Err(SqliteClientError::DbError(rusqlite::Error::SqliteFailure(_, Some(ref message))))
+                if message == "resolution failure"));
     }
     assert_eq!(receipts(&db.conn), 1);
     assert!(

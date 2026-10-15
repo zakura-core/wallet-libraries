@@ -166,6 +166,7 @@ pub(crate) fn apply_transparent_policy(
 ) -> Result<AppliedTransparentPolicy, SqliteClientError> {
     // The handle must already be configured; the write does not invent a mode for empty wallets.
     let _ = configured.ok_or(SqliteClientError::TransparentLedgerModeNotConfigured)?;
+    session.check_transaction(conn)?;
     let session = session.transaction();
     let applied = in_transaction(conn, |conn| transition_policy(conn, &session, mode))?;
     session.commit();

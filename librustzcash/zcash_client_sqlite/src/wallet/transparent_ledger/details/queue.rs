@@ -28,6 +28,7 @@ fn enqueue(
     params: &[(&str, &dyn rusqlite::ToSql)],
     reasons: TransparentDetailReasons,
 ) -> Result<(), SqliteClientError> {
+    session.check_transaction(conn)?;
     revalidate(conn, filter, params)?;
     let tip = chain_tip_height(conn)?;
     let new = match tip {

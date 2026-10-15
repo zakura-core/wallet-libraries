@@ -53,6 +53,10 @@ pub enum SqliteClientError {
     EnhancementModeNotConfigured,
     /// Transparent ledger APIs require an explicit mode on this handle.
     TransparentLedgerModeNotConfigured,
+    /// Queuing transparent lookups inside SQL requires a wallet-owned session journal.
+    /// Use `WalletDb::transactionally` or `WalletDb::transactionally_with_extension` instead
+    /// of wrapping a caller-owned SQL transaction for operations that can queue lookups.
+    TransparentSessionTransactionRequired,
     /// Consuming transparent inputs requires transparent authority, which is not available.
     /// The [`AuthorityRefusal`] says whether waiting for private recovery can change that.
     TransparentAuthorityUnavailable(AuthorityRefusal),
@@ -498,6 +502,10 @@ impl fmt::Display for SqliteClientError {
             SqliteClientError::TransparentLedgerModeNotConfigured => write!(
                 f,
                 "Transparent ledger mode is not configured; call set_transparent_ledger_mode first"
+            ),
+            SqliteClientError::TransparentSessionTransactionRequired => write!(
+                f,
+                "Transparent lookup writes require a wallet-owned transaction; use WalletDb::transactionally or transactionally_with_extension"
             ),
             SqliteClientError::PublicTransparentDiscoveryForbidden => write!(
                 f,

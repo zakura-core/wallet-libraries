@@ -16,6 +16,11 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- Operations that can queue transparent lookups now reject caller-owned SQL transactions
+  without a wallet-owned session journal with `TransparentSessionTransactionRequired`.
+  Use `WalletDb::transactionally` or `transactionally_with_extension` so a rollback cannot
+  release an existing lookup's privacy hold.
+
 - A txid lookup newly queued at the current chain tip (by a recovery, Enhance,
   status or receiver PIR reply, a policy change or the scan) is not listed by
   `TransparentDetailRead::transparent_detail_work` until the chain tip changes,

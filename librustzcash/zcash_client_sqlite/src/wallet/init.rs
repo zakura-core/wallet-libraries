@@ -200,7 +200,8 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::InvalidOneTimeIvkInput(_) => {
             unreachable!("migrations do not use one-time IVKs")
         }
-        SqliteClientError::TransparentLedgerModeNotConfigured
+        SqliteClientError::TransparentSessionTransactionRequired
+        | SqliteClientError::TransparentLedgerModeNotConfigured
         | SqliteClientError::TransparentAuthorityUnavailable(_)
         | SqliteClientError::TransparentLedgerIncompatible { .. }
         | SqliteClientError::StaleTransparentPolicy { .. }

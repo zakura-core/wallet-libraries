@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 
+use crate::error::SqliteClientError;
+
 /// The chain tip at which each transparent lookup was newly queued, for one open-wallet session.
 ///
 /// At a given chain tip, a private reply may only change what the wallet asks at a later tip.
@@ -57,6 +59,20 @@ pub(crate) struct SessionState {
 }
 
 impl SessionState {
+    /// A caller-owned SQL transaction cannot publish or roll back this session's changes.
+    /// Wallet-owned transactions have an enclosing journal that delays publication until
+    /// their SQL commit; reject writes without one before creating a nested journal.
+    pub(crate) fn check_transaction(
+        &self,
+        conn: &rusqlite::Connection,
+    ) -> Result<(), SqliteClientError> {
+        if !conn.is_autocommit() && self.journals.is_empty() {
+            Err(SqliteClientError::TransparentSessionTransactionRequired)
+        } else {
+            Ok(())
+        }
+    }
+
     pub(crate) fn new(session: TransparentPirSession) -> Self {
         Self {
             session,

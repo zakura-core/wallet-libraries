@@ -104,6 +104,7 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
     trust: CommitTrust,
 ) -> Result<CommitOutcome, SqliteClientError> {
     check_well_formed(&commit).map_err(|e| reject(CommitRejection::Invalid(e)))?;
+    session.check_transaction(conn)?;
     // The facts' journal, kept only when they are; the suspension of a failed commit queues
     // nothing.
     let facts = session.transaction();

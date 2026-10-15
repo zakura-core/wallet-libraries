@@ -14,6 +14,7 @@ pub(crate) fn activate_recovered_ledger<P: consensus::Parameters>(
     configured: Option<TransparentLedgerMode>,
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
+    session.check_transaction(conn)?;
     let session = session.transaction();
     atomically(conn, |conn| {
         if !grants_private_authority(conn, configured)? {
