@@ -1095,6 +1095,8 @@ fn window_growth_stays_out_of_the_address_table() {
     c.coverage = full_coverage(&ws);
     assert!(apply(&mut st, c).unwrap().window_grew);
 
+    // The grown window is watched from the next target.
+    scan_new_blocks(&mut st, 1);
     let grown = watch(&st, account);
     let window: Vec<_> = grown
         .addresses

@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
+#[cfg(feature = "transparent-inputs")]
+use {crate::AccountUuid, zcash_client_backend::data_api::transparent_ledger::ChainPoint};
 
 use crate::error::SqliteClientError;
 
@@ -13,7 +15,9 @@ use crate::error::SqliteClientError;
 /// At a given chain tip, a private reply may only change what the wallet asks at a later tip.
 /// A txid lookup queued at the current tip (by a recovery reply, an Enhance reply, a status
 /// reply or the scan) is therefore not listed until the tip changes, whether it rose or a reorg
-/// lowered it.
+/// lowered it. Likewise, the addresses an account's watch set holds at one recovery target
+/// are those its first read at that target held: window growth a reply causes is watched from
+/// the next target.
 ///
 /// Keep this object alive across syncs. Handles opened for the same wallet can share it with
 /// `WalletDb::with_transparent_pir_session`; serialize their wallet operations. Never share it
@@ -27,11 +31,17 @@ struct State {
     /// The chain tip at which each lookup was newly queued. Only entries at one tip matter;
     /// recording at another tip drops the rest.
     queued_at: BTreeMap<TxId, BlockHeight>,
+    /// Per account, the target of the first watch set read there and each window scope's
+    /// watched end at that read.
+    #[cfg(feature = "transparent-inputs")]
+    watched: BTreeMap<AccountUuid, (ChainPoint, [u32; 3])>,
 }
 
 #[derive(Clone)]
 enum Change {
     Queued(BlockHeight, Vec<TxId>),
+    #[cfg(feature = "transparent-inputs")]
+    Watched(AccountUuid, ChainPoint, [u32; 3]),
 }
 
 impl Change {
@@ -42,6 +52,10 @@ impl Change {
                 state
                     .queued_at
                     .extend(txids.iter().map(|txid| (*txid, *tip)));
+            }
+            #[cfg(feature = "transparent-inputs")]
+            Self::Watched(account, target, ends) => {
+                state.watched.insert(*account, (*target, *ends));
             }
         }
     }
@@ -149,5 +163,23 @@ impl SessionState {
             .filter(|(_, at)| *at == tip)
             .map(|(txid, _)| txid)
             .collect()
+    }
+
+    /// The window ends `account`'s watch set keeps at `target`, per window scope. The first
+    /// read at a target records the current `ends`; later reads there get the recorded ones.
+    #[cfg(feature = "transparent-inputs")]
+    pub(crate) fn watched_ends(
+        &self,
+        account: AccountUuid,
+        target: ChainPoint,
+        ends: [u32; 3],
+    ) -> [u32; 3] {
+        match self.state().watched.get(&account) {
+            Some((at, recorded)) if *at == target => *recorded,
+            _ => {
+                self.change(Change::Watched(account, target, ends));
+                ends
+            }
+        }
     }
 }

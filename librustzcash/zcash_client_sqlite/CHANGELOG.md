@@ -14,6 +14,16 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- At a given recovery target, `transparent_watch_set` watches no further in each
+  derived window than the first read at that target did: growth a reply causes
+  (a receive near a window's end, or the gap generation of an active account) is
+  stored at once, as before, but watched from the next target, whether it rose or
+  a reorg lowered it. Recovery status and coverage see the growth, so the account
+  stays incomplete until a pass at a later target covers the new addresses. A
+  same-target catch-up pass after a lagging or busy reply therefore watches the
+  same addresses as the pass before it. The record lives in the handle's
+  `TransparentPirSession`; a fresh session watches the grown window at once.
+
 - Storing a received transparent output no longer scans `transparent_spend_map`
   to learn whether a wallet transaction already spends it.
 

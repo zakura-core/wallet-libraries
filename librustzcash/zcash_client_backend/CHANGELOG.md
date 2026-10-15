@@ -7,6 +7,13 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- `TransparentLedgerRead::transparent_watch_set` may keep each derived window at
+  the size the first read at a target observed. `CommitOutcome::window_grew`
+  means the new addresses are recovered at the next target. The SQLite store
+  now watches window growth from that next target.
+
 ## [0.1.0-rc9.6] - 2026-10-30
 
 ### Added
