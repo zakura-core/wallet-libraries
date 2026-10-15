@@ -136,6 +136,48 @@ pub fn funding(seed: u8, values: &[i64]) -> Tx {
     })
 }
 
+/// A transparent V4 transaction spending `inputs` and paying each `(value, script)`
+/// of `outputs`, scripts raw.
+pub fn transfer(inputs: Vec<Spend>, outputs: &[(i64, &[u8])]) -> Tx {
+    reparse(Transaction::V4 {
+        inputs: inputs.into_iter().map(|spend| spend.0).collect(),
+        outputs: outputs
+            .iter()
+            .map(|(value, script)| Output {
+                value: Amount::try_from(*value).unwrap(),
+                lock_script: Script::new(script),
+            })
+            .collect(),
+        lock_time: LockTime::unlocked(),
+        expiry_height: Height(0),
+        joinsplit_data: None,
+        sapling_shielded_data: None,
+    })
+}
+
+/// A transparent coinbase transaction at `height` paying each `(value, script)` of
+/// `outputs`.
+pub fn coinbase(height: u32, outputs: &[(i64, &[u8])]) -> Tx {
+    reparse(Transaction::V4 {
+        inputs: vec![Input::Coinbase {
+            height: Height(height),
+            data: vec![0x51; 4],
+            sequence: u32::MAX,
+        }],
+        outputs: outputs
+            .iter()
+            .map(|(value, script)| Output {
+                value: Amount::try_from(*value).unwrap(),
+                lock_script: Script::new(script),
+            })
+            .collect(),
+        lock_time: LockTime::unlocked(),
+        expiry_height: Height(0),
+        joinsplit_data: None,
+        sapling_shielded_data: None,
+    })
+}
+
 /// A V6 transaction with the fixture's Ironwood Actions and the given transparent
 /// parts and value balances.
 pub struct Mixed {

@@ -18,3 +18,7 @@ license = "MIT OR Apache-2.0"
 # The Common 3 node revision the PIR services read. Changing it does not upgrade a
 # deployed node; a direct database reader must match the running node's format.
 zakura-chain = { git = "https://github.com/zakura-core/zakura.git", rev = "83738c07468bee30a7db8a8d678cb27bf60094f4" }
+# Pinned to the same revision as `zakura-chain`, and it must stay that way: the
+# `rocksdb` reader opens the node's database directly, so its format must match
+# the running node's.
+zakura-state = { git = "https://github.com/zakura-core/zakura.git", rev = "83738c07468bee30a7db8a8d678cb27bf60094f4" }
