@@ -537,6 +537,17 @@ pub mod receiver {
             self
         }
 
+        /// This block with its refund transaction changed under the same header, so
+        /// its transactions no longer match the header's merkle root.
+        pub fn tampered(mut self) -> Self {
+            if let Transaction::V6 { expiry_height, .. } =
+                Arc::make_mut(&mut self.0.transactions[1])
+            {
+                expiry_height.0 += 1;
+            }
+            self
+        }
+
         /// The serialized block.
         pub fn bytes(&self) -> Vec<u8> {
             self.0.zcash_serialize_to_vec().unwrap()
