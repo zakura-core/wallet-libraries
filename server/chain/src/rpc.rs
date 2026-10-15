@@ -169,6 +169,12 @@ impl NodeClient {
         })
     }
 
+    /// This client, naming itself `id` in its JSON-RPC requests, as the node logs.
+    pub fn with_request_id(mut self, id: &'static str) -> Self {
+        self.id = id;
+        self
+    }
+
     /// The endpoint this client calls.
     pub fn url(&self) -> &str {
         &self.url
@@ -297,13 +303,30 @@ impl NodeClient {
         method: &str,
         params: Vec<serde_json::Value>,
     ) -> Result<Vec<Result<T, (i64, String)>>, NodeError> {
-        if params.is_empty() {
+        self.batch_mixed(
+            params
+                .into_iter()
+                .map(|params| json!({"method": method, "params": params}))
+                .collect(),
+        )
+        .await
+    }
+
+    /// [`Self::batch`] for calls of any methods, each given as
+    /// `{"method": ..., "params": ...}`.
+    pub(crate) async fn batch_mixed<T: DeserializeOwned>(
+        &self,
+        calls: Vec<serde_json::Value>,
+    ) -> Result<Vec<Result<T, (i64, String)>>, NodeError> {
+        if calls.is_empty() {
             return Ok(Vec::new());
         }
-        let requests: Vec<_> = params
+        let requests: Vec<_> = calls
             .into_iter()
             .enumerate()
-            .map(|(id, params)| json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+            .map(|(id, call)| {
+                json!({"jsonrpc": "2.0", "id": id, "method": call["method"], "params": call["params"]})
+            })
             .collect();
         let body = self.send(self.post()?.json(&requests)).await?;
         let value: serde_json::Value = serde_json::from_slice(&body).map_err(NodeError::Decode)?;
