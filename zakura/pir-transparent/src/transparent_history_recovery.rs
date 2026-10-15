@@ -17,7 +17,9 @@ mod sync_inputs;
 mod tests;
 
 use crate::engine::transport::{FilterSource, ShardTransport};
-use crate::engine::{ChainView, SetIdentity, SyncError, WorkLimits};
+use crate::engine::{
+    ChainView, Completion, IncompleteReason, SetIdentity, SyncError, WalletStore, WorkLimits,
+};
 use crate::engine_store::SqliteStore;
 use rusqlite::Connection;
 use std::{any::Any, path::Path, time::Duration};
@@ -34,6 +36,7 @@ use crate::batch::{RecoveryBatch, behind_unread_batch};
 use crate::catalog::{self, Published};
 use crate::error::{RecoveryError, ensure_valid, failure};
 use crate::progress::{FailedEntries, Outcome, Progress};
+use page_cover::{CoverSession, PageCover, pending_tables};
 use preflight::{accepted_target, watch_floor};
 use sync_inputs::{FloorAcceptingChain, RecordingFilterSource, watched_scripts};
 
@@ -62,9 +65,12 @@ pub struct TransparentHistoryRecoveryConfig {
     pub shards: usize,
     /// Maximum candidate event records exported per pass.
     pub events: usize,
-    /// Private query budget. Exhaustion retains continuation and reports [`Outcome::More`].
+    /// Private query budget, page cover included. Exhaustion retains continuation and
+    /// reports [`Outcome::More`].
     pub queries: u64,
-    /// Private payload budget, including setup. One atomic response may cross it.
+    /// Private payload budget, including setup and page cover. A pass stops before a
+    /// page sweep, with the padding it may need, would cross it, and before any other
+    /// request whose expected size would.
     pub private_bytes: u64,
 }
 
@@ -92,6 +98,9 @@ pub struct TransparentHistoryRecovery {
     /// The ready batch [`Self::pass`] returned last, a `RecoveryBatch<A>` for the
     /// pass's account type, until it is taken or a new pass starts.
     pub(crate) latest: Option<Box<dyn Any + Send>>,
+    /// Page cover for this open companion: its random source and each directory
+    /// shard's cover set, kept for every pass until the companion is reopened.
+    cover: CoverSession,
 }
 
 impl TransparentHistoryRecovery {
@@ -151,13 +160,17 @@ impl TransparentHistoryRecovery {
             catalog,
             outstanding_receipt: None,
             latest: None,
+            cover: CoverSession::new().map_err(failure)?,
         })
     }
 
-    /// Test support: draws page cover from `seed` from now on. Page cover is not
-    /// built yet, so this does nothing. Never call it in a production build.
+    /// Test support: draws page cover from `seed` from now on, forgetting every
+    /// cover set drawn so far, as a reopened companion would. Never call it in a
+    /// production build.
     #[cfg(feature = "testing")]
-    pub fn seed_page_cover(&mut self, _seed: u64) {}
+    pub fn seed_page_cover(&mut self, seed: u64) {
+        self.cover = CoverSession::seeded(seed);
+    }
 
     /// One attempt of [`Self::pass`] through `filters` and `transport`, returning its
     /// batch rather than holding it. A new attempt makes the batch of every earlier one
@@ -221,7 +234,11 @@ impl TransparentHistoryRecovery {
             max_queries: Some(self.config.queries),
             max_private_bytes: Some(self.config.private_bytes),
         };
-        let synced = match crate::engine::sync_into(
+        // Every page query goes through page cover, which also holds the pass to
+        // its budgets, cover included.
+        let pending = pending_tables(&self.store.pending().map_err(failure)?);
+        let mut covered = PageCover::new(transport, &mut self.cover, &geometry, limits, pending);
+        let result = crate::engine::sync_into(
             &mut self.store,
             &map,
             map_fetch_bytes,
@@ -229,11 +246,30 @@ impl TransparentHistoryRecovery {
             &floor_accepting_chain,
             &mut scripts,
             &mut filters,
-            transport,
+            &mut covered,
             &limits,
             &sync_target.anchor,
-        ) {
-            Ok(report) => Some(report),
+        );
+        let cover_stop = covered.finish();
+        let synced = match result {
+            Ok(mut report) => {
+                // A budget stop reaches the sync as a capacity refusal, which it
+                // reports as an overload; it was the pass's budget.
+                if let (
+                    Some(reason),
+                    Completion::Incomplete {
+                        reason: IncompleteReason::Overloaded { .. },
+                        pending,
+                    },
+                ) = (cover_stop, &report.completion)
+                {
+                    report.completion = Completion::Incomplete {
+                        reason,
+                        pending: *pending,
+                    };
+                }
+                Some(report)
+            }
             Err(SyncError::SealedRewrite { .. }) => return self.refused_rewrite_batch(&map),
             // Not a set change, which was checked above: a map refreshed
             // mid-pass does not continue the first (another re-cut epoch, or a
