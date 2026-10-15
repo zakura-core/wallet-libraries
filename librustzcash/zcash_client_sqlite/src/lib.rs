@@ -857,8 +857,9 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
                 enhance_pir_session: self.enhance_pir_session.read_transaction(),
                 #[cfg(feature = "orchard")]
                 enhance_pir_max_delay: self.enhance_pir_max_delay,
-                // No wallet writes are available to the callback.
-                transparent_pir_session: self.transparent_pir_session.transaction(),
+                // No wallet writes are available to the callback, and its reads see committed
+                // state, so what they record (a watch set's window) takes effect at once.
+                transparent_pir_session: self.transparent_pir_session.clone(),
                 anchor_retention_interval: self.anchor_retention_interval,
                 status_mode: self.status_mode,
                 transparent_ledger_mode: self.transparent_ledger_mode,
@@ -2338,6 +2339,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
         wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
             wallet::transparent_ledger::watch_set(
                 conn,
+                &self.transparent_pir_session,
                 &self.params,
                 &self.gap_limits,
                 self.transparent_ledger_mode,

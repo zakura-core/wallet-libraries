@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `ApplyStats::window_grew`: the grown addresses are passed at the next target, as
+  the SQLite store now watches window growth from the next target.
+
 ## [0.0.1-rc1] - 2026-10-14
 
 ### Added

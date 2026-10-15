@@ -25,6 +25,15 @@ and this library adheres to Rust's notion of
   it back. The record lives in the handle's `TransparentPirSession` and changes
   with the wallet transaction that queued the work; a fresh session, as after a
   restart, lists the work at once.
+- At a given recovery target, `transparent_watch_set` watches no further in each
+  derived window than the first read at that target did: growth a reply causes
+  (a receive near a window's end, or the gap generation of an active account) is
+  stored at once, as before, but watched from the next target, whether it rose or
+  a reorg lowered it. Recovery status and coverage see the growth, so the account
+  stays incomplete until a pass at a later target covers the new addresses. A
+  same-target catch-up pass after a lagging or busy reply therefore watches the
+  same addresses as the pass before it. The record lives in the handle's
+  `TransparentPirSession`; a fresh session watches the grown window at once.
 
 ## [0.1.0-rc9] - 2026-10-14
 

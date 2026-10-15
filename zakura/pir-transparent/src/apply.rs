@@ -49,8 +49,8 @@ pub struct ApplyStats {
     pub applied: usize,
     /// Of those, commits whose revision was qualified as it applied.
     pub qualified: usize,
-    /// Whether any applied commit grew a derived window: read a fresh watch set and pass
-    /// again at the same target.
+    /// Whether any applied commit grew a derived window. The grown addresses are passed
+    /// at the next target, from the watch set read there.
     pub window_grew: bool,
 }
 
