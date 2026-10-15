@@ -1544,6 +1544,7 @@ pub(crate) fn apply<P: Parameters>(
 /// sticky route-2 marker here, keeping memo work for its other received notes, and every later
 /// response for it lands in this function again. The marker stays when every memo is known:
 /// its transparent details remain unsupported, and history keeps reporting them as pending.
+#[allow(clippy::too_many_arguments)]
 fn store_unsupported_details(
     tx: &Transaction<'_>,
     tpir_session: &TransparentSession,
