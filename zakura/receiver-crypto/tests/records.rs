@@ -1,3 +1,4 @@
+#![cfg(feature = "crypto")]
 //! Receivers, records and zero-OVK recovery.
 mod common;
 use common::{RECEIVER_HEX, action, receiver, record};
@@ -46,7 +47,7 @@ fn receivers_must_be_ironwood_addresses() {
     assert_eq!(Receiver::from_bytes([0; 43]), Err(Error::Malformed));
 }
 
-/// The layout is `receiver-wire`'s, byte for byte.
+/// The layout is the canonical codec's, byte for byte.
 #[test]
 fn wire_layout_and_strict_empty_slots() {
     let r = record(0, 1);
@@ -59,7 +60,9 @@ fn wire_layout_and_strict_empty_slots() {
     assert_eq!(&b[53..57], &101u32.to_le_bytes());
     assert_eq!(&b[129..137], &200u64.to_le_bytes());
     assert_eq!(&b[233..285], &[8; 52]);
-    let raw = receiver_wire::RawRecord::decode(&b).unwrap().unwrap();
+    let raw = zakura_receiver_crypto::wire::RawRecord::decode(&b)
+        .unwrap()
+        .unwrap();
     assert_eq!(raw.encode().unwrap(), b);
     assert_eq!(Record::decode(&b).unwrap(), Some(r));
     assert!(Record::decode(&[0; RECORD_BYTES]).unwrap().is_none());
@@ -83,7 +86,9 @@ fn structurally_valid_records_still_require_cryptographic_checks() {
     for field in [1..44, 137..169, 169..201, 201..233] {
         let mut bytes = valid;
         bytes[field.clone()].fill(255);
-        let raw = receiver_wire::RawRecord::decode(&bytes).unwrap().unwrap();
+        let raw = zakura_receiver_crypto::wire::RawRecord::decode(&bytes)
+            .unwrap()
+            .unwrap();
         assert_eq!(raw.encode().unwrap(), bytes);
         assert_eq!(Record::decode(&bytes), Err(Error::Malformed), "{field:?}");
     }

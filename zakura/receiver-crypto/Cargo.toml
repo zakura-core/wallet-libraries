@@ -9,16 +9,18 @@ license.workspace = true
 repository.workspace = true
 readme = "README.md"
 
+[features]
+default = ["crypto"]
+# Address, record and proof validation. The wire codec is available without this.
+crypto = ["dep:incrementalmerkletree", "dep:orchard", "dep:zcash_address", "dep:zcash_note_encryption", "dep:zcash_protocol", "dep:thiserror"]
+
 [dependencies]
-incrementalmerkletree.workspace = true
-orchard.workspace = true
-zcash_address = { workspace = true, features = ["std"] }
-zcash_note_encryption.workspace = true
-zcash_protocol.workspace = true
-thiserror = "2"
-# The only receiver record codec. Pinned to an exact wallet-pir revision; the
-# package has no dependencies, so it never brings PIR serving into a wallet.
-receiver-wire = { git = "https://github.com/valargroup/wallet-pir", rev = "3cb83315258dcfada296e35df00a5c9b2bcec5c6" }
+incrementalmerkletree = { workspace = true, optional = true }
+orchard = { workspace = true, optional = true }
+zcash_address = { workspace = true, features = ["std"], optional = true }
+zcash_note_encryption = { workspace = true, optional = true }
+zcash_protocol = { workspace = true, optional = true }
+thiserror = { version = "2", optional = true }
 
 [dev-dependencies]
 hex.workspace = true

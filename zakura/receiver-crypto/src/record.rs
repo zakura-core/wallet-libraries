@@ -1,14 +1,14 @@
 //! Validated receivers and payment records over the shared fixed-width row encoding.
+use crate::wire::RawRecord;
 use crate::{Error, Hash};
 use orchard::{
     note::{ExtractedNoteCommitment, Nullifier},
     note_encryption::IronwoodDomain,
 };
-use receiver_wire::RawRecord;
 use zcash_note_encryption::{Domain, EphemeralKeyBytes};
 
 /// Encoded size of one [`Record`] slot.
-pub const RECORD_BYTES: usize = receiver_wire::RECORD_BYTES;
+pub const RECORD_BYTES: usize = crate::wire::RECORD_BYTES;
 
 /// Full canonical receiver. The same encoding is shared by refund and incoming keys.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -86,7 +86,7 @@ impl Record {
             receiver: self.receiver.0,
             page: self.page,
             total: self.total,
-            payment: receiver_wire::Payment {
+            payment: crate::wire::Payment {
                 height: p.height,
                 block_hash: p.block_hash,
                 txid: p.txid,

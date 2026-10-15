@@ -1,38 +1,36 @@
-//! Cryptographic validation for receiver directory data.
+//! Receiver record encoding and cryptographic validation.
 //!
-//! A receiver directory publishes, per Ironwood receiver, the compact payments that
-//! were sent to it with the public all-zero outgoing viewing key, together with one
-//! common file of Merkle siblings that proves those payments' note commitments are in
-//! the pool's commitment tree. The PIR layer (`receiver-wire` and the serving crates
-//! in wallet-pir) moves these bytes without interpreting them; this crate is where
-//! they are trusted or refused:
+//! [`wire`] owns the fixed record format. Its raw records contain untrusted bytes:
+//! structural parsing does not check addresses, field elements or ephemeral keys.
+//! The codec has no dependencies and is available with default features disabled.
 //!
-//! - [`Receiver`] accepts only bytes that decode to an Ironwood address, and reads
-//!   and writes the Ironwood receiver of a unified address.
-//! - [`Record`] decodes and encodes one row slot through `receiver-wire`'s codec, and
-//!   additionally refuses noncanonical note commitments and nullifiers and invalid
-//!   ephemeral keys.
-//! - [`recovery::Action`] recovers a payment's receiver with the zero outgoing viewing
-//!   key, authenticating the note plaintext.
-//! - [`witness`] builds and checks the common inclusion-proof file.
-//!
-//! The types here are owned by this crate. Callers holding their own copy of the
-//! receiver protocol structs map fields, or decode the fixed canonical bytes, rather
-//! than share struct identities across crate sources.
+//! The default `crypto` feature adds validated `Receiver`, `Record` and `Payment`
+//! APIs, authenticated zero-OVK receiver recovery, and inclusion proof construction
+//! and verification. These checks must finish before a caller accepts a payment;
+//! a proof root must additionally match the caller's independently accepted chain.
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "crypto")]
 mod address;
+#[cfg(feature = "crypto")]
 mod record;
+#[cfg(feature = "crypto")]
 pub mod recovery;
+pub mod wire;
+#[cfg(feature = "crypto")]
 pub mod witness;
 
+#[cfg(feature = "crypto")]
 pub use address::Network;
-pub use record::{Payment, RECORD_BYTES, Receiver, Record};
+#[cfg(feature = "crypto")]
+pub use record::{Payment, Receiver, Record};
+pub use wire::RECORD_BYTES;
 
 /// A 32-byte hash in protocol byte order.
 pub type Hash = [u8; 32];
 
 /// Why receiver data was refused.
+#[cfg(feature = "crypto")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     /// Bytes that are not a valid encoding, address, field element or proof.

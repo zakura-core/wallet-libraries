@@ -27,6 +27,7 @@ CONFIGS = {
     "transparent-pir-sqlite": (["-p", "zakura-pir-transparent"], ["sqlite"]),
     "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing"]),
     "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),
+    "receiver-wire": (["-p", "zakura-receiver-crypto", "--no-default-features"], []),
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
 }
 VERIFY = ("zakura-graph", "wallet-lib-modes", "vendor-ancestry")

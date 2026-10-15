@@ -1,3 +1,4 @@
+#![cfg(feature = "crypto")]
 //! Common inclusion proofs, checked against an independent commitment tree.
 mod common;
 use common::{leaves, publication};

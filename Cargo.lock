@@ -4310,11 +4310,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "receiver-wire"
-version = "0.0.1"
-source = "git+https://github.com/valargroup/wallet-pir?rev=3cb83315258dcfada296e35df00a5c9b2bcec5c6#3cb83315258dcfada296e35df00a5c9b2bcec5c6"
-
-[[package]]
 name = "reddsa"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8416,7 +8411,6 @@ version = "0.0.1-rc0"
 dependencies = [
  "hex",
  "incrementalmerkletree 0.8.2",
- "receiver-wire",
  "serde_json",
  "thiserror 2.0.21",
  "zakura-address",
