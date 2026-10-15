@@ -21,13 +21,23 @@ node or Zakura Common types.
 
 This crate is server-only. It lives in the separate `server/` workspace with its
 own lockfile, so no wallet build resolves the node's packages, and it may use the
-wallet-owned crates under `zakura/` by path, never the reverse.
+wallet-owned crates under `zakura/` by path, never the reverse. Its dependency
+graph, including test support and inactive optional or platform dependencies, must
+contain no package owned or released by wallet-pir. Service-facing values contain
+only library-owned records, errors, bytes, heights and network choices; node and
+Common types remain implementation details.
 
 ## Validation
 
 From the repository root:
 
 ```sh
+python3 scripts/dev.py doctor --config server
+python3 scripts/dev.py verify --only server-graph
 python3 scripts/dev.py test --config server
 python3 scripts/dev.py lint --config server
 ```
+
+The graph check also builds fresh wallet-component and server consumers with their
+own lockfiles. It proves this adapter boundary; the unrelated older wallet PIR
+adapters are outside this change and still need their separate ownership migration.

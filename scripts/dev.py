@@ -32,7 +32,7 @@ CONFIGS = {
     # The server-only workspace, with its own lockfile; see server/Cargo.toml.
     "server": (["--manifest-path", "server/Cargo.toml", "--workspace"], ["testing"]),
 }
-VERIFY = ("zakura-graph", "wallet-lib-modes", "vendor-ancestry")
+VERIFY = ("server-graph", "zakura-graph", "wallet-lib-modes", "vendor-ancestry")
 
 
 def capture(argv: list[str], **kwargs) -> str:
@@ -102,7 +102,8 @@ class Lease:
 def cargo_args(args) -> list[str]:
     packages, features = CONFIGS[args.config]
     if args.package:
-        packages = [item for p in args.package for item in ("-p", p)]
+        manifest = packages[:2] if packages[:1] == ["--manifest-path"] else []
+        packages = manifest + [item for p in args.package for item in ("-p", p)]
         if "zakura-wallet-lib" in args.package:
             raise ValueError("the facade has exclusive backends; use verify --only wallet-lib-modes")
     return packages + (["--features", ",".join(features)] if features else [])
@@ -128,7 +129,9 @@ def execute(args) -> int:
         print(capture(["rustc", "-vV"]))
         print(capture(["cargo", "--version"]))
         print(f"configuration: {args.config}; profile: {profile}; build root: {root / identity}")
-        ready = subprocess.run(["cargo", "metadata", "--locked", "--offline", "--format-version", "1"], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        packages, _ = CONFIGS[args.config]
+        manifest = packages[:2] if packages[:1] == ["--manifest-path"] else []
+        ready = subprocess.run(["cargo", "metadata", *manifest, "--locked", "--offline", "--format-version", "1"], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         print("dependencies: ready offline" if ready.returncode == 0 else "dependencies: not ready offline; run cargo fetch --locked")
         for owner in sorted(root.glob("*/*/*/*/*/owner.json")):
             print(f"build owner: {owner}: {owner.read_text().strip()}")

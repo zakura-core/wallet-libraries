@@ -127,6 +127,61 @@ node_packages = [
   "zakura-test",
 ]
 
+# Packages owned by wallet-pir, including retired packages: registry sources must
+# respect the same one-way ownership boundary as git sources. Repository metadata
+# is checked too, so a newly named package cannot bypass this inventory.
+wallet_pir_packages = [
+  "chain-ingest",
+  "combined-server",
+  "commitment-ingest",
+  "commitment-tree-db",
+  "decryption-types",
+  "enhance-layout-benchmark",
+  "enhance-noise-analysis",
+  "enhance-pir",
+  "enhance-pir-load-test",
+  "enhance-pir-server",
+  "enhance-q48-interop",
+  "enhance-schema9-worker-capacity-benchmark",
+  "enhance-width-study",
+  "hashtable-pir",
+  "live-pir-probe",
+  "nf-ingest",
+  "pir-apm",
+  "pir-control",
+  "pir-monitor",
+  "pir-native",
+  "pir-observability",
+  "pir-types",
+  "receiver-directory",
+  "receiver-indexer",
+  "receiver-pir",
+  "receiver-pir-server",
+  "receiver-wire",
+  "spend-client",
+  "spend-server",
+  "spend-types",
+  "transparent-block-server",
+  "transparent-blocks",
+  "transparent-events",
+  "transparent-filter",
+  "transparent-filter-server",
+  "transparent-loadtest",
+  "transparent-measure",
+  "transparent-native",
+  "transparent-regression",
+  "transparent-shard",
+  "transparent-shard-server",
+  "transparent-spend-pir",
+  "transparent-txid-client",
+  "transparent-wallet",
+  "transparent-wallet-store",
+  "txid-sizing-export",
+  "witness-client",
+  "witness-server",
+  "witness-types",
+]
+
 # Crate names that must never appear in a built graph: the crates.io originals
 # of everything `libraries` forks. Any one of them means an edge escaped the
 # rewiring, and two copies of a type that looks identical are not the same type.
