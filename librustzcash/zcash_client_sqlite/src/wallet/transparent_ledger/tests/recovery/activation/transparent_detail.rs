@@ -125,6 +125,12 @@ fn listing(st: &State) -> Vec<TxId> {
     listing_at(st, now(), None)
 }
 
+/// Releases the lookups queued at the current chain tip, which the listing holds back until the
+/// tip changes, as a restart does. For tests of what happens to work once it is listed.
+fn release_held(st: &mut State) {
+    st.wallet_mut().db_mut().transparent_pir_session = Default::default();
+}
+
 fn mined_height(st: &State, txid: TxId) -> BlockHeight {
     let height = conn(st)
         .query_row(
@@ -347,6 +353,9 @@ fn projection_receive_enqueues() {
     c.coverage = full_coverage(&ws);
     apply(&mut st, c).unwrap();
     assert_eq!(reasons(&st, txid_of(&fresh)), Some(RECEIVE));
+    // Listed from the next tip.
+    assert!(!listing(&st).contains(&txid_of(&fresh)));
+    scan_new_blocks(&mut st, 1);
     assert!(listing(&st).contains(&txid_of(&fresh)));
 }
 
@@ -416,7 +425,8 @@ fn route2_and_transition_enqueue() {
     let (mut st, _, unspent) = active_wallet();
     // Enhance PIR marks a projected receive's transaction as mixed: reasons accumulate.
     let tx = tx_ref(&st, txid_of(&unspent));
-    crate::wallet::enhance_pir::route_transparent_details(conn(&st), None, tx).unwrap();
+    crate::wallet::enhance_pir::route_transparent_details(conn(&st), &Default::default(), None, tx)
+        .unwrap();
     assert_eq!(reasons(&st, txid_of(&unspent)), Some(RECEIVE | MIXED));
 
     // A route-1 transaction becomes route 2 when PrivateRequired is applied.
@@ -434,6 +444,8 @@ fn route2_and_transition_enqueue() {
     assert_eq!(reasons(&st, mixed), None);
     set_policy(&mut st, PrivateRequired);
     assert_eq!(reasons(&st, mixed), Some(MIXED));
+    assert!(!listing(&st).contains(&mixed));
+    scan_new_blocks(&mut st, 1);
     assert!(listing(&st).contains(&mixed));
 }
 
@@ -473,15 +485,27 @@ fn parent_transactions_not_enqueued() {
     // Every enqueue site: projection by txid (receive) and by row (spend), and route 2.
     let sites = |st: &State, txid: TxId| {
         let tx = tx_ref(st, txid);
-        details::enqueue_txid(conn(st), &txid, TransparentDetailReasons::RECEIVE).unwrap();
-        details::enqueue_tx(conn(st), tx, TransparentDetailReasons::SPEND).unwrap();
+        details::enqueue_txid(
+            conn(st),
+            &Default::default(),
+            &txid,
+            TransparentDetailReasons::RECEIVE,
+        )
+        .unwrap();
+        details::enqueue_tx(
+            conn(st),
+            &Default::default(),
+            tx,
+            TransparentDetailReasons::SPEND,
+        )
+        .unwrap();
         conn(st)
             .execute(
                 "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1, 2)",
                 [tx.0],
             )
             .unwrap();
-        details::enqueue_route_two(conn(st)).unwrap();
+        details::enqueue_route_two(conn(st), &Default::default()).unwrap();
     };
     sites(&st, parent);
     sites(&st, control);
@@ -1053,6 +1077,7 @@ fn contradicted(
 ) {
     let txid = facts.txid;
     assert!(reasons(st, txid).is_some());
+    release_held(st);
     let before = display_rows(st);
     assert_eq!(
         store(st, facts),
@@ -1758,6 +1783,7 @@ fn withdrawn_receive(st: &mut State, account: AccountUuid) -> ReceiveEvent {
     let ws = watch(st, account);
     let fresh = receive(5, external(&ws), 60_000, below_target(&ws, 0));
     provisional_commit(st, account, 2, vec![fresh.clone()]);
+    release_held(st);
     assert!(listing(st).contains(&txid_of(&fresh)));
     provisional_commit(st, account, 3, vec![]);
     fresh
@@ -1834,7 +1860,13 @@ fn contradiction_public_spend_links() {
             rusqlite::params![tx.0, [0x45u8; 32].as_slice()],
         )
         .unwrap();
-    details::enqueue_tx(conn(&st), tx, TransparentDetailReasons::SPEND).unwrap();
+    details::enqueue_tx(
+        conn(&st),
+        &Default::default(),
+        tx,
+        TransparentDetailReasons::SPEND,
+    )
+    .unwrap();
 
     // A shielding transaction whose one known script is the unspent output's.
     let mut facts = facts_for(&unspent);
@@ -1920,6 +1952,8 @@ fn facts_stored_while_withdrawn_revalidated_when_reported_again() {
     provisional_commit(&mut st, account, 4, vec![fresh.clone()]);
     assert_eq!(display_rows(&st), (0, 0));
     assert_eq!(reasons(&st, txid), Some(RECEIVE));
+    assert!(!listing(&st).contains(&txid));
+    release_held(&mut st);
     assert!(listing(&st).contains(&txid));
     assert_eq!(
         view(&st, account, txid),
@@ -1957,6 +1991,9 @@ fn spend_projected_over_facts_revalidated() {
     apply(&mut st, c).unwrap();
     assert_eq!(display_rows(&st), (0, 0));
     assert_eq!(reasons(&st, spending), Some(SPEND));
+    // Requeued by this reply: listed from the next tip.
+    assert!(!listing(&st).contains(&spending));
+    release_held(&mut st);
     assert!(listing(&st).contains(&spending));
 }
 
@@ -2147,6 +2184,9 @@ fn route2_unmined_at_transition_queued_when_mined() {
         .set_transaction_status(mixed, TransactionStatus::Mined(unspent.mined_height + 1))
         .unwrap();
     assert_eq!(reasons(&st, mixed), Some(MIXED));
+    // The status reply queued it: listed from the next tip.
+    assert!(!listing(&st).contains(&mixed));
+    scan_new_blocks(&mut st, 1);
     assert!(listing(&st).contains(&mixed));
 }
 

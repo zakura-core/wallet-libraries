@@ -18,6 +18,7 @@ mod policy;
 mod projection;
 mod reader_version;
 mod recovery;
+pub(crate) mod session;
 mod snapshot;
 mod transactions;
 

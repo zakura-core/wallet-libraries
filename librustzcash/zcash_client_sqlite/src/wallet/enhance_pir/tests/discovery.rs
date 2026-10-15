@@ -1410,6 +1410,7 @@ fn reconstruction_cannot_take_an_outgoing_position_from_another_transaction() {
         assert!(
             queue_transaction(
             send.st.wallet().conn(),
+            &Default::default(),
             Some(zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public),
             &send.st.wallet().db().enhance_pir_session,
             claimant,
@@ -2213,7 +2214,7 @@ fn rewind_and_full_data_clear_discovery() {
                 )
                 .unwrap();
             clear_work(send.st.wallet().conn(), send.tx_ref()).unwrap();
-            super::super::discovery::queue(send.st.wallet().conn(), Some(zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public), send.tx_ref()).unwrap();
+            super::super::discovery::queue(send.st.wallet().conn(), &Default::default(), Some(zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public), send.tx_ref()).unwrap();
         } else {
             send.st
                 .wallet_mut()

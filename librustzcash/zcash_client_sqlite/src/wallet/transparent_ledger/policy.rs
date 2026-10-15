@@ -11,7 +11,9 @@ use zcash_primitives::transaction::TxId;
 
 use crate::{error::SqliteClientError, wallet::init::migrations::TRANSPARENT_LEDGER_SCHEMA_ID};
 
-use super::{reader_version::TPIR_READER_VERSION, transactions::in_transaction};
+use super::{
+    reader_version::TPIR_READER_VERSION, session::SessionState, transactions::in_transaction,
+};
 
 /// Decodes `tpir_meta.applied_mode`. Code 1 belonged to the removed shadow mode and is refused.
 fn mode_from_code(code: i64) -> Result<TransparentLedgerMode, SqliteClientError> {
@@ -158,12 +160,16 @@ pub(crate) fn check_transparent_policy_generation(
 /// does not.
 pub(crate) fn apply_transparent_policy(
     conn: &rusqlite::Connection,
+    session: &SessionState,
     configured: Option<TransparentLedgerMode>,
     mode: TransparentLedgerMode,
 ) -> Result<AppliedTransparentPolicy, SqliteClientError> {
     // The handle must already be configured; the write does not invent a mode for empty wallets.
     let _ = configured.ok_or(SqliteClientError::TransparentLedgerModeNotConfigured)?;
-    in_transaction(conn, |conn| transition_policy(conn, mode))
+    let session = session.transaction();
+    let applied = in_transaction(conn, |conn| transition_policy(conn, &session, mode))?;
+    session.commit();
+    Ok(applied)
 }
 
 /// Writes `mode` as the durable policy within the caller's transaction, and moves the wallet's
@@ -172,6 +178,7 @@ pub(crate) fn apply_transparent_policy(
 /// transactions are rerouted for the new mode. Same-mode reapplication writes nothing.
 fn transition_policy(
     conn: &rusqlite::Connection,
+    session: &SessionState,
     mode: TransparentLedgerMode,
 ) -> Result<AppliedTransparentPolicy, SqliteClientError> {
     // Re-read under the write lock so a concurrent transition cannot be overwritten.
@@ -231,7 +238,7 @@ fn transition_policy(
             [],
         )?;
         // Their transparent details are now txid enhancement work.
-        super::details::enqueue_route_two(conn)?;
+        super::details::enqueue_route_two(conn, session)?;
         // Their received memos remain privately recoverable.
         #[cfg(feature = "orchard")]
         crate::wallet::enhance_pir::queue_unsupported_memos(conn, None)?;

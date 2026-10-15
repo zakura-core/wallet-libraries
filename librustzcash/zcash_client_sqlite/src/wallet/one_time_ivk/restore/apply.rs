@@ -46,6 +46,7 @@ pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL, R>(
         let applied = db.transactionally(|db| {
             apply_payment(
                 db.conn.0,
+                &db.transparent_pir_session,
                 db.params,
                 configured,
                 &db.enhance_pir_session,
@@ -82,6 +83,7 @@ fn merkle_path(position: u32, siblings: [[u8; 32]; 32]) -> Option<MerklePath> {
 #[allow(clippy::too_many_arguments)]
 pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
+    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
     params: &P,
     configured: Option<TransparentLedgerMode>,
     session: &wallet::enhance_pir::session::SessionState,
@@ -296,21 +298,22 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         vec![],
         vec![],
     );
-    let tx_ref = wallet::put_tx_meta(conn, &tx, candidate.height)?;
+    let tx_ref = wallet::put_tx_meta(conn, tpir_session, &tx, candidate.height)?;
     let spent_in = if let SpendStatus::Spent(txid) = spent {
         // The map also records the spend's canonical height and index on a stored row,
         // which may be unmined. A linked spend has no map entry (see `spend_status`).
         let nf = recovered.nullifier().to_bytes();
-        let spending = match wallet::query_nullifier_map(conn, ShieldedPool::Ironwood, &nf)? {
-            Some(id) => Some(id),
-            None => conn
-                .query_row(
-                    "SELECT id_tx FROM transactions WHERE txid = ?1",
-                    [txid.as_ref()],
-                    |r| r.get(0).map(crate::TxRef),
-                )
-                .optional()?,
-        };
+        let spending =
+            match wallet::query_nullifier_map(conn, tpir_session, ShieldedPool::Ironwood, &nf)? {
+                Some(id) => Some(id),
+                None => conn
+                    .query_row(
+                        "SELECT id_tx FROM transactions WHERE txid = ?1",
+                        [txid.as_ref()],
+                        |r| r.get(0).map(crate::TxRef),
+                    )
+                    .optional()?,
+            };
         Some(spending.ok_or_else(|| corrupt("verified one-time-key spend lost its transaction"))?)
     } else {
         None
@@ -330,6 +333,7 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     .with_compact_ciphertext(encrypted[96..].try_into().unwrap());
     wallet::orchard::put_received_note(
         conn,
+        tpir_session,
         params,
         ShieldedPool::Ironwood,
         &output,
@@ -337,7 +341,14 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         Some(candidate.height),
         spent_in,
     )?;
-    wallet::enhance_pir::finish_private_receipt(conn, configured, session, tx_ref, candidate.txid)?;
+    wallet::enhance_pir::finish_private_receipt(
+        conn,
+        tpir_session,
+        configured,
+        session,
+        tx_ref,
+        candidate.txid,
+    )?;
     dequeue()?;
     Ok(Ok(PaymentApplication::Applied))
 }

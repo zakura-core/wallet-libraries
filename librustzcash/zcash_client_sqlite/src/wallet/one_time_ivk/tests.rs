@@ -287,7 +287,16 @@ pub(super) fn apply_payment(
     let session = db.enhance_pir_session.clone();
     tx(db, |c, p| {
         apply(
-            c, p, mode, &session, account, key, candidate, through, anchored,
+            c,
+            &Default::default(),
+            p,
+            mode,
+            &session,
+            account,
+            key,
+            candidate,
+            through,
+            anchored,
         )
     })
     .map(|applied| applied.expect("the payment's blocks are on the wallet's chain"))

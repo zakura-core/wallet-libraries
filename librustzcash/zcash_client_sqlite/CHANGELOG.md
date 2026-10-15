@@ -7,6 +7,25 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Added
+
+- `TransparentPirSession`, with `WalletDb::with_transparent_pir_session` and
+  `WalletDb::transparent_pir_session`: the transparent work an open wallet holds
+  back until the next chain tip, shared by the wallet's database handles like
+  `EnhancePirSession`. It is kept in memory only, with no new table or migration.
+
+### Changed
+
+- A txid lookup newly queued at the current chain tip (by a recovery, Enhance,
+  status or receiver PIR reply, a policy change or the scan) is not listed by
+  `TransparentDetailRead::transparent_detail_work` until the chain tip changes,
+  whether it rose or a reorg lowered it, even when the caller prefers its txid.
+  The display service therefore never sees a reply from another service turn
+  into a lookup at the same tip. Adding a reason to a queued lookup does not hold
+  it back. The record lives in the handle's `TransparentPirSession` and changes
+  with the wallet transaction that queued the work; a fresh session, as after a
+  restart, lists the work at once.
+
 ## [0.1.0-rc9] - 2026-10-14
 
 ### Added

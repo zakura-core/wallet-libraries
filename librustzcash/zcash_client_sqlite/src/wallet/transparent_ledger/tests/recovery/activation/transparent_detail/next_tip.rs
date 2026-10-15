@@ -4,8 +4,6 @@
 //! arrived would let the display service see another service's reply turn into a query within
 //! one sync, so the listing holds such work back until the tip changes.
 
-use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerWrite as _;
-
 use super::*;
 use crate::testing::db::{test_clock, test_rng};
 

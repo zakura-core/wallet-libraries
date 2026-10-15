@@ -18,7 +18,7 @@ use zcash_keys::keys::transparent::gap_limits::GapLimits;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{self, BlockHeight};
 
-use super::ProjectionOrigin;
+use super::{ProjectionOrigin, session::SessionState};
 use crate::{
     AccountUuid, TxRef,
     error::SqliteClientError,
@@ -62,6 +62,7 @@ fn check_against_wallet_transaction(
 /// Projects a placed receive of `account`.
 pub(super) fn project_receive<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
+    session: &SessionState,
     params: &P,
     gap_limits: &GapLimits,
     account: AccountUuid,
@@ -129,7 +130,7 @@ pub(super) fn project_receive<P: consensus::Parameters>(
         false,
         ProjectionOrigin::LedgerEvent,
     )?;
-    super::details::enqueue_txid(conn, &txid, TransparentDetailReasons::RECEIVE)?;
+    super::details::enqueue_txid(conn, session, &txid, TransparentDetailReasons::RECEIVE)?;
     if receive.coinbase {
         // A coinbase transaction is the first in its block. Recording that keeps the output's
         // maturity rule without its raw bytes; un-mining clears it with the placement.
@@ -144,6 +145,7 @@ pub(super) fn project_receive<P: consensus::Parameters>(
 /// Projects a placed spend.
 pub(super) fn project_spend<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
+    session: &SessionState,
     params: &P,
     gap_limits: &GapLimits,
     spend: &SpendEvent,
@@ -220,7 +222,7 @@ pub(super) fn project_spend<P: consensus::Parameters>(
         &spend.prevout,
         Some(ProjectionOrigin::LedgerEvent),
     )?;
-    super::details::enqueue_tx(conn, spending_tx, TransparentDetailReasons::SPEND)?;
+    super::details::enqueue_tx(conn, session, spending_tx, TransparentDetailReasons::SPEND)?;
     update_gap_limits(
         conn,
         params,

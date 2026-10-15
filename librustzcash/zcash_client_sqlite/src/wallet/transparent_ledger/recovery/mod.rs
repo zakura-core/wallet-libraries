@@ -18,7 +18,7 @@ use crate::error::SqliteClientError;
 use {
     super::{
         capture_policy_generation, check_transparent_policy_generation, durable_policy,
-        grants_private_authority, projection, resolve_mode,
+        grants_private_authority, projection, resolve_mode, session::SessionState,
     },
     crate::{
         AccountRef, AccountUuid,

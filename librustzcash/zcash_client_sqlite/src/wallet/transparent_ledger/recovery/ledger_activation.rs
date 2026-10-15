@@ -8,11 +8,13 @@ use super::*;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) fn activate_recovered_ledger<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
+    session: &SessionState,
     params: &P,
     gap_limits: &GapLimits,
     configured: Option<TransparentLedgerMode>,
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
+    let session = session.transaction();
     atomically(conn, |conn| {
         if !grants_private_authority(conn, configured)? {
             return Err(SqliteClientError::TransparentRecoveryNotEnabled);
@@ -55,10 +57,10 @@ pub(crate) fn activate_recovered_ledger<P: consensus::Parameters>(
             ));
         }
         for receive in placed_receives(conn, account_ref)? {
-            projection::project_receive(conn, params, gap_limits, account, &receive)?;
+            projection::project_receive(conn, &session, params, gap_limits, account, &receive)?;
         }
         for spend in placed_spends(conn, account_ref)? {
-            projection::project_spend(conn, params, gap_limits, &spend)?;
+            projection::project_spend(conn, &session, params, gap_limits, &spend)?;
         }
 
         conn.execute(
@@ -66,5 +68,7 @@ pub(crate) fn activate_recovered_ledger<P: consensus::Parameters>(
             named_params![":account_id": account_ref.0],
         )?;
         super::super::require_reader_version(conn, super::super::ACTIVATION_READER_VERSION)
-    })
+    })?;
+    session.commit();
+    Ok(())
 }

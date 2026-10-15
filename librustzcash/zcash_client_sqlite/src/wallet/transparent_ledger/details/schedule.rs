@@ -13,10 +13,14 @@ use zcash_client_backend::data_api::transparent_ledger::{
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 
-use crate::{error::SqliteClientError, wallet::TxQueryType};
+use crate::{
+    error::SqliteClientError,
+    wallet::{TxQueryType, chain_tip_height},
+};
 
 use super::super::{
-    check_transparent_policy_generation, durable_policy, resolve_mode, with_read_snapshot,
+    check_transparent_policy_generation, durable_policy, resolve_mode, session::SessionState,
+    with_read_snapshot,
 };
 use super::codes::{
     ABSENT, CONTRADICTION, NOT_COVERED, NOT_YET_PUBLISHED, PROTOCOL, UNAVAILABLE, UNSUPPORTED,
@@ -51,8 +55,13 @@ fn i64_secs(d: Duration) -> i64 {
 ///
 /// Two listings of the same due rows: the preferred ones, without a limit (each txid names at
 /// most one row), then the rest up to `limit`.
+///
+/// Work `session` records as newly queued at the current chain tip is left out of both, so a
+/// reply's work is asked at a later tip; preferring it does not list it either, or a reply and
+/// the user opening its receipt would reveal the row together.
 pub(crate) fn work(
     conn: &Connection,
+    session: &SessionState,
     configured: Option<TransparentLedgerMode>,
     now: SystemTime,
     limit: usize,
@@ -67,6 +76,13 @@ pub(crate) fn work(
             .map(|txid| Value::Blob(txid.as_ref().to_vec()))
             .collect::<Vec<_>>(),
     );
+    let held = Rc::new(
+        chain_tip_height(conn)?
+            .map_or_else(Vec::new, |tip| session.held(tip))
+            .into_iter()
+            .map(|txid| Value::Blob(txid.as_ref().to_vec()))
+            .collect::<Vec<_>>(),
+    );
     let list = |among: &str, limit: usize| -> Result<Vec<_>, SqliteClientError> {
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT t.txid, t.mined_height, w.reasons
@@ -74,6 +90,7 @@ pub(crate) fn work(
              JOIN transactions t ON t.id_tx = w.transaction_id
              WHERE {eligible}
                AND ({REARMED} OR (w.next_attempt_at <= :now AND NOT ({parked})))
+               AND t.txid NOT IN rarray(:held)
                AND {among}
              ORDER BY (w.attempts = 0 OR {REARMED}) DESC, t.mined_height DESC, t.txid
              LIMIT :limit",
@@ -88,6 +105,7 @@ pub(crate) fn work(
                 ":public": mode.retains_public_authority(),
                 ":enhancement": TxQueryType::Enhancement.code(),
                 ":prefer": &preferred,
+                ":held": &held,
                 ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
             ],
             |row| {

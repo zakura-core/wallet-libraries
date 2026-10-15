@@ -51,6 +51,7 @@ fn accept(conn: &mut Connection, hash: [u8; 32]) {
     tx.execute("INSERT INTO blocks (height, hash, time, sapling_tree) VALUES (100, ?1, 0, X'00') ON CONFLICT (height) DO UPDATE SET hash=excluded.hash", [hash]).unwrap();
     reconcile_scanned_blocks(
         &tx,
+        &Default::default(),
         &Network::TestNetwork,
         #[cfg(feature = "transparent-inputs")]
         &GapLimits::default(),
@@ -77,6 +78,7 @@ fn observed(conn: &mut Connection, txid: TxId, status: TransactionStatus) {
     let tx = conn.transaction().unwrap();
     super::super::set_transaction_status(
         &tx,
+        &Default::default(),
         &Network::TestNetwork,
         #[cfg(feature = "transparent-inputs")]
         &GapLimits::default(),
@@ -107,6 +109,7 @@ fn receipt_survives_reopen_and_restores_index_without_network_or_payload_complet
     let tx = db.conn.transaction().unwrap();
     reconcile_scanned_blocks(
         &tx,
+        &Default::default(),
         &Network::TestNetwork,
         #[cfg(feature = "transparent-inputs")]
         &GapLimits::default(),
@@ -153,6 +156,7 @@ fn changed_block_exposes_private_fallback_without_manufacturing_inclusion_bounds
     accept(&mut db.conn, [8; 32]);
     crate::wallet::transparent_ledger::apply_transparent_policy(
         &db.conn,
+        &Default::default(),
         Some(TransparentLedgerMode::Public),
         TransparentLedgerMode::PrivateRequired,
     )
@@ -322,6 +326,7 @@ fn capture_and_reconciliation_failure_roll_back_receipts_metadata_and_flags() {
         assert!(
             reconcile_scanned_blocks(
                 &tx,
+                &Default::default(),
                 &Network::TestNetwork,
                 #[cfg(feature = "transparent-inputs")]
                 &GapLimits::default(),

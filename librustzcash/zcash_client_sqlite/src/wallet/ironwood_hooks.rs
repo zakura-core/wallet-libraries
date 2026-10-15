@@ -161,6 +161,7 @@ pub(crate) fn put_received_note_encryption_fields(
 #[cfg(feature = "orchard")]
 pub(crate) fn put_received_note_spend(
     conn: &rusqlite::Transaction,
+    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
     shielded_pool: ShieldedPool,
     spent_in: TxRef,
     inserted: usize,
@@ -177,7 +178,7 @@ pub(crate) fn put_received_note_spend(
         // New links and unclassified history need reconstruction. Rewinds preserve
         // protected transactions' discovery obligations separately, so replaying
         // an existing link must not reopen ordinarily completed work.
-        super::enhance_pir::discovery::queue(conn, None, spent_in)?;
+        super::enhance_pir::discovery::queue(conn, tpir_session, None, spent_in)?;
     }
     Ok(())
 }

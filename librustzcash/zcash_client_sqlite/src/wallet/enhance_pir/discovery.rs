@@ -24,6 +24,8 @@ use super::{
 use crate::wallet::transparent_ledger;
 use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
 
+use crate::wallet::transparent_ledger::session::SessionState as TransparentSession;
+
 struct ReconstructedCandidates {
     outgoing: Vec<IronwoodEnhanceCandidate<AccountUuid>>,
     received_context: Vec<(u32, [u8; 32], [u8; 52])>,
@@ -35,6 +37,7 @@ struct ReconstructedCandidates {
 /// This is mode-independent; Standard exposes the restored request, PrivateIronwood withholds it.
 pub(crate) fn queue(
     conn: &Connection,
+    tpir_session: &TransparentSession,
     configured: Option<TransparentLedgerMode>,
     tx_ref: TxRef,
 ) -> Result<(), SqliteClientError> {
@@ -61,7 +64,7 @@ pub(crate) fn queue(
     )?;
     let existing = route(conn, tx_ref)?;
     if existing == Some(LWD_REQUIRED) || existing == Some(PRIVATE_DETAILS_UNSUPPORTED) {
-        return route_transparent_details(conn, configured, tx_ref);
+        return route_transparent_details(conn, tpir_session, configured, tx_ref);
     }
     conn.execute(
         "INSERT INTO ironwood_enhance_discovery_queue (transaction_id, suspended) VALUES (:tx, :suspended)
@@ -116,6 +119,7 @@ pub(super) fn funding(
 /// associations under the caller's SQL transaction (not a pre-network account snapshot).
 pub(crate) fn rebuild(
     conn: &Transaction<'_>,
+    tpir_session: &TransparentSession,
     configured: Option<TransparentLedgerMode>,
     session: &super::SessionState,
     request: IronwoodEnhanceDiscoveryRequest,
@@ -301,7 +305,7 @@ pub(crate) fn rebuild(
         if eligible {
             super::metadata::bind(conn, session, tx_ref, u64::from(position), 0)?;
         } else {
-            super::route_transparent_details(conn, configured, tx_ref)?;
+            super::route_transparent_details(conn, tpir_session, configured, tx_ref)?;
         }
     }
     for (tx_ref, received_context) in received_context_plans {
@@ -315,7 +319,7 @@ pub(crate) fn rebuild(
     }
     for (tx_ref, plan, received_context) in plans {
         restore_received_context(conn, tx_ref, received_context)?;
-        queue_transaction(conn, configured, session, tx_ref, &plan)?;
+        queue_transaction(conn, tpir_session, configured, session, tx_ref, &plan)?;
         conn.execute(
             "DELETE FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx",
             named_params![":tx": tx_ref.0],

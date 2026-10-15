@@ -96,6 +96,7 @@ pub(crate) enum CommitTrust {
 #[cfg(feature = "transparent-inputs")]
 pub(crate) fn apply_commit<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
+    session: &SessionState,
     params: &P,
     gap_limits: &GapLimits,
     configured: Option<TransparentLedgerMode>,
@@ -103,7 +104,10 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
     trust: CommitTrust,
 ) -> Result<CommitOutcome, SqliteClientError> {
     check_well_formed(&commit).map_err(|e| reject(CommitRejection::Invalid(e)))?;
-    atomically(conn, |conn| {
+    // The facts' journal, kept only when they are; the suspension of a failed commit queues
+    // nothing.
+    let facts = session.transaction();
+    let outcome = atomically(conn, |conn| {
         // Private recovery must be selected by this handle and authorized durably. A handle
         // selecting `Public` records no recovery evidence, even over a durable private policy
         // it reads under.
@@ -167,7 +171,14 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
             if trust == CommitTrust::Qualified {
                 qualify_in(conn, &commit.revision)?;
             }
-            apply_facts(conn, params, gap_limits, &recovery_addresses, &commit)
+            apply_facts(
+                conn,
+                &facts,
+                params,
+                gap_limits,
+                &recovery_addresses,
+                &commit,
+            )
         }) {
             Err(SqliteClientError::TransparentLedgerCommitRejected(
                 rejection @ CommitRejection::Integrity(_),
@@ -177,7 +188,9 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
             }
             result => result.map(Ok),
         }
-    })?
+    })??;
+    facts.commit();
+    Ok(outcome)
 }
 
 /// Applies a validated commit's revision, pages, events, ranges, and window growth. An active
@@ -185,6 +198,7 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
 #[cfg(feature = "transparent-inputs")]
 fn apply_facts<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
+    session: &SessionState,
     params: &P,
     gap_limits: &GapLimits,
     recovery_addresses: &AccountRecoveryAddresses,
@@ -271,10 +285,17 @@ fn apply_facts<P: consensus::Parameters>(
         // Events join the wallet's outputs and spends, where the wallet's own gap-limit
         // generation extends its address window.
         for receive in &commit.receives {
-            projection::project_receive(conn, params, gap_limits, commit.context.account, receive)?;
+            projection::project_receive(
+                conn,
+                session,
+                params,
+                gap_limits,
+                commit.context.account,
+                receive,
+            )?;
         }
         for spend in &commit.spends {
-            projection::project_spend(conn, params, gap_limits, spend)?;
+            projection::project_spend(conn, session, params, gap_limits, spend)?;
         }
         // The wallet's gap rule stops at the first unused run as long as the gap limit, so
         // growth past one is read-time window growth, which the next commit materializes.

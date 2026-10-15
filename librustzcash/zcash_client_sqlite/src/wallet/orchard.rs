@@ -522,6 +522,7 @@ pub(crate) fn put_received_note<
     P: consensus::Parameters,
 >(
     conn: &rusqlite::Transaction,
+    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
     params: &P,
     shielded_pool: ShieldedPool,
     output: &T,
@@ -617,7 +618,13 @@ pub(crate) fn put_received_note<
                 ":transaction_id": spent_in.0
             ],
         )?;
-        super::ironwood_hooks::put_received_note_spend(conn, shielded_pool, spent_in, inserted)?;
+        super::ironwood_hooks::put_received_note_spend(
+            conn,
+            tpir_session,
+            shielded_pool,
+            spent_in,
+            inserted,
+        )?;
     }
 
     Ok(account_id)
@@ -1267,6 +1274,7 @@ pub(crate) mod tests {
         // An Orchard note and an Ironwood note sharing an action index may both be recorded.
         super::put_received_note(
             &tx,
+            &Default::default(),
             &network,
             ShieldedPool::Orchard,
             &output(0, note(10_000, NoteVersion::V2), ValuePool::Orchard),
@@ -1277,6 +1285,7 @@ pub(crate) mod tests {
         .unwrap();
         super::put_received_note(
             &tx,
+            &Default::default(),
             &network,
             ShieldedPool::Ironwood,
             &output(0, note(20_000, NoteVersion::V3), ValuePool::Ironwood),

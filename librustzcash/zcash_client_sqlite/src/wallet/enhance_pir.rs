@@ -28,7 +28,7 @@ use zip32::Scope;
 
 use crate::{AccountUuid, error::SqliteClientError};
 
-use super::transparent_ledger;
+use super::transparent_ledger::{self, session::SessionState as TransparentSession};
 use super::{TxQueryType, get_account, memo_repr, orchard::parse_note_version};
 
 use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
@@ -322,6 +322,7 @@ fn require_lwd(
 #[cfg(feature = "orchard")]
 pub(crate) fn finish_private_receipt(
     conn: &Transaction<'_>,
+    tpir_session: &TransparentSession,
     configured: Option<TransparentLedgerMode>,
     session: &SessionState,
     tx_ref: crate::TxRef,
@@ -337,6 +338,7 @@ pub(crate) fn finish_private_receipt(
         super::queue_tx_retrieval(conn, std::iter::once(txid), None)?;
         return queue_transaction(
             conn,
+            tpir_session,
             configured,
             session,
             tx_ref,
@@ -356,6 +358,7 @@ pub(crate) fn finish_private_receipt(
 /// then requeues the memos of its received Ironwood notes, which remain privately recoverable.
 fn require_private_details_unsupported(
     conn: &Connection,
+    tpir_session: &TransparentSession,
     tx_ref: crate::TxRef,
 ) -> Result<(), SqliteClientError> {
     conn.execute(
@@ -366,6 +369,7 @@ fn require_private_details_unsupported(
     clear_work(conn, tx_ref)?;
     transparent_ledger::details::enqueue_tx(
         conn,
+        tpir_session,
         tx_ref,
         zcash_client_backend::data_api::transparent_ledger::TransparentDetailReasons::MIXED,
     )?;
@@ -393,6 +397,7 @@ pub(crate) fn queue_unsupported_memos(
 /// authority is current, otherwise a private-details marker with no public request.
 fn require_transparent_details(
     conn: &Connection,
+    tpir_session: &TransparentSession,
     configured: Option<TransparentLedgerMode>,
     tx_ref: crate::TxRef,
     expected_generation: u64,
@@ -402,7 +407,7 @@ fn require_transparent_details(
         require_lwd(conn, tx_ref, expected_generation)?;
         Ok(EnhancePirStoreResult::LwdRequired)
     } else {
-        require_private_details_unsupported(conn, tx_ref)?;
+        require_private_details_unsupported(conn, tpir_session, tx_ref)?;
         Ok(EnhancePirStoreResult::PrivateDetailsUnsupported)
     }
 }
@@ -410,11 +415,12 @@ fn require_transparent_details(
 /// Like [`require_transparent_details`], for scan-time paths that do not return a store result.
 pub(super) fn route_transparent_details(
     conn: &Connection,
+    tpir_session: &TransparentSession,
     configured: Option<TransparentLedgerMode>,
     tx_ref: crate::TxRef,
 ) -> Result<(), SqliteClientError> {
     let expected = transparent_ledger::capture_policy_generation(conn)?;
-    let _ = require_transparent_details(conn, configured, tx_ref, expected)?;
+    let _ = require_transparent_details(conn, tpir_session, configured, tx_ref, expected)?;
     Ok(())
 }
 
@@ -657,6 +663,7 @@ pub(crate) fn transaction_enhancement_work(
 /// Authentication context and writes share the transaction owned by the public operation.
 struct Storage<'a, 'conn, P> {
     tx: &'a Transaction<'conn>,
+    tpir_session: &'a TransparentSession,
     params: &'a P,
     configured: Option<TransparentLedgerMode>,
     expected_generation: u64,
@@ -719,6 +726,7 @@ impl<P: Parameters> EnhancePirStorage for Storage<'_, '_, P> {
     ) -> Result<EnhancePirStoreResult, Self::Error> {
         apply(
             self.tx,
+            self.tpir_session,
             self.params,
             self.configured,
             self.expected_generation,
@@ -729,6 +737,7 @@ impl<P: Parameters> EnhancePirStorage for Storage<'_, '_, P> {
 
 pub(crate) fn apply_records<P: Parameters>(
     tx: &Transaction<'_>,
+    tpir_session: &TransparentSession,
     params: &P,
     configured: Option<TransparentLedgerMode>,
     records: &[(EnhancePirRequest, EnhanceRecord)],
@@ -737,6 +746,7 @@ pub(crate) fn apply_records<P: Parameters>(
     zcash_client_backend::data_api::enhance_pir::storage::validate_and_apply_records(
         &mut Storage {
             tx,
+            tpir_session,
             params,
             configured,
             expected_generation,
@@ -800,6 +810,7 @@ pub(crate) fn pending_outgoing(
 /// Runs exactly once per scanned wallet transaction, after its notes are stored.
 pub(crate) fn queue_scanned(
     conn: &Connection,
+    tpir_session: &TransparentSession,
     configured: Option<TransparentLedgerMode>,
     session: &SessionState,
     tx_ref: crate::TxRef,
@@ -813,7 +824,7 @@ pub(crate) fn queue_scanned(
         IronwoodEnhancementPlan::Ineligible
     ) && (!tx.ironwood_spends().is_empty() || !tx.ironwood_outputs().is_empty())
     {
-        route_transparent_details(conn, configured, tx_ref)?;
+        route_transparent_details(conn, tpir_session, configured, tx_ref)?;
         // Route 2 keeps private memo work; this rescan re-arms it as queue_transaction does.
         return rearm_rejected_positions(conn, session, tx_ref);
     }
@@ -828,10 +839,11 @@ pub(crate) fn queue_scanned(
         .iter()
         .any(|(account, _)| !scanned_accounts.contains(account))
     {
-        discovery::queue(conn, configured, tx_ref)?;
+        discovery::queue(conn, tpir_session, configured, tx_ref)?;
     }
     queue_transaction(
         conn,
+        tpir_session,
         configured,
         session,
         tx_ref,
@@ -841,6 +853,7 @@ pub(crate) fn queue_scanned(
 
 fn queue_transaction(
     conn: &Connection,
+    tpir_session: &TransparentSession,
     configured: Option<TransparentLedgerMode>,
     session: &SessionState,
     tx_ref: crate::TxRef,
@@ -856,7 +869,7 @@ fn queue_transaction(
     }
     let route = route(conn, tx_ref)?;
     if route == Some(LWD_REQUIRED) || route == Some(PRIVATE_DETAILS_UNSUPPORTED) {
-        route_transparent_details(conn, configured, tx_ref)?;
+        route_transparent_details(conn, tpir_session, configured, tx_ref)?;
         // Route 2 keeps private memo work; the rescan re-arms it like any other.
         return rearm_rejected_positions(conn, session, tx_ref);
     }
@@ -869,7 +882,7 @@ fn queue_transaction(
                 |row| row.get(0),
             )?;
             if route.is_some() || has_notes {
-                route_transparent_details(conn, configured, tx_ref)?;
+                route_transparent_details(conn, tpir_session, configured, tx_ref)?;
                 rearm_rejected_positions(conn, session, tx_ref)?;
             }
             return Ok(());
@@ -1311,6 +1324,7 @@ fn pending_note<P: Parameters>(
 /// back together if any operation fails.
 pub(crate) fn apply<P: Parameters>(
     tx: &Transaction<'_>,
+    tpir_session: &TransparentSession,
     params: &P,
     configured: Option<TransparentLedgerMode>,
     expected_generation: u64,
@@ -1390,6 +1404,7 @@ pub(crate) fn apply<P: Parameters>(
         }
         return store_unsupported_details(
             tx,
+            tpir_session,
             tx_ref,
             route,
             has_transparent_outputs,
@@ -1531,6 +1546,7 @@ pub(crate) fn apply<P: Parameters>(
 /// its transparent details remain unsupported, and history keeps reporting them as pending.
 fn store_unsupported_details(
     tx: &Transaction<'_>,
+    tpir_session: &TransparentSession,
     tx_ref: crate::TxRef,
     route: i64,
     has_transparent_outputs: bool,
@@ -1613,7 +1629,7 @@ fn store_unsupported_details(
         [tx_ref.0],
     )?;
     if route == PRIVATE_PROTECTED {
-        require_private_details_unsupported(tx, tx_ref)?;
+        require_private_details_unsupported(tx, tpir_session, tx_ref)?;
     }
     Ok(EnhancePirStoreResult::PrivateDetailsUnsupported)
 }

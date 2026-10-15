@@ -876,6 +876,7 @@ fn interrupted_recovery_retries_without_duplicates() {
     // A replayed scan of the transaction finds nothing more to queue.
     crate::wallet::enhance_pir::route_transparent_details(
         conn(&case.st),
+        &Default::default(),
         Some(PrivateRequired),
         crate::TxRef(case.tx_ref),
     )

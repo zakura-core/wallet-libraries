@@ -112,6 +112,7 @@ pub(super) fn complete_observation(conn: &Connection, txid: TxId) -> Result<(), 
 /// not establish unspentness, transparent recovery coverage, or private spending authority.
 pub(crate) fn reconcile_scanned_blocks<P: consensus::Parameters>(
     conn: &rusqlite::Transaction<'_>,
+    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
     params: &P,
     #[cfg(feature = "transparent-inputs")] gap_limits: &GapLimits,
     scanned_blocks: &[(BlockHeight, BlockHash)],
@@ -140,6 +141,7 @@ pub(crate) fn reconcile_scanned_blocks<P: consensus::Parameters>(
             } else if previous_hash.as_slice() == hash.0 {
                 super::record_mined_transaction(
                     conn,
+                    tpir_session,
                     params,
                     #[cfg(feature = "transparent-inputs")]
                     gap_limits,

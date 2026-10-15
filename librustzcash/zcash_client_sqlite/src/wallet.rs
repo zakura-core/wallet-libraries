@@ -3577,6 +3577,7 @@ pub(crate) fn get_max_height_hash(
 
 pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
     conn: &rusqlite::Transaction,
+    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
     params: &P,
     #[cfg(feature = "transparent-inputs")] gap_limits: &GapLimits,
     sent_tx: &SentTransaction<AccountUuid>,
@@ -3733,6 +3734,7 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
                         let shielded_pool = orchard_note.pool();
                         orchard::put_received_note(
                             conn,
+                            tpir_session,
                             params,
                             shielded_pool,
                             &DecryptedOutput::new(
@@ -3837,6 +3839,7 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
 
 pub(crate) fn set_transaction_status<P: consensus::Parameters>(
     conn: &rusqlite::Transaction,
+    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
     _params: &P,
     #[cfg(feature = "transparent-inputs")] gap_limits: &GapLimits,
     txid: TxId,
@@ -3891,6 +3894,7 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
         TransactionStatus::Mined(height) => {
             record_mined_transaction(
                 conn,
+                tpir_session,
                 _params,
                 #[cfg(feature = "transparent-inputs")]
                 gap_limits,
@@ -3907,6 +3911,7 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
 /// It associates an available block and updates gap limits, without establishing unspentness.
 fn record_mined_transaction<P: consensus::Parameters>(
     conn: &rusqlite::Transaction<'_>,
+    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
     _params: &P,
     #[cfg(feature = "transparent-inputs")] gap_limits: &GapLimits,
     txid: TxId,
@@ -3938,7 +3943,7 @@ fn record_mined_transaction<P: consensus::Parameters>(
          AND blocks.height = :height",
         sql_args,
     )?;
-    transparent_ledger::details::enqueue_mined_route_two(conn, &txid)?;
+    transparent_ledger::details::enqueue_mined_route_two(conn, tpir_session, &txid)?;
 
     #[cfg(feature = "transparent-inputs")]
     transparent::update_gap_limits(conn, _params, gap_limits, txid, height)?;
@@ -4361,6 +4366,7 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
             enhance_pir_session: Default::default(),
             #[cfg(feature = "orchard")]
             enhance_pir_max_delay: crate::wallet::enhance_pir::MAX_NOT_BEFORE_DELAY,
+            transparent_pir_session: Default::default(),
             // Truncation removes checkpoints; it never establishes them, so no anchor retention
             // decision is made through this handle and the interval is immaterial.
             anchor_retention_interval: AnchorRetentionInterval::default(),
@@ -5258,6 +5264,7 @@ pub(crate) fn set_tx_trust(
 /// contain a note related to this wallet into the database.
 pub(crate) fn put_tx_meta(
     conn: &rusqlite::Connection,
+    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
     tx: &WalletTx<AccountUuid>,
     height: BlockHeight,
 ) -> Result<TxRef, SqliteClientError> {
@@ -5282,7 +5289,7 @@ pub(crate) fn put_tx_meta(
     ];
 
     let tx_ref = stmt_upsert_tx_meta.query_row(tx_params, |row| row.get::<_, i64>(0).map(TxRef))?;
-    transparent_ledger::details::enqueue_mined_route_two(conn, &txid_bytes)?;
+    transparent_ledger::details::enqueue_mined_route_two(conn, tpir_session, &txid_bytes)?;
     Ok(tx_ref)
 }
 
@@ -6086,6 +6093,7 @@ pub(crate) fn insert_nullifier_map<N: AsRef<[u8]>>(
 /// this nullifier is revealed, if any.
 pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
     conn: &rusqlite::Transaction<'_>,
+    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
     spend_pool: ShieldedPool,
     nf: &N,
 ) -> Result<Option<TxRef>, SqliteClientError> {
@@ -6122,6 +6130,7 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
     // change or explicit in-wallet recipient.
     put_tx_meta(
         conn,
+        tpir_session,
         &WalletTx::new(
             txid,
             index,
