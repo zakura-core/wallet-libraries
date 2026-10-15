@@ -24,21 +24,10 @@ pub struct Checkpoint {
     pub position: u64,
 }
 
-/// A payment's compact context and location. All hashes use protocol byte order.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Payment {
-    pub height: u32,
-    pub block_hash: [u8; 32],
-    pub txid: [u8; 32],
-    pub tx_index: u32,
-    pub action_index: u32,
-    pub position: u64,
-    /// The Action's input nullifier, not the received note's spend nullifier.
-    pub action_nullifier: [u8; 32],
-    pub cmx: [u8; 32],
-    pub ephemeral_key: [u8; 32],
-    pub ciphertext_prefix: [u8; 52],
-}
+/// A payment's compact context and location, using the library-owned wire record.
+/// All hashes use protocol byte order. Recovery authenticates the receiver before
+/// the adapter returns this record; parsing wire bytes alone does not.
+pub use zakura_receiver_crypto::wire::Payment;
 
 /// One block's Ironwood Actions: every commitment in position order, the count from
 /// coinbase transactions, whose recipients the directory excludes although their
