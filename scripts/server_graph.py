@@ -24,6 +24,8 @@ def problems(metadata, owned, node_packages=(), wallet=False, ownership=True):
         if wallet and (name in node_packages or name == "zakura-server-chain"):
             errors.append(f"{name}: server/node package in wallet consumer")
         for dependency in package.get("dependencies", []):
+            if wallet and (dependency["name"] in node_packages or dependency["name"] == "zakura-server-chain"):
+                errors.append(f"{name}: server/node dependency in wallet consumer: {dependency['name']}")
             if ownership and (dependency["name"] in owned or wallet_pir_owned(dependency.get("source"))):
                 errors.append(f"{name}: dependency on wallet-pir package {dependency['name']}")
     return errors

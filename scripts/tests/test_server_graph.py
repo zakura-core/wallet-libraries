@@ -40,6 +40,13 @@ class ServerBoundaryTests(unittest.TestCase):
             self.assertEqual(self.check(self.package(name)), [])
             self.assertTrue(self.check(self.package(name), wallet=True))
 
+    def test_inactive_node_declarations_are_rejected_for_wallet_facades(self):
+        for name in ("zakura-chain", "zakura-server-chain"):
+            for kind, optional, target in ((None, False, None), (None, True, None), ("build", False, None), ("dev", False, None), (None, False, 'cfg(target_os = "windows")')):
+                package = self.package(dependencies=[{"name": name, "kind": kind, "optional": optional, "target": target}])
+                with self.subTest(name=name, kind=kind, optional=optional, target=target):
+                    self.assertTrue(graph.problems({"packages": [package]}, set(), {"zakura-chain"}, wallet=True, ownership=False))
+
     def run_probes(self, contaminated=None):
         consumers = {}
         def metadata(manifest, **kwargs):
