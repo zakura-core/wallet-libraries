@@ -38,6 +38,7 @@ jobs:
       - run: rustup show
       - run: python3 -m unittest discover -s scripts/tests -v
       - run: cargo fmt --all -- --check
+      - run: cargo fmt --manifest-path server/Cargo.toml --all -- --check
       - run: git diff --exit-code
 
   repository-checks:
@@ -79,7 +80,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        config: [default, orchard, transparent, transparent-import, pczt, sqlite, enhance-wallet, enhance, transparent-pir, transparent-pir-sqlite, transparent-pir-testing, pir-receiver, receiver-wire]
+        config: [default, orchard, transparent, transparent-import, pczt, sqlite, enhance-wallet, enhance, transparent-pir, transparent-pir-sqlite, transparent-pir-testing, pir-receiver, receiver-wire, server]
     env:
       WALLET_LIB_BUILD_ROOT: ${{ github.workspace }}/target/dev-lanes
     steps:
