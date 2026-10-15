@@ -3122,3 +3122,5 @@ fn receipt_requires_an_entry_for_the_account() {
         None
     );
 }
+
+mod next_tip;

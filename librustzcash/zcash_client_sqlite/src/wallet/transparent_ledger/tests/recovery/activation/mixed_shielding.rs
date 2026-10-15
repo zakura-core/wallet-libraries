@@ -1137,3 +1137,103 @@ fn deleting_the_shape_binding_account_rebinds_to_a_surviving_note() {
     assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
     assert!(reopened.transaction_enhancement_work().unwrap().is_empty());
 }
+
+/// The lookups the wallet would ask the txid display service for now.
+fn lookups(st: &State) -> Vec<TxId> {
+    use zcash_client_backend::data_api::transparent_ledger::TransparentDetailRead as _;
+    let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    st.wallet()
+        .db()
+        .transparent_detail_work(now, 100, &[], None)
+        .unwrap()
+        .requests
+        .into_iter()
+        .map(|r| r.txid)
+        .collect()
+}
+
+/// A `PrivateRequired` wallet under `PrivateIronwood` enhancement that compact-scanned an
+/// Ironwood receive to its internal address, from a transaction transparent recovery has
+/// published nothing about. Enhance PIR has not run yet.
+fn unrecovered_ironwood_receive() -> Shielding {
+    let mut st = TestBuilder::new()
+        .with_network(ironwood_network())
+        .with_data_store_factory(TestDbFactory::default())
+        .with_block_cache(BlockCache::new())
+        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .build();
+    scan_new_blocks(&mut st, 10);
+    set_policy(&mut st, PrivateRequired);
+    let account = st.test_account().unwrap().id();
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+    let (height, _, _) = st.generate_next_block_multi(&[FakeCompactOutput::new(
+        &fvk,
+        AddressType::Internal,
+        zat(180_000),
+    )]);
+    st.scan_cached_blocks(height, 1);
+    scan_new_blocks(&mut st, 2);
+    let (tx_ref, txid): (i64, [u8; 32]) = conn(&st)
+        .query_row(
+            "SELECT id_tx, txid FROM transactions WHERE mined_height = ?1",
+            [u32::from(height)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    // A transaction with transparent inputs follows the coinbase.
+    conn(&st)
+        .execute(
+            "UPDATE transactions SET tx_index = 1 WHERE id_tx = ?1",
+            [tx_ref],
+        )
+        .unwrap();
+    Shielding {
+        st,
+        account,
+        txid: TxId::from_bytes(txid),
+        tx_ref,
+        height,
+    }
+}
+
+/// An Enhance reply that marks a transaction mixed queues its txid lookup. The display service
+/// must not see that lookup at the tip the reply arrived: it waits for the next one.
+#[test]
+fn a_lookup_an_enhance_reply_queues_is_listed_from_the_next_tip() {
+    use rusqlite::OptionalExtension as _;
+    let mut case = unrecovered_ironwood_receive();
+    assert!(!lookups(&case.st).contains(&case.txid));
+    assert_eq!(
+        recover_memo(&mut case, Some(FEE)),
+        vec![EnhancePirStoreResult::PrivateDetailsUnsupported]
+    );
+    let mixed: Option<u8> = conn(&case.st)
+        .query_row(
+            "SELECT reasons FROM transparent_detail_work WHERE transaction_id = ?1",
+            [case.tx_ref],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    assert_eq!(mixed, Some(4));
+    assert!(!lookups(&case.st).contains(&case.txid));
+    scan_new_blocks(&mut case.st, 1);
+    assert!(lookups(&case.st).contains(&case.txid));
+}
+
+/// A reply that adds a reason to a lookup queued at an earlier tip leaves it listed.
+#[test]
+fn an_enhance_reply_adding_to_earlier_work_leaves_it_listed() {
+    let mut case = shielding(&CASES[0], Some(reported_metadata()));
+    // Recovery queued the spending transaction's lookup; the tip has moved since.
+    scan_new_blocks(&mut case.st, 1);
+    assert!(lookups(&case.st).contains(&case.txid));
+    assert_eq!(
+        recover_memo(&mut case, Some(FEE)),
+        vec![EnhancePirStoreResult::PrivateDetailsUnsupported]
+    );
+    assert!(lookups(&case.st).contains(&case.txid));
+}
