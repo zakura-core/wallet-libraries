@@ -8406,6 +8406,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-receiver-crypto"
+version = "0.0.1-rc0"
+dependencies = [
+ "hex",
+ "incrementalmerkletree 0.8.2",
+ "serde_json",
+ "thiserror 2.0.21",
+ "zakura-address",
+ "zakura-note-encryption",
+ "zakura-orchard",
+ "zakura-protocol",
+]
+
+[[package]]
 name = "zakura-reddsa"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

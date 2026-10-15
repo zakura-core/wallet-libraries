@@ -1,0 +1,43 @@
+[package]
+name = "zakura-server-chain"
+version = "0.0.1-rc0"
+publish = false
+description = "Zakura node reads and chain interpretation for the PIR services"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[features]
+## Synthetic chain fixtures for service tests: raw blocks and transactions built
+## with the node's own encoders.
+testing = ["dep:axum", "tokio/net", "tokio/time"]
+
+[dependencies]
+axum = { version = "0.7", optional = true }
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "sync"] }
+zakura-chain.workspace = true
+zakura-receiver-crypto = { path = "../../zakura/receiver-crypto" }
+
+[dev-dependencies]
+axum = "0.7"
+hex = "0.4"
+tokio = { version = "1", features = ["full"] }
+
+[[test]]
+name = "enhance"
+required-features = ["testing"]
+
+[[test]]
+name = "receiver"
+required-features = ["testing"]
+
+[[test]]
+name = "status"
+required-features = ["testing"]

@@ -90,7 +90,6 @@ fn state_with_factory(factory: TestDbFactory) -> State {
 }
 
 mod discovery;
-mod not_before;
 
 fn outgoing(st: &State, tx_ref: crate::TxRef, position: u64, index: usize) -> EnhancePirRequest {
     queue_transaction(
@@ -1202,9 +1201,7 @@ fn reopening_requires_mode_before_enumerating_persisted_work() {
         db.transaction_enhancement_work(),
         Err(SqliteClientError::EnhancementModeNotConfigured)
     ));
-    let mut db = db.with_enhancement_mode(EnhancementMode::PrivateIronwood);
-    // A new handle starts a new session, which would draw each position's wait again.
-    db.set_enhance_pir_max_delay(std::time::Duration::ZERO);
+    let db = db.with_enhancement_mode(EnhancementMode::PrivateIronwood);
     assert_eq!(db.transaction_enhancement_work().unwrap(), expected);
 }
 
@@ -2218,7 +2215,6 @@ fn routed(st: &State) -> (Vec<TxId>, Vec<EnhancePirWork>) {
     for work in &private {
         let txid = match work {
             EnhancePirWork::Query(request)
-            | EnhancePirWork::Waiting { request, .. }
             | EnhancePirWork::Suspended(
                 EnhancePirSuspension::OutgoingNotRecoverable(request)
                 | EnhancePirSuspension::Rejected(request),
@@ -2808,7 +2804,7 @@ fn third_rejection_suspends_the_position() {
     assert!(!visible(&st, request));
 
     // A newly opened wallet starts a new in-memory allowance.
-    let mut reopened = crate::WalletDb::for_path(
+    let reopened = crate::WalletDb::for_path(
         st.wallet().data_file_path(),
         *st.network(),
         test_clock(),
@@ -2817,8 +2813,6 @@ fn third_rejection_suspends_the_position() {
     .unwrap()
     .with_enhancement_mode(EnhancementMode::PrivateIronwood)
     .with_transparent_ledger_mode(TransparentLedgerMode::Public);
-    // Its session would also draw the position's wait again.
-    reopened.set_enhance_pir_max_delay(std::time::Duration::ZERO);
     assert_eq!(rejections(&reopened, request), None);
     assert!(
         reopened

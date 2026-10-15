@@ -119,6 +119,20 @@ class WorkflowTests(unittest.TestCase):
             args = execute.call_args.args[0]
             self.assertEqual((args.command, args.filter, args.config, args.package), ("test", "transparent_ledger", "transparent", ["zakura-client-sqlite"]))
 
+    def test_selecting_one_server_package_keeps_its_workspace(self):
+        args = argparse.Namespace(package=["zakura-server-chain"], config="server")
+        command = dev.cargo_args(args)
+        self.assertEqual(command[:4], ["--manifest-path", "server/Cargo.toml", "-p", "zakura-server-chain"])
+        self.assertIn("testing", command)
+
+    def test_server_doctor_checks_the_server_lockfile(self):
+        args = argparse.Namespace(command="doctor", config="server", profile=None)
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"WALLET_LIB_BUILD_ROOT": root}), patch.object(dev, "build_identity", return_value="test"), patch.object(dev, "capture", return_value="version"), patch.object(dev.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            self.assertEqual(dev.execute(args), 0)
+        command = run.call_args.args[0]
+        self.assertIn("--manifest-path", command)
+        self.assertEqual(command[command.index("--manifest-path") + 1], "server/Cargo.toml")
+
     def test_facade_requires_explicit_verification(self):
         with self.assertRaisesRegex(ValueError, "exclusive backends"):
             dev.cargo_args(argparse.Namespace(package=["zakura-wallet-lib"], config="default"))

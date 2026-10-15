@@ -112,11 +112,11 @@ impl Progress {
 impl Progress {
     /// Maps the reference client's report onto the adapter's narrower contract.
     ///
-    /// A `clamped` pass synced to the publication's end below the wallet's target,
-    /// so even its completion is [`Outcome::Behind`].
+    /// A `clamped` pass synced to a publication ending below the wallet's target.
+    /// Preserve that public wait even if private contents prevented completion;
+    /// failure counts remain separate. A capacity refusal keeps its longer wait.
     pub(crate) fn from_sync_report(report: &SyncReport, clamped: bool) -> Self {
         let outcome = match &report.completion {
-            Completion::Complete if clamped => Outcome::Behind,
             Completion::Complete => Outcome::Complete,
             Completion::Incomplete { reason, .. } => match reason {
                 IncompleteReason::QueryBudget
@@ -133,6 +133,20 @@ impl Progress {
         Self {
             covered_through: report.covered_through,
             outcome,
+        }
+        .with_publication_wait(clamped)
+    }
+
+    /// A public publication boundary must not disappear because of private
+    /// content, a work budget, or a contradiction that left no sync report.
+    pub(crate) fn with_publication_wait(self, clamped: bool) -> Self {
+        if clamped && self.outcome != Outcome::Overloaded {
+            Self {
+                outcome: Outcome::Behind,
+                ..self
+            }
+        } else {
+            self
         }
     }
 }

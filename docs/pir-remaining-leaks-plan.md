@@ -57,19 +57,14 @@ The broadcast height is already visible to the broadcast service, and status
 query timing remains observable. Hiding traffic timing needs broader cover
 traffic rather than a per-transaction window.
 
-**Enhance waits stay in session memory.** Reopening draws queued waits again.
-A restart is an application action, and the fresh wait is between zero and 75
-seconds; a position first read before a write waits the full 75 seconds.
-
 **Enhance replies do not steer the rest of the sync.** An unreadable reply or
 a rejected record fails that position only. The other positions are still
 queried in the same order, and the failure counts toward the existing cap of
 three.
 
-**Enhance items wait a random time before their first query.** When an item
-is first queued, the wallet draws a delay of 0 to 75 seconds from its random
-source and does not query the item before then. A rescan in the same session
-keeps the drawn time.
+**First-query timing is deferred for separate analysis.** Newly queued Enhance
+items have no randomized first-query wait. Choosing a delay needs evidence of
+its privacy benefit and its effect on memo display latency.
 
 **A restore watches a fixed window.** Until an account is activated, its
 transparent recovery watches 50 external and 25 internal addresses, whatever
@@ -77,7 +72,7 @@ the replies show, so a typical restore completes in one sync (change F).
 
 ## 3. Changes
 
-Increment 2 has two pull requests, one per repository (section 5). Changes D and F are in wallet-libraries; A is dropped. B and C are separate Vizor work. Each change lists the
+Increment 2 has two pull requests, one per repository (section 5). Change F is in wallet-libraries; A is dropped and D is deferred. B and C are separate Vizor work. Each change lists the
 files, the rule, and its tests.
 
 Every test lands in a first commit that contains only the tests. That commit
@@ -134,50 +129,12 @@ Tests use the scripted `Service` in `payload/tests.rs`:
 - **Real database.** Three syncs with the same corrupt row leave the position
   as `EnhancePirSuspension::Rejected`.
 
-### D. Enhance not-before time (wallet-libraries)
+### D. First-query delay (deferred)
 
-Today an Enhance item is due as soon as it is queued.
-`transaction_enhancement_work` (`zcash_client_sqlite/src/wallet/enhance_pir.rs`)
-has no time condition. `queue_transaction` deletes and re-inserts the memo and
-outgoing rows on every scan, so a time kept in those rows would be drawn again
-at every rescan.
-
-No table or migration. Each position's not-before time is kept in the
-`EnhancePirSession`, beside #180's content-failure counts.
-
-Library changes:
-
-- The delay is drawn uniformly from 0 to 75 seconds with the wallet's
-  `rng`, and added to the wallet's `clock`, when a wallet write first sees the
-  position in the session: when scanning queues it, when rediscovery rebuilds
-  it, or at the session's first `update_chain_tip`. A read cannot draw, so a
-  position read before any write waits the full 75 seconds.
-- `transaction_enhancement_work` lists any position whose time is later than
-  now as waiting. The read impl gains a `CL: Clock` bound, so the signature
-  does not change.
-- `EnhancePirWork` gains `Waiting { request, not_before }`.
-  `zakura/pir-enhance` `PreparedWork` counts these as `waiting`, and treats
-  work with waiting items as incomplete, as it does suspended items.
-- The time is forgotten when the position's work completes. A rewind that
-  truncates the position forgets it, so a later requeue draws a new time.
-- A fresh session draws each queued position's wait again. The restart is the
-  app's doing, not a reply's; it costs at most a fresh 0–75 second wait.
-
-Tests, in `wallet/enhance_pir/tests.rs`, with `test_clock` and a seeded
-`test_rng`:
-
-- **Not due early.** At the queue time the item is `Waiting`. After its time
-  it is `Query`. Reverted, it is `Query` at once.
-- **Seeds.** Two seeds give different times. Items found in one scan get
-  independent times.
-- **Rescan.** A rescan keeps the time. Reverted to storing the time in the
-  memo row, it changes.
-- **Fresh session.** A new session draws the wait again and keeps it across a
-  rescan.
-- **Completeness.** `PreparedWork` is incomplete while an item waits.
-
-Vizor needs one change for D, carried in its pull request: show waiting items
-as pending. Its checkpoint at each block picks them up once due.
+Do not add a randomized delay before the first Enhance lookup in this increment.
+Analyze timing correlation and realistic traffic overlap separately, and measure
+any proposed delay against its effect on memo and transaction-detail latency.
+Reply-created work still follows Vizor's next-block scheduling rule.
 
 ### E. Pin the filter bound (wallet-pir, follow-up)
 
@@ -340,8 +297,8 @@ None of the PIR changes above touches the transport.
   open wallet's session. Reopening the wallet resets them. A service can
   therefore learn up to two bits per record per session, rather than two bits
   in all. A durable count needs one small table.
-- **Is 75 seconds enough?** The first Enhance query waits 37.5 seconds on
-  average, with a maximum of 75 seconds, roughly one target block interval. A longer delay hides the block better but
-  holds memos back.
+- **First-query timing.** What timing correlation remains under realistic
+  traffic, and would delaying a lookup materially reduce it? Compare any
+  proposed delay with cover traffic and the user-visible latency it adds.
 
 - **Should Enhance cover go on now, while it is free?** See section 6.

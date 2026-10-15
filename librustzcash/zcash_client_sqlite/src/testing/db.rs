@@ -127,13 +127,6 @@ impl TestDb {
         wallet_db: WalletDb<Connection, LocalNetwork, FixedClock, TestRng>,
         data_file: Option<NamedTempFile>,
     ) -> Self {
-        #[cfg(feature = "orchard")]
-        let wallet_db = {
-            let mut wallet_db = wallet_db;
-            // Most tests query newly queued Enhance work at once; delay tests set it back.
-            wallet_db.set_enhance_pir_max_delay(std::time::Duration::ZERO);
-            wallet_db
-        };
         Self {
             wallet_db: wallet_db
                 .with_status_mode(TransactionStatusMode::Public)

@@ -223,6 +223,14 @@ retrieval reports complete, and any batch with failed entries as stalled,
 whatever else stopped its pass. Read a fresh watch set when applying commits
 grows an address window. `PassPlan::next` turns both into the next step.
 
+For service scheduling, preserve `report.progress.retry()` when it is
+`Retry::After`: publication lag and capacity refusals are public, independently
+of private content failures. A publication ending below the target remains
+`Behind` even when a private entry, contradiction or work budget prevents
+completion; an overload keeps its longer wait. This does not grant coverage or
+remove a failed-entry hold. The content-aware `report.retry()` still reports
+`Stalled` for failed entries and must not erase that public service wait.
+
 A private row whose content fails to decode or check out (a directory entry or
 page fragment that is malformed, missing, held twice or out of place, or a run
 link the shard cannot follow), or a record that contradicts the companion,

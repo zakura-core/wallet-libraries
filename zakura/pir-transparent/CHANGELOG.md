@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A publication ending below the wallet's target retains its public retry wait
+  even when private content, a work budget or a contradiction prevents the pass
+  from completing. An overload preserves its longer wait. Coverage and failed-entry
+  counts are unchanged, so the content-aware retry and hold policy still apply.
+
 ## [0.0.1-rc1] - 2026-10-14
 
 ### Added

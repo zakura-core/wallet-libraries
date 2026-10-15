@@ -1109,8 +1109,6 @@ fn deleting_the_shape_binding_account_rebinds_to_a_surviving_note() {
     )
     .unwrap()
     .with_transparent_ledger_mode(PrivateRequired);
-    // Its fresh session would also draw the position's wait again.
-    reopened.set_enhance_pir_max_delay(std::time::Duration::ZERO);
     reopened.set_enhancement_mode(EnhancementMode::PrivateIronwood);
     assert_eq!(
         reopened.transaction_enhancement_work().unwrap(),
