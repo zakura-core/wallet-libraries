@@ -2000,6 +2000,24 @@ impl Fixture {
         queries.len() / all.len()
     }
 
+    /// What the companion holds of the history: the receives it recovered, and
+    /// the bytes of fragments its unfinished walks saved. A pass that reads any
+    /// of the history raises one or the other.
+    fn history_read(&self) -> (i64, i64) {
+        let db = self.companion_db();
+        let receives = db
+            .query_row("SELECT COUNT(*) FROM receives", [], |row| row.get(0))
+            .unwrap();
+        let fragments = db
+            .query_row(
+                "SELECT COALESCE(SUM(length(fragments)), 0) FROM pending_work",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (receives, fragments)
+    }
+
     /// Rows in the companion's run cache.
     fn cached_runs(&self) -> i64 {
         self.companion_db()
@@ -2083,11 +2101,18 @@ fn a_history_across_page_shards_recovers_and_catch_up_stops_at_the_cached_run() 
 /// A real page lookup respects small query and byte budgets and resumes from
 /// SQLite after every pass, including midway through a run with many fragments.
 /// Under page cover a pass stops between sweeps, here of the one page table that
-/// holds rows, so the budgets are a few sweeps rather than one query or byte.
+/// holds rows: one query is one sweep, the query budget fits the directory and
+/// two sweeps, and the byte budgets fit the page setup and one or two sweeps,
+/// never the run's round of the other fragments. Every pass keeps what it read,
+/// so each reads more and the history finishes.
 #[test]
 fn small_page_budgets_recover_a_long_history_across_restarts() {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
-    for (queries, private_bytes) in [(4, 96 << 20), (256, SMALL_PAGE_BYTES)] {
+    for (queries, private_bytes) in [
+        (4, 96 << 20),
+        (256, TIGHT_PAGE_BYTES),
+        (256, SMALL_PAGE_BYTES),
+    ] {
         let birthday = H0 + 600;
         let mut f = Fixture::new(birthday, H0 + 619);
         f.trust_service();
@@ -2121,6 +2146,7 @@ fn small_page_budgets_recover_a_long_history_across_restarts() {
         f.pass().unwrap();
         let mut complete = false;
         let mut saved_fragments = false;
+        let mut read = f.history_read();
         for _ in 0..40 {
             f.companion = None;
             let mut bounded = config(f.account);
@@ -2152,6 +2178,12 @@ fn small_page_budgets_recover_a_long_history_across_restarts() {
                 )
                 .unwrap()
                 > 0;
+            let now = f.history_read();
+            assert!(
+                now > read,
+                "{queries} queries, {private_bytes} bytes: a pass read nothing more: {read:?}"
+            );
+            read = now;
             if pass.batch.progress.outcome == Outcome::Complete {
                 complete = true;
                 break;
@@ -2170,11 +2202,13 @@ fn small_page_budgets_recover_a_long_history_across_restarts() {
     }
 }
 
-/// A byte budget for [`small_page_budgets_recover_a_long_history_across_restarts`]
-/// that fits the run's longest round, two fragments, and not the whole run. At
-/// 80,000 bytes that round never fits a pass and the walk stalls
-/// (`docs/pir-page-cover.md`, open questions).
+/// Byte budgets for [`small_page_budgets_recover_a_long_history_across_restarts`]:
+/// the page setup and two sweeps, and the page setup and one. Neither fits the
+/// run's round of its other fragments, which a pass once had to fit whole: at
+/// 80,000 bytes the walk then sent the round's first sweep in every pass and
+/// never finished.
 const SMALL_PAGE_BYTES: u64 = 120_000;
+const TIGHT_PAGE_BYTES: u64 = 80_000;
 
 /// The last height the re-cut tests publish, and the wallet's tip.
 const RECUT_TIP: u64 = H0 + 549;

@@ -22,10 +22,12 @@ hold the wallet's runs, and one query per fragment. Each table is a block
 range, so the service learns roughly when the wallet's addresses were active
 in that shard and how long their histories are.
 
-The walk is in wallet-pir (`transparent-wallet`, `walk_chains`), pinned here at
-`=0.1.0-rc.4`. This change does not touch it. wallet-libraries owns the
-transport the walk calls, and every page query passes through it one at a time.
-Page cover is a wrapper around that transport, `PageCover` in
+The walk is the recovery engine's (`zakura_pir_transparent::engine`, `walk_chains`).
+Page cover changes nothing in it and needs one thing from it: a typed budget
+stop, `BudgetStop`, with which a transport declines a request it has not sent
+(section 2). wallet-libraries owns the transport the walk calls, and every page
+query passes through it one at a time. Page cover is a wrapper around that
+transport, `PageCover` in
 `zakura/pir-transparent/src/transparent_history_recovery/page_cover.rs`. It
 sees each page query as the walk sends it (shard, revision, table, body) and
 adds dummy queries around it.
@@ -57,7 +59,8 @@ Per directory shard S, per pass:
 5. **Padding.** When S's page work ends, the wrapper sends cover sweeps over C
    until S's sweep count is the next power of two. Work ends at the next
    request that is not a page request to S's revision, or at the end of the
-   pass. A failed cover sweep ends padding for the pass.
+   pass. A failed cover sweep, or a page reply of the wrong length (rule 10),
+   ends padding for the pass.
 6. **Same C for the session.** The recovery handle keeps C in memory, keyed by
    the shard, its page table count and the chained identities of its sealed
    page tables, with every table growth added. A walk resumed by a later pass
@@ -73,16 +76,30 @@ Per directory shard S, per pass:
    setup the store kept from an earlier session. If the walk asks for a setup a
    second time, having dropped it after a mismatch, all N are fetched again.
 8. **Budgets bound the total.** The wrapper counts every private query and
-   private byte it sends, cover included, against the pass's limits. A real
-   sweep starts only if it, and the padding its sweep count then requires,
-   fit: before sweep k it needs |C| x (P(k) - k + 1) queries and their bytes,
-   where P(k) is the next power of two. Otherwise the pass stops there, between
-   sweeps, and the padding already reserved is still sent. Bytes are projected
-   from the query lengths and the scheme's response size; setups from the
-   scheme's mask size. The side that gives is the walk: it stops early.
+   private byte it sends, cover included, against the pass's limits. A query
+   and its upload count before it is sent, so a failed one counts too; its
+   reply counts when it arrives. A real sweep starts only if it, and the
+   padding its sweep count then requires, fit: before sweep k it needs
+   |C| x (P(k) - k + 1) queries and their bytes, where P(k) is the next power
+   of two. Otherwise the pass stops there, between sweeps, and the padding
+   already reserved is still sent. Bytes are projected from the query lengths
+   and the scheme's response size; setups from the scheme's mask size. The
+   side that gives is the walk: it stops early.
 9. **Nothing reply-dependent.** The draw, the order and the padding depend only
    on the session's random source, N, the tables the store's pending work
    names, the first request's table, and the count of real queries.
+10. **Every reply has its published framing.** Each page reply, real or
+    dummy, must be exactly the length its table's scheme fixes, a header and
+    the scheme's response per segment, and each segment's header must carry
+    the revision and table binding and the epoch of the setup fetched for it,
+    as the client requires of the real reply. This is checked before the
+    sweep's next query is sent. Otherwise a service could fail one slot's
+    reply and learn from the walk's reaction whether that slot was real. Each
+    page setup reply must be no longer than the estimate admitted for it
+    before the next setup is fetched. A reply that fails this fails its
+    request and ends padding for the pass; a wrong epoch also makes the next
+    attempt fetch every setup again. The check is the same in every slot and
+    reads nothing past the headers.
 
 Randomness comes from a ChaCha generator seeded from the operating system when
 the companion opens. Tests seed it through `seed_page_cover`, which exists only
@@ -90,17 +107,26 @@ with feature `testing`.
 
 ### How a budget stop reaches the walk
 
-A transport has one way to stop the walk: refuse a request. The wrapper
-refuses with a capacity refusal that names no wait (`Overloaded` with a zero
-`retry_after`). The walk retries the shard a few times, each refused at once
-without a request, and reports the sync incomplete with every commit so far
-kept. Recovery then reports the pass as stopped on its budget
-(`Outcome::More`), not as overloaded.
+The wrapper declines the request it cannot afford, and everything after it in
+the pass, with the client's `BudgetStop`, naming the query or the byte budget.
+Nothing of a declined request is sent. The walk treats it as its own budget:
+it keeps the replies of the round received before the stop, saves their
+fragments, commits every run they complete, and reports the sync incomplete on
+that budget (`Outcome::More`). It does not retry or wait, as it would for a
+service at capacity, and a real refusal or failure from the service is still
+reported as one.
 
-The walk discards the replies of a round that a refusal interrupts. So a stop
-in the middle of a round costs the real queries already sent in that round,
-and a round whose sweeps cannot fit one pass's budget never completes. Section
-6 has the numbers and the wallet-pir change that removes this.
+A round can therefore be longer than a pass: each pass reads the sweeps it can
+afford and the next resumes after them. A pass makes progress whenever it can
+afford the work that must happen together before its first page query (a
+shard's directory phase when it is not yet done, and every page table's setup
+when the session does not hold them) and one sweep with its padding. A budget
+smaller than that reads nothing.
+
+A malformed reply is bounded, not prevented: the transport reads a reply up to
+the pass's response limit before rule 10 can check it, so one oversized reply
+can carry a pass past its byte budget by up to that limit. Rule 10 keeps it to
+one: the sweep sends nothing after it.
 
 ## 3. Cost
 
@@ -183,13 +209,15 @@ service's headroom above 20 QPS, and the 20 QPS gate under v12.
 - **What a refusal reveals.** A request outcome stays exempt, as in increment
   1, but a service that refuses a cover sweep can tell padding from real work:
   after a refused real sweep the walk retries the shard, after a refused cover
-  sweep the wallet moves on.
+  sweep the wallet moves on. A budget stop is not a refusal and is never sent:
+  the service sees the pass end between sweeps.
 - **Import discovery** (`discover.rs`) sends its own syncs without cover.
 
 ## 5. What this does not build
 
 - No directory shard cover, no directory-count padding, no Enhance cover.
-- No wallet-pir change, release or crate publish.
+- No change to the walk beyond the budget stop it takes from its transport,
+  and no release or crate publish.
 - No new tables, migrations or stored cover state; nothing outlives the open
   companion.
 - No transport work (Tor, unlinking services) and no server change.
@@ -197,23 +225,14 @@ service's headroom above 20 QPS, and the 20 QPS gate under v12.
 
 ## 6. Open questions
 
-- **A round that cannot fit a pass.** The walk sends a run's remaining
-  fragments and the next run's head as one round, and drops the round's
-  replies when a request in it is refused. A round of f requests needs
-  |C| x P(f) queries in one pass: at Vizor's 256, f of at most 64 at |C| = 3,
-  at most 8 at |C| = 32. A longer round never completes, where today a
-  one-query budget still advances a long run. Busy addresses, which have runs
-  of hundreds of fragments, would stop recovering. The fix is in wallet-pir: a
-  transport hook the walk's budget check consults before each request (for
-  example `ShardTransport::stopped() -> Option<IncompleteReason>`, `None` by
-  default). The wrapper would report its spend and its reservation for the
-  next sweep there, and the walk would stop between requests and keep the
-  replies it has, as it does for its own budget. Recommendation: take that
-  change and a release candidate before this ships; until then, raise the
-  query budget.
+- **A strict byte bound.** One oversized reply can still cross the pass's byte
+  budget by up to the response limit (section 2). Holding every reply to its
+  published length while it is read needs the expected length passed down to
+  the HTTP exchange, a transport change this note does not make.
 - **Archive growth.** Most older runs in archive shards show through growth.
   Covering every table of archive shards would close it at N times the page
   queries there, up to 32x. Recommendation: keep the drawn cover for now and
   decide with the PIR operators once the 20 QPS gate is rerun under v12.
 - **Budget defaults.** Recommendation: Vizor's query limit 256 to 512, bytes
-  unchanged at 96 MiB.
+  unchanged at 96 MiB, so a full restore fits one pass. Smaller limits only
+  take more passes.

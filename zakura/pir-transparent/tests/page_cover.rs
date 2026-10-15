@@ -16,6 +16,7 @@ use std::sync::{Mutex, PoisonError};
 
 use fixture::{GEOMETRY, Loopback, SEAL, Server, ShardSpec, synthetic};
 use regex::Regex;
+use rusqlite::{Connection, OpenFlags};
 use transparent::address::TransparentAddress;
 use transparent_events::{ReceiveEvent, TransparentEvent, Txid};
 use transparent_filter::ScriptBytes;
@@ -318,6 +319,8 @@ const PRIVATE_BYTES: u64 = 1 << 30;
 struct Wallet {
     dir: tempfile::TempDir,
     tag: u8,
+    /// Other owners' addresses the wallet also watches.
+    also: Vec<u8>,
     tip: u64,
     config: TransparentHistoryRecoveryConfig,
     recovery: Option<TransparentHistoryRecovery>,
@@ -328,6 +331,7 @@ impl Wallet {
         let mut wallet = Self {
             dir: tempfile::tempdir().unwrap(),
             tag,
+            also: Vec::new(),
             tip,
             config,
             recovery: None,
@@ -357,13 +361,43 @@ impl Wallet {
                 height: BlockHeight::from_u32(self.tip as u32),
                 hash: BlockHash(synthetic(self.tip).0),
             }),
-            addresses: vec![WatchedAddress {
-                address: address(self.tag),
-                origin: WatchOrigin::Standalone,
-                required_from: BlockHeight::from_u32(H0 as u32),
-            }],
+            addresses: std::iter::once(self.tag)
+                .chain(self.also.iter().copied())
+                .map(|tag| WatchedAddress {
+                    address: address(tag),
+                    origin: WatchOrigin::Standalone,
+                    required_from: BlockHeight::from_u32(H0 as u32),
+                })
+                .collect(),
             pending_pages: vec![],
         }
+    }
+
+    /// What the companion holds of `owner`'s history: the receives it
+    /// recovered, and the bytes of fragments its unfinished walks saved. A
+    /// pass that reads anything of a history raises one or the other.
+    fn recovered(&self, owner: u8) -> (i64, i64) {
+        let db = Connection::open_with_flags(
+            self.dir.path().join("companion.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let owner = script(address(owner)).as_slice().to_vec();
+        let receives = db
+            .query_row(
+                "SELECT COUNT(*) FROM receives WHERE script = ?1",
+                [&owner],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let fragments = db
+            .query_row(
+                "SELECT COALESCE(SUM(length(fragments)), 0) FROM pending_work WHERE script = ?1",
+                [&owner],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (receives, fragments)
     }
 
     /// One pass through the service at `url`, with every exchange it sent.
@@ -692,5 +726,417 @@ mod page_cover {
             queries_sent(&sent)
         );
         assert_eq!(queries_sent(&sent), 14, "the whole pass fits its budget");
+    }
+
+    /// Passes `wallet` until one completes, and returns how many it took.
+    /// Every pass stays within the companion's query and byte limits, sends
+    /// whole sweeps over every page table of shard 0, and reads more of the
+    /// owners' histories than the pass before: no owner loses ground and one
+    /// gains. The companion is reopened, a new session, before each pass
+    /// `reopen` names.
+    fn finish(
+        wallet: &mut Wallet,
+        url: &str,
+        owners: &[u8],
+        reopen: &dyn Fn(usize) -> bool,
+        max: usize,
+    ) -> usize {
+        let cover = BTreeSet::from([0, 1, 2]);
+        let mut read: Vec<Vec<(i64, i64)>> = Vec::new();
+        for pass in 1..=max {
+            if reopen(pass) {
+                wallet.reopen(pass as u64);
+            }
+            let (report, sent) = wallet.pass(url);
+            assert!(
+                queries_sent(&sent) as u64 <= wallet.config.queries,
+                "pass {pass}: {} queries",
+                queries_sent(&sent)
+            );
+            assert!(
+                bytes_sent(&sent) as u64 <= wallet.config.private_bytes,
+                "pass {pass}: {} private bytes",
+                bytes_sent(&sent)
+            );
+            sweeps(&page_queries(&sent, 0), &cover);
+            let now: Vec<(i64, i64)> = owners
+                .iter()
+                .map(|owner| wallet.recovered(*owner))
+                .collect();
+            if let Some(before) = read.last() {
+                assert!(
+                    now.iter().zip(before).all(|(now, before)| now >= before) && now != *before,
+                    "pass {pass} read nothing more: {read:?} then {now:?}"
+                );
+            }
+            read.push(now);
+            if report.progress.outcome == Outcome::Complete {
+                return pass;
+            }
+            assert_eq!(
+                report.progress.outcome,
+                Outcome::More,
+                "pass {pass}: {report:?}"
+            );
+        }
+        panic!("no complete pass in {max}: {read:?}");
+    }
+
+    /// A run of eight fragments in a shard of three page tables, which the walk
+    /// reads as its head and then one round of the other seven. A pass's query
+    /// budget fits two directory queries and two sweeps, never the round: each
+    /// pass keeps the fragments it read and the next resumes after them, also
+    /// in a reopened companion, until the whole history is recovered. Before a
+    /// budget stop kept the replies of the round it cut short, every pass sent
+    /// the round's first sweeps again and saved none of them.
+    #[test]
+    fn a_round_longer_than_a_pass_finishes_across_passes_and_restarts() {
+        let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+        let end = H0 + 29;
+        // A run of 642 events beyond the two the directory keeps: eight rows.
+        let count = 644;
+        let (_server, url, _dir) = serve(&[shard(H0, end, 10, burst(1, H0 + 5, count))]);
+        let mut wallet = Wallet::open(1, end, 9, config(1, 2 + 2 * 3, PRIVATE_BYTES));
+        let passes = finish(&mut wallet, &url, &[1], &|pass| pass == 3, 12);
+        assert!(passes >= 4, "the run takes several passes: {passes}");
+        assert_eq!(
+            wallet.recovered(1),
+            (i64::from(count), 0),
+            "every receive is recovered and no walk is left"
+        );
+    }
+
+    /// Two scripts with runs of four fragments in different page tables share
+    /// each round: first both heads, then the six other fragments together.
+    /// After the directory pass, each pass, in a reopened companion, has bytes
+    /// for every page table's setup and three and a half sweeps, so two sweeps
+    /// at a time: the passes split the shared round, each keeping what it read,
+    /// and both histories are recovered whole.
+    #[test]
+    fn scripts_sharing_a_round_finish_it_across_passes_within_the_byte_budget() {
+        let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+        let end = H0 + 29;
+        // Runs of 266 events, four rows each, in pages-0 and pages-2.
+        let count = 268;
+        let mut events = burst(1, H0 + 5, count);
+        events.extend(burst(2, H0 + 25, count));
+        let (_server, url, _dir) = serve(&[shard(H0, end, 10, events)]);
+
+        // An unlimited pass measures what the budget is made of: the directory
+        // queries, every page table's setup, and one sweep.
+        let mut probe = Wallet::open(1, end, 4, config(1, QUERIES, PRIVATE_BYTES));
+        probe.also = vec![2];
+        let (report, sent) = probe.pass(&url);
+        assert_eq!(report.progress.outcome, Outcome::Complete);
+        let route = Regex::new(SHARD_ROUTE).unwrap();
+        let mut directory_queries = 0;
+        let mut setups = 0;
+        let mut pages = Vec::new();
+        for sent in &sent {
+            let Some(captures) = route.captures(&sent.path) else {
+                continue;
+            };
+            match (&captures[2], captures.get(4)) {
+                ("query", None) => directory_queries += 1,
+                ("setup", Some(_)) => setups += sent.upload + sent.download,
+                ("query", Some(_)) => pages.push(sent.upload + sent.download),
+                _ => {}
+            }
+        }
+        let sweep: usize = pages[..3].iter().sum();
+
+        // The directory pass: its queries, and no room for a sweep.
+        let mut wallet = Wallet::open(1, end, 4, config(1, directory_queries, PRIVATE_BYTES));
+        wallet.also = vec![2];
+        let (report, sent) = wallet.pass(&url);
+        assert_eq!(report.progress.outcome, Outcome::More);
+        assert!(page_queries(&sent, 0).is_empty());
+
+        // The setups, with room for the envelope page cover admits them at,
+        // and three and a half sweeps.
+        wallet.config.queries = QUERIES;
+        wallet.config.private_bytes = (setups + 3 * 1024 + 3 * sweep + sweep / 2) as u64;
+        let passes = finish(&mut wallet, &url, &[1, 2], &|_| true, 12);
+        // Both heads; then the other six fragments, two a pass.
+        assert_eq!(passes, 4, "two sweeps a pass");
+        for owner in [1, 2] {
+            assert_eq!(
+                wallet.recovered(owner),
+                (i64::from(count), 0),
+                "owner {owner}"
+            );
+        }
+    }
+
+    /// A run of three fragments under a query budget of exactly one sweep after
+    /// the directory pass: each pass reads one fragment, the head and then one
+    /// of the round of two, and the history finishes. One query fewer fits no
+    /// sweep: those passes send no page query and read nothing, as a budget too
+    /// small for a sweep must. Before a budget stop kept a round's replies, the
+    /// one-sweep passes repeated the round's first fragment without end.
+    #[test]
+    fn a_budget_of_exactly_one_sweep_reads_a_fragment_per_pass() {
+        let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+        let end = H0 + 29;
+        // A run of 182 events beyond the two the directory keeps: three rows.
+        let count = 184;
+        let (_server, url, _dir) = serve(&[shard(H0, end, 10, burst(1, H0 + 5, count))]);
+
+        // The directory pass: two directory queries, and no room for a sweep.
+        let mut wallet = Wallet::open(1, end, 2, config(1, 2, PRIVATE_BYTES));
+        let (report, sent) = wallet.pass(&url);
+        assert_eq!(report.progress.outcome, Outcome::More);
+        assert_eq!(queries_sent(&sent), 2);
+        assert!(page_queries(&sent, 0).is_empty());
+        let directory = wallet.recovered(1);
+        for _ in 0..2 {
+            let (report, sent) = wallet.pass(&url);
+            assert_eq!(report.progress.outcome, Outcome::More);
+            assert_eq!(queries_sent(&sent), 0, "two queries fit no sweep");
+            assert_eq!(wallet.recovered(1), directory, "and read nothing");
+        }
+
+        wallet.config.queries = 3;
+        wallet.reopen(2);
+        let passes = finish(&mut wallet, &url, &[1], &|_| false, 6);
+        assert_eq!(passes, 3, "one fragment per pass");
+        assert_eq!(wallet.recovered(1), (i64::from(count), 0));
+    }
+
+    /// A pass whose byte budget fits the directory but not the page setups
+    /// stops at that boundary: it fetches no page setup and sends no page
+    /// query, keeps the directory's work, and reports a budget stop. The next
+    /// pass, with room for the setups and a sweep, starts at the pages without
+    /// asking the directory again, and finishes.
+    #[test]
+    fn a_pass_stops_at_the_page_setup_boundary_and_the_next_resumes() {
+        let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+        let end = H0 + 29;
+        let count = 100;
+        let (_server, url, _dir) = serve(&[shard(H0, end, 10, burst(1, H0 + 5, count))]);
+        let mut probe = Wallet::open(1, end, 6, config(1, QUERIES, PRIVATE_BYTES));
+        let (_, sent) = probe.pass(&url);
+        let route = Regex::new(SHARD_ROUTE).unwrap();
+        let directory: usize = sent
+            .iter()
+            .filter(|sent| {
+                route
+                    .captures(&sent.path)
+                    .is_some_and(|captures| captures.get(4).is_none())
+            })
+            .map(|sent| sent.upload + sent.download)
+            .sum();
+
+        let mut wallet = Wallet::open(1, end, 6, config(1, QUERIES, directory as u64 + 1_000));
+        let (report, sent) = wallet.pass(&url);
+        assert_eq!(report.progress.outcome, Outcome::More, "{report:?}");
+        assert!(page_setups(&sent, 0).is_empty(), "no page setup");
+        assert!(page_queries(&sent, 0).is_empty(), "no page query");
+        let after_directory = wallet.recovered(1);
+        assert_eq!(
+            after_directory.0, 2,
+            "the directory's inline receives are kept"
+        );
+
+        wallet.config.private_bytes = PRIVATE_BYTES;
+        wallet.reopen(7);
+        let (report, sent) = wallet.pass(&url);
+        assert_eq!(report.progress.outcome, Outcome::Complete);
+        assert!(
+            routed(&sent).iter().all(|routed| routed.page.is_some()),
+            "the next pass resumes at the pages"
+        );
+        assert_eq!(wallet.recovered(1), (i64::from(count), 0));
+    }
+
+    /// A service refusing page queries for capacity, or failing one, stays that:
+    /// the pass reports the overload, or fails, rather than a budget stop, and
+    /// keeps every round finished before it. A later pass against a healthy
+    /// service finishes the history.
+    #[test]
+    fn service_overload_and_failure_are_not_budget_stops() {
+        let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+        /// Answers the `from`th page query on, counted from zero, with `status`.
+        struct Refusing {
+            inner: Loopback,
+            status: u16,
+            from: usize,
+            pages: std::cell::Cell<usize>,
+        }
+        impl HttpExchange for Refusing {
+            fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
+                if request.method == HttpMethod::Post && request.path.contains("/query/pages-") {
+                    let page = self.pages.get();
+                    self.pages.set(page + 1);
+                    if page >= self.from {
+                        return Ok(HttpReply {
+                            status: self.status,
+                            retry_after: Some("0".into()),
+                            ..HttpReply::default()
+                        });
+                    }
+                }
+                self.inner.send(request)
+            }
+        }
+        let end = H0 + 29;
+        let count = 644;
+        let (_server, url, _dir) = serve(&[shard(H0, end, 10, burst(1, H0 + 5, count))]);
+        for status in [503, 500] {
+            let mut wallet = Wallet::open(1, end, 8, config(1, QUERIES, PRIVATE_BYTES));
+            // The head's sweep and a sweep of the next round get through.
+            let exchange = Refusing {
+                inner: Loopback::new(&url),
+                status,
+                from: 6,
+                pages: std::cell::Cell::new(0),
+            };
+            let watch = wallet.watch();
+            let chain = Chain { tip: end };
+            let result = wallet.recovery.as_mut().unwrap().pass(
+                &watch,
+                &chain,
+                &exchange,
+                RESPONSE_LIMIT,
+                &|| false,
+            );
+            match (status, result) {
+                (503, Ok(report)) => {
+                    assert_eq!(report.progress.outcome, Outcome::Overloaded, "{report:?}")
+                }
+                (500, Err(_)) => {}
+                (status, other) => panic!("{status}: {other:?}"),
+            }
+            let (receives, fragments) = wallet.recovered(1);
+            assert_eq!(receives, 2, "{status}: the directory's inline receives");
+            assert!(fragments > 0, "{status}: the head round is kept");
+            let (report, _) = wallet.pass(&url);
+            assert_eq!(report.progress.outcome, Outcome::Complete, "{status}");
+            assert_eq!(wallet.recovered(1), (i64::from(count), 0), "{status}");
+        }
+    }
+
+    /// A service answering page queries with replies longer than their table's
+    /// scheme fixes gets one such reply through: the sweep fails on it before
+    /// sending its next query, sends no padding after it, and the pass stays
+    /// within its byte budget. Before, every slot of the sweep, and the cover
+    /// sweeps padding it, fetched an oversized reply, past the budget.
+    #[test]
+    fn an_oversized_page_reply_ends_the_sweep_before_its_next_query() {
+        let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+        /// Replaces each page query's reply with 400,000 bytes, below the
+        /// response limit, counting the private bytes delivered and the page
+        /// queries sent after the first oversized reply.
+        struct Oversized {
+            inner: Loopback,
+            bytes: std::cell::Cell<u64>,
+            after: std::cell::Cell<Option<usize>>,
+        }
+        impl HttpExchange for Oversized {
+            fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
+                let page =
+                    request.method == HttpMethod::Post && request.path.contains("/query/pages-");
+                if page && let Some(after) = self.after.get() {
+                    self.after.set(Some(after + 1));
+                }
+                let mut reply = self.inner.send(request)?;
+                if page {
+                    reply.body = vec![0; 400_000];
+                    self.after.set(self.after.get().or(Some(0)));
+                }
+                if Regex::new(SHARD_ROUTE).unwrap().is_match(&request.path) {
+                    let delivered = reply.body.len().min(request.limit);
+                    self.bytes
+                        .set(self.bytes.get() + (request.body.len() + delivered) as u64);
+                }
+                if reply.body.len() > request.limit {
+                    return Err(HttpFailure::TooLarge);
+                }
+                Ok(reply)
+            }
+        }
+        let end = H0 + 29;
+        let (_server, url, _dir) = serve(&[shard(H0, end, 10, history(1, H0 + 1, 3))]);
+        let budget = 1 << 20;
+        let mut wallet = Wallet::open(1, end, 7, config(1, QUERIES, budget));
+        let exchange = Oversized {
+            inner: Loopback::new(&url),
+            bytes: std::cell::Cell::new(0),
+            after: std::cell::Cell::new(None),
+        };
+        let watch = wallet.watch();
+        let chain = Chain { tip: end };
+        let result = wallet.recovery.as_mut().unwrap().pass(
+            &watch,
+            &chain,
+            &exchange,
+            RESPONSE_LIMIT,
+            &|| false,
+        );
+        assert!(result.is_err(), "the malformed reply fails the pass");
+        assert_eq!(
+            exchange.after.get(),
+            Some(0),
+            "no page query follows the oversized reply"
+        );
+        assert!(
+            exchange.bytes.get() <= budget,
+            "{} bytes exceeded a {budget}-byte pass",
+            exchange.bytes.get()
+        );
+    }
+
+    /// A service that corrupts the header of one page reply learns nothing from
+    /// the wallet's reaction about whether that slot was real: whichever slot
+    /// of the sweep it hits, the pass fails there and sends no other page query.
+    /// Before, a corrupted dummy reply went unread and the walk carried on.
+    #[test]
+    fn a_tagged_page_reply_fails_the_pass_whichever_slot_it_hits() {
+        let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+        /// Flips the first byte of page reply `tagged`, counted from zero, and
+        /// counts the page queries sent.
+        struct Tagging {
+            inner: Loopback,
+            tagged: usize,
+            pages: std::cell::Cell<usize>,
+        }
+        impl HttpExchange for Tagging {
+            fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
+                let mut reply = self.inner.send(request)?;
+                if request.method == HttpMethod::Post && request.path.contains("/query/pages-") {
+                    if self.pages.get() == self.tagged {
+                        reply.body[0] ^= 0xff;
+                    }
+                    self.pages.set(self.pages.get() + 1);
+                }
+                Ok(reply)
+            }
+        }
+        let end = H0 + 29;
+        let (_server, url, _dir) = serve(&[shard(H0, end, 10, history(1, H0 + 1, 3))]);
+        // One sweep over the three tables; every slot takes its turn.
+        for tagged in 0..3 {
+            let mut wallet = Wallet::open(1, end, 7, config(1, QUERIES, PRIVATE_BYTES));
+            let exchange = Tagging {
+                inner: Loopback::new(&url),
+                tagged,
+                pages: std::cell::Cell::new(0),
+            };
+            let watch = wallet.watch();
+            let chain = Chain { tip: end };
+            let result = wallet.recovery.as_mut().unwrap().pass(
+                &watch,
+                &chain,
+                &exchange,
+                RESPONSE_LIMIT,
+                &|| false,
+            );
+            assert!(result.is_err(), "slot {tagged}: the pass fails");
+            assert_eq!(
+                exchange.pages.get(),
+                tagged + 1,
+                "slot {tagged}: no page query after the tagged reply"
+            );
+        }
     }
 }

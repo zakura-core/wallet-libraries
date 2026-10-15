@@ -17,9 +17,7 @@ mod sync_inputs;
 mod tests;
 
 use crate::engine::transport::{FilterSource, ShardTransport};
-use crate::engine::{
-    ChainView, Completion, IncompleteReason, SetIdentity, SyncError, WalletStore, WorkLimits,
-};
+use crate::engine::{ChainView, SetIdentity, SyncError, WalletStore, WorkLimits};
 use crate::engine_store::SqliteStore;
 use rusqlite::Connection;
 use std::{any::Any, path::Path, time::Duration};
@@ -70,7 +68,8 @@ pub struct TransparentHistoryRecoveryConfig {
     pub queries: u64,
     /// Private payload budget, including setup and page cover. A pass stops before a
     /// page sweep, with the padding it may need, would cross it, and before any other
-    /// request whose expected size would.
+    /// request whose expected size would. A reply longer than its expected size fails
+    /// its request, but is read first, so one can still cross it.
     pub private_bytes: u64,
 }
 
@@ -250,26 +249,9 @@ impl TransparentHistoryRecovery {
             &limits,
             &sync_target.anchor,
         );
-        let cover_stop = covered.finish();
+        covered.finish();
         let synced = match result {
-            Ok(mut report) => {
-                // A budget stop reaches the sync as a capacity refusal, which it
-                // reports as an overload; it was the pass's budget.
-                if let (
-                    Some(reason),
-                    Completion::Incomplete {
-                        reason: IncompleteReason::Overloaded { .. },
-                        pending,
-                    },
-                ) = (cover_stop, &report.completion)
-                {
-                    report.completion = Completion::Incomplete {
-                        reason,
-                        pending: *pending,
-                    };
-                }
-                Some(report)
-            }
+            Ok(report) => Some(report),
             Err(SyncError::SealedRewrite { .. }) => return self.refused_rewrite_batch(&map),
             // Not a set change, which was checked above: a map refreshed
             // mid-pass does not continue the first (another re-cut epoch, or a

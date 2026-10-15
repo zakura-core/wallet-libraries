@@ -17,19 +17,16 @@
 //! held. A link to a table outside `C` grows `C` by that table, which the
 //! service sees.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::time::Duration;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::engine::client::{Table, TableClient};
+use crate::engine::transport::{BoxError, BudgetStop, Overloaded, ShardTransport, StaleRevision};
+use crate::engine::{GeometryParams, PendingPages, ServiceGeometry, WorkLimits};
 use rand::rngs::{StdRng, SysRng};
 use rand::seq::SliceRandom;
 use rand::{RngExt, SeedableRng};
 use sha2::{Digest, Sha256};
 use transparent_shard::manifest::ShardManifest;
-use crate::engine::client::{Table, TableClient};
-use crate::engine::transport::{BoxError, Overloaded, ShardTransport};
-use crate::engine::{
-    GeometryParams, IncompleteReason, PendingPages, ServiceGeometry, WorkLimits,
-};
 
 /// Shards with at most this many queryable page tables cover every one.
 const SMALL_SHARD: u32 = 3;
@@ -65,6 +62,10 @@ pub(crate) struct CoverSession {
     /// Page setups fetched for a shard revision, by table and segment, until
     /// the walk asks for them: the walk keeps what it asked for in its store.
     setups: HashMap<(u64, String), Setups>,
+    /// The parameter epoch each page setup fetched for a shard revision
+    /// names, by table and segment, for as long as the session holds that
+    /// revision's setups: what every page reply's header must carry.
+    epochs: HashMap<(u64, String), HashMap<(u32, u32), [u8; 8]>>,
 }
 
 /// One shard revision's page setups, by table and segment: each setup's bytes
@@ -88,6 +89,7 @@ impl CoverSession {
             rng,
             covers: HashMap::new(),
             setups: HashMap::new(),
+            epochs: HashMap::new(),
         }
     }
 }
@@ -151,6 +153,19 @@ pub(crate) fn padded(sweeps: u64) -> u64 {
     sweeps.next_power_of_two()
 }
 
+/// The parameter epoch a page setup reply names: the first eight bytes of its
+/// parameters' digest, as the client derives it when it opens the segment.
+fn setup_epoch(setup: &[u8]) -> Result<[u8; 8], BoxError> {
+    let parsed: serde_json::Value = serde_json::from_slice(setup)?;
+    let digest = parsed["public_params_sha256"]
+        .as_str()
+        .and_then(|digest| hex::decode(digest.get(..16)?).ok())
+        .ok_or("page cover: a page setup without a parameter digest")?;
+    let mut epoch = [0u8; 8];
+    epoch.copy_from_slice(&digest);
+    Ok(epoch)
+}
+
 /// What keeps a shard's cover set across revisions: its id, its page table
 /// count, and the chained identity of each sealed page table. A growing tail
 /// republished over the same sealed tables keeps its `C`; one that seals
@@ -180,10 +195,19 @@ struct Work {
 /// A pass's shard transport with page cover, over the caller's.
 ///
 /// Counts every private query and private byte it sends, cover included,
-/// against the pass's limits. A sweep starts only when it and the padding it
-/// may need fit; otherwise the transport refuses from then on, as a service
-/// at capacity would, and [`Self::stopped`] names the budget. A refused sweep
-/// sends nothing, so a budget stop always falls between sweeps.
+/// against the pass's limits: a query and its upload before it is sent, its
+/// reply once it arrives. A sweep starts only when it and the padding it may
+/// need fit; otherwise the transport declines it, and everything after it,
+/// with a [`BudgetStop`]. The walk then ends the pass on that budget, keeping
+/// every reply it already received. A declined sweep sends nothing, so a
+/// budget stop always falls between sweeps.
+///
+/// Every page reply, real or dummy, must have the length and segment headers
+/// its table's published scheme and setups fix before the next query of the
+/// sweep is sent. One that does not, or a request that fails other than by a
+/// refusal the walk retries, fails the sweep and ends padding for the pass: a
+/// service cannot single out a dummy slot by its framing, and one sending
+/// oversized replies gets one of them through, not one per slot.
 pub(crate) struct PageCover<'a, T> {
     inner: &'a mut T,
     session: &'a mut CoverSession,
@@ -198,11 +222,15 @@ pub(crate) struct PageCover<'a, T> {
     /// The upload length of a query to a page table, per shard revision. A
     /// dummy body is never reused: each is a fresh query.
     uploads: HashMap<(u64, String, u32), u64>,
+    /// Shard revisions whose page setups this pass fetched. A setup the
+    /// session held from an earlier pass is handed to the walk at no cost.
+    fetched: HashSet<(u64, String)>,
     current: Option<Work>,
     queries: u64,
     bytes: u64,
-    stopped: Option<IncompleteReason>,
-    /// A cover sweep failed: no more padding this pass.
+    stopped: Option<BudgetStop>,
+    /// A cover sweep failed, or a page reply had the wrong length: no more
+    /// padding this pass.
     padding_failed: bool,
 }
 
@@ -223,6 +251,7 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
             manifests: HashMap::new(),
             clients: BTreeMap::new(),
             uploads: HashMap::new(),
+            fetched: HashSet::new(),
             current: None,
             queries: 0,
             bytes: 0,
@@ -231,37 +260,25 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
         }
     }
 
-    /// Ends the pass: pads the shard whose page work was in progress, and
-    /// returns the budget that stopped the pass, if cover stopped it.
-    pub(crate) fn finish(mut self) -> Option<IncompleteReason> {
+    /// Ends the pass: pads the shard whose page work was in progress.
+    pub(crate) fn finish(mut self) {
         self.end_work();
-        self.stopped
-    }
-
-    /// The refusal a budget stop answers with: a capacity refusal naming no
-    /// wait, which the walk reports as an incomplete sync with every commit
-    /// so far kept.
-    fn refusal() -> BoxError {
-        Overloaded {
-            retry_after: Some(Duration::ZERO),
-        }
-        .boxed()
     }
 
     /// The budget `queries` and `bytes` more would exceed, if any.
-    fn exceeds(&self, queries: u64, bytes: u64) -> Option<IncompleteReason> {
+    fn exceeds(&self, queries: u64, bytes: u64) -> Option<BudgetStop> {
         if self
             .limits
             .max_queries
             .is_some_and(|max| self.queries + queries > max)
         {
-            Some(IncompleteReason::QueryBudget)
+            Some(BudgetStop::Queries)
         } else if self
             .limits
             .max_private_bytes
             .is_some_and(|max| self.bytes + bytes > max)
         {
-            Some(IncompleteReason::ByteBudget)
+            Some(BudgetStop::Bytes)
         } else {
             None
         }
@@ -274,7 +291,7 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
             self.stopped = self.exceeds(queries, bytes);
         }
         match self.stopped {
-            Some(_) => Err(Self::refusal()),
+            Some(stop) => Err(stop.boxed()),
             None => Ok(()),
         }
     }
@@ -287,15 +304,23 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
             .ok_or_else(|| "page cover: the service declares no parameters for a geometry".into())
     }
 
-    /// Upload and expected download of one query to page table `table`.
-    fn page_query_bytes(&mut self, key: &(u64, String), table: u32) -> Result<u64, BoxError> {
+    /// The length of every reply to a query to page table `table`: a header
+    /// and the scheme's response per segment. The client refuses any other.
+    fn page_reply_bytes(&self, key: &(u64, String), table: u32) -> Result<u64, BoxError> {
         let manifest = &self.manifests[key];
         let params = self.params(manifest)?;
         let child = manifest
             .child(table)
             .ok_or("page cover: a page table the manifest does not declare")?;
-        let download = (RESPONSE_HEADER + params.pages_scheme.response_bytes as u64)
-            * child.page_segments.len() as u64;
+        Ok(
+            (RESPONSE_HEADER + params.pages_scheme.response_bytes as u64)
+                * child.page_segments.len() as u64,
+        )
+    }
+
+    /// Upload and download of one query to page table `table`.
+    fn page_query_bytes(&mut self, key: &(u64, String), table: u32) -> Result<u64, BoxError> {
+        let download = self.page_reply_bytes(key, table)?;
         let upload_key = (key.0, key.1.clone(), table);
         let upload = match self.uploads.get(&upload_key) {
             Some(upload) => *upload,
@@ -385,7 +410,9 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
 
     /// Fetches every segment's setup of every page table of a shard revision,
     /// in table order, so setup fetches never single out the tables the walk
-    /// needs. Replaces what the session held for the shard.
+    /// needs. Replaces what the session held for the shard. A setup reply
+    /// longer than the estimate admitted for it fails the fetch before the
+    /// next is asked for.
     fn fetch_setups(&mut self, key: &(u64, String)) -> Result<(), BoxError> {
         let manifest = &self.manifests[key];
         let params = self.params(manifest)?;
@@ -397,17 +424,72 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
             .collect();
         self.admit(0, per_segment * requests.len() as u64)?;
         let mut setups = HashMap::with_capacity(requests.len());
+        let mut epochs = HashMap::with_capacity(requests.len());
         for (table, segment) in requests {
             let (bytes, cost) = self
                 .inner
                 .setup(key.0, &key.1, Table::Pages(table), segment)?;
             self.bytes += cost;
+            if cost > per_segment {
+                return Err("page cover: a page setup reply longer than its scheme allows".into());
+            }
+            epochs.insert((table, segment), setup_epoch(&bytes)?);
             setups.insert((table, segment), (bytes, cost));
         }
         self.session
             .setups
             .retain(|(shard_id, _), _| *shard_id != key.0);
+        self.session
+            .epochs
+            .retain(|(shard_id, _), _| *shard_id != key.0);
         self.session.setups.insert(key.clone(), setups);
+        self.session.epochs.insert(key.clone(), epochs);
+        self.fetched.insert(key.clone());
+        Ok(())
+    }
+
+    /// Checks a page reply's framing the same way in every slot, real or
+    /// dummy: its length, and each segment's header, the revision and table
+    /// binding and the epoch of the setup fetched for that segment. Nothing
+    /// past the header is read. A wrong epoch also forgets the session's
+    /// setups for the revision, so the next attempt fetches all of them again.
+    fn check_framing(
+        &mut self,
+        key: &(u64, String),
+        table: u32,
+        reply: &[u8],
+    ) -> Result<(), BoxError> {
+        let expected = self.page_reply_bytes(key, table)?;
+        let segments = self.manifests[key]
+            .child(table)
+            .map_or(0, |child| child.page_segments.len());
+        let failed = || -> BoxError { "page cover: a page reply with the wrong framing".into() };
+        if reply.len() as u64 != expected || segments == 0 {
+            return Err(failed());
+        }
+        let binding = transparent_shard::manifest::query_binding_for_schema(
+            &self.geometry.schema,
+            &key.1,
+            &Table::Pages(table).name(),
+        );
+        let each = reply.len() / segments;
+        let mut stale = false;
+        for (segment, part) in reply.chunks(each).enumerate() {
+            if part[..8] != binding {
+                return Err(failed());
+            }
+            let held = self
+                .session
+                .epochs
+                .get(key)
+                .and_then(|epochs| epochs.get(&(table, segment as u32)));
+            stale |= held.is_none_or(|epoch| part[8..16] != epoch[..]);
+        }
+        if stale {
+            self.session.setups.remove(key);
+            self.session.epochs.remove(key);
+            return Err(failed());
+        }
         Ok(())
     }
 
@@ -438,8 +520,8 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
                 self.admit(cover.len() as u64 * sweeps, sweep_bytes * sweeps)?;
             }
             None => {
-                if self.exceeds(cover.len() as u64, sweep_bytes).is_some() {
-                    return Err(Self::refusal());
+                if let Some(stop) = self.exceeds(cover.len() as u64, sweep_bytes) {
+                    return Err(stop.boxed());
                 }
             }
         }
@@ -458,11 +540,33 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
                     &dummy[..]
                 }
             };
-            let answer = self
-                .inner
-                .query(shard_id, &revision_key.1, Table::Pages(table), body)?;
             self.queries += 1;
-            self.bytes += (body.len() + answer.len()) as u64;
+            self.bytes += body.len() as u64;
+            let answer =
+                match self
+                    .inner
+                    .query(shard_id, &revision_key.1, Table::Pages(table), body)
+                {
+                    Ok(answer) => answer,
+                    Err(error) => {
+                        // A failure other than a refusal the walk retries, an
+                        // oversized reply among them, ends padding: the service
+                        // gets no more cover queries to answer badly this pass.
+                        if Overloaded::found_in(&error).is_none()
+                            && StaleRevision::found_in(&error).is_none()
+                        {
+                            self.padding_failed = true;
+                        }
+                        return Err(error);
+                    }
+                };
+            self.bytes += answer.len() as u64;
+            // Checked the same way in every slot, before the next is sent:
+            // nothing here depends on which slot is real.
+            if let Err(error) = self.check_framing(&revision_key, table, &answer) {
+                self.padding_failed = true;
+                return Err(error);
+            }
             if real.is_some_and(|(real_table, _)| real_table == table) {
                 reply = Some(answer);
             }
@@ -503,13 +607,14 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
         segment: u32,
     ) -> Result<(Vec<u8>, u64), BoxError> {
         let key = (shard_id, revision.to_owned());
-        if let Some(setup) = self
+        if let Some((bytes, cost)) = self
             .session
             .setups
             .get_mut(&key)
             .and_then(|setups| setups.remove(&(table, segment)))
         {
-            return Ok(setup);
+            let cost = if self.fetched.contains(&key) { cost } else { 0 };
+            return Ok((bytes, cost));
         }
         self.fetch_setups(&key)?;
         self.session
@@ -547,8 +652,8 @@ impl<T: ShardTransport> ShardTransport for PageCover<'_, T> {
     ) -> Result<(Vec<u8>, u64), BoxError> {
         match table {
             Table::Pages(child) => {
-                if self.stopped.is_some() {
-                    return Err(Self::refusal());
+                if let Some(stop) = self.stopped {
+                    return Err(stop.boxed());
                 }
                 self.page_work(shard_id, revision, child)?;
                 self.page_setup(shard_id, revision, child, segment)
@@ -579,8 +684,8 @@ impl<T: ShardTransport> ShardTransport for PageCover<'_, T> {
     ) -> Result<Vec<u8>, BoxError> {
         match table {
             Table::Pages(child) => {
-                if self.stopped.is_some() {
-                    return Err(Self::refusal());
+                if let Some(stop) = self.stopped {
+                    return Err(stop.boxed());
                 }
                 self.page_work(shard_id, revision, child)?;
                 self.sweep(Some((child, body)))
@@ -598,9 +703,10 @@ impl<T: ShardTransport> ShardTransport for PageCover<'_, T> {
                     })
                     .unwrap_or(0);
                 self.admit(1, body.len() as u64 + download)?;
-                let answer = self.inner.query(shard_id, revision, table, body)?;
                 self.queries += 1;
-                self.bytes += (body.len() + answer.len()) as u64;
+                self.bytes += body.len() as u64;
+                let answer = self.inner.query(shard_id, revision, table, body)?;
+                self.bytes += answer.len() as u64;
                 Ok(answer)
             }
         }
