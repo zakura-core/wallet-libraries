@@ -7,7 +7,8 @@
 //! in wallet-pir) moves these bytes without interpreting them; this crate is where
 //! they are trusted or refused:
 //!
-//! - [`Receiver`] accepts only bytes that decode to an Ironwood address.
+//! - [`Receiver`] accepts only bytes that decode to an Ironwood address, and reads
+//!   and writes the Ironwood receiver of a unified address.
 //! - [`Record`] decodes and encodes one row slot through `receiver-wire`'s codec, and
 //!   additionally refuses noncanonical note commitments and nullifiers and invalid
 //!   ephemeral keys.
@@ -20,10 +21,12 @@
 //! than share struct identities across crate sources.
 #![forbid(unsafe_code)]
 
+mod address;
 mod record;
 pub mod recovery;
 pub mod witness;
 
+pub use address::Network;
 pub use record::{Payment, RECORD_BYTES, Receiver, Record};
 
 /// A 32-byte hash in protocol byte order.
