@@ -8,6 +8,7 @@
 mod commit_builder;
 mod normalize;
 mod page_completion;
+mod page_cover;
 mod preflight;
 mod publication_gate;
 mod receipt;
@@ -152,6 +153,11 @@ impl TransparentHistoryRecovery {
             latest: None,
         })
     }
+
+    /// Test support: draws page cover from `seed` from now on. Page cover is not
+    /// built yet, so this does nothing. Never call it in a production build.
+    #[cfg(feature = "testing")]
+    pub fn seed_page_cover(&mut self, _seed: u64) {}
 
     /// One attempt of [`Self::pass`] through `filters` and `transport`, returning its
     /// batch rather than holding it. A new attempt makes the batch of every earlier one
