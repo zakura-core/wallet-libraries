@@ -14,17 +14,17 @@ def wallet_pir_owned(value):
     return "github.com/valargroup/wallet-pir" in (value or "").lower() or "github.com/zakura-core/wallet-pir" in (value or "").lower()
 
 
-def problems(metadata, owned, node_packages=(), wallet=False):
+def problems(metadata, owned, node_packages=(), wallet=False, ownership=True):
     """Inspect declarations too: inactive optional/target/dev edges still count."""
     errors = []
     for package in metadata["packages"]:
         name = package["name"]
-        if name in owned or wallet_pir_owned(package.get("source")) or wallet_pir_owned(package.get("repository")):
+        if ownership and (name in owned or wallet_pir_owned(package.get("source")) or wallet_pir_owned(package.get("repository"))):
             errors.append(f"{name}: package owned by wallet-pir")
         if wallet and (name in node_packages or name == "zakura-server-chain"):
             errors.append(f"{name}: server/node package in wallet consumer")
         for dependency in package.get("dependencies", []):
-            if dependency["name"] in owned or wallet_pir_owned(dependency.get("source")):
+            if ownership and (dependency["name"] in owned or wallet_pir_owned(dependency.get("source"))):
                 errors.append(f"{name}: dependency on wallet-pir package {dependency['name']}")
     return errors
 
@@ -56,6 +56,8 @@ def main():
         for kind, dependency, source in (
             ("wallet", f'zakura-receiver-crypto = {{ path = "{ROOT / "zakura/receiver-crypto"}" }}',
              'fn main() { let _ = zakura_receiver_crypto::RECORD_BYTES; }\n'),
+            ("server-production", f'zakura-server-chain = {{ path = "{ROOT / "server/chain"}" }}',
+             'fn main() { let _ = zakura_server_chain::NodeClient::new("http://127.0.0.1:1".into(), None); }\n'),
             ("server", f'zakura-server-chain = {{ path = "{ROOT / "server/chain"}", features = ["testing"] }}',
              '''use zakura_server_chain::{Network, NodeClient, NodeError, receiver::ReceiverBlock, enhance::EnhanceBlock, status::StatusBlock};
 fn public_results(receiver: ReceiverBlock, enhance: EnhanceBlock, status: StatusBlock) {
@@ -79,6 +81,23 @@ fn main() {
             errors.extend(problems(fresh, owned, nodes, wallet=kind == "wallet"))
             if not errors:
                 subprocess.run(["cargo", "check", "--locked", "--manifest-path", str(consumer / "Cargo.toml")], cwd=ROOT, check=True)
+        # The primary wallet facade must also remain node-free in each mutually
+        # exclusive backend mode. Its legacy PIR dependencies are a separate
+        # migration; only the node/server boundary is enforced here.
+        for mode, options in (
+            ("default", ""),
+            ("zakura", ', default-features = false, features = ["zakura"]'),
+            ("lrz", ', default-features = false, features = ["lrz"]'),
+        ):
+            consumer = Path(temporary) / f"facade-{mode}"
+            (consumer / "src").mkdir(parents=True)
+            (consumer / "src/main.rs").write_text("fn main() {}\n")
+            (consumer / "Cargo.toml").write_text(
+                f'[package]\nname = "facade-{mode}-boundary-consumer"\nversion = "0.0.0"\nedition = "2024"\n'
+                f'[dependencies]\nzakura-wallet-lib = {{ path = "{ROOT / "wallet-lib"}"{options} }}\n'
+            )
+            fresh = metadata(consumer / "Cargo.toml", locked=False)
+            errors.extend(problems(fresh, owned, nodes, wallet=True, ownership=False))
     if errors:
         raise SystemExit("server ownership boundary failed:\n  " + "\n  ".join(sorted(set(errors))))
     print("verified: separate server workspace and fresh consumers; no wallet-pir-owned dependencies in the affected graphs")

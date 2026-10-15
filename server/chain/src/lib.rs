@@ -28,7 +28,9 @@ pub mod testing;
 pub use fee::{DEFAULT_CACHE_OUTPUTS, FeeError};
 pub use rpc::{NodeClient, NodeError};
 
-/// A Zakura network whose consensus rules this crate applies.
+/// A Zakura network for genesis identity and explicit activation-height queries.
+/// The receiver backfill and combined Enhance block reader currently apply mainnet
+/// activation rules only; selecting this enum does not configure a [`NodeClient`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Network {
     Mainnet,

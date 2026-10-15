@@ -87,9 +87,9 @@ struct Commitments {
 }
 
 impl NodeClient {
-    /// The block at `height` and the Ironwood tree size after it, read by that block's
+    /// A mainnet block at `height` and the Ironwood tree size after it, read by that block's
     /// hash so a height reorg cannot mix two block versions. Before mainnet Ironwood
-    /// activation the size is zero.
+    /// activation the size is zero. Testnet backfill is unsupported.
     pub async fn receiver_boundary(&self, height: u32) -> Result<Checkpoint, NodeError> {
         let displayed = self.block_hash_display(u64::from(height)).await?;
         let hash = crate::hash::parse_display(&displayed)?;
@@ -153,7 +153,7 @@ impl NodeClient {
         Ok(header.time)
     }
 
-    /// The `count` blocks after `previous`, fetched at most `concurrency` at a time,
+    /// The `count` mainnet blocks after `previous`, fetched at most `concurrency` at a time,
     /// then checked as one chain before any is returned: each extends the last, its
     /// transactions match its header, and the node's tree size at the terminal block,
     /// read by its hash, equals `previous`'s position plus every Action in the batch.

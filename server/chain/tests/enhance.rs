@@ -383,3 +383,46 @@ async fn block_hashes_are_batched_in_protocol_order() {
         Err(NodeError::Rpc(-8, _))
     ));
 }
+
+/// A height can name a different block between the raw and verbose reads. The
+/// returned actions and tree position must still describe the same block.
+#[tokio::test]
+async fn reorg_between_actions_and_tree_size_keeps_one_block_identity() {
+    use axum::{Json, Router, routing::post};
+    use serde_json::{Value, json};
+    let (raw, displayed) = block(&[ironwood_fixture()], 41);
+    let expected_hash = zakura_server_chain::hash::parse_display(&displayed).unwrap();
+    let app = Router::new().route(
+        "/",
+        post(move |Json(request): Json<Value>| {
+            let (raw, displayed) = (raw.clone(), displayed.clone());
+            async move {
+                let result = match request["method"].as_str().unwrap() {
+                    "getblock" if request["params"][1] == 0 => json!(raw),
+                    "getblock" => {
+                        // The old block still has two actions. At this height the new
+                        // canonical block now has an unrelated tree size.
+                        let size = if request["params"][0] == displayed {
+                            2
+                        } else {
+                            99
+                        };
+                        json!({"trees": {"ironwood": {"size": size}}})
+                    }
+                    method => panic!("unexpected RPC {method}"),
+                };
+                Json(json!({"result": result, "error": null}))
+            }
+        }),
+    );
+    let (url, task) = serve(app).await;
+    let rpc = NodeClient::new(url, None).unwrap();
+    let result = rpc.enhance_block(h(), &Prevouts::new(0)).await.unwrap();
+    assert_eq!(result.hash, expected_hash);
+    assert_eq!(result.actions.len(), 2);
+    assert_eq!(
+        result.tree_size, 2,
+        "tree size must belong to the returned block"
+    );
+    task.abort();
+}

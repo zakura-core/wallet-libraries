@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("server_graph", Path(__file__).parents[1] / "server_graph.py")
 graph = importlib.util.module_from_spec(spec)
@@ -38,6 +39,31 @@ class ServerBoundaryTests(unittest.TestCase):
         for name in ("zakura-chain", "zakura-server-chain"):
             self.assertEqual(self.check(self.package(name)), [])
             self.assertTrue(self.check(self.package(name), wallet=True))
+
+    def run_probes(self, contaminated=None):
+        consumers = {}
+        def metadata(manifest, **kwargs):
+            if manifest == graph.ROOT / "Cargo.toml":
+                return {"workspace_members": ["wallet"]}
+            if manifest == graph.ROOT / "server/Cargo.toml":
+                return {"workspace_root": str(graph.ROOT / "server"), "workspace_members": ["server"], "packages": []}
+            consumers[manifest.parent.name] = manifest.read_text()
+            packages = [self.package("zakura-chain")] if manifest.parent.name == contaminated else []
+            return {"packages": packages}
+        with patch.object(graph, "metadata", side_effect=metadata), patch.object(graph.subprocess, "run"):
+            graph.main()
+        return consumers
+
+    def test_facade_consumers_reject_node_packages_in_every_backend_mode(self):
+        for mode in ("facade-default", "facade-zakura", "facade-lrz"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(SystemExit, "server/node package"):
+                self.run_probes(contaminated=mode)
+
+    def test_production_and_testing_server_consumers_are_both_exercised(self):
+        consumers = self.run_probes()
+        self.assertIn("server-production", consumers)
+        self.assertNotIn('features = ["testing"]', consumers["server-production"])
+        self.assertIn('features = ["testing"]', consumers["server"])
 
 
 if __name__ == "__main__":

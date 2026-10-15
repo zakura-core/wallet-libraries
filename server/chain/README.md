@@ -19,6 +19,10 @@ node or Zakura Common types.
 - `testing` (feature): synthetic transactions, block envelopes and a JSON-RPC node
   double built with the node's own encoders, for service tests.
 
+Receiver backfill and the combined Enhance block reader currently use mainnet
+activation rules. `Network::Testnet` provides explicit identity/height queries; it
+does not configure the RPC client or enable Testnet backfill.
+
 This crate is server-only. It lives in the separate `server/` workspace with its
 own lockfile, so no wallet build resolves the node's packages, and it may use the
 wallet-owned crates under `zakura/` by path, never the reverse. Its dependency
@@ -38,6 +42,7 @@ python3 scripts/dev.py test --config server
 python3 scripts/dev.py lint --config server
 ```
 
-The graph check also builds fresh wallet-component and server consumers with their
-own lockfiles. It proves this adapter boundary; the unrelated older wallet PIR
+The graph check also builds fresh wallet-component and server consumers, with and
+without fixture support, using independent lockfiles. It checks the default,
+Zakura and upstream wallet facade graphs for node/server packages. It proves this adapter boundary; the unrelated older wallet PIR
 adapters are outside this change and still need their separate ownership migration.
