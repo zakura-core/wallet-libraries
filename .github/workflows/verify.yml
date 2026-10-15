@@ -51,6 +51,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - check: server-graph
+            fetch-depth: 1
           - check: zakura-graph
             fetch-depth: 1
           - check: wallet-lib-modes
