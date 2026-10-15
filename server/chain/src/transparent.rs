@@ -241,6 +241,17 @@ impl FetchedBlock {
             .map_err(|error| NodeError::Block(error.to_string()))
     }
 
+    /// The block serialized in `raw`, which must hold exactly one block.
+    pub fn from_exact_bytes(raw: &[u8]) -> Result<Self, NodeError> {
+        let mut cursor = raw;
+        let block = Block::zcash_deserialize(&mut cursor)
+            .map_err(|error| NodeError::Block(error.to_string()))?;
+        if !cursor.is_empty() {
+            return Err(NodeError::Block("trailing bytes after the block".into()));
+        }
+        Ok(Self(Arc::new(block)))
+    }
+
     /// The block hash in protocol byte order.
     pub fn hash(&self) -> [u8; 32] {
         self.0.hash().0

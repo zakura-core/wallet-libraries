@@ -242,7 +242,14 @@ async fn an_unknown_spent_output_fails_the_block() {
 #[test]
 fn compact_blocks_keep_transparent_and_shielded_fields() {
     let raw = hex::decode(include_str!("fixtures/compact-mainnet-1687106.hex").trim()).unwrap();
-    let block = FetchedBlock::from_bytes(&raw).unwrap();
+    let block = FetchedBlock::from_exact_bytes(&raw).unwrap();
+    assert!(FetchedBlock::from_exact_bytes(&[raw.clone(), vec![0]].concat()).is_err());
+    assert_eq!(
+        FetchedBlock::from_bytes(&[raw.clone(), vec![0]].concat())
+            .unwrap()
+            .hash(),
+        block.hash()
+    );
     let mut counts = [0; 3];
     let compact = block.compact(1687106, &mut counts).unwrap();
     assert_eq!(compact.hash, block.hash());
