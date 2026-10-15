@@ -49,9 +49,11 @@ Per directory shard S, per pass:
    with the table's `query_rows`, as the walk builds its own dummies, so it has
    the length of any query to that table. A dummy is never reused. Only the
    real reply goes back to the walk; dummy replies are not read.
-4. **Growth.** A real query to a table outside C adds that table to C first.
-   The walk only reaches such a table through a link to an older run. The
-   service sees C grow by one table (section 4).
+4. **Growth.** A real query to a table outside C adds that table to C when its
+   sweep fits the budget. A refused expansion leaves C unchanged so the padding
+   already reserved for the old cover still fits. The walk only reaches such a
+   table through a link to an older run. The service sees C grow by one table
+   (section 4).
 5. **Padding.** When S's page work ends, the wrapper sends cover sweeps over C
    until S's sweep count is the next power of two. Work ends at the next
    request that is not a page request to S's revision, or at the end of the

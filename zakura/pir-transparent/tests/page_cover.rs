@@ -664,4 +664,33 @@ mod page_cover {
             }
         }
     }
+
+    /// Discovering another table must leave the already reserved padding intact
+    /// when the larger sweep does not fit the pass's remaining query allowance.
+    #[test]
+    fn refused_growth_preserves_the_reserved_padding() {
+        let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+        let end = H0 + 99;
+        let events = [21, 41, 61, 81]
+            .into_iter()
+            .flat_map(|offset| history(1, H0 + offset, 3))
+            .collect();
+        let (_server, url, _dir) = serve(&[shard(H0, end, 10, events)]);
+
+        // This seed covers the three newest runs, but not the oldest in pages-2.
+        // Two directory queries leave twelve slots for four three-table sweeps.
+        let mut wallet = Wallet::open(1, end, 120, config(1, 14, PRIVATE_BYTES));
+        let (report, sent) = wallet.pass(&url);
+        let queries = page_queries(&sent, 0);
+        let cover = BTreeSet::from([4, 6, 8]);
+        assert_eq!(report.progress.outcome, Outcome::More);
+        assert_eq!(tables(&queries), cover, "the refused table is not sent");
+        assert_eq!(
+            sweeps(&queries, &cover).len(),
+            4,
+            "three real sweeps retain room for their fourth padding sweep: {} total queries",
+            queries_sent(&sent)
+        );
+        assert_eq!(queries_sent(&sent), 14, "the whole pass fits its budget");
+    }
 }

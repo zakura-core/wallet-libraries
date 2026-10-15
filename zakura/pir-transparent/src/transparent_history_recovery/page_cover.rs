@@ -421,14 +421,10 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
         };
         let (shard_id, key, sweep) = (work.shard_id, work.key, work.sweeps + 1);
         let revision_key = (shard_id, work.revision.clone());
+        let mut cover = self.session.covers[&key].clone();
         if let Some((table, _)) = real {
-            self.session
-                .covers
-                .get_mut(&key)
-                .expect("page work draws its cover")
-                .insert(table);
+            cover.insert(table);
         }
-        let cover = self.session.covers[&key].clone();
         let mut sweep_bytes = 0;
         for table in &cover {
             sweep_bytes += self.page_query_bytes(&revision_key, *table)?;
@@ -446,6 +442,11 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
                     return Err(Self::refusal());
                 }
             }
+        }
+        // Only admitted growth changes the session's cover. A refused larger
+        // sweep must leave the old cover's reserved padding affordable.
+        if real.is_some() {
+            self.session.covers.insert(key, cover.clone());
         }
         let mut reply = None;
         for table in sweep_order(&mut self.session.rng, &cover) {
