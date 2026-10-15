@@ -60,7 +60,7 @@ async fn rpc_blocks_resolve_every_spent_script_raw_with_exact_fees() {
         // Earlier history the node holds outside the block.
         c.add_transaction(&earlier);
         c.add_transaction(&parent);
-        c.push_block(10, &[miner, created, spender], 1)
+        c.push_block(10, &[miner, created.clone(), spender], 1)
     };
     let mut cache = OutputCache::new(1000);
     let fetched = rpc.fetch_block(10).await.unwrap();
@@ -143,9 +143,15 @@ async fn rpc_blocks_resolve_every_spent_script_raw_with_exact_fees() {
         fetched.transparent(10, &mut known).unwrap(),
         read.transactions
     );
-    // A transaction outside any block reads with the same identity and outputs.
+    // A transaction outside any block reads with the same identity and outputs,
+    // and its outputs keep their consensus encoding.
     let alone = read_transaction(&earlier.bytes()).unwrap();
     assert_eq!(alone.txid, earlier.txid());
+    assert_eq!(
+        (alone.coinbase, alone.has_shielded_components),
+        (false, false)
+    );
+    assert_eq!(alone.spends, vec![([9; 32], 0)]);
     assert_eq!(
         alone.outputs,
         vec![
@@ -160,6 +166,48 @@ async fn rpc_blocks_resolve_every_spent_script_raw_with_exact_fees() {
         ]
     );
     assert!(read_transaction(&earlier.bytes()[1..]).is_err());
+    assert!(read_transaction(&[earlier.bytes(), vec![0]].concat()).is_err());
+    let encoded = alone.outputs[0].consensus_bytes().unwrap();
+    assert_eq!(
+        encoded,
+        [&50_000u64.to_le_bytes()[..], &[ODD.len() as u8], ODD].concat()
+    );
+    assert_eq!(
+        Output::from_consensus_bytes(&encoded).unwrap(),
+        alone.outputs[0]
+    );
+    // The block's transactions read as they appear, and each can be read alone,
+    // resolving even a same-block spend through the resolver.
+    let views = fetched.transactions();
+    assert_eq!(views.len(), 3);
+    assert!(views[0].coinbase && views[0].spends.is_empty());
+    assert_eq!(views[2].spends.len(), 3);
+    assert_eq!(fetched.coinbase_height(), Some(1_000_000));
+    let mut alone_resolver = Known(
+        [(
+            (created.txid(), 0),
+            Output {
+                value: 40_000,
+                script: P2PKH.to_vec(),
+            },
+        )]
+        .into_iter()
+        .chain(known.0.clone())
+        .collect(),
+    );
+    let single = fetched
+        .transparent_transaction(2, 10, &mut alone_resolver)
+        .unwrap();
+    assert_eq!(single.transaction_index, 0);
+    assert_eq!(
+        (single.inputs.clone(), single.outputs.clone(), single.fee),
+        (spent.inputs.clone(), spent.outputs.clone(), spent.fee)
+    );
+    assert!(matches!(
+        fetched.transparent_transaction(2, 10, &mut Known(Default::default())),
+        Err(ExtractError::MissingPreviousOutput(_))
+    ));
+    assert!(fetched.transparent_transaction(3, 10, &mut known).is_err());
     // A later block spending those outputs again reads them from the cache.
     let again = transfer(vec![spend(&earlier, 0)], &[(1, P2PKH)]);
     chain.lock().unwrap().push_block(11, &[again], 2);

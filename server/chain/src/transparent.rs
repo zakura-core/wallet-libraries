@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 use zakura_chain::block::Block;
-use zakura_chain::serialization::ZcashDeserialize;
+use zakura_chain::serialization::{ZcashDeserialize, ZcashSerialize};
 use zakura_chain::transaction::{self, Transaction};
 use zakura_chain::transparent::{Input as ChainInput, OutPoint, Utxo};
 
@@ -46,6 +46,41 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub struct Output {
     pub value: u64,
     pub script: Vec<u8>,
+}
+
+impl Output {
+    /// The output in its consensus encoding, as a transaction carries it: the
+    /// value, then the script with its length prefix.
+    pub fn consensus_bytes(&self) -> Result<Vec<u8>, NodeError> {
+        node_output(self)
+            .map_err(|error| NodeError::Transaction("<output>".into(), error))?
+            .zcash_serialize_to_vec()
+            .map_err(|error| NodeError::Transaction("<output>".into(), error.to_string()))
+    }
+
+    /// The output whose consensus encoding is `raw`.
+    pub fn from_consensus_bytes(raw: &[u8]) -> Result<Self, NodeError> {
+        zakura_chain::transparent::Output::zcash_deserialize(raw)
+            .map(|output| chain_output(&output))
+            .map_err(|error| NodeError::Transaction("<output>".into(), error.to_string()))
+    }
+}
+
+/// `output` as this crate returns it.
+fn chain_output(output: &zakura_chain::transparent::Output) -> Output {
+    Output {
+        value: u64::from(output.value),
+        script: output.lock_script.as_raw_bytes().to_vec(),
+    }
+}
+
+/// `output` as the node represents it, refusing a value outside the money range.
+fn node_output(output: &Output) -> Result<zakura_chain::transparent::Output, String> {
+    Ok(zakura_chain::transparent::Output {
+        value: zakura_chain::amount::Amount::try_from(output.value)
+            .map_err(|error| error.to_string())?,
+        lock_script: zakura_chain::transparent::Script::new(&output.script),
+    })
 }
 
 /// A transparent input that spends an earlier output, with that output resolved.
@@ -141,31 +176,57 @@ pub trait PreviousOutputs {
     fn previous_output(&mut self, txid: [u8; 32], index: u32) -> Result<Option<Output>, BoxError>;
 }
 
-/// A transaction's identity and transparent outputs, for a caller holding a raw
-/// transaction outside any block, such as a fixture's spent parents.
+/// A transaction's identity and transparent parts as it appears on chain, with
+/// nothing resolved: what can be read from the transaction alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransactionOutputs {
+pub struct TransactionView {
     /// The transaction ID in protocol byte order.
     pub txid: [u8; 32],
+    /// Whether it has a coinbase input.
+    pub coinbase: bool,
+    /// The outputs its other inputs spend, in input order: a txid in protocol byte
+    /// order and an output index.
+    pub spends: Vec<([u8; 32], u32)>,
     /// Every transparent output, in order, scripts raw.
     pub outputs: Vec<Output>,
+    /// Whether the transaction has Sprout, Sapling, Orchard or Ironwood parts.
+    pub has_shielded_components: bool,
 }
 
-/// The transaction serialized in `raw`: its identity and transparent outputs.
-pub fn read_transaction(raw: &[u8]) -> Result<TransactionOutputs, NodeError> {
-    let transaction = Transaction::zcash_deserialize(raw)
+impl TransactionView {
+    fn of(transaction: &Transaction) -> Self {
+        Self {
+            txid: transaction.hash().0,
+            coinbase: transaction
+                .inputs()
+                .iter()
+                .any(|input| matches!(input, ChainInput::Coinbase { .. })),
+            spends: transaction
+                .inputs()
+                .iter()
+                .filter_map(|input| match input {
+                    ChainInput::PrevOut { outpoint, .. } => Some((outpoint.hash.0, outpoint.index)),
+                    ChainInput::Coinbase { .. } => None,
+                })
+                .collect(),
+            outputs: transaction.outputs().iter().map(chain_output).collect(),
+            has_shielded_components: transaction.has_shielded_data(),
+        }
+    }
+}
+
+/// The transaction serialized in `raw`, which must hold exactly one transaction.
+pub fn read_transaction(raw: &[u8]) -> Result<TransactionView, NodeError> {
+    let mut cursor = raw;
+    let transaction = Transaction::zcash_deserialize(&mut cursor)
         .map_err(|error| NodeError::Transaction("<raw>".into(), error.to_string()))?;
-    Ok(TransactionOutputs {
-        txid: transaction.hash().0,
-        outputs: transaction
-            .outputs()
-            .iter()
-            .map(|o| Output {
-                value: u64::from(o.value),
-                script: o.lock_script.as_raw_bytes().to_vec(),
-            })
-            .collect(),
-    })
+    if !cursor.is_empty() {
+        return Err(NodeError::Transaction(
+            crate::hash::display(&transaction.hash().0),
+            "trailing bytes after the transaction".into(),
+        ));
+    }
+    Ok(TransactionView::of(&transaction))
 }
 
 /// A decoded block, read over RPC or from the node's database.
@@ -193,6 +254,37 @@ impl FetchedBlock {
     /// The header time the miner stamped, in Unix seconds.
     pub fn time(&self) -> i64 {
         self.0.header.time.timestamp()
+    }
+
+    /// The height the coinbase transaction commits to, if it has one.
+    pub fn coinbase_height(&self) -> Option<u32> {
+        self.0.coinbase_height().map(|height| height.0)
+    }
+
+    /// Every transaction as it appears on chain, in block order.
+    pub fn transactions(&self) -> Vec<TransactionView> {
+        self.0
+            .transactions
+            .iter()
+            .map(|transaction| TransactionView::of(transaction))
+            .collect()
+    }
+
+    /// The transaction at `position` read alone, as if it were the only one in a
+    /// block at `height`: every output it spends resolves through `previous`, even
+    /// one created earlier in this block, and its transaction index is 0. For
+    /// analysis that reads transactions independently; ingest reads whole blocks
+    /// with [`Self::transparent`].
+    pub fn transparent_transaction(
+        &self,
+        position: usize,
+        height: u32,
+        previous: &mut impl PreviousOutputs,
+    ) -> Result<TransparentTransaction, ExtractError> {
+        let transaction = self.0.transactions.get(position).ok_or_else(|| {
+            ExtractError::Metadata(format!("block has no transaction at position {position}"))
+        })?;
+        Ok(extract(std::slice::from_ref(transaction), previous, height)?.remove(0))
     }
 
     /// The transaction IDs, in block order and protocol byte order.
