@@ -2557,6 +2557,12 @@ fn private_details_end_to_end() {
             .map(|r| (r.txid, u64::from(u32::from(r.mined_height))))
             .collect()
     };
+    // Activation queued both lookups at this tip, so they are held until the next one, or
+    // until a restart forgets the session; this fixture restarts to keep its tip.
+    assert_eq!(due(&f, now), vec![]);
+    f.st.wallet_mut()
+        .db_mut()
+        .set_transparent_pir_session(zcash_client_sqlite::TransparentPirSession::default());
     let work = due(&f, now);
     assert_eq!(
         work.iter()

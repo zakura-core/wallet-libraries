@@ -9,8 +9,8 @@ and this library adheres to Rust's notion of
 
 ### Added
 
-- `TransparentPirSession`, with `WalletDb::with_transparent_pir_session` and
-  `WalletDb::transparent_pir_session`: the transparent work an open wallet holds
+- `TransparentPirSession`, with `WalletDb::with_transparent_pir_session`,
+  `WalletDb::set_transparent_pir_session` and `WalletDb::transparent_pir_session`: the transparent work an open wallet holds
   back until the next chain tip, shared by the wallet's database handles like
   `EnhancePirSession`. It is kept in memory only, with no new table or migration.
 

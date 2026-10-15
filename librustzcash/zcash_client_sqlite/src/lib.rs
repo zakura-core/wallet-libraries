@@ -642,9 +642,15 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// handles of this wallet; see [`TransparentPirSession`]. Keep the session alive across
     /// syncs; a fresh session releases the work the previous one held.
     pub fn with_transparent_pir_session(mut self, session: TransparentPirSession) -> Self {
+        self.set_transparent_pir_session(session);
+        self
+    }
+
+    /// Replaces this handle's transparent session; see
+    /// [`Self::with_transparent_pir_session`], of which this is the by-reference form.
+    pub fn set_transparent_pir_session(&mut self, session: TransparentPirSession) {
         self.transparent_pir_session =
             wallet::transparent_ledger::session::SessionState::new(session);
-        self
     }
 
     /// The transparent work this open wallet holds back until the next chain tip, for
