@@ -52,3 +52,7 @@ unchanged during tooling or fixture changes.
 Use the native roman-dev-ux skill to log delays/blockers and detach long local
 checks; commands and concrete ownership examples are in docs/development.md.
 Do not promise automatic wake unless the runtime provides it.
+
+## Dependency and release boundary
+
+- Keep release dependencies one-way: wallet-pir may consume wallet-libraries, but wallet-libraries must not depend on packages owned or released by wallet-pir, including normal, optional, build, target-specific and development dependencies.
