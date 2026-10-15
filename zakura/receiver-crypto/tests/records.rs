@@ -107,3 +107,33 @@ fn records_refuse_noncanonical_fields() {
         assert_eq!(r.payment.check(), Err(Error::Malformed));
     }
 }
+
+#[test]
+fn only_unified_ironwood_receivers_for_the_network_count() {
+    use zakura_receiver_crypto::Network;
+    // A Vizor swap address from 2026-10-07.
+    let swap = "u14nnj43rj7dpf7qh6gu24fuyu8vld9fgatxd32xre27yqgu6p0yq0sf0t3uxnwts4968hf7d8nvyh4wfzqtmcdt6xzk7el6pn0ufx6pdg";
+    let parsed = Receiver::from_unified_address(swap, Network::Main).unwrap();
+    assert_eq!(&parsed.as_bytes()[..4], &[0x15, 0x5f, 0x51, 0xfe]);
+    assert_eq!(
+        Receiver::from_unified_address(&parsed.to_unified_address(Network::Main), Network::Main),
+        Ok(parsed)
+    );
+    let test = receiver().to_unified_address(Network::Test);
+    assert_eq!(
+        Receiver::from_unified_address(&test, Network::Test),
+        Ok(receiver())
+    );
+    for (address, network) in [
+        (swap, Network::Test),
+        (test.as_str(), Network::Main),
+        ("t1KfwsnwJeNRVjQGBDZhwKskpQbih2qx5Ua", Network::Main),
+        ("check-alice.near", Network::Main),
+    ] {
+        assert_eq!(
+            Receiver::from_unified_address(address, network),
+            Err(Error::Malformed),
+            "{address}"
+        );
+    }
+}

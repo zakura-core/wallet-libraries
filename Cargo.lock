@@ -8419,8 +8419,10 @@ dependencies = [
  "receiver-wire",
  "serde_json",
  "thiserror 2.0.21",
+ "zakura-address",
  "zakura-note-encryption",
  "zakura-orchard",
+ "zakura-protocol",
 ]
 
 [[package]]

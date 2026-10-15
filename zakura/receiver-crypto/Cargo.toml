@@ -12,7 +12,9 @@ readme = "README.md"
 [dependencies]
 incrementalmerkletree.workspace = true
 orchard.workspace = true
+zcash_address = { workspace = true, features = ["std"] }
 zcash_note_encryption.workspace = true
+zcash_protocol.workspace = true
 thiserror = "2"
 # The only receiver record codec. Pinned to an exact wallet-pir revision; the
 # package has no dependencies, so it never brings PIR serving into a wallet.
