@@ -152,12 +152,10 @@ impl StateReader {
     /// append them in order. The RPC path cannot, because every block writes the
     /// output cache the next one reads.
     pub fn transparent_block(&self, height: u64) -> Result<TransparentBlock, ExtractError> {
-        let block = self
-            .fetch_block(height)
-            .map_err(|error| ExtractError::Lookup {
-                outpoint: format!("block {height}"),
-                source: Box::new(error),
-            })?;
+        let block = self.fetch_block(height).map_err(|error| match error {
+            StateError::HeightRange(height) => ExtractError::Height(height),
+            _ => ExtractError::MissingBlock(height),
+        })?;
         let event_height = u32::try_from(height).map_err(|_| ExtractError::Height(height))?;
         let mut previous = StatePreviousOutputs {
             db: &self.db,

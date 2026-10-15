@@ -147,7 +147,7 @@ async fn the_database_reader_agrees_with_rpc_and_refuses_missing_blocks() {
     ));
     assert!(matches!(
         reader.transparent_block(3),
-        Err(ExtractError::Lookup { .. })
+        Err(ExtractError::MissingBlock(3))
     ));
     assert!(matches!(
         reader.block_hash(u64::MAX),

@@ -116,6 +116,9 @@ pub enum ExtractError {
     },
     #[error("height {0} does not fit a block height")]
     Height(u64),
+    /// The node's database holds no finalized block at this height (yet).
+    #[error("the node holds no finalized block at height {0}")]
+    MissingBlock(u64),
     #[error(transparent)]
     Node(#[from] NodeError),
 }
@@ -570,7 +573,6 @@ impl NodeClient {
         calls: &[(&str, serde_json::Value)],
     ) -> Result<Vec<serde_json::Value>, NodeError> {
         let mut results = Vec::with_capacity(calls.len());
-        // One method per sub-batch keeps the shared batch reader's placement by id.
         let requests: Vec<serde_json::Value> = calls
             .iter()
             .map(|(method, params)| json!({"method": method, "params": params}))
