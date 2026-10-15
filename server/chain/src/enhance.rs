@@ -109,9 +109,12 @@ struct TreeSize {
 impl NodeClient {
     /// The node's Ironwood tree size after the block at `height`.
     pub async fn tree_size(&self, height: u64) -> Result<u64, NodeError> {
-        let block: VerboseBlock = self
-            .call("getblock", json!([height.to_string(), 2]))
-            .await?;
+        self.tree_size_at(height.to_string(), height).await
+    }
+
+    /// Read by block identity when another read already selected that block.
+    async fn tree_size_at(&self, block: String, height: u64) -> Result<u64, NodeError> {
+        let block: VerboseBlock = self.call("getblock", json!([block, 2])).await?;
         block
             .trees
             .ironwood
@@ -119,7 +122,9 @@ impl NodeClient {
             .ok_or(NodeError::MissingTreeSize(height))
     }
 
-    /// The block's Enhance actions and the node's Ironwood tree size after it.
+    /// A mainnet block's Enhance actions and the Ironwood tree size after that
+    /// same block, read by hash so a height reorg cannot mix two blocks.
+    /// This method uses mainnet activation rules; Testnet backfill is unsupported.
     ///
     /// Fails, rather than publishing an absent or partial fee, when a spent
     /// output cannot be resolved; the caller retries the block later.
@@ -130,7 +135,8 @@ impl NodeClient {
     ) -> Result<EnhanceBlock, NodeError> {
         let (hash, actions) = self.enhance_actions(height, prevouts).await?;
         let tree_size = if height >= u64::from(Network::Mainnet.ironwood_activation()) {
-            self.tree_size(height).await?
+            self.tree_size_at(crate::hash::display(&hash), height)
+                .await?
         } else {
             0
         };

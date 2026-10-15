@@ -343,7 +343,18 @@ fn answer(chain: &mut Chain, request: &Value) -> Value {
             None => return error(-8, "Block height out of range"),
         },
         "getblock" => {
-            let requested = height(&request["params"][0]);
+            let selected = &request["params"][0];
+            let requested = selected
+                .as_u64()
+                .or_else(|| selected.as_str().and_then(|s| s.parse().ok()))
+                .or_else(|| {
+                    chain.blocks.iter().find_map(|(height, block)| {
+                        (selected.as_str() == Some(block.1.as_str())).then_some(*height)
+                    })
+                });
+            let Some(requested) = requested else {
+                return error(-5, "Block hash not found");
+            };
             let verbosity = request["params"][1].as_u64().unwrap();
             chain.getblocks.push((requested, verbosity));
             let Some(block) = chain.blocks.get(&requested) else {
