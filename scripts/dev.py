@@ -28,6 +28,8 @@ CONFIGS = {
     "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing"]),
     "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
+    # The server-only workspace, with its own lockfile; see server/Cargo.toml.
+    "server": (["--manifest-path", "server/Cargo.toml", "--workspace"], ["testing"]),
 }
 VERIFY = ("zakura-graph", "wallet-lib-modes", "vendor-ancestry")
 

@@ -8,7 +8,7 @@ import subprocess
 def needs_rust(paths):
     for name in paths:
         path = PurePosixPath(name)
-        if path.parts[0] in {"zakura", "librustzcash", "wallet-lib"}:
+        if path.parts[0] in {"zakura", "librustzcash", "wallet-lib", "server"}:
             return True
         if path.suffix in {".md", ".mdc"}:
             continue

@@ -1,0 +1,32 @@
+{
+  "transaction_sha256": "566aa040e2513afcc1c08818af4ac69b61df32d97a451e6bdad498b3259d5f4c",
+  "transaction_id": "f337d9675817668120ae626021f61e5350ff5412beeb5e42b67bd412452b8d13",
+  "records": [
+    {
+      "action": 0,
+      "record_file": "ironwood-canonical-record-0.hex",
+      "record_sha256": "51a0d990e2b52297907170a1ab57b950d4378c5a2213f00eab8754770fcc3c8b",
+      "raw_offsets": {
+        "ephemeral_key": 154,
+        "enc_ciphertext": 186,
+        "cv_net": 26,
+        "out_ciphertext": 766,
+        "expiry_height": 16,
+        "fee_value_balance": 1667
+      }
+    },
+    {
+      "action": 1,
+      "record_file": "ironwood-canonical-record-1.hex",
+      "record_sha256": "68a35ee80643b901a70a9d8af20a6ac9f72964f5740bc88cdd1d20df0706952d",
+      "raw_offsets": {
+        "ephemeral_key": 974,
+        "enc_ciphertext": 1006,
+        "cv_net": 846,
+        "out_ciphertext": 1586,
+        "expiry_height": 16,
+        "fee_value_balance": 1667
+      }
+    }
+  ]
+}
