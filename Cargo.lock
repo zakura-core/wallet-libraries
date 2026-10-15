@@ -8200,7 +8200,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pczt"
-version = "0.1.0-rc5"
+version = "0.1.0-rc6"
 dependencies = [
  "blake2b_simd",
  "document-features",

@@ -7,6 +7,8 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc6] - 2026-10-14
+
 ### Changed
 
 - Updated the public cryptography and note-encryption types to Zakura Common

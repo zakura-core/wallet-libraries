@@ -7,11 +7,6 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
-### Changed
-
-- Updated the public cryptography and note-encryption types to Zakura Common
-  3.0.0 and raised the minimum supported Rust version to 1.97.
-
 ## [0.1.0-rc9] - 2026-10-14
 
 ### Added
@@ -64,6 +59,9 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- Updated the public cryptography and note-encryption types to Zakura Common
+  3.0.0 and raised the minimum supported Rust version to 1.97.
+
 - `EnhancePirWork` has the new `Waiting` variant: exhaustive matches must
   handle it.
 
@@ -79,6 +77,7 @@ and this library adheres to Rust's notion of
   note, `ivk`, in place of `scope`. Storage resolves it, so a note a one-time key found
   binds its transaction's metadata with that key. `PendingIronwoodMetadata::Incoming`
   boxes it.
+- Update the PCZT dependency to `zakura-pczt 0.1.0-rc6` for Common 3.0.0.
 
 ## [0.1.0-rc8] - 2026-10-13
 

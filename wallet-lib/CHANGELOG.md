@@ -7,6 +7,8 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc8] - 2026-10-14
+
 ### Changed
 
 - Updated the Zakura Common stack to 3.0.0, including the shared note-encryption
@@ -14,12 +16,9 @@ and this library adheres to Rust's notion of
 - Updated the selectable upstream backend to the prerelease family using
   stable bip32 0.6 so both backends can resolve in the same workspace lockfile.
 
-## [0.1.0-rc8] - 2026-10-14
-
-### Changed
-
 - Update the Zakura backend and SQLite dependencies to `0.1.0-rc9`, including
   one-time incoming keys and the private recovery and receipt retry changes.
+- Update the PCZT dependency to `zakura-pczt 0.1.0-rc6` for Common 3.0.0.
 
 ## [0.1.0-rc7] - 2026-10-13
 

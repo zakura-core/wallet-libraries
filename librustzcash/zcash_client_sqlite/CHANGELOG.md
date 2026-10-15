@@ -7,11 +7,6 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
-### Changed
-
-- Updated the public cryptography and note-encryption types to Zakura Common
-  3.0.0 and raised the minimum supported Rust version to 1.97.
-
 ## [0.1.0-rc9] - 2026-10-14
 
 ### Added
@@ -31,6 +26,9 @@ and this library adheres to Rust's notion of
   `SqliteClientError::OneTimeIvksNotUsed` while a one-time key is open.
 
 ### Changed
+
+- Updated the public cryptography and note-encryption types to Zakura Common
+  3.0.0 and raised the minimum supported Rust version to 1.97.
 
 - Each newly queued Ironwood Enhance position waits a delay drawn uniformly
   from 0 to 75 seconds (37.5 seconds on average) with the wallet's random source

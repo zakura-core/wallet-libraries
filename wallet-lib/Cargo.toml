@@ -40,7 +40,7 @@ zcash-client-backend = { package = "zakura-client-backend", path = "../librustzc
 zcash-client-sqlite = { package = "zakura-client-sqlite", path = "../librustzcash/zcash_client_sqlite", version = "0.1.0-rc9", default-features = false, optional = true }
 zcash-keys = { package = "zakura-keys", version = "=3.0.0", default-features = false, optional = true }
 orchard = { package = "zakura-orchard", version = "=3.0.0", optional = true }
-pczt = { package = "zakura-pczt", path = "../librustzcash/pczt", version = "0.1.0-rc5", optional = true }
+pczt = { package = "zakura-pczt", path = "../librustzcash/pczt", version = "0.1.0-rc6", optional = true }
 zcash-primitives = { package = "zakura-primitives", version = "=3.0.0", default-features = false, optional = true }
 
 # Keep every transitive crate in the default Zakura graph on Common v3.0.0,
