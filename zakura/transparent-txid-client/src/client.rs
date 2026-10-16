@@ -57,17 +57,15 @@ fn query_reply_bytes(response_bytes: usize, segments: u32) -> Result<usize, Txid
         .ok_or(TxidError::Protocol(ProtocolKind::Length))
 }
 
-fn check_manifest_segments(
-    manifest: &DisplayManifest,
-    geometry: &Geometry,
-) -> Result<(), TxidError> {
-    let slots = txid::slots_per_row(geometry.directory_row_bytes) as u64;
-    // Every overflow segment fills a row in every preceding segment. Even
-    // if all records collide in one row, the builder cannot need more than
-    // ceil(records / slots) segments. Empty buckets still have one segment.
-    if manifest.buckets.iter().any(|bucket| {
-        bucket.directory_segments.len() as u64 > bucket.records.div_ceil(slots).max(1)
-    }) {
+fn check_manifest_segments(manifest: &DisplayManifest) -> Result<(), TxidError> {
+    // The server verifier allows an empty first segment, but every later
+    // segment must hold at least one distinct record. Match that acceptance
+    // rule even when a publication does not use the builder's compact layout.
+    if manifest
+        .buckets
+        .iter()
+        .any(|bucket| bucket.directory_segments.len().saturating_sub(1) as u64 > bucket.records)
+    {
         return Err(TxidError::Protocol(ProtocolKind::Manifest));
     }
     Ok(())
@@ -740,10 +738,10 @@ impl TxidDisplayClient {
         if manifest.canonical_bytes() != reply.body || !entry.describes(&manifest) {
             return Err(TxidError::Protocol(ProtocolKind::Manifest));
         }
-        let geometry = manifest
+        manifest
             .validate()
             .map_err(protocol(ProtocolKind::Manifest))?;
-        check_manifest_segments(&manifest, geometry)?;
+        check_manifest_segments(&manifest)?;
         let manifest = Arc::new(manifest);
         self.manifests
             .insert(entry.manifest_digest.clone(), manifest.clone());
@@ -1640,6 +1638,10 @@ mod tests {
             })
             .collect();
         let built = display::build_shard(0, &display::TXID_2K8, 1, &entries).unwrap();
+        manifest_from_tables(sealed, &built)
+    }
+
+    fn manifest_from_tables(sealed: bool, built: &display::BuiltDisplay) -> DisplayManifest {
         let manifest = DisplayManifest::new(
             display::ManifestHeader {
                 network: "main".into(),
@@ -1656,7 +1658,7 @@ mod tests {
                 archive_target: 1,
             },
             &display::TXID_2K8,
-            &built,
+            built,
         );
         manifest.validate().unwrap();
         manifest
@@ -2227,7 +2229,7 @@ mod tests {
     #[test]
     fn impossible_segment_counts_stop_recent_and_archive_before_setup() {
         for sealed in [false, true] {
-            for segments in [2, 50_000] {
+            for segments in [3, 50_000] {
                 let mut manifest = sample_manifest(sealed);
                 manifest.buckets[0].records = 1;
                 manifest.records = 1;
@@ -2245,6 +2247,52 @@ mod tests {
                 };
                 assert_eq!(routes, expected);
             }
+        }
+    }
+
+    #[test]
+    fn noncompact_tables_accepted_by_the_server_reach_setup() {
+        let geometry = &display::TXID_2K8;
+        let entry = txid::DisplayFacts {
+            txid: Txid([0; 32]),
+            coinbase: false,
+            fee: 1,
+            has_shielded_components: false,
+            spent: vec![txid::DisplayOutput {
+                value: 2,
+                script: vec![0; 25],
+            }],
+            outputs: vec![txid::DisplayOutput {
+                value: 1,
+                script: vec![0; 25],
+            }],
+        }
+        .entry()
+        .unwrap();
+        let mut built = display::build_shard(0, geometry, 1, &[entry]).unwrap();
+        let bytes = built.buckets[0].directory[0].len();
+        built.buckets[0].directory.insert(0, vec![0; bytes]);
+        // Independent server verification accepts an empty first segment
+        // followed by one correctly placed entry. The client must too.
+        assert_eq!(display::verify(0, geometry, &built).unwrap(), vec![1]);
+        let profile = Arc::new(
+            TableProfile::new(
+                display::NATIVE_SCHEMA,
+                geometry.name,
+                DisplayKind::TxDirectory.as_str(),
+                geometry.directory_rows,
+                geometry.directory_row_bytes as u32,
+            )
+            .unwrap(),
+        );
+        for sealed in [false, true] {
+            let manifest = manifest_from_tables(sealed, &built);
+            assert_eq!(manifest.records, 1);
+            assert_eq!(manifest.buckets[0].directory_segments.len(), 2);
+            let (result, routes) = manifest_lookup(&manifest, true, Some(profile.clone()));
+            assert_eq!(result, Err(BUSY));
+            assert_eq!(routes.last(), Some(&Route::Setup));
+            assert!(!routes.contains(&Route::Query));
         }
     }
 
