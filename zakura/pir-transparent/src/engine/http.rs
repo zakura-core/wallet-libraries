@@ -165,15 +165,30 @@ fn execute(
     observer: &Option<HttpObserver>,
     policy: RetryPolicy,
 ) -> Result<Vec<u8>, BoxError> {
+    execute_measured(request, stage, bytes_up, binding, observer, policy).map(|(bytes, _)| bytes)
+}
+
+fn execute_measured(
+    request: reqwest::blocking::RequestBuilder,
+    stage: &'static str,
+    bytes_up: u64,
+    binding: Option<(u64, &str)>,
+    observer: &Option<HttpObserver>,
+    policy: RetryPolicy,
+) -> Result<(Vec<u8>, u64), BoxError> {
     static REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let request_id = REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let attempts = policy.attempts.max(1);
     let retry_overload = policy.overload;
     let started = Instant::now();
+    let mut downloaded = 0u64;
     for attempt in 0..attempts {
         let remaining = policy.timeout.saturating_sub(started.elapsed());
         if remaining.is_zero() {
-            return Err("HTTP call deadline exhausted".into());
+            return Err(TransferFailure::boxed(
+                downloaded,
+                "HTTP call deadline exhausted".into(),
+            ));
         }
         let observed = observer.as_ref().map(|observer| {
             let observer = observer.clone();
@@ -195,6 +210,10 @@ fn execute(
             &observed,
             policy.response_limit,
         );
+        downloaded += match &result {
+            Ok(bytes) => bytes.len() as u64,
+            Err(error) => TransferFailure::downloaded(error),
+        };
         let delay = result.as_ref().err().and_then(|error| {
             if !retry_overload
                 && transport_cause::<HttpStatusError>(error.as_ref())
@@ -236,12 +255,16 @@ fn execute(
             })
         });
         if attempt + 1 == attempts || delay.is_none() {
-            return result;
+            return result
+                .map(|bytes| (bytes, downloaded))
+                .map_err(|error| TransferFailure::boxed(downloaded, error));
         }
         let delay = delay.unwrap();
         if delay >= policy.timeout.saturating_sub(started.elapsed()) {
             // Return the last refusal/error without oversleeping its budget.
-            return result;
+            return result
+                .map(|bytes| (bytes, downloaded))
+                .map_err(|error| TransferFailure::boxed(downloaded, error));
         }
         std::thread::sleep(delay);
     }
@@ -564,7 +587,7 @@ impl HttpShardTransport {
         } else {
             self.retry
         };
-        let bytes = execute(
+        let (bytes, len) = execute_measured(
             builder,
             request.stage(),
             request.upload(),
@@ -572,14 +595,13 @@ impl HttpShardTransport {
             &self.observer,
             policy,
         )?;
-        let len = bytes.len() as u64;
         Ok((bytes, len))
     }
 }
 
 impl ShardTransport for HttpShardTransport {
     fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
-        let bytes = execute(
+        let (bytes, len) = execute_measured(
             self.client.get(format!("{}/v2/shards/init", self.base)),
             "init",
             0,
@@ -587,7 +609,6 @@ impl ShardTransport for HttpShardTransport {
             &self.observer,
             self.retry,
         )?;
-        let len = bytes.len() as u64;
         Ok((bytes, len))
     }
 
@@ -685,7 +706,7 @@ pub struct HttpFilterSource {
     /// re-cut renumbers every shard above it), so the next prefetch or map
     /// fetch drops whatever the last walk left unused rather than hand it out
     /// under a map it was not fetched for.
-    prefetched: std::collections::HashMap<u64, Vec<u8>>,
+    prefetched: std::collections::HashMap<u64, (Vec<u8>, u64)>,
     prefetched_paid: bool,
     prefetch_failed_bytes: u64,
     /// Requests a prefetch keeps in flight.
@@ -805,7 +826,7 @@ impl FilterSource for HttpFilterSource {
     fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
         // The map about to be read may number its shards differently.
         self.prefetched.clear();
-        let bytes = execute(
+        let (bytes, len) = execute_measured(
             self.client.get(format!("{}/v2/filters/shards", self.base)),
             "map",
             0,
@@ -813,7 +834,6 @@ impl FilterSource for HttpFilterSource {
             &self.observer,
             self.retry,
         )?;
-        let len = bytes.len() as u64;
         Ok((bytes, len))
     }
 
@@ -844,7 +864,7 @@ impl FilterSource for HttpFilterSource {
                         }
                         let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some(&id) = wanted.get(at) else { break };
-                        match execute(
+                        match execute_measured(
                             self.client
                                 .get(format!("{}/v2/filters/shards/{id}/filter", self.base)),
                             "filters",
@@ -874,24 +894,15 @@ impl FilterSource for HttpFilterSource {
     fn prefetch_charged(&mut self, shard_ids: &[u64]) -> u64 {
         self.prefetch(shard_ids);
         self.prefetched_paid = true;
-        self.prefetch_failed_bytes
-            + self
-                .prefetched
-                .values()
-                .map(|bytes| bytes.len() as u64)
-                .sum::<u64>()
+        self.prefetch_failed_bytes + self.prefetched.values().map(|(_, cost)| *cost).sum::<u64>()
     }
 
     fn filter(&mut self, shard_id: u64) -> Result<(Vec<u8>, u64), BoxError> {
-        if let Some(bytes) = self.prefetched.remove(&shard_id) {
-            let cost = if self.prefetched_paid {
-                0
-            } else {
-                bytes.len() as u64
-            };
+        if let Some((bytes, cost)) = self.prefetched.remove(&shard_id) {
+            let cost = if self.prefetched_paid { 0 } else { cost };
             return Ok((bytes, cost));
         }
-        let bytes = execute(
+        let (bytes, len) = execute_measured(
             self.client
                 .get(format!("{}/v2/filters/shards/{shard_id}/filter", self.base)),
             "filters",
@@ -900,7 +911,6 @@ impl FilterSource for HttpFilterSource {
             &self.observer,
             self.retry,
         )?;
-        let len = bytes.len() as u64;
         Ok((bytes, len))
     }
 }
@@ -1671,7 +1681,7 @@ mod observation_tests {
                     } else {
                         client.get(&url)
                     };
-                    let result = execute(
+                    let result = execute_measured(
                         request,
                         "test",
                         if private { 7 } else { 0 },
@@ -1691,9 +1701,21 @@ mod observation_tests {
                         failures < attempts,
                         "partial={partial_body} private={private}: {result:?}"
                     );
-                    if let Ok(body) = result {
-                        assert_eq!(body, b"ok");
-                    }
+                    let paid = match &result {
+                        Ok((body, paid)) => {
+                            assert_eq!(body, b"ok");
+                            *paid
+                        }
+                        Err(error) => TransferFailure::downloaded(error),
+                    };
+                    assert_eq!(
+                        paid,
+                        if partial_body {
+                            failures.min(attempts) as u64 * 7
+                        } else {
+                            0
+                        } + if failures < attempts { 2 } else { 0 }
+                    );
                     let events = events.lock().unwrap();
                     assert_eq!(events.len(), if observe { expected } else { 0 });
                     for (index, event) in events.iter().enumerate() {
@@ -1752,7 +1774,7 @@ mod observation_tests {
             let observed = observations.clone();
             let observer: HttpObserver = Arc::new(move |o| observed.lock().unwrap().push(o));
             let request = reqwest::blocking::Client::new().get(format!("http://{address}"));
-            let result = execute(
+            let result = execute_measured(
                 request,
                 "setup_directory",
                 0,
@@ -1767,6 +1789,14 @@ mod observation_tests {
                 },
             );
             assert_eq!(result.is_ok(), success);
+            let paid = match &result {
+                Ok((body, paid)) => {
+                    assert_eq!(body, b"ok");
+                    *paid
+                }
+                Err(error) => TransferFailure::downloaded(error),
+            };
+            assert_eq!(paid, expected as u64 * 2);
             server.join().unwrap();
             let observations = observations.lock().unwrap();
             assert_eq!(observations.len(), expected);

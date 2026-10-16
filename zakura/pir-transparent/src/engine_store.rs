@@ -701,6 +701,31 @@ impl WalletStore for SqliteStore {
                 .iter()
                 .map(|stored| (stored.script.as_slice(), &stored.event)),
         )?;
+        // Replay the prospective history inside this transaction before any
+        // write. Aggregate and historical-prefix overflow must refuse the
+        // whole commit, rather than poison a store on the next ledger read.
+        let mut history = commit
+            .events
+            .iter()
+            .map(|stored| (stored.script.clone(), stored.event))
+            .collect::<Vec<_>>();
+        {
+            let mut query = tx
+                .prepare_cached(
+                    "SELECT script, event FROM receives UNION ALL SELECT script, event FROM spends",
+                )
+                .map_err(io)?;
+            let rows = query
+                .query_map([], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(io)?;
+            for row in rows {
+                let (script, raw) = row.map_err(io)?;
+                history.push((script, decode_event(&raw)?));
+            }
+        }
+        crate::engine::ledger::Ledger::new().replay(&mut history)?;
         for (stored, encoded) in commit.events.iter().zip(&encoded_events) {
             match &stored.event {
                 TransparentEvent::Receive(receive) => {

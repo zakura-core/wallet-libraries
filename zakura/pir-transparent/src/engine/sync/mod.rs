@@ -599,6 +599,36 @@ pub fn sync_into<S: WalletStore>(
     limits: &WorkLimits,
     target_anchor: &Anchor,
 ) -> Result<SyncReport, SyncError> {
+    sync_into_tracking(
+        store,
+        map,
+        map_bytes,
+        geometry,
+        chain,
+        scripts,
+        filters,
+        transport,
+        limits,
+        target_anchor,
+        &mut None,
+    )
+}
+
+/// Retains an adopted map even when a later request ends this call in error.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sync_into_tracking<S: WalletStore>(
+    store: &mut S,
+    map: &ShardMap,
+    map_bytes: u64,
+    geometry: &ServiceGeometry,
+    chain: &impl ChainView,
+    scripts: &mut impl ScriptProvider,
+    filters: &mut impl FilterSource,
+    transport: &mut impl ShardTransport,
+    limits: &WorkLimits,
+    target_anchor: &Anchor,
+    adopted_map: &mut Option<ShardMap>,
+) -> Result<SyncReport, SyncError> {
     if !transparent_shard::manifest::supported_schema(&geometry.schema) {
         return Err(SyncError::Schema {
             served: geometry.schema.clone(),
@@ -1209,6 +1239,7 @@ pub fn sync_into<S: WalletStore>(
                             },
                             pending: store.pending()?.len(),
                         };
+                        *adopted_map = Some(fresh.clone());
                         active = Cow::Owned(fresh);
                         prune_to(store, &active)?;
                         break 'passes;
@@ -1221,6 +1252,7 @@ pub fn sync_into<S: WalletStore>(
                         .position(|candidate| candidate.shard_id == entry.shard_id)
                     else {
                         // The refreshed map no longer advertises this range.
+                        *adopted_map = Some(fresh.clone());
                         active = Cow::Owned(fresh);
                         prune_to(store, &active)?;
                         break;
@@ -1245,6 +1277,7 @@ pub fn sync_into<S: WalletStore>(
                     if !replaced_revisions.contains(&stale.revision) {
                         replaced_revisions.push(stale.revision.clone());
                     }
+                    *adopted_map = Some(fresh.clone());
                     active = Cow::Owned(fresh);
                     prune_to(store, &active)?;
                     // Re-plan against the new map from this shard on.

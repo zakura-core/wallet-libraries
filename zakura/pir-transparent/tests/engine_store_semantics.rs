@@ -892,3 +892,46 @@ fn legacy_failure_counts_without_a_revision_binding_do_not_hold_the_latest_revis
     let store = SqliteStore::open(&path).unwrap();
     assert_eq!(store.entry_failures(7, "new", &script(1)).unwrap(), 1);
 }
+
+#[test]
+fn aggregate_overflow_does_not_poison_a_reopened_sqlite_store() {
+    use zakura_pir_transparent::engine::{LedgerError, StoreError};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("overflow.sqlite");
+    let mut store = SqliteStore::open(&path).unwrap();
+    store.bind_set(&identity()).unwrap();
+    store
+        .commit_shard(commit(
+            0,
+            "r0",
+            true,
+            (0, 99),
+            vec![receive(1, 0, u64::MAX, 10)],
+            vec![script(1)],
+        ))
+        .unwrap();
+    let before = store.events().unwrap();
+    let before_id = store.last_commit().unwrap();
+    assert!(matches!(
+        store.commit_shard(commit(
+            1,
+            "r1",
+            true,
+            (100, 199),
+            vec![receive(2, 0, 1, 110)],
+            vec![script(2)]
+        )),
+        Err(StoreError::Contradiction(LedgerError::ValueOverflow))
+    ));
+    drop(store);
+    let mut store = SqliteStore::open(&path).unwrap();
+    assert_eq!(store.events().unwrap(), before);
+    assert_eq!(store.last_commit().unwrap(), before_id);
+    assert!(store.coverage(&script(2)).unwrap().is_empty());
+    assert_eq!(store.ledger().unwrap().confirmed_balance(), u64::MAX);
+    // Removing the uncommitted output makes the same range safely retryable.
+    store
+        .commit_shard(commit(1, "r1", true, (100, 199), vec![], vec![script(2)]))
+        .unwrap();
+    assert_eq!(store.ledger().unwrap().confirmed_balance(), u64::MAX);
+}

@@ -157,6 +157,7 @@ pub fn cached_run(child: &str, script_tag: u8, heights: &[u32]) -> CachedRun {
 /// bound is exercised cheaply.
 pub fn suite<S: WalletStore>(make: impl Fn() -> S) {
     an_empty_store_reports_nothing(&make);
+    aggregate_overflow_refuses_the_entire_commit(&make);
     omitted_geometries_keep_their_bound_seals(&make);
     invalid_cover_obligations_do_not_change_the_store(&make);
     a_commit_is_idempotent_and_a_differing_repeat_is_refused_whole(&make);
@@ -951,5 +952,59 @@ fn invalid_cover_obligations_do_not_change_the_store<S: WalletStore>(make: &impl
         assert!(result.is_err());
         assert_eq!(store.last_commit().unwrap(), before);
         assert!(store.pending().unwrap().is_empty());
+    }
+}
+
+fn aggregate_overflow_refuses_the_entire_commit<S: WalletStore>(make: &impl Fn() -> S) {
+    // Both a single batch and an addition to existing history must be atomic.
+    for prior in [false, true] {
+        let mut store = make();
+        store.bind_set(&identity()).unwrap();
+        let first = receive(1, 0, u64::MAX, 10);
+        if prior {
+            store
+                .commit_shard(commit(
+                    0,
+                    "r0",
+                    true,
+                    (0, 99),
+                    vec![first.clone()],
+                    vec![script(1)],
+                ))
+                .unwrap();
+        }
+        let before = store.events().unwrap();
+        let before_id = store.last_commit().unwrap();
+        let mut events = vec![receive(2, 0, 1, 110)];
+        if !prior {
+            events.push(first.clone());
+        }
+        let offered = commit(1, "r1", true, (100, 199), events, vec![script(2)]);
+        assert!(matches!(
+            store.commit_shard(offered),
+            Err(StoreError::Contradiction(LedgerError::ValueOverflow))
+        ));
+        assert_eq!(store.events().unwrap(), before);
+        assert_eq!(store.last_commit().unwrap(), before_id);
+        assert!(store.coverage(&script(2)).unwrap().is_empty());
+        assert_eq!(
+            store.ledger().unwrap().confirmed_balance(),
+            if prior { u64::MAX } else { 0 }
+        );
+        let retry = commit(
+            1,
+            "r1",
+            true,
+            (100, 199),
+            if prior {
+                vec![first]
+            } else {
+                vec![receive(2, 0, u64::MAX, 110)]
+            },
+            vec![script(2)],
+        );
+        store.commit_shard(retry.clone()).unwrap();
+        store.commit_shard(retry).unwrap();
+        assert_eq!(store.ledger().unwrap().confirmed_balance(), u64::MAX);
     }
 }

@@ -621,26 +621,31 @@ pub fn merge_coverage(mut ranges: Vec<CoverageRange>) -> Vec<CoverageRange> {
 /// The heights in `[from, through]` that `ranges` do not cover, as inclusive
 /// gaps in ascending order.
 pub fn uncovered(ranges: &[CoverageRange], from: u64, through: u64) -> Vec<(u64, u64)> {
+    if from > through {
+        return Vec::new();
+    }
     let mut sorted: Vec<&CoverageRange> = ranges.iter().collect();
     sorted.sort_by_key(|range| range.start_height);
     let mut gaps = Vec::new();
     let mut next = from;
     for range in sorted {
-        if range.end_height < next {
+        if range.end_height < next || range.start_height > range.end_height {
             continue;
         }
-        if range.start_height > next {
-            gaps.push((next, range.start_height.min(through + 1) - 1));
-        }
-        next = next.max(range.end_height + 1);
-        if next > through {
+        if range.start_height > through {
             break;
         }
+        if range.start_height > next {
+            gaps.push((next, range.start_height - 1));
+        }
+        // Reaching the inclusive target completes the walk, including MAX:
+        // there need not be a representable height after the covered suffix.
+        if range.end_height >= through {
+            return gaps;
+        }
+        next = next.max(range.end_height + 1);
     }
-    if next <= through {
-        gaps.push((next, through));
-    }
-    gaps.retain(|(a, b)| a <= b);
+    gaps.push((next, through));
     gaps
 }
 
@@ -659,6 +664,27 @@ mod tests {
             revision_digest: "d".into(),
             terminal_block_hash: "h".into(),
         }
+    }
+
+    #[test]
+    fn coverage_at_the_largest_height_does_not_wrap() {
+        let max = u64::MAX;
+        assert_eq!(uncovered(&[], max, max), vec![(max, max)]);
+        assert!(uncovered(&[], max, max - 1).is_empty());
+        assert!(uncovered(&[range(0, max, CoverageKind::Settled)], 0, max).is_empty());
+        assert_eq!(
+            uncovered(&[range(1, max, CoverageKind::Settled)], 0, max),
+            vec![(0, 0)]
+        );
+        assert_eq!(
+            uncovered(&[range(1, max - 1, CoverageKind::Settled)], 0, max),
+            vec![(0, 0), (max, max)]
+        );
+        assert_eq!(
+            uncovered(&[range(max, max, CoverageKind::Settled)], 3, 5),
+            vec![(3, 5)]
+        );
+        assert!(uncovered(&[range(max, max, CoverageKind::Settled)], max, max).is_empty());
     }
 
     #[test]

@@ -172,6 +172,12 @@ impl WalletStore for MemoryStore {
                 .iter()
                 .map(|stored| (stored.script.as_slice(), &stored.event)),
         )?;
+        let mut offered = commit
+            .events
+            .iter()
+            .map(|stored| (stored.script.clone(), stored.event))
+            .collect::<Vec<_>>();
+        self.ledger()?.replay(&mut offered)?;
         // Validate everything against the current state first; only then
         // write, so a refused commit leaves the store exactly as it was.
         let mut new_receives: Vec<(ReceiveKey, StoredEvent)> = Vec::new();

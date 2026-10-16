@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Retain maps adopted during facade synchronization and consume cached map receipts once. HTTP retries preserve all delivered response bytes, including partial and failed attempts.
+- Reject aggregate-value overflow before either engine store changes events, coverage or commit markers, and handle inclusive coverage through the largest height without wrapping. No SQL schema, version or migration changes are required.
 - Preserve unsent page-cover queries across query/byte budgets, outages and SQLite reopen. The existing pending-work JSON gains an optional cover obligation; existing schema-7 records remain readable and no SQL schema, version or migration changes are required. Failure holds begin only after the cover queries finish.
 - Verify a sealed manifest before promoting provisional coverage, and retain previously bound seal parameters when a publication temporarily omits a geometry.
 - Include newly watched scripts in early progress, retain unproductive counts in mixed shards, and charge prefetched filters and manifests when transferred even if their replies are later discarded.
