@@ -912,6 +912,7 @@ pub fn sync_into<S: WalletStore>(
     // A budgeted sync walks in sequence: whether a later shard's queries are
     // sent at all depends on page work the walk discovers on the way.
     let look_ahead = transport.concurrency() > 1
+        && store.pending_limit() > 0
         && limits.max_queries.is_none()
         && limits.max_private_bytes.is_none();
 
