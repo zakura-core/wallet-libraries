@@ -67,6 +67,40 @@ pub enum LedgerError {
     DoubleSpend(String, u32),
 }
 
+/// Refuse conflicting incoming observations before either store writes them.
+/// Provenance may differ for a repeated observation; event contents and script
+/// must agree for a received outpoint or a consumed outpoint. Index only this
+/// incoming batch so store commits never scan the full retained ledger.
+pub(crate) fn check_event_identities<'a>(
+    events: impl IntoIterator<Item = (&'a [u8], &'a TransparentEvent)>,
+) -> Result<(), LedgerError> {
+    let mut receives = BTreeMap::new();
+    let mut spends = BTreeMap::new();
+    for (script, event) in events {
+        let (entries, key, receive) = match event {
+            TransparentEvent::Receive(receive) => {
+                (&mut receives, (receive.txid, receive.output_index), true)
+            }
+            TransparentEvent::Spend(spend) => (
+                &mut spends,
+                (spend.spent_txid, spend.spent_output_index),
+                false,
+            ),
+        };
+        if entries
+            .insert(key, (script, event))
+            .is_some_and(|previous| previous != (script, event))
+        {
+            return Err(if receive {
+                LedgerError::ConflictingReceive(key.0.to_display_hex(), key.1)
+            } else {
+                LedgerError::DoubleSpend(key.0.to_display_hex(), key.1)
+            });
+        }
+    }
+    Ok(())
+}
+
 /// One transaction's effect on the wallet, for history presentation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionSummary {
@@ -149,6 +183,21 @@ impl Ledger {
             self.observations
                 .values()
                 .chain(events.iter().map(|(_, event)| event)),
+        )?;
+        let unresolved = self
+            .unresolved
+            .iter()
+            .map(|held| (held.script.as_slice(), TransparentEvent::Spend(held.event)))
+            .collect::<Vec<_>>();
+        check_event_identities(
+            unresolved
+                .iter()
+                .map(|(script, event)| (*script, event))
+                .chain(
+                    events
+                        .iter()
+                        .map(|(script, event)| (script.as_slice(), event)),
+                ),
         )?;
         events.sort_by_key(|entry| entry.1.sort_key());
         for (script, event) in events.iter() {
@@ -263,7 +312,10 @@ impl Ledger {
         // one chain, so the two sources contradict each other and taking either
         // one would produce a ledger that looks fine and is wrong.
         if let Some(existing) = self.spent_index.get(&key).map(|&index| &self.spends[index]) {
-            if existing.spending_txid != event.spending_txid || existing.height != event.height {
+            if existing.spending_txid != event.spending_txid
+                || existing.input_index != event.input_index
+                || existing.height != event.height
+            {
                 return Err(LedgerError::DoubleSpend(
                     event.spent_txid.to_display_hex(),
                     event.spent_output_index,

@@ -14,7 +14,7 @@
 //! Kept behind its own feature so the engine stays pure Rust: a wallet that
 //! brings its own storage does not compile SQLite to use the library.
 
-use crate::engine::ledger::LedgerError;
+use crate::engine::ledger::{LedgerError, check_event_identities};
 use crate::engine::store::{
     Anchor, CachedRun, CoverageKind, CoverageRange, PendingPages, RunCursor, ScriptEntry,
     ScriptOrigin, SetIdentity, SetupBlob, SetupKey, ShardCommit, StoreError, StoredEvent,
@@ -376,14 +376,20 @@ fn kind_str(kind: CoverageKind) -> &'static str {
 }
 
 /// Events, each framed by its length, after a version tag.
-fn encode_events(events: &[TransparentEvent]) -> Vec<u8> {
+fn encode_events(events: &[TransparentEvent]) -> Result<Vec<u8>, StoreError> {
     let mut out = b"EV3\0".to_vec();
     for event in events {
-        let raw = event.to_bytes();
+        let raw = encode_event(*event)?;
         out.extend_from_slice(&(raw.len() as u16).to_le_bytes());
         out.extend_from_slice(&raw);
     }
-    out
+    Ok(out)
+}
+
+fn encode_event(event: TransparentEvent) -> Result<Vec<u8>, StoreError> {
+    event
+        .to_bytes()
+        .map_err(|error| StoreError::Corrupt(error.to_string()))
 }
 
 /// Decodes [`encode_events`], refusing more than `limit` events.
@@ -593,6 +599,24 @@ impl WalletStore for SqliteStore {
     }
 
     fn commit_shard(&mut self, commit: ShardCommit) -> Result<u64, StoreError> {
+        // Encode every event before opening the write transaction, including
+        // unfinished walks and cached runs that do not enter the ledger yet.
+        // Invalid metadata must not persist bytes that reopening would refuse.
+        let encoded_events = commit
+            .events
+            .iter()
+            .map(|stored| encode_event(stored.event))
+            .collect::<Result<Vec<_>, _>>()?;
+        let encoded_pending = commit
+            .pending_upsert
+            .iter()
+            .map(|pending| encode_events(&pending.carried))
+            .collect::<Result<Vec<_>, _>>()?;
+        let encoded_runs = commit
+            .cached_runs
+            .iter()
+            .map(|run| encode_events(&run.events))
+            .collect::<Result<Vec<_>, _>>()?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -619,7 +643,13 @@ impl WalletStore for SqliteStore {
             .map_err(|e| StoreError::Corrupt(e.to_string()))?;
         // Contradictions first, before any write, so a refused commit rolls
         // back to exactly the prior state.
-        for stored in &commit.events {
+        check_event_identities(
+            commit
+                .events
+                .iter()
+                .map(|stored| (stored.script.as_slice(), &stored.event)),
+        )?;
+        for (stored, encoded) in commit.events.iter().zip(&encoded_events) {
             match &stored.event {
                 TransparentEvent::Receive(receive) => {
                     let existing: Option<(Vec<u8>, Vec<u8>)> = tx
@@ -631,7 +661,7 @@ impl WalletStore for SqliteStore {
                         .optional()
                         .map_err(io)?;
                     if let Some((script, raw)) = existing {
-                        if script != stored.script || raw != stored.event.to_bytes() {
+                        if script != stored.script || raw != *encoded {
                             return Err(LedgerError::ConflictingReceive(
                                 receive.txid.to_display_hex(),
                                 receive.output_index,
@@ -652,7 +682,7 @@ impl WalletStore for SqliteStore {
                     if let Some(existing) = existing {
                         if existing.spending_txid != spend.spending_txid.0.as_slice()
                             || existing.input_index as u32 != spend.input_index
-                            || existing.event != stored.event.to_bytes()
+                            || existing.event != *encoded
                             || existing.script != stored.script
                         {
                             return Err(LedgerError::DoubleSpend(
@@ -689,7 +719,7 @@ impl WalletStore for SqliteStore {
             }
         }
 
-        for stored in &commit.events {
+        for (stored, encoded) in commit.events.iter().zip(&encoded_events) {
             match &stored.event {
                 TransparentEvent::Receive(receive) => {
                     tx.execute(
@@ -700,7 +730,7 @@ impl WalletStore for SqliteStore {
                             receive.output_index as i64,
                             stored.script,
                             receive.height as i64,
-                            stored.event.to_bytes().as_slice(),
+                            encoded.as_slice(),
                             stored.shard_id as i64,
                             stored.revision_digest,
                         ],
@@ -718,7 +748,7 @@ impl WalletStore for SqliteStore {
                             spend.spent_output_index as i64,
                             stored.script,
                             spend.height as i64,
-                            stored.event.to_bytes().as_slice(),
+                            encoded.as_slice(),
                             stored.shard_id as i64,
                             stored.revision_digest,
                         ],
@@ -784,7 +814,7 @@ impl WalletStore for SqliteStore {
             )
             .map_err(io)?;
         }
-        for pending in &commit.pending_upsert {
+        for (pending, encoded) in commit.pending_upsert.iter().zip(&encoded_pending) {
             let cursor = pending.cursor;
             match pending.id {
                 Some(id) => {
@@ -795,7 +825,7 @@ impl WalletStore for SqliteStore {
                             i64::from(cursor.child),
                             i64::from(cursor.row),
                             cursor.older_runs.map(i64::from),
-                            encode_events(&pending.carried),
+                            encoded,
                             pending.attempts as i64,
                             pending.fragments.concat(),
                         ],
@@ -813,7 +843,7 @@ impl WalletStore for SqliteStore {
                             i64::from(cursor.child),
                             i64::from(cursor.row),
                             cursor.older_runs.map(i64::from),
-                            encode_events(&pending.carried),
+                            encoded,
                             pending.target_anchor.as_ref().map(|a| serde_json::to_string(a).unwrap()),
                             pending.attempts as i64,
                             pending.fragments.concat(),
@@ -823,7 +853,7 @@ impl WalletStore for SqliteStore {
                 }
             }
         }
-        for run in &commit.cached_runs {
+        for (run, encoded) in commit.cached_runs.iter().zip(&encoded_runs) {
             tx.execute(
                 "INSERT OR IGNORE INTO run_cache (child_digest, script, shard_id, events, older) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -831,7 +861,7 @@ impl WalletStore for SqliteStore {
                     run.child_digest,
                     run.script,
                     run.shard_id as i64,
-                    encode_events(&run.events),
+                    encoded,
                     run.older,
                 ],
             )

@@ -6,6 +6,10 @@
 
 - Report retained coverage after reopening, early sync stops, script additions and rollback by recomputing it from saved script ranges.
 
+- Refuse contradictory receives or spends within one store commit before writing anything, while accepting identical repeated observations.
+
+- Reject invalid event encodings before changing the SQLite store, including unfinished walks and cached page runs.
+
 ### Changed
 
 - Refuse unsupported shard-map versions before storing refreshed maps or advancing sync, including an already complete wallet.
