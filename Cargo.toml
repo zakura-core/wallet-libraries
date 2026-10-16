@@ -30,6 +30,8 @@ members = [
     "zakura/transparent-filter",
     "zakura/transparent-shard",
     "zakura/transparent-txid-client",
+    "zakura/receiver-directory",
+    "zakura/receiver-pir",
 ]
 
 resolver = "2"
