@@ -96,6 +96,10 @@ name = "private_discovery"
 required-features = ["testing", "reqwest"]
 
 [[test]]
+name = "engine_cache_pruning"
+required-features = ["testing", "reqwest"]
+
+[[test]]
 name = "detail_run"
 required-features = ["testing"]
 
