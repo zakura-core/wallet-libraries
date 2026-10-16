@@ -405,6 +405,11 @@ pub struct ProvisionalCoverage {
 /// Reaching a bound is not an error: the sync commits what it has, records
 /// the page work still owed, and reports `Incomplete`. The next call resumes
 /// from the durable pending work.
+/// Soft limits checked before starting private setup or a whole query group.
+/// A started group completes every candidate row and table segment, even on
+/// a hit or failure, so the last indivisible group can exceed either limit.
+/// A zero limit starts no private work. Checked progress is committed before
+/// returning an incomplete report.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WorkLimits {
     /// Private queries, directory and pages together.
