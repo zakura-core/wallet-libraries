@@ -10,12 +10,17 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 /// A publication prepared for PIR evaluation.
+#[derive(Clone)]
 pub struct Server {
     manifest: Manifest,
     id: Hash,
-    public: Vec<u8>,
+    prepared: Arc<Prepared>,
     rows: Arc<[u8]>,
     filters: Arc<[u8]>,
+}
+
+struct Prepared {
+    public: Vec<u8>,
     /// The rows as u16 coefficients, scanned modulo the native `q`.
     server: IPIRServer<u16>,
     preprocessed: Vec<NativePreprocessed>,
@@ -63,11 +68,39 @@ impl Server {
         Ok(Self {
             manifest,
             id,
-            public,
+            prepared: Arc::new(Prepared {
+                public,
+                server,
+                preprocessed,
+            }),
             rows: snapshot.data.into(),
             filters: snapshot.filters.into(),
-            server,
-            preprocessed,
+        })
+    }
+
+    /// Validate a fresh snapshot and reuse only public row preprocessing when
+    /// its geometry and actual row bytes match `previous`. Session identity and
+    /// filters always come from the new snapshot. Changed rows build normally.
+    /// This does not accept a chain anchor or validate payment cryptography.
+    pub fn new_reusing_rows(snapshot: Snapshot, previous: &Self) -> Result<Self, Error> {
+        snapshot.validate()?;
+        if snapshot.manifest.rows != previous.manifest.directory.rows
+            || snapshot.data.as_slice() != previous.rows.as_ref()
+        {
+            return Self::new(snapshot);
+        }
+        let manifest = Manifest {
+            protocol: PROTOCOL.into(),
+            directory: snapshot.manifest,
+            public_digest: previous.manifest.public_digest,
+        };
+        let id = manifest.id()?;
+        Ok(Self {
+            manifest,
+            id,
+            rows: previous.rows.clone(),
+            filters: snapshot.filters.into(),
+            prepared: previous.prepared.clone(),
         })
     }
 
@@ -83,7 +116,7 @@ impl Server {
 
     /// The public setup that clients download once per session.
     pub fn public(&self) -> &[u8] {
-        &self.public
+        &self.prepared.public
     }
 
     /// Identical immutable directory bytes for every caller, already digest-checked.
@@ -110,12 +143,14 @@ impl Server {
             pir_native::parse_with(&profile.setup, &body[HEADER_BYTES..], profile.rows)
                 .map_err(|_| Error::Malformed)?;
         let intermediate = self
+            .prepared
             .server
             .try_multiply_power_of_two(pir_native::Q, &query)
             .map_err(|_| Error::Pir)?;
         let mut response = body[..HEADER_BYTES].to_vec();
         response.extend(
-            pir_native::pack(&self.preprocessed, &keys, &intermediate).map_err(|_| Error::Pir)?,
+            pir_native::pack(&self.prepared.preprocessed, &keys, &intermediate)
+                .map_err(|_| Error::Pir)?,
         );
         Ok(response)
     }
