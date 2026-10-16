@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `testing` feature (off by default) with `testing::IronwoodOutputFixture`, a
+  deterministic synthetic Ironwood output built from fixed public test seeds,
+  and byte-level `testing::decrypt_incoming` / `testing::recover_outgoing`
+  checks, so services can authenticate PIR-returned records without depending
+  on Orchard or note encryption directly.
+
 ### Removed
 
 - `PreparedWork::waiting`, following removal of the randomized first-query delay.

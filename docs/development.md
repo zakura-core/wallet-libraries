@@ -26,6 +26,7 @@ python3 scripts/dev.py verify
 | `sqlite` | SQLite; `test-dependencies`, without Orchard |
 | `enhance-wallet` | Enhance PIR; `wallet` |
 | `enhance` | Enhance PIR; default features |
+| `enhance-testing` | Enhance PIR; `testing` (the synthetic Ironwood output fixture service tests authenticate PIR-returned records with) |
 | `transparent-pir` | Transparent PIR adapter; `wallet` |
 | `transparent-pir-sqlite` | Transparent PIR adapter; `sqlite` (`wallet` plus the SQLite apply-and-acknowledge integration and the in-process end-to-end tests) |
 | `transparent-pir-testing` | Transparent PIR adapter; `sqlite` and `testing` (the test support applications build their recovery and txid display tests on) |
