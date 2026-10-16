@@ -486,6 +486,20 @@ mod tests {
     }
 
     #[test]
+    fn chunk_chain_rejects_an_overflowing_predecessor_height() {
+        let mut split = map(0, 2).split().unwrap();
+        split.recent.recent = None;
+        split.recent.check_shape().unwrap();
+        let mut chunk = split.chunks[0].chunk.clone();
+        chunk.shards[0].end_height = u64::MAX;
+        assert!(split.recent.check_chunk(0, &chunk).is_err());
+        // In a wrapping build, MAX + 1 would equal this hostile successor's
+        // start. Matching block hashes must not allow that backwards chain.
+        chunk.shards[1].start_height = 0;
+        assert!(split.recent.check_chunk(0, &chunk).is_err());
+    }
+
+    #[test]
     fn chunk_terminal_height_overflow_is_rejected() {
         let split = map(0, 1).split().unwrap();
         let mut chunk = split.chunks[0].chunk.clone();
