@@ -73,6 +73,26 @@ use transparent_shard::manifest::ShardManifest;
 /// cost, or its refusal or failure.
 type Answer = Result<(Vec<u8>, u64), BoxError>;
 
+/// Charge setup bytes at dispatch, even if a previous refusal means the walk
+/// never uses this reply. The staged receipt then has no remaining byte cost;
+/// its original cause still identifies refusals through the source chain.
+fn prepay_setup(
+    reply: Answer,
+    table: Table,
+    charges: &mut crate::engine::transport::ByteCharges,
+) -> Answer {
+    match reply {
+        Ok((bytes, cost)) => {
+            charges.add_setup_download(table, cost);
+            Ok((bytes, 0))
+        }
+        Err(error) => {
+            charges.add_failed_setup(table, &error);
+            Err(crate::engine::transport::TransferFailure::boxed(0, error))
+        }
+    }
+}
+
 /// A shard transport with replies already in hand.
 pub(super) struct Staged<'a, T: ShardTransport> {
     inner: &'a mut T,
@@ -391,9 +411,10 @@ pub(super) fn look_ahead<S: WalletStore, F: FilterSource, T: ShardTransport>(
                 table,
                 segment,
             } => {
-                transport
-                    .setups
-                    .insert((shard_id, revision.to_string(), table, segment), reply);
+                transport.setups.insert(
+                    (shard_id, revision.to_string(), table, segment),
+                    prepay_setup(reply, table, charges),
+                );
             }
             ShardRequest::Query { .. } => unreachable!("the first batch holds no queries"),
         }
@@ -498,4 +519,39 @@ pub(super) fn look_ahead<S: WalletStore, F: FilterSource, T: ShardTransport>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::transport::{ByteCharges, Overloaded};
+
+    #[test]
+    fn prefetched_setup_bytes_are_charged_even_when_the_walk_drops_the_reply() {
+        let table = Table::Directory;
+        let mut charges = ByteCharges::default();
+        let success = prepay_setup(Ok((vec![0; 23], 23)), table, &mut charges).unwrap();
+        let error = prepay_setup(
+            Err(crate::engine::transport::TransferFailure::boxed(
+                17,
+                Overloaded { retry_after: None }.boxed(),
+            )),
+            table,
+            &mut charges,
+        )
+        .unwrap_err();
+        assert_eq!(
+            charges.setup_bytes(),
+            40,
+            "dispatch has paid both outcomes already"
+        );
+        assert!(Overloaded::found_in(&error).is_some());
+        charges.add_setup(table, success.1);
+        charges.add_failed_setup(table, &error);
+        assert_eq!(
+            charges.setup_bytes(),
+            40,
+            "consuming staged outcomes must not charge them twice"
+        );
+    }
 }

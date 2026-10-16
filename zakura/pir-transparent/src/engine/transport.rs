@@ -319,9 +319,14 @@ impl ByteCharges {
         self.manifests_checked += 1;
     }
 
+    /// Setup response bytes paid before the walk consumes a prefetched reply.
+    pub(crate) fn add_setup_download(&mut self, table: Table, cost: u64) {
+        self.table_mut(table).setup_bytes += cost;
+    }
+
     /// Failed setup responses consume private bytes without opening a segment.
     pub(crate) fn add_failed_setup(&mut self, table: Table, error: &BoxError) {
-        self.table_mut(table).setup_bytes += TransferFailure::downloaded(error);
+        self.add_setup_download(table, TransferFailure::downloaded(error));
     }
 
     pub fn add_setup(&mut self, table: Table, cost: u64) {

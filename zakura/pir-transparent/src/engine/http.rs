@@ -943,6 +943,24 @@ mod observation_tests {
         use transparent_native::TableProfile;
         for status in [503, 410] {
             for setup in [false, true] {
+                // Derive native parameters before starting the server deadline.
+                let profile = TableProfile::new(
+                    transparent_shard::SCHEMA,
+                    "recent-4k",
+                    "directory",
+                    4096,
+                    4096,
+                )
+                .unwrap();
+                let mut client = TableClient::new(
+                    Table::Directory,
+                    "recent-4k",
+                    4096,
+                    4096,
+                    &profile.scheme,
+                    None,
+                )
+                .unwrap();
                 let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
                 let address = listener.local_addr().unwrap();
                 listener.set_nonblocking(true).unwrap();
@@ -997,23 +1015,6 @@ mod observation_tests {
                     assert_eq!(charges.setup_bytes(), 4);
                     assert_eq!(charges.shards_opened(), 0);
                 } else {
-                    let profile = TableProfile::new(
-                        transparent_shard::SCHEMA,
-                        "recent-4k",
-                        "directory",
-                        4096,
-                        4096,
-                    )
-                    .unwrap();
-                    let mut client = TableClient::new(
-                        Table::Directory,
-                        "recent-4k",
-                        4096,
-                        4096,
-                        &profile.scheme,
-                        None,
-                    )
-                    .unwrap();
                     let upload = client
                         .prepare(&revision, Table::Directory, 17)
                         .unwrap()
