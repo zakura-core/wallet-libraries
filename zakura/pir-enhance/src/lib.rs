@@ -25,3 +25,7 @@ pub use types::{
 
 #[cfg(feature = "wallet")]
 pub mod wallet;
+
+/// Synthetic Ironwood output fixture with byte-level decryption checks.
+#[cfg(feature = "testing")]
+pub mod testing;

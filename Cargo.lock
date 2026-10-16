@@ -8206,6 +8206,8 @@ dependencies = [
  "url",
  "zakura-client-backend",
  "zakura-client-sqlite",
+ "zakura-note-encryption",
+ "zakura-orchard",
  "zakura-pir-enhance-types",
  "zakura-pir-native",
  "zakura-primitives",
