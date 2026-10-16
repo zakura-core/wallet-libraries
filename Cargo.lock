@@ -6941,22 +6941,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "transparent-txid-client"
-version = "0.1.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8e64944a5565e8b11b198f01adfcf3b75ad3e42b68551bf18032dff69aca1f4"
-dependencies = [
- "base64 0.22.1",
- "hex",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "transparent-events",
- "transparent-native",
- "transparent-shard",
-]
-
-[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8298,12 +8282,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tower",
- "transparent-events",
- "transparent-filter",
- "transparent-native",
- "transparent-shard",
  "transparent-shard-server",
- "transparent-txid-client",
  "url",
  "zakura-client-backend",
  "zakura-client-sqlite",
@@ -8311,6 +8290,11 @@ dependencies = [
  "zakura-primitives",
  "zakura-protocol",
  "zakura-transparent",
+ "zakura-transparent-events",
+ "zakura-transparent-filter",
+ "zakura-transparent-native",
+ "zakura-transparent-shard",
+ "zakura-transparent-txid-client",
 ]
 
 [[package]]
