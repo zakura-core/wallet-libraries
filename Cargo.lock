@@ -6957,40 +6957,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "transparent-wallet"
-version = "0.1.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2306996a00cf5a6cbfe5e7f2a98bfab8fe46d0c86d316d9eb7fbcc4d748bd344"
-dependencies = [
- "base64 0.22.1",
- "hex",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.21",
- "transparent-events",
- "transparent-filter",
- "transparent-native",
- "transparent-shard",
-]
-
-[[package]]
-name = "transparent-wallet-store"
-version = "0.1.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a2c9831761563028fd8e38c760eeaa768000c22afa921dbbbe296fa6e7e328c"
-dependencies = [
- "hex",
- "rusqlite",
- "serde_json",
- "thiserror 2.0.21",
- "transparent-events",
- "transparent-shard",
- "transparent-wallet",
-]
-
-[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8322,6 +8288,7 @@ dependencies = [
  "rusqlite",
  "rustix",
  "same-file",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -8334,8 +8301,6 @@ dependencies = [
  "transparent-shard",
  "transparent-shard-server",
  "transparent-txid-client",
- "transparent-wallet",
- "transparent-wallet-store",
  "url",
  "zakura-client-backend",
  "zakura-client-sqlite",
