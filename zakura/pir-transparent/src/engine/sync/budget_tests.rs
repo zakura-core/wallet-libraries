@@ -231,7 +231,12 @@ fn retrieve(
 }
 #[test]
 fn directory_budget_admits_one_whole_pair_for_hits_misses_and_malformed_replies() {
-    for (script, malformed) in [(script(1), false), (script(999), false), (script(1), true)] {
+    for (script, malformed, refusal) in [
+        (script(1), false, false),
+        (script(999), false, false),
+        (script(1), true, false),
+        (script(1), false, true),
+    ] {
         let mut transport = Transport::new();
         transport.malformed_first = malformed;
         transport.refuse_first = refusal;
@@ -263,7 +268,12 @@ fn directory_budget_admits_one_whole_pair_for_hits_misses_and_malformed_replies(
 #[test]
 fn choice_directory_budget_admits_one_fixed_query_per_group() {
     assert!(small_fixture().directory.built.choice.is_some());
-    for (script, malformed) in [(script(1), false), (script(999), false), (script(1), true)] {
+    for (script, malformed, refusal) in [
+        (script(1), false, false),
+        (script(999), false, false),
+        (script(1), true, false),
+        (script(1), false, true),
+    ] {
         let mut transport = Transport::new();
         transport.malformed_first = malformed;
         transport.refuse_first = refusal;
