@@ -197,7 +197,11 @@ impl FixturePublication {
             let canonical = std::fs::read(path.join("manifest.json")).expect("a manifest");
             let manifest: ShardManifest =
                 serde_json::from_slice(&canonical).expect("a well-formed manifest");
-            assert_eq!(manifest.canonical_bytes(), canonical, "a canonical manifest");
+            assert_eq!(
+                manifest.canonical_bytes(),
+                canonical,
+                "a canonical manifest"
+            );
             let geometry = transparent_shard::layout::by_name(&manifest.geometry)
                 .expect("a registered geometry");
             let revision = Revision {
