@@ -63,7 +63,9 @@ use super::{
 use crate::engine::adapters::{Acceptance, ChainView};
 use crate::engine::client::Table;
 use crate::engine::store::{Anchor, SetupKey, WalletStore};
-use crate::engine::transport::{BoxError, FilterSource, ShardReply, ShardRequest, ShardTransport};
+use crate::engine::transport::{
+    BoxError, BudgetStop, FilterSource, ShardReply, ShardRequest, ShardTransport,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use transparent_filter::{BlockHash, ShardMap, ShardMapEntry};
 use transparent_shard::build::candidate_rows;
@@ -94,10 +96,15 @@ fn prepay_setup(
 }
 
 /// A shard transport with replies already in hand.
+///
+/// Once any reply, sent ahead or by the walk, is a [`BudgetStop`], nothing
+/// more goes to the inner transport: replies already in hand are still
+/// handed out, and every other request is answered with that stop.
 pub(super) struct Staged<'a, T: ShardTransport> {
     inner: &'a mut T,
     manifests: HashMap<(u64, String), Answer>,
     setups: HashMap<(u64, String, Table, u32), Answer>,
+    stopped: Option<BudgetStop>,
 }
 
 impl<'a, T: ShardTransport> Staged<'a, T> {
@@ -106,7 +113,43 @@ impl<'a, T: ShardTransport> Staged<'a, T> {
             inner,
             manifests: HashMap::new(),
             setups: HashMap::new(),
+            stopped: None,
         }
+    }
+
+    /// Records a budget stop in `reply`, and returns it.
+    fn noted<R>(&mut self, reply: Result<R, BoxError>) -> Result<R, BoxError> {
+        if let Err(error) = &reply {
+            if let Some(stop) = BudgetStop::found_in(error) {
+                self.stopped.get_or_insert(*stop);
+            }
+        }
+        reply
+    }
+
+    /// The stop to answer a request with instead of sending it, if any.
+    fn refused(&self) -> Result<(), BoxError> {
+        match self.stopped {
+            Some(stop) => Err(stop.boxed()),
+            None => Ok(()),
+        }
+    }
+
+    /// Sends `requests` to the inner transport together, unless a budget
+    /// stop came first, in which case none is sent.
+    fn send_batch(&mut self, requests: &[ShardRequest<'_>]) -> Vec<Option<ShardReply>> {
+        if self.stopped.is_some() {
+            return requests.iter().map(|_| None).collect();
+        }
+        let replies = self.inner.batch(requests);
+        for reply in replies.iter().flatten() {
+            if let Err(error) = reply {
+                if let Some(stop) = BudgetStop::found_in(error) {
+                    self.stopped.get_or_insert(*stop);
+                }
+            }
+        }
+        replies
     }
 
     pub(super) fn clear(&mut self) {
@@ -121,10 +164,12 @@ impl<T: ShardTransport> ShardTransport for Staged<'_, T> {
     }
 
     fn manifest(&mut self, shard_id: u64, revision: &str) -> Result<(Vec<u8>, u64), BoxError> {
-        match self.manifests.remove(&(shard_id, revision.to_string())) {
-            Some(reply) => reply,
-            None => self.inner.manifest(shard_id, revision),
+        if let Some(reply) = self.manifests.remove(&(shard_id, revision.to_string())) {
+            return reply;
         }
+        self.refused()?;
+        let reply = self.inner.manifest(shard_id, revision);
+        self.noted(reply)
     }
 
     fn setup(
@@ -134,13 +179,15 @@ impl<T: ShardTransport> ShardTransport for Staged<'_, T> {
         table: Table,
         segment: u32,
     ) -> Result<(Vec<u8>, u64), BoxError> {
-        match self
+        if let Some(reply) = self
             .setups
             .remove(&(shard_id, revision.to_string(), table, segment))
         {
-            Some(reply) => reply,
-            None => self.inner.setup(shard_id, revision, table, segment),
+            return reply;
         }
+        self.refused()?;
+        let reply = self.inner.setup(shard_id, revision, table, segment);
+        self.noted(reply)
     }
 
     fn query(
@@ -150,7 +197,9 @@ impl<T: ShardTransport> ShardTransport for Staged<'_, T> {
         table: Table,
         body: &[u8],
     ) -> Result<Vec<u8>, BoxError> {
-        self.inner.query(shard_id, revision, table, body)
+        self.refused()?;
+        let reply = self.inner.query(shard_id, revision, table, body);
+        self.noted(reply)
     }
 
     fn page_round(&mut self, shard_id: u64, revision: &str, tables: &[u32]) {
@@ -162,7 +211,7 @@ impl<T: ShardTransport> ShardTransport for Staged<'_, T> {
     }
 
     fn batch(&mut self, requests: &[ShardRequest<'_>]) -> Vec<Option<ShardReply>> {
-        self.inner.batch(requests)
+        self.send_batch(requests)
     }
 }
 
@@ -385,7 +434,7 @@ pub(super) fn look_ahead<S: WalletStore, F: FilterSource, T: ShardTransport>(
             }
         }
     }
-    let replies = transport.inner.batch(&requests);
+    let replies = transport.send_batch(&requests);
     let mut manifests: HashMap<u64, ShardManifest> = HashMap::new();
     for (request, reply) in requests.iter().zip(replies) {
         // A sent request's outcome is kept whatever it was: a refusal reaches
@@ -488,7 +537,7 @@ pub(super) fn look_ahead<S: WalletStore, F: FilterSource, T: ShardTransport>(
             body: &ahead.query.body,
         })
         .collect();
-    let replies = transport.inner.batch(&requests);
+    let replies = transport.send_batch(&requests);
     for (request, reply) in requests.iter().zip(&replies) {
         if let Some(reply) = reply {
             charges.add_query_reply(Table::Directory, request.upload(), reply);
@@ -557,5 +606,73 @@ mod tests {
             40,
             "consuming staged outcomes must not charge them twice"
         );
+    }
+
+    /// Answers the first setup of a batch with a byte budget stop and every
+    /// other request with an empty success, counting what reaches it.
+    struct Stopping {
+        sent: usize,
+    }
+
+    impl ShardTransport for Stopping {
+        fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            Ok((Vec::new(), 0))
+        }
+        fn manifest(&mut self, _: u64, _: &str) -> Result<(Vec<u8>, u64), BoxError> {
+            self.sent += 1;
+            Ok((Vec::new(), 0))
+        }
+        fn setup(&mut self, _: u64, _: &str, _: Table, _: u32) -> Result<(Vec<u8>, u64), BoxError> {
+            self.sent += 1;
+            Err(BudgetStop::Bytes.boxed())
+        }
+        fn query(&mut self, _: u64, _: &str, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+            self.sent += 1;
+            Ok(Vec::new())
+        }
+        fn concurrency(&self) -> usize {
+            2
+        }
+    }
+
+    /// After a batch meets a budget stop, the staged transport sends nothing
+    /// more: a later batch goes unsent, and later single requests are answered
+    /// with the stop, while a reply already in hand is still handed out.
+    #[test]
+    fn nothing_is_sent_after_a_budget_stop() {
+        let mut inner = Stopping { sent: 0 };
+        let mut staged = Staged::new(&mut inner);
+        let revision = "aa".to_string();
+        staged
+            .manifests
+            .insert((1, revision.clone()), Ok((b"held".to_vec(), 4)));
+        let first = staged.batch(&[
+            ShardRequest::Manifest {
+                shard_id: 0,
+                revision: &revision,
+            },
+            ShardRequest::Setup {
+                shard_id: 0,
+                revision: &revision,
+                table: Table::Directory,
+                segment: 0,
+            },
+        ]);
+        assert!(matches!(first[1], Some(Err(_))));
+        let later = staged.batch(&[ShardRequest::Query {
+            shard_id: 0,
+            revision: &revision,
+            table: Table::Directory,
+            body: &[],
+        }]);
+        assert!(
+            later.iter().all(Option::is_none),
+            "the later batch is not sent"
+        );
+        let query = staged.query(0, &revision, Table::Directory, &[]);
+        assert!(query.is_err_and(|error| BudgetStop::found_in(&error).is_some()));
+        assert_eq!(staged.manifest(1, &revision).unwrap().0, b"held");
+        drop(staged);
+        assert_eq!(inner.sent, 2, "only the first batch reached the transport");
     }
 }
