@@ -1,7 +1,7 @@
 //! The store, in memory: the reference semantics every other implementation
 //! has to match, and what the one-shot `sync` uses.
 
-use crate::engine::ledger::LedgerError;
+use crate::engine::ledger::{LedgerError, check_event_identities};
 use crate::engine::store::{
     Anchor, CachedRun, CoverageKind, CoverageRange, PendingPages, ScriptEntry, SetIdentity,
     SetupBlob, SetupKey, ShardCommit, StoreError, StoredEvent, WalletStore, merge_coverage,
@@ -162,6 +162,12 @@ impl WalletStore for MemoryStore {
                 .map(|stored| &stored.event),
         )
         .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        check_event_identities(
+            commit
+                .events
+                .iter()
+                .map(|stored| (stored.script.as_slice(), &stored.event)),
+        )?;
         // Validate everything against the current state first; only then
         // write, so a refused commit leaves the store exactly as it was.
         let mut new_receives: Vec<(ReceiveKey, StoredEvent)> = Vec::new();

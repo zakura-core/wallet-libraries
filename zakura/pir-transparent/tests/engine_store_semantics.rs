@@ -367,3 +367,200 @@ fn invalid_saved_events_leave_every_table_unchanged_and_allow_a_valid_retry() {
         assert_eq!(store.coverage(&script(2)).unwrap()[0].end_height, 199);
     }
 }
+
+#[test]
+fn conflicting_events_in_one_commit_are_atomic_and_exact_duplicates_are_retryable() {
+    use transparent_events::{FeeState, TransactionMetadata, TransparentEvent};
+    use zakura_pir_transparent::engine::ledger::LedgerError;
+    use zakura_pir_transparent::engine::store::StoreError;
+    use zakura_pir_transparent::engine::testing::spend;
+
+    #[derive(Clone, Copy)]
+    enum Conflict {
+        ReceiveValue,
+        ReceiveScript,
+        SpendingTransaction,
+        SpendingInput,
+        SpendScript,
+    }
+    for metadata in [
+        None,
+        Some(TransactionMetadata {
+            fee: FeeState::Exact(1000),
+            transparent_input_count: 2,
+            has_shielded_components: true,
+        }),
+    ] {
+        for conflict in [
+            Conflict::ReceiveValue,
+            Conflict::ReceiveScript,
+            Conflict::SpendingTransaction,
+            Conflict::SpendingInput,
+            Conflict::SpendScript,
+        ] {
+            let is_receive = matches!(conflict, Conflict::ReceiveValue | Conflict::ReceiveScript);
+            let first = if is_receive {
+                receive(1, 0, 5000, 110)
+            } else {
+                spend(1, 4, 0, 5, 110)
+            };
+            let mut second = first.clone();
+            match conflict {
+                Conflict::ReceiveValue => {
+                    if let TransparentEvent::Receive(ref mut event) = second.event {
+                        event.value += 1;
+                    }
+                }
+                Conflict::ReceiveScript | Conflict::SpendScript => second.script = script(9),
+                Conflict::SpendingTransaction => second = spend(1, 4, 0, 6, 110),
+                Conflict::SpendingInput => {
+                    if let TransparentEvent::Spend(ref mut event) = second.event {
+                        event.input_index = 1;
+                    }
+                }
+            }
+            let first = {
+                let mut event = first;
+                event.event = event.event.with_metadata(metadata);
+                event
+            };
+            second.event = second.event.with_metadata(metadata);
+            for reversed in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join("conflicts.sqlite");
+                let mut store = SqliteStore::open(&path).unwrap();
+                store.bind_set(&identity()).unwrap();
+                let initial = commit(
+                    0,
+                    "r0",
+                    true,
+                    (0, 99),
+                    vec![receive(8, 0, 3000, 10)],
+                    vec![script(8)],
+                );
+                let mut memory = MemoryStore::new();
+                memory.bind_set(&identity()).unwrap();
+                memory.commit_shard(initial.clone()).unwrap();
+                store.commit_shard(initial).unwrap();
+                store
+                    .commit_anchor(
+                        &Anchor {
+                            height: 99,
+                            hash: format!("{:064x}", 99),
+                        },
+                        99,
+                        99,
+                    )
+                    .unwrap();
+                let mut events = vec![first.clone(), second.clone()];
+                if reversed {
+                    events.reverse();
+                }
+                let offered = commit(
+                    1,
+                    "r1",
+                    true,
+                    (100, 199),
+                    events,
+                    vec![script(1), script(9)],
+                );
+                let before = database_rows(&path);
+                let before_memory = format!("{memory:?}");
+                let memory_error = memory.commit_shard(offered.clone()).unwrap_err();
+                let error = store.commit_shard(offered.clone()).unwrap_err();
+                assert_eq!(memory_error.to_string(), error.to_string());
+                assert_eq!(format!("{memory:?}"), before_memory);
+                let mut observations = offered
+                    .events
+                    .iter()
+                    .map(|stored| (stored.script.clone(), stored.event))
+                    .collect::<Vec<_>>();
+                let mut ledger = zakura_pir_transparent::engine::Ledger::new();
+                let ledger_error = ledger.replay(&mut observations).unwrap_err();
+                assert_eq!(
+                    ledger_error.to_string(),
+                    match &error {
+                        StoreError::Contradiction(error) => error.to_string(),
+                        _ => panic!("expected contradiction"),
+                    }
+                );
+                assert!(matches!(
+                    (is_receive, error),
+                    (
+                        true,
+                        StoreError::Contradiction(LedgerError::ConflictingReceive(_, 0))
+                    ) | (
+                        false,
+                        StoreError::Contradiction(LedgerError::DoubleSpend(_, 0))
+                    )
+                ));
+                assert_eq!(database_rows(&path), before);
+                drop(store);
+                let mut store = SqliteStore::open(&path).unwrap();
+                assert_eq!(database_rows(&path), before);
+                let retry = commit(
+                    1,
+                    "r1",
+                    true,
+                    (100, 199),
+                    vec![first.clone(), first.clone()],
+                    vec![script(1)],
+                );
+                memory.commit_shard(retry.clone()).unwrap();
+                store.commit_shard(retry.clone()).unwrap();
+                assert_eq!(store.events().unwrap(), memory.events().unwrap());
+                let retained = store.events().unwrap();
+                assert_eq!(retained.len(), 2);
+                store.commit_shard(retry).unwrap();
+                assert_eq!(store.events().unwrap(), retained);
+                drop(store);
+                let store = SqliteStore::open(&path).unwrap();
+                assert_eq!(store.events().unwrap(), retained);
+                store.ledger().unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn a_known_outpoint_cannot_be_spent_by_two_inputs_of_one_transaction() {
+    use transparent_events::TransparentEvent;
+    use zakura_pir_transparent::engine::testing::spend;
+    use zakura_pir_transparent::engine::{Ledger, LedgerError};
+    let first = spend(4, 4, 0, 5, 110);
+    let mut second = first.clone();
+    if let TransparentEvent::Spend(ref mut event) = second.event {
+        event.input_index = 1;
+    }
+    let mut ledger = Ledger::new();
+    let received = receive(4, 0, 5000, 10);
+    ledger
+        .replay(&mut [
+            (received.script, received.event),
+            (first.script, first.event),
+        ])
+        .unwrap();
+    assert!(matches!(
+        ledger.extend(&mut [(second.script, second.event)]),
+        Err(LedgerError::DoubleSpend(_, 0))
+    ));
+}
+
+#[test]
+fn unresolved_outpoint_conflicts_are_rejected_when_a_later_batch_arrives() {
+    use transparent_events::TransparentEvent;
+    use zakura_pir_transparent::engine::testing::spend;
+    use zakura_pir_transparent::engine::{Ledger, LedgerError};
+    let first = spend(4, 4, 0, 5, 110);
+    let mut second = first.clone();
+    if let TransparentEvent::Spend(ref mut event) = second.event {
+        event.input_index = 1;
+    }
+    let mut ledger = Ledger::new();
+    ledger.replay(&mut [(first.script, first.event)]).unwrap();
+    assert!(matches!(
+        ledger.extend(&mut [(second.script, second.event)]),
+        Err(LedgerError::DoubleSpend(_, 0))
+    ));
+    assert_eq!(ledger.unresolved().len(), 1);
+}

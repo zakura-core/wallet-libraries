@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Refuse contradictory receives or spends within one store commit before writing anything, while accepting identical repeated observations.
+
 - Reject invalid event encodings before changing the SQLite store, including unfinished walks and cached page runs.
 
 ### Changed

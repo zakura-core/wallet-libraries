@@ -14,7 +14,7 @@
 //! Kept behind its own feature so the engine stays pure Rust: a wallet that
 //! brings its own storage does not compile SQLite to use the library.
 
-use crate::engine::ledger::LedgerError;
+use crate::engine::ledger::{LedgerError, check_event_identities};
 use crate::engine::store::{
     Anchor, CachedRun, CoverageKind, CoverageRange, PendingPages, RunCursor, ScriptEntry,
     ScriptOrigin, SetIdentity, SetupBlob, SetupKey, ShardCommit, StoreError, StoredEvent,
@@ -643,6 +643,12 @@ impl WalletStore for SqliteStore {
             .map_err(|e| StoreError::Corrupt(e.to_string()))?;
         // Contradictions first, before any write, so a refused commit rolls
         // back to exactly the prior state.
+        check_event_identities(
+            commit
+                .events
+                .iter()
+                .map(|stored| (stored.script.as_slice(), &stored.event)),
+        )?;
         for (stored, encoded) in commit.events.iter().zip(&encoded_events) {
             match &stored.event {
                 TransparentEvent::Receive(receive) => {
