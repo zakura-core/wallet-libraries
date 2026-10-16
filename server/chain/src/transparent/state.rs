@@ -40,10 +40,11 @@
 //! a wrong answer; a failed catch-up is [`StateError::CatchUp`], never a stale
 //! answer presented as current.
 //!
-//! Catching up only adds finalized blocks, so a read that overlaps a catch-up
-//! on another thread sees each block either entirely or not at all, and a block
-//! it has seen never changes. Reads at heights the reader has already seen never
-//! catch up, so a backfill of buried history pays nothing for this.
+//! Catching up only adds finalized blocks, and each lookup sees at least what
+//! the lookups before it saw, so a read that overlaps a catch-up on another
+//! thread finds a block or reports it missing, and a block once found does not
+//! change. Reads of blocks the reader already holds never catch up, so a
+//! backfill of buried history pays nothing for this.
 
 use super::{
     BoxError, ExtractError, FetchedBlock, Output as ChainOutput, PreviousOutputs, TransparentBlock,
