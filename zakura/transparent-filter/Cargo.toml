@@ -1,0 +1,46 @@
+[package]
+name = "zakura-transparent-filter"
+version = "0.0.1-rc0"
+# Kept at 2021 from wallet-pir so the moved code compiles unchanged.
+edition = "2021"
+description = "Transparent PIR address filters and their client"
+rust-version.workspace = true
+license = "MIT"
+repository.workspace = true
+readme = "README.md"
+categories.workspace = true
+keywords = ["zcash", "privacy", "pir"]
+
+[lib]
+# The library keeps wallet-pir's crate name, so `transparent_filter::` paths
+# are unchanged for its consumers.
+name = "transparent_filter"
+path = "src/lib.rs"
+
+[[bin]]
+name = "transparent-filter-cli"
+path = "src/bin/cli.rs"
+required-features = ["cli"]
+
+[features]
+default = []
+# Wallet-side HTTP transport and the dummy-wallet / harness-adapter binary.
+client = ["dep:reqwest", "dep:serde_json"]
+cli = ["client", "dep:clap"]
+
+[dependencies]
+# Pinned exactly: the filter bytes this crate produces are consensus-visible to
+# every wallet that caches them, so the encoder may not move without a
+# deliberate revalidation against the committed vectors.
+bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2"
+
+clap = { version = "4", features = ["derive"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[dev-dependencies]
+serde_json = "1"
