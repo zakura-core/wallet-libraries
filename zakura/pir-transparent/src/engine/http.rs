@@ -130,6 +130,29 @@ struct RetryPolicy {
     timeout: Duration,
 }
 
+/// Find a typed transport cause without losing it through receipt or IO
+/// wrappers. IO's source chain can skip the contained error itself, so inspect
+/// get_ref before continuing through its ordinary sources.
+fn transport_cause<E: std::error::Error + 'static>(
+    error: &(dyn std::error::Error + 'static),
+) -> Option<&E> {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if let Some(cause) = error.downcast_ref::<E>() {
+            return Some(cause);
+        }
+        current = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(|error| {
+                error
+                    .get_ref()
+                    .map(|cause| cause as &(dyn std::error::Error + 'static))
+            })
+            .or_else(|| error.source());
+    }
+    None
+}
+
 /// Opt-in retries replay the same buffered request within one shared deadline.
 /// Application decoding and revision validation occur after this function and
 /// are never retried here. The observer records every attempt; callers must
@@ -173,12 +196,8 @@ fn execute(
             policy.response_limit,
         );
         let delay = result.as_ref().err().and_then(|error| {
-            let error = error
-                .downcast_ref::<TransferFailure>()
-                .map_or(error, |failure| &failure.source);
             if !retry_overload
-                && error
-                    .downcast_ref::<HttpStatusError>()
+                && transport_cause::<HttpStatusError>(error.as_ref())
                     .is_some_and(|e| matches!(e.status, 502 | 504))
             {
                 return Some(transient_backoff(attempt));
@@ -190,19 +209,15 @@ fn execute(
                     None
                 };
             }
-            if error
-                .downcast_ref::<HttpStatusError>()
-                .is_some_and(|error| {
-                    matches!(error.status, 408 | 502 | 504)
-                        || (retry_overload && error.status == 503)
-                })
-            {
+            if transport_cause::<HttpStatusError>(error.as_ref()).is_some_and(|error| {
+                matches!(error.status, 408 | 502 | 504) || (retry_overload && error.status == 503)
+            }) {
                 return Some(transient_backoff(attempt));
             }
-            if error.downcast_ref::<std::io::Error>().is_some() {
+            if transport_cause::<std::io::Error>(error.as_ref()).is_some() {
                 return Some(transient_backoff(attempt));
             }
-            error.downcast_ref::<reqwest::Error>().and_then(|error| {
+            transport_cause::<reqwest::Error>(error.as_ref()).and_then(|error| {
                 (error.is_timeout()
                     || error.is_connect()
                     // These read-only API calls have buffered, replayable bodies.
@@ -351,7 +366,7 @@ fn execute_once(
             bytes_down,
             failed: result.is_err(),
             transport_error: result.as_ref().err().and_then(|error| {
-                let error = error.downcast_ref::<reqwest::Error>()?;
+                let error = transport_cause::<reqwest::Error>(error.as_ref())?;
                 if error.is_status() {
                     return None;
                 }
@@ -1506,6 +1521,20 @@ mod observation_tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].status, Some(503));
         assert!(events.iter().all(|e| e.failed));
+    }
+
+    #[test]
+    fn receipt_and_io_wrappers_preserve_the_contained_transport_error() {
+        // A builder failure needs no network and supplies the same reqwest
+        // error type the bounded body reader retains inside an IO error.
+        let original = reqwest::blocking::Client::new()
+            .get("http://[")
+            .build()
+            .unwrap_err();
+        let error = TransferFailure::boxed(7, std::io::Error::other(original).into());
+        assert!(transport_cause::<reqwest::Error>(error.as_ref()).is_some());
+        assert!(transport_cause::<std::io::Error>(error.as_ref()).is_some());
+        assert_eq!(TransferFailure::downloaded(&error), 7);
     }
 
     #[test]
