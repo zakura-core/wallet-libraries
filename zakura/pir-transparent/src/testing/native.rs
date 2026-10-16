@@ -115,7 +115,10 @@ impl Segment {
             Columns::Wide(columns) => scan(columns, query),
             Columns::Bytes(columns) => scan(columns, query),
         };
-        let body = self.profile.native.pack(&self.blocks, keys, &intermediate)?;
+        let body = self
+            .profile
+            .native
+            .pack(&self.blocks, keys, &intermediate)?;
         let mut reply = Vec::with_capacity(16 + body.len());
         reply.extend_from_slice(&binding);
         reply.extend_from_slice(&self.epoch);
