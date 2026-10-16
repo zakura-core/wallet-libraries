@@ -10,25 +10,33 @@ from urllib.parse import unquote, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 
 
+GITHUB_HOSTS = ("github.com", "www.github.com", "ssh.github.com")
+
+
 def wallet_pir_owned(value):
-    """Recognize both historical and current ownership URLs, including git sources."""
+    """Recognize both historical and current ownership URLs, including git sources.
+
+    Release and graph verification share this predicate; it names the repository
+    only, so package-name checks must stay alongside it.
+    """
     if not value:
         return False
     # Cargo source IDs add git+ and a revision; repository metadata can also
     # use Git's scp-style SSH URL. Parse the host independently of its port.
-    value = value.removeprefix("git+")
+    value = value.strip().removeprefix("git+")
     if "://" not in value and ":" in value:
         host, path = value.split(":", 1)
-        if host.rsplit("@", 1)[-1].lower() in ("github.com", "ssh.github.com"):
+        if host.rsplit("@", 1)[-1].lower().rstrip(".") in GITHUB_HOSTS:
             value = f"ssh://{host}/{path}"
     try:
         parsed = urlsplit(value)
-        if (parsed.hostname or "").lower() not in ("github.com", "ssh.github.com"):
+        if (parsed.hostname or "").lower().rstrip(".") not in GITHUB_HOSTS:
             return False
     except ValueError:
         return False
-    path = unquote(parsed.path).lower().rstrip("/").removesuffix(".git")
-    return path in ("/valargroup/wallet-pir", "/zakura-core/wallet-pir")
+    # Decode once, as URL parsing does; an encoded separator still names the repository.
+    path = "/".join(part for part in unquote(parsed.path).lower().split("/") if part)
+    return path.removesuffix(".git") in ("valargroup/wallet-pir", "zakura-core/wallet-pir")
 
 
 def problems(metadata, owned, node_packages=(), wallet=False, ownership=True):
