@@ -49,6 +49,19 @@ pub fn public_query_masks(
     P16.public_query_masks(seed, rows, cols)
 }
 
+/// Decodes `cols` 16-bit coefficients of one [`P16`] response. Every shape
+/// [`Profile::decode_cols`] refuses is an error here, including no columns at
+/// all. This shadows `zakura_pir_native`'s function of the same name, which
+/// accepts an empty response for zero columns.
+pub fn decode_cols(
+    secret: &NativeSecret,
+    public: &[u8],
+    body: &[u8],
+    cols: usize,
+) -> Result<Vec<u8>, String> {
+    P16.decode_cols(secret, public, body, cols)
+}
+
 pub mod batched_hint;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -613,6 +626,18 @@ mod tests {
         // The 16-bit lengths are refused.
         assert!(!profile.accepts_request_len(request_len(rows)));
         assert!(!profile.accepts_request_len(dithered_request_len(rows)));
+    }
+
+    /// Transparent's response decoder refuses an empty response for zero
+    /// columns, as it always has, rather than taking `zakura-pir-native`'s.
+    #[test]
+    fn decode_cols_refuses_zero_columns() {
+        let profile = TableProfile::new("test", "g", "t", 4_096, 4_096).unwrap();
+        let (secret, _) = profile.prepare(0).unwrap();
+        assert_eq!(
+            decode_cols(&secret, &[], &[], 0),
+            Err("native response shape".to_string())
+        );
     }
 
     #[test]
