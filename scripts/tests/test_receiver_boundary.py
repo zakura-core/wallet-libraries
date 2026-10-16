@@ -39,6 +39,15 @@ class ReceiverBoundaryTests(unittest.TestCase):
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["dependencies"]
         self.assertEqual(service_dependencies(manifest, workspace), [])
 
+    def test_receiver_consumers_have_no_service_owned_dependency(self):
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["dependencies"]
+        for crate in (
+            "receiver-directory", "receiver-pir", "pir-receiver", "one-time-ivk-scenarios",
+        ):
+            manifest = tomllib.loads((ROOT / "zakura" / crate / "Cargo.toml").read_text())
+            with self.subTest(crate=crate):
+                self.assertEqual(service_dependencies(manifest, workspace), [])
+
     def test_optional_development_build_target_and_registry_edges_are_checked(self):
         for kind in ("dependencies", "dev-dependencies", "build-dependencies"):
             for value in (
