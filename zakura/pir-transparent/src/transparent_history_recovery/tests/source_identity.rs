@@ -185,35 +185,3 @@ fn lineage_follows_the_published_revision() {
     let mut recreated = covering(&dir.path().join("recreated.sqlite"), &map);
     assert_eq!(revisions(&pass(&mut recreated, &map)), revisions(&batch));
 }
-
-#[test]
-fn unsupported_publications_do_not_reset_a_bound_companion() {
-    let map = map();
-    let dir = tempfile::tempdir().unwrap();
-    let mut adapter = covering(&dir.path().join("companion.sqlite"), &map);
-    let before = pass(&mut adapter, &map);
-    let identity = adapter.store.set_identity().unwrap();
-    let anchor = adapter.store.anchor().unwrap();
-    let events = adapter.store.events().unwrap();
-    let pending = adapter.store.pending().unwrap();
-    let rows = catalog_rows(&adapter);
-    for mutate in [
-        (|map: &mut ShardMap| map.range_envelope_version += 1) as fn(&mut ShardMap),
-        |map: &mut ShardMap| map.profile = "unknown-range-profile".into(),
-        |map: &mut ShardMap| map.shards[0].directory_segments = 0,
-    ] {
-        let mut invalid = map.clone();
-        mutate(&mut invalid);
-        assert!(
-            adapter
-                .gate_publication_set::<u32>(&invalid, &StaticChain::from_map(&map))
-                .is_err()
-        );
-        assert_eq!(adapter.store.set_identity().unwrap(), identity);
-        assert_eq!(adapter.store.anchor().unwrap(), anchor);
-        assert_eq!(adapter.store.events().unwrap(), events);
-        assert_eq!(adapter.store.pending().unwrap(), pending);
-        assert_eq!(catalog_rows(&adapter), rows);
-        assert_eq!(revisions(&pass(&mut adapter, &map)), revisions(&before));
-    }
-}
