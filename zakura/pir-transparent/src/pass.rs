@@ -1,7 +1,7 @@
 //! One recovery pass as a wallet runs it: fresh transports over the caller's exchange,
 //! one retry after a publication change, and the ready batch held for its settlement.
 
-use transparent_wallet::ChainView;
+use crate::engine::ChainView;
 use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchSet;
 
 use crate::batch::{self, BatchState, RecoveryBatch};

@@ -3,9 +3,9 @@
 
 use std::collections::BTreeSet;
 
+use crate::engine::{Acceptance, ChainView};
 use sha2::{Digest, Sha256};
 use transparent::address::TransparentAddress;
-use transparent_wallet::{Acceptance, ChainView};
 use zcash_client_backend::data_api::transparent_ledger::{
     AddressRange, ChainPoint, PageRequest, TransparentAddressWatchSet, TransparentLedgerCommit,
     TransparentRecoveryContext,

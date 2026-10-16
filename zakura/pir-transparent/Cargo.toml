@@ -12,13 +12,22 @@ keywords = ["zcash", "privacy", "pir"]
 
 [features]
 default = []
+# The recovery engine: birthday-to-balance sync over caller transports, its ledger
+# and the in-memory store. No wallet or node dependency.
+engine = ["dep:transparent-events", "dep:transparent-filter", "dep:transparent-native", "dep:transparent-shard", "dep:base64", "dep:hex", "dep:serde", "dep:serde_json"]
+# The engine's SQLite store of recovery progress and history.
+engine-store = ["engine", "dep:rusqlite"]
+# The store conformance suite, for a wallet that brings its own engine storage.
+engine-conformance = ["engine"]
+# Reference blocking HTTP adapters for the shard service and filter origin.
+reqwest = ["engine", "dep:reqwest"]
 # Applying a batch to a SQLite wallet and acknowledging it in one call.
 sqlite = ["wallet", "dep:zcash_client_sqlite"]
-wallet = ["dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol", "dep:transparent", "dep:transparent-wallet", "dep:transparent-wallet-store", "dep:transparent-events", "dep:transparent-filter", "dep:transparent-txid-client", "dep:rusqlite", "dep:hex", "dep:serde_json", "dep:same-file", "dep:rustix"]
+wallet = ["engine-store", "dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol", "dep:transparent", "dep:transparent-txid-client", "dep:same-file", "dep:rustix"]
 # Test support for applications: batches no companion issued, their settlement, a
 # fake txid display publication, and a real shard service in process. Never enable
 # it in a production build.
-testing = ["wallet", "dep:transparent-shard", "dep:transparent-shard-server", "dep:transparent-native", "dep:base64", "dep:axum", "dep:tokio", "dep:tower"]
+testing = ["wallet", "engine-conformance", "dep:transparent-shard-server", "dep:axum", "dep:tokio", "dep:tower"]
 
 [dependencies]
 zcash_client_backend = { workspace = true, optional = true, features = ["transparent-inputs"] }
@@ -29,19 +38,19 @@ transparent = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 sha2.workspace = true
+serde = { workspace = true, optional = true, features = ["std"] }
 serde_json = { workspace = true, optional = true }
 same-file = { version = "1.0.6", optional = true }
 base64 = { workspace = true, optional = true }
 thiserror = "2"
 url = "2"
-transparent-wallet = { version = "=0.1.0-rc.4", optional = true }
-transparent-wallet-store = { version = "=0.1.0-rc.4", optional = true }
 transparent-events = { version = "=0.1.0-rc.4", optional = true }
 transparent-filter = { version = "=0.1.0-rc.4", optional = true }
 transparent-txid-client = { version = "=0.1.0-rc.4", optional = true }
 transparent-shard = { version = "=0.1.0-rc.4", optional = true }
 transparent-native = { version = "=0.1.0-rc.4", optional = true }
 transparent-shard-server = { version = "=0.1.0-rc.4", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
 axum = { version = "0.7", optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread"] }
 tower = { version = "0.5", optional = true, features = ["util"] }
@@ -56,9 +65,6 @@ serde_json.workspace = true
 zcash_client_sqlite = { version = "0.1.0-rc9", path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "transparent-inputs", "test-dependencies", "unstable"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 zcash_keys = { workspace = true, features = ["transparent-inputs"] }
-# The end-to-end tests read the service's init and manifests, and run discovery,
-# through the reference HTTP adapters; the library takes caller transports.
-transparent-wallet = { version = "=0.1.0-rc.4", features = ["reqwest"] }
 # The example's and the end-to-end tests' `HttpExchange`: one blocking request at a
 # time, the client the reference HTTP adapters above already build.
 reqwest = { version = "0.12", default-features = false, features = ["blocking"] }
@@ -78,6 +84,10 @@ transparent-txid-client = { version = "=0.1.0-rc.4", features = ["testing"] }
 tower = { version = "0.5", features = ["util"] }
 
 [[example]]
+name = "engine-store-reopen"
+required-features = ["engine-store"]
+
+[[example]]
 name = "recover-activity"
 required-features = ["sqlite"]
 
@@ -92,3 +102,15 @@ required-features = ["testing"]
 [[test]]
 name = "detail_run"
 required-features = ["testing"]
+
+[[test]]
+name = "engine_birthday_to_balance"
+required-features = ["engine"]
+
+[[test]]
+name = "engine_store_semantics"
+required-features = ["engine-store", "engine-conformance"]
+
+[[test]]
+name = "engine_store_schema_upgrade"
+required-features = ["engine-store", "engine-conformance"]

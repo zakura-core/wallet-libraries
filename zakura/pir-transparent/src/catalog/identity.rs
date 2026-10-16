@@ -7,9 +7,9 @@
 //! ([`revision_identity`]); the wallet's whole `RecoveryRevision`; and the
 //! [`Published`] entry that carries it.
 
+use crate::engine::SetIdentity;
 use sha2::{Digest, Sha256};
 use transparent_filter::{ShardMapEntry, SupersededShard};
-use transparent_wallet::SetIdentity;
 use zcash_client_backend::data_api::transparent_ledger::{PublicationAnchor, RecoveryRevision};
 
 use crate::convert::{block_hash_from_display, block_height};

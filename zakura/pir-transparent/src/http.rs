@@ -17,12 +17,12 @@
 use std::cell::Cell;
 use std::fmt;
 
+use crate::engine::client::Table;
+use crate::engine::transport::{
+    BoxError, FilterSource, Overloaded, ShardRequest, ShardTransport, refusal,
+};
 use transparent_txid_client::{
     Method as TxidMethod, Route as TxidRoute, TransportError, TxidReply, TxidRequest, TxidTransport,
-};
-use transparent_wallet::client::Table;
-use transparent_wallet::transport::{
-    BoxError, FilterSource, Overloaded, ShardRequest, ShardTransport, refusal,
 };
 
 /// Error-body bytes worth reading from a shard-bound refusal: a stale
@@ -446,9 +446,9 @@ impl<E: HttpExchange> TxidTransport for TxidHttp<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::transport::StaleRevision;
     use std::cell::RefCell;
     use std::time::Duration;
-    use transparent_wallet::transport::StaleRevision;
 
     const SHARD: u64 = 4242;
     const REVISION: &str = "5f0c2b9e7d41a8c36e19f0b2d47a5c8e9b1d3f6a2c4e8b0d7f9a1c3e5b7d9f0a";

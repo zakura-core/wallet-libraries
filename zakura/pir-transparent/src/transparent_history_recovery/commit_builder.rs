@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use transparent_wallet::{Acceptance, ChainView};
+use crate::engine::{Acceptance, ChainView};
 use zcash_client_backend::data_api::transparent_ledger::{
     ChainPoint, RecoveryRevision, TransparentLedgerCommit, TransparentRecoveryContext,
 };

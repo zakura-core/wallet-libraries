@@ -2,11 +2,11 @@
 //! that keeps the map the sync finished with, the chain view below the floor, and the
 //! anchor to sync to.
 
-use transparent_filter::ShardMap;
-use transparent_wallet::transport::{BoxError, FilterSource};
-use transparent_wallet::{
+use crate::engine::transport::{BoxError, FilterSource};
+use crate::engine::{
     Acceptance, Anchor, ChainView, ScriptEntry, ScriptOrigin, StaticScripts, WalletStore,
 };
+use transparent_filter::ShardMap;
 use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchSet;
 
 use super::TransparentHistoryRecovery;

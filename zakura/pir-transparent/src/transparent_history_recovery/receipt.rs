@@ -1,8 +1,8 @@
 //! The export receipt: what a ready batch's acknowledgment must present, and the
 //! acknowledgment that spends it.
 
+use crate::engine::WalletStore;
 use sha2::{Digest, Sha256};
-use transparent_wallet::WalletStore;
 use zcash_client_backend::data_api::transparent_ledger::{
     RecoveryRevision, TransparentLedgerCommit,
 };

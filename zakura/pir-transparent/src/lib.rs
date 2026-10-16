@@ -13,6 +13,10 @@ mod companion;
 mod convert;
 #[cfg(feature = "wallet")]
 mod discover;
+#[cfg(feature = "engine")]
+pub mod engine;
+#[cfg(feature = "engine-store")]
+pub mod engine_store;
 #[cfg(feature = "wallet")]
 mod error;
 #[cfg(feature = "sqlite")]
@@ -80,10 +84,10 @@ pub use txid::{
 // What a caller implements for `pass` and `discover_active_addresses`: the chain view
 // (or `WalletChain`), and transports that reach the service and map its refusals.
 #[cfg(feature = "wallet")]
-pub use transparent_wallet::ChainView;
+pub use crate::engine::ChainView;
 #[cfg(feature = "wallet")]
-pub use transparent_wallet::client::Table;
+pub use crate::engine::client::Table;
 #[cfg(feature = "wallet")]
-pub use transparent_wallet::transport::{
+pub use crate::engine::transport::{
     BoxError, FilterSource, Overloaded, ShardRequest, ShardTransport, StaleRevision, refusal,
 };
