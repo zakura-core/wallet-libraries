@@ -1395,8 +1395,9 @@ fn prune_to<S: WalletStore>(store: &mut S, map: &ShardMap) -> Result<(), SyncErr
 }
 
 /// The scripts with saved history through `through`, in the store's order,
-/// leaving out history saved under an entry [`held`] out of this sync, as a
-/// completed shard read leaves out an entry that failed under its revision.
+/// leaving out history saved under an entry [`held`] out of this sync. Each
+/// event is judged under the revision it was saved by, so history a re-cut
+/// kept, already checked when read, is still reported.
 fn saved_activity<S: WalletStore>(
     store: &S,
     failed: &[FailedEntry],

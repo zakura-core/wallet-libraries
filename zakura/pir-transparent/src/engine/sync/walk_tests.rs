@@ -2121,7 +2121,7 @@ fn activity_saved_before_a_budget_stop_reaches_the_gap_limit_rule() {
             );
             assert!(
                 !provider.reported.contains(&broken),
-                "a malformed entry is never reported: {report:?}"
+                "a malformed entry is never reported"
             );
             break;
         }
