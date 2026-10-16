@@ -129,17 +129,28 @@ fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
             .unwrap(),
         1
     );
-    // The two shard revision bindings are kept beside it; the scan order of
-    // the three rows is the query plan's, so the binding rows are left out.
-    let kept: String = adapter
+    let kept: BTreeMap<String, String> = adapter
         .catalog
-        .query_row(
-            "SELECT key FROM wallet_meta WHERE key NOT GLOB 'failure_revision:*'",
-            [],
-            |row| row.get(0),
-        )
+        .prepare("SELECT key, value FROM wallet_meta ORDER BY key")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(kept, "schema_version");
+    assert_eq!(
+        kept,
+        BTreeMap::from([
+            ("schema_version".to_owned(), "7".to_owned()),
+            (
+                format!("failure_revision:{}", sealed.shard_id),
+                sealed.manifest_digest.clone(),
+            ),
+            (
+                format!("failure_revision:{}", tail.shard_id),
+                tail.manifest_digest.clone(),
+            ),
+        ])
+    );
     // The catalog keeps every row. Only the tail's revision, whose source the
     // resealed map no longer names, stops counting as exported.
     assert_eq!(cataloged(&adapter), 2);

@@ -7964,7 +7964,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-enhance"
-version = "0.0.1-rc3"
+version = "0.0.1-rc4"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -8031,7 +8031,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-status"
-version = "0.0.1-rc1"
+version = "0.0.1-rc2"
 dependencies = [
  "hex",
  "rand 0.8.8",
@@ -8254,7 +8254,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-transaction-status"
-version = "0.0.1-rc2"
+version = "0.0.1-rc3"
 dependencies = [
  "tokio",
  "tonic",
