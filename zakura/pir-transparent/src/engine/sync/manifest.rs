@@ -154,10 +154,15 @@ pub(super) fn fetch_manifest(
     transport: &mut impl ShardTransport,
     charges: &mut ByteCharges,
 ) -> Result<ShardManifest, SyncError> {
+    let prepaid = transport.manifest_prepaid(entry.shard_id, &entry.manifest_digest);
     let (raw, cost) = transport
         .manifest(entry.shard_id, &entry.manifest_digest)
         .map_err(|error| SyncError::from(classify_transport(error)))?;
-    charges.add_manifest(cost);
+    if prepaid {
+        charges.add_manifest_download(cost);
+    } else {
+        charges.add_manifest(cost);
+    }
     verify_manifest(&raw, entry, previous_digest, map)
 }
 

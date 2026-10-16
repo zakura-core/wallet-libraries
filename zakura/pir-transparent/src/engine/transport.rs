@@ -475,6 +475,14 @@ pub trait ShardTransport {
     /// need not verify anything itself. Refusals are recognised as for setup.
     fn manifest(&mut self, shard_id: u64, revision: &str) -> Result<(Vec<u8>, u64), BoxError>;
 
+    /// Whether the next manifest reply already has a transfer receipt in the
+    /// sync's charges. Staged transports return true until that reply is taken;
+    /// ordinary transports retain the default. This prevents counting a
+    /// prefetched manifest twice while keeping discarded replies accounted for.
+    fn manifest_prepaid(&self, _shard_id: u64, _revision: &str) -> bool {
+        false
+    }
+
     /// One segment's published setup for one table, as JSON, with its cost.
     ///
     /// `revision` is the manifest digest the map named. Setup is derived from
@@ -696,6 +704,10 @@ impl<T: ShardTransport + ?Sized> ShardTransport for Box<T> {
     fn manifest(&mut self, shard_id: u64, revision: &str) -> Result<(Vec<u8>, u64), BoxError> {
         (**self).manifest(shard_id, revision)
     }
+    fn manifest_prepaid(&self, shard_id: u64, revision: &str) -> bool {
+        (**self).manifest_prepaid(shard_id, revision)
+    }
+
     fn setup(
         &mut self,
         shard_id: u64,

@@ -97,11 +97,11 @@ fn prepay_setup(
 fn prepay_manifest(reply: Answer, charges: &mut crate::engine::transport::ByteCharges) -> Answer {
     match reply {
         Ok((bytes, cost)) => {
-            charges.add_manifest_download(cost);
+            charges.add_manifest(cost);
             Ok((bytes, 0))
         }
         Err(error) => {
-            charges.add_manifest_download(crate::engine::transport::TransferFailure::downloaded(
+            charges.add_manifest(crate::engine::transport::TransferFailure::downloaded(
                 &error,
             ));
             Err(crate::engine::transport::TransferFailure::boxed(0, error))
@@ -134,6 +134,12 @@ impl<'a, T: ShardTransport> Staged<'a, T> {
 impl<T: ShardTransport> ShardTransport for Staged<'_, T> {
     fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
         self.inner.init()
+    }
+
+    fn manifest_prepaid(&self, shard_id: u64, revision: &str) -> bool {
+        self.manifests
+            .contains_key(&(shard_id, revision.to_string()))
+            || self.inner.manifest_prepaid(shard_id, revision)
     }
 
     fn manifest(&mut self, shard_id: u64, revision: &str) -> Result<(Vec<u8>, u64), BoxError> {
@@ -588,7 +594,12 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(charges.manifest_bytes, 61);
-        charges.add_manifest(first.1);
+        assert_eq!(
+            charges.manifests_checked, 3,
+            "each delivered receipt is counted once"
+        );
+        charges.add_manifest_download(first.1);
+        assert_eq!(charges.manifests_checked, 3);
         assert_eq!(
             charges.manifest_bytes, 61,
             "consumption cannot double charge"
