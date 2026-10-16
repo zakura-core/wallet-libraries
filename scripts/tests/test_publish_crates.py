@@ -124,24 +124,64 @@ class PublishingTests(unittest.TestCase):
 
     def test_wallet_pir_packages_are_refused_under_any_source(self):
         declarations = (
+            'receiver-pir = "=0.1.0"',
             'receiver-pir = { version = "=0.1.0" }',
             'alias = { package = "transparent-shard", version = "=0.1.0" }',
             'renamed = { git = "https://github.com/valargroup/wallet-pir", version = "=0.1.0" }',
         )
         for declaration in declarations:
-            for table in ("dependencies", "dev-dependencies", "build-dependencies", 'target."cfg(unix)".dependencies'):
-                with self.subTest(declaration=declaration, table=table), tempfile.TemporaryDirectory() as directory:
+            for inherited in (False, True):
+                self.check_forbidden_dependency(declaration, inherited)
+
+    def check_forbidden_dependency(self, declaration, inherited):
+        alias = declaration.split(" =", 1)[0]
+        for table in ("dependencies", "dev-dependencies", "build-dependencies", 'target."cfg(unix)".dependencies',
+                      'target."cfg(unix)".dev-dependencies', 'target."cfg(unix)".build-dependencies'):
+            with self.subTest(declaration=declaration, inherited=inherited, table=table), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "manifests").mkdir()
+                (root / "manifests/sources.toml").write_text(
+                    '[server]\nwallet_pir_packages = ["receiver-pir", "transparent-shard"]\n')
+                (root / "first").mkdir()
+                (root / "first/Cargo.toml").write_text(
+                    f'[package]\nname = "first"\nversion = "1.0.0"\n[{table}]\n'
+                    + (f'{alias} = {{ workspace = true }}\n' if inherited else declaration + "\n"))
+                (root / "Cargo.toml").write_text('[workspace]\nmembers = ["first"]\n[workspace.dependencies]\n'
+                                                     + (declaration + '\n' if inherited else ''))
+                with patch.object(release, "ORDER", ("first",)), \
+                        self.assertRaisesRegex(release.ReleaseError, "depends on the wallet-pir package"):
+                    release.release_packages(root)
+
+    def test_string_dependencies_keep_release_version_and_order_checks(self):
+        for inherited in (False, True):
+            for requirement, ordered, expected in (
+                ("=1.0.0", True, None),
+                ("=2.0.0", True, "mismatched dependency"),
+                ("=1.0.0", False, "must be published before"),
+            ):
+                with self.subTest(inherited=inherited, requirement=requirement, ordered=ordered), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
                     (root / "manifests").mkdir()
-                    (root / "manifests/sources.toml").write_text(
-                        '[server]\nwallet_pir_packages = ["receiver-pir", "transparent-shard"]\n')
+                    (root / "manifests/sources.toml").write_text('[server]\nwallet_pir_packages = []\n')
                     (root / "first").mkdir()
-                    (root / "first/Cargo.toml").write_text(
-                        f'[package]\nname = "first"\nversion = "1.0.0"\n[{table}]\n{declaration}\n')
-                    (root / "Cargo.toml").write_text('[workspace]\nmembers = ["first"]\n[workspace.dependencies]\n')
-                    with patch.object(release, "ORDER", ("first",)), \
-                            self.assertRaisesRegex(release.ReleaseError, "depends on the wallet-pir package"):
-                        release.release_packages(root)
+                    (root / "first/Cargo.toml").write_text('[package]\nname = "first"\nversion = "1.0.0"\n')
+                    (root / "second").mkdir()
+                    declaration = 'first = { workspace = true }' if inherited else f'first = "{requirement}"'
+                    (root / "second/Cargo.toml").write_text(
+                        '[package]\nname = "second"\nversion = "1.0.0"\n[dependencies]\n'
+                        + declaration + '\nexternal = "0.5"\n')
+                    (root / "Cargo.toml").write_text(
+                        '[workspace]\nmembers = ["first", "second"]\n[workspace.dependencies]\n'
+                        + f'first = "{requirement}"\n')
+                    order = ("first", "second") if ordered else ("second", "first")
+                    with patch.object(release, "ORDER", order):
+                        if expected:
+                            with self.assertRaisesRegex(release.ReleaseError, expected):
+                                release.release_packages(root)
+                        else:
+                            packages, upstream = release.release_packages(root)
+                            self.assertEqual([p["name"] for p in packages], ["first", "second"])
+                            self.assertEqual(upstream, [])
 
     def receipt(self, directory, selection, **changes):
         data = {"schema_version": 2, "commit": "commit",

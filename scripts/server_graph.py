@@ -5,13 +5,30 @@ from pathlib import Path
 import subprocess
 import tempfile
 import tomllib
+from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def wallet_pir_owned(value):
     """Recognize both historical and current ownership URLs, including git sources."""
-    return "github.com/valargroup/wallet-pir" in (value or "").lower() or "github.com/zakura-core/wallet-pir" in (value or "").lower()
+    if not value:
+        return False
+    # Cargo source IDs add git+ and a revision; repository metadata can also
+    # use Git's scp-style SSH URL. Parse the host independently of its port.
+    value = value.removeprefix("git+")
+    if "://" not in value and ":" in value:
+        host, path = value.split(":", 1)
+        if host.rsplit("@", 1)[-1].lower() == "github.com":
+            value = f"ssh://{host}/{path}"
+    try:
+        parsed = urlsplit(value)
+        if (parsed.hostname or "").lower() != "github.com":
+            return False
+    except ValueError:
+        return False
+    path = unquote(parsed.path).lower().rstrip("/").removesuffix(".git")
+    return path in ("/valargroup/wallet-pir", "/zakura-core/wallet-pir")
 
 
 def problems(metadata, owned, node_packages=(), wallet=False, ownership=True):
@@ -118,9 +135,8 @@ fn main() {
             errors.extend(problems(fresh, owned, nodes, wallet=kind == "wallet"))
             if not errors:
                 subprocess.run(["cargo", "check", "--locked", "--manifest-path", str(consumer / "Cargo.toml")], cwd=ROOT, check=True)
-        # The primary wallet facade must also remain node-free in each mutually
-        # exclusive backend mode. Its legacy PIR dependencies are a separate
-        # migration; only the node/server boundary is enforced here.
+        # Each mutually exclusive facade backend must remain free of both
+        # node packages and wallet-pir ownership, including transitive packages.
         for mode, options in (
             ("default", ""),
             ("zakura", ', default-features = false, features = ["zakura"]'),
@@ -134,7 +150,7 @@ fn main() {
                 f'[dependencies]\nzakura-wallet-lib = {{ path = "{ROOT / "wallet-lib"}"{options} }}\n'
             )
             fresh = metadata(consumer / "Cargo.toml", locked=False)
-            errors.extend(problems(fresh, owned, nodes, wallet=True, ownership=False))
+            errors.extend(problems(fresh, owned, nodes, wallet=True))
     if errors:
         raise SystemExit("server ownership boundary failed:\n  " + "\n  ".join(sorted(set(errors))))
     print("verified: separate server workspace and fresh consumers; no wallet-pir-owned dependency in either workspace or lockfile")
