@@ -249,6 +249,17 @@ fn publish(
     end: ChainPoint,
     provider: &[ProviderSet],
 ) -> Routes {
+    let raw: Vec<_> = records.iter().map(raw_record).collect();
+    publish_raw(&raw, commitments, end, provider)
+}
+
+/// [`publish`]es row slots as given, whether or not a publisher would accept them.
+fn publish_raw(
+    records: &[RawRecord],
+    commitments: &[[u8; 32]],
+    end: ChainPoint,
+    provider: &[ProviderSet],
+) -> Routes {
     let manifest = Manifest {
         profile: PROFILE.into(),
         genesis: GENESIS,
@@ -265,8 +276,7 @@ fn publish(
         filters: Vec::new(),
         filters_sha256: [0; 32],
     };
-    let raw: Vec<_> = records.iter().map(raw_record).collect();
-    let snapshot = Snapshot::build(manifest, &raw, provider).unwrap();
+    let snapshot = Snapshot::build(manifest, records, provider).unwrap();
     let positions = records
         .iter()
         .map(|record| u32::try_from(record.payment.position).unwrap())
@@ -1003,6 +1013,41 @@ async fn a_run_wide_directory_failure_leases_no_further_key() {
             due.contains(&0) != opened && due.contains(&1),
             "{fault:?}: {due:?}"
         );
+    }
+}
+
+/// A payment the directory serves with a noncanonical note commitment or Action
+/// nullifier, or an invalid ephemeral key, is refused once looked up, before anything
+/// is queued or credited: the directory crates parse records structurally only.
+#[tokio::test]
+async fn a_forged_payment_is_refused() {
+    let forgeries: [fn(&mut RawRecord); 3] = [
+        |r| r.payment.cmx = [0xff; 32],
+        |r| r.payment.action_nullifier = [0xff; 32],
+        |r| r.payment.ephemeral_key = [0xff; 32],
+    ];
+    for (case, forge) in forgeries.into_iter().enumerate() {
+        let mut r = restored(&[0]);
+        let commitments: Vec<_> = r.records.iter().map(|r| r.payment.cmx).collect();
+        let mut raw = raw_record(&r.records[0]);
+        forge(&mut raw);
+        let directory =
+            Directory::new(publish_raw(&[raw], &commitments, r.through, &provider(&[])));
+        let swept = run(&mut r.st, r.through, &directory, &NoLock, NOW)
+            .await
+            .unwrap();
+        let malformed = |e: &_| {
+            matches!(
+                e,
+                Error::Directory(DirectoryError::Directory(
+                    receiver_directory::Error::Malformed
+                ))
+            )
+        };
+        assert_matches!(swept.deferred[..], [(k, e)] if k.index() == 0 && malformed(e));
+        assert_eq!(lookups(&directory), 1, "case {case}");
+        assert_eq!(balance(&r.st), 0, "case {case}");
+        assert!(pending(&r.st, r.through), "case {case}");
     }
 }
 
