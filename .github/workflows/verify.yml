@@ -82,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        config: [default, orchard, transparent, transparent-import, pczt, sqlite, enhance-wallet, enhance, transparent-pir, transparent-pir-sqlite, transparent-pir-testing, pir-receiver, receiver-wire, server]
+        config: [default, orchard, transparent, transparent-import, pczt, sqlite, enhance-wallet, enhance, transparent-filter-client, transparent-pir, transparent-pir-sqlite, transparent-pir-testing, pir-receiver, receiver-wire, server]
     env:
       WALLET_LIB_BUILD_ROOT: ${{ github.workspace }}/target/dev-lanes
       # librocksdb-sys (the server lane's opt-in `rocksdb` reader) enables SSE4.2 for
