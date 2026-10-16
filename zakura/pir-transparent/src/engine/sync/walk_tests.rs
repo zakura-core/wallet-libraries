@@ -1700,6 +1700,216 @@ fn malformed_manifest_cases_do_not_change_the_shared_fixture() {
     );
 }
 
+/// An entry that failed on content under one revision of a shard does not
+/// hide what its replacement, read in the same sync, recovers for the same
+/// script: the activity reaches the gap-limit rule, which derives the next
+/// funded script, and that script's history is recovered in the same sync.
+/// The failure under the withdrawn revision is still reported.
+///
+/// Revision A of the tail publishes `first`'s directory entry malformed;
+/// `busy`'s history needs a page walk, and its first page query finds A
+/// withdrawn in favour of an honest revision B of the same range.
+#[cfg(feature = "testing")]
+#[test]
+fn activity_recovered_from_a_replacement_revision_advances_the_gap_limit() {
+    use crate::engine::adapters::StaticChain;
+    use crate::testing::service::{InProcess, SEAL, ShardSpec, publish, synthetic};
+    use crate::{
+        HttpExchange, HttpFailure, HttpMethod, HttpReply, HttpRequest, TransparentPirHttp,
+    };
+    use std::cell::RefCell;
+
+    /// The service, which serves `next` from the first page query on.
+    struct Republishing {
+        serving: RefCell<InProcess>,
+        next: RefCell<Option<InProcess>>,
+    }
+    impl HttpExchange for Republishing {
+        fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
+            if request.method == HttpMethod::Post && request.path.contains("/query/pages-") {
+                if let Some(next) = self.next.borrow_mut().take() {
+                    *self.serving.borrow_mut() = next;
+                }
+            }
+            let answered = self.serving.borrow().answer(
+                axum::http::Request::builder()
+                    .method(request.method.as_str())
+                    .uri(&request.path)
+                    .body(request.body.clone())
+                    .unwrap(),
+            );
+            let status = answered.status().as_u16();
+            let retry_after = answered
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let mut body = answered.into_body();
+            if !(200..300).contains(&status) {
+                body.truncate(request.error_limit);
+            }
+            Ok(HttpReply {
+                status,
+                retry_after,
+                map_sha256: None,
+                body,
+            })
+        }
+    }
+
+    /// Derives one script past the newest active one in `chain`.
+    struct GapLimit {
+        fixed: Vec<u8>,
+        chain: Vec<Vec<u8>>,
+        derived: usize,
+        reported: Vec<Vec<Vec<u8>>>,
+    }
+    impl GapLimit {
+        fn entry(script: &[u8]) -> ScriptEntry {
+            ScriptEntry {
+                script: script.to_vec(),
+                origin: ScriptOrigin::Derived,
+                required_from: START,
+            }
+        }
+    }
+    impl ScriptProvider for GapLimit {
+        fn scripts(&mut self) -> Vec<ScriptEntry> {
+            std::iter::once(&self.fixed)
+                .chain(&self.chain[..self.derived])
+                .map(|script| Self::entry(script))
+                .collect()
+        }
+        fn on_activity(&mut self, active: &[Vec<u8>]) -> Vec<ScriptEntry> {
+            self.reported.push(active.to_vec());
+            let wanted = self
+                .chain
+                .iter()
+                .rposition(|script| active.contains(script))
+                .map_or(0, |newest| (newest + 2).min(self.chain.len()));
+            if wanted <= self.derived {
+                return Vec::new();
+            }
+            let added = self.chain[self.derived..wanted]
+                .iter()
+                .map(|script| Self::entry(script))
+                .collect();
+            self.derived = wanted;
+            added
+        }
+    }
+
+    const START: u64 = 3_428_143;
+    const END: u64 = START + 99;
+    let (busy, first, second, third) = (script(70), script(71), script(72), script(73));
+    let mut events = vec![
+        (
+            ScriptBytes::new(first.clone()),
+            receive(START as u32 + 10, 1),
+        ),
+        (
+            ScriptBytes::new(second.clone()),
+            receive(START as u32 + 60, 2),
+        ),
+    ];
+    for n in 0..4 {
+        events.push((
+            ScriptBytes::new(busy.clone()),
+            receive(START as u32 + 20 + 10 * n, 10 + n),
+        ));
+    }
+    let revision = |revision: u32, supersedes: String, malformed: Vec<ScriptBytes>| ShardSpec {
+        revision,
+        supersedes,
+        malformed_entries: malformed,
+        ..ShardSpec::first(START, END, false, events.clone())
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (dir_a, dir_b) = (dir.path().join("a"), dir.path().join("b"));
+    let map_a = publish(
+        &dir_a,
+        &[revision(
+            0,
+            String::new(),
+            vec![ScriptBytes::new(first.clone())],
+        )],
+        SEAL,
+        synthetic,
+        vec![],
+    );
+    let digest_a = map_a.shards[0].manifest_digest.clone();
+    let map_b = publish(
+        &dir_b,
+        &[revision(1, digest_a.clone(), Vec::new())],
+        SEAL,
+        synthetic,
+        vec![],
+    );
+    assert_ne!(map_b.shards[0].manifest_digest, digest_a);
+
+    let exchange = Republishing {
+        serving: RefCell::new(InProcess::serve(&dir_a)),
+        next: RefCell::new(Some(InProcess::serve(&dir_b))),
+    };
+    let mut http = TransparentPirHttp::new(&exchange, 64 << 20);
+    let (mut filters, mut shards) = http.split();
+    let geometry = crate::engine::parse_init(&shards.init().unwrap().0).unwrap();
+    let mut gap = GapLimit {
+        fixed: busy.clone(),
+        chain: vec![first.clone(), second.clone(), third.clone()],
+        derived: 1,
+        reported: Vec::new(),
+    };
+    let target = Anchor {
+        height: END,
+        hash: map_a.shards[0].terminal_block_hash.clone(),
+    };
+    let mut store = MemoryStore::new();
+    let report = sync_into(
+        &mut store,
+        &map_a,
+        serde_json::to_vec(&map_a).unwrap().len() as u64,
+        &geometry,
+        &StaticChain::from_map(&map_a),
+        &mut gap,
+        &mut filters,
+        &mut shards,
+        &WorkLimits::UNLIMITED,
+        &target,
+    )
+    .unwrap();
+
+    assert!(exchange.next.borrow().is_none(), "A was withdrawn mid-sync");
+    assert_eq!(report.replaced_revisions, vec![digest_a.clone()]);
+    assert_eq!(
+        report.failed_entries,
+        vec![FailedEntry {
+            shard_id: 0,
+            revision_digest: digest_a,
+            script: first.clone(),
+            failures: 1,
+        }],
+        "the failure under the withdrawn revision is still reported"
+    );
+    assert!(
+        gap.reported[0].contains(&first),
+        "activity recovered from the replacement reaches the gap-limit rule: {:?}",
+        gap.reported
+    );
+    assert_eq!(
+        gap.derived, 3,
+        "the derived funded script advanced it again"
+    );
+    assert_eq!(stored(&store, &first), vec![receive(START as u32 + 10, 1)]);
+    assert_eq!(
+        stored(&store, &second),
+        vec![receive(START as u32 + 60, 2)],
+        "the gap-limit rule derived the next funded script in the same sync"
+    );
+    assert_eq!(stored(&store, &busy).len(), 4);
+    assert_eq!(report.completion, Completion::Complete);
+}
+
 // Shares only immutable shard construction and independent history helpers.
 #[path = "budget_tests.rs"]
 mod budget_tests;
