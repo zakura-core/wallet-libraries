@@ -71,6 +71,9 @@ class ServerBoundaryTests(unittest.TestCase):
         self.assertIn("server-production", consumers)
         self.assertNotIn('features = ["testing"]', consumers["server-production"])
         self.assertIn('features = ["testing"]', consumers["server"])
+        # The opt-in RocksDB reader is resolved and type-checked on its own.
+        self.assertIn('features = ["rocksdb"]', consumers["server-rocksdb"])
+        self.assertNotIn("rocksdb", consumers["server-production"] + consumers["server"])
 
 
 if __name__ == "__main__":

@@ -360,7 +360,7 @@ impl DisplayMap {
 
     /// The first height no archive holds: the last archive's end plus one,
     /// or the start when none is listed. It and every later height are the
-    /// recent shard's.
+    /// recent shard's. Requires a map that passed [`Self::check_shape`].
     pub fn unsealed_start(&self) -> u64 {
         self.archives()
             .last()
@@ -398,7 +398,7 @@ impl DisplayMap {
             return Err("display map start".into());
         }
         for (index, shard) in self.shards.iter().enumerate() {
-            if shard.shard_id != self.first_shard_id + index as u64 {
+            if self.first_shard_id.checked_add(index as u64) != Some(shard.shard_id) {
                 return Err(format!(
                     "display shard at position {index} claims id {}",
                     shard.shard_id
@@ -413,6 +413,14 @@ impl DisplayMap {
             }
         }
         let archives = self.archives();
+        // Validate the exclusive end before unsealed_start is used, including
+        // maps containing only sealed archives.
+        if archives
+            .last()
+            .is_some_and(|last| last.end_height.checked_add(1).is_none())
+        {
+            return Err("display archive height range overflows".into());
+        }
         for pair in archives.windows(2) {
             check_chain(&pair[0], &pair[1])?;
         }
@@ -502,7 +510,13 @@ pub(crate) fn check_recent_parent(
     archive: &DisplayMapEntry,
     recent: &DisplayMapEntry,
 ) -> Result<(), String> {
-    let parent = if recent.start_height == archive.end_height + 1 {
+    let next_height = archive.end_height.checked_add(1).ok_or_else(|| {
+        format!(
+            "display archive {} height range overflows",
+            archive.shard_id
+        )
+    })?;
+    let parent = if recent.start_height == next_height {
         &archive.terminal_block_hash
     } else if recent.start_height == archive.start_height {
         &archive.parent_block_hash
@@ -524,7 +538,7 @@ pub(crate) fn check_chain(
     previous: &DisplayMapEntry,
     shard: &DisplayMapEntry,
 ) -> Result<(), String> {
-    if shard.start_height != previous.end_height + 1
+    if previous.end_height.checked_add(1) != Some(shard.start_height)
         || shard.parent_block_hash != previous.terminal_block_hash
     {
         return Err(format!(
@@ -703,6 +717,48 @@ mod tests {
             first_shard_id: 7,
             shards,
         }
+    }
+
+    #[test]
+    fn full_map_rejects_overflowing_archive_heights_and_ids() {
+        let original = map();
+        for index in [0, 1] {
+            let mut hostile = original.clone();
+            hostile.shards[index].end_height = u64::MAX;
+            assert!(hostile.check_shape().is_err());
+            // The range must also be rejected when there is no recent shard.
+            hostile.shards.pop();
+            assert!(hostile.check_shape().is_err());
+        }
+        let mut hostile = original.clone();
+        hostile.first_shard_id = u64::MAX;
+        hostile.shards[0].shard_id = u64::MAX;
+        hostile.shards[1].shard_id = 0;
+        hostile.shards[2].shard_id = 1;
+        assert!(hostile.check_shape().is_err());
+        // The highest representable consecutive ids still describe a valid map.
+        let mut valid = original;
+        valid.first_shard_id = u64::MAX - 2;
+        for (index, shard) in valid.shards.iter_mut().enumerate() {
+            shard.shard_id = valid.first_shard_id + index as u64;
+        }
+        valid.check_shape().unwrap();
+    }
+
+    #[test]
+    fn recent_parent_rejects_an_overflowing_archive_height() {
+        let m = map();
+        let mut archive = m.shards[0].clone();
+        let mut recent = m.shards[2].clone();
+        archive.end_height = u64::MAX;
+        recent.start_height = 0;
+        recent.parent_block_hash = archive.terminal_block_hash.clone();
+        assert!(check_recent_parent(&archive, &recent).is_err());
+        // Even a recent shard starting at the archive's start cannot give an
+        // overflowing sealed range a representable next height.
+        recent.start_height = archive.start_height;
+        recent.parent_block_hash = archive.parent_block_hash.clone();
+        assert!(check_recent_parent(&archive, &recent).is_err());
     }
 
     #[test]

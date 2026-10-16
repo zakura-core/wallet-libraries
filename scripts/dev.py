@@ -28,6 +28,8 @@ CONFIGS = {
     # the reference HTTP adapters, without the wallet.
     "transparent-engine": (["-p", "zakura-pir-transparent"], ["engine"]),
     "transparent-engine-store": (["-p", "zakura-pir-transparent"], ["engine-store", "engine-conformance", "reqwest"]),
+    # The Transparent filter's wallet HTTP client, which no other lane enables.
+    "transparent-filter-client": (["-p", "zakura-transparent-filter"], ["client"]),
     "transparent-pir": (["-p", "zakura-pir-transparent"], ["wallet"]),
     "transparent-pir-sqlite": (["-p", "zakura-pir-transparent"], ["sqlite"]),
     "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing", "reqwest"]),

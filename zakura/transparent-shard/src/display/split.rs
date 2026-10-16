@@ -218,16 +218,20 @@ impl DisplayRecentMap {
     }
 
     /// The base shard id of chunk `index`.
+    /// Requires a map that passed [`Self::check_shape`] and an existing index.
     pub fn chunk_base_id(&self, index: usize) -> u64 {
         chunk_base(self.first_shard_id) + index as u64 * INDEX_CHUNK_SHARDS
     }
 
     /// The ids chunk `index` must list: from its base, or the window's first
     /// shard, to the next base or the last archive.
+    /// Requires a map that passed [`Self::check_shape`] and an existing index.
     pub fn chunk_ids(&self, index: usize) -> std::ops::Range<u64> {
         let base = self.chunk_base_id(index);
-        base.max(self.first_shard_id)
-            ..(base + INDEX_CHUNK_SHARDS).min(self.first_shard_id + self.archives)
+        let end = self.first_shard_id + self.archives;
+        // Bound the addition by the validated exclusive archive end before
+        // adding: the final chunk's next absolute base may exceed u64::MAX.
+        base.max(self.first_shard_id)..base + (end - base).min(INDEX_CHUNK_SHARDS)
     }
 
     /// The origin-relative path of chunk `index`.
@@ -272,13 +276,14 @@ impl DisplayRecentMap {
         if self.archives == 0 && self.recent.is_none() {
             return Err("display map is empty".into());
         }
+        let archive_end = self
+            .first_shard_id
+            .checked_add(self.archives)
+            .ok_or("archive id range")?;
         let expected = match self.archives {
             0 => 0,
-            n => {
-                let last = self
-                    .first_shard_id
-                    .checked_add(n - 1)
-                    .ok_or("archive count")?;
+            _ => {
+                let last = archive_end - 1;
                 (chunk_base(last) - chunk_base(self.first_shard_id)) / INDEX_CHUNK_SHARDS + 1
             }
         };
@@ -299,7 +304,10 @@ impl DisplayRecentMap {
                 // Every archive covers at least one block.
                 Some(before) => {
                     let ids = self.chunk_ids(before);
-                    self.chunks[before].start_height + (ids.end - ids.start)
+                    self.chunks[before]
+                        .start_height
+                        .checked_add(ids.end - ids.start)
+                        .ok_or("index chunk height range")?
                 }
             };
             if (index == 0 && chunk.start_height != floor) || chunk.start_height < floor {
@@ -310,7 +318,10 @@ impl DisplayRecentMap {
             None => self.start_height,
             Some(last) => {
                 let ids = self.chunk_ids(last);
-                self.chunks[last].start_height + (ids.end - ids.start)
+                self.chunks[last]
+                    .start_height
+                    .checked_add(ids.end - ids.start)
+                    .ok_or("index chunk height range")?
             }
         };
         let unsealed = self.unsealed_start;
@@ -319,7 +330,7 @@ impl DisplayRecentMap {
         }
         if let Some(recent) = &self.recent {
             check_entry(&self.seal, recent)?;
-            if recent.sealed || recent.shard_id != self.first_shard_id + self.archives {
+            if recent.sealed || recent.shard_id != archive_end {
                 return Err("recent display shard id or seal".into());
             }
             check_recent(&self.seal, self.start_height, self.unsealed_start, recent)?;
@@ -363,7 +374,7 @@ impl DisplayRecentMap {
             Some(next) => next.start_height,
             None => self.unsealed_start,
         };
-        if last.end_height + 1 != next_start {
+        if last.end_height.checked_add(1) != Some(next_start) {
             return Err(format!("index chunk {index} does not reach the next start"));
         }
         if let Some(recent) = &self.recent {
@@ -422,6 +433,78 @@ mod tests {
             first_shard_id: first,
             shards,
         }
+    }
+
+    #[test]
+    fn archive_id_and_chunk_limits_are_checked() {
+        let template = map(0, 1).split().unwrap().recent;
+        for (first, archives) in [(u64::MAX, 1), (u64::MAX - 1, 2), (u64::MAX - 31, 32)] {
+            let mut invalid = template.clone();
+            invalid.first_shard_id = first;
+            invalid.archives = archives;
+            invalid.recent = None;
+            assert!(invalid.check_shape().is_err(), "{first} {archives}");
+        }
+        // The exclusive end is representable even though the final absolute
+        // chunk boundary is not. Partial and crossing-chunk windows remain valid.
+        for (first, archives) in [(u64::MAX - 1, 1), (u64::MAX - 31, 31), (u64::MAX - 32, 32)] {
+            let mut valid = template.clone();
+            valid.first_shard_id = first;
+            valid.archives = archives;
+            valid.recent = None;
+            valid.unsealed_start = valid.start_height + archives;
+            let count = (chunk_base(u64::MAX - 1) - chunk_base(first)) / INDEX_CHUNK_SHARDS + 1;
+            valid.chunks = (0..count)
+                .map(|index| DisplayChunkRef {
+                    start_height: valid.start_height
+                        + if index == 0 {
+                            0
+                        } else {
+                            INDEX_CHUNK_SHARDS - first % INDEX_CHUNK_SHARDS
+                        },
+                    sha256: "aa".repeat(32),
+                })
+                .collect();
+            valid.check_shape().unwrap();
+            let ids: Vec<_> = (0..valid.chunks.len())
+                .flat_map(|index| valid.chunk_ids(index))
+                .collect();
+            assert_eq!(ids, (first..u64::MAX).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn chunk_height_overflow_is_rejected() {
+        let mut recent = map(0, 33).split().unwrap().recent;
+        recent.start_height = u64::MAX - 1;
+        recent.chunks[0].start_height = recent.start_height;
+        assert!(recent.check_shape().is_err());
+        let mut recent = map(0, 1).split().unwrap().recent;
+        recent.start_height = u64::MAX;
+        recent.chunks[0].start_height = u64::MAX;
+        assert!(recent.check_shape().is_err());
+    }
+
+    #[test]
+    fn chunk_chain_rejects_an_overflowing_predecessor_height() {
+        let mut split = map(0, 2).split().unwrap();
+        split.recent.recent = None;
+        split.recent.check_shape().unwrap();
+        let mut chunk = split.chunks[0].chunk.clone();
+        chunk.shards[0].end_height = u64::MAX;
+        assert!(split.recent.check_chunk(0, &chunk).is_err());
+        // In a wrapping build, MAX + 1 would equal this hostile successor's
+        // start. Matching block hashes must not allow that backwards chain.
+        chunk.shards[1].start_height = 0;
+        assert!(split.recent.check_chunk(0, &chunk).is_err());
+    }
+
+    #[test]
+    fn chunk_terminal_height_overflow_is_rejected() {
+        let split = map(0, 1).split().unwrap();
+        let mut chunk = split.chunks[0].chunk.clone();
+        chunk.shards[0].end_height = u64::MAX;
+        assert!(split.recent.check_chunk(0, &chunk).is_err());
     }
 
     #[test]
