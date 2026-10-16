@@ -25,7 +25,7 @@ pub const TREE_SIZE: u64 = 1 << 32;
 /// The record slots in a table of `rows` rows. A row count that is not a power of two
 /// up to [`MAX_ROWS`] is [`Error::Malformed`]. Smaller tables than [`MIN_ROWS`] are
 /// accepted here, for tests; publishers and clients enforce the floor.
-pub(crate) fn capacity(rows: u32) -> Result<u64, Error> {
+pub fn capacity(rows: u32) -> Result<u64, Error> {
     if !rows.is_power_of_two() || rows > MAX_ROWS {
         return Err(Error::Malformed);
     }
