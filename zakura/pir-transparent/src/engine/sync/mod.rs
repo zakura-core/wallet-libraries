@@ -1250,6 +1250,17 @@ pub fn sync_into<S: WalletStore>(
         // Anything read ahead and not consumed belongs to this pass only.
         ahead::clear(transport, filters, &mut clients);
 
+        if pass == 0 {
+            // A call that stopped for its budget, or failed, after saving a
+            // script's history never reported that activity, and coverage now
+            // keeps the history from being read again. Report what the store
+            // holds, as a completed read of it would have.
+            for script in saved_activity(store, &failures.entries, target_anchor.height)? {
+                if !active_scripts.contains(&script) {
+                    active_scripts.push(script);
+                }
+            }
+        }
         let added = scripts.on_activity(&active_scripts);
         if added.is_empty() {
             break;
@@ -1381,6 +1392,36 @@ fn prune_to<S: WalletStore>(store: &mut S, map: &ShardMap) -> Result<(), SyncErr
         .map(|entry| entry.manifest_digest.as_str())
         .collect();
     Ok(store.prune_caches(&queryable)?)
+}
+
+/// The scripts with saved history through `through`, in the store's order,
+/// leaving out history saved under an entry [`held`] out of this sync, as a
+/// completed shard read leaves out an entry that failed under its revision.
+fn saved_activity<S: WalletStore>(
+    store: &S,
+    failed: &[FailedEntry],
+    through: u64,
+) -> Result<Vec<Vec<u8>>, SyncError> {
+    let mut active: Vec<Vec<u8>> = Vec::new();
+    let mut judged: BTreeMap<(u64, String, Vec<u8>), bool> = BTreeMap::new();
+    for stored in store.events()? {
+        if event_height(&stored.event) > through || active.contains(&stored.script) {
+            continue;
+        }
+        let key = (stored.shard_id, stored.revision_digest, stored.script);
+        let excluded = match judged.get(&key) {
+            Some(&excluded) => excluded,
+            None => {
+                let excluded = held(store, failed, key.0, &key.1, &key.2)?;
+                judged.insert(key.clone(), excluded);
+                excluded
+            }
+        };
+        if !excluded {
+            active.push(key.2);
+        }
+    }
+    Ok(active)
 }
 
 fn previous_digest_of(map: &ShardMap, shard_id: u64) -> String {
