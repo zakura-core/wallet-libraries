@@ -10,6 +10,12 @@
   checks, so services can authenticate PIR-returned records without depending
   on Orchard or note encryption directly.
 
+## [0.0.1-rc4] - 2026-10-16
+
+### Changed
+
+- Require native PIR `0.0.1-rc2`, including the canonical protocol primitives moved into this repository.
+
 ### Removed
 
 - `PreparedWork::waiting`, following removal of the randomized first-query delay.

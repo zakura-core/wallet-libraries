@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc3] - 2026-10-16
+
+### Changed
+
+- Require private Status PIR `0.0.1-rc2`, which carries the updated native PIR dependency.
+
 ## [0.0.1-rc2] - 2026-10-14
 
 ### Changed
