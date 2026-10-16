@@ -52,8 +52,8 @@ class ServerBoundaryTests(unittest.TestCase):
         def metadata(manifest, **kwargs):
             if manifest == graph.ROOT / "Cargo.toml":
                 return {"workspace_members": ["wallet"]}
-            if manifest == graph.ROOT / "server/Cargo.toml":
-                return {"workspace_root": str(graph.ROOT / "server"), "workspace_members": ["server"], "packages": []}
+            if manifest == graph.ROOT / "zakura/pir-ingest/Cargo.toml":
+                return {"workspace_root": str(graph.ROOT / "zakura/pir-ingest"), "workspace_members": ["server"], "packages": []}
             consumers[manifest.parent.name] = manifest.read_text()
             packages = [self.package("zakura-chain")] if manifest.parent.name == contaminated else []
             return {"packages": packages}
