@@ -9,8 +9,7 @@ use std::time::Duration;
 
 use axum::{body::Body, extract::Request, middleware::Next, response::Response};
 use tokio::{net::TcpListener, runtime::Runtime, task::JoinHandle};
-use transparent_shard_server::service::{ServiceConfig, ServiceState, router};
-use transparent_shard_server::shardset::{DEFAULT_RETAIN_REVISIONS, ShardSet};
+use zakura_pir_transparent::testing::service::InProcess;
 use zakura_pir_transparent::{HttpExchange, HttpFailure, HttpMethod, HttpReply, HttpRequest};
 
 pub use zakura_pir_transparent::testing::service::{
@@ -57,12 +56,13 @@ impl Server {
             previous.abort();
         }
         let requests = self.requests.clone();
-        let set = ShardSet::open(dir, DEFAULT_RETAIN_REVISIONS).expect("a verified shard set");
+        let service = InProcess::serve(dir);
         let (url, serving) = self.runtime.block_on(async move {
-            let state = ServiceState::build(set, ServiceConfig::default()).expect("a service");
-            let app = router(state).layer(axum::middleware::from_fn(
-                move |request: Request, next: Next| record(requests.clone(), request, next),
-            ));
+            let app = axum::Router::new()
+                .fallback(move |request: Request| forward(service.clone(), request))
+                .layer(axum::middleware::from_fn(
+                    move |request: Request, next: Next| record(requests.clone(), request, next),
+                ));
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let serving = tokio::spawn(async move {
@@ -104,6 +104,20 @@ async fn record(requests: Arc<Mutex<Vec<Recorded>>>, request: Request, next: Nex
             body: body.to_vec(),
         });
     next.run(Request::from_parts(parts, Body::from(body))).await
+}
+
+/// Hands `request` to the in-process service, off the async runtime: a
+/// query is evaluated with real PIR, which takes a while.
+async fn forward(service: InProcess, request: Request) -> Response {
+    let (parts, body) = request.into_parts();
+    let body = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .expect("a readable request body");
+    let request = axum::http::Request::from_parts(parts, body.to_vec());
+    let reply = tokio::task::spawn_blocking(move || service.answer(request))
+        .await
+        .expect("the service answered");
+    reply.map(Body::from)
 }
 
 /// A wallet's [`HttpExchange`] over loopback HTTP to one served publication: one

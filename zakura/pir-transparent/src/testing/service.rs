@@ -16,13 +16,8 @@
 //! arrives, so a long history is a chain of runs across page shards.
 
 use std::path::Path;
-use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Request, Response};
 use sha2::{Digest, Sha256};
-use tokio::runtime::Runtime;
-use tower::ServiceExt;
 use transparent_events::TransparentEvent;
 use transparent_filter::{
     BlockHash, Recut, ScriptBytes, SealParameters, ShardMap, ShardMapEntry, SupersededShard,
@@ -37,8 +32,6 @@ use transparent_shard::manifest::{
     pages_table,
 };
 use transparent_shard::records::decode_directory_row;
-use transparent_shard_server::service::{ServiceConfig, ServiceState, router};
-use transparent_shard_server::shardset::{DEFAULT_RETAIN_REVISIONS, ShardSet};
 
 /// A shard's usual geometry: the recent one, 2,048 directory rows and page
 /// shards of 8,192 rows, which keeps the tables a pass sets up and queries small.
@@ -337,54 +330,4 @@ pub fn superseded(entry: &ShardMapEntry) -> SupersededShard {
     }
 }
 
-/// The shard server for one published set, answering in process: no socket,
-/// no TLS, the service's own routes and replies.
-#[derive(Clone)]
-pub struct InProcess {
-    runtime: Arc<Runtime>,
-    router: axum::Router,
-}
-
-impl InProcess {
-    /// Serves the shard set [`publish`] wrote to `dir`.
-    pub fn serve(dir: &Path) -> Self {
-        let set = ShardSet::open(dir, DEFAULT_RETAIN_REVISIONS).expect("a verified shard set");
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("a runtime");
-        let state = runtime
-            .block_on(async { ServiceState::build(set, ServiceConfig::default()) })
-            .expect("a service");
-        Self {
-            runtime: Arc::new(runtime),
-            router: router(state),
-        }
-    }
-
-    /// The service's reply to `request`, whose URI is the route's path and
-    /// query. Callable from inside another runtime: the request is served on
-    /// this service's runtime from a thread of its own.
-    pub fn answer(&self, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
-        let (runtime, router) = (self.runtime.clone(), self.router.clone());
-        std::thread::scope(|scope| {
-            scope
-                .spawn(move || {
-                    runtime.block_on(async move {
-                        let response = router
-                            .oneshot(request.map(Body::from))
-                            .await
-                            .expect("the router is infallible");
-                        let (parts, body) = response.into_parts();
-                        let body = axum::body::to_bytes(body, usize::MAX)
-                            .await
-                            .expect("a readable reply");
-                        Response::from_parts(parts, body.to_vec())
-                    })
-                })
-                .join()
-                .expect("the service answered")
-        })
-    }
-}
+pub use super::publication::InProcess;
