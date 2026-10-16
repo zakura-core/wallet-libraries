@@ -115,6 +115,7 @@ fn blocks() -> Vec<Block> {
 struct Directory {
     built: BuiltDirectory,
     children: Vec<BuiltChild>,
+    manifest: std::sync::OnceLock<ShardManifest>,
 }
 
 /// [`blocks`] and what they build, once per test binary: building is
@@ -163,6 +164,7 @@ fn build(blocks: &[Block]) -> Vec<Directory> {
             Built::Directory { built, .. } => directories.push(Directory {
                 built,
                 children: std::mem::take(&mut children),
+                manifest: std::sync::OnceLock::new(),
             }),
         }
     }
@@ -170,6 +172,16 @@ fn build(blocks: &[Block]) -> Vec<Directory> {
 }
 
 fn manifest_of(directory: &Directory) -> ShardManifest {
+    // These tables never change. Rehashing every child for each walk or
+    // candidate script hid the behavior under test behind gigabytes of I/O.
+    // Return an owned copy so malformed-manifest cases cannot alter a fixture.
+    directory
+        .manifest
+        .get_or_init(|| build_manifest(directory))
+        .clone()
+}
+
+fn build_manifest(directory: &Directory) -> ShardManifest {
     let built = &directory.built;
     let geometry = built.geometry;
     let page_children: Vec<PageChild> = directory
@@ -1635,4 +1647,22 @@ fn push_out_placement_and_order_are_checked() {
     assert!(check_run(&page_child(1650, 1999), &[e(1400), e(1100)], &carried).is_err());
     assert!(check_run(&page_child(1650, 1999), &[e(1100), e(1705)], &carried).is_err());
     assert!(check_run(&page_child(1650, 1999), &[e(1100)], &carried[..1]).is_err());
+}
+
+#[test]
+fn malformed_manifest_cases_do_not_change_the_shared_fixture() {
+    let (_, directories) = fixture();
+    let directory = &directories[0];
+    let expected = build_manifest(directory);
+    let mut changed = manifest_of(directory);
+    assert_eq!(
+        serde_json::to_vec(&changed).unwrap(),
+        serde_json::to_vec(&expected).unwrap()
+    );
+    changed.page_children.clear();
+    changed.schema.clear();
+    assert_eq!(
+        serde_json::to_vec(&manifest_of(directory)).unwrap(),
+        serde_json::to_vec(&expected).unwrap()
+    );
 }
