@@ -24,7 +24,8 @@
 //! compact JSON in declaration order.
 
 use super::manifest::{
-    check_chain, check_entry, check_recent, check_recent_parent, find_by_height,
+    check_chain, check_entry, check_entry_structure, check_recent, check_recent_parent,
+    find_by_height, is_digest,
 };
 use super::seal::DisplaySealParams;
 use super::{DisplayMap, DisplayMapEntry, DISPLAY_SCHEMA};
@@ -46,13 +47,6 @@ pub fn index_file(sha256: &str) -> String {
 /// The base shard id of the index chunk holding `shard_id`.
 pub fn chunk_base(shard_id: u64) -> u64 {
     shard_id - shard_id % INDEX_CHUNK_SHARDS
-}
-
-fn is_digest(text: &str) -> bool {
-    text.len() == 64
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// One index chunk as the recent map names it.
@@ -263,6 +257,18 @@ impl DisplayRecentMap {
 
     /// Checks the recent map is well formed before anything is fetched.
     pub fn check_shape(&self) -> Result<(), String> {
+        self.check_structure()?;
+        if let Some(recent) = &self.recent {
+            check_entry(&self.seal, recent)?;
+        }
+        Ok(())
+    }
+
+    /// Checks the known schema's ranges, identities, bounds and revision
+    /// digests, without requiring a recognized recent geometry. Clients may
+    /// then report a future geometry as unsupported, but must not query it.
+    /// Unknown schemas and malformed fields are errors.
+    pub fn check_structure(&self) -> Result<(), String> {
         if self.schema != DISPLAY_SCHEMA {
             return Err(format!(
                 "unsupported recent display map schema {:?}",
@@ -329,7 +335,7 @@ impl DisplayRecentMap {
             return Err("display map sealed height".into());
         }
         if let Some(recent) = &self.recent {
-            check_entry(&self.seal, recent)?;
+            check_entry_structure(&self.seal, recent)?;
             if recent.sealed || recent.shard_id != archive_end {
                 return Err("recent display shard id or seal".into());
             }
@@ -343,6 +349,23 @@ impl DisplayRecentMap {
     /// against the neighbouring chunk starts and the recent shard. The digest
     /// is the caller's to compare.
     pub fn check_chunk(&self, index: usize, chunk: &DisplayIndexChunk) -> Result<(), String> {
+        self.check_chunk_structure(index, chunk)?;
+        for shard in &chunk.shards {
+            check_entry(&self.seal, shard)?;
+        }
+        Ok(())
+    }
+
+    /// Checks every chunk identity, entry, range and chain link as
+    /// [`Self::check_chunk`] does, while allowing unknown geometry names.
+    /// Call only after [`Self::check_structure`]; the caller must still check
+    /// canonical bytes and their digest, and recognize the selected entry's
+    /// geometry before requesting its manifest, setup or table rows.
+    pub fn check_chunk_structure(
+        &self,
+        index: usize,
+        chunk: &DisplayIndexChunk,
+    ) -> Result<(), String> {
         let reference = self
             .chunks
             .get(index)
@@ -361,7 +384,7 @@ impl DisplayRecentMap {
                     shard.shard_id
                 ));
             }
-            check_entry(&self.seal, shard)?;
+            check_entry_structure(&self.seal, shard)?;
             if let Some(previous) = position.checked_sub(1).map(|p| &chunk.shards[p]) {
                 check_chain(previous, shard)?;
             }

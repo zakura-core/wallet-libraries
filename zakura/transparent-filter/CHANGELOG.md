@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Reject reversed per-block ranges and unknown per-block profiles before fetching or reporting coverage.
+
 - Validate whole-map shape once at admission; batch checks inspect only advertised format and requested records.
 
 - Reject unsupported shard-map envelope versions before accepting a publication, including passes with no remaining filters.
