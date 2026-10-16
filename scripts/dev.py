@@ -23,6 +23,10 @@ CONFIGS = {
     "sqlite": (["-p", "zakura-client-sqlite"], ["test-dependencies"]),
     "enhance-wallet": (["-p", "zakura-pir-enhance"], ["wallet"]),
     "enhance": (["-p", "zakura-pir-enhance"], []),
+    # The recovery engine alone, and with its SQLite store, the store suite and
+    # the reference HTTP adapters, without the wallet.
+    "transparent-engine": (["-p", "zakura-pir-transparent"], ["engine"]),
+    "transparent-engine-store": (["-p", "zakura-pir-transparent"], ["engine-store", "engine-conformance", "reqwest"]),
     "transparent-pir": (["-p", "zakura-pir-transparent"], ["wallet"]),
     "transparent-pir-sqlite": (["-p", "zakura-pir-transparent"], ["sqlite"]),
     "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing"]),
