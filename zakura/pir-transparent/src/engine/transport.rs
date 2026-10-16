@@ -346,10 +346,12 @@ impl ByteCharges {
 
     /// Charges one dispatched query, even if its reply failed. Upload size is
     /// known locally; failed response bytes are counted when the transport
-    /// retained them in [`TransferFailure`].
+    /// retained them in [`TransferFailure`]. A [`BudgetStop`] is a request the
+    /// transport declined before sending any of it, so it costs nothing.
     pub(crate) fn add_query_reply(&mut self, table: Table, upload: u64, reply: &ShardReply) {
         let download = match reply {
             Ok((_, cost)) => *cost,
+            Err(error) if BudgetStop::found_in(error).is_some() => return,
             Err(error) => TransferFailure::downloaded(error),
         };
         self.add_query(table, upload, download);
@@ -765,6 +767,27 @@ impl<T: ShardTransport + ?Sized> ShardTransport for Box<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A query a budget stop declined was never sent and is not charged; any
+    /// other failed query is, with the bytes it delivered.
+    #[test]
+    fn a_declined_query_costs_nothing() {
+        let mut charges = ByteCharges::default();
+        let table = Table::Pages(0);
+        charges.add_query_reply(table, 100, &Err(BudgetStop::Queries.boxed()));
+        let wrapped = TransferFailure::boxed(0, BudgetStop::Bytes.boxed());
+        charges.add_query_reply(table, 100, &Err(wrapped));
+        assert_eq!((charges.queries(), charges.query_upload()), (0, 0));
+        charges.add_query_reply(table, 100, &Err(TransferFailure::boxed(7, "failed".into())));
+        assert_eq!(
+            (
+                charges.queries(),
+                charges.query_upload(),
+                charges.query_download()
+            ),
+            (1, 100, 7)
+        );
+    }
 
     const DIGEST: &str = "aa";
 
