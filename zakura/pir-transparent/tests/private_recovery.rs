@@ -2389,7 +2389,9 @@ struct DisplayService {
 
 impl DisplayService {
     fn start(start: u64, end: u64, records: &[zakura_pir_transparent::DisplayEntry]) -> Self {
-        use transparent_shard::display::{DisplaySealParams, TXID_4K8};
+        // wallet-pir's production display server takes its own release of
+        // the shard types; hand it the entries through their canonical bytes.
+        use released_transparent_shard::display::{DisplaySealParams, TXID_4K8};
         use transparent_shard_server::{
             display::{
                 DisplayRole,
@@ -2414,7 +2416,13 @@ impl DisplayService {
                 archive_target: 1,
                 geometry: &TXID_4K8,
             },
-            records,
+            &records
+                .iter()
+                .map(|entry| {
+                    released_transparent_shard::txid::DisplayEntry::decode(&entry.encode().unwrap())
+                        .unwrap()
+                })
+                .collect::<Vec<_>>(),
         )
         .unwrap();
         let params = DisplaySealParams {

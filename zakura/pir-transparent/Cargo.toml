@@ -72,6 +72,8 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking"] 
 # `wallet`, which brings the event and filter crates.
 transparent-shard = { package = "zakura-transparent-shard", version = "=0.0.1-rc0", path = "../transparent-shard" }
 transparent-shard-server = { version = "=0.1.0-rc.4" }
+# The release the production shard server above is built on; goes with it.
+released-transparent-shard = { package = "transparent-shard", version = "=0.1.0-rc.4" }
 # The private-recovery test computes the pages query length a manifest fixes.
 transparent-native = { package = "zakura-transparent-native", version = "=0.0.1-rc0", path = "../transparent-native" }
 axum = "0.7"
