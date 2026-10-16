@@ -18,7 +18,9 @@ pub fn jittered(base: Duration) -> Duration {
         return base;
     }
     let nanos = spread.as_nanos().min(u64::MAX as u128) as u64;
-    base + Duration::from_nanos(random_u64() % (nanos + 1))
+    let random = random_u64();
+    let extra = nanos.checked_add(1).map_or(random, |bound| random % bound);
+    base.saturating_add(Duration::from_nanos(extra))
 }
 
 /// `initial` doubled per failure after the first, capped at `cap`, then
@@ -53,6 +55,20 @@ mod tests {
         let distinct: std::collections::BTreeSet<_> = delays.iter().collect();
         assert!(distinct.len() > 100, "{} distinct delays", distinct.len());
         assert_eq!(jittered(Duration::ZERO), Duration::ZERO);
+    }
+
+    #[test]
+    fn enormous_requested_delays_never_overflow_or_shorten() {
+        for base in [
+            Duration::from_nanos(u64::MAX).saturating_mul(2),
+            Duration::from_secs(u64::MAX),
+            Duration::MAX,
+        ] {
+            for _ in 0..64 {
+                let delay = jittered(base);
+                assert!(delay >= base && delay <= base.saturating_add(base / 2));
+            }
+        }
     }
 
     #[test]

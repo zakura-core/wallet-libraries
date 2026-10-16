@@ -16,6 +16,11 @@ use crate::engine::transport::{
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+// Callers may explicitly choose a different finite success-body limit for a
+// larger publication. Error bodies never need the binary-response allowance.
+const DEFAULT_RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
+const ERROR_RESPONSE_LIMIT: usize = 64 * 1024;
+
 /// How the reference clients are built.
 #[derive(Clone, Debug)]
 pub struct HttpOptions {
@@ -72,14 +77,14 @@ pub fn checked(
 ) -> Result<Vec<u8>, BoxError> {
     let status = response.status();
     if status.is_success() {
-        return Ok(response.bytes()?.to_vec());
+        return response_body(response, "checked", DEFAULT_RESPONSE_LIMIT);
     }
     let retry_after = response
         .headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let body = response.bytes()?.to_vec();
+    let body = response_body(response, "checked", DEFAULT_RESPONSE_LIMIT)?;
     if let Some(refused) = refusal(
         status.as_u16(),
         retry_after.as_deref(),
@@ -240,14 +245,22 @@ fn response_body(
     stage: &str,
     response_limit: usize,
 ) -> Result<Vec<u8>, BoxError> {
-    let limit = match stage {
-        "parent_manifest" => 2 * 1024 * 1024,
-        "parent_filters" => transparent_filter::experimental_parent::LIMITS.max_bytes,
-        _ => response_limit,
+    let limit = if response.status().is_success() {
+        match stage {
+            "parent_manifest" => 2 * 1024 * 1024,
+            "parent_filters" => transparent_filter::experimental_parent::LIMITS.max_bytes,
+            _ => response_limit,
+        }
+    } else {
+        ERROR_RESPONSE_LIMIT
     }
-    .min(response_limit);
-    if limit == usize::MAX {
-        return Ok(response.bytes()?.to_vec());
+    .min(response_limit)
+    .min(usize::MAX - 1);
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err("HTTP response exceeds size limit".into());
     }
     use std::io::Read;
     let mut bytes = Vec::new();
@@ -372,7 +385,7 @@ impl HttpResourceClient {
                 .build()?,
             observer,
             retry: RetryPolicy {
-                response_limit: usize::MAX,
+                response_limit: DEFAULT_RESPONSE_LIMIT,
                 attempts: attempts.clamp(1, 3),
                 overload: false,
 
@@ -426,7 +439,7 @@ impl HttpShardTransport {
             client: build(options)?,
             observer: None,
             retry: RetryPolicy {
-                response_limit: usize::MAX,
+                response_limit: DEFAULT_RESPONSE_LIMIT,
                 attempts: 1,
                 overload: true,
 
@@ -473,6 +486,18 @@ impl HttpShardTransport {
     /// Sends one request. Shared by the single-request methods and a batch,
     /// so both take exactly the same path, retries and observation included.
     fn send(&self, request: &ShardRequest<'_>) -> Result<(Vec<u8>, u64), BoxError> {
+        let revision = match request {
+            ShardRequest::Manifest { revision, .. }
+            | ShardRequest::Setup { revision, .. }
+            | ShardRequest::Query { revision, .. } => revision,
+        };
+        if revision.len() != 64
+            || !revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("revision digest must contain exactly 64 hexadecimal characters".into());
+        }
         let url = format!("{}{}", self.base, request.route());
         let (builder, binding) = match *request {
             ShardRequest::Manifest { shard_id, revision }
@@ -641,7 +666,7 @@ impl HttpFilterSource {
             client: build(options)?,
             observer: None,
             retry: RetryPolicy {
-                response_limit: usize::MAX,
+                response_limit: DEFAULT_RESPONSE_LIMIT,
                 attempts: 1,
                 overload: true,
 
@@ -817,6 +842,127 @@ mod observation_tests {
             stream.read_exact(&mut byte).unwrap();
             headers.push(byte[0]);
             assert!(headers.len() < 8192);
+        }
+    }
+
+    #[test]
+    fn default_clients_and_checked_reject_oversized_headers_before_reading_body() {
+        for client_kind in ["resource", "filter", "shard", "checked"] {
+            for status in [200, 503] {
+                let limit = if status == 200 {
+                    DEFAULT_RESPONSE_LIMIT
+                } else {
+                    ERROR_RESPONSE_LIMIT
+                };
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = std::thread::spawn(move || {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    read_headers(&mut stream);
+                    // No large allocation or payload is needed to prove that
+                    // the advertised length is refused before a full read.
+                    write!(
+                        stream,
+                        "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        limit + 1
+                    )
+                    .unwrap();
+                });
+                let base = format!("http://{address}");
+                let options = HttpOptions::default();
+                let result = match client_kind {
+                    "resource" => HttpResourceClient::new(&options, None, 1)
+                        .unwrap()
+                        .get(&base, "test"),
+                    "filter" => HttpFilterSource::new(base, &options)
+                        .unwrap()
+                        .shard_map()
+                        .map(|(bytes, _)| bytes),
+                    "shard" => HttpShardTransport::new(base, &options)
+                        .unwrap()
+                        .init()
+                        .map(|(bytes, _)| bytes),
+                    "checked" => checked(
+                        build(&options).unwrap().get(base).send().unwrap(),
+                        1,
+                        "revision",
+                    ),
+                    _ => unreachable!(),
+                };
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("response exceeds size limit"),
+                    "{client_kind} {status}"
+                );
+                server.join().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_revision_digests_never_reach_the_network() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let mut client = HttpShardTransport::new(base, &HttpOptions::default()).unwrap();
+        for revision in [
+            String::new(),
+            "../setup".into(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "g".repeat(64),
+            "A".repeat(64),
+            format!("{}?x=1", "a".repeat(64)),
+        ] {
+            assert!(
+                client
+                    .manifest(1, &revision)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("revision digest")
+            );
+            assert!(
+                client
+                    .setup(1, &revision, Table::Directory, 0)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("revision digest")
+            );
+            assert!(
+                client
+                    .query(1, &revision, Table::Directory, &[])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("revision digest")
+            );
+        }
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn enormous_retry_after_returns_the_refusal_without_panicking_or_waiting() {
+        for attempts in [1, 3] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                read_headers(&mut stream);
+                write!(stream, "HTTP/1.1 503 Busy\r\nRetry-After: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", u64::MAX).unwrap();
+            });
+            let mut client =
+                HttpShardTransport::new(format!("http://{address}"), &HttpOptions::default())
+                    .unwrap()
+                    .with_retry_attempts(attempts);
+            let started = Instant::now();
+            let error = client.init().unwrap_err();
+            assert!(crate::engine::transport::Overloaded::found_in(&error).is_some());
+            assert!(started.elapsed() < Duration::from_secs(1));
+            server.join().unwrap();
         }
     }
 
@@ -1048,7 +1194,7 @@ mod observation_tests {
             .iter()
             .map(|&shard_id| ShardRequest::Manifest {
                 shard_id,
-                revision: "aa",
+                revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             })
             .collect();
         let started = Instant::now();
@@ -1071,7 +1217,7 @@ mod observation_tests {
             .iter()
             .map(|&shard_id| ShardRequest::Setup {
                 shard_id,
-                revision: "aa",
+                revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 table: Table::Directory,
                 segment: 0,
             })
@@ -1120,7 +1266,7 @@ mod observation_tests {
             .with_observer(Arc::new(move |e| saved.lock().unwrap().push(e)));
             let started = Instant::now();
             let result = if bound {
-                client.manifest(1, "revision")
+                client.manifest(1, &"a".repeat(64))
             } else {
                 client.init()
             };
