@@ -17,7 +17,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror = "2"
-zakura-pir-native = { version = "=0.0.1-rc2", path = "../pir-native" }
+zakura-pir-native = { version = "=0.0.1-rc2", path = "../pir-native", features = ["client"] }
 
 [dev-dependencies]
 zakura-pir-native = { version = "=0.0.1-rc2", path = "../pir-native", features = ["test-server"] }

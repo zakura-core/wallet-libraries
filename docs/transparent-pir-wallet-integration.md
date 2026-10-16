@@ -75,7 +75,7 @@ private queries are encoded and retrieved.
 | Receipt screen → wallet store | Read one transaction's history view, transparent details, and what they establish together, in one snapshot | `transaction_receipt`, `ReceiptAttribution` |
 
 The ledger APIs do not depend on wallet-pir's wire types. The adapter,
-`zakura-pir-transparent`, translates protocol records, leaving publisher trust
+`zakura-transparent-private-wallet`, translates protocol records, leaving publisher trust
 and activation to the caller. Vizor supplies routed HTTPS, including Tor when
 enabled; the adapter owns service routes and response interpretation.
 
@@ -592,7 +592,7 @@ the new setting. Previously withheld transactions can be fetched publicly.
 Resumed address and transaction queries can link privately learned information
 to the wallet.
 
-`forget_private_recovery` (zakura-pir-transparent, feature `sqlite`) deletes
+`forget_private_recovery` (zakura-transparent-private-wallet, feature `sqlite`) deletes
 every companion and only then runs `forget_transparent_ledger` through the
 application's `WriteGate`. A companion records which revisions the wallet
 holds; one that outlived the facts would make a later private run skip them, so

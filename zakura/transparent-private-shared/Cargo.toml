@@ -1,0 +1,29 @@
+[package]
+name = "zakura-transparent-private-shared"
+version = "0.0.1-rc0"
+# The event, filter and shard code moved from wallet-pir at edition 2021 and
+# compiles unchanged under it.
+edition = "2021"
+description = "Transparent private-mode protocol shared by the wallet and the publisher: events, filters, shard layout and manifests, and native PIR profiles"
+rust-version.workspace = true
+license = "MIT"
+repository.workspace = true
+readme = "README.md"
+categories.workspace = true
+keywords = ["zcash", "privacy", "pir"]
+
+# No features: nothing here is the wallet's or the server's alone, so no
+# feature switches this crate between them.
+[dependencies]
+base64 = "0.22"
+hex = { workspace = true, features = ["std"] }
+serde = { workspace = true, features = ["std"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror = "2"
+# The generic native profile, with neither its client nor its server
+# operations: parameters, masks, setups and lengths only.
+zakura-pir-native = { version = "=0.0.1-rc2", path = "../pir-native" }
+
+[dev-dependencies]
+serde_json.workspace = true

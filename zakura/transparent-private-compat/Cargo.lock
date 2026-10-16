@@ -3436,6 +3436,61 @@ dependencies = [
 [[package]]
 name = "zakura-client-backend"
 version = "0.1.0-rc9"
+dependencies = [
+ "ambassador",
+ "assert_matches",
+ "base64 0.22.1",
+ "bech32",
+ "bip32",
+ "bs58",
+ "byteorder",
+ "document-features",
+ "flume",
+ "getset",
+ "group",
+ "hex",
+ "incrementalmerkletree",
+ "memuse",
+ "nonempty",
+ "percent-encoding",
+ "proptest",
+ "prost",
+ "rand 0.10.3",
+ "rand 0.8.8",
+ "rand_chacha 0.3.1",
+ "rand_core 0.10.1",
+ "rayon",
+ "secp256k1 0.33.1",
+ "secrecy",
+ "shardtree",
+ "subtle",
+ "time",
+ "tonic-prost-build",
+ "tracing",
+ "which",
+ "zakura-address",
+ "zakura-bls12-381",
+ "zakura-jubjub",
+ "zakura-keys",
+ "zakura-note-encryption",
+ "zakura-one-time-ivk 0.0.1-rc0",
+ "zakura-orchard",
+ "zakura-pasta-curves",
+ "zakura-pir-enhance-types 0.0.1-rc1",
+ "zakura-primitives",
+ "zakura-proofs",
+ "zakura-protocol",
+ "zakura-sapling-crypto",
+ "zakura-transparent",
+ "zakura-zip321",
+ "zcash_encoding",
+ "zcash_script",
+ "zip32",
+]
+
+[[package]]
+name = "zakura-client-backend"
+version = "0.1.0-rc9"
 source = "git+https://github.com/zakura-core/wallet-libraries.git?rev=1c1bd327e493b740f8ffbd109039acb88a45e100#1c1bd327e493b740f8ffbd109039acb88a45e100"
 dependencies = [
  "ambassador",
@@ -3474,16 +3529,66 @@ dependencies = [
  "zakura-jubjub",
  "zakura-keys",
  "zakura-note-encryption",
- "zakura-one-time-ivk",
+ "zakura-one-time-ivk 0.0.1-rc0 (git+https://github.com/zakura-core/wallet-libraries.git?rev=1c1bd327e493b740f8ffbd109039acb88a45e100)",
  "zakura-orchard",
  "zakura-pasta-curves",
- "zakura-pir-enhance-types",
+ "zakura-pir-enhance-types 0.0.1-rc1 (git+https://github.com/zakura-core/wallet-libraries.git?rev=1c1bd327e493b740f8ffbd109039acb88a45e100)",
  "zakura-primitives",
  "zakura-proofs",
  "zakura-protocol",
  "zakura-sapling-crypto",
  "zakura-transparent",
  "zakura-zip321",
+ "zcash_encoding",
+ "zcash_script",
+ "zip32",
+]
+
+[[package]]
+name = "zakura-client-sqlite"
+version = "0.1.0-rc9"
+dependencies = [
+ "ambassador",
+ "bip32",
+ "bitflags 2.13.2",
+ "bs58",
+ "byteorder",
+ "document-features",
+ "group",
+ "hex",
+ "incrementalmerkletree",
+ "maybe-rayon",
+ "nonempty",
+ "prost",
+ "rand 0.10.3",
+ "rand_chacha 0.3.1",
+ "rand_core 0.10.1",
+ "rand_distr",
+ "regex",
+ "rusqlite",
+ "schemerz",
+ "schemerz-rusqlite",
+ "secp256k1 0.33.1",
+ "secrecy",
+ "shardtree",
+ "static_assertions",
+ "subtle",
+ "tempfile",
+ "time",
+ "tracing",
+ "uuid",
+ "zakura-address",
+ "zakura-client-backend 0.1.0-rc9",
+ "zakura-jubjub",
+ "zakura-keys",
+ "zakura-note-encryption",
+ "zakura-one-time-ivk 0.0.1-rc0",
+ "zakura-orchard",
+ "zakura-pczt 0.1.0-rc6",
+ "zakura-primitives",
+ "zakura-protocol",
+ "zakura-sapling-crypto",
+ "zakura-transparent",
  "zcash_encoding",
  "zcash_script",
  "zip32",
@@ -3524,13 +3629,13 @@ dependencies = [
  "tracing",
  "uuid",
  "zakura-address",
- "zakura-client-backend",
+ "zakura-client-backend 0.1.0-rc9 (git+https://github.com/zakura-core/wallet-libraries.git?rev=1c1bd327e493b740f8ffbd109039acb88a45e100)",
  "zakura-jubjub",
  "zakura-keys",
  "zakura-note-encryption",
- "zakura-one-time-ivk",
+ "zakura-one-time-ivk 0.0.1-rc0 (git+https://github.com/zakura-core/wallet-libraries.git?rev=1c1bd327e493b740f8ffbd109039acb88a45e100)",
  "zakura-orchard",
- "zakura-pczt",
+ "zakura-pczt 0.1.0-rc6 (git+https://github.com/zakura-core/wallet-libraries.git?rev=1c1bd327e493b740f8ffbd109039acb88a45e100)",
  "zakura-primitives",
  "zakura-protocol",
  "zakura-sapling-crypto",
@@ -3652,6 +3757,18 @@ dependencies = [
 [[package]]
 name = "zakura-one-time-ivk"
 version = "0.0.1-rc0"
+dependencies = [
+ "blake2b_simd",
+ "ff",
+ "zakura-orchard",
+ "zakura-pasta-curves",
+ "zakura-protocol",
+ "zeroize",
+]
+
+[[package]]
+name = "zakura-one-time-ivk"
+version = "0.0.1-rc0"
 source = "git+https://github.com/zakura-core/wallet-libraries.git?rev=1c1bd327e493b740f8ffbd109039acb88a45e100#1c1bd327e493b740f8ffbd109039acb88a45e100"
 dependencies = [
  "blake2b_simd",
@@ -3728,6 +3845,34 @@ dependencies = [
 [[package]]
 name = "zakura-pczt"
 version = "0.1.0-rc6"
+dependencies = [
+ "blake2b_simd",
+ "document-features",
+ "ff",
+ "getset",
+ "nonempty",
+ "postcard",
+ "rand 0.10.3",
+ "rand_core 0.10.1",
+ "secp256k1 0.33.1",
+ "serde",
+ "serde_with",
+ "zakura-bls12-381",
+ "zakura-jubjub",
+ "zakura-note-encryption",
+ "zakura-orchard",
+ "zakura-pasta-curves",
+ "zakura-primitives",
+ "zakura-protocol",
+ "zakura-redjubjub",
+ "zakura-sapling-crypto",
+ "zakura-transparent",
+ "zcash_script",
+]
+
+[[package]]
+name = "zakura-pczt"
+version = "0.1.0-rc6"
 source = "git+https://github.com/zakura-core/wallet-libraries.git?rev=1c1bd327e493b740f8ffbd109039acb88a45e100#1c1bd327e493b740f8ffbd109039acb88a45e100"
 dependencies = [
  "blake2b_simd",
@@ -3757,7 +3902,22 @@ dependencies = [
 [[package]]
 name = "zakura-pir-enhance-types"
 version = "0.0.1-rc1"
+
+[[package]]
+name = "zakura-pir-enhance-types"
+version = "0.0.1-rc1"
 source = "git+https://github.com/zakura-core/wallet-libraries.git?rev=1c1bd327e493b740f8ffbd109039acb88a45e100#1c1bd327e493b740f8ffbd109039acb88a45e100"
+
+[[package]]
+name = "zakura-pir-native"
+version = "0.0.1-rc2"
+dependencies = [
+ "ipir-sp",
+ "rand 0.8.8",
+ "rand_chacha 0.3.1",
+ "rayon",
+ "reinspiring",
+]
 
 [[package]]
 name = "zakura-pir-native"
@@ -3788,8 +3948,8 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "url",
- "zakura-client-backend",
- "zakura-client-sqlite",
+ "zakura-client-backend 0.1.0-rc9 (git+https://github.com/zakura-core/wallet-libraries.git?rev=1c1bd327e493b740f8ffbd109039acb88a45e100)",
+ "zakura-client-sqlite 0.1.0-rc9 (git+https://github.com/zakura-core/wallet-libraries.git?rev=1c1bd327e493b740f8ffbd109039acb88a45e100)",
  "zakura-primitives",
  "zakura-protocol",
  "zakura-transparent",
@@ -3987,7 +4147,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "zakura-pir-native",
+ "zakura-pir-native 0.0.1-rc2 (git+https://github.com/zakura-core/wallet-libraries.git?rev=1c1bd327e493b740f8ffbd109039acb88a45e100)",
 ]
 
 [[package]]
@@ -4005,8 +4165,10 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
- "zakura-client-backend",
- "zakura-client-sqlite",
+ "zakura-client-backend 0.1.0-rc9",
+ "zakura-client-backend 0.1.0-rc9 (git+https://github.com/zakura-core/wallet-libraries.git?rev=1c1bd327e493b740f8ffbd109039acb88a45e100)",
+ "zakura-client-sqlite 0.1.0-rc9",
+ "zakura-client-sqlite 0.1.0-rc9 (git+https://github.com/zakura-core/wallet-libraries.git?rev=1c1bd327e493b740f8ffbd109039acb88a45e100)",
  "zakura-pir-transparent",
  "zakura-primitives",
  "zakura-protocol",
@@ -4014,8 +4176,67 @@ dependencies = [
  "zakura-transparent-events",
  "zakura-transparent-filter",
  "zakura-transparent-native",
+ "zakura-transparent-private-server",
+ "zakura-transparent-private-shared",
+ "zakura-transparent-private-wallet",
  "zakura-transparent-shard",
  "zakura-transparent-txid-client",
+]
+
+[[package]]
+name = "zakura-transparent-private-server"
+version = "0.0.1-rc0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "bitcoin",
+ "hex",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "zakura-pir-native 0.0.1-rc2",
+ "zakura-transparent-private-shared",
+]
+
+[[package]]
+name = "zakura-transparent-private-shared"
+version = "0.0.1-rc0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "zakura-pir-native 0.0.1-rc2",
+]
+
+[[package]]
+name = "zakura-transparent-private-wallet"
+version = "0.0.1-rc0"
+dependencies = [
+ "base64 0.22.1",
+ "bitcoin",
+ "hex",
+ "reqwest",
+ "rusqlite",
+ "rustix",
+ "same-file",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "url",
+ "zakura-client-backend 0.1.0-rc9",
+ "zakura-client-sqlite 0.1.0-rc9",
+ "zakura-pir-native 0.0.1-rc2",
+ "zakura-primitives",
+ "zakura-protocol",
+ "zakura-transparent",
+ "zakura-transparent-private-server",
+ "zakura-transparent-private-shared",
 ]
 
 [[package]]

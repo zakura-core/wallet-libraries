@@ -44,18 +44,35 @@
 //! a one-digit `K_g` key of half the size, masks rounded to 22 bits, 28-bit
 //! dithered selections only and 10-bit responses.
 //!
+//! Each role's operations are behind a feature, so a build carries only its
+//! own: `client` prepares queries and decodes responses, `server` builds the
+//! hint, preprocesses, publishes masks, parses queries and packs responses.
+//! Without either, the crate is the profile alone: parameters, masks, setups
+//! and lengths, which both sides derive.
+//!
 //! This profile is experimental: ipir-sp's cryptographic gates for the native
 //! path remain open, and correctness certificates are snapshot-specific.
 
+#[cfg(any(feature = "client", feature = "server"))]
 use ipir_sp::bits::{contiguous_bytes_to_u64s, u64s_to_contiguous_bytes};
 use ipir_sp::native::{NativeProfile, NativePublicSetup};
+#[cfg(feature = "client")]
 use rand::{RngCore, SeedableRng};
+#[cfg(feature = "client")]
 use rand_chacha::ChaCha20Rng;
+#[cfg(feature = "server")]
 use rayon::prelude::*;
-use reinspiring::native::{NativeParams, NativeTwoMaskCiphertext, SecretDistribution};
+#[cfg(feature = "client")]
+use reinspiring::native::NativeTwoMaskCiphertext;
+use reinspiring::native::{NativeParams, SecretDistribution};
+#[cfg(feature = "server")]
 use std::borrow::Borrow;
 
-pub use reinspiring::native::{NativeKeys, NativePreprocessed, NativeSecret, NativeSetup};
+#[cfg(feature = "client")]
+pub use reinspiring::native::NativeSecret;
+pub use reinspiring::native::NativeSetup;
+#[cfg(feature = "server")]
+pub use reinspiring::native::{NativeKeys, NativePreprocessed};
 
 /// Ciphertext modulus.
 pub const Q: u64 = 1 << 54;
@@ -254,6 +271,7 @@ impl Profile {
         }
     }
 
+    #[cfg(feature = "server")]
     /// Canonical published bytes for two-mask blocks: every first mask, then
     /// every second mask, each coefficient rounded to `mask_bits`.
     pub fn publish<B: Borrow<NativePreprocessed>>(&self, blocks: &[B]) -> Result<Vec<u8>, String> {
@@ -274,6 +292,7 @@ impl Profile {
         Ok(u64s_to_contiguous_bytes(&words, self.mask_bits))
     }
 
+    #[cfg(feature = "client")]
     /// Fresh secret, one-key packing upload and the profile's own selection
     /// ([`Self::primary_bits`]): 49 bits to nearest for [`P16`], 28 dithered
     /// bits for [`P8`].
@@ -294,6 +313,7 @@ impl Profile {
         self.prepare_rounded(setup, masks, rows, target, (bits, dithered), rng)
     }
 
+    #[cfg(feature = "client")]
     /// Fresh secret, one-key packing upload and dithered selection.
     pub fn prepare_dithered(
         &self,
@@ -313,6 +333,7 @@ impl Profile {
         )
     }
 
+    #[cfg(feature = "client")]
     /// Fresh secret, one-key packing upload and dithered selection over a
     /// caller's generator; see the free [`prepare_dithered_with`].
     pub fn prepare_dithered_with(
@@ -326,6 +347,7 @@ impl Profile {
         self.prepare_rounded(setup, masks, rows, target, (self.dithered_bits, true), rng)
     }
 
+    #[cfg(feature = "client")]
     /// Draws the secret, the packing key, the selection's errors and, when
     /// dithered, one rounding coin per row, in that order.
     fn prepare_rounded(
@@ -341,7 +363,8 @@ impl Profile {
             return Err("native query shape".into());
         }
         let secret = NativeSecret::sample(&self.params(), rng);
-        let keys = NativeKeys::generate_one_key(setup, &secret, rng).map_err(|e| e.to_string())?;
+        let keys = reinspiring::native::NativeKeys::generate_one_key(setup, &secret, rng)
+            .map_err(|e| e.to_string())?;
         let query = secret
             .encrypt_selection(&masks[..rows / D], target, rng)
             .map_err(|e| e.to_string())?;
@@ -358,6 +381,7 @@ impl Profile {
         Ok((secret, bytes))
     }
 
+    #[cfg(feature = "server")]
     /// Parses an upload whose selection was sent at `bits`, one of the
     /// profile's widths, into its packing key and the selection lifted back
     /// to `q`.
@@ -398,6 +422,7 @@ impl Profile {
         Ok((keys, query))
     }
 
+    #[cfg(feature = "server")]
     /// Parses an upload at whichever width its exact length names.
     pub fn parse_accepted(
         &self,
@@ -411,6 +436,7 @@ impl Profile {
         self.parse_bits(setup, bytes, rows, bits)
     }
 
+    #[cfg(feature = "server")]
     /// Parses a full or prefix upload and returns the selection over every
     /// row; see the free [`parse_selection`].
     pub fn parse_selection(
@@ -431,6 +457,7 @@ impl Profile {
         Ok((keys, query))
     }
 
+    #[cfg(feature = "client")]
     /// Decodes every plaintext coefficient of a two-mask response, each as
     /// `entry_bytes` little-endian bytes.
     pub fn decode_cols(
@@ -480,6 +507,7 @@ impl Profile {
         Ok(out)
     }
 
+    #[cfg(feature = "server")]
     /// Prepares one uploaded key for every block, then finishes each block
     /// with its scan result. Returns the switched response bodies.
     pub fn pack<B: Borrow<NativePreprocessed> + Sync>(
@@ -511,6 +539,7 @@ impl Profile {
         Ok(self.response(&values))
     }
 
+    #[cfg(feature = "server")]
     /// Rounds response bodies to `response_bits` and bit-packs them.
     pub fn response(&self, bodies: &[u64]) -> Vec<u8> {
         let switched: Vec<_> = bodies
@@ -604,10 +633,12 @@ pub const fn accepted_query_bits(rows: usize, len: usize) -> Option<usize> {
     P16.accepted_query_bits(rows, len)
 }
 
+#[cfg(any(feature = "client", feature = "server"))]
 fn round(x: u64, bits: usize) -> u64 {
     (((x as u128 * (1u128 << bits) + (Q / 2) as u128) / Q as u128) as u64) & ((1 << bits) - 1)
 }
 
+#[cfg(feature = "client")]
 /// Unbiased randomized rounding of `x < Q` to `bits`: up with probability
 /// exactly `dropped / 2^(Q_BITS - bits)`, by comparing the dropped bits with
 /// the low bits of a fresh uniform `coin`. Branch-free in the value. The same
@@ -619,12 +650,14 @@ fn round_dithered(x: u64, bits: usize, coin: u64) -> u64 {
     ((x >> shift) + up) & ((1 << bits) - 1)
 }
 
+#[cfg(feature = "server")]
 /// Canonical published bytes for two-mask blocks: every first mask, then every
 /// second mask, each coefficient rounded to `MASK_BITS`.
 pub fn publish<B: Borrow<NativePreprocessed>>(blocks: &[B]) -> Result<Vec<u8>, String> {
     P16.publish(blocks)
 }
 
+#[cfg(feature = "client")]
 /// Fresh secret, one-key packing upload and 49-bit selection query.
 pub fn prepare_with(
     setup: &NativeSetup,
@@ -635,6 +668,7 @@ pub fn prepare_with(
     P16.prepare(setup, masks, rows, target)
 }
 
+#[cfg(feature = "client")]
 /// Fresh secret, one-key packing upload and 44-bit dithered selection query.
 pub fn prepare_dithered(
     setup: &NativeSetup,
@@ -653,6 +687,7 @@ pub fn prepare_dithered(
     )
 }
 
+#[cfg(feature = "client")]
 /// [`prepare_dithered`] over a caller's generator, which must be freshly and
 /// secretly seeded for every query: it draws the secret, the packing key, the
 /// selection's errors and then one rounding coin per row, in that order.
@@ -671,6 +706,7 @@ pub fn prepare_dithered_with(
     P16.prepare_dithered_with(setup, masks, rows, target, rng)
 }
 
+#[cfg(feature = "server")]
 /// Parses a 49-bit upload into its packing key and the selection lifted back
 /// to `q`.
 pub fn parse_with(
@@ -681,6 +717,7 @@ pub fn parse_with(
     parse_bits(setup, bytes, rows, QUERY_BITS)
 }
 
+#[cfg(feature = "server")]
 /// Parses an upload at whichever accepted width its exact length names; see
 /// [`accepted_query_bits`]. Any other length is refused.
 pub fn parse_accepted(
@@ -691,6 +728,7 @@ pub fn parse_accepted(
     P16.parse_accepted(setup, bytes, rows)
 }
 
+#[cfg(feature = "server")]
 /// Parses an upload whose selection was sent at `bits`, which must be
 /// [`QUERY_BITS`] or [`DITHERED_QUERY_BITS`], into its packing key and the
 /// selection lifted back to `q`.
@@ -722,6 +760,7 @@ pub const fn accepted_query_shape(
     P16.accepted_query_shape(rows, query_rows, len)
 }
 
+#[cfg(feature = "server")]
 /// Parses an upload over every one of `rows`, or over only the first
 /// `query_rows`, at either accepted width ([`accepted_query_shape`]), and
 /// returns the selection over every row, zero past what was sent.
@@ -742,6 +781,7 @@ pub fn parse_selection(
     P16.parse_selection(setup, bytes, query_rows, rows)
 }
 
+#[cfg(feature = "client")]
 /// Decodes every little-endian u16 plaintext coefficient of a two-mask response.
 ///
 /// Unlike [`Profile::decode_cols`], zero columns with empty material decode to
@@ -758,6 +798,7 @@ pub fn decode_cols(
     P16.decode_cols(secret, public, body, cols)
 }
 
+#[cfg(feature = "server")]
 /// Prepares one uploaded key for every block, then finishes each block with
 /// its scan result. Returns the switched response bodies.
 pub fn pack<B: Borrow<NativePreprocessed> + Sync>(
@@ -768,25 +809,30 @@ pub fn pack<B: Borrow<NativePreprocessed> + Sync>(
     P16.pack(blocks, keys, intermediate)
 }
 
+#[cfg(feature = "server")]
 /// Rounds response bodies to `RESPONSE_BITS` and bit-packs them.
 pub fn response(bodies: &[u64]) -> Vec<u8> {
     P16.response(bodies)
 }
 
 /// A stored plaintext coefficient: u16 under [`P16`], u8 under [`P8`].
+#[cfg(feature = "server")]
 pub trait Entry: Copy + Into<u64> + Send + Sync {
     /// The largest value, which bounds the hint's lifted products.
     const MAX: u64;
 }
 
+#[cfg(feature = "server")]
 impl Entry for u16 {
     const MAX: u64 = u16::MAX as u64;
 }
 
+#[cfg(feature = "server")]
 impl Entry for u8 {
     const MAX: u64 = u8::MAX as u64;
 }
 
+#[cfg(feature = "server")]
 /// The public hint `H = A * D` for one segment, one block of `D` rows per
 /// packing block, using exact lifted native-ring products.
 ///
@@ -828,6 +874,7 @@ pub fn hint<'a, T: Entry + 'a>(
         .collect()
 }
 
+#[cfg(feature = "server")]
 /// Two-mask preprocessing for every block of a hint.
 pub fn preprocess(
     setup: &NativeSetup,
@@ -854,7 +901,7 @@ pub const PREPARED_HEADER_BYTES: u64 = 16;
 /// The fixture builds its hint, preprocessing, published masks and packed
 /// responses with this crate's server operations, but scans the table with its
 /// own scalar loop, independent of any server's scan.
-#[cfg(any(test, feature = "test-server"))]
+#[cfg(feature = "test-server")]
 pub mod test_server {
     use super::*;
 
@@ -917,7 +964,7 @@ pub mod test_server {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "client", feature = "server"))]
 mod tests {
     use super::*;
     use rand::Rng;

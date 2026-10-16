@@ -8044,39 +8044,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zakura-pir-transparent"
-version = "0.0.1-rc2"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "hex",
- "regex",
- "reqwest",
- "rusqlite",
- "rustix",
- "same-file",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tower",
- "url",
- "zakura-client-backend",
- "zakura-client-sqlite",
- "zakura-keys",
- "zakura-primitives",
- "zakura-protocol",
- "zakura-transparent",
- "zakura-transparent-events",
- "zakura-transparent-filter",
- "zakura-transparent-native",
- "zakura-transparent-shard",
- "zakura-transparent-txid-client",
-]
-
-[[package]]
 name = "zakura-primitives"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8288,31 +8255,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "zakura-transparent-events"
+name = "zakura-transparent-private-server"
 version = "0.0.1-rc0"
 dependencies = [
- "hex",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "zakura-transparent-filter"
-version = "0.0.1-rc0"
-dependencies = [
+ "axum",
+ "base64 0.22.1",
  "bitcoin",
- "clap",
- "hex",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "zakura-transparent-native"
-version = "0.0.1-rc0"
-dependencies = [
  "hex",
  "ipir-sp",
  "rand 0.8.8",
@@ -8321,11 +8269,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "thiserror 2.0.21",
  "zakura-pir-native",
+ "zakura-transparent-private-shared",
 ]
 
 [[package]]
-name = "zakura-transparent-shard"
+name = "zakura-transparent-private-shared"
 version = "0.0.1-rc0"
 dependencies = [
  "base64 0.22.1",
@@ -8334,25 +8284,43 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
- "zakura-transparent-events",
- "zakura-transparent-filter",
+ "zakura-pir-native",
 ]
 
 [[package]]
-name = "zakura-transparent-txid-client"
+name = "zakura-transparent-private-wallet"
 version = "0.0.1-rc0"
 dependencies = [
+ "axum",
  "base64 0.22.1",
+ "bitcoin",
  "clap",
  "flate2",
  "hex",
+ "rand 0.8.8",
+ "rand_chacha 0.3.1",
+ "regex",
  "reqwest",
+ "rusqlite",
+ "rustix",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "zakura-transparent-events",
- "zakura-transparent-native",
- "zakura-transparent-shard",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "url",
+ "zakura-client-backend",
+ "zakura-client-sqlite",
+ "zakura-keys",
+ "zakura-pir-native",
+ "zakura-primitives",
+ "zakura-protocol",
+ "zakura-transparent",
+ "zakura-transparent-private-server",
+ "zakura-transparent-private-shared",
 ]
 
 [[package]]

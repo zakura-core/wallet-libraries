@@ -18,7 +18,7 @@ path = "src/lib.rs"
 [dependencies]
 # The wire codec alone: this crate parses structure and checks no cryptography.
 zakura-receiver-crypto = { version = "=0.0.1-rc0", path = "../receiver-crypto", default-features = false }
-# Pinned exactly, as in `zakura-transparent-filter`: the filter bytes are what
+# Pinned exactly, as in the Transparent private-mode filter crates: the filter bytes are what
 # every wallet tests, so the encoder may not move without revalidation.
 bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
 sha2 = "0.10"

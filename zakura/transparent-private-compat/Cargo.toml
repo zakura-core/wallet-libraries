@@ -38,6 +38,18 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking"] 
 rand_chacha = "0.3"
 uuid = "1"
 
+# The current crates, compared with the baseline by the tests.
+[dev-dependencies]
+zakura-transparent-private-shared = { path = "../transparent-private-shared" }
+zakura-transparent-private-wallet = { path = "../transparent-private-wallet", features = ["sqlite", "testing", "reqwest"] }
+zakura-transparent-private-server = { path = "../transparent-private-server", features = ["testing"] }
+cur-sqlite = { package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", features = ["orchard", "transparent-inputs", "test-dependencies", "unstable"] }
+cur-backend = { package = "zakura-client-backend", path = "../../librustzcash/zcash_client_backend", features = ["orchard", "test-dependencies"] }
+
+[[test]]
+name = "live"
+required-features = ["live-baseline"]
+
 [[bin]]
 name = "capture"
 required-features = ["live-baseline"]
