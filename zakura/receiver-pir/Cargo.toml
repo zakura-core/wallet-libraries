@@ -1,8 +1,6 @@
 [package]
 name = "zakura-receiver-pir"
 version = "0.0.1-rc0"
-# Unpublished with `zakura-receiver-directory`.
-publish = false
 # Kept at 2021 from wallet-pir so the moved code compiles unchanged.
 edition = "2021"
 description = "Receiver directory PIR: session manifests, the client, the wallet transport and the evaluator"
@@ -23,7 +21,7 @@ server = ["dep:ipir-sp"]
 
 [dependencies]
 hex = "0.4"
-receiver-directory = { package = "zakura-receiver-directory", path = "../receiver-directory" }
+receiver-directory = { package = "zakura-receiver-directory", version = "=0.0.1-rc0", path = "../receiver-directory" }
 ipir-sp = { version = "=0.1.0-rc.7", optional = true }
 pir-native = { package = "zakura-pir-native", version = "=0.0.1-rc1", path = "../pir-native" }
 rand = "0.8"

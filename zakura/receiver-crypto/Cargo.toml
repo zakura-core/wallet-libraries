@@ -1,7 +1,6 @@
 [package]
 name = "zakura-receiver-crypto"
 version = "0.0.1-rc0"
-publish = false
 description = "Receiver directory validation: addresses, zero-OVK recovery, records and inclusion proofs"
 edition.workspace = true
 rust-version.workspace = true
