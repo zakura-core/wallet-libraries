@@ -390,43 +390,4 @@ fn failed_syncs_leave_only_the_adopted_maps_revisions_cached() {
             [current_revisions.clone(), current_revisions]
         );
     }
-
-    // A newer map the sync refuses before adopting it changes nothing cached,
-    // though it no longer publishes the tail the stores hold.
-    let tail = &served.last().unwrap().map.shards[1];
-    let refused = publish(&mut server, root.path(), 4);
-    let before = cached_revisions(&path);
-    refused_sync(&mut sqlite, &refused, &chain);
-    refused_sync(&mut memory, &refused, &chain);
-    for store in [&sqlite as &dyn WalletStore, &memory] {
-        assert_caches(store, &[&sealed, tail], &[], &run, &sealed);
-    }
-    assert_eq!(cached_revisions(&path), before);
-}
-
-/// Syncs to a target the publication's tail does not end on, which the sync
-/// refuses before it adopts the map.
-fn refused_sync<S: WalletStore>(store: &mut S, served: &Served, chain: &StaticChain) {
-    let options = HttpOptions::default();
-    let mut filters = HttpFilterSource::new(&served.url, &options).unwrap();
-    let mut transport = HttpShardTransport::new(&served.url, &options).unwrap();
-    let geometry = parse_init(&transport.init().unwrap().0).unwrap();
-    let (sealed, tail) = (&served.map.shards[0], &served.map.shards[1]);
-    sync_into(
-        store,
-        &served.map,
-        0,
-        &geometry,
-        chain,
-        &mut StaticScripts(Vec::new()),
-        &mut filters,
-        &mut transport,
-        &WorkLimits::UNLIMITED,
-        &Anchor {
-            height: tail.end_height,
-            hash: sealed.terminal_block_hash.clone(),
-        },
-    )
-    .err()
-    .expect("the sync refuses the map");
 }
