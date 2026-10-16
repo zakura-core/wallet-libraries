@@ -3688,42 +3688,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
-name = "pir-control"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "218ff42f9e0129b600cfd03d126c0964460a9d085b3a3ea69443e5742d4c7854"
-dependencies = [
- "hex",
- "rand 0.8.8",
- "serde",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "pir-native"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d418b79cb9fca50a00e3cc4d2bf4ba9d9a4f3e4eeded0b52c9aedb0cbc956f4"
-dependencies = [
- "ipir-sp",
- "rand 0.8.8",
- "rand_chacha 0.3.1",
- "rayon",
- "reinspiring",
-]
-
-[[package]]
-name = "pir-observability"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1adddf7e3ac9297a7fbe939df8f23f0a4d01643b7523a5f376c5690eb96e89b"
-dependencies = [
- "axum",
- "http-body",
- "serde",
-]
-
-[[package]]
 name = "pkcs1"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4375,7 +4339,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower",
- "tower-http 0.6.11",
+ "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -5421,7 +5385,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -6634,22 +6597,6 @@ dependencies = [
 
 [[package]]
 name = "tower-http"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e9cd434a998747dd2c4276bc96ee2e0c7a2eadf3cae88e52be55a05fa9053f5"
-dependencies = [
- "bitflags 2.13.2",
- "bytes",
- "http",
- "http-body",
- "http-body-util",
- "pin-project-lite",
- "tower-layer",
- "tower-service",
-]
-
-[[package]]
-name = "tower-http"
 version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
@@ -6770,93 +6717,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "transparent-events"
-version = "0.1.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b566f517dec3abeeece5191c18204f5266ff42dc2e4d4d46db0b86387950b01a"
-dependencies = [
- "hex",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "transparent-filter"
-version = "0.1.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86d64dd5c657e4deed127d3540668861028cdf9b99f0a1cc08439f0372a0082a"
-dependencies = [
- "bitcoin",
- "hex",
- "serde",
- "sha2 0.10.9",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "transparent-native"
-version = "0.1.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f5dd7d5c42a4dd7e8904b1fdfb34290c054a207bf4f4d5a5e107718c4043f4"
-dependencies = [
- "hex",
- "pir-native",
- "rayon",
- "serde",
- "serde_json",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "transparent-shard"
-version = "0.1.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e054f8d90e8ea540e855e2f01e1889d522dccc71912f08a792755be4ae2853db"
-dependencies = [
- "base64 0.22.1",
- "hex",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.21",
- "transparent-events",
- "transparent-filter",
-]
-
-[[package]]
-name = "transparent-shard-server"
-version = "0.1.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66da689e592881d64994b4c2b6c90b933e2a9644d516607d537ad4d2887fbf75"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "clap",
- "hex",
- "http-body",
- "ipir-sp",
- "memmap2",
- "pir-control",
- "pir-observability",
- "rayon",
- "reinspiring",
- "rustix",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sysinfo",
- "thiserror 2.0.21",
- "tokio",
- "tower",
- "tower-http 0.5.2",
- "tracing",
- "tracing-subscriber",
- "transparent-events",
- "transparent-filter",
- "transparent-native",
- "transparent-shard",
 ]
 
 [[package]]
@@ -8202,8 +8062,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tower",
- "transparent-shard",
- "transparent-shard-server",
  "url",
  "zakura-client-backend",
  "zakura-client-sqlite",

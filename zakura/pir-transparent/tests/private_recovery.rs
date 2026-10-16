@@ -7,6 +7,7 @@
 //! account's in any path, query, header or body, and no request for a shard
 //! wholly below the account's birthday.
 
+mod display_fixture;
 mod fixture;
 
 use std::{
@@ -16,6 +17,7 @@ use std::{
     time::Duration,
 };
 
+use display_fixture::DisplayService;
 use fixture::{GEOMETRY, Loopback, SEAL, Server, ShardSpec, WIDE, synthetic};
 use regex::Regex;
 use rusqlite::{Connection, OpenFlags, types::Value};
@@ -2377,108 +2379,6 @@ fn an_undeclared_re_cut_reaches_nothing_in_the_wallet() {
     }
     assert!(f.shards_requested(seen).is_empty());
     assert_eq!(f.spendable().unwrap(), received);
-}
-
-/// The txid display service in process: a recent-replica worker serving one
-/// recent shard of `records` over `[start, end]`, reached through its router.
-struct DisplayService {
-    runtime: tokio::runtime::Runtime,
-    router: axum::Router,
-    _root: tempfile::TempDir,
-}
-
-impl DisplayService {
-    fn start(start: u64, end: u64, records: &[zakura_pir_transparent::DisplayEntry]) -> Self {
-        // wallet-pir's production display server takes its own release of
-        // the shard types; hand it the entries through their canonical bytes.
-        use released_transparent_shard::display::{DisplaySealParams, TXID_4K8};
-        use transparent_shard_server::{
-            display::{
-                DisplayRole,
-                live::{DisplayCommand, DisplayLive, DisplayPublication},
-                service::DisplayRuntime,
-                synth,
-            },
-            service::{ReadinessMode, ServiceConfig},
-        };
-        let root = tempfile::tempdir().unwrap();
-        let shard = synth::write_shard(
-            root.path(),
-            &synth::ShardSpec {
-                shard_id: 0,
-                start_height: start,
-                end_height: end,
-                sealed: false,
-                revision: 0,
-                supersedes: String::new(),
-                parent_manifest_digest: String::new(),
-                n_buckets: 1,
-                archive_target: 1,
-                geometry: &TXID_4K8,
-            },
-            &records
-                .iter()
-                .map(|entry| {
-                    released_transparent_shard::txid::DisplayEntry::decode(&entry.encode().unwrap())
-                        .unwrap()
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
-        let params = DisplaySealParams {
-            n_archive: 1,
-            n_recent: 1,
-            archive_target: 1,
-            recent_window: 1,
-            reorg_margin: 1,
-        };
-        let (directory, map_sha256) =
-            synth::write_candidate(root.path(), &params, &[shard], "p0").unwrap();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        let live = DisplayLive::new(
-            DisplayRuntime::new(
-                ServiceConfig {
-                    cache_bytes: 2 << 30,
-                    readiness: ReadinessMode::Warm,
-                    ..ServiceConfig::default()
-                },
-                None,
-            ),
-            DisplayRole::RecentReplica,
-            3,
-            root.path().join("recent.active.json"),
-            Vec::new(),
-            None,
-        )
-        .unwrap();
-        runtime.block_on(async {
-            let expected = live.expected();
-            live.command(DisplayCommand::Prepare {
-                expected: expected.clone(),
-                publication: DisplayPublication {
-                    directory,
-                    map_sha256: map_sha256.clone(),
-                },
-            })
-            .await
-            .unwrap();
-            live.command(DisplayCommand::Activate {
-                expected,
-                map_sha256,
-            })
-            .await
-            .unwrap();
-        });
-        Self {
-            router: live.router(),
-            runtime,
-            _root: root,
-        }
-    }
 }
 
 /// A transport to the in-process display service that records every request

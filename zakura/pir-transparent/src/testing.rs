@@ -10,6 +10,8 @@
 //! revision this crate builds on, so an application's tests need no wallet-pir
 //! dependency of their own to build events, scripts and maps.
 
+pub mod native;
+mod publication;
 pub mod service;
 
 pub use {transparent_events, transparent_filter, transparent_shard};
