@@ -338,7 +338,8 @@ fn failing_sync<S: WalletStore>(store: &mut S, served: &Served, chain: &mut Stat
             hash: tail.terminal_block_hash.clone(),
         },
     )
-    .unwrap_err();
+    .err()
+    .expect("the sync fails");
     assert!(
         error.to_string().contains("the service is unavailable"),
         "the transport's own error is returned: {error}"
@@ -390,12 +391,13 @@ fn failed_syncs_leave_only_the_adopted_maps_revisions_cached() {
         );
     }
 
-    // A map the sync refuses before adopting it changes nothing cached.
-    let current = served.last().unwrap();
-    let tail = &current.map.shards[1];
+    // A newer map the sync refuses before adopting it changes nothing cached,
+    // though it no longer publishes the tail the stores hold.
+    let tail = &served.last().unwrap().map.shards[1];
+    let refused = publish(&mut server, root.path(), 4);
     let before = cached_revisions(&path);
-    refused_sync(&mut sqlite, current, &chain);
-    refused_sync(&mut memory, current, &chain);
+    refused_sync(&mut sqlite, &refused, &chain);
+    refused_sync(&mut memory, &refused, &chain);
     for store in [&sqlite as &dyn WalletStore, &memory] {
         assert_caches(store, &[&sealed, tail], &[], &run, &sealed);
     }
@@ -425,5 +427,6 @@ fn refused_sync<S: WalletStore>(store: &mut S, served: &Served, chain: &StaticCh
             hash: sealed.terminal_block_hash.clone(),
         },
     )
-    .unwrap_err();
+    .err()
+    .expect("the sync refuses the map");
 }
