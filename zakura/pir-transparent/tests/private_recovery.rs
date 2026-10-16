@@ -26,7 +26,7 @@ use transparent::{
 };
 use transparent_events::{ReceiveEvent, SpendEvent, TransparentEvent, Txid};
 use transparent_filter::{Recut, ScriptBytes, SealParameters, ShardMap};
-use transparent_wallet::http::{HttpOptions, HttpShardTransport};
+use zakura_pir_transparent::engine::http::{HttpOptions, HttpShardTransport};
 use zakura_pir_transparent::{
     ApplyAction, ApplyError, BatchState, Companion, CompanionDir, FailedEntries, ForgetError,
     HoldCause, Interrupted, Outcome, PassError, PassLimits, PassPlan, PassReport, Progress,
@@ -780,7 +780,7 @@ impl Fixture {
         let url = self.url.as_deref().expect("a served publication");
         let mut transport = HttpShardTransport::new(url, &HttpOptions::default()).unwrap();
         let (init, _) = transport.init().unwrap();
-        let service = transparent_wallet::parse_init(&init).unwrap();
+        let service = zakura_pir_transparent::engine::parse_init(&init).unwrap();
         let mut lengths = HashSet::new();
         for geometry in &service.geometries {
             for (scheme, dq44) in [

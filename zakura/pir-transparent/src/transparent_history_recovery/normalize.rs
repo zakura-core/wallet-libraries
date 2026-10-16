@@ -3,11 +3,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::engine::{ChainView, SetIdentity, WalletStore};
+use crate::engine_store::SqliteStore;
 use transparent::bundle::OutPoint;
 use transparent_events::TransparentEvent;
 use transparent_filter::ShardMap;
-use transparent_wallet::{ChainView, SetIdentity, WalletStore};
-use transparent_wallet_store::SqliteStore;
 use zcash_client_backend::data_api::transparent_ledger::{
     AddressRange, ChainPoint, PageRequest, ReceiveEvent, SpendEvent, TransparentAddressWatchSet,
     TransparentLedgerCommit, WatchedAddress,

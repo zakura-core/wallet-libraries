@@ -19,7 +19,7 @@ use crate::error::{RecoveryError, failure};
 // A companion's file name commits to the shard
 // schema (see `companion`), so a schema-v12 companion never opens a file a schema-v11
 // build wrote.
-const _: () = assert!(transparent_wallet_store::SCHEMA_VERSION == 7);
+const _: () = assert!(crate::engine_store::SCHEMA_VERSION == 7);
 
 /// The reference store's tables at schema version 7 that a reset empties, besides
 /// `wallet_meta`.

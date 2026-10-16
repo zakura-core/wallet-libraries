@@ -2,9 +2,9 @@
 
 use std::collections::BTreeMap;
 
+use crate::engine::transport::{FilterSource, ShardTransport};
+use crate::engine::{Acceptance, Anchor, ChainView, ServiceGeometry, WalletStore};
 use transparent_filter::{MAINNET_GENESIS_DISPLAY, NETWORK, ShardMap, wire::MAX_SUPERSEDED};
-use transparent_wallet::transport::{FilterSource, ShardTransport};
-use transparent_wallet::{Acceptance, Anchor, ChainView, ServiceGeometry, WalletStore};
 use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchSet;
 
 use super::{SCHEMA, TransparentHistoryRecovery};
@@ -141,7 +141,7 @@ pub(crate) fn service_geometry(
     transport: &mut impl ShardTransport,
 ) -> Result<ServiceGeometry, RecoveryError> {
     let (raw_init, _) = transport.init().map_err(failure)?;
-    let geometry = transparent_wallet::parse_init(&raw_init).map_err(failure)?;
+    let geometry = crate::engine::parse_init(&raw_init).map_err(failure)?;
     ensure_valid(
         geometry.schema == SCHEMA,
         "service serves an unsupported shard schema",

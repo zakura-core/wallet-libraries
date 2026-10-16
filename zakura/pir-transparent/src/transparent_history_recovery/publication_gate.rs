@@ -1,8 +1,8 @@
 //! Publications a pass cannot sync from as they are: a changed publication set, which
 //! restarts the companion's store, and sealed history the sync refuses as rewritten.
 
+use crate::engine::{Acceptance, ChainView, SetIdentity, WalletStore};
 use transparent_filter::ShardMap;
-use transparent_wallet::{Acceptance, ChainView, SetIdentity, WalletStore};
 
 use super::{SCHEMA, TransparentHistoryRecovery};
 use crate::batch::{BatchState, RecoveryBatch, WithdrawnCause, behind_unread_batch, unready_batch};

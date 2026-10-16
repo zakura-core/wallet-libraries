@@ -632,7 +632,7 @@ fn a_page_under_a_declared_revision_with_saved_events_completes_once() {
     let pending = adapter.store.pending().unwrap();
     adapter
         .store
-        .commit_shard(transparent_wallet::ShardCommit {
+        .commit_shard(crate::engine::ShardCommit {
             pending_complete: vec![pending[0].id.unwrap()],
             ..Default::default()
         })

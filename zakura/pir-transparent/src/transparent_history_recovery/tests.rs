@@ -6,6 +6,12 @@ use super::*;
 use crate::batch::{BatchState, WithdrawnCause};
 use crate::convert::address_script;
 use crate::convert::{block_hash_from_display, block_height, ledger_metadata};
+use crate::engine::client::Table;
+use crate::engine::store::RunCursor;
+use crate::engine::transport::BoxError;
+use crate::engine::{Acceptance, Anchor, ScriptEntry, ScriptOrigin};
+use crate::engine::{Completion, IncompleteReason, SyncReport, WalletStore};
+use crate::engine::{Ledger, PendingPages, SetupBlob, SetupKey, StaticChain, StoredEvent};
 use crate::progress::Retry;
 use crate::test_support::{CountingFilters, CountingShards, MAP};
 use sha2::{Digest, Sha256};
@@ -15,12 +21,6 @@ use transparent_events::{FeeState, TransparentEvent};
 use transparent_filter::MAINNET_GENESIS_DISPLAY;
 use transparent_filter::wire::MAX_SUPERSEDED;
 use transparent_filter::{Recut, SealParameters, ShardMapEntry, SupersededShard};
-use transparent_wallet::client::Table;
-use transparent_wallet::store::RunCursor;
-use transparent_wallet::transport::BoxError;
-use transparent_wallet::{Acceptance, Anchor, ScriptEntry, ScriptOrigin};
-use transparent_wallet::{Completion, IncompleteReason, SyncReport, WalletStore};
-use transparent_wallet::{Ledger, PendingPages, SetupBlob, SetupKey, StaticChain, StoredEvent};
 use zcash_client_backend::data_api::transparent_ledger::{
     AccountLifecycle, PendingPage, WatchOrigin, WatchedAddress,
 };
@@ -118,8 +118,8 @@ fn covered(
     (end, terminal): (u64, &str),
     script: &[u8],
     events: Vec<TransparentEvent>,
-) -> transparent_wallet::ShardCommit {
-    transparent_wallet::ShardCommit {
+) -> crate::engine::ShardCommit {
+    crate::engine::ShardCommit {
         source_anchor: None,
         shard_id: entry.shard_id,
         revision_digest: digest.into(),

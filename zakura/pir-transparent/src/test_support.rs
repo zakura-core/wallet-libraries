@@ -3,8 +3,8 @@
 
 use std::cell::Cell;
 
-use transparent_wallet::client::Table;
-use transparent_wallet::transport::{BoxError, FilterSource, ShardTransport};
+use crate::engine::client::Table;
+use crate::engine::transport::{BoxError, FilterSource, ShardTransport};
 
 /// A mainnet shard map with two shards, a sealed one and the tail.
 pub(crate) const MAP: &[u8] = include_bytes!("../tests/fixtures/shard-map.json");
