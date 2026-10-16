@@ -215,8 +215,8 @@ pub(crate) mod tests {
         assert_eq!(standalone[0], 1);
         assert_eq!(&standalone[43..75], &[0x12; 32]);
         assert_eq!(decode(&standalone, 1).unwrap().0, vec![spend]);
-        assert_eq!(receive.to_bytes().len(), 87);
-        assert_eq!(spend.to_bytes().len(), 87);
+        assert_eq!(receive.to_bytes().unwrap().len(), 87);
+        assert_eq!(spend.to_bytes().unwrap().len(), 87);
     }
 
     #[test]

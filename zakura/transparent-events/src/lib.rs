@@ -332,14 +332,20 @@ impl TransparentEvent {
         Ok(())
     }
 
-    /// Canonical self-contained event bytes; legacy events retain their v2 representation.
-    pub fn to_bytes(self) -> Vec<u8> {
-        let mut bytes = self.to_legacy_bytes().to_vec();
+    /// Encodes a self-contained event only if its metadata and legacy record can be decoded.
+    /// Legacy observations retain their exact v2 representation.
+    pub fn to_bytes(self) -> Result<Vec<u8>, EventError> {
+        self.validate_metadata()?;
+        let legacy = self.legacy_bytes();
+        if legacy.iter().all(|byte| *byte == 0) {
+            return Err(EventError::Empty);
+        }
+        let mut bytes = legacy.to_vec();
         if let Some(metadata) = self.metadata() {
             bytes.push(metadata.flags());
             metadata.encode(&mut bytes);
         }
-        bytes
+        Ok(bytes)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, EventError> {
@@ -418,6 +424,15 @@ impl TransparentEvent {
     }
 
     pub fn to_legacy_bytes(self) -> [u8; EVENT_BYTES] {
+        let bytes = self.legacy_bytes();
+        debug_assert!(
+            bytes.iter().any(|byte| *byte != 0),
+            "an encoder must not emit the empty sentinel"
+        );
+        bytes
+    }
+
+    fn legacy_bytes(self) -> [u8; EVENT_BYTES] {
         let mut bytes = [0u8; EVENT_BYTES];
         match self {
             TransparentEvent::Receive(event) => {
@@ -442,10 +457,6 @@ impl TransparentEvent {
                 bytes[OFF_SPENT_INDEX..].copy_from_slice(&event.spent_output_index.to_le_bytes());
             }
         }
-        debug_assert!(
-            bytes.iter().any(|byte| *byte != 0),
-            "an encoder must not emit the empty sentinel"
-        );
         bytes
     }
 
@@ -563,7 +574,10 @@ mod tests {
                 transparent_input_count: u32::MAX,
                 has_shielded_components: true,
             }));
-            assert_eq!(TransparentEvent::from_bytes(&event.to_bytes()), Ok(event));
+            assert_eq!(
+                TransparentEvent::from_bytes(&event.to_bytes().unwrap()),
+                Ok(event)
+            );
         }
         let coinbase = TransparentEvent::Receive(ReceiveEvent {
             coinbase: true,
@@ -578,7 +592,7 @@ mod tests {
             has_shielded_components: false,
         }));
         assert_eq!(
-            TransparentEvent::from_bytes(&coinbase.to_bytes()),
+            TransparentEvent::from_bytes(&coinbase.to_bytes().unwrap()),
             Ok(coinbase)
         );
         let metadata = TransactionMetadata {
@@ -587,7 +601,7 @@ mod tests {
             has_shielded_components: false,
         };
         let event = spend().with_metadata(Some(metadata));
-        let bytes = event.to_bytes();
+        let bytes = event.to_bytes().unwrap();
         for end in EVENT_BYTES + 1..bytes.len() {
             assert!(TransparentEvent::from_bytes(&bytes[..end]).is_err());
         }
@@ -608,6 +622,149 @@ mod tests {
             }))
             .validate_metadata()
             .is_err());
+    }
+
+    #[test]
+    fn invalid_metadata_cannot_be_encoded_as_a_self_contained_event() {
+        let ordinary = TransactionMetadata {
+            fee: FeeState::Exact(500),
+            transparent_input_count: 1,
+            has_shielded_components: false,
+        };
+        let receive = match receive() {
+            TransparentEvent::Receive(event) => event,
+            _ => unreachable!(),
+        };
+        let spend = match spend() {
+            TransparentEvent::Spend(event) => event,
+            _ => unreachable!(),
+        };
+        let invalid = [
+            TransparentEvent::Receive(ReceiveEvent {
+                value: MAX_MONEY + 1,
+                ..receive
+            })
+            .with_metadata(Some(ordinary)),
+            TransparentEvent::Receive(receive).with_metadata(Some(TransactionMetadata {
+                fee: FeeState::Exact(MAX_MONEY + 1),
+                ..ordinary
+            })),
+            TransparentEvent::Receive(receive).with_metadata(Some(TransactionMetadata {
+                fee: FeeState::NotApplicable,
+                ..ordinary
+            })),
+            TransparentEvent::Receive(ReceiveEvent {
+                coinbase: true,
+                ..receive
+            })
+            .with_metadata(Some(TransactionMetadata {
+                transparent_input_count: 0,
+                ..ordinary
+            })),
+            TransparentEvent::Receive(ReceiveEvent {
+                coinbase: true,
+                ..receive
+            })
+            .with_metadata(Some(TransactionMetadata {
+                fee: FeeState::Unknown,
+                transparent_input_count: 0,
+                ..ordinary
+            })),
+            TransparentEvent::Receive(ReceiveEvent {
+                coinbase: true,
+                ..receive
+            })
+            .with_metadata(Some(TransactionMetadata {
+                fee: FeeState::NotApplicable,
+                ..ordinary
+            })),
+            TransparentEvent::Spend(spend).with_metadata(Some(TransactionMetadata {
+                transparent_input_count: 0,
+                ..ordinary
+            })),
+            TransparentEvent::Spend(SpendEvent {
+                input_index: 1,
+                ..spend
+            })
+            .with_metadata(Some(ordinary)),
+            TransparentEvent::Spend(spend).with_metadata(Some(TransactionMetadata {
+                fee: FeeState::NotApplicable,
+                ..ordinary
+            })),
+        ];
+        for event in invalid {
+            assert!(
+                matches!(event.to_bytes(), Err(EventError::Metadata(_))),
+                "{event:?}"
+            );
+            // A raw encoding must not round-trip an invalid assertion, even
+            // where its flags would instead decode to different metadata.
+            let mut invalid_bytes = event.to_legacy_bytes().to_vec();
+            let metadata = event.metadata().unwrap();
+            invalid_bytes.push(metadata.flags());
+            metadata.encode(&mut invalid_bytes);
+            assert_ne!(
+                TransparentEvent::from_bytes(&invalid_bytes),
+                Ok(event),
+                "{event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_legacy_record_is_rejected_without_panicking() {
+        let empty = TransparentEvent::Receive(ReceiveEvent {
+            metadata: None,
+            height: 0,
+            txid: Txid([0; 32]),
+            transaction_index: 0,
+            output_index: 0,
+            value: 0,
+            coinbase: false,
+        });
+        assert_eq!(empty.to_bytes(), Err(EventError::Empty));
+        let metadata = TransactionMetadata {
+            fee: FeeState::Unknown,
+            transparent_input_count: 0,
+            has_shielded_components: false,
+        };
+        assert_eq!(
+            empty.with_metadata(Some(metadata)).to_bytes(),
+            Err(EventError::Empty)
+        );
+    }
+
+    #[test]
+    fn valid_metadata_keeps_fixed_wire_bytes() {
+        let event = TransparentEvent::Receive(ReceiveEvent {
+            metadata: Some(TransactionMetadata {
+                fee: FeeState::Exact(127),
+                transparent_input_count: 128,
+                has_shielded_components: true,
+            }),
+            height: 1,
+            txid: Txid([2; 32]),
+            transaction_index: 3,
+            output_index: 4,
+            value: 5,
+            coinbase: false,
+        });
+        let expected = hex::decode(concat!(
+            "00",
+            "0300",
+            "01000000",
+            "0500000000000000",
+            "0202020202020202020202020202020202020202020202020202020202020202",
+            "04000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "00000000",
+            "38",
+            "8001",
+            "7f",
+        ))
+        .unwrap();
+        assert_eq!(event.to_bytes().unwrap(), expected);
+        assert_eq!(TransparentEvent::from_bytes(&expected), Ok(event));
     }
 
     #[test]
@@ -653,7 +810,10 @@ mod tests {
     #[test]
     fn both_kinds_round_trip() {
         for event in [receive(), spend()] {
-            assert_eq!(TransparentEvent::from_bytes(&event.to_bytes()), Ok(event));
+            assert_eq!(
+                TransparentEvent::from_bytes(&event.to_bytes().unwrap()),
+                Ok(event)
+            );
         }
     }
 
@@ -666,13 +826,16 @@ mod tests {
                 _ => unreachable!(),
             }
         });
-        assert_eq!(TransparentEvent::from_bytes(&event.to_bytes()), Ok(event));
+        assert_eq!(
+            TransparentEvent::from_bytes(&event.to_bytes().unwrap()),
+            Ok(event)
+        );
     }
 
     #[test]
     fn every_record_is_the_same_width_regardless_of_kind() {
-        assert_eq!(receive().to_bytes().len(), EVENT_BYTES);
-        assert_eq!(spend().to_bytes().len(), EVENT_BYTES);
+        assert_eq!(receive().to_bytes().unwrap().len(), EVENT_BYTES);
+        assert_eq!(spend().to_bytes().unwrap().len(), EVENT_BYTES);
     }
 
     /// A shorter or longer slice is a framing disagreement, not a value to
@@ -680,7 +843,7 @@ mod tests {
     /// in a page.
     #[test]
     fn a_wrong_length_record_is_refused() {
-        let bytes = receive().to_bytes();
+        let bytes = receive().to_bytes().unwrap();
         assert_eq!(
             TransparentEvent::from_bytes(&bytes[..EVENT_BYTES - 1]),
             Err(EventError::Length(EVENT_BYTES - 1))
@@ -697,7 +860,7 @@ mod tests {
 
     #[test]
     fn unknown_flags_are_refused() {
-        let mut bytes = receive().to_bytes();
+        let mut bytes = receive().to_bytes().unwrap();
         bytes[OFF_FLAGS] = 0x80;
         assert_eq!(
             TransparentEvent::from_bytes(&bytes),
@@ -710,7 +873,7 @@ mod tests {
     /// could disagree about a record while both calling it valid.
     #[test]
     fn fields_a_kind_does_not_use_must_be_zero() {
-        let mut bytes = receive().to_bytes();
+        let mut bytes = receive().to_bytes().unwrap();
         bytes[OFF_SPENT_INDEX] = 1;
         assert!(matches!(
             TransparentEvent::from_bytes(&bytes),
@@ -720,14 +883,14 @@ mod tests {
             })
         ));
 
-        let mut bytes = spend().to_bytes();
+        let mut bytes = spend().to_bytes().unwrap();
         bytes[OFF_VALUE] = 1;
         assert!(matches!(
             TransparentEvent::from_bytes(&bytes),
             Err(EventError::UnusedField { kind: "spend", .. })
         ));
 
-        let mut bytes = spend().to_bytes();
+        let mut bytes = spend().to_bytes().unwrap();
         bytes[OFF_FLAGS] |= FLAG_COINBASE;
         assert!(matches!(
             TransparentEvent::from_bytes(&bytes),
