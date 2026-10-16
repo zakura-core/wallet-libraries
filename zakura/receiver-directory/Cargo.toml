@@ -1,0 +1,32 @@
+[package]
+name = "zakura-receiver-directory"
+version = "0.0.1-rc0"
+# Unpublished with `zakura-receiver-crypto`, whose wire codec it carries.
+publish = false
+# Kept at 2021 from wallet-pir so the moved code compiles unchanged.
+edition = "2021"
+description = "Receiver directory publications: record placement, filters, manifests and structural parsing"
+rust-version.workspace = true
+license = "MIT"
+repository.workspace = true
+readme = "README.md"
+
+[lib]
+# The library keeps wallet-pir's crate name, so `receiver_directory::` paths
+# are unchanged for its consumers.
+name = "receiver_directory"
+path = "src/lib.rs"
+
+[dependencies]
+# The wire codec alone: this crate parses structure and checks no cryptography.
+zakura-receiver-crypto = { path = "../receiver-crypto", default-features = false }
+# Pinned exactly, as in `zakura-transparent-filter`: the filter bytes are what
+# every wallet tests, so the encoder may not move without revalidation.
+bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+hex = "0.4"
