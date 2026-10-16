@@ -65,6 +65,20 @@ impl Failures {
             .map(|&(_, _, _, child, count)| (child, count))
     }
 
+    /// Records that `count` dummies to page shard `child` are still owed.
+    pub(super) fn owe(
+        &mut self,
+        shard_id: u64,
+        revision: &str,
+        script: &[u8],
+        child: u8,
+        count: u32,
+    ) {
+        self.settle(shard_id, revision, script);
+        self.owed
+            .push((shard_id, revision.to_owned(), script.to_vec(), child, count));
+    }
+
     /// Records that the dummies `owes` names were sent.
     pub(super) fn settle(&mut self, shard_id: u64, revision: &str, script: &[u8]) {
         self.owed.retain(|(shard, digest, owner, ..)| {

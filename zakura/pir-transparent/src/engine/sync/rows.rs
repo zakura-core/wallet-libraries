@@ -86,7 +86,16 @@ impl<T: ShardTransport> RowSource for PirRows<'_, T> {
         let revision = self.entry.manifest_digest.as_str();
         let geometry = transparent_shard::layout::by_name(&self.entry.geometry)
             .ok_or_else(|| SyncError::UnknownGeometry(self.entry.geometry.clone()))?;
-        let mut tables: Vec<u32> = requests.iter().map(|request| request.child).collect();
+        // Only the rows the sync's own query budget lets it send can be sent.
+        let sendable = self
+            .limits
+            .max_queries
+            .map(|limit| limit.saturating_sub(self.charges.queries()) as usize)
+            .unwrap_or(requests.len());
+        let mut tables: Vec<u32> = requests[..requests.len().min(sendable)]
+            .iter()
+            .map(|request| request.child)
+            .collect();
         tables.sort_unstable();
         tables.dedup();
         if !tables.is_empty() {

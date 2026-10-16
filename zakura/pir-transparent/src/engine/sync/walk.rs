@@ -202,8 +202,17 @@ pub(super) fn walk_chains<S: WalletStore, R: RowSource>(
                 continue;
             }
             // A failed walk's dummies were this round's; their replies are
-            // not read, and the walk ends.
-            if walk.dummies.take().is_some() {
+            // not read, and the walk ends once all of them were sent. A budget
+            // that stopped the round partway leaves the rest owed.
+            if let Some((child, count)) = walk.dummies.take() {
+                let sent = answers.len().clamp(start, end) - start;
+                if sent < count as usize {
+                    let left = count - sent as u32;
+                    walk.dummies = Some((child, left));
+                    let revision = &entry.manifest_digest;
+                    failures.owe(entry.shard_id, revision, &walk.item.script, child, left);
+                    continue;
+                }
                 failures.settle(entry.shard_id, &entry.manifest_digest, &walk.item.script);
                 walk.done = true;
                 continue;

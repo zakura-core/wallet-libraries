@@ -1342,6 +1342,79 @@ fn dummies_owed_before_an_overload_are_sent_on_the_retry() {
     );
 }
 
+/// A budget that stops the round a failed walk owed its dummies in, before
+/// any of them is sent, leaves them owed and stops the walk on that budget,
+/// instead of counting them as sent.
+#[test]
+fn dummies_a_budget_stop_leaves_unsent_stay_owed() {
+    /// Answers the first round, then stops on the query budget.
+    struct StopsAfterFirst<'a> {
+        inner: Direct<'a>,
+        stopped: bool,
+    }
+    impl RowSource for StopsAfterFirst<'_> {
+        fn stopped(&self) -> Option<IncompleteReason> {
+            self.stopped.then_some(IncompleteReason::QueryBudget)
+        }
+        fn fetch<S: WalletStore>(
+            &mut self,
+            store: &mut S,
+            requests: &[RowRequest],
+        ) -> Result<Vec<Reply>, SyncError> {
+            if self.inner.rounds == 0 {
+                return self.inner.fetch(store, requests);
+            }
+            self.stopped = true;
+            Ok(Vec::new())
+        }
+    }
+    let (_, directories) = fixture();
+    let directory = &directories[0];
+    let manifest = manifest_of(directory);
+    let scripts = paged(directory);
+    let victim = scripts[0].clone();
+    let ((child, row), head, bytes) = rewritten_head(directory, &victim, |entry| {
+        let link = RunLink {
+            prev_row: 60_000,
+            ..entry.link
+        };
+        entry.with_link(link).unwrap()
+    });
+    let mut store = MemoryStore::new();
+    let owed = directory_phase(&mut store, directory, &manifest, &scripts);
+    let mut failures = Failures::default();
+    let mut inner = Direct::new(directory);
+    inner
+        .rewritten
+        .insert((u32::from(child), u64::from(row)), vec![bytes]);
+    let mut rows = StopsAfterFirst {
+        inner,
+        stopped: false,
+    };
+    let walked = walk_chains(
+        &mut store,
+        &entry_of(&manifest),
+        &manifest,
+        &owed,
+        &mut rows,
+        &target_of(&manifest),
+        &mut failures,
+    )
+    .unwrap();
+    assert_eq!(
+        walked,
+        Some(Completion::Incomplete {
+            reason: IncompleteReason::QueryBudget,
+            pending: store.pending().unwrap().len(),
+        })
+    );
+    assert_eq!(
+        failures.owes(manifest.shard_id, &manifest.digest(), &victim),
+        Some((child, head.fragment_count)),
+        "the unsent dummies are still owed"
+    );
+}
+
 /// A directory row whose content does not decode fails its entry, on
 /// content, whichever candidate row it was; the honest replies find the
 /// entry.
@@ -1779,10 +1852,11 @@ impl ShardTransport for Scripted {
 }
 
 /// [`PirRows::fetch`] over `transport` for `requests` in the first fixture
-/// shard, without limits.
+/// shard, under `limits`.
 fn fetch_with(
     transport: &mut Scripted,
     requests: &[RowRequest],
+    limits: WorkLimits,
 ) -> (Result<usize, String>, Option<IncompleteReason>) {
     let (_, directories) = fixture();
     let manifest = manifest_of(&directories[0]);
@@ -1806,7 +1880,6 @@ fn fetch_with(
     )
     .unwrap();
     let mut charges = ByteCharges::default();
-    let limits = WorkLimits::UNLIMITED;
     let mut rows = PirRows {
         entry: &entry,
         manifest: &manifest,
@@ -1838,10 +1911,33 @@ fn a_round_announces_its_tables_before_sending_anything() {
         RowRequest { child: 0, row: 3 },
         RowRequest { child: 1, row: 1 },
     ];
-    let (fetched, stopped) = fetch_with(&mut transport, &requests);
+    let (fetched, stopped) = fetch_with(&mut transport, &requests, WorkLimits::UNLIMITED);
     assert_eq!(fetched, Ok(0));
     assert_eq!(stopped, Some(IncompleteReason::ByteBudget));
     assert_eq!(transport.asked, ["round [0, 1]", "setup pages-1"]);
+}
+
+/// A round names only the tables of the rows the sync's own query budget
+/// lets it send: here one query, so only the first row's table.
+#[test]
+fn a_round_names_only_the_tables_its_query_budget_can_reach() {
+    let mut transport = Scripted {
+        serves: Vec::new(),
+        public_bytes: 0,
+        concurrency: 1,
+        asked: Vec::new(),
+    };
+    let requests = [
+        RowRequest { child: 1, row: 0 },
+        RowRequest { child: 0, row: 3 },
+    ];
+    let limits = WorkLimits {
+        max_queries: Some(1),
+        max_private_bytes: None,
+    };
+    let (fetched, _) = fetch_with(&mut transport, &requests, limits);
+    assert_eq!(fetched, Ok(0));
+    assert_eq!(transport.asked[0], "round [1]");
 }
 
 /// In a concurrent round, a setup declined for the budget stops the round
@@ -1859,7 +1955,7 @@ fn a_budget_stop_while_planning_a_concurrent_round_sends_no_query() {
         RowRequest { child: 0, row: 0 },
         RowRequest { child: 1, row: 0 },
     ];
-    let (fetched, stopped) = fetch_with(&mut transport, &requests);
+    let (fetched, stopped) = fetch_with(&mut transport, &requests, WorkLimits::UNLIMITED);
     assert_eq!(fetched, Ok(0));
     assert_eq!(stopped, Some(IncompleteReason::ByteBudget));
     assert_eq!(
