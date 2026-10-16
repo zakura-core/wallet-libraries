@@ -124,3 +124,75 @@ fn the_protocol_reproduces_its_pinned_bytes() {
         assert_eq!(got, want, "{name}");
     }
 }
+
+/// Sharing public preprocessing must not share a session, skip validation, or
+/// answer changed rows with the previous publication's database.
+#[test]
+fn reused_rows_keep_fresh_sessions_and_changed_rows_rebuild() {
+    let records = [record(0, 2), record(1, 2)];
+    let snapshot = Snapshot::build(manifest(MIN_ROWS), &records, &[]).unwrap();
+    let original = Server::new(snapshot.clone()).unwrap();
+    let accepted = AcceptedCoverage {
+        genesis: [1; 32],
+        required_start: 100,
+        height: 101,
+        hash: [3; 32],
+    };
+    let old_client = Client::new(original.manifest().clone(), original.public(), accepted).unwrap();
+    let old_query = old_client.prepare(receiver(), 1).unwrap();
+    let mut advanced = snapshot.clone();
+    advanced.manifest.end_height = 102;
+    advanced.manifest.end_hash = [4; 32];
+    let reused = Server::new_reusing_rows(advanced.clone(), &original).unwrap();
+    assert!(std::ptr::eq(
+        original.public().as_ptr(),
+        reused.public().as_ptr()
+    ));
+    assert_ne!(original.id(), reused.id());
+    assert!(matches!(
+        reused.respond(old_query.body()),
+        Err(receiver_pir::Error::Revision)
+    ));
+    let fresh = Server::new(advanced).unwrap();
+    assert_eq!(reused.public(), fresh.public());
+    let accepted = AcceptedCoverage {
+        height: 102,
+        hash: [4; 32],
+        ..accepted
+    };
+    let client = Client::new(reused.manifest().clone(), reused.public(), accepted).unwrap();
+    let query = client.prepare(receiver(), 1).unwrap();
+    let response = reused.respond(query.body()).unwrap();
+    assert_eq!(response, fresh.respond(query.body()).unwrap());
+    assert_eq!(
+        client.decode(query, &response).unwrap(),
+        Some(records[1].clone())
+    );
+
+    let mut changed_records = records;
+    changed_records[1].payment.txid[0] ^= 0x80;
+    let changed = Snapshot::build(manifest(MIN_ROWS), &changed_records, &[]).unwrap();
+    let rebuilt = Server::new_reusing_rows(changed, &original).unwrap();
+    assert!(!std::ptr::eq(
+        original.public().as_ptr(),
+        rebuilt.public().as_ptr()
+    ));
+    let accepted = AcceptedCoverage {
+        height: 101,
+        hash: [3; 32],
+        ..accepted
+    };
+    let client = Client::new(rebuilt.manifest().clone(), rebuilt.public(), accepted).unwrap();
+    let query = client.prepare(receiver(), 1).unwrap();
+    let response = rebuilt.respond(query.body()).unwrap();
+    assert_eq!(
+        client.decode(query, &response).unwrap(),
+        Some(changed_records[1].clone())
+    );
+    let mut corrupt = snapshot.clone();
+    corrupt.data[0] ^= 1;
+    assert!(Server::new_reusing_rows(corrupt, &original).is_err());
+    let mut corrupt = snapshot;
+    corrupt.filters.push(1);
+    assert!(Server::new_reusing_rows(corrupt, &original).is_err());
+}
