@@ -27,6 +27,9 @@ pub use sweep::{Error, Swept, WriteLock, sweep};
 
 pub use receiver_pir::{Error as DirectoryError, transport::Transport};
 /// The directory format and client underneath, for callers that need them directly.
+/// They parse records and witness files structurally only: payments from
+/// `DirectoryClient::lookup` and the bytes from `DirectoryClient::witnesses` are
+/// unchecked. Validate them with `zakura-receiver-crypto`, as `sweep` does, before use.
 pub use {receiver_directory, receiver_pir};
 
 /// The directory error for data a receiver check refuses: the same error the

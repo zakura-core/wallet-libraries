@@ -270,8 +270,7 @@ fn run_one(scenario: &Scenario) -> ScenarioResult {
     result
 }
 
-/// The revisions under test: this checkout, and the wallet-pir receiver crates its lock
-/// file pins.
+/// The revision under test: this checkout, which holds the receiver crates too.
 fn revisions() -> Vec<(String, String)> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let git = |args: &[&str]| {
@@ -292,17 +291,6 @@ fn revisions() -> Vec<(String, String)> {
             head
         };
         revisions.push(("wallet-libraries".into(), value));
-    }
-    if let Ok(lock) = std::fs::read_to_string(root.join("Cargo.lock")) {
-        let pin = lock
-            .split("[[package]]")
-            .find(|p| p.contains("name = \"receiver-directory\""))
-            .and_then(|p| p.lines().find(|l| l.starts_with("source = ")))
-            .and_then(|l| l.rsplit('#').next())
-            .map(|s| s.trim_end_matches('"').to_string());
-        if let Some(pin) = pin {
-            revisions.push(("wallet-pir receiver crates".into(), pin));
-        }
     }
     revisions
 }
