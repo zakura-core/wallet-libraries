@@ -125,8 +125,8 @@ use {
             one_time_ivk::{
                 OneTimeIvkRead, OneTimeIvkWrite,
                 restore::{
-                    DirectoryPayment, DiscoveryWork, OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite,
-                    PaymentApplication, SweepDeferral,
+                    DirectoryPayment, DiscoveryWork, EarlyRestoreKey, OneTimeIvkRestoreRead,
+                    OneTimeIvkRestoreWrite, PaymentApplication, PublicationEnd, SweepDeferral,
                 },
             },
             transparent_ledger::ChainPoint,
@@ -2710,6 +2710,13 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
         wallet::one_time_ivk::scanning_keys(self.conn.borrow(), &self.params)
     }
 
+    fn get_one_time_scanning_keys_for_range(
+        &self,
+        range: std::ops::Range<BlockHeight>,
+    ) -> Result<Vec<OneTimeScanningKey<AccountUuid>>, Self::Error> {
+        wallet::one_time_ivk::scanning_keys_for_range(self.conn.borrow(), &self.params, range)
+    }
+
     fn get_one_time_transaction_keys(
         &self,
         txid: TxId,
@@ -2761,6 +2768,30 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
             &self.params,
             account,
             height,
+        )
+    }
+
+    fn one_time_early_restore_start(
+        &self,
+        account: AccountUuid,
+    ) -> Result<Option<BlockHeight>, Self::Error> {
+        wallet::one_time_ivk::restore::early::start(self.conn.borrow(), &self.params, account)
+    }
+
+    fn one_time_receivers(
+        &self,
+        account: AccountUuid,
+        purpose: zakura_one_time_ivk::Purpose,
+        from: u64,
+        count: u32,
+    ) -> Result<Vec<DiscoveryWork>, Self::Error> {
+        wallet::one_time_ivk::restore::early::receivers(
+            self.conn.borrow(),
+            &self.params,
+            account,
+            purpose,
+            from,
+            count,
         )
     }
 }
@@ -2875,6 +2906,43 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         self.transactionally(|wdb| {
             wallet::one_time_ivk::restore::finish_nullifier_recovery(
                 wdb.conn.0, wdb.params, account, through, now,
+            )
+        })
+    }
+
+    fn begin_one_time_early_restore(
+        &mut self,
+        account: AccountUuid,
+        end: PublicationEnd,
+        keys: &[EarlyRestoreKey],
+    ) -> Result<bool, SqliteClientError> {
+        let now = wallet::one_time_ivk::unix_now(&self.clock);
+        self.transactionally(|wdb| {
+            wallet::one_time_ivk::restore::early::begin(
+                wdb.conn.0, wdb.params, account, end, keys, now,
+            )
+        })
+    }
+
+    fn record_one_time_early_lookup(
+        &mut self,
+        account: AccountUuid,
+        key: KeyId,
+        payments: &[DirectoryPayment],
+        witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
+    ) -> Result<(), SqliteClientError> {
+        let configured = self.transparent_ledger_mode;
+        self.transactionally(|wdb| {
+            wallet::one_time_ivk::restore::early::record_lookup(
+                wdb.conn.0,
+                wdb.params,
+                configured,
+                &wdb.enhance_pir_session,
+                &wdb.transparent_pir_session,
+                account,
+                key,
+                payments,
+                witness,
             )
         })
     }
@@ -3432,8 +3500,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
     /// Stores scanned blocks for `put_blocks` and, with `one_time_keys`, the one-time key
     /// snapshot that scanned them, for `put_blocks_with_one_time_ivks`. Blocks scanned
     /// without one-time keys, as every build without `orchard` scans them, are refused while
-    /// `wallet::one_time_key_open`: storing them would mark a key's payments scanned without
-    /// finding them.
+    /// `wallet::one_time_scan_required`: storing them would mark a key's payments scanned
+    /// without finding them, or skip an early restore's checks.
     fn store_scanned_blocks(
         &mut self,
         from_state: &ChainState,
@@ -3442,7 +3510,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
     ) -> Result<(), SqliteClientError> {
         #[cfg(not(feature = "orchard"))]
         let one_time_keys: Option<()> = None;
-        if one_time_keys.is_none() && wallet::one_time_key_open(self.conn.0)? {
+        if one_time_keys.is_none() && wallet::one_time_scan_required(self.conn.0)? {
             return Err(SqliteClientError::OneTimeIvksNotUsed);
         }
         // Without one-time IVK state, nothing needs Ironwood spend evidence kept longer.
@@ -3517,10 +3585,23 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             &self.gap_limits,
             &scanned_block_identities,
         )?;
+        #[cfg(feature = "orchard")]
+        if let Some(range) = scanned_range.clone() {
+            wallet::one_time_ivk::restore::sweep::revalidate(self.conn.0, range)?;
+        }
         // A key activated after the scanner captured its keys missed this batch.
         #[cfg(feature = "orchard")]
         if let Some((keys, range)) = one_time_keys.zip(scanned_range) {
-            wallet::one_time_ivk::rescan_missed_keys(self.conn.0, keys, range)?;
+            wallet::one_time_ivk::rescan_missed_keys(self.conn.0, keys, range.clone())?;
+            wallet::one_time_ivk::restore::early::after_blocks_stored(
+                self.conn.0,
+                &self.params,
+                self.transparent_ledger_mode,
+                &self.enhance_pir_session,
+                &self.transparent_pir_session,
+                keys,
+                range,
+            )?;
         }
         Ok(())
     }

@@ -95,6 +95,22 @@ fn prepay_setup(
     }
 }
 
+/// Pay manifest transfer costs before staged replies can be discarded.
+fn prepay_manifest(reply: Answer, charges: &mut crate::engine::transport::ByteCharges) -> Answer {
+    match reply {
+        Ok((bytes, cost)) => {
+            charges.add_manifest(cost);
+            Ok((bytes, 0))
+        }
+        Err(error) => {
+            charges.add_manifest(crate::engine::transport::TransferFailure::downloaded(
+                &error,
+            ));
+            Err(crate::engine::transport::TransferFailure::boxed(0, error))
+        }
+    }
+}
+
 /// A shard transport with replies already in hand.
 ///
 /// Once any reply, sent ahead or by the walk, is a [`BudgetStop`], nothing
@@ -161,6 +177,12 @@ impl<'a, T: ShardTransport> Staged<'a, T> {
 impl<T: ShardTransport> ShardTransport for Staged<'_, T> {
     fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
         self.inner.init()
+    }
+
+    fn manifest_prepaid(&self, shard_id: u64, revision: &str) -> bool {
+        self.manifests
+            .contains_key(&(shard_id, revision.to_string()))
+            || self.inner.manifest_prepaid(shard_id, revision)
     }
 
     fn manifest(&mut self, shard_id: u64, revision: &str) -> Result<(Vec<u8>, u64), BoxError> {
@@ -256,6 +278,9 @@ impl<F: FilterSource> FilterSource for StagedFilters<'_, F> {
 
     fn prefetch(&mut self, shard_ids: &[u64]) {
         self.inner.prefetch(shard_ids)
+    }
+    fn prefetch_charged(&mut self, shard_ids: &[u64]) -> u64 {
+        self.inner.prefetch_charged(shard_ids)
     }
 
     fn prepare_parents(
@@ -454,9 +479,10 @@ pub(super) fn look_ahead<S: WalletStore, F: FilterSource, T: ShardTransport>(
                         manifests.insert(shard_id, manifest);
                     }
                 }
+                let prepaid = prepay_manifest(reply, charges);
                 transport
                     .manifests
-                    .insert((shard_id, revision.to_string()), reply);
+                    .insert((shard_id, revision.to_string()), prepaid);
             }
             ShardRequest::Setup {
                 shard_id,
@@ -606,6 +632,36 @@ mod tests {
             40,
             "consuming staged outcomes must not charge them twice"
         );
+    }
+    #[test]
+    fn looked_ahead_manifests_are_paid_before_early_exit() {
+        let mut charges = ByteCharges::default();
+        let first = prepay_manifest(Ok((vec![0; 23], 23)), &mut charges).unwrap();
+        let _unused = prepay_manifest(Ok((vec![0; 31], 31)), &mut charges).unwrap();
+        let failure = prepay_manifest(
+            Err(crate::engine::transport::TransferFailure::boxed(
+                7,
+                Overloaded { retry_after: None }.boxed(),
+            )),
+            &mut charges,
+        )
+        .unwrap_err();
+        assert_eq!(charges.manifest_bytes, 61);
+        assert_eq!(
+            charges.manifests_checked, 3,
+            "each delivered receipt is counted once"
+        );
+        charges.add_manifest_download(first.1);
+        assert_eq!(charges.manifests_checked, 3);
+        assert_eq!(
+            charges.manifest_bytes, 61,
+            "consumption cannot double charge"
+        );
+        assert_eq!(
+            crate::engine::transport::TransferFailure::downloaded(&failure),
+            0
+        );
+        assert!(Overloaded::found_in(&failure).is_some());
     }
 
     /// Answers the first setup of a batch with a byte budget stop and every

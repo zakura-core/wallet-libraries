@@ -19,7 +19,7 @@ use crate::engine::adapters::{Acceptance, ChainView, ScriptProvider};
 use crate::engine::ledger::{ConfirmedSpend, TransactionSummary, UnresolvedSpend, Utxo};
 use crate::engine::store::{Anchor, ScriptEntry, WalletStore};
 use crate::engine::sync::{
-    Completion, FailedEntry, IncompleteReason, ServiceGeometry, WorkLimits, sync_into,
+    Completion, FailedEntry, IncompleteReason, ServiceGeometry, WorkLimits, sync_into_tracking,
 };
 use crate::engine::transport::{FilterSource, ShardTransport};
 use std::collections::BTreeMap;
@@ -169,16 +169,19 @@ impl TransparentSync {
         Ok(tip)
     }
 
-    /// One bounded sync against the last refreshed map.
+    /// One bounded sync against the last refreshed or adopted map. A saved
+    /// map's transfer receipt is consumed once; a revision refresh remains
+    /// current even if later work stops short or returns an error.
     pub fn sync_once(&mut self, request: SyncRequest) -> Result<SyncStatus, FacadeError> {
-        let (map, map_bytes) = self.map.as_ref().ok_or(FacadeError::NoMap)?;
+        let (map, map_bytes) = self.map.as_mut().ok_or(FacadeError::NoMap)?;
         let geometry = self.geometry.as_ref().ok_or(FacadeError::NoMap)?;
         let chain = AcceptedHeaders(request.accepted_headers.iter().cloned().collect());
         let mut scripts = GivenScripts(request.scripts);
-        let report = sync_into(
+        let mut adopted_map = None;
+        let report = sync_into_tracking(
             &mut self.store,
             map,
-            *map_bytes,
+            std::mem::take(map_bytes),
             geometry,
             &chain,
             &mut scripts,
@@ -186,7 +189,13 @@ impl TransparentSync {
             &mut self.transport,
             &request.limits,
             &request.target_anchor,
-        )?;
+            &mut adopted_map,
+        );
+        if let Some(map) = adopted_map {
+            // Its receipt was charged by the sync that fetched it.
+            self.map = Some((map, 0));
+        }
+        let report = report?;
         let completion = match report.completion {
             Completion::Complete => "complete".to_string(),
             Completion::Incomplete { reason, .. } => match reason {
@@ -255,5 +264,143 @@ impl TransparentSync {
     pub fn rollback_to(&mut self, anchor: Anchor) -> Result<SyncStatus, FacadeError> {
         self.store.rollback_above(&anchor, "host rollback")?;
         self.status()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::client::Table;
+    use crate::engine::transport::BoxError;
+    use crate::engine::{MemoryStore, ScriptOrigin};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    struct Filters {
+        fresh: ShardMap,
+        calls: Arc<AtomicUsize>,
+        negative: Arc<AtomicBool>,
+    }
+    impl FilterSource for Filters {
+        fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let bytes = serde_json::to_vec(&self.fresh)?;
+            let len = bytes.len() as u64;
+            Ok((bytes, len))
+        }
+        fn filter(&mut self, _: u64) -> Result<(Vec<u8>, u64), BoxError> {
+            Ok((b"new".to_vec(), 3))
+        }
+        fn parent_negative(
+            &mut self,
+            _: &ShardMap,
+            _: u64,
+            _: &[Vec<u8>],
+            _: &mut dyn WalletStore,
+        ) -> Result<(bool, u64), BoxError> {
+            Ok((self.negative.load(Ordering::Relaxed), 0))
+        }
+    }
+    struct Offline;
+    impl ShardTransport for Offline {
+        fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            Err("offline".into())
+        }
+        fn manifest(&mut self, _: u64, _: &str) -> Result<(Vec<u8>, u64), BoxError> {
+            Err("offline".into())
+        }
+        fn setup(&mut self, _: u64, _: &str, _: Table, _: u32) -> Result<(Vec<u8>, u64), BoxError> {
+            Err("offline".into())
+        }
+        fn query(&mut self, _: u64, _: &str, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+            Err("offline".into())
+        }
+    }
+    fn map() -> ShardMap {
+        serde_json::from_value(serde_json::json!({
+            "genesis_hash": "01".repeat(32), "network":"main",
+            "profile":"zcash-transparent-range-v1", "range_envelope_version":1,
+            "start_height":100, "seal":{"decoupled-2k-8k":{"max_scripts":1,"max_page_rows":1,"max_txids":0}},
+            "shards":[{"shard_id":0,"geometry":"decoupled-2k-8k","start_height":100,"end_height":199,
+                "parent_block_hash":"02".repeat(32),"terminal_block_hash":"03".repeat(32),
+                "filter_hash":"00".repeat(32),"scripts":1,"page_rows":1,"txids":1,
+                "directory_segments":1,"page_segments":1,"manifest_digest":"04".repeat(32),
+                "revision":0,"sealed":false}], "recuts":[]
+        })).unwrap()
+    }
+    fn request(scripts: bool) -> SyncRequest {
+        SyncRequest {
+            target_anchor: Anchor {
+                height: 199,
+                hash: "03".repeat(32),
+            },
+            accepted_headers: vec![(99, "02".repeat(32)), (199, "03".repeat(32))],
+            scripts: if scripts {
+                vec![ScriptEntry {
+                    script: vec![1],
+                    origin: ScriptOrigin::Imported,
+                    required_from: 100,
+                }]
+            } else {
+                vec![]
+            },
+            limits: WorkLimits::UNLIMITED,
+        }
+    }
+    fn facade(
+        fresh: ShardMap,
+        calls: Arc<AtomicUsize>,
+        negative: Arc<AtomicBool>,
+    ) -> TransparentSync {
+        let mut sync = TransparentSync::new(
+            Box::new(MemoryStore::new()),
+            Box::new(Offline),
+            Box::new(Filters {
+                fresh,
+                calls,
+                negative,
+            }),
+        );
+        sync.map = Some((map(), 17));
+        sync.geometry = Some(ServiceGeometry {
+            schema: transparent_shard::SCHEMA.into(),
+            geometries: vec![],
+        });
+        sync
+    }
+    #[test]
+    fn cached_map_receipt_is_consumed_once_across_bounded_calls() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut sync = facade(map(), calls.clone(), Arc::new(AtomicBool::new(false)));
+        sync.sync_once(request(false)).unwrap();
+        assert_eq!(sync.map.as_ref().unwrap().1, 0);
+        sync.sync_once(request(false)).unwrap();
+        assert_eq!(sync.map.as_ref().unwrap().1, 0);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+    #[test]
+    fn adopted_map_survives_an_error_and_the_next_bounded_call() {
+        let mut fresh = map();
+        fresh.shards[0].revision = 1;
+        fresh.shards[0].manifest_digest = "05".repeat(32);
+        fresh.shards[0].filter_hash = transparent_filter::filter_hash(b"new").to_display_hex();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let negative = Arc::new(AtomicBool::new(false));
+        let mut sync = facade(fresh.clone(), calls.clone(), negative.clone());
+        // The replacement filter is delivered under the old URL, causing a
+        // validated map refresh. Its malformed contents then stop this call.
+        assert!(sync.sync_once(request(true)).is_err());
+        assert_eq!(
+            sync.map.as_ref().unwrap().0.shards[0].manifest_digest,
+            fresh.shards[0].manifest_digest
+        );
+        assert_eq!(sync.map.as_ref().unwrap().1, 0);
+        negative.store(true, Ordering::Relaxed);
+        // The invalid filter is still rejected on retry; the facade must
+        // nevertheless keep the adopted revision rather than refresh again.
+        assert!(sync.sync_once(request(true)).is_err());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 }

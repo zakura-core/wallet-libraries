@@ -89,7 +89,9 @@ impl WalletStore for MemoryStore {
             }
             Some(stored) if stored.continues(identity) => {
                 // A geometry the store had not seen may appear; record it.
-                self.state.identity = Some(identity.clone());
+                let mut identity = identity.clone();
+                identity.retain_seals(stored);
+                self.state.identity = Some(identity);
                 Ok(())
             }
             Some(stored) => Err(StoreError::SetMismatch {
@@ -170,6 +172,12 @@ impl WalletStore for MemoryStore {
                 .iter()
                 .map(|stored| (stored.script.as_slice(), &stored.event)),
         )?;
+        let mut offered = commit
+            .events
+            .iter()
+            .map(|stored| (stored.script.clone(), stored.event))
+            .collect::<Vec<_>>();
+        self.ledger()?.replay(&mut offered)?;
         // Validate everything against the current state first; only then
         // write, so a refused commit leaves the store exactly as it was.
         let mut new_receives: Vec<(ReceiveKey, StoredEvent)> = Vec::new();
@@ -483,6 +491,15 @@ impl WalletStore for MemoryStore {
             revision_digest.to_string(),
             (filter_hash.to_string(), sealed, bytes.to_vec()),
         );
+        Ok(())
+    }
+
+    fn prune_caches(&mut self, queryable: &[&str]) -> Result<(), StoreError> {
+        let kept = |revision: &str| queryable.contains(&revision);
+        self.state
+            .setups
+            .retain(|key, _| kept(&key.revision_digest));
+        self.state.filters.retain(|revision, _| kept(revision));
         Ok(())
     }
 

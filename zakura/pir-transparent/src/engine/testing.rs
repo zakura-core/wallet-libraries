@@ -116,6 +116,7 @@ pub fn commit(
 
 pub fn pending(script_tag: u8, revision: &str) -> PendingPages {
     PendingPages {
+        dummy_queries: None,
         id: None,
         shard_id: 1,
         revision_digest: revision.into(),
@@ -156,6 +157,9 @@ pub fn cached_run(child: &str, script_tag: u8, heights: &[u32]) -> CachedRun {
 /// bound is exercised cheaply.
 pub fn suite<S: WalletStore>(make: impl Fn() -> S) {
     an_empty_store_reports_nothing(&make);
+    aggregate_overflow_refuses_the_entire_commit(&make);
+    omitted_geometries_keep_their_bound_seals(&make);
+    invalid_cover_obligations_do_not_change_the_store(&make);
     a_commit_is_idempotent_and_a_differing_repeat_is_refused_whole(&make);
     coverage_merges_settled_ranges_and_keeps_provisional_ones_apart(&make);
     rollback_removes_only_the_suffix(&make);
@@ -388,6 +392,29 @@ fn setup_is_keyed_by_set_revision_table_and_segment<S: WalletStore>(make: &impl 
     );
     assert_eq!(store.filter("rev-a", "hash-b").unwrap(), None);
     assert_eq!(store.filter("rev-b", "hash-a").unwrap(), None);
+
+    // Pruning to the queryable revisions forgets the others' filters and
+    // setups, and keeps cached runs and failure counts.
+    let old = SetupKey {
+        revision_digest: "rev-old".into(),
+        ..key.clone()
+    };
+    store.put_setup(&old, &blob).unwrap();
+    store
+        .put_filter("rev-old", "hash-old", false, b"old")
+        .unwrap();
+    let run = cached_run("child", 9, &[10, 20]);
+    let mut kept = commit(4, "rev-old", false, (0, 0), vec![], vec![]);
+    kept.cached_runs.push(run.clone());
+    kept.failed_entries.push(script(9));
+    store.commit_shard(kept).unwrap();
+    store.prune_caches(&["rev-a"]).unwrap();
+    assert_eq!(store.setup(&key).unwrap(), Some(blob.clone()));
+    assert_eq!(store.setup(&old).unwrap(), None);
+    assert!(store.filter("rev-a", "hash-a").unwrap().is_some());
+    assert_eq!(store.filter("rev-old", "hash-old").unwrap(), None);
+    assert_eq!(store.cached_run("child", &script(9)).unwrap(), Some(run));
+    assert_eq!(store.entry_failures(4, "rev-old", &script(9)).unwrap(), 1);
 }
 
 fn a_commit_past_the_pending_bound_is_refused_whole<S: WalletStore>(make: &impl Fn() -> S) {
@@ -888,4 +915,96 @@ fn retiring_pending_work_preserves_shard_zero_failure_holds<S: WalletStore>(make
         .unwrap();
     assert!(store.pending().unwrap().is_empty());
     assert_eq!(store.entry_failures(0, "held", &script(1)).unwrap(), 3);
+}
+
+fn omitted_geometries_keep_their_bound_seals<S: WalletStore>(make: &impl Fn() -> S) {
+    let mut store = make();
+    let original = identity();
+    store.bind_set(&original).unwrap();
+    let mut empty = original.clone();
+    empty.seal.clear();
+    store.bind_set(&empty).unwrap();
+    assert_eq!(store.set_identity().unwrap(), Some(original.clone()));
+    let mut changed = original.clone();
+    changed.seal.values_mut().next().unwrap().max_scripts += 1;
+    assert!(matches!(
+        store.bind_set(&changed),
+        Err(StoreError::SetMismatch { .. })
+    ));
+    assert_eq!(store.set_identity().unwrap(), Some(original));
+}
+
+fn invalid_cover_obligations_do_not_change_the_store<S: WalletStore>(make: &impl Fn() -> S) {
+    let mut store = make();
+    store.bind_set(&identity()).unwrap();
+    for (count, anchor) in [(0, Some(Anchor::default())), (1, None)] {
+        let mut item = pending(1, "r1");
+        item.dummy_queries = Some(crate::engine::store::DummyQueries {
+            child: 0,
+            remaining: count,
+        });
+        item.target_anchor = anchor;
+        let before = store.last_commit().unwrap();
+        let result = store.commit_shard(ShardCommit {
+            pending_upsert: vec![item],
+            ..Default::default()
+        });
+        assert!(result.is_err());
+        assert_eq!(store.last_commit().unwrap(), before);
+        assert!(store.pending().unwrap().is_empty());
+    }
+}
+
+fn aggregate_overflow_refuses_the_entire_commit<S: WalletStore>(make: &impl Fn() -> S) {
+    // Both a single batch and an addition to existing history must be atomic.
+    for prior in [false, true] {
+        let mut store = make();
+        store.bind_set(&identity()).unwrap();
+        let first = receive(1, 0, u64::MAX, 10);
+        if prior {
+            store
+                .commit_shard(commit(
+                    0,
+                    "r0",
+                    true,
+                    (0, 99),
+                    vec![first.clone()],
+                    vec![script(1)],
+                ))
+                .unwrap();
+        }
+        let before = store.events().unwrap();
+        let before_id = store.last_commit().unwrap();
+        let mut events = vec![receive(2, 0, 1, 110)];
+        if !prior {
+            events.push(first.clone());
+        }
+        let offered = commit(1, "r1", true, (100, 199), events, vec![script(2)]);
+        assert!(matches!(
+            store.commit_shard(offered),
+            Err(StoreError::Contradiction(LedgerError::ValueOverflow))
+        ));
+        assert_eq!(store.events().unwrap(), before);
+        assert_eq!(store.last_commit().unwrap(), before_id);
+        assert!(store.coverage(&script(2)).unwrap().is_empty());
+        assert_eq!(
+            store.ledger().unwrap().confirmed_balance(),
+            if prior { u64::MAX } else { 0 }
+        );
+        let retry = commit(
+            1,
+            "r1",
+            true,
+            (100, 199),
+            if prior {
+                vec![first]
+            } else {
+                vec![receive(2, 0, u64::MAX, 110)]
+            },
+            vec![script(2)],
+        );
+        store.commit_shard(retry.clone()).unwrap();
+        store.commit_shard(retry).unwrap();
+        assert_eq!(store.ledger().unwrap().confirmed_balance(), u64::MAX);
+    }
 }

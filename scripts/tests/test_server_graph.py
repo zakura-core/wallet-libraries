@@ -40,6 +40,14 @@ class ServerBoundaryTests(unittest.TestCase):
                 f"git@GITHUB.COM:{owner}/wallet-pir.git",
                 f"https://GITHUB.COM:443/{owner.upper()}/WALLET-PIR.git/",
                 f"git+https://github.com/{owner}/wallet%2Dpir?rev=abc#def",
+                f"https://%67ithub.com/{owner}/wallet-pir.git",
+                f"https://github.com/{owner}/ignored/../wallet-pir.git",
+                f"https://github.com/{owner}%2Fwallet-pir",
+                f"https://www.github.com/{owner}/wallet-pir",
+                f"https://github.com./{owner}/wallet-pir",
+                f"https://github.com//{owner}/wallet-pir",
+                f"git@github.com:/{owner}/wallet-pir.git",
+                f" https://github.com/{owner}/wallet-pir ",
             ):
                 with self.subTest(url=url):
                     self.assertTrue(self.check(self.package("future-wire", source=url)))
@@ -59,6 +67,11 @@ class ServerBoundaryTests(unittest.TestCase):
             "ssh://git@ssh.github.com.example.com:443/valargroup/wallet-pir.git",
             "https://github.com/unrelated/wallet-pir",
             "https://example.com/github.com/valargroup/wallet-pir",
+            "https://github.com/valargroup/wallet-pirate",
+            "https://%67ithub.com.evil.example/valargroup/wallet-pir",
+            "https://github.com/valargroup/wallet-pir/../ordinary",
+            "https://github.com/valargroup/wallet%252Dpir",
+            "https://github.com@example.com/valargroup/wallet-pir",
         ):
             with self.subTest(url=url):
                 self.assertFalse(graph.wallet_pir_owned(url))

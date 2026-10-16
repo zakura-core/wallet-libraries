@@ -603,7 +603,8 @@ fn quoting_and_reclamation_wait_for_the_tip_and_queued_candidates() {
         let draft = prepare(&mut st, NOW);
         let behind = if queued {
             let sql = "INSERT INTO ironwood_one_time_payment_recovery
-                       SELECT id, zeroblob(32), id, 100000, zeroblob(32), 1, 0, zeroblob(148)
+                       SELECT id, zeroblob(32), id, 100000, zeroblob(32), 1, 0, zeroblob(148),
+                           NULL, 0
                        FROM ironwood_one_time_keys";
             exec(st.wallet().conn(), sql, []);
             None

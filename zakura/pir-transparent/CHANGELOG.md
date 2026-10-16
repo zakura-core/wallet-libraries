@@ -4,6 +4,25 @@
 
 ### Fixed
 
+- Retain maps adopted during facade synchronization and consume cached map receipts once. HTTP retries preserve all delivered response bytes, including partial and failed attempts.
+- Reject aggregate-value overflow before either engine store changes events, coverage or commit markers, and handle inclusive coverage through the largest height without wrapping. No SQL schema, version or migration changes are required.
+- Preserve unsent page-cover queries across query/byte budgets, outages and SQLite reopen. The existing pending-work JSON gains an optional cover obligation; existing schema-7 records remain readable and no SQL schema, version or migration changes are required. Failure holds begin only after the cover queries finish.
+- Verify a sealed manifest before promoting provisional coverage, and retain previously bound seal parameters when a publication temporarily omits a geometry.
+- Include newly watched scripts in early progress, retain unproductive counts in mixed shards, and charge prefetched filters and manifests when transferred even if their replies are later discarded.
+- Reject recovered balances and transaction totals that overflow, including historical prefixes retained after rollback.
+
+### Changed
+
+- Custom engine stores must round-trip `PendingPages::dummy_queries` with their existing pending state. Eager `FilterSource` implementations can override `prefetch_charged` to report transfer costs before replies are consumed.
+
+## [0.0.1-rc2] - 2026-10-16
+
+### Fixed
+
+- Refuse a SQLite engine store whose metadata lacks a schema version, or whose store tables lack the metadata table, before changing its journal mode, tables or rows; admission is repeated under the write lock. Unrelated tables sharing the file still open as a fresh store.
+- Hide a script's recovered activity only for a content failure under the same shard revision, so a replacement read in the same sync still reports it to gap-limit discovery; failures under the withdrawn revision stay reported.
+- Prune filter and setup caches of revisions the validated map no longer publishes during every engine sync, for both reference stores; cached runs and content failure counts are kept. `WalletStore` gains the required `prune_caches` method.
+- Match settled coverage cut short of its shard by a target or rollback against the exact publication it was read from. A same-chain silent replacement is refused as a sealed rewrite, an exact re-cut declaration keeps it, a republication on a fork above the covered part re-derives it, and an endpoint the chain cannot check yet defers the sync.
 - Scope content failure holds to the exact shard revision so a re-cut can reuse numeric shard ids without inheriting another shard's failures. Pending-work housekeeping preserves those holds; legacy counters with no proven revision binding do not hold a current revision.
 - Complete empty-script recovery at its accepted target while retaining conservative progress when scripts are added or preflight stops early.
 - Charge failed and already dispatched private query attempts, including observed refusal bytes, before handling retries or decoding batch responses. Private HTTP setup and query calls make one physical attempt so wallet work limits govern retries; failed setup response bytes consume the private allowance.

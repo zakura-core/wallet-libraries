@@ -75,6 +75,13 @@ impl SetIdentity {
         }
     }
 
+    /// Extends a compatible identity without forgetting previously bound seals.
+    pub(crate) fn retain_seals(&mut self, stored: &Self) {
+        for (name, seal) in &stored.seal {
+            self.seal.entry(name.clone()).or_insert(*seal);
+        }
+    }
+
     /// SHA-256 of the canonical serialization.
     pub fn digest(&self) -> String {
         hex::encode(Sha256::digest(
@@ -182,6 +189,14 @@ pub struct RunCursor {
     pub older_runs: Option<u8>,
 }
 
+/// Indistinguishable page queries still owed after an entry's content failed.
+/// Kept with the pending cursor so a budget, outage or restart cannot omit them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DummyQueries {
+    pub child: u8,
+    pub remaining: u32,
+}
+
 /// Page retrieval a wallet still owes for one script in one directory shard
 /// revision: the rest of its chain of runs.
 ///
@@ -208,6 +223,8 @@ pub struct PendingPages {
     /// only this script. They are revalidated on resume and cleared at the next run.
     pub fragments: Vec<Vec<u8>>,
     pub attempts: u32,
+    /// Cover traffic must finish before this failed entry can be suppressed.
+    pub dummy_queries: Option<DummyQueries>,
     pub target_anchor: Option<Anchor>,
 }
 
@@ -281,7 +298,18 @@ impl ShardCommit {
         let pending = self
             .pending_upsert
             .iter()
-            .map(|pending| encode_events(&pending.carried))
+            .map(|pending| {
+                if pending
+                    .dummy_queries
+                    .is_some_and(|cover| cover.remaining == 0)
+                    || pending.dummy_queries.is_some() && pending.target_anchor.is_none()
+                {
+                    return Err(StoreError::Corrupt(
+                        "invalid pending cover obligation".into(),
+                    ));
+                }
+                encode_events(&pending.carried)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let runs = self
             .cached_runs
@@ -437,6 +465,11 @@ pub trait WalletStore {
         sealed: bool,
         bytes: &[u8],
     ) -> Result<(), StoreError>;
+    /// Forgets the filters and setups cached under any revision but those in
+    /// `queryable`, the revisions a validated map publishes. A sync reads them
+    /// only under those, so the rest are never read again. Cached runs and
+    /// content failure counts are not keyed by a map revision and are kept.
+    fn prune_caches(&mut self, queryable: &[&str]) -> Result<(), StoreError>;
 
     /// The id of the last commit, zero before any.
     fn last_commit(&self) -> Result<u64, StoreError>;
@@ -539,6 +572,9 @@ impl<T: WalletStore + ?Sized> WalletStore for Box<T> {
     ) -> Result<(), StoreError> {
         (**self).put_filter(revision_digest, filter_hash, sealed, bytes)
     }
+    fn prune_caches(&mut self, queryable: &[&str]) -> Result<(), StoreError> {
+        (**self).prune_caches(queryable)
+    }
     fn last_commit(&self) -> Result<u64, StoreError> {
         (**self).last_commit()
     }
@@ -585,26 +621,31 @@ pub fn merge_coverage(mut ranges: Vec<CoverageRange>) -> Vec<CoverageRange> {
 /// The heights in `[from, through]` that `ranges` do not cover, as inclusive
 /// gaps in ascending order.
 pub fn uncovered(ranges: &[CoverageRange], from: u64, through: u64) -> Vec<(u64, u64)> {
+    if from > through {
+        return Vec::new();
+    }
     let mut sorted: Vec<&CoverageRange> = ranges.iter().collect();
     sorted.sort_by_key(|range| range.start_height);
     let mut gaps = Vec::new();
     let mut next = from;
     for range in sorted {
-        if range.end_height < next {
+        if range.end_height < next || range.start_height > range.end_height {
             continue;
         }
-        if range.start_height > next {
-            gaps.push((next, range.start_height.min(through + 1) - 1));
-        }
-        next = next.max(range.end_height + 1);
-        if next > through {
+        if range.start_height > through {
             break;
         }
+        if range.start_height > next {
+            gaps.push((next, range.start_height - 1));
+        }
+        // Reaching the inclusive target completes the walk, including MAX:
+        // there need not be a representable height after the covered suffix.
+        if range.end_height >= through {
+            return gaps;
+        }
+        next = next.max(range.end_height + 1);
     }
-    if next <= through {
-        gaps.push((next, through));
-    }
-    gaps.retain(|(a, b)| a <= b);
+    gaps.push((next, through));
     gaps
 }
 
@@ -623,6 +664,27 @@ mod tests {
             revision_digest: "d".into(),
             terminal_block_hash: "h".into(),
         }
+    }
+
+    #[test]
+    fn coverage_at_the_largest_height_does_not_wrap() {
+        let max = u64::MAX;
+        assert_eq!(uncovered(&[], max, max), vec![(max, max)]);
+        assert!(uncovered(&[], max, max - 1).is_empty());
+        assert!(uncovered(&[range(0, max, CoverageKind::Settled)], 0, max).is_empty());
+        assert_eq!(
+            uncovered(&[range(1, max, CoverageKind::Settled)], 0, max),
+            vec![(0, 0)]
+        );
+        assert_eq!(
+            uncovered(&[range(1, max - 1, CoverageKind::Settled)], 0, max),
+            vec![(0, 0), (max, max)]
+        );
+        assert_eq!(
+            uncovered(&[range(max, max, CoverageKind::Settled)], 3, 5),
+            vec![(3, 5)]
+        );
+        assert!(uncovered(&[range(max, max, CoverageKind::Settled)], max, max).is_empty());
     }
 
     #[test]

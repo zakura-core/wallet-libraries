@@ -2,7 +2,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::data_api::{
     one_time_ivk::restore::{
-        SweepDeferral,
+        DirectoryPayment, SweepDeferral,
         recovery::{EncryptedNote, RecoveredNote},
     },
     transparent_ledger::ChainPoint,
@@ -33,6 +33,27 @@ pub(in crate::wallet::one_time_ivk) struct PendingPayment {
     pub position: u32,
     /// Full incoming encrypted-note context, without service fee or expiry assertions.
     pub encrypted_note: EncryptedNote,
+}
+
+/// `payment` as a candidate, or `None` if its position or transaction index is out of
+/// range.
+pub(in crate::wallet::one_time_ivk) fn directory_candidate(
+    payment: &DirectoryPayment,
+) -> Option<PendingPayment> {
+    Some(PendingPayment {
+        txid: TxId::from_bytes(payment.txid),
+        action_index: payment.action_index,
+        height: payment.height.into(),
+        block_hash: BlockHash(payment.block_hash),
+        tx_index: payment.tx_index.try_into().ok()?,
+        position: payment.position.try_into().ok()?,
+        encrypted_note: EncryptedNote::from_parts(
+            payment.action_nullifier,
+            payment.cmx,
+            payment.ephemeral_key,
+            payment.ciphertext_prefix,
+        ),
+    })
 }
 
 /// Local spend evidence as of one independently checked scan anchor.
@@ -90,15 +111,19 @@ fn payment(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingPayment> {
 }
 
 /// Checks retained nullifiers through `through` for `nullifier`, authenticated
-/// `candidate`'s, without accepting a service's claim of absence.
+/// `candidate`'s, without accepting a service's claim of absence, under `gate`'s scan
+/// requirement.
 pub(in crate::wallet::one_time_ivk) fn spend_status(
     conn: &Connection,
     candidate: &PendingPayment,
     nullifier: &orchard::note::Nullifier,
     through: ChainPoint,
+    gate: super::apply::Gate,
 ) -> Result<Result<SpendStatus, SweepDeferral>, SqliteClientError> {
+    // An early restore relies on the coverage count below alone (see `apply::Gate`).
     if through.height < candidate.height
-        || wallet::fully_scanned_height(conn)?.is_none_or(|h| h < through.height)
+        || (gate == super::apply::Gate::FullyScanned
+            && wallet::fully_scanned_height(conn)?.is_none_or(|h| h < through.height))
     {
         return Ok(Ok(SpendStatus::Unknown));
     }

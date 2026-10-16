@@ -33,7 +33,9 @@ pub trait ScriptProvider {
     /// Every script the wallet is currently responsible for, with the height
     /// its coverage must begin at.
     fn scripts(&mut self) -> Vec<ScriptEntry>;
-    /// Called with the scripts that showed activity in a sync. Returns any
+    /// Called with the scripts that showed activity in a sync, including
+    /// those whose saved history an earlier, unfinished sync never reported,
+    /// so a script may be reported again by a later sync. Returns any
     /// scripts the wallet's own rules now add — a gap-limit advance — each
     /// with its own required height. Those receive historical discovery
     /// over their whole required range before the sync completes.

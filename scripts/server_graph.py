@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify the server ownership boundary and fresh wallet/server consumer graphs."""
 import json
+import posixpath
 from pathlib import Path
 import subprocess
 import tempfile
@@ -10,25 +11,38 @@ from urllib.parse import unquote, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 
 
+GITHUB_HOSTS = ("github.com", "www.github.com", "ssh.github.com")
+
+
 def wallet_pir_owned(value):
-    """Recognize both historical and current ownership URLs, including git sources."""
+    """Recognize both historical and current ownership URLs, including git sources.
+
+    Release and graph verification share this predicate; it names the repository
+    only, so package-name checks must stay alongside it.
+    """
     if not value:
         return False
     # Cargo source IDs add git+ and a revision; repository metadata can also
     # use Git's scp-style SSH URL. Parse the host independently of its port.
-    value = value.removeprefix("git+")
+    value = value.strip().removeprefix("git+")
+    # Cargo parses special-scheme URLs as WHATWG URLs, which read a backslash as
+    # a slash; urlsplit would otherwise keep it inside the hostname.
+    if value.split(":", 1)[0].lower() in ("http", "https"):
+        value = value.replace("\\", "/")
     if "://" not in value and ":" in value:
         host, path = value.split(":", 1)
-        if host.rsplit("@", 1)[-1].lower() in ("github.com", "ssh.github.com"):
+        if host.rsplit("@", 1)[-1].lower().rstrip(".") in GITHUB_HOSTS:
             value = f"ssh://{host}/{path}"
     try:
         parsed = urlsplit(value)
-        if (parsed.hostname or "").lower() not in ("github.com", "ssh.github.com"):
+        if unquote(parsed.hostname or "").lower().rstrip(".") not in GITHUB_HOSTS:
             return False
     except ValueError:
         return False
-    path = unquote(parsed.path).lower().rstrip("/").removesuffix(".git")
-    return path in ("/valargroup/wallet-pir", "/zakura-core/wallet-pir")
+    # Git accepts escaped hostnames and resolves dot segments in HTTP paths.
+    # Decode once: double escaping names a different path on GitHub.
+    path = posixpath.normpath(unquote(parsed.path).lower()).strip("/")
+    return path.removesuffix(".git") in ("valargroup/wallet-pir", "zakura-core/wallet-pir")
 
 
 def problems(metadata, owned, node_packages=(), wallet=False, ownership=True):

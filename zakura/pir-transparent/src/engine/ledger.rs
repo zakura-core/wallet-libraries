@@ -59,6 +59,8 @@ pub struct UnresolvedSpend {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LedgerError {
+    #[error("recovered balance or transaction value exceeds u64")]
+    ValueOverflow,
     #[error("transaction metadata contradicts recovered history: {0}")]
     Metadata(#[from] transparent_events::EventError),
     #[error("outpoint {0}:{1} was received twice with different contents")]
@@ -199,6 +201,7 @@ impl Ledger {
                         .map(|(script, event)| (script.as_slice(), event)),
                 ),
         )?;
+        self.check_value_totals(events)?;
         events.sort_by_key(|entry| entry.1.sort_key());
         for (script, event) in events.iter() {
             self.apply(script, event)?;
@@ -220,6 +223,92 @@ impl Ledger {
     ) -> Result<(), LedgerError> {
         self.replay(events)?;
         self.resolve_unresolved()
+    }
+
+    /// Validate every value aggregate before applying a batch. Legacy events
+    /// carry u64 amounts without transaction metadata, so encoding alone does
+    /// not establish that a balance or a transaction total can be represented.
+    fn check_value_totals(
+        &self,
+        events: &[(Vec<u8>, TransparentEvent)],
+    ) -> Result<(), LedgerError> {
+        let mut receives: BTreeMap<_, _> = self
+            .receives
+            .iter()
+            .map(|(key, utxo)| (*key, utxo.value))
+            .collect();
+        let mut spends: BTreeMap<_, _> = self
+            .spends
+            .iter()
+            .map(|spend| {
+                (
+                    (spend.spent_txid, spend.spent_output_index),
+                    spend.spending_txid,
+                )
+            })
+            .chain(self.unresolved.iter().map(|spend| {
+                (
+                    (spend.event.spent_txid, spend.event.spent_output_index),
+                    spend.event.spending_txid,
+                )
+            }))
+            .collect();
+        for (_, event) in events {
+            match event {
+                TransparentEvent::Receive(event) => {
+                    receives.insert((event.txid, event.output_index), event.value);
+                }
+                TransparentEvent::Spend(event) => {
+                    spends.insert(
+                        (event.spent_txid, event.spent_output_index),
+                        event.spending_txid,
+                    );
+                }
+            }
+        }
+        let mut ordered = self.observations.clone();
+        for (_, event) in events {
+            ordered.insert(event.sort_key(), *event);
+        }
+        let mut unspent = BTreeMap::new();
+        let mut running = 0u64;
+        for event in ordered.values() {
+            match event {
+                TransparentEvent::Receive(event) => {
+                    if unspent
+                        .insert((event.txid, event.output_index), event.value)
+                        .is_none()
+                    {
+                        running = running
+                            .checked_add(event.value)
+                            .ok_or(LedgerError::ValueOverflow)?;
+                    }
+                }
+                TransparentEvent::Spend(event) => {
+                    if let Some(value) =
+                        unspent.remove(&(event.spent_txid, event.spent_output_index))
+                    {
+                        running -= value;
+                    }
+                }
+            }
+        }
+        let mut received = BTreeMap::<Txid, u64>::new();
+        let mut spent = BTreeMap::<Txid, u64>::new();
+        let mut balance = 0u64;
+        for (outpoint, value) in receives {
+            let total = received.entry(outpoint.0).or_default();
+            *total = total.checked_add(value).ok_or(LedgerError::ValueOverflow)?;
+            if let Some(txid) = spends.get(&outpoint) {
+                let total = spent.entry(*txid).or_default();
+                *total = total.checked_add(value).ok_or(LedgerError::ValueOverflow)?;
+            } else {
+                balance = balance
+                    .checked_add(value)
+                    .ok_or(LedgerError::ValueOverflow)?;
+            }
+        }
+        Ok(())
     }
 
     fn resolve_unresolved(&mut self) -> Result<(), LedgerError> {
@@ -802,5 +891,36 @@ mod tests {
         // Counted in the confirmed balance; whether it is spendable is not this
         // module's decision.
         assert_eq!(ledger.confirmed_balance(), 6_250);
+    }
+    #[test]
+    fn recovered_value_overflow_is_rejected_before_mutating_the_ledger() {
+        for events in [
+            vec![receive(1, 0, u64::MAX, 1), receive(2, 0, 1, 2)],
+            vec![receive(1, 0, u64::MAX, 1), receive(1, 1, 1, 1)],
+            vec![
+                receive(1, 0, u64::MAX, 1),
+                spend(1, 1, 0, 3, 4),
+                receive(2, 0, 1, 3),
+                spend(2, 2, 0, 3, 4),
+            ],
+        ] {
+            let mut ledger = Ledger::new();
+            assert_eq!(
+                ledger.replay(&mut events.clone()),
+                Err(LedgerError::ValueOverflow)
+            );
+            assert_eq!(ledger.confirmed_balance(), 0);
+            assert!(ledger.history().is_empty());
+        }
+        let mut ledger = Ledger::new();
+        ledger.replay(&mut [receive(1, 0, u64::MAX, 1)]).unwrap();
+        assert_eq!(ledger.confirmed_balance(), u64::MAX);
+        assert_eq!(
+            ledger.replay(&mut [receive(2, 0, 1, 2)]),
+            Err(LedgerError::ValueOverflow)
+        );
+        assert_eq!(ledger.confirmed_balance(), u64::MAX);
+        ledger.replay(&mut [receive(1, 0, u64::MAX, 1)]).unwrap();
+        assert_eq!(ledger.history()[0].received, u64::MAX);
     }
 }

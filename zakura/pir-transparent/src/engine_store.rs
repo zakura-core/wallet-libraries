@@ -16,9 +16,9 @@
 
 use crate::engine::ledger::{LedgerError, check_event_identities};
 use crate::engine::store::{
-    Anchor, CachedRun, CoverageKind, CoverageRange, PendingPages, RunCursor, ScriptEntry,
-    ScriptOrigin, SetIdentity, SetupBlob, SetupKey, ShardCommit, StoreError, StoredEvent,
-    WalletStore, merge_coverage,
+    Anchor, CachedRun, CoverageKind, CoverageRange, DummyQueries, PendingPages, RunCursor,
+    ScriptEntry, ScriptOrigin, SetIdentity, SetupBlob, SetupKey, ShardCommit, StoreError,
+    StoredEvent, WalletStore, merge_coverage,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::{Path, PathBuf};
@@ -31,6 +31,36 @@ pub const SCHEMA_VERSION: u32 = 7;
 
 /// Default bound on pending page retrievals a commit may leave.
 pub const DEFAULT_PENDING_LIMIT: usize = 4_096;
+
+// Existing schema-7 target_anchor JSON remains readable unchanged. New pending
+// work can carry an optional cover obligation beside the same height/hash;
+// absent fields mean no obligation, without altering any SQL object or version.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PendingContext {
+    #[serde(flatten)]
+    anchor: Anchor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dummy_queries: Option<DummyQueries>,
+}
+
+fn pending_context(pending: &PendingPages) -> Result<Option<String>, StoreError> {
+    if pending.dummy_queries.is_some() && pending.target_anchor.is_none() {
+        return Err(StoreError::Corrupt(
+            "cover queries have no target anchor".into(),
+        ));
+    }
+    pending
+        .target_anchor
+        .as_ref()
+        .map(|anchor| {
+            serde_json::to_string(&PendingContext {
+                anchor: anchor.clone(),
+                dummy_queries: pending.dummy_queries,
+            })
+            .map_err(|error| StoreError::Io(error.to_string()))
+        })
+        .transpose()
+}
 
 struct SpendRow {
     spending_txid: Vec<u8>,
@@ -181,21 +211,7 @@ impl SqliteStore {
     fn prepare(&mut self) -> Result<(), StoreError> {
         let target_version = SCHEMA_VERSION.to_string();
         // Fence unknown readers before changing journal mode or creating indexes.
-        let has_meta: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wallet_meta')",
-            [], |row| row.get(0),
-        ).map_err(io)?;
-        if has_meta {
-            if let Some(found) = self.meta("schema_version")? {
-                // Schema 6 has the same history and walk representation. Older
-                // stores lack saved fragments or use another shard schema.
-                if found != "6" && found != target_version {
-                    return Err(StoreError::Corrupt(format!(
-                        "store schema {found}, this build reads {SCHEMA_VERSION}"
-                    )));
-                }
-            }
-        }
+        admit(&self.conn)?;
         // Durable on every commit: a commit that returned is on disk.
         self.conn
             .execute_batch(
@@ -206,30 +222,9 @@ impl SqliteStore {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(io)?;
-        // Read again under the write lock: another opener may have upgraded
-        // the file after the initial compatibility check.
-        let has_meta: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wallet_meta')",
-            [], |row| row.get(0),
-        ).map_err(io)?;
-        let version: Option<String> = if has_meta {
-            tx.query_row(
-                "SELECT value FROM wallet_meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(io)?
-        } else {
-            None
-        };
-        if let Some(found) = &version {
-            if found != "6" && found != &target_version {
-                return Err(StoreError::Corrupt(format!(
-                    "store schema {found}, this build reads {SCHEMA_VERSION}"
-                )));
-            }
-        }
+        // Admit again under the write lock: another opener may have created
+        // or upgraded the store after the initial compatibility check.
+        let version = admit(&tx)?;
         // Existing tables and their rows are untouched. For schema 6 this
         // creates only the empty failure-count table. Its creation and the
         // version update either both commit or both roll back.
@@ -381,6 +376,83 @@ impl SqliteStore {
     }
 }
 
+/// Deletes the filter and setup cache rows under any revision but those in
+/// `queryable`. The engine's sync and the catalog's pass both prune with it.
+pub(crate) fn prune_revision_caches(conn: &Connection, queryable: &[&str]) -> rusqlite::Result<()> {
+    let named = serde_json::to_string(queryable)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    for table in ["filter_cache", "setup_cache"] {
+        conn.execute(
+            &format!(
+                "DELETE FROM {table} WHERE revision_digest NOT IN (SELECT value FROM json_each(?1))"
+            ),
+            [&named],
+        )?;
+    }
+    Ok(())
+}
+
+/// The names of the tables and indexes [`SCHEMA`] creates.
+fn owned_names() -> impl Iterator<Item = &'static str> {
+    SCHEMA.lines().filter_map(|line| {
+        line.strip_prefix("CREATE TABLE IF NOT EXISTS ")
+            .or_else(|| line.strip_prefix("CREATE INDEX IF NOT EXISTS "))
+            .and_then(|rest| rest.split([' ', '(']).next())
+    })
+}
+
+/// Admits the file's store before anything in it changes, returning the
+/// schema version it records, or `None` for a file holding no store.
+///
+/// Only a file with none of the store's tables is fresh: other tables, such as
+/// a catalog sharing the file, are left alone. A metadata table without its
+/// version marker, store tables without a metadata table, or a version this
+/// build does not read is refused. Creating the missing tables beside those
+/// and stamping the current version would pass a layout of unknown origin off
+/// as this one.
+fn admit(conn: &Connection) -> Result<Option<String>, StoreError> {
+    let held: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'index') ORDER BY name")
+        .map_err(io)?
+        .query_map([], |row| row.get(0))
+        .map_err(io)?
+        .collect::<Result<_, _>>()
+        .map_err(io)?;
+    // SQLite resolves names without regard to ASCII case, so `SCRIPTS` is the
+    // table the schema's `IF NOT EXISTS` and every later query would reach.
+    if !held
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case("wallet_meta"))
+    {
+        return match held
+            .iter()
+            .find(|name| owned_names().any(|owned| owned.eq_ignore_ascii_case(name)))
+        {
+            Some(orphan) => Err(StoreError::Corrupt(format!(
+                "store table {orphan} without the store's metadata"
+            ))),
+            None => Ok(None),
+        };
+    }
+    let found: String = conn
+        .query_row(
+            "SELECT value FROM wallet_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(io)?
+        .ok_or_else(|| StoreError::Corrupt("store metadata without a schema version".into()))?;
+    // Schema 6 has the same history and walk representation. Older stores
+    // lack saved fragments or use another shard schema.
+    if found != "6" && found != SCHEMA_VERSION.to_string() {
+        return Err(StoreError::Corrupt(format!(
+            "store schema {found}, this build reads {SCHEMA_VERSION}"
+        )));
+    }
+    Ok(Some(found))
+}
+
 fn kind_str(kind: CoverageKind) -> &'static str {
     match kind {
         CoverageKind::Settled => "settled",
@@ -431,9 +503,10 @@ impl WalletStore for SqliteStore {
     }
 
     fn bind_set(&mut self, identity: &SetIdentity) -> Result<(), StoreError> {
+        let mut retained = identity.clone();
         match self.set_identity()? {
             None => {}
-            Some(stored) if stored.continues(identity) => {}
+            Some(stored) if stored.continues(identity) => retained.retain_seals(&stored),
             Some(stored) => {
                 return Err(StoreError::SetMismatch {
                     stored: stored.digest(),
@@ -442,7 +515,7 @@ impl WalletStore for SqliteStore {
             }
         }
         let json =
-            serde_json::to_string(identity).map_err(|error| StoreError::Io(error.to_string()))?;
+            serde_json::to_string(&retained).map_err(|error| StoreError::Io(error.to_string()))?;
         self.set_meta("set_identity", &json)
     }
 
@@ -628,6 +701,31 @@ impl WalletStore for SqliteStore {
                 .iter()
                 .map(|stored| (stored.script.as_slice(), &stored.event)),
         )?;
+        // Replay the prospective history inside this transaction before any
+        // write. Aggregate and historical-prefix overflow must refuse the
+        // whole commit, rather than poison a store on the next ledger read.
+        let mut history = commit
+            .events
+            .iter()
+            .map(|stored| (stored.script.clone(), stored.event))
+            .collect::<Vec<_>>();
+        {
+            let mut query = tx
+                .prepare_cached(
+                    "SELECT script, event FROM receives UNION ALL SELECT script, event FROM spends",
+                )
+                .map_err(io)?;
+            let rows = query
+                .query_map([], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(io)?;
+            for row in rows {
+                let (script, raw) = row.map_err(io)?;
+                history.push((script, decode_event(&raw)?));
+            }
+        }
+        crate::engine::ledger::Ledger::new().replay(&mut history)?;
         for (stored, encoded) in commit.events.iter().zip(&encoded_events) {
             match &stored.event {
                 TransparentEvent::Receive(receive) => {
@@ -798,7 +896,7 @@ impl WalletStore for SqliteStore {
             match pending.id {
                 Some(id) => {
                     tx.execute(
-                        "UPDATE pending_work SET cursor_child = ?2, cursor_row = ?3, cursor_older_runs = ?4, carried = ?5, attempts = ?6, fragments = ?7 WHERE id = ?1",
+                        "UPDATE pending_work SET cursor_child = ?2, cursor_row = ?3, cursor_older_runs = ?4, carried = ?5, attempts = ?6, fragments = ?7, target_anchor = ?8 WHERE id = ?1",
                         params![
                             id as i64,
                             i64::from(cursor.child),
@@ -807,6 +905,7 @@ impl WalletStore for SqliteStore {
                             encoded,
                             pending.attempts as i64,
                             pending.fragments.concat(),
+                            pending_context(pending)?,
                         ],
                     )
                     .map_err(io)?;
@@ -823,7 +922,7 @@ impl WalletStore for SqliteStore {
                             i64::from(cursor.row),
                             cursor.older_runs.map(i64::from),
                             encoded,
-                            pending.target_anchor.as_ref().map(|a| serde_json::to_string(a).unwrap()),
+                            pending_context(pending)?,
                             pending.attempts as i64,
                             pending.fragments.concat(),
                         ],
@@ -1039,7 +1138,7 @@ impl WalletStore for SqliteStore {
                     row.get::<_, Option<i64>>(6)?,
                     row.get::<_, Vec<u8>>(7)?,
                     row.get::<_, i64>(8)? as u32,
-                    decode_anchor(row.get(9)?)?,
+                    row.get::<_, Option<String>>(9)?,
                     row.get::<_, Vec<u8>>(10)?,
                 ))
             })
@@ -1059,6 +1158,13 @@ impl WalletStore for SqliteStore {
                 target_anchor,
                 fragments,
             ) = row.map_err(io)?;
+            let context: Option<PendingContext> = target_anchor
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|error| StoreError::Corrupt(format!("pending context: {error}")))?;
+            let dummy_queries = context.as_ref().and_then(|context| context.dummy_queries);
+            let target_anchor = context.map(|context| context.anchor);
             let width = transparent_shard::PAGE_ROW_BYTES;
             if fragments.len() % width != 0 {
                 return Err(StoreError::Corrupt(
@@ -1067,6 +1173,7 @@ impl WalletStore for SqliteStore {
             }
             let corrupt = |_| StoreError::Corrupt("pending walk cursor out of range".into());
             pending.push(PendingPages {
+                dummy_queries,
                 id: Some(id),
                 shard_id,
                 revision_digest,
@@ -1184,6 +1291,15 @@ impl WalletStore for SqliteStore {
             .map_err(io)
     }
 
+    fn prune_caches(&mut self, queryable: &[&str]) -> Result<(), StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io)?;
+        prune_revision_caches(&tx, queryable).map_err(io)?;
+        tx.commit().map_err(io)
+    }
+
     fn last_commit(&self) -> Result<u64, StoreError> {
         self.conn
             .query_row("SELECT COALESCE(MAX(id), 0) FROM commits", [], |row| {
@@ -1230,6 +1346,46 @@ fn decode_anchor(raw: Option<String>) -> rusqlite::Result<Option<Anchor>> {
 #[cfg(test)]
 mod coverage_append_tests {
     use super::*;
+
+    #[test]
+    fn pending_context_accepts_old_json_and_preserves_the_anchor_shape() {
+        let old = r#"{"height":123,"hash":"block"}"#;
+        let mut context: PendingContext = serde_json::from_str(old).unwrap();
+        assert_eq!(context.dummy_queries, None);
+        assert_eq!(serde_json::to_string(&context).unwrap(), old);
+        context.dummy_queries = Some(DummyQueries {
+            child: 2,
+            remaining: 3,
+        });
+        let encoded = serde_json::to_string(&context).unwrap();
+        let anchor: Anchor = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            anchor, context.anchor,
+            "existing anchor readers still accept the envelope"
+        );
+        let decoded: PendingContext = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.dummy_queries, context.dummy_queries);
+    }
+
+    /// Admission recognizes exactly the tables and indexes the schema creates.
+    #[test]
+    fn owned_names_are_every_object_the_schema_creates() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let created: Vec<String> = store
+            .conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'index') \
+                 AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let mut owned: Vec<&str> = owned_names().collect();
+        owned.sort_unstable();
+        assert_eq!(created, owned);
+    }
 
     #[test]
     fn appending_checkpoints_does_not_rewrite_prior_coverage() {

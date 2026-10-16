@@ -34,7 +34,7 @@ fn key8() -> KeyId {
 }
 
 /// The path of the chain's Ironwood leaf at `position` at the cached tip.
-fn witness_at(st: &State, position: u32) -> MerklePath {
+pub(super) fn witness_at(st: &State, position: u32) -> MerklePath {
     use incrementalmerkletree::{frontier::CommitmentTree, witness::IncrementalWitness};
     let mut tree = CommitmentTree::<MerkleHashOrchard, 32>::empty();
     let mut witness: Option<IncrementalWitness<_, 32>> = None;

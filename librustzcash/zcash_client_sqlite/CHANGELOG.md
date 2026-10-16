@@ -9,12 +9,27 @@ and this library adheres to Rust's notion of
 
 ### Added
 
+- Early restore of one-time IVK payments (with `orchard`): `WalletDb` implements the backend's
+  early restore methods and `get_one_time_scanning_keys_for_range`, so a restored account's
+  swap payments appear as its restore scan covers them rather than after restore sweeps.
+- `wallet::init::migrations::ids::ONE_TIME_IVK_EARLY_RESTORE`, an additive migration for early
+  restores.
 - `TransparentPirSession`, with `WalletDb::with_transparent_pir_session`,
   `WalletDb::set_transparent_pir_session` and `WalletDb::transparent_pir_session`: the transparent work an open wallet holds
   back until the next chain tip, shared by the wallet's database handles like
   `EnhancePirSession`. It is kept in memory only, with no new table or migration.
 
 ### Changed
+
+- A rewind on the same chain, such as adding an account with an older birthday, keeps finished
+  one-time restore sweeps: each reruns only if the rescan stores a different block where it
+  finished, or if the rewind lowers its account's birthday. A key a sweep closed scans again
+  from its first payment above the rewind until that payment is confirmed again, instead of
+  waiting for a rerun sweep. An open one-time key that started above the rewind scans from the
+  first rescanned block.
+- `finish_one_time_nullifier_recovery` releases at most 50,000 retained Ironwood nullifiers
+  per call, so its prune stays short; later calls continue. Pruning checks only transaction
+  locators below the retention floor.
 
 - Operations that can queue transparent lookups now reject caller-owned SQL transactions
   without a wallet-owned session journal with `TransparentSessionTransactionRequired`.

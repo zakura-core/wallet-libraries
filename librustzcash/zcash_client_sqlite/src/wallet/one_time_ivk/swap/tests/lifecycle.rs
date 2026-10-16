@@ -304,6 +304,28 @@ fn a_rewind_reopens_a_closed_key_whose_receipt_it_leaves_unconfirmed() {
     assert_eq!(unspent_keys(&st, replacement), [Some(key.key_id()); 2]);
 }
 
+/// A closed key a rewind below its start reopens scans from the first rescanned block, so
+/// a replacement payment below its old start is found.
+#[test]
+fn a_key_reopened_below_its_start_scans_from_the_rewind() {
+    let mut st = scanned_wallet();
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(2);
+    let key = refund_key(&mut st);
+    let terminal = registered_at() + HOUR;
+    observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
+    let height = pay(&mut st, key.full_viewing_key(), 10_000);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(10);
+    assert_eq!(close(&mut st, terminal), 1);
+    st.truncate_to_height(height - 2);
+    assert_eq!(scanning_keys(&st), [key.key_id()]);
+    let recipient = IronwoodFvk(key.full_viewing_key().clone());
+    let value = Zatoshis::const_from_u64(20_000);
+    let (replacement, _, _) =
+        st.generate_next_block(&recipient, AddressType::DefaultExternal, value);
+    st.scan_cached_blocks_with_one_time_ivks(replacement, 1);
+    assert_eq!(unspent_keys(&st, replacement), [Some(key.key_id())]);
+}
+
 #[test]
 fn a_key_closes_once_its_last_operation_is_final() {
     let mut st = scanned_wallet();
