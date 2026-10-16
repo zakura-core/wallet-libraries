@@ -1,4 +1,4 @@
-# PIR chain ingestion
+# PIR chain readers
 
 `zakura-server-chain` reads Zakura node data for the PIR services in wallet-pir and
 interprets it, returning plain values (bytes, heights, amounts, positions) that the
@@ -31,7 +31,7 @@ Receiver backfill and the combined Enhance block reader currently use mainnet
 activation rules. `Network::Testnet` provides explicit identity/height queries; it
 does not configure the RPC client or enable Testnet backfill.
 
-This crate is server-only. It lives in the separate `zakura/pir-ingest/` workspace
+This crate is server-only. It lives in the separate `zakura/pir-chain/` workspace
 with its own lockfile, so no wallet build resolves the node's packages. It may use
 the wallet-owned crates under `zakura/` by path, never the reverse. Its dependency
 graph, including test support and inactive optional or platform dependencies, must

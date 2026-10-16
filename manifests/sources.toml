@@ -111,10 +111,10 @@ secp256k1 = "0.33"
 zcash_script = "0.6"
 
 # The Zakura node's crates. Only the server-only workspace in
-# `zakura/pir-ingest/`, which has its own lockfile, may use them: a wallet build
+# `zakura/pir-chain/`, which has its own lockfile, may use them: a wallet build
 # must never resolve one.
 [server]
-workspace = "zakura/pir-ingest"
+workspace = "zakura/pir-chain"
 node_packages = [
   "zakura-chain",
   "zakura-consensus",

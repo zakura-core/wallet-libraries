@@ -14,7 +14,7 @@
 //! amounts and positions, never a node type. The services map these onto their own
 //! protocol records, so they need no node or Common dependency of their own.
 //!
-//! This crate is server-only: it lives in its own `zakura/pir-ingest` workspace
+//! This crate is server-only: it lives in its own `zakura/pir-chain` workspace
 //! and is never part of a wallet build.
 #![forbid(unsafe_code)]
 
