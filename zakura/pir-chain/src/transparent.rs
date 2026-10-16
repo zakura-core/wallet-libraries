@@ -1026,7 +1026,7 @@ mod tests {
             c.hold_lookup = Some(2);
         }
         let mut cache = OutputCache::new(3);
-        {
+        let reached = {
             let read = rpc.transparent_block(1, rpc.fetch_block(1).await.unwrap(), &mut cache);
             tokio::pin!(read);
             tokio::select! {
@@ -1035,10 +1035,13 @@ mod tests {
                     while chain.lock().unwrap().held_lookups == 0 {
                         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                     }
-                }) => waited.expect("the extraction reaches the held lookup"),
+                }) => waited.is_ok(),
             }
-        }
+        };
+        // Released after the read is dropped, and before any failure: a lookup
+        // still held would keep its blocking extraction, and so the runtime, alive.
         chain.lock().unwrap().hold_lookup = None;
+        assert!(reached, "the extraction reaches the held lookup");
         assert_eq!(cache.capacity, 3);
         let read = rpc
             .transparent_block(1, rpc.fetch_block(1).await.unwrap(), &mut cache)
