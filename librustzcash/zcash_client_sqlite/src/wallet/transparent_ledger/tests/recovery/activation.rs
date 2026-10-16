@@ -518,6 +518,8 @@ fn ready_wallet() -> (State, AccountUuid, ReceiveEvent, ReceiveEvent) {
     c.spends = vec![spend(3, &spent, below_target(&ws, 2))];
     c.coverage = full_coverage(&ws);
     assert!(apply(&mut st, c).unwrap().window_grew);
+    // The grown window is watched from the next target.
+    scan_new_blocks(&mut st, 1);
     let ws = watch(&st, account);
     let mut c = commit(&ws);
     c.revision = fixture.clone();
@@ -1147,6 +1149,8 @@ fn active_window_growth_uses_the_wallets_own_addresses() {
     apply(&mut st, c).unwrap();
     assert!(count(&st, "addresses") > addresses);
     assert_eq!(count(&st, "tpir_candidate_windows"), 0);
+    // They are watched from the next target.
+    scan_new_blocks(&mut st, 1);
     let grown = watch(&st, account);
     assert!(last_external(&grown).1 > index);
     assert!(
@@ -1474,6 +1478,7 @@ mod public_fixtures;
 mod attribution;
 mod history_summaries;
 mod rewind_reconfirmation;
+mod same_target_window;
 mod transparent_detail;
 
 mod qualification;

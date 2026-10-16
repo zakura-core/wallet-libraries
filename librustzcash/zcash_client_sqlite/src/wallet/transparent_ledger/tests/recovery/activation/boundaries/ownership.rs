@@ -100,6 +100,8 @@ fn shared_activity_after_activation_extends_discovery_across_reopen() {
     ];
     c.coverage = full_coverage(&ws);
     apply(&mut st, c).unwrap();
+    // The grown window is watched from the next target.
+    scan_new_blocks(&mut st, 1);
     let ws = watch(&st, a);
     let mut c = commit(&ws);
     c.coverage = full_coverage(&ws);
@@ -117,6 +119,8 @@ fn shared_activity_after_activation_extends_discovery_across_reopen() {
     c.receives = vec![receive(222, shared, 20_000, below_target(&ws, 1))];
     c.coverage = full_coverage(&ws);
     apply(&mut st, c).unwrap();
+    // B's receive grows A's window, which A watches from the next target.
+    scan_new_blocks(&mut st, 1);
     let effective = watch(&st, a);
     assert!(effective.addresses.len() > before.addresses.len());
     assert_eq!(
@@ -176,6 +180,8 @@ fn shared_activity_after_activation_extends_discovery_across_reopen() {
     )];
     c.coverage = full_coverage(&ws);
     apply(&mut st, c).unwrap();
+    // The grown window is watched from the next target.
+    scan_new_blocks(&mut st, 1);
     let ws = watch(&st, a);
     let mut c = commit(&ws);
     c.coverage = full_coverage(&ws);
@@ -241,6 +247,9 @@ fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
                 .iter()
                 .any(|r| r.address == address)
         );
+        // B's receive grows A's window, which A watches from the next target.
+        scan_new_blocks(&mut st, 1);
+        let before = production_dump(conn(&st));
         let reopened = crate::WalletDb::for_path(
             st.wallet().data_file_path(),
             *st.network(),
@@ -436,6 +445,8 @@ fn ownership_cleanup_failure_rolls_back_the_import_and_evidence() {
     let (mut st, accounts) = recovery_wallet_with(1);
     let (address, _, key, edge) = future_receiver(&st, accounts[0]);
     grow(&mut st, accounts[0], edge);
+    // The grown window is watched from the next target.
+    scan_new_blocks(&mut st, 1);
     let ws = watch(&st, accounts[0]);
     let mut c = commit(&ws);
     c.receives = vec![receive(212, address, 20_000, below_target(&ws, 1))];

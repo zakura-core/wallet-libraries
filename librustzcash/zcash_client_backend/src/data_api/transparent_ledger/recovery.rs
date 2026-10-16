@@ -274,8 +274,9 @@ impl ForgottenTransparentLedger {
 /// The result of an applied commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommitOutcome {
-    /// Whether candidate activity near the end of a derived window extended it. The run should
-    /// then read a fresh watch set and recover the new addresses at the same target.
+    /// Whether candidate activity near the end of a derived window extended it. The new
+    /// addresses are recovered at the next target, from a watch set read there; the account
+    /// stays incomplete until then.
     pub window_grew: bool,
 }
 

@@ -288,7 +288,10 @@ pub trait TransparentLedgerRead: WalletRead {
     /// captures, and the pages earlier runs left open, from one read.
     ///
     /// The handle must be configured. Addresses added later, such as by window growth or new
-    /// receiving addresses, appear in the next read; a run repeats until the set is stable.
+    /// receiving addresses, appear in the first read at a later target: at one target, a
+    /// store may keep each derived window where the first read there left it, so that growth
+    /// a reply causes does not change what a pass at the same target watches. Coverage and
+    /// completion still account for the growth.
     #[cfg(feature = "transparent-inputs")]
     fn transparent_watch_set(
         &self,

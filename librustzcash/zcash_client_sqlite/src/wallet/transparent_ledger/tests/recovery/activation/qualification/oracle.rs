@@ -298,7 +298,16 @@ pub(super) fn recover(
             .map(|w| (w.address, w.required_from))
             .collect();
         if previous.as_ref() == Some(&watched) && ws.pending_pages.is_empty() {
-            return pass;
+            // Window growth is watched from the next target: a run that left the grown
+            // addresses uncovered continues at the next block.
+            if !recovery(st, account)
+                .blockers
+                .contains(&CandidateBlocker::IncompleteCoverage)
+            {
+                return pass;
+            }
+            scan_new_blocks(st, 1);
+            continue;
         }
         let target = ws.target.unwrap();
         let base = || {
