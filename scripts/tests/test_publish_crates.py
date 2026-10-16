@@ -155,8 +155,39 @@ class PublishingTests(unittest.TestCase):
                 for inherited in (False, True):
                     self.check_forbidden_dependency(f'future-wire = {{ git = "{url}", version = "=0.1.0" }}', inherited)
 
+    def test_backslash_separated_repository_urls_are_refused(self):
+        # Cargo parses special-scheme URLs as WHATWG URLs, where a backslash is a slash.
+        urls = []
+        for owner in ("valargroup", "zakura-core"):
+            urls += [f"https:\\\\github.com\\{owner}\\wallet-pir", f"https://github.com\\{owner}\\wallet-pir.git",
+                     f"https://github.com\\{owner}/wallet-pir", f"git+https://github.com/{owner}\\wallet-pir"]
+        for url in urls:
+            escaped = url.replace("\\", "\\\\")
+            for declaration in (f'future-wire = {{ git = "{escaped}", version = "=1.0.0" }}',
+                                f'future-wire = {{ git = "{escaped}", version = "=1.0.0", optional = true }}',
+                                f'renamed = {{ package = "future-wire", git = "{escaped}", version = "=1.0.0" }}'):
+                for inherited in (False, True):
+                    self.check_forbidden_dependency(declaration, inherited)
+
+    def test_cargo_normalized_backslash_sources_match_the_raw_predicate(self):
+        # Independent oracle: Cargo's own source normalization, offline and without building.
+        url = "https://github.com\\valargroup\\wallet-pir"
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "Cargo.toml"
+            manifest.write_text('[package]\nname = "probe"\nversion = "0.0.0"\n[lib]\npath = "lib.rs"\n'
+                                f"[dependencies]\nfuture-wire = {{ git = '{url}', version = '=1.0.0' }}\n")
+            output = subprocess.check_output(["cargo", "metadata", "--no-deps", "--offline", "--format-version", "1",
+                                              "--manifest-path", str(manifest)], text=True)
+        source = json.loads(output)["packages"][0]["dependencies"][0]["source"]
+        self.assertEqual(source, "git+https://github.com/valargroup/wallet-pir")
+        self.assertTrue(release.server_graph.wallet_pir_owned(source))
+        self.assertTrue(release.server_graph.wallet_pir_owned(url))
+
     def test_neighbouring_git_repositories_remain_release_prerequisites(self):
         for url in (
+            "https://evil.example\\github.com\\valargroup\\wallet-pir",
+            "https://github.com\\valargroup\\wallet-pir-extra",
+            "https://github.com\\other\\wallet-pir",
             "https://github.com/valargroup/wallet-pir-extra",
             "https://github.com/valargroup/wallet-pirate",
             "https://github.com/other/wallet-pir",
@@ -169,7 +200,8 @@ class PublishingTests(unittest.TestCase):
             "https://github.com/zcash/librustzcash",
         ):
             for inherited in (False, True):
-                declaration = f'external = {{ git = "{url}", version = "=0.1.0" }}'
+                escaped = url.replace("\\", "\\\\")
+                declaration = f'external = {{ git = "{escaped}", version = "=0.1.0" }}'
                 for table, root in self.release_roots(declaration, inherited):
                     with self.subTest(url=url, inherited=inherited, table=table), \
                             patch.object(release, "ORDER", ("first",)):

@@ -25,6 +25,10 @@ def wallet_pir_owned(value):
     # Cargo source IDs add git+ and a revision; repository metadata can also
     # use Git's scp-style SSH URL. Parse the host independently of its port.
     value = value.strip().removeprefix("git+")
+    # Cargo parses special-scheme URLs as WHATWG URLs, which read a backslash as
+    # a slash; urlsplit would otherwise keep it inside the hostname.
+    if value.split(":", 1)[0].lower() in ("http", "https"):
+        value = value.replace("\\", "/")
     if "://" not in value and ":" in value:
         host, path = value.split(":", 1)
         if host.rsplit("@", 1)[-1].lower().rstrip(".") in GITHUB_HOSTS:
