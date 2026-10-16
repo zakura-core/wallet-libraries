@@ -587,7 +587,12 @@ impl TxidDisplayClient {
         if map.to_bytes() != reply.body {
             return Err(TxidError::Protocol(ProtocolKind::MapCanonical));
         }
-        map.check_shape().map_err(protocol(ProtocolKind::Map))?;
+        // Shape rules describe only the schema this client understands.
+        // A canonical map advertising another schema reaches locate's
+        // Unsupported result before any chunk, manifest or private query.
+        if map.schema == display::DISPLAY_SCHEMA {
+            map.check_shape().map_err(protocol(ProtocolKind::Map))?;
+        }
         let chain = Chain {
             network: map.network.clone(),
             genesis_hash: map.genesis_hash.clone(),
@@ -1020,6 +1025,134 @@ mod tests {
         assert_eq!(transport.sent[0].method, Method::Get);
         assert_eq!(transport.sent[0].path(), "/v2/txid/init");
         assert!(transport.sent[0].body.is_empty());
+    }
+
+    #[test]
+    fn unsupported_recent_map_schema_stops_before_chunks_manifests_or_private_queries() {
+        let mut unsupported = recent_map(100, 200, "txid-2k8");
+        unsupported.schema = "transparent-txid-display-shard-v4".into();
+        assert!(unsupported.check_shape().is_err());
+        let mut transport = Scripted::default();
+        transport
+            .replies
+            .extend([Ok(init(txid::CODEC)), served(&unsupported)]);
+        let mut client = test_client();
+        assert_eq!(
+            client.lookup(&mut transport, [1; 32], 150, &never),
+            Ok(TxidLookup::Unsupported)
+        );
+        assert_eq!(sent(&mut transport), [Route::Init, Route::Map]);
+        assert_eq!(client.map_sha256(), Some(unsupported.sha256().as_str()));
+        assert!(client.chunks.is_empty());
+        assert!(client.manifests.is_empty());
+        assert!(client.setups.is_empty());
+        // The cached unsupported map never advances to placement or private work.
+        assert_eq!(
+            client.lookup(&mut transport, [2; 32], 150, &never),
+            Ok(TxidLookup::Unsupported)
+        );
+        assert!(sent(&mut transport).is_empty());
+        assert!(transport.replies.is_empty());
+    }
+
+    #[test]
+    fn supported_publication_can_transition_through_an_unknown_schema_and_back() {
+        let supported = recent_map(100, 200, "txid-2k8");
+        let mut unknown = supported.clone();
+        unknown.schema = "transparent-txid-display-shard-v4".into();
+        let mut transport = Scripted::default();
+        let mut client = test_client();
+        transport
+            .replies
+            .extend([served(&supported), Ok(init_with(&["txid-2k8"])), busy()]);
+        client.refresh_map(&mut transport, &never).unwrap();
+        assert_eq!(
+            client.lookup(&mut transport, [1; 32], 150, &never),
+            Err(BUSY)
+        );
+        assert_eq!(
+            sent(&mut transport),
+            [Route::Map, Route::Init, Route::Manifest]
+        );
+        client.invalidate_map();
+        transport
+            .replies
+            .extend([served(&unknown), Ok(init(txid::CODEC))]);
+        assert_eq!(
+            client.lookup(&mut transport, [1; 32], 150, &never),
+            Ok(TxidLookup::Unsupported)
+        );
+        assert_eq!(sent(&mut transport), [Route::Map, Route::Init]);
+        assert_eq!(client.map_sha256(), Some(unknown.sha256().as_str()));
+        transport
+            .replies
+            .extend([served(&supported), Ok(init_with(&["txid-2k8"])), busy()]);
+        client.refresh_map(&mut transport, &never).unwrap();
+        assert_eq!(
+            client.lookup(&mut transport, [1; 32], 150, &never),
+            Err(BUSY)
+        );
+        assert_eq!(
+            sent(&mut transport),
+            [Route::Map, Route::Init, Route::Manifest]
+        );
+        assert_eq!(client.map_sha256(), Some(supported.sha256().as_str()));
+        assert!(transport.replies.is_empty());
+    }
+
+    #[test]
+    fn unsupported_schema_does_not_bypass_map_header_or_canonical_encoding() {
+        let mut unsupported = recent_map(100, 200, "txid-2k8");
+        unsupported.schema = "transparent-txid-display-shard-v4".into();
+        for canonical in [false, true] {
+            let mut response = served(&unsupported).unwrap();
+            let expected = if canonical {
+                response.map_sha256 = None;
+                ProtocolKind::MapHeader
+            } else {
+                response.body.push(b' ');
+                response.map_sha256 = Some(hex::encode(Sha256::digest(&response.body)));
+                ProtocolKind::MapCanonical
+            };
+            let mut transport = Scripted::default();
+            transport
+                .replies
+                .extend([Ok(init(txid::CODEC)), Ok(response)]);
+            let mut client = test_client();
+            assert_eq!(
+                client.lookup(&mut transport, [1; 32], 150, &never),
+                Err(TxidError::Protocol(expected))
+            );
+            assert_eq!(sent(&mut transport), [Route::Init, Route::Map]);
+            assert!(client.map.is_none());
+            assert!(client.chain.is_none());
+            assert!(client.layout.is_none());
+        }
+    }
+
+    #[test]
+    fn unsupported_schema_cannot_replace_the_accepted_chain() {
+        let supported = recent_map(100, 200, "txid-2k8");
+        let mut other = supported.clone();
+        other.schema = "transparent-txid-display-shard-v4".into();
+        other.genesis_hash = "11".repeat(32);
+        let mut client = test_client();
+        let mut transport = Scripted::default();
+        transport
+            .replies
+            .extend([served(&supported), served(&other)]);
+        client.refresh_map(&mut transport, &never).unwrap();
+        let held = client.map.clone().unwrap();
+        let chain = client.chain.clone();
+        let layout = client.layout.clone();
+        assert_eq!(
+            client.refresh_map(&mut transport, &never),
+            Err(TxidError::Protocol(ProtocolKind::Map))
+        );
+        assert!(Arc::ptr_eq(client.map.as_ref().unwrap(), &held));
+        assert!(client.chain == chain);
+        assert!(client.layout == layout);
+        assert_eq!(sent(&mut transport), [Route::Map, Route::Map]);
     }
 
     #[test]
