@@ -11,3 +11,11 @@
   `orchard` feature.
 - `fetch_seen` and `Seen`: a publication's swap provider seen sets, which a wallet
   checks before issuing a swap address. They need no `wallet` feature.
+
+### Changed
+
+- Builds on the library's `zakura-receiver-directory` and `zakura-receiver-pir`
+  instead of wallet-pir's receiver crates, re-exported as `receiver_directory` and
+  `receiver_pir`. Their lookups return records checked structurally only, so the
+  sweep validates receivers, every looked-up payment and the common witness file
+  with `zakura-receiver-crypto`; refusals keep their directory errors.
