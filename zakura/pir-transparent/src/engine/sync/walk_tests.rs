@@ -1666,3 +1666,7 @@ fn malformed_manifest_cases_do_not_change_the_shared_fixture() {
         serde_json::to_vec(&expected).unwrap()
     );
 }
+
+// Shares only immutable shard construction and independent history helpers.
+#[path = "budget_tests.rs"]
+mod budget_tests;

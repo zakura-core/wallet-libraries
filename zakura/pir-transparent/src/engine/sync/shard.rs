@@ -410,6 +410,12 @@ where
                     segment,
                 }));
             }
+            Err(SyncError::Store(crate::engine::store::StoreError::PendingLimit { .. })) => {
+                return Ok(Some(Completion::Incomplete {
+                    reason: IncompleteReason::PendingLimit,
+                    pending: store.pending()?.len(),
+                }));
+            }
             Err(other) => return Err(other),
         }
     }
@@ -432,8 +438,8 @@ pub(super) fn overload_backoff(attempt: u32, asked: Option<Duration>) -> Duratio
 ///
 /// A script whose replies fail on content fails its entry alone: it gets no
 /// coverage and no walk, as an entry with inline history or a false-positive
-/// match sends no pages either, and the shard's one commit still lands for
-/// every other script, counting the failure. Every directory query planned for
+/// match sends no pages either. Other scripts' processed prefixes still land,
+/// counting the failure. Every directory query planned for
 /// a script is sent before any of its replies is decoded, so the queries sent
 /// are the same whatever came back, and in the order a lookahead stashed them.
 /// A retry after an overload sends them again for every script without a
@@ -514,7 +520,13 @@ pub(super) fn retrieve_shard_into<S: WalletStore, T: ShardTransport>(
         .set_identity()?
         .map(|identity| identity.digest())
         .unwrap_or_default();
-    open_table(
+    if store.pending_limit() == 0 {
+        return Ok(Some(Completion::Incomplete {
+            reason: IncompleteReason::PendingLimit,
+            pending: store.pending()?.len(),
+        }));
+    }
+    if !open_table(
         store,
         &set_digest,
         shard_id,
@@ -524,152 +536,195 @@ pub(super) fn retrieve_shard_into<S: WalletStore, T: ShardTransport>(
         &mut clients.directory,
         transport,
         charges,
-        None,
-    )?;
-
-    if let Some(reason) = budget_stopped(charges, limits) {
+        Some(limits),
+    )? {
         return Ok(Some(Completion::Incomplete {
-            reason,
+            reason: budget_stopped(charges, limits).expect("setup stopped at a budget"),
             pending: store.pending()?.len(),
         }));
     }
 
-    let mut events: Vec<StoredEvent> = Vec::new();
-    let mut covered: Vec<Vec<u8>> = unmatched.to_vec();
-    let mut pending_upsert: Vec<PendingPages> = Vec::new();
-    let mut failed_here: Vec<Vec<u8>> = Vec::new();
+    let mut matched = matched.into_iter().peekable();
+    let mut unmatched = unmatched.to_vec();
+    while matched.peek().is_some() {
+        // Any directory answer may start a page walk. Admit at most the free
+        // pending capacity, commit that prefix, then drain it before asking
+        // another group. A capacity-one store can therefore make progress.
+        let available = store.pending_limit().saturating_sub(store.pending()?.len());
+        if available == 0 {
+            return Ok(Some(Completion::Incomplete {
+                reason: IncompleteReason::PendingLimit,
+                pending: store.pending()?.len(),
+            }));
+        }
+        let mut stopped = None;
+        let mut events: Vec<StoredEvent> = Vec::new();
+        let mut covered: Vec<Vec<u8>> = std::mem::take(&mut unmatched);
+        let mut pending_upsert: Vec<PendingPages> = Vec::new();
+        let mut failed_here: Vec<Vec<u8>> = Vec::new();
 
-    for (script, failed) in matched {
-        // With a published choice table, exactly the one candidate row it
-        // names is queried. Without one, both candidate rows are. Either way
-        // the query count per matched script is fixed for the shard: querying
-        // the first and stopping on a hit would make it depend on where the
-        // script landed, which is a function of the script. Candidates are
-        // taken over the shard's whole logical row space; each names one row
-        // within a segment, and every segment answers it.
-        let wanted = transparent_shard::script_tag(salt, script);
-        let rows = geometry.directory_rows * entry.directory_segments as u64;
-        let candidates = candidate_rows(shard_id, script, rows);
-        let queried: &[u64] = match choice {
-            Some(table) => std::slice::from_ref(&candidates[table.choice(shard_id, script)]),
-            None => &candidates,
-        };
-        let mut replies = Vec::with_capacity(queried.len());
-        for &row in queried {
-            let (_, within) = transparent_shard::layout::split_row(row, geometry.directory_rows);
-            let directory_rows = clients.directory.rows();
-            let answer = clients.directory.fetch_row(
-                transport,
-                shard_id,
-                revision,
-                Table::Directory,
-                entry.directory_segments,
-                directory_rows,
-                within as usize,
-                charges,
-            );
-            replies.push((row, answer?));
-        }
-        if failed {
-            continue;
-        }
-        let found = match entry_in(entry, manifest, geometry, &wanted, &replies) {
-            Ok(found) => found,
-            Err(SyncError::Content(_)) => {
-                failed_here.push(script.clone());
+        for _ in 0..available {
+            if matched.peek().is_none() {
+                break;
+            }
+            if let Some(reason) = budget_stopped(charges, limits) {
+                stopped = Some(reason);
+                break;
+            }
+            let (script, failed) = matched.next().expect("matched script remains");
+            // With a published choice table, exactly the one candidate row it
+            // names is queried. Without one, both candidate rows are. Either way
+            // the query count per matched script is fixed for the shard: querying
+            // the first and stopping on a hit would make it depend on where the
+            // script landed, which is a function of the script. Candidates are
+            // taken over the shard's whole logical row space; each names one row
+            // within a segment, and every segment answers it.
+            let wanted = transparent_shard::script_tag(salt, script);
+            let rows = geometry.directory_rows * entry.directory_segments as u64;
+            let candidates = candidate_rows(shard_id, script, rows);
+            let queried: &[u64] = match choice {
+                Some(table) => std::slice::from_ref(&candidates[table.choice(shard_id, script)]),
+                None => &candidates,
+            };
+            let mut replies = Vec::with_capacity(queried.len());
+            for &row in queried {
+                let (_, within) =
+                    transparent_shard::layout::split_row(row, geometry.directory_rows);
+                let directory_rows = clients.directory.rows();
+                let answer = clients.directory.fetch_row(
+                    transport,
+                    shard_id,
+                    revision,
+                    Table::Directory,
+                    entry.directory_segments,
+                    directory_rows,
+                    within as usize,
+                    charges,
+                );
+                replies.push((row, answer));
+            }
+            // Complete the fixed candidate group even if a reply failed. Neither
+            // a hit nor a malformed/refused reply may select a shorter pattern.
+            let replies = replies
+                .into_iter()
+                .map(|(row, answer)| Ok((row, answer?)))
+                .collect::<Result<Vec<_>, SyncError>>()?;
+            if failed {
                 continue;
             }
-            Err(other) => return Err(other),
-        };
-        match found {
-            // A filter match with no directory entry is either a false positive
-            // or a script outside the private tables' coverage. Both are
-            // wasted work rather than errors; coverage still advances.
-            None => covered.push(script.clone()),
-            Some(found) => {
-                for event in &found.inline {
-                    events.push(StoredEvent {
-                        script: script.clone(),
-                        event: *event,
-                        shard_id,
-                        revision_digest: revision.to_string(),
-                    });
+            let found = match entry_in(entry, manifest, geometry, &wanted, &replies) {
+                Ok(found) => found,
+                Err(SyncError::Content(_)) => {
+                    failed_here.push(script.clone());
+                    continue;
                 }
-                match found.head() {
-                    Some((child, row)) => pending_upsert.push(PendingPages {
-                        id: None,
-                        shard_id,
-                        revision_digest: revision.to_string(),
-                        script: script.clone(),
-                        cursor: RunCursor {
-                            child,
-                            row,
-                            older_runs: None,
-                        },
-                        fragments: Vec::new(),
-                        carried: found.inline.clone(),
-                        attempts: 0,
-                        target_anchor: Some(target_anchor.clone()),
-                    }),
-                    None => covered.push(script.clone()),
+                Err(other) => return Err(other),
+            };
+            match found {
+                // A filter match with no directory entry is either a false positive
+                // or a script outside the private tables' coverage. Both are
+                // wasted work rather than errors; coverage still advances.
+                None => covered.push(script.clone()),
+                Some(found) => {
+                    for event in &found.inline {
+                        events.push(StoredEvent {
+                            script: script.clone(),
+                            event: *event,
+                            shard_id,
+                            revision_digest: revision.to_string(),
+                        });
+                    }
+                    match found.head() {
+                        Some((child, row)) => pending_upsert.push(PendingPages {
+                            id: None,
+                            shard_id,
+                            revision_digest: revision.to_string(),
+                            script: script.clone(),
+                            cursor: RunCursor {
+                                child,
+                                row,
+                                older_runs: None,
+                            },
+                            fragments: Vec::new(),
+                            carried: found.inline.clone(),
+                            attempts: 0,
+                            target_anchor: Some(target_anchor.clone()),
+                        }),
+                        None => covered.push(script.clone()),
+                    }
                 }
             }
         }
-    }
 
-    // The directory phase is one commit: inline events, coverage for every
-    // script that needs no pages, and the walk owed for the rest. The walks
-    // that follow resume from the store even if nothing else of this call
-    // survives.
-    let pending_ids_before: std::collections::BTreeSet<u64> =
-        store.pending()?.iter().filter_map(|p| p.id).collect();
-    commit_bounded(
-        store,
-        target_anchor,
-        ShardCommit {
-            source_anchor: None,
-            shard_id,
-            revision_digest: revision.to_string(),
-            sealed: entry.sealed,
-            start_height: entry.start_height,
-            end_height: entry.end_height,
-            terminal_block_hash: entry.terminal_block_hash.clone(),
-            events,
-            covered_scripts: covered,
-            pending_upsert,
-            pending_complete: Vec::new(),
-            cached_runs: Vec::new(),
-            failed_entries: failed_here.clone(),
-        },
-    )?;
-    for script in &failed_here {
-        record_failure(store, &mut failures.entries, shard_id, script)?;
+        // Only this processed prefix is committed: uncovered scripts remain
+        // discoverable on the next call, and its walks can resume durably.
+        let pending_ids_before: std::collections::BTreeSet<u64> =
+            store.pending()?.iter().filter_map(|p| p.id).collect();
+        let committed = commit_bounded(
+            store,
+            target_anchor,
+            ShardCommit {
+                source_anchor: None,
+                shard_id,
+                revision_digest: revision.to_string(),
+                sealed: entry.sealed,
+                start_height: entry.start_height,
+                end_height: entry.end_height,
+                terminal_block_hash: entry.terminal_block_hash.clone(),
+                events,
+                covered_scripts: covered,
+                pending_upsert,
+                pending_complete: Vec::new(),
+                cached_runs: Vec::new(),
+                failed_entries: failed_here.clone(),
+            },
+        );
+        if let Err(SyncError::Store(crate::engine::store::StoreError::PendingLimit { .. })) =
+            &committed
+        {
+            return Ok(Some(Completion::Incomplete {
+                reason: IncompleteReason::PendingLimit,
+                pending: store.pending()?.len(),
+            }));
+        }
+        committed?;
+        for script in &failed_here {
+            record_failure(store, &mut failures.entries, shard_id, script)?;
+        }
+        let owed: Vec<PendingPages> = store
+            .pending()?
+            .into_iter()
+            .filter(|p| {
+                p.shard_id == shard_id
+                    && p.revision_digest == revision
+                    && p.id.is_some_and(|id| !pending_ids_before.contains(&id))
+            })
+            .collect();
+        if !owed.is_empty() {
+            if let Some(stopped) = finish_pages(
+                store,
+                entry,
+                manifest,
+                &owed,
+                clients,
+                transport,
+                charges,
+                limits,
+                target_anchor,
+                chain,
+                failures,
+            )? {
+                return Ok(Some(stopped));
+            }
+        }
+        if let Some(reason) = stopped {
+            return Ok(Some(Completion::Incomplete {
+                reason,
+                pending: store.pending()?.len(),
+            }));
+        }
     }
-    let owed: Vec<PendingPages> = store
-        .pending()?
-        .into_iter()
-        .filter(|p| {
-            p.shard_id == shard_id
-                && p.revision_digest == revision
-                && p.id.is_some_and(|id| !pending_ids_before.contains(&id))
-        })
-        .collect();
-    if owed.is_empty() {
-        return Ok(None);
-    }
-    finish_pages(
-        store,
-        entry,
-        manifest,
-        &owed,
-        clients,
-        transport,
-        charges,
-        limits,
-        target_anchor,
-        chain,
-        failures,
-    )
+    Ok(None)
 }
 
 /// The entry tagged `wanted` among the replies to one script's candidate
