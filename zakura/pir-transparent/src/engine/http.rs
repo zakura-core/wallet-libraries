@@ -683,7 +683,7 @@ impl HttpFilterSource {
     pub fn map(&mut self) -> Result<(transparent_filter::ShardMap, u64), BoxError> {
         let (raw, len) = self.shard_map()?;
         let map: transparent_filter::ShardMap = serde_json::from_slice(&raw)?;
-        map.check_shape()?;
+        map.validate_supported()?;
         Ok((map, len))
     }
 }

@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Refuse unsupported shard-map versions before storing refreshed maps or advancing sync, including an already complete wallet.
+
 - A publication ending below the wallet's target retains its public retry wait
   even when private content, a work budget or a contradiction prevents the pass
   from completing. An overload preserves its longer wait. Coverage and failed-entry

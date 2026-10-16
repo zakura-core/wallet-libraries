@@ -148,7 +148,7 @@ impl TransparentSync {
             .map_err(|error| FacadeError::Transport(error.to_string()))?;
         let map: ShardMap = serde_json::from_slice(&raw)
             .map_err(|error| FacadeError::Transport(error.to_string()))?;
-        map.check_shape().map_err(FacadeError::Transport)?;
+        map.validate_supported().map_err(FacadeError::Transport)?;
         let (init, _) = self
             .transport
             .init()

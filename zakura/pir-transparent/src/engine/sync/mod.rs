@@ -598,11 +598,13 @@ pub fn sync_into<S: WalletStore>(
             expected: transparent_shard::SCHEMA,
         });
     }
-    map.check_shape()
-        .map_err(|error| SyncError::Invalid(format!("shard map is malformed: {error}")))?;
-    if transparent_filter::range_profile(&map.profile).is_none() {
-        return Err(SyncError::UnknownProfile(map.profile.clone()));
-    }
+    map.validate_supported().map_err(|error| {
+        if transparent_filter::range_profile(&map.profile).is_none() {
+            SyncError::UnknownProfile(map.profile.clone())
+        } else {
+            SyncError::Invalid(format!("shard map is unsupported: {error}"))
+        }
+    })?;
     let genesis = BlockHash::from_display_hex(&map.genesis_hash)?;
     BlockHash::from_display_hex(&target_anchor.hash)?;
     if target_anchor.height < map.start_height {

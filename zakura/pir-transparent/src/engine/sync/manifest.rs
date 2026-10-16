@@ -285,7 +285,7 @@ pub(super) fn refresh_map(
     let fresh: ShardMap = serde_json::from_slice(&bytes).map_err(|error| {
         SyncError::Invalid(format!("refreshed shard map is malformed: {error}"))
     })?;
-    fresh.check_shape().map_err(|error| {
+    fresh.validate_supported().map_err(|error| {
         SyncError::Invalid(format!("refreshed shard map is malformed: {error}"))
     })?;
     check_continuation(started_from, &fresh, covered_through).map_err(SyncError::MapDiverged)?;

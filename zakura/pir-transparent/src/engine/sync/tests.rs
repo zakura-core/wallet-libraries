@@ -808,3 +808,79 @@ fn compact_boundaries_reject_underfilled_reordered_and_cross_row_reference_short
     assert!(validate_page_boundary(Some(&next), &[receive]).is_err());
     assert!(validate_page_boundary(None, &[]).is_err());
 }
+
+#[test]
+fn unsupported_maps_do_not_touch_transport_or_store_even_when_no_work_remains() {
+    use crate::engine::adapters::StaticScripts;
+    use crate::engine::client::Table;
+    use crate::engine::transport::BoxError;
+
+    struct Never;
+    impl FilterSource for Never {
+        fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("unsupported maps must not refresh")
+        }
+        fn filter(&mut self, _: u64) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("unsupported maps must not fetch filters")
+        }
+    }
+    impl ShardTransport for Never {
+        fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("unsupported maps must not fetch init")
+        }
+        fn manifest(&mut self, _: u64, _: &str) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("unsupported maps must not fetch manifests")
+        }
+        fn setup(&mut self, _: u64, _: &str, _: Table, _: u32) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("unsupported maps must not fetch setup")
+        }
+        fn query(&mut self, _: u64, _: &str, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+            panic!("unsupported maps must not send private queries")
+        }
+    }
+    let valid = map(vec![entry(0, 100, 199, true)]);
+    let target = Anchor {
+        height: 199,
+        hash: valid.shards[0].terminal_block_hash.clone(),
+    };
+    let geometry = ServiceGeometry {
+        schema: transparent_shard::SCHEMA.into(),
+        geometries: vec![],
+    };
+    for completed in [false, true] {
+        let mut store = MemoryStore::new();
+        if completed {
+            store
+                .bind_set(&SetIdentity::of_schema(&valid, &geometry.schema))
+                .unwrap();
+            store
+                .commit_anchor(&target, target.height, target.height)
+                .unwrap();
+        }
+        let before = format!("{store:?}");
+        for mutate in [
+            (|map: &mut ShardMap| map.range_envelope_version += 1) as fn(&mut ShardMap),
+            |map: &mut ShardMap| map.profile = "unknown-range-profile".into(),
+            |map: &mut ShardMap| map.shards[0].directory_segments = 0,
+        ] {
+            let mut invalid = valid.clone();
+            mutate(&mut invalid);
+            assert!(
+                sync_into(
+                    &mut store,
+                    &invalid,
+                    0,
+                    &geometry,
+                    &StaticChain::from_map(&valid),
+                    &mut StaticScripts(vec![]),
+                    &mut Never,
+                    &mut Never,
+                    &WorkLimits::UNLIMITED,
+                    &target,
+                )
+                .is_err()
+            );
+            assert_eq!(format!("{store:?}"), before);
+        }
+    }
+}
