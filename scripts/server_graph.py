@@ -19,11 +19,11 @@ def wallet_pir_owned(value):
     value = value.removeprefix("git+")
     if "://" not in value and ":" in value:
         host, path = value.split(":", 1)
-        if host.rsplit("@", 1)[-1].lower() == "github.com":
+        if host.rsplit("@", 1)[-1].lower() in ("github.com", "ssh.github.com"):
             value = f"ssh://{host}/{path}"
     try:
         parsed = urlsplit(value)
-        if (parsed.hostname or "").lower() != "github.com":
+        if (parsed.hostname or "").lower() not in ("github.com", "ssh.github.com"):
             return False
     except ValueError:
         return False

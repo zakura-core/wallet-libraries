@@ -34,6 +34,8 @@ class ServerBoundaryTests(unittest.TestCase):
             for url in (
                 f"git+ssh://git@github.com:22/{owner}/wallet-pir?rev=abc#def",
                 f"ssh://git@github.com:443/{owner}/wallet-pir.git",
+                f"git+ssh://git@ssh.github.com:443/{owner}/wallet-pir.git?rev=abc#def",
+                f"git@ssh.github.com:{owner}/wallet-pir.git",
                 f"git@github.com:{owner}/wallet-pir.git",
                 f"git@GITHUB.COM:{owner}/wallet-pir.git",
                 f"https://GITHUB.COM:443/{owner.upper()}/WALLET-PIR.git/",
@@ -54,6 +56,7 @@ class ServerBoundaryTests(unittest.TestCase):
             "git+ssh://git@github.com:22/valargroup/wallet-pir-tools?rev=abc",
             "https://example.com/valargroup/wallet-pir",
             "https://github.com.example.com/valargroup/wallet-pir",
+            "ssh://git@ssh.github.com.example.com:443/valargroup/wallet-pir.git",
             "https://github.com/unrelated/wallet-pir",
             "https://example.com/github.com/valargroup/wallet-pir",
         ):
@@ -87,7 +90,7 @@ class ServerBoundaryTests(unittest.TestCase):
             if manifest == graph.ROOT / "zakura/pir-chain/Cargo.toml":
                 return {"workspace_root": str(graph.ROOT / "zakura/pir-chain"), "workspace_members": ["server"], "packages": []}
             consumers[manifest.parent.name] = manifest.read_text()
-            packages = [self.package("future-wire", repository="ssh://git@github.com:22/valargroup/wallet-pir") if ownership
+            packages = [self.package("future-wire", repository="ssh://git@ssh.github.com:443/valargroup/wallet-pir") if ownership
                         else self.package("zakura-chain")] if manifest.parent.name == contaminated else []
             return {"packages": packages}
         def lock_problems(lockfile, owned):
