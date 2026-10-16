@@ -12,7 +12,6 @@ use crate::envelope::{
 use crate::error::FilterError;
 use crate::hash::{BlockHash, ShardKey};
 use crate::matching::{map_wallet_scripts, map_wallet_scripts_keyed, match_mapped};
-use crate::profile::{range_profile, RangeProfile};
 use crate::script::ScriptBytes;
 use crate::transport::{
     ByteCharges, FilterTransport, RangeRequest, ShardFilterTransport, ShardRangeRequest,
@@ -206,7 +205,7 @@ pub fn check_range_batch(
     chain: &impl AcceptedChain,
     limits: FilterLimits,
 ) -> Result<Vec<CheckedShard>, FilterError> {
-    let profile = checked_range_profile(map)?;
+    let profile = map.validate_supported().map_err(FilterError::Response)?;
     if map.profile != request.profile {
         return Err(FilterError::Response(
             "requested profile differs from the shard map".into(),
@@ -329,15 +328,6 @@ pub fn check_range_batch(
     Ok(checked)
 }
 
-fn checked_range_profile(map: &ShardMap) -> Result<&'static RangeProfile, FilterError> {
-    range_profile(&map.profile).ok_or_else(|| {
-        FilterError::Response(format!(
-            "unsupported shard filter profile {:?}",
-            map.profile
-        ))
-    })
-}
-
 /// One shard where at least one wallet script matched.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShardMatch {
@@ -380,9 +370,7 @@ pub fn sync_shards(
     wallet_scripts: &[ScriptBytes],
     limits: FilterLimits,
 ) -> Result<ShardSyncOutcome, FilterError> {
-    map.check_shape()
-        .map_err(|error| FilterError::Response(format!("shard map is malformed: {error}")))?;
-    checked_range_profile(map)?;
+    map.validate_supported().map_err(FilterError::Response)?;
     let genesis = BlockHash::from_display_hex(&map.genesis_hash)?;
     let total = map.shards.len() as u64;
     if start_shard > total {
@@ -953,6 +941,60 @@ mod tests {
             assert!(error
                 .to_string()
                 .contains("unsupported shard filter profile"));
+        }
+    }
+
+    #[test]
+    fn unsupported_maps_are_refused_without_fetching_or_remaining_work() {
+        struct NeverFetch;
+        impl ShardFilterTransport for NeverFetch {
+            fn fetch_shards(
+                &mut self,
+                _: &ShardRangeRequest,
+            ) -> Result<(RangeFilterBatch, ByteCharges), FilterError> {
+                panic!("an unsupported map must not reach the transport")
+            }
+        }
+        let (valid, _, chain) = shard_fixture(1);
+        for mutate in [
+            (|map: &mut ShardMap| map.range_envelope_version += 1) as fn(&mut ShardMap),
+            |map: &mut ShardMap| map.profile = "unknown-range-profile".into(),
+            |map: &mut ShardMap| map.shards[0].directory_segments = 0,
+        ] {
+            let mut map = valid.clone();
+            mutate(&mut map);
+            assert!(map.validate_supported().is_err());
+            for start in [0, 1] {
+                assert!(sync_shards(
+                    &mut NeverFetch,
+                    &map,
+                    &chain,
+                    start,
+                    &[],
+                    FilterLimits::default()
+                )
+                .is_err());
+            }
+            let request = ShardRangeRequest {
+                genesis: mainnet_genesis(),
+                profile: map.profile.clone(),
+                start_shard: 1,
+                count: 0,
+            };
+            let batch = RangeFilterBatch {
+                version: RANGE_ENVELOPE_VERSION,
+                genesis: request.genesis,
+                profile: request.profile.clone(),
+                start_shard: 1,
+                records: vec![],
+            };
+            assert!(
+                check_range_batch(&batch, &request, &map, &chain, FilterLimits::default()).is_err()
+            );
+        }
+        for profile in [&RANGE_PROFILE_V1, &RANGE_PROFILE_V2] {
+            let (map, _, _) = shard_fixture_for(1, profile);
+            assert_eq!(map.validate_supported().unwrap(), profile);
         }
     }
 
