@@ -133,9 +133,9 @@ struct RetryPolicy {
 /// Find a typed transport cause without losing it through receipt or IO
 /// wrappers. IO's source chain can skip the contained error itself, so inspect
 /// get_ref before continuing through its ordinary sources.
-fn transport_cause<E: std::error::Error + 'static>(
-    error: &(dyn std::error::Error + 'static),
-) -> Option<&E> {
+fn transport_cause<'a, E: std::error::Error + 'static>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a E> {
     let mut current = Some(error);
     while let Some(error) = current {
         if let Some(cause) = error.downcast_ref::<E>() {
