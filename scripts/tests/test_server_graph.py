@@ -1,6 +1,7 @@
 """Ownership checks must cover registry, renamed and inactive dependencies."""
 import importlib.util
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -47,17 +48,20 @@ class ServerBoundaryTests(unittest.TestCase):
                 with self.subTest(name=name, kind=kind, optional=optional, target=target):
                     self.assertTrue(graph.problems({"packages": [package]}, set(), {"zakura-chain"}, wallet=True, ownership=False))
 
-    def run_probes(self, contaminated=None):
+    def run_probes(self, contaminated=None, root=None, locked=()):
         consumers = {}
         def metadata(manifest, **kwargs):
             if manifest == graph.ROOT / "Cargo.toml":
-                return {"workspace_members": ["wallet"]}
+                return {"workspace_members": ["wallet"], "packages": [root] if root else []}
             if manifest == graph.ROOT / "zakura/pir-chain/Cargo.toml":
                 return {"workspace_root": str(graph.ROOT / "zakura/pir-chain"), "workspace_members": ["server"], "packages": []}
             consumers[manifest.parent.name] = manifest.read_text()
             packages = [self.package("zakura-chain")] if manifest.parent.name == contaminated else []
             return {"packages": packages}
-        with patch.object(graph, "metadata", side_effect=metadata), patch.object(graph.subprocess, "run"):
+        def lock_problems(lockfile, owned):
+            return [f"{lockfile.name}: resolves wallet-pir package receiver-pir"] if lockfile.relative_to(graph.ROOT).as_posix() in locked else []
+        with patch.object(graph, "metadata", side_effect=metadata), patch.object(graph, "lock_problems", side_effect=lock_problems), \
+                patch.object(graph.subprocess, "run"):
             graph.main()
         return consumers
 
@@ -74,6 +78,29 @@ class ServerBoundaryTests(unittest.TestCase):
         # The opt-in RocksDB reader is resolved and type-checked on its own.
         self.assertIn('features = ["rocksdb"]', consumers["server-rocksdb"])
         self.assertNotIn("rocksdb", consumers["server-production"] + consumers["server"])
+
+
+    def test_ordinary_workspace_declarations_are_checked(self):
+        member = self.package(dependencies=[{"name": "receiver-pir", "source": "git+https://github.com/valargroup/wallet-pir?tag=t", "kind": "dev"}])
+        with self.assertRaisesRegex(SystemExit, "dependency on wallet-pir package receiver-pir"):
+            self.run_probes(root=member)
+
+    def test_both_lockfiles_are_checked(self):
+        for lockfile in ("Cargo.lock", "zakura/pir-chain/Cargo.lock"):
+            with self.subTest(lockfile=lockfile), self.assertRaisesRegex(SystemExit, "resolves wallet-pir package"):
+                self.run_probes(locked=(lockfile,))
+
+    def test_lockfile_entries_are_matched_by_name_and_source(self):
+        with tempfile.TemporaryDirectory(dir=graph.ROOT) as directory:
+            lockfile = Path(directory) / "Cargo.lock"
+            lockfile.write_text(
+                'version = 4\n[[package]]\nname = "library-owned"\nversion = "1.0.0"\n'
+                '[[package]]\nname = "receiver-wire"\nversion = "0.1.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n'
+                '[[package]]\nname = "renamed"\nversion = "0.1.0"\nsource = "git+https://github.com/valargroup/wallet-pir?tag=t#abc"\n'
+            )
+            errors = graph.lock_problems(lockfile, {"receiver-wire"})
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(any("receiver-wire" in e for e in errors) and any("renamed" in e for e in errors))
 
 
 if __name__ == "__main__":

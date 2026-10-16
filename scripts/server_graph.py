@@ -31,6 +31,15 @@ def problems(metadata, owned, node_packages=(), wallet=False, ownership=True):
     return errors
 
 
+def lock_problems(lockfile, owned):
+    """A checked-in lockfile must not resolve a wallet-pir package, under any name or source."""
+    errors = []
+    for package in tomllib.loads(lockfile.read_text()).get("package", []):
+        if package["name"] in owned or wallet_pir_owned(package.get("source")):
+            errors.append(f"{lockfile.relative_to(ROOT)}: resolves wallet-pir package {package['name']}")
+    return errors
+
+
 def metadata(manifest, locked=True, no_deps=False):
     command = ["cargo", "metadata", "--format-version", "1", "--all-features", "--manifest-path", str(manifest)]
     if locked:
@@ -49,8 +58,14 @@ def main():
     errors = problems(graph, owned)
     if Path(graph["workspace_root"]) != workspace:
         errors.append("server packages must resolve in their separate workspace")
-    root_members = metadata(ROOT / "Cargo.toml", no_deps=True)["workspace_members"]
-    if set(root_members) & set(graph["workspace_members"]):
+    # The ordinary wallet workspace too: every member's declarations of every kind,
+    # and both checked-in lockfiles. A wallet-libraries release never waits on a
+    # wallet-pir release.
+    root = metadata(ROOT / "Cargo.toml", no_deps=True)
+    errors.extend(problems(root, owned))
+    for lockfile in (ROOT / "Cargo.lock", workspace / "Cargo.lock"):
+        errors.extend(lock_problems(lockfile, owned))
+    if set(root["workspace_members"]) & set(graph["workspace_members"]):
         errors.append("server and ordinary wallet workspace members overlap")
 
     # Fresh lockfiles exercise downstream resolution independently of both checked-in
@@ -122,7 +137,7 @@ fn main() {
             errors.extend(problems(fresh, owned, nodes, wallet=True, ownership=False))
     if errors:
         raise SystemExit("server ownership boundary failed:\n  " + "\n  ".join(sorted(set(errors))))
-    print("verified: separate server workspace and fresh consumers; no wallet-pir-owned dependencies in the affected graphs")
+    print("verified: separate server workspace and fresh consumers; no wallet-pir-owned dependency in either workspace or lockfile")
 
 
 if __name__ == "__main__":
