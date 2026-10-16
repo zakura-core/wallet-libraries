@@ -67,9 +67,9 @@ use {
                 OneTimeIvkRead, OneTimeIvkWrite, ambassador_impl_OneTimeIvkRead,
                 ambassador_impl_OneTimeIvkWrite,
                 restore::{
-                    DirectoryPayment, DiscoveryWork, OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite,
-                    PaymentApplication, SweepDeferral, ambassador_impl_OneTimeIvkRestoreRead,
-                    ambassador_impl_OneTimeIvkRestoreWrite,
+                    DirectoryPayment, DiscoveryWork, EarlyRestoreKey, OneTimeIvkRestoreRead,
+                    OneTimeIvkRestoreWrite, PaymentApplication, PublicationEnd, SweepDeferral,
+                    ambassador_impl_OneTimeIvkRestoreRead, ambassador_impl_OneTimeIvkRestoreWrite,
                 },
             },
             transparent_ledger::ChainPoint,

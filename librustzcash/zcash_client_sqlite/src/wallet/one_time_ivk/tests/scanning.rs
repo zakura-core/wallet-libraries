@@ -312,6 +312,22 @@ fn active_keys_scan_whole_batches_across_their_start() {
     assert!(queued(&st).is_empty());
 }
 
+/// A rewind starts open keys at the first rescanned block, so a payment the replacement
+/// chain mines below a key's old start is still found.
+#[test]
+fn a_rewind_scans_open_keys_from_the_rewind() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let first = st.generate_and_scan_empty_blocks_with_one_time_ivks(3) - 2;
+    let db = st.wallet_mut().db_mut();
+    let key = reserve_key(db, account, Purpose::Receive, first + 3).key_id();
+    st.truncate_to_height(first);
+    let paid = mine_payment(&mut st, key, 50_000);
+    st.generate_empty_block();
+    st.scan_cached_blocks_with_one_time_ivks(paid, 2);
+    assert_eq!(unspent_keys(&st, paid + 1), vec![Some(key)]);
+}
+
 /// Activating a new key, or reopening a closed one, rescans blocks scanned without it
 /// from its start, and the queued rescan survives a reopen.
 #[test]

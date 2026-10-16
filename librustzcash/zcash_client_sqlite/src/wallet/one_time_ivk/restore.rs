@@ -3,11 +3,12 @@
 //! Ironwood spend evidence they need, and the paid-filter backstop for closed keys.
 
 pub(super) mod apply;
+pub(crate) mod early;
 pub(super) mod payments;
 pub(super) mod planner;
 pub(super) mod recovery;
 pub(super) mod retention;
-pub(super) mod sweep;
+pub(crate) mod sweep;
 
 pub(crate) use apply::apply_sweep;
 use payments::{PendingPayment, SpendStatus};

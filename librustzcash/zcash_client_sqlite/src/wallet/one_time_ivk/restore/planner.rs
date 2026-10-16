@@ -47,7 +47,8 @@ pub(crate) fn history_pending<P: Parameters>(
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_sweeps s
             JOIN ironwood_one_time_keys k ON k.id = s.one_time_key_id
-            WHERE k.account_id = ?1 AND k.scan_from <= ?2 AND s.done_height IS NULL)
+            WHERE k.account_id = ?1 AND k.scan_from <= ?2 AND (s.done_height IS NULL
+                OR (s.done_height = s.lookup_height AND s.lookup_height > ?2)))
          OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
             JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
             WHERE k.account_id = ?1)",
@@ -86,7 +87,8 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
          FROM ironwood_one_time_sweeps s
          JOIN ironwood_one_time_keys k ON k.id = s.one_time_key_id
          WHERE k.account_id = ?1 AND k.scan_from <= ?2 AND s.next_attempt_at <= ?3
-           AND (s.done_height IS NULL OR EXISTS(
+           AND (s.done_height IS NULL
+               OR (s.done_height = s.lookup_height AND s.lookup_height > ?2) OR EXISTS(
                SELECT 1 FROM ironwood_one_time_payment_recovery p
                WHERE p.one_time_key_id = s.one_time_key_id))
          ORDER BY s.next_attempt_at, s.one_time_key_id LIMIT ?4",
@@ -159,9 +161,11 @@ pub(crate) fn begin_sweep_attempt(
         |r| r.get(0),
     )?;
     let delay = (60i64 << attempt.min(10)).min(43200);
+    // The sweep takes over a key whose early restore lookup never came, as
+    // `early::fall_back` hands one over, so a later rewind reopens it like any sweep.
     conn.execute(
         "UPDATE ironwood_one_time_sweeps
-         SET attempts = MIN(attempts + 1, 30), next_attempt_at = ?2
+         SET attempts = MIN(attempts + 1, 30), next_attempt_at = ?2, provisional = 0
          WHERE one_time_key_id = ?1",
         params![id, now.saturating_add(delay)],
     )?;

@@ -7,6 +7,22 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Added
+
+- Early restore (with `orchard`): `data_api::one_time_ivk::restore` adds `PublicationEnd` and
+  `EarlyRestoreKey`, `OneTimeIvkRestoreRead::{one_time_early_restore_start, one_time_receivers}`
+  and `OneTimeIvkRestoreWrite::{begin_one_time_early_restore, record_one_time_early_lookup}`,
+  so a store can find a restored account's one-time payments during its restore scan instead
+  of only by sweeps after it. `OneTimeIvkRead::get_one_time_scanning_keys_for_range` gives the
+  keys for one scan batch, and `chain::scan_cached_blocks_with_one_time_ivks` now uses it.
+  Its default is `get_one_time_scanning_keys`, and the early restore methods default to no
+  early restore, so it stays opt-in for other stores.
+
+### Changed
+
+- `OneTimeIvkRestoreWrite::finish_one_time_nullifier_recovery` may release only part of the
+  retained evidence per call; it returns true once release reaches the tip.
+
 ### Removed
 
 - `EnhancePirWork::Waiting`: newly queued private payload work is eligible through

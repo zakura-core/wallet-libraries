@@ -25,9 +25,9 @@ use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 use crate::{DirectoryError, Transport, checked, seen::seen_sets};
 
 /// A wallet's account identifier.
-type AccountId<W> = <W as WalletRead>::AccountId;
+pub(crate) type AccountId<W> = <W as WalletRead>::AccountId;
 /// A wallet's error type.
-type AccountError<W> = <W as WalletRead>::Error;
+pub(crate) type AccountError<W> = <W as WalletRead>::Error;
 
 /// Due sweeps prepared per run.
 const BATCH: NonZeroU32 = NonZeroU32::new(64).unwrap();
@@ -143,7 +143,7 @@ where
     if !work.is_empty() {
         let transport = transport.take().expect("not yet used");
         let accepted = Directory::accept(wallet, params, through, genesis, origin, transport);
-        let directory = directory.insert(accepted.await?);
+        let (directory, anchor) = directory.insert(accepted.await?);
         let checks = directory.check(&work, now).await?;
         let lookups = checks.iter().filter(|check| check.paid).count();
         if lookups > 0 {
@@ -165,7 +165,10 @@ where
             if !leased {
                 break;
             }
-            match sweep_key(wallet, directory, account, &item, check, through, lock).await {
+            let swept = sweep_key(
+                wallet, directory, *anchor, account, &item, check, through, lock,
+            );
+            match swept.await {
                 Ok(()) => finished += 1,
                 Err(e @ Error::Wallet(_)) => return Err(e),
                 Err(e) => {
@@ -201,11 +204,11 @@ where
             directory = Some(accepted.await?);
         }
     }
-    if let Some(directory) = &mut directory {
+    if let Some((directory, anchor)) = &mut directory {
         // Only keys this publication has not checked, so the filters are fetched only for
         // a newer one.
         let keys = wallet
-            .one_time_keys_to_recheck(account, directory.anchor.height)
+            .one_time_keys_to_recheck(account, anchor.height)
             .map_err(Error::Wallet)?;
         if !keys.is_empty() {
             let checks = directory.check(&keys, now).await?;
@@ -215,7 +218,7 @@ where
                 .map(|(item, check)| (item.key, check.paid))
                 .collect();
             lock.write("one_time_sweep.recheck", || {
-                wallet.record_paid_filter_check(account, directory.anchor, &checked)
+                wallet.record_paid_filter_check(account, *anchor, &checked)
             })
             .map_err(Error::Wallet)?;
         }
@@ -233,25 +236,24 @@ where
 
 /// What a publication's filters say about one key's receiver.
 #[derive(Clone, Copy)]
-struct Check {
+pub(crate) struct Check {
     /// The paid set holds it, so a lookup may find payments.
-    paid: bool,
+    pub(crate) paid: bool,
     /// A swap may still pay it, so its key keeps scanning after its sweep.
-    recent: bool,
+    pub(crate) recent: bool,
     /// A swap provider's seen set holds it, so it is never issued again.
-    seen: bool,
+    pub(crate) seen: bool,
 }
 
-/// A receiver-directory publication accepted at a block the wallet scanned. Its filters
-/// are fetched only once a key needs them, and its PIR session and common witnesses only
+/// A receiver-directory publication whose coverage the client checked. Its filters are
+/// fetched only once a key needs them, and its PIR session and common witnesses only
 /// once a key needs a lookup.
-struct Directory<'a, T> {
+pub(crate) struct Directory<'a, T> {
     origin: &'a str,
     /// Moves into the session when one opens.
     transport: Option<T>,
     manifest: receiver_pir::Manifest,
     accepted: AcceptedCoverage,
-    anchor: ChainPoint,
     filters: Option<Filters>,
     /// The labels of the provider seen sets.
     seen: Vec<String>,
@@ -266,44 +268,27 @@ struct Session<T> {
 }
 
 impl<'a, T: Transport> Directory<'a, T> {
-    /// Accepts the publication `origin` serves, at the block of the wallet's chain it
-    /// ends at.
-    async fn accept<W: OneTimeIvkRestoreRead, P: Parameters>(
-        wallet: &W,
-        params: &P,
-        through: ChainPoint,
+    /// Takes `manifest`, the publication `origin` serves, if it commits to `genesis`, covers
+    /// history from `activation` (see [`ironwood_activation`]), ends at block `height` with
+    /// hash `hash`, and has the seen sets [`fetch_seen`](crate::fetch_seen) requires.
+    pub(crate) fn new<E>(
+        activation: BlockHeight,
         genesis: [u8; 32],
         origin: &'a str,
         transport: T,
-    ) -> Result<Self, Error<AccountError<W>>> {
-        let manifest = DirectoryClient::fetch_manifest(origin, &transport).await?;
-        let end = BlockHeight::from(manifest.directory.end_height);
-        let anchor = wallet
-            .directory_publication_anchor(end, through)
-            .map_err(Error::Wallet)?
-            .map_err(Error::Deferred)?;
-        let activation = params
-            .activation_height(NetworkUpgrade::Nu6_3)
-            .ok_or(Error::Unavailable("Ironwood is not active on this network"))?;
+        manifest: receiver_pir::Manifest,
+        height: u32,
+        hash: [u8; 32],
+    ) -> Result<Self, Error<E>> {
         let accepted = AcceptedCoverage {
             genesis,
             required_start: activation.into(),
-            height: anchor.height.into(),
-            hash: anchor.hash.0,
+            height,
+            hash,
         };
         accepted.check(&manifest.directory)?;
-        // Height and hash alone accept a publication that stops partway through the
-        // anchor block, whose omitted payments no lookup or scan from `anchor + 1` finds.
-        let tree_size = wallet
-            .block_metadata(anchor.height)
-            .map_err(Error::Wallet)?
-            .and_then(|block| block.ironwood_tree_size());
-        if tree_size.map(u64::from) != Some(manifest.directory.end_position) {
-            return Err(Error::Unavailable(
-                "the receiver directory's tree size differs from the wallet's at its anchor",
-            ));
-        }
-        // Sweeps use only seen-set membership; issuance checks the sets' dates as it issues.
+        // Restores use only seen-set membership; issuance checks the sets' dates as it
+        // issues.
         let seen = seen_sets(&manifest.directory.filters)?
             .into_iter()
             .map(|(label, _, _)| label.to_owned())
@@ -313,16 +298,54 @@ impl<'a, T: Transport> Directory<'a, T> {
             transport: Some(transport),
             manifest,
             accepted,
-            anchor,
             filters: None,
             seen,
             session: None,
         })
     }
 
+    /// Accepts the publication `origin` serves at the block of the wallet's chain it ends
+    /// at, which it returns with it.
+    async fn accept<W: OneTimeIvkRestoreRead, P: Parameters>(
+        wallet: &W,
+        params: &P,
+        through: ChainPoint,
+        genesis: [u8; 32],
+        origin: &'a str,
+        transport: T,
+    ) -> Result<(Self, ChainPoint), Error<AccountError<W>>> {
+        let manifest = DirectoryClient::fetch_manifest(origin, &transport).await?;
+        let end = BlockHeight::from(manifest.directory.end_height);
+        let anchor = wallet
+            .directory_publication_anchor(end, through)
+            .map_err(Error::Wallet)?
+            .map_err(Error::Deferred)?;
+        let activation = ironwood_activation(params)?;
+        let (height, hash) = (anchor.height.into(), anchor.hash.0);
+        let directory = Self::new(
+            activation, genesis, origin, transport, manifest, height, hash,
+        )?;
+        // Height and hash alone accept a publication that stops partway through the
+        // anchor block, whose omitted payments no lookup or scan from `anchor + 1` finds.
+        let tree_size = wallet
+            .block_metadata(anchor.height)
+            .map_err(Error::Wallet)?
+            .and_then(|block| block.ironwood_tree_size());
+        if tree_size.map(u64::from) != Some(directory.manifest.directory.end_position) {
+            return Err(Error::Unavailable(
+                "the receiver directory's tree size differs from the wallet's at its anchor",
+            ));
+        }
+        Ok((directory, anchor))
+    }
+
     /// What the filters say about each item's receiver at `now`, downloading them first
     /// if needed; see [`sweep`] for how the recent sets are read.
-    async fn check<E>(&mut self, work: &[DiscoveryWork], now: i64) -> Result<Vec<Check>, Error<E>> {
+    pub(crate) async fn check<E>(
+        &mut self,
+        work: &[DiscoveryWork],
+        now: i64,
+    ) -> Result<Vec<Check>, Error<E>> {
         let receivers = work
             .iter()
             .map(|item| Receiver::from_bytes(item.receiver).map(|r| *r.as_bytes()))
@@ -379,8 +402,13 @@ impl<'a, T: Transport> Directory<'a, T> {
         Ok(checks)
     }
 
+    /// Drops the filters, which [`Self::check`] fetches again if it needs them.
+    pub(crate) fn release_filters(&mut self) {
+        self.filters = None;
+    }
+
     /// Opens the PIR session for `lookups` lookups, after the filters are fetched.
-    async fn open_session<E>(&mut self, lookups: usize) -> Result<(), Error<E>> {
+    pub(crate) async fn open_session<E>(&mut self, lookups: usize) -> Result<(), Error<E>> {
         let transport = self.transport.take().expect("a session opens once");
         let client = DirectoryClient::connect_manifest(
             self.origin,
@@ -396,6 +424,34 @@ impl<'a, T: Transport> Directory<'a, T> {
         self.session = Some(Session { client, witnesses });
         Ok(())
     }
+
+    /// Looks up `item`'s receiver over the open session.
+    pub(crate) async fn look_up(
+        &mut self,
+        item: &DiscoveryWork,
+    ) -> Result<Vec<DirectoryPayment>, DirectoryError> {
+        let receiver = Receiver::from_bytes(item.receiver).map_err(checked)?;
+        let session = self.session.as_mut().expect("opened for paid keys");
+        let payments = session
+            .client
+            .lookup(*receiver.as_bytes(), self.accepted)
+            .await?;
+        payments.into_iter().map(directory_payment).collect()
+    }
+
+    /// The inclusion path of the note commitment `cmx` at `position` in the session's
+    /// common witnesses, if a session is open and they hold it.
+    pub(crate) fn witness(&self, position: u32, cmx: [u8; 32]) -> Option<[[u8; 32]; 32]> {
+        let session = self.session.as_ref()?;
+        session.witnesses.path(position, cmx).ok()
+    }
+}
+
+/// Ironwood activation on `params`' network, the history every publication must cover.
+pub(crate) fn ironwood_activation<E>(params: &impl Parameters) -> Result<BlockHeight, Error<E>> {
+    params
+        .activation_height(NetworkUpgrade::Nu6_3)
+        .ok_or(Error::Unavailable("Ironwood is not active on this network"))
 }
 
 /// Whether a provider's recent set can rule a receiver out at `now` (see [`sweep`]).
@@ -415,10 +471,12 @@ fn covers_restore_watch(set: &FilterSet, now: i64) -> bool {
 
 /// Sweeps one key whose attempt is leased: looks up its receiver if `check` shows the
 /// paid set holds it, queues the answer, empty on a miss, and applies it with the
-/// publication's witnesses.
+/// witnesses of the publication accepted at `anchor`.
+#[allow(clippy::too_many_arguments)]
 async fn sweep_key<W, T, L>(
     wallet: &mut W,
     directory: &mut Directory<'_, T>,
+    anchor: ChainPoint,
     account: AccountId<W>,
     item: &DiscoveryWork,
     check: Check,
@@ -431,19 +489,9 @@ where
     L: WriteLock,
 {
     let key = item.key;
-    let anchor = directory.anchor;
     let paid = check.paid;
-    let payments: Vec<_> = if paid {
-        let receiver = Receiver::from_bytes(item.receiver).map_err(checked)?;
-        let accepted = directory.accepted;
-        let session = directory.session.as_mut().expect("opened for paid keys");
-        session
-            .client
-            .lookup(*receiver.as_bytes(), accepted)
-            .await?
-            .into_iter()
-            .map(directory_payment)
-            .collect::<Result<_, _>>()?
+    let payments = if paid {
+        directory.look_up(item).await?
     } else {
         Vec::new()
     };
@@ -452,13 +500,11 @@ where
     })
     .map_err(Error::Wallet)?
     .map_err(Error::Deferred)?;
-    // A miss queued nothing to apply.
-    let witnesses = directory.session.as_ref().filter(|_| paid);
-    let witnesses = witnesses.map(|session| &session.witnesses);
     let applied = lock
         .write("one_time_sweep.apply", || {
             wallet.apply_one_time_sweep(account, key, through, anchor, check.recent, |p, cmx| {
-                witnesses.and_then(|w| w.path(p, cmx).ok())
+                // A miss queued nothing to apply.
+                directory.witness(p, cmx).filter(|_| paid)
             })
         })
         .map_err(Error::Wallet)?

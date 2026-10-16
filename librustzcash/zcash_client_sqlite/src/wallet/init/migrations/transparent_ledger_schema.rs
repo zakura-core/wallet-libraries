@@ -240,8 +240,9 @@ mod tests {
                 .is_empty()
         );
         // Transparent txid enhancement tables start empty for a wallet without ledger-origin or
-        // route-2 transactions.
+        // route-2 transactions, and early restores for a wallet that has started none.
         for table in [
+            "ironwood_one_time_restores",
             "transparent_detail_work",
             "transparent_tx_display",
             "transparent_tx_display_outputs",
