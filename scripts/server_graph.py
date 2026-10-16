@@ -60,6 +60,21 @@ def main():
              'fn main() { let _ = zakura_receiver_crypto::RECORD_BYTES; }\n'),
             ("server-production", f'zakura-server-chain = {{ path = "{ROOT / "server/chain"}" }}',
              'fn main() { let _ = zakura_server_chain::NodeClient::new("http://127.0.0.1:1".into(), None); }\n'),
+            # The RocksDB reader's public surface: its errors carry only this
+            # repository's own types, so a consumer needs no node package to match them.
+            ("server-rocksdb", f'zakura-server-chain = {{ path = "{ROOT / "server/chain"}", features = ["rocksdb"] }}',
+             '''use std::path::PathBuf;
+use zakura_server_chain::{Network, transparent::{TransparentBlock, state::{StateError, StateReader}}};
+fn main() {
+    let opened: Result<StateReader, StateError> = StateReader::open("/nonexistent", Network::Mainnet);
+    let _: Option<Result<TransparentBlock, _>> = opened.as_ref().ok().map(|r| r.transparent_block(1));
+    match opened {
+        Err(StateError::Open { path, reason }) => { let _: (PathBuf, String) = (path, reason); }
+        Err(StateError::NotArchive { path, reason }) => { let _: (PathBuf, &'static str) = (path, reason); }
+        _ => {}
+    }
+}
+'''),
             ("server", f'zakura-server-chain = {{ path = "{ROOT / "server/chain"}", features = ["testing"] }}',
              '''use zakura_server_chain::{Network, NodeClient, NodeError, receiver::ReceiverBlock, enhance::EnhanceBlock, status::StatusBlock};
 use zakura_server_chain::transparent::{CompactBlock, Fee, TransparentBlock};

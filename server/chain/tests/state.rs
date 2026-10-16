@@ -154,6 +154,20 @@ async fn the_database_reader_agrees_with_rpc_and_refuses_missing_blocks() {
         Err(StateError::HeightRange(_))
     ));
 
+    // The reader is a snapshot: a block the node commits after it opened stays
+    // missing to it, while a reader opened afterwards sees it.
+    let third = child(&second, &[coinbase(3, &[(1, P2PKH)])]);
+    commit(&mut primary, &third);
+    assert_eq!(reader.tip_height().unwrap(), 2);
+    assert!(matches!(
+        reader.fetch_block(3),
+        Err(StateError::MissingBlock(3))
+    ));
+    let later = StateReader::open(dir.path(), Network::Mainnet).unwrap();
+    assert_eq!(later.tip_height().unwrap(), 3);
+    assert_eq!(later.block_hash(3).unwrap(), third.hash().0);
+    drop(later);
+
     // The reader keeps its database open on its own handles after the primary closes.
     drop(primary);
     assert_eq!(

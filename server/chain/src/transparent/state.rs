@@ -28,13 +28,23 @@
 //! would silently drop every nonstandard script, and a wallet told it has no
 //! activity does not look again.
 //!
-//! # Coverage
+//! # Coverage: a snapshot taken at open
 //!
-//! A secondary instance sees the primary's flushed data, so it trails the tip
-//! by whatever is still in the primary's memtable, and it does not see the
-//! non-finalized state at all. For a backfill of buried history that is
-//! irrelevant. Near the tip it means a height can be briefly absent, which
-//! surfaces as [`StateError::MissingBlock`] rather than as a wrong answer.
+//! A secondary instance sees the primary's data as flushed when it opens, and
+//! this reader never catches up afterwards: it reads one fixed finalized
+//! snapshot, and a block the node commits later is [`StateError::MissingBlock`]
+//! until a new reader is opened. It trails the node's tip by whatever was still
+//! in the primary's memtable, and it does not see the non-finalized state at
+//! all. For a backfill of buried history, bounded by [`StateReader::tip_height`],
+//! that is irrelevant; near the tip a height is absent rather than wrong.
+//!
+//! # Archive databases only
+//!
+//! Previous outputs resolve from raw transactions, which only an archive node
+//! keeps for the whole chain. A database that has pruned raw transactions, or
+//! that stopped maintaining its transparent indexes as a pruned checkpoint-syncing
+//! node does, is refused at open with [`StateError::NotArchive`]; the node's own
+//! archive-mode open would refuse both (the first by panicking).
 
 use super::{
     BoxError, ExtractError, FetchedBlock, Output as ChainOutput, PreviousOutputs, TransparentBlock,
@@ -43,16 +53,16 @@ use crate::Network;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use zakura_chain::transparent::{OutPoint, Output};
-use zakura_state::{Config, HashOrHeight, ReadStateService, StorageMode, ZakuraDb};
+use zakura_state::{Config, HashOrHeight, PruningConfig, ReadStateService, StorageMode, ZakuraDb};
 
+/// Why the node's database could not be read. Every field is this crate's own: the
+/// node's error is carried as its message.
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
-    #[error("could not open the Zakura state database at {path}: {source}")]
-    Open {
-        path: PathBuf,
-        #[source]
-        source: zakura_state::StateInitError,
-    },
+    #[error("could not open the Zakura state database at {path}: {reason}")]
+    Open { path: PathBuf, reason: String },
+    #[error("the Zakura state database at {path} is not an archive database: {reason}")]
+    NotArchive { path: PathBuf, reason: &'static str },
     #[error("the state database holds no block at height {0}")]
     MissingBlock(u64),
     #[error("the state database holds no finalized tip")]
@@ -74,13 +84,13 @@ pub struct StateReader {
 }
 
 impl StateReader {
-    /// Opens the node's state directory read-only.
+    /// Opens a snapshot of the node's finalized state, read-only; see the module
+    /// documentation for what it covers.
     ///
     /// `cache_dir` is the node's `[state] cache_dir` — the directory holding
-    /// `state/vN/<network>`, not that inner path. The storage mode must match
-    /// the node's, because it decides whether raw transactions are expected to
-    /// be present; resolving previous outputs needs `tx_by_loc`, which only an
-    /// archive node retains for the whole chain.
+    /// `state/vN/<network>`, not that inner path. Resolving previous outputs needs
+    /// `tx_by_loc`, which only an archive node retains for the whole chain, so any
+    /// other database is [`StateError::NotArchive`].
     pub fn open(cache_dir: impl AsRef<Path>, network: Network) -> Result<Self, StateError> {
         let network = network.node();
         let cache_dir = cache_dir.as_ref().to_path_buf();
@@ -91,14 +101,27 @@ impl StateReader {
             // format directories are not ours to collect.
             delete_old_database: false,
             should_backup_non_finalized_state: false,
-            storage_mode: StorageMode::Archive,
+            // Opened as pruned so that the node's archive-mode checks, one of which
+            // panics, do not run: this reader makes them itself, below, and refuses
+            // with an error. A read-only secondary never prunes or writes, so the
+            // retention window is never applied.
+            storage_mode: StorageMode::Pruned(PruningConfig::default()),
             ..Config::default()
         };
         let (read_service, db, non_finalized) = zakura_state::init_read_only(config, &network)
-            .map_err(|source| StateError::Open {
-                path: cache_dir,
-                source,
+            .map_err(|error| StateError::Open {
+                path: cache_dir.clone(),
+                reason: error.to_string(),
             })?;
+        if let Some(reason) = archive_refusal(
+            db.lowest_retained_height().is_some(),
+            db.transparent_indexes_skipped_from().is_some(),
+        ) {
+            return Err(StateError::NotArchive {
+                path: cache_dir,
+                reason,
+            });
+        }
         Ok(Self {
             db,
             _read_service: read_service,
@@ -173,6 +196,20 @@ impl StateReader {
             lookups: previous.lookups,
             cache_hits: previous.cache_hits,
         })
+    }
+}
+
+/// Why a database with these markers cannot serve every previous output, if it
+/// cannot: `pruned` when it has deleted raw transactions below some height, and
+/// `indexes_skipped` when a pruned checkpoint-syncing node stopped its transparent
+/// indexes in it. Both are the node's own reasons for refusing an archive-mode open.
+fn archive_refusal(pruned: bool, indexes_skipped: bool) -> Option<&'static str> {
+    if pruned {
+        Some("it has pruned raw transactions, which previous outputs resolve from")
+    } else if indexes_skipped {
+        Some("it was written by a pruned checkpoint-syncing node")
+    } else {
+        None
     }
 }
 
@@ -339,6 +376,14 @@ mod tests {
             hash: tx.hash(),
             index,
         }
+    }
+
+    #[test]
+    fn only_a_database_with_neither_pruning_marker_is_an_archive() {
+        assert_eq!(archive_refusal(false, false), None);
+        assert!(archive_refusal(true, false).is_some());
+        assert!(archive_refusal(false, true).is_some());
+        assert!(archive_refusal(true, true).is_some());
     }
 
     #[test]

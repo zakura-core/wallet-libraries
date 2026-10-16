@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `transparent::state::StateError` no longer exposes the node's
+  `zakura_state::StateInitError`: `Open` carries the node's message as a `String`.
+  A database that is not an archive database is refused with the new
+  `StateError::NotArchive` instead of a panic inside the node's initializer.
+  `StateReader` is documented and tested as a snapshot taken at open, and the
+  server graph check builds a fresh consumer with `rocksdb` enabled.
+
 - Read transparent blocks for the transparent services: raw output and spent-output
   scripts with exact fees, resolved from the same block, a bounded cache and batched
   reads, plus compact blocks and raw JSON-RPC calls for independent checks.
